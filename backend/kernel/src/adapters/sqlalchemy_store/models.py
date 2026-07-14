@@ -137,6 +137,9 @@ class EventModel(Base):
         Index("ix_events_session_type", "session_id", "type"),
         Index("ix_events_message_id", "message_id"),
         Index("uq_events_owner_uid", "user_id", "event_uid", unique=True),
+        # Cursor scan for the user-level control-plane stream:
+        # ``WHERE user_id = ? AND id > ? ORDER BY id`` (get_events_after_for_user).
+        Index("ix_events_owner_id", "user_id", "id"),
     )
 
 

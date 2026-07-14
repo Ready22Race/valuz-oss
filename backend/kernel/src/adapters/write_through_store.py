@@ -269,6 +269,18 @@ class WriteThroughStore:
             user_id, session_id, after_seq=after_seq, limit=limit
         )
 
+    async def get_events_after_for_user(
+        self,
+        user_id: str,
+        *,
+        after_seq: int = 0,
+        types: tuple[str, ...] | None = None,
+        limit: int = 200,
+    ) -> list[StoredEvent]:
+        return await self._read.get_events_after_for_user(
+            user_id, after_seq=after_seq, types=types, limit=limit
+        )
+
     async def get_events_window(
         self, user_id: str, session_id: str, *, before_seq: int | None = None, turn_limit: int = 20
     ) -> tuple[list[StoredEvent], bool]:

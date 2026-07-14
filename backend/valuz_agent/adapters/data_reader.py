@@ -64,6 +64,19 @@ class DataReader(Protocol):
         after_seq: int | None = None,
     ) -> list[Any]: ...
 
+    async def get_events_after_for_user(
+        self,
+        user_id: str,
+        *,
+        after_seq: int = 0,
+        types: tuple[str, ...] | None = None,
+        limit: int = 200,
+    ) -> list[Any]:
+        """Cross-session cursor read for the user-level control-plane stream —
+        ALL of one owner's events after ``after_seq``, optionally restricted to
+        ``types``. Backs ``iter_user_events_sse``'s backfill."""
+        ...
+
     async def get_events_window(
         self,
         user_id: str,
@@ -137,6 +150,25 @@ class _KernelClientReader:
 
         return await kernel_client.get_events(
             user_id, session_id, limit=limit, offset=offset, after_seq=after_seq
+        )
+
+    async def get_events_after_for_user(
+        self,
+        user_id: str,
+        *,
+        after_seq: int = 0,
+        types: tuple[str, ...] | None = None,
+        limit: int = 200,
+    ) -> list[Any]:
+        # The user-level control-plane stream needs a durable, cross-session
+        # read. The per-session kernel seam has no such route, and OSS always
+        # binds a durable ``DataReader`` (``LocalDataServiceReader`` in local
+        # mode, ``DataServiceReadClient`` in remote) before the stream is
+        # reachable — so this fallback is never the live path. Fail loud rather
+        # than silently degrade to per-session fan-out.
+        raise NotImplementedError(
+            "get_events_after_for_user requires a bound durable DataReader; "
+            "the kernel-seam fallback does not serve cross-session user reads"
         )
 
     async def get_events_window(

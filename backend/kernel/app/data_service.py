@@ -194,6 +194,20 @@ async def get_events_after(body: JsonBody, owner_id: OwnerDep, store: StoreDep) 
     return {"data": [sw.stored_event_to_row(e) for e in rows]}
 
 
+@router.post("/rpc/get_events_after_for_user")
+async def get_events_after_for_user(
+    body: JsonBody, owner_id: OwnerDep, store: StoreDep
+) -> dict[str, Any]:
+    types = body.get("types")
+    rows = await store.get_events_after_for_user(
+        owner_id,
+        after_seq=body.get("after_seq", 0),
+        types=tuple(types) if types else None,
+        limit=body.get("limit", 200),
+    )
+    return {"data": [sw.stored_event_to_row(e) for e in rows]}
+
+
 @router.post("/rpc/get_events_window")
 async def get_events_window(body: JsonBody, owner_id: OwnerDep, store: StoreDep) -> dict[str, Any]:
     events, has_more = await store.get_events_window(
