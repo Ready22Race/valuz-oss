@@ -25,3 +25,8 @@ def test_build_prompt_without_data():
 def test_constants_are_set():
     assert "UI" in TOOL_DESCRIPTION and "chart" in TOOL_DESCRIPTION.lower()
     assert "OpenUI Lang" in GENERATIVE_UI_INSTRUCTIONS
+    assert "do not nest Card components" in GENERATIVE_UI_INSTRUCTIONS
+    assert "borderless sections" in GENERATIVE_UI_INSTRUCTIONS
+    assert "never generate an application shell" in GENERATIVE_UI_INSTRUCTIONS
+    assert "charts must render one per row" in GENERATIVE_UI_INSTRUCTIONS
+    assert "use Tabs to switch" in GENERATIVE_UI_INSTRUCTIONS

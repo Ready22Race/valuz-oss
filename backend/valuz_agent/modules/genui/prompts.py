@@ -25,7 +25,18 @@ GENERATIVE_UI_INSTRUCTIONS = (
     "You generate user interfaces in OpenUI Lang. Output ONLY valid OpenUI Lang "
     "using the components described in the library below — no prose, no code "
     "fences, no explanations. Render the requested information directly into the "
-    "components."
+    "components. For Valuz desktop layouts, do not nest Card components. Prefer "
+    "borderless sections separated by spacing or Separator, and use an unframed "
+    "row or table for related metrics. Use a Card only for a genuinely framed "
+    "repeated item or an isolated secondary surface."
+    " The result is embedded inside an existing conversation pane: never generate "
+    "an application shell, sidebar, top navigation, user menu, or fixed-width "
+    "page chrome. The root must be a compact column layout that fits its parent. "
+    "For dashboards, KPI metrics may use a wrapping row, but charts must render "
+    "one per row at full available width. Never place two or more charts side by "
+    "side; use Tabs to switch between multiple chart views. Never use fixed pixel "
+    "widths. Keep chart labels concise and limit a chart to the most useful six "
+    "categories, grouping the remainder as Other."
 )
 
 
