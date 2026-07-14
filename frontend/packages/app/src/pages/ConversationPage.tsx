@@ -4337,84 +4337,46 @@ export const ConversationPage = () => {
 
   // Stream queued items as they drain. Each queued item runs as its OWN kernel
   // turn after the previous one idles (which tears down that turn's SSE), so
-  // while a drain is in flight or items remain (and nothing is streaming), we
-  // re-subscribe when the next drained turn starts. That start now arrives as a
-  // pushed ``run.started`` / ``run.status(running)`` frame on the always-on
-  // control-plane stream (the same signal the created→running bridge uses) —
-  // no 500ms status poll. ``subscribeToSession`` replays every event after
-  // ``maxSeqRef`` from the DB and then streams live (the same proven path as
-  // reopen / mid-turn reconnect), so it also renders a turn that already
-  // finished. We subscribe when the session is ``running`` OR when the DB
-  // already has events past ``maxSeqRef`` — the latter catches a turn that
-  // finished before we attached (fast turns / steer-interrupted turns); the
-  // replay renders it and self-terminates on the replayed ``session.idle``. We
-  // must NOT subscribe on a quiet idle with nothing new (a bare subscribe hangs
-  // the SSE open — fine between items, but after the LAST item it would never
-  // release ``sending``), which is why the stream only fires on a running
-  // transition and the level check gates on events-past-cursor. ``queueDraining``
-  // (a dispatched item is invisible in ``queue``) keeps this armed until the
-  // last item finishes; then the effect goes quiet (§14.5). Subscribing flips
-  // ``sending`` → this effect re-runs and its guard parks it until that turn
-  // idles, exactly as the poll's ``sending`` guard did.
+  // while a drain is in flight or items remain (and nothing is streaming), poll
+  // for the next drained turn and re-subscribe. ``subscribeToSession`` replays
+  // every event after ``maxSeqRef`` from the DB and then streams live (the same
+  // proven path as reopen / mid-turn reconnect). We subscribe when the session
+  // is ``running`` OR when the DB already has events past ``maxSeqRef`` — the
+  // latter catches a turn that finished *inside* the poll interval (fast turns
+  // / steer-interrupted turns); the replay renders it and self-terminates on
+  // the replayed ``session.idle``. We must NOT subscribe on a quiet idle with
+  // nothing new (a bare subscribe hangs the SSE open — fine between items, but
+  // after the LAST item it would never release ``sending``). ``queueDraining``
+  // (a dispatched item is invisible in ``queue``) keeps this alive until the
+  // last item finishes; then the effect goes quiet (§14.5).
   useEffect(() => {
     if (!selectedSessionId || sending || queuePaused) return;
     if (!queueDraining && !queue.some((i) => i.status === "queued")) return;
     const sid = selectedSessionId;
     let cancelled = false;
-    let subscribed = false;
-    const resubscribe = () => {
-      if (cancelled || subscribed || abortRef.current || isSendInFlightRef.current) {
-        return;
-      }
-      subscribed = true;
-      subscribeToSession(sid, maxSeqRef.current);
-    };
-
-    // Level check ONCE on arm: the drain can outrace the stream subscription
-    // below, so the next turn may already be ``running`` — or already have
-    // finished with events past our cursor — by the time this effect runs. The
-    // stream only carries transitions AFTER we attach, so this one-shot catches
-    // an in-flight / just-finished turn the stream would miss. This is a single
-    // read per drain cycle, not a periodic poll.
-    const checkNow = async () => {
+    const tick = async () => {
       if (cancelled || abortRef.current || isSendInFlightRef.current) return;
       try {
         const detail = await sessionsApi.get(sid);
         if (cancelled || abortRef.current || isSendInFlightRef.current) return;
         if (detail.status === "running") {
-          resubscribe();
+          subscribeToSession(sid, maxSeqRef.current);
           return;
         }
         const resp = await sessionsApi.listEvents(sid, maxSeqRef.current);
         if (cancelled || abortRef.current || isSendInFlightRef.current) return;
-        if (resp.items.length > 0) resubscribe();
+        if (resp.items.length > 0) {
+          subscribeToSession(sid, maxSeqRef.current);
+        }
       } catch {
-        // best-effort — the control stream still catches the next transition.
+        // best-effort — a transient poll failure retries on the next tick.
       }
     };
-
-    // Edge trigger: each subsequent drained turn arrives as a pushed
-    // ``run.started`` / ``run.status(running)`` frame for this session. As with
-    // the P1 bridge, control frames ONLY trigger a subscribe — they never write
-    // status directly (the data-plane sub owns that under its ``sawTurnStart``
-    // guard).
-    const unsub = subscribeUserStream((frame) => {
-      if (cancelled || abortRef.current || isSendInFlightRef.current) return;
-      if (frame.sessionId !== sid) return;
-      const status = frame.payload.status;
-      if (
-        frame.eventType === "run.started" ||
-        (frame.eventType === "run.status" && status === "running")
-      ) {
-        resubscribe();
-      }
-    });
-
-    void checkNow();
-
+    const timer = window.setInterval(() => void tick(), 500);
+    void tick();
     return () => {
       cancelled = true;
-      unsub();
+      window.clearInterval(timer);
     };
   }, [
     selectedSessionId,
