@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 import valuz_agent.boot.kernel  # noqa: F401
 
 from src.core import ToolDef, ToolResult
-from src.core.tools import ExecContext
+from src.core.tools import ExecContext, ToolHandler
 
 from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.modules.tasks import messaging, planning, queries
@@ -351,6 +351,77 @@ async def _bound_agent_member(sess: Any) -> dict[str, Any] | None:
 
 
 # ---------------------------------------------------------------------------
+# Pull-gap: surface a member_done that landed between two await_members calls
+# ---------------------------------------------------------------------------
+
+
+def _with_inbox_notice(handler: ToolHandler) -> ToolHandler:
+    """Wrap a lead tool so a member_done that arrived in the gap is surfaced.
+
+    Companion to ``await_member_results``' ``still_running`` hint. Between two
+    ``await_members`` calls the lead often touches other orchestration tools
+    (get_plan / dispatch / review_subtask …). If a member finished meanwhile,
+    its ``member_done`` sits in the lead's mailbox unread until the *next*
+    ``await_members`` — the exact pull-gap that stranded a completed result for
+    minutes. This wrapper PEEKS the mailbox (``has_pending`` — non-consuming: it
+    never pops, so it cannot disturb ``await_member_results``' live-key /
+    in_review invariants) and appends an ``inbox_pending`` notice to the JSON
+    envelope so the model collects it NOW rather than reasoning past it.
+
+    Self-gating: only fires for a caller whose session has queued mail (a lead in
+    an active task); a no-op for chat callers, empty inboxes, error results, and
+    non-JSON/plain-text envelopes.
+    """
+    import json as _json
+
+    async def _wrapped(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
+        result = await handler(args, ctx)
+        try:
+            if result.is_error:
+                return result
+            from valuz_agent.modules.tasks.mailbox import mailbox_registry
+
+            if not mailbox_registry.has_pending(ctx.session_id):
+                return result
+            try:
+                payload = _json.loads(result.content)
+            except (ValueError, TypeError):
+                return result  # plain-text envelope (e.g. finish_task) — leave as-is
+            if not isinstance(payload, dict):
+                return result
+            payload["inbox_pending"] = True
+            payload["inbox_hint"] = (
+                "A member finished (or a user message arrived) and is waiting in "
+                "your inbox. Call await_members now to collect and review it "
+                "before continuing — a completed result is already queued and "
+                "returns to you instantly."
+            )
+            return ToolResult(content=_json.dumps(payload, ensure_ascii=False), is_error=False)
+        except Exception:  # noqa: BLE001 — a notice must never break the tool call
+            return result
+
+    return _wrapped
+
+
+# Lead tools worth augmenting: those a lead can call *during* a wait gap. Excludes
+# await_members (the consumer itself), terminal/plain-text tools (finish_task,
+# update_deliverable), and chat-side orchestration tools (create/list/get_task,
+# draft/commit/abandon/inject/resume) a running lead never calls.
+_INBOX_NOTICE_TOOLS: frozenset[str] = frozenset(
+    {
+        DISPATCH_TOOL_NAME,
+        GET_PLAN_TOOL_NAME,
+        MODIFY_PLAN_TOOL_NAME,
+        REVIEW_SUBTASK_TOOL_NAME,
+        SEND_TOOL_NAME,
+        STOP_SUBTASK_TOOL_NAME,
+        PLAN_TASK_TOOL_NAME,
+        LIST_MEMBERS_TOOL_NAME,
+    }
+)
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
@@ -367,6 +438,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
     async startup steps), once the tasks orchestrator exists.
     """
     import json
+    from dataclasses import replace as _dc_replace
 
     _defs: list[ToolDef] = []
 
@@ -374,6 +446,10 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
         # Local shadow of the former kernel-registry call — the body below
         # is unchanged; defs are collected and served over the host's
         # toolkit MCP server instead of the kernel's in-process registry.
+        # Pull-gap: wrap gap-callable lead tools so a member_done queued between
+        # await_members calls is surfaced on the next tool result (self-gating).
+        if td.name in _INBOX_NOTICE_TOOLS and td.handler is not None:
+            td = _dc_replace(td, handler=_with_inbox_notice(td.handler))
         _defs.append(td)
 
     async def _dispatch_handler(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
