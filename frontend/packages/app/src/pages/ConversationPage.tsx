@@ -3521,12 +3521,17 @@ export const ConversationPage = () => {
       const abort = new AbortController();
       let sawTurnStart = !opts.requireUserBeforeTerminal;
       let stopped = false;
+      let pollTimer: number | null = null;
       abortRef.current = abort;
       setSending(true);
 
       const stopSubscription = () => {
         if (stopped) return;
         stopped = true;
+        if (pollTimer !== null) {
+          window.clearInterval(pollTimer);
+          pollTimer = null;
+        }
         void refreshActiveSession(sessionId);
         void fetchSidebarSessions();
         abort.abort();
@@ -3820,19 +3825,90 @@ export const ConversationPage = () => {
         }
       };
 
-      // No client-side gap-fill / status poll here (removed the 500ms
-      // ``events?after_seq`` poll). Its two jobs are covered WITHOUT the client
-      // polling, so the state stays purely stream-derived:
-      //   1. Gap-fill of missed persisted events — the server-side backfill
-      //      inside ``iter_events_sse`` re-emits them on THIS live stream every
-      //      ~2s, so ``appendEvent`` still receives them (via the SSE reader).
-      //   2. Un-sticking the loading flag on a missed terminal frame — the same
-      //      backfill re-delivers the persisted ``session.idle`` / ``run.failed``
-      //      to ``appendEvent``, which stops the subscription under its
-      //      ``sawTurnStart`` guard (the guard is what my earlier control-stream
-      //      reconcile wrongly bypassed). ``session.update`` frames also keep
-      //      ``sessions[].status`` fresh inline (see ``appendEvent`` above). A
-      //      stream that drops ENTIRELY is handled by ``reconcileStreamEnd`` below.
+      // Reconcile the authoritative session status. The composer's loading state
+      // is DERIVED from ``sessions[].status`` (see ``deriveTurnActive``), so
+      // keeping that status fresh here is what un-sticks the Stop button / loading
+      // logo / "已处理 X 秒" timer when the terminal SSE frame is missed — a
+      // re-subscribe whose ``afterSeq`` is already past the turn's terminal event,
+      // a dropped/deduped frame, or a non-idle ending. It also fixes a stale
+      // "运行中" header pill. Once the turn is genuinely over we also
+      // ``stopSubscription`` so this poll stops spinning.
+      //
+      // ``sawTurnActivity`` seeds ``true`` for non-``requireUserBeforeTerminal``
+      // subscriptions (auto-resume / queue-drain), which are only ever created
+      // for an already-running session — so an ``idle`` reading means the turn
+      // finished, not that it hasn't started (the pre-run window that the
+      // fresh-send path must wait through).
+      let sawTurnActivity = !opts.requireUserBeforeTerminal;
+      let idleReconcileTicks = 0;
+      // Single-flight: a slow backend (e.g. valuz.db write contention during a
+      // tool-heavy turn) makes each poll exceed the 500ms interval — without
+      // this guard every tick stacks another pending request, and the pile-up
+      // saturates the browser's 6-connections-per-host pool, stalling EVERY
+      // fetch to the backend (the "153 pending requests" incident).
+      let pollInFlight = false;
+      pollTimer = window.setInterval(() => {
+        if (stopped || abort.signal.aborted || pollInFlight) return;
+        // A session switch flips ``selectedSessionIdRef`` synchronously in
+        // bootstrap and ``refreshEvents`` resets ``maxSeqRef`` — before the
+        // abort effect commits. A tick in that window would read the fresh
+        // cursor (0) against the OLD session and fetch its entire history.
+        if (selectedSessionIdRef.current !== sessionId) return;
+        pollInFlight = true;
+        sessionsApi
+          .listEvents(sessionId, maxSeqRef.current)
+          .then((response) => {
+            // Same staleness guards as ``appendEvent`` — this response may
+            // have been in flight across a session switch / abort.
+            if (stopped || abort.signal.aborted) return;
+            if (selectedSessionIdRef.current !== sessionId) return;
+            if (response.items.length > 0) {
+              sawTurnActivity = true;
+              idleReconcileTicks = 0;
+              for (const event of response.items) {
+                appendEvent(event);
+              }
+              return;
+            }
+            // No new persisted events this tick. After ~2s of silence,
+            // reconcile against the authoritative session status.
+            idleReconcileTicks += 1;
+            if (idleReconcileTicks < 4) return;
+            idleReconcileTicks = 0;
+            void sessionsApi
+              .get(sessionId)
+              .then((detail) => {
+                if (stopped || abort.signal.aborted) return;
+                if (selectedSessionIdRef.current !== sessionId) return;
+                // Push the authoritative status into local state — this drives
+                // the derived loading flag and the header pill.
+                setSessions((prev) =>
+                  prev.map((s) =>
+                    s.id === sessionId ? { ...s, status: detail.status } : s,
+                  ),
+                );
+                if (
+                  detail.status === "running" ||
+                  detail.status === "created"
+                ) {
+                  sawTurnActivity = true;
+                  return;
+                }
+                // Terminal status. If the turn actually ran (events streamed, or
+                // this subscription was born for a running session), it's done —
+                // stop the poll/stream. The loading UI has already cleared via
+                // the reconciled status regardless of this.
+                if (sawTurnActivity || maxSeqRef.current > afterSeq) {
+                  stopSubscription();
+                }
+              })
+              .catch(() => {});
+          })
+          .catch(() => {})
+          .finally(() => {
+            pollInFlight = false;
+          });
+      }, 500);
 
       // A live stream can end for reasons other than "turn finished and
       // fully delivered" — a proxy cutting the localhost connection, a
@@ -3962,6 +4038,10 @@ export const ConversationPage = () => {
         .then(safeReconcileStreamEnd)
         .catch(safeReconcileStreamEnd)
         .finally(() => {
+          if (pollTimer !== null) {
+            window.clearInterval(pollTimer);
+            pollTimer = null;
+          }
           // Only the CURRENT subscription may release the loading flag. A
           // superseded one (a hung stream aborted by the next send's
           // ``subscribeToSession``) finalises late — an unconditional
