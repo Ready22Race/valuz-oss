@@ -134,6 +134,13 @@ class McpHttpServerConfig:
     url: str
     transport: Literal["http", "sse"] = "http"
     headers: dict[str, str] = field(default_factory=dict)
+    # Per-server tool-call timeout (seconds). Lets the owner declare that a
+    # server hosts a legitimately long-blocking tool (e.g. the harness toolkit's
+    # ``await_members``, which parks up to its own ``timeout_s``). Runtimes whose
+    # MCP client imposes a shorter default — codex caps tool calls at 120s —
+    # honor this to avoid aborting a healthy long call. ``None`` = use the
+    # runtime/client default.
+    tool_timeout_sec: float | None = None
 
 
 @dataclass(frozen=True)

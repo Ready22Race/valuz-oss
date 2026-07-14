@@ -57,6 +57,16 @@ logger = logging.getLogger(__name__)
 # in-flight members against their kernel session while waiting (VALUZ-RESUME §5.4).
 _HEARTBEAT_S = 8.0
 
+# Max seconds a SINGLE await_members call parks. await is designed to be LOOPED
+# (the still_running hint + inbox-notice drive prompt re-await), so one call
+# never needs to wait longer — and it MUST stay under the MCP client's tool-call
+# ceiling (codex aborts a tool call at its ``tool_timeout_sec``) so a healthy
+# wait is never mis-reported as a transport failure. The harness MCP servers set
+# that ceiling to this value + a margin (see
+# capability_resolver._INTERNAL_MCP_TOOL_TIMEOUT_SEC). A model-supplied
+# ``timeout_s`` above this is clamped.
+_MAX_AWAIT_WINDOW_S = 600.0
+
 
 class CoordinationService:
     """Lead ↔ member coordination + chat→task / lead→member text delivery.
@@ -163,7 +173,12 @@ class CoordinationService:
         # Default cap so a member that dies without a member_done can't hang
         # the lead indefinitely (the actor loop posts member_done even on
         # terminal status, so this is a backstop, not the common path).
-        effective_timeout = timeout_s if timeout_s is not None else 600.0
+        # Clamp the per-call wait to one window unit (_MAX_AWAIT_WINDOW_S). A
+        # larger model-supplied timeout_s doesn't buy anything — await loops — and
+        # would risk exceeding the codex tool-call ceiling, turning a healthy wait
+        # into a "timed out awaiting tools/call" transport failure.
+        requested = timeout_s if timeout_s is not None else _MAX_AWAIT_WINDOW_S
+        effective_timeout = min(requested, _MAX_AWAIT_WINDOW_S)
         deadline = loop.time() + effective_timeout
         collected: dict[str, dict[str, Any]] = {}
         # VALUZ-CHATPLAN S5: if a user-injected ``message`` arrives in the
@@ -309,10 +324,11 @@ class CoordinationService:
                     "Pending members with state 'running' are ALIVE and still "
                     "working — a long tool call (research, build, tests) easily "
                     "exceeds this wait. Do NOT treat them as dead and do NOT stop "
-                    "the task. Call await_members again right away (a longer "
-                    "timeout_s is fine): any member that finishes meanwhile is "
-                    "already queued in your inbox and returns to you instantly. "
-                    "Do not pause to reason in between."
+                    "the task. Call await_members again right away (the wait is a "
+                    "fixed window — just loop it, a bigger timeout_s won't help): "
+                    "any member that finishes meanwhile is already queued in your "
+                    "inbox and returns to you instantly. Do not pause to reason in "
+                    "between."
                 )
         if user_inject is not None:
             # Surface the inject to the lead so it can decide how to respond

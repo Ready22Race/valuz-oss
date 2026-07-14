@@ -193,11 +193,15 @@ _AWAIT_MEMBERS_PARAMETERS: dict[str, Any] = {
         },
         "timeout_s": {
             "type": "number",
+            "maximum": 600,
             "description": (
-                "Optional max seconds to wait. On timeout, returns whatever "
-                "finished plus a 'pending' list AND 'pending_status' — each "
-                "pending member's live state: 'running' means it is ALIVE and "
-                "still working (long builds/tests routinely exceed this wait; "
+                "Optional max seconds to wait, capped at 600 (larger values are "
+                "clamped — a bigger number does NOT let you wait longer). await "
+                "is meant to be LOOPED: one call need not wait long; to keep "
+                "waiting, just call await_members again. On timeout, returns "
+                "whatever finished plus a 'pending' list AND 'pending_status' — "
+                "each pending member's live state: 'running' means it is ALIVE "
+                "and still working (long builds/tests routinely exceed this wait; "
                 "await again rather than treating it as dead), "
                 "'awaiting_user' means it is paused on a question only the "
                 "USER can answer (do not busy-wait; do other work or end your "

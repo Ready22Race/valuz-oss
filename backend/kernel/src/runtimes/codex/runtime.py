@@ -124,6 +124,13 @@ CODEX_TOOLKIT_BASE_URL_DEFAULT = "http://127.0.0.1:8000"
 # MCP server name the codex config block uses for the harness toolkit.
 _HARNESS_TOOLKIT_MCP_NAME = "harness_toolkit"
 
+# codex caps every MCP tool call at 120s by default; the harness toolkit hosts
+# ``await_members``, which parks up to one window unit. Raise the ceiling for the
+# kernel-exposed toolkit so a healthy await isn't aborted with "timed out
+# awaiting tools/call after 120s". = the host's await window (600) + a 120s
+# margin (mirrors capability_resolver._INTERNAL_MCP_TOOL_TIMEOUT_SEC).
+_HARNESS_TOOLKIT_TOOL_TIMEOUT_SEC = 720.0
+
 
 class CodexRuntime:
     """Wraps the Codex SDK (``AsyncCodex`` + ``AsyncThread``) as a RuntimePort."""
@@ -1306,11 +1313,24 @@ def _build_config_overrides(
                 overrides.append(
                     f"mcp_servers.{cfg.name}.http_headers.{_toml_key(k)}={_toml_quote(v)}"
                 )
+        # Per-server tool-call timeout (seconds, TOML float). Emitted only when
+        # the owner declared one — e.g. the host's ``harness`` toolkit, whose
+        # ``await_members`` parks longer than codex's 120s default. A bare
+        # number (never quoted) so codex reads it as a float, not a string.
+        if cfg.tool_timeout_sec is not None:
+            overrides.append(
+                f"mcp_servers.{cfg.name}.tool_timeout_sec={float(cfg.tool_timeout_sec)}"
+            )
 
     if expose_toolkit:
         base = os.getenv(CODEX_TOOLKIT_BASE_URL_ENV) or CODEX_TOOLKIT_BASE_URL_DEFAULT
         toolkit_url = f"{base.rstrip('/')}/mcp/toolkit/{session.id}"
         overrides.append(f"mcp_servers.{_HARNESS_TOOLKIT_MCP_NAME}.url={_toml_quote(toolkit_url)}")
+        # Same 120s-default lift for the kernel-exposed toolkit path (await_members).
+        overrides.append(
+            f"mcp_servers.{_HARNESS_TOOLKIT_MCP_NAME}.tool_timeout_sec="
+            f"{_HARNESS_TOOLKIT_TOOL_TIMEOUT_SEC}"
+        )
 
     # NB: ``model_reasoning_effort`` is intentionally NOT emitted as a
     # server-level override here. Codex pins ``reasoning_effort`` into
