@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -751,12 +751,182 @@ async def iter_events_sse(
             pass
 
 
+# ---------------------------------------------------------------------------
+# User-level control plane (the always-on multiplexed stream)
+#
+# Carries ONLY low-frequency lifecycle events across ALL of one owner's
+# sessions — never token deltas — so a user with a task lead + N members
+# streaming at once does not multiplex M token firehoses onto one connection.
+# Because lifecycle is low-frequency there is NO live tap: a server-side
+# backfill poll over the (user_id, id)-indexed durable read is the delivery
+# path (each poll is a discrete open→read→close, holding no pooled DB session
+# between reads — see docs/design/event-delivery-unification.md §9.2). The
+# client still polls nothing: one SSE, all reconciliation server-side.
+# ---------------------------------------------------------------------------
+
+# The lifecycle set the control plane reads. ``user_message`` brackets a run's
+# start (status just flipped to "running"); ``session_idle`` / ``session_error``
+# bracket its end; ``session_update`` carries interim status. Everything else —
+# deltas, tool calls, assistant text — stays on the per-session data plane.
+CONTROL_LIFECYCLE_TYPES: tuple[str, ...] = (
+    "user_message",
+    "session_idle",
+    "session_error",
+    "session_update",
+)
+
+# Backfill cadence for the control plane. Lifecycle latency of ~1s is fine for
+# badges/lists (the actively-viewed conversation streams live on its own
+# per-session data-plane stream); the query is a cheap indexed cursor read.
+CONTROL_POLL_INTERVAL_SECONDS = 1.0
+
+
+@dataclass(frozen=True)
+class UserEventFrame:
+    """One control-plane lifecycle frame, multiplexed across a user's sessions.
+
+    Unlike :class:`SessionEventFrame` this carries ``session_id`` — the stream
+    is user-scoped, so every frame names the run it belongs to.
+    """
+
+    seq: int
+    event_type: str
+    session_id: str
+    payload: dict[str, str]
+    timestamp: int | None
+
+    def to_sse_data(self) -> str:
+        return json.dumps(
+            {
+                "seq": self.seq,
+                "event_type": self.event_type,
+                "session_id": self.session_id,
+                "payload": self.payload,
+                "timestamp": self.timestamp,
+            },
+            default=str,
+        )
+
+
+def _translate_control_event(
+    kernel_type: str, data: dict[str, Any]
+) -> tuple[str, dict[str, str]] | None:
+    """Lean lifecycle projection for the control plane — NO prompt text, NO
+    deltas. Returns ``(event_type, payload)`` or ``None`` to drop.
+
+    Wire types the client reduces into running/finished lists:
+      - ``user_message``   → ``run.started``   (text-free start marker)
+      - ``session_idle``   → ``run.finished``  {status: idle, stop_reason}
+      - ``session_error``  → ``run.finished``  {status: failed, message}
+      - ``session_update`` → ``run.status``    {status}
+    """
+    d = data or {}
+    if kernel_type == "user_message":
+        return "run.started", {}
+    if kernel_type == "session_idle":
+        return "run.finished", {
+            "status": "idle",
+            "stop_reason": _stringify(d.get("stop_reason") or ""),
+        }
+    if kernel_type == "session_error":
+        return "run.finished", {
+            "status": "failed",
+            "message": _stringify(d.get("message") or d.get("category") or "agent run failed"),
+        }
+    if kernel_type == "session_update":
+        return "run.status", {"status": _stringify(d.get("status") or "")}
+    return None
+
+
+async def list_user_events_after(
+    user_id: str,
+    *,
+    after_seq: int = 0,
+    limit: int = 200,
+) -> list[UserEventFrame]:
+    """Return one owner's lifecycle events with ``seq > after_seq``, translated
+    to lean control-plane frames. Pages under the kernel's per-call cap."""
+    items: list[Any] = []
+    cursor = after_seq
+    while len(items) < limit:
+        want = min(_EVENTS_PAGE, limit - len(items))
+        page = await _history_reader().get_events_after_for_user(
+            user_id, after_seq=cursor, types=CONTROL_LIFECYCLE_TYPES, limit=want
+        )
+        if not page:
+            break
+        items.extend(page)
+        last_seq = page[-1].seq
+        if last_seq is None or len(page) < want:
+            break
+        cursor = last_seq
+
+    frames: list[UserEventFrame] = []
+    for item in items:
+        translated = _translate_control_event(
+            str(item.type), dict(item.data) if item.data is not None else {}
+        )
+        if translated is None:
+            continue
+        event_type, payload = translated
+        frames.append(
+            UserEventFrame(
+                seq=int(item.seq or 0),
+                event_type=event_type,
+                session_id=str(getattr(item, "session_id", "") or ""),
+                payload=payload,
+                timestamp=int(item.timestamp) if item.timestamp is not None else None,
+            )
+        )
+    return frames
+
+
+async def iter_user_events_sse(
+    user_id: str,
+    *,
+    after_seq: int = 0,
+    is_disconnected: Callable[[], bool] | None = None,
+) -> AsyncIterator[dict[str, str]]:
+    """Yield ``EventSourceResponse``-shaped control-plane frames forever.
+
+    One always-on connection carrying ALL of ``user_id``'s lifecycle events
+    (across every session), multiplexed and projected text-free. No live tap:
+    a server-side backfill poll (~1s) over the ``(user_id, id)``-indexed
+    durable read is the delivery path. Each poll is a discrete read that holds
+    no pooled DB session between ticks; ``shielded`` keeps a client disconnect
+    from tearing a connection down mid-read. The caller wraps this with
+    ``EventSourceResponse``.
+    """
+    cursor = after_seq
+    last_emit = asyncio.get_event_loop().time()
+    while True:
+        if is_disconnected is not None and is_disconnected():
+            break
+
+        frames = await shielded(list_user_events_after(user_id, after_seq=cursor))
+        for frame in frames:
+            yield {"event": frame.event_type, "data": frame.to_sse_data()}
+            cursor = frame.seq
+            last_emit = asyncio.get_event_loop().time()
+
+        if asyncio.get_event_loop().time() - last_emit >= IDLE_HEARTBEAT_SECONDS:
+            yield {"event": "heartbeat", "data": json.dumps({"seq": cursor})}
+            last_emit = asyncio.get_event_loop().time()
+
+        await asyncio.sleep(CONTROL_POLL_INTERVAL_SECONDS)
+
+
 __all__ = [
     "SessionEventFrame",
     "TurnWindow",
+    "UserEventFrame",
     "list_events_after",
     "list_events_window",
+    "list_user_events_after",
     "iter_events_sse",
+    "iter_user_events_sse",
     "POLL_INTERVAL_SECONDS",
     "IDLE_HEARTBEAT_SECONDS",
+    "CONTROL_POLL_INTERVAL_SECONDS",
+    "CONTROL_LIFECYCLE_TYPES",
 ]
