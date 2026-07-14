@@ -3521,12 +3521,17 @@ export const ConversationPage = () => {
       const abort = new AbortController();
       let sawTurnStart = !opts.requireUserBeforeTerminal;
       let stopped = false;
+      // Bounded resume-reconcile burst (see below the appendEvent def). Tracked
+      // here so ``stopSubscription`` / the stream ``finally`` can cancel any
+      // still-pending shots when this subscription ends or is superseded.
+      const reconcileBurstTimers: number[] = [];
       abortRef.current = abort;
       setSending(true);
 
       const stopSubscription = () => {
         if (stopped) return;
         stopped = true;
+        reconcileBurstTimers.forEach((t) => window.clearTimeout(t));
         void refreshActiveSession(sessionId);
         void fetchSidebarSessions();
         abort.abort();
@@ -3820,19 +3825,67 @@ export const ConversationPage = () => {
         }
       };
 
-      // No client-side gap-fill / status poll here (removed the 500ms
-      // ``events?after_seq`` poll). Its two jobs are covered WITHOUT the client
-      // polling, so the state stays purely stream-derived:
-      //   1. Gap-fill of missed persisted events — the server-side backfill
-      //      inside ``iter_events_sse`` re-emits them on THIS live stream every
-      //      ~2s, so ``appendEvent`` still receives them (via the SSE reader).
-      //   2. Un-sticking the loading flag on a missed terminal frame — the same
-      //      backfill re-delivers the persisted ``session.idle`` / ``run.failed``
-      //      to ``appendEvent``, which stops the subscription under its
-      //      ``sawTurnStart`` guard (the guard is what my earlier control-stream
-      //      reconcile wrongly bypassed). ``session.update`` frames also keep
-      //      ``sessions[].status`` fresh inline (see ``appendEvent`` above). A
-      //      stream that drops ENTIRELY is handled by ``reconcileStreamEnd`` below.
+      // No forever-poll here — the old 500ms ``events?after_seq`` loop is gone
+      // (it spammed ~2 req/s for the WHOLE turn). Ongoing delivery is stream-
+      // driven: live frames via the SSE reader, plus the server-side backfill
+      // inside ``iter_events_sse`` re-emitting any missed persisted events on
+      // THIS stream (~2s); a full stream drop is handled by
+      // ``reconcileStreamEnd`` below; a missed terminal frame is re-delivered by
+      // that same backfill and stops the subscription under the ``sawTurnStart``
+      // guard.
+      //
+      // BUT on a RESUME (opening an already-running session), the initial
+      // transcript window (``refreshEvents``) and this subscription race — and
+      // under some interleavings the loaded window lands empty / superseded,
+      // leaving the transcript BLANK until a later event forces a re-render
+      // (the "reload mid-turn shows nothing until you jostle it" bug; the
+      // content IS persisted, just not painted). Close that race determinist
+      // -ally with a BOUNDED, self-terminating reconcile burst: re-fetch the
+      // transcript window a few times over the first ~2.5s and idempotently
+      // merge it via ``appendEvent`` (dedups on seq), forcing the persisted
+      // transcript to paint regardless of which async path won. Bounded — NOT a
+      // per-turn poll — so it converges the load without reviving the spam, and
+      // it doubles as a safety net: any transient blank self-heals within one
+      // burst window instead of waiting for a manual "jostle".
+      const reconcileTranscript = () => {
+        if (stopped || abort.signal.aborted) return;
+        if (selectedSessionIdRef.current !== sessionId) return;
+        void sessionsApi
+          .listEventsWindow(sessionId, { turnLimit: TURN_PAGE_SIZE })
+          .then((resp) => {
+            if (stopped || abort.signal.aborted) return;
+            if (selectedSessionIdRef.current !== sessionId) return;
+            if (resp.items.length === 0) return;
+            // Order-safe merge, NOT ``appendEvent`` (which appends to the tail):
+            // if the live stream already delivered newer events, tail-appending
+            // the older window would misorder the array and ``buildTurns``
+            // consumes events in array order. Add only genuinely-missing
+            // persisted rows (dedup by seq) and keep the whole thing seq-sorted.
+            setEvents((prev) => {
+              const seen = new Set(
+                prev.map((e) => e.seq).filter((s) => s > 0),
+              );
+              const missing = resp.items.filter(
+                (e) => e.seq > 0 && !seen.has(e.seq),
+              );
+              if (missing.length === 0) return prev;
+              return [...prev, ...missing].sort((a, b) => a.seq - b.seq);
+            });
+            const top = resp.items[resp.items.length - 1].seq;
+            if (top > maxSeqRef.current) maxSeqRef.current = top;
+          })
+          .catch(() => {});
+      };
+      // Only the RESUME / queue-drain / auto-reconnect subscriptions race the
+      // window load — a fresh user send drives ``events`` optimistically and has
+      // nothing pre-loaded to lose, so it skips the burst. These are exactly the
+      // ``!requireUserBeforeTerminal`` subscriptions (born for an already-running
+      // session).
+      if (!opts.requireUserBeforeTerminal) {
+        for (const ms of [400, 1200, 2500]) {
+          reconcileBurstTimers.push(window.setTimeout(reconcileTranscript, ms));
+        }
+      }
 
       // A live stream can end for reasons other than "turn finished and
       // fully delivered" — a proxy cutting the localhost connection, a
@@ -3962,6 +4015,9 @@ export const ConversationPage = () => {
         .then(safeReconcileStreamEnd)
         .catch(safeReconcileStreamEnd)
         .finally(() => {
+          // The resume-reconcile burst only needs the subscription's opening
+          // window; cancel any shots still pending once the stream settles.
+          reconcileBurstTimers.forEach((t) => window.clearTimeout(t));
           // Only the CURRENT subscription may release the loading flag. A
           // superseded one (a hung stream aborted by the next send's
           // ``subscribeToSession``) finalises late — an unconditional
