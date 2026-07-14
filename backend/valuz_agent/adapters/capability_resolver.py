@@ -374,6 +374,14 @@ def _mint_internal_mcp_token(owner_user_id: str) -> str:
     return token
 
 
+# Tool-call timeout for the first-party harness MCP servers. Their tools can
+# block far longer than a runtime client's default cap (codex aborts at 120s):
+# the ``harness`` toolkit's ``await_members`` parks up to its own ``timeout_s``,
+# and cloud doc parsing can also run long. 1h matches codex's own approval
+# timeout and is a pure safety net — each tool still owns its real wait.
+_INTERNAL_MCP_TOOL_TIMEOUT_SEC = 3600.0
+
+
 def always_on_http_mcp_servers(
     session_id: str, *, owner_user_id: str, toolkit: str = "base"
 ) -> list[McpHttpServerConfig]:
@@ -414,24 +422,28 @@ def always_on_http_mcp_servers(
             url=docs_mcp_url(base_url=base),
             transport="http",
             headers=dict(headers),
+            tool_timeout_sec=_INTERNAL_MCP_TOOL_TIMEOUT_SEC,
         ),
         McpHttpServerConfig(
             name="valuz_automations",
             url=automations_mcp_url(base_url=base),
             transport="http",
             headers=dict(headers),
+            tool_timeout_sec=_INTERNAL_MCP_TOOL_TIMEOUT_SEC,
         ),
         McpHttpServerConfig(
             name="valuz_connectors",
             url=connectors_mcp_url(base_url=base),
             transport="http",
             headers=dict(headers),
+            tool_timeout_sec=_INTERNAL_MCP_TOOL_TIMEOUT_SEC,
         ),
         McpHttpServerConfig(
             name="harness",
             url=toolkit_mcp_url(base_url=base, toolset=toolkit),
             transport="http",
             headers=dict(headers),
+            tool_timeout_sec=_INTERNAL_MCP_TOOL_TIMEOUT_SEC,
         ),
     ]
 

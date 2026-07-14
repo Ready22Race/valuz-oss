@@ -349,12 +349,15 @@ def mcp_to_dict(cfg: McpServerConfig) -> dict[str, Any]:
             "env": dict(cfg.env),
             "env_vars": list(cfg.env_vars),
         }
-    return {
+    out: dict[str, Any] = {
         "name": cfg.name,
         "url": cfg.url,
         "transport": cfg.transport,
         "headers": dict(cfg.headers),
     }
+    if cfg.tool_timeout_sec is not None:
+        out["tool_timeout_sec"] = cfg.tool_timeout_sec
+    return out
 
 
 def dict_to_mcp(data: dict[str, Any]) -> McpServerConfig:
@@ -379,11 +382,14 @@ def dict_to_mcp(data: dict[str, Any]) -> McpServerConfig:
     headers = (
         {str(k): str(v) for k, v in raw_headers.items()} if isinstance(raw_headers, dict) else {}
     )
+    raw_timeout = data.get("tool_timeout_sec")
+    tool_timeout_sec = float(raw_timeout) if isinstance(raw_timeout, (int, float)) else None
     return McpHttpServerConfig(
         name=str(data.get("name", "")),
         url=str(data.get("url", "")),
         transport=transport,
         headers=headers,
+        tool_timeout_sec=tool_timeout_sec,
     )
 
 
