@@ -1,5 +1,7 @@
 import os
+import tempfile
 from functools import wraps
+from pathlib import Path
 
 # The document parser offloads to a ``ProcessPoolExecutor`` in production
 # (see ``valuz_agent.infra.parse_pool``). For the unit suite we force the
@@ -7,6 +9,74 @@ from functools import wraps
 # subprocesses (which re-import modules and slow CI). The dedicated offload
 # regression test (``test_parse_pool_offload``) re-enables the pool explicitly.
 os.environ.setdefault("VALUZ_PARSE_POOL_DISABLED", "1")
+
+# ---------------------------------------------------------------------------
+# Home sandbox — env-level isolation that survives config-module reloads.
+#
+# History: the suite repeatedly leaked fixture skills (``created``,
+# ``empty-session-N``, ``weekly-report-vN``, …) and ``local-test-owner`` DB
+# rows into the REAL user home (``~/.agent[s]/skills``, ``~/.valuz-oss``).
+# Attribute-level monkeypatches on the ``settings`` singleton (including the
+# ``_isolate_user_skills_dir`` fence below) cannot fully stop that: any test
+# that reloads ``valuz_agent.infra.config`` builds a NEW ``Settings`` from the
+# environment, and code holding the fresh singleton writes to the real
+# defaults again. Pinning the environment itself — before ANY valuz_agent
+# import — makes every (re)constructed ``Settings`` land in the sandbox.
+#
+# Force-set (not ``setdefault``): a dev shell exporting VALUZ_DATA_DIR (e.g.
+# ``scripts/dev.sh`` pins ``~/.valuz-oss-dev``) must not bleed into tests
+# either.
+_HOME_SANDBOX = Path(tempfile.mkdtemp(prefix="valuz-test-home-"))
+
+# (1) Positive pins — every real-home path a test could write lands INSIDE the
+# sandbox. Each of these fields defaults to a location under the user's actual
+# home; pinning them makes the resolved path sandbox-relative instead.
+os.environ["VALUZ_DATA_DIR"] = str(_HOME_SANDBOX / "valuz-data")
+os.environ["VALUZ_LOG_DIR"] = str(_HOME_SANDBOX / "logs")
+os.environ["VALUZ_USER_SKILLS_DIR"] = str(_HOME_SANDBOX / "user-skills")
+# ``user_project_root`` defaults to ``~/Valuz`` — a REAL directory the user
+# keeps data in (backups live under ``~/Valuz/backups``). Tests that create a
+# managed project (``ProjectService.create_project`` / import-confirm without a
+# ``root_path``) write a project marker there via ``fs_registry.project_root()``.
+os.environ["VALUZ_USER_PROJECT_ROOT"] = str(_HOME_SANDBOX / "projects")
+
+# (2) Kernel durable-store tier — force the in-process/local backend so a test
+# that boots the kernel dual-writes to the SANDBOXED host db (boot injects the
+# sandbox ``db_url`` as the durable URL only when ``KERNEL_STORE == "local"``),
+# never to an ambient pg/remote backend. Read exact-case via ``os.getenv``.
+os.environ["KERNEL_STORE"] = "local"
+
+# (3) Clear ambient overrides that would REDIRECT a write OUTSIDE the sandbox,
+# so each falls back to its sandboxed default:
+#   * VALUZ_DATABASE_URL / VALUZ_KERNEL_DATABASE_URL — ``fs_registry.db_url()`` /
+#     ``kernel_db_url()`` return these VERBATIM when set, bypassing the
+#     data-dir-derived SQLite path pinned above.
+#   * VALUZ_DURABLE_DATABASE_URL / VALUZ_DATA_API_* — the kernel ``AppConfig``
+#     reads these directly; left set they would dual-write to a real pg/remote
+#     durable store even with the host db sandboxed.
+#   * VALUZ_USER_SKILL_STAGING_DIR / VALUZ_USER_TEMP_DIR — optional dir
+#     overrides whose ``None`` default already resolves under the sandboxed
+#     data dir / OS temp; deleting an ambient value restores that safe default
+#     (unlike PINNING them, which would flip the legacy-staging branch).
+# A dev shell or CI env exporting any of these would re-leak into a real DB or
+# real home that the filesystem tripwire below cannot see. Case-insensitive:
+# pydantic-settings matches env vars without regard to case, so any spelling
+# must go; VALUZ_DATA_API_* is matched by prefix (URL / TOKEN / KIND).
+_SANDBOX_ESCAPE_HATCHES = frozenset(
+    {
+        "VALUZ_DATABASE_URL",
+        "VALUZ_KERNEL_DATABASE_URL",
+        "VALUZ_DURABLE_DATABASE_URL",
+        "VALUZ_USER_SKILL_STAGING_DIR",
+        "VALUZ_USER_TEMP_DIR",
+    }
+)
+for _escape_key in [
+    k
+    for k in os.environ
+    if k.upper() in _SANDBOX_ESCAPE_HATCHES or k.upper().startswith("VALUZ_DATA_API_")
+]:
+    del os.environ[_escape_key]
 
 # ---------------------------------------------------------------------------
 # Owner context — explicit-identity semantics (no implicit fallback).
@@ -168,3 +238,65 @@ def _isolate_user_skills_dir(tmp_path, monkeypatch):
     from valuz_agent.infra.config import settings as _settings
 
     monkeypatch.setattr(_settings, "user_skills_dir", tmp_path / "_isolated-user-skills")
+
+
+# ---------------------------------------------------------------------------
+# Real-home leak tripwire — no leak may ever land silently again.
+#
+# The env sandbox above closes every KNOWN write path, but the next
+# ``Path.home()`` shortcut someone adds would leak silently for weeks (as the
+# ``~/.agent/skills`` fixture pollution did — three cleanup rounds between
+# 2026-07-10 and 2026-07-14). This session fixture snapshots the real home
+# targets before the first test and fails the run loudly if the suite added
+# anything to them. Watched: both skill library spellings (the pre-26a3e1e8
+# default was ``~/.agent/skills``), the production data dir, and the legacy
+# CLI skill roots (read-only by contract — a write there is always a bug).
+#
+# Note: entries are compared by top-level NAME, so a concurrently running
+# desktop app quietly rewriting file contents under ``~/.valuz-oss`` does not
+# false-positive; only something NEW appearing does. If this fires for you
+# locally, a test wrote outside the sandbox — fix the test, don't widen the
+# watchlist.
+# ---------------------------------------------------------------------------
+_REAL_HOME_WATCHED = (
+    Path.home() / ".agents" / "skills",
+    Path.home() / ".agent" / "skills",
+    Path.home() / ".valuz-oss",
+    Path.home() / "Valuz",  # user_project_root default — real user data lives here
+    Path.home() / ".claude" / "skills",
+    Path.home() / ".codex" / "skills",
+)
+
+
+def _real_home_snapshot() -> dict[str, set[str] | None]:
+    return {
+        str(root): (set(os.listdir(root)) if root.is_dir() else None)
+        for root in _REAL_HOME_WATCHED
+    }
+
+
+# Baseline captured at conftest IMPORT time — this runs before
+# ``pytest_sessionstart`` and its collection-time ``valuz_agent`` imports (which
+# pull in dozens of modules). A session-scoped fixture would only snapshot at
+# the first test's setup, i.e. AFTER those imports, folding any import- or
+# session-start-time ``Path.home()`` write into the baseline as "pre-existing"
+# and letting it leak silently — the exact class of bug this tripwire guards.
+_REAL_HOME_BASELINE = _real_home_snapshot()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _real_home_leak_tripwire():
+    yield
+    after = _real_home_snapshot()
+    leaks: list[str] = []
+    for root, entries_after in after.items():
+        entries_before = _REAL_HOME_BASELINE.get(root)
+        added = sorted((entries_after or set()) - (entries_before or set()))
+        if added:
+            leaks.append(f"{root} gained: {added}")
+    assert not leaks, (
+        "Test suite leaked into the REAL home directory — a write path "
+        "escaped the conftest home sandbox (check for a reloaded "
+        "valuz_agent.infra.config, a hardcoded Path.home(), or a missing "
+        f"env knob): {'; '.join(leaks)}"
+    )

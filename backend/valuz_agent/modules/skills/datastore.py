@@ -4,8 +4,8 @@ import json
 from pathlib import Path
 from typing import Protocol
 
+from sqlalchemy import case, select
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from valuz_agent.infra.db import async_commit_with_retry
@@ -61,13 +61,49 @@ class SkillDatastore:
             .first()
         )
 
+    # Same-slug rows can now coexist across scopes (an ``official`` bundled copy
+    # AND a ``user`` copy under ~/.agents/skills). ``get_by_slug`` is the "which
+    # copy is effective for this slug" resolver — used by agent runtime skill
+    # resolution and read APIs — so it returns the highest-priority row
+    # deterministically: official > project > user, ``source_path`` as a stable
+    # final tiebreak. Row-precise writes (create/import/delete stamping) must use
+    # ``get_by_source_path`` instead, never this.
+    _SCOPE_PRIORITY = case(
+        (SkillIndexRow.scope == "official", 0),
+        (SkillIndexRow.scope == "project", 1),
+        else_=2,
+    )
+
     async def get_by_slug(self, user_id: str, slug: str) -> SkillIndexRow | None:
+        return (
+            (
+                await self._db.execute(
+                    select(SkillIndexRow)
+                    .where(
+                        SkillIndexRow.user_id == user_id,
+                        SkillIndexRow.slug == slug,
+                    )
+                    .order_by(self._SCOPE_PRIORITY, SkillIndexRow.source_path)
+                )
+            )
+            .scalars()
+            .first()
+        )
+
+    async def get_by_source_path(
+        self, user_id: str, source_path: str
+    ) -> SkillIndexRow | None:
+        """The row for one on-disk skill directory — the business identity.
+
+        This is the exact-row lookup the upsert and the create/import/delete
+        stamping paths use, so a same-slug copy in another scope is never
+        touched by accident."""
         return (
             (
                 await self._db.execute(
                     select(SkillIndexRow).where(
                         SkillIndexRow.user_id == user_id,
-                        SkillIndexRow.slug == slug,
+                        SkillIndexRow.source_path == source_path,
                     )
                 )
             )
@@ -97,6 +133,18 @@ class SkillDatastore:
         row.creation_origin = origin
         await async_commit_with_retry(self._db, where="SkillDatastore.set_creation_origin_by_slug")
 
+    async def set_creation_origin_by_path(
+        self, user_id: str, source_path: str, origin: str
+    ) -> None:
+        """Row-precise variant of ``set_creation_origin_by_slug`` — stamps the
+        exact skill folder the create/import flow just wrote, so a same-slug
+        copy in another scope is never mislabeled."""
+        row = await self.get_by_source_path(user_id, source_path)
+        if row is None:
+            return
+        row.creation_origin = origin
+        await async_commit_with_retry(self._db, where="SkillDatastore.set_creation_origin_by_path")
+
     async def set_origin_metadata(self, user_id: str, skill_id: str, origin_json: str) -> None:
         """Stamp import provenance (``origin_json``) on an existing row.
 
@@ -116,6 +164,17 @@ class SkillDatastore:
             return
         row.origin_json = origin_json
         await async_commit_with_retry(self._db, where="SkillDatastore.set_origin_metadata_by_slug")
+
+    async def set_origin_metadata_by_path(
+        self, user_id: str, source_path: str, origin_json: str
+    ) -> None:
+        """Row-precise variant of ``set_origin_metadata_by_slug`` (see
+        ``set_creation_origin_by_path``)."""
+        row = await self.get_by_source_path(user_id, source_path)
+        if row is None:
+            return
+        row.origin_json = origin_json
+        await async_commit_with_retry(self._db, where="SkillDatastore.set_origin_metadata_by_path")
 
     async def create(self, user_id: str, row: SkillIndexRow) -> SkillIndexRow:
         row.user_id = user_id
@@ -142,6 +201,15 @@ class SkillDatastore:
             return
         row.status = "unavailable"
         await async_commit_with_retry(self._db, where="SkillDatastore.mark_unavailable_by_slug")
+
+    async def mark_unavailable_by_path(self, user_id: str, source_path: str) -> None:
+        """Row-precise variant of ``mark_unavailable_by_slug`` — used by delete
+        so removing a user copy never marks a same-slug official row absent."""
+        row = await self.get_by_source_path(user_id, source_path)
+        if row is None:
+            return
+        row.status = "unavailable"
+        await async_commit_with_retry(self._db, where="SkillDatastore.mark_unavailable_by_path")
 
     async def list_project_skills(
         self, user_id: str, project_id: str
@@ -201,6 +269,25 @@ class SkillDatastore:
         ).scalars()
         return set(rows)
 
+    async def list_library_disabled_paths(self, user_id: str) -> set[str]:
+        """Skill ``source_path``s currently OFF in the library.
+
+        The path-keyed companion to ``list_library_disabled_slugs``: the catalog
+        overlays the library switch per row, and same-slug rows can now coexist
+        across scopes with different switch states (an ``official`` copy default
+        ON, a ``discovered`` user copy default OFF). Keying the overlay on slug
+        would let the disabled user copy wrongly hide the enabled official one;
+        keying on ``source_path`` targets each row exactly."""
+        rows = (
+            await self._db.execute(
+                select(SkillIndexRow.source_path).where(
+                    SkillIndexRow.user_id == user_id,
+                    SkillIndexRow.library_enabled.is_(False),
+                )
+            )
+        ).scalars()
+        return set(rows)
+
     async def set_library_enabled(self, user_id: str, skill_id: str, enabled: bool) -> None:
         """Set the global library switch on one index row (the Skills-page
         representative). No-op if the id is unknown to this owner."""
@@ -216,6 +303,18 @@ class SkillDatastore:
             return
         row.library_enabled = enabled
         await async_commit_with_retry(self._db, where="SkillDatastore.set_library_enabled_by_slug")
+
+    async def set_library_enabled_by_path(
+        self, user_id: str, source_path: str, enabled: bool
+    ) -> None:
+        """Row-precise variant — flips the switch on the exact row the Skills
+        page shows (resolved by its ``source_path``), so a toggle never leaks
+        onto a same-slug copy in another scope."""
+        row = await self.get_by_source_path(user_id, source_path)
+        if row is None:
+            return
+        row.library_enabled = enabled
+        await async_commit_with_retry(self._db, where="SkillDatastore.set_library_enabled_by_path")
 
     # ------------------------------------------------------------------
     # Filesystem-based project skill config (JSON project-config.json)

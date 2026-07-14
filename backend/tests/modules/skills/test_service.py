@@ -97,7 +97,19 @@ class FakeSkillDatastore:
         return self._rows.get(skill_id)
 
     async def get_by_slug(self, user_id, slug):
-        return next((row for row in self._rows.values() if row.slug == slug), None)
+        # Mirror the real datastore: same-slug rows can coexist across scopes, so
+        # resolve the highest-priority one (official > project > user).
+        matches = [row for row in self._rows.values() if row.slug == slug]
+        if not matches:
+            return None
+        rank = {"official": 0, "project": 1}
+        matches.sort(
+            key=lambda r: (
+                rank.get(getattr(r, "scope", ""), 2),
+                getattr(r, "source_path", "") or "",
+            )
+        )
+        return matches[0]
 
     async def set_creation_origin(self, user_id, skill_id, origin):
         row = self._rows.get(skill_id)
@@ -153,6 +165,15 @@ class FakeSkillDatastore:
 
     async def set_library_enabled(self, user_id, skill_id, enabled):
         row = self._rows.get(skill_id)
+        if row is None:
+            # Catalog view ids are composite ``{scope}:{slug}``; resolve to the
+            # underlying row by slug so the row's ``library_enabled`` (what the
+            # path-keyed catalog overlay reads) actually flips.
+            slug_part = skill_id.split(":", 1)[1] if ":" in skill_id else skill_id
+            row = next(
+                (r for r in self._rows.values() if getattr(r, "slug", None) == slug_part),
+                None,
+            )
         if row is not None:
             row.library_enabled = enabled
         disabled = getattr(self, "_library_disabled", set())
@@ -179,6 +200,51 @@ class FakeSkillDatastore:
         else:
             disabled.add(slug)
         self._library_disabled_slugs = disabled
+
+    async def get_by_source_path(self, user_id, source_path):
+        return next(
+            (
+                row
+                for row in self._rows.values()
+                if getattr(row, "source_path", None) == source_path
+            ),
+            None,
+        )
+
+    async def set_creation_origin_by_path(self, user_id, source_path, origin):
+        row = await self.get_by_source_path(user_id, source_path)
+        if row is not None:
+            row.creation_origin = origin
+
+    async def set_origin_metadata_by_path(self, user_id, source_path, origin_json):
+        row = await self.get_by_source_path(user_id, source_path)
+        if row is not None:
+            row.origin_json = origin_json
+
+    async def mark_unavailable_by_path(self, user_id, source_path):
+        row = await self.get_by_source_path(user_id, source_path)
+        if row is not None:
+            row.status = "unavailable"
+
+    async def list_library_disabled_paths(self, user_id):
+        paths = {
+            row.source_path
+            for row in self._rows.values()
+            if getattr(row, "user_id", user_id) == user_id
+            and getattr(row, "library_enabled", True) is False
+        }
+        return paths | set(getattr(self, "_library_disabled_paths", set()))
+
+    async def set_library_enabled_by_path(self, user_id, source_path, enabled):
+        row = await self.get_by_source_path(user_id, source_path)
+        if row is not None:
+            row.library_enabled = enabled
+        disabled = getattr(self, "_library_disabled_paths", set())
+        if enabled:
+            disabled.discard(source_path)
+        else:
+            disabled.add(source_path)
+        self._library_disabled_paths = disabled
 
     def add_ignore(self, skill_id, content_hash=None):
         pass
@@ -259,6 +325,119 @@ class TestIndexOfficialSkills:
 
         rows = await service._ds.list_skills("u")
         assert len([r for r in rows if r.slug == "dcf"]) == 1
+
+
+class TestSameSlugCoexistence:
+    """A bundled ``official`` copy and a ``user`` copy of the same slug are
+    distinct skills (different on-disk dirs) and must coexist — the scan indexes
+    both and the catalog shows each in its own source group, rather than one
+    shadowing the other in the ``(user_id, slug)``-keyed index."""
+
+    @staticmethod
+    def _seed_official_row(source_path: str, *, library_enabled: bool = True):
+        from valuz_agent.modules.skills.models import SkillIndexRow
+
+        return SkillIndexRow(
+            slug="shared",
+            name="shared",
+            description="official copy",
+            scope="official",
+            source="official",
+            source_path=source_path,
+            user_id="u",
+            readonly=True,
+            deletable=False,
+            status="available",
+            creation_origin="discovered",
+            library_enabled=library_enabled,
+        )
+
+    @staticmethod
+    def _seed_user_row(source_path: str, *, library_enabled: bool = False):
+        from valuz_agent.modules.skills.models import SkillIndexRow
+
+        return SkillIndexRow(
+            slug="shared",
+            name="shared",
+            description="user copy",
+            scope="user",
+            source="valuz",
+            source_path=source_path,
+            user_id="u",
+            status="available",
+            creation_origin="discovered",
+            library_enabled=library_enabled,
+        )
+
+    class _ExplodingOfficialSource:
+        name = "official"
+
+        def list_skills(self, ctx, *, compute_content_hash=True):
+            raise AssertionError("official source should not be scanned when index is warm")
+
+    async def test_startup_scan_indexes_both_copies_without_shadowing(
+        self, svc, skill_root, tmp_path
+    ):
+        from valuz_agent.integrations.skills_official import OfficialSkillSource
+
+        # A user copy under the user skills root...
+        _make_skill_dir(skill_root, "shared")
+        # ...and an official copy of the SAME slug under the official-skills root.
+        official_dir = tmp_path / "official"
+        official_copy = _make_skill_dir(official_dir, "shared")
+        (official_copy / ".bundled-version").write_text("v1", encoding="utf-8")
+        svc._extra_sources = [OfficialSkillSource(official_dir=official_dir)]
+
+        await svc.startup_scan("u")
+
+        rows = [r for r in await svc._ds.list_skills("u") if r.slug == "shared"]
+        # Both rows exist — the user source (scanned first) no longer claims the
+        # slug and drops the official one.
+        assert {r.scope for r in rows} == {"user", "official"}
+        assert len({r.source_path for r in rows}) == 2
+        # ``get_by_slug`` resolves the effective copy: official outranks user.
+        effective = await svc._ds.get_by_slug("u", "shared")
+        assert effective is not None and effective.scope == "official"
+
+    async def test_catalog_shows_both_copies_in_their_groups(self, svc, tmp_path):
+        official_dir = tmp_path / "official" / "shared"
+        official_dir.mkdir(parents=True)
+        (official_dir / ".bundled-version").write_text("v1", encoding="utf-8")
+        await svc._ds.create("u", self._seed_official_row(str(official_dir)))
+        await svc._ds.create("u", self._seed_user_row(str(tmp_path / "user" / "shared")))
+        svc._extra_sources = [self._ExplodingOfficialSource()]
+
+        catalog = await svc.list_catalog("u", "ws-1")
+
+        shared = [s for s in catalog.skills if s.slug == "shared"]
+        assert {s.id for s in shared} == {"official:shared", "user:shared"}
+        official = next(s for s in shared if s.scope == "official")
+        user = next(s for s in shared if s.scope == "user")
+        assert official.origin_label == "Built-in"
+        assert user.origin_label != "Built-in"
+
+    async def test_disabling_user_copy_does_not_disable_official(self, svc, tmp_path):
+        official_dir = tmp_path / "official" / "shared"
+        official_dir.mkdir(parents=True)
+        (official_dir / ".bundled-version").write_text("v1", encoding="utf-8")
+        await svc._ds.create(
+            "u", self._seed_official_row(str(official_dir), library_enabled=True)
+        )
+        # The user copy is turned OFF; a slug-keyed overlay would wrongly hide the
+        # enabled official copy too. Path-keying isolates them.
+        await svc._ds.create(
+            "u", self._seed_user_row(str(tmp_path / "user" / "shared"), library_enabled=False)
+        )
+        svc._extra_sources = [self._ExplodingOfficialSource()]
+
+        catalog = await svc.list_catalog("u", "ws-1")
+
+        official = next(
+            s for s in catalog.skills if s.slug == "shared" and s.scope == "official"
+        )
+        user = next(s for s in catalog.skills if s.slug == "shared" and s.scope == "user")
+        assert official.library_enabled is True
+        assert user.library_enabled is False
 
 
 class TestListCatalog:
@@ -509,13 +688,21 @@ class TestLibraryState:
             '---\nname: "skill-creator"\ndescription: "x"\norigin-label: "Built-in"\n---\n\nbody\n',
             encoding="utf-8",
         )
+        # The pre-index (fallback scan) view carries the Built-in label from the
+        # SKILL.md frontmatter.
         cat0 = await service.list_catalog("u", "ws-1")
-        sc_id = next(s for s in cat0.skills if s.slug == "skill-creator").id
-        await service._ds.set_library_enabled("u", sc_id, False)
+        sc0 = next(s for s in cat0.skills if s.slug == "skill-creator")
+        assert sc0.origin_label == "Built-in"
+
+        # Index it (the production read path) and hide it through the real
+        # library toggle, which resolves the row by its on-disk path.
+        await service.startup_scan("u")
+        cat1 = await service.list_catalog("u", "ws-1")
+        sc_id = next(s for s in cat1.skills if s.slug == "skill-creator").id
+        await service.set_library_enabled("u", sc_id, False)
 
         catalog = await service.list_catalog("u", "ws-1")
         sc = next(s for s in catalog.skills if s.slug == "skill-creator")
-        assert sc.origin_label == "Built-in"
         assert sc.library_enabled is False
 
     async def test_toggle_returns_updated_and_persists(self, svc, skill_root):

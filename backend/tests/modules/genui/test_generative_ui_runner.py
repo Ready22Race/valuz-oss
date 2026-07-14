@@ -50,9 +50,23 @@ def patched(tmp_path, monkeypatch):
     async def _delete(user_id, sid):
         captured.setdefault("deleted", []).append(sid)
 
+    async def _gen():
+        for d in ({"text": "root "}, {"text": "= Stack()"}):
+            yield SimpleNamespace(type="text_delta", data=d)
+        yield SimpleNamespace(type="assistant_message", data={"text": "Chart\n  data: 1,2,3"})
+
+    def _subscribe(user_id, sid):
+        captured.setdefault("subscribed", []).append(sid)
+        return _gen()
+
+    async def _emit(user_id, sid, type_, data):
+        captured.setdefault("forwarded", []).append((sid, type_, data))
+
     monkeypatch.setattr(r.kernel_client, "create_session", _create)
     monkeypatch.setattr(r.kernel_client, "run_turn", _run_turn)
     monkeypatch.setattr(r.kernel_client, "delete_session", _delete)
+    monkeypatch.setattr(r.kernel_client, "subscribe_session_events", _subscribe)
+    monkeypatch.setattr(r.kernel_client, "emit_live_event", _emit)
     return captured
 
 
@@ -88,3 +102,40 @@ async def test_generative_ui_sessions_share_one_fixed_cwd(patched):
     assert reqs[0].cwd == reqs[1].cwd
     assert reqs[0].cwd.endswith("generative-ui")
     assert reqs[0].id not in reqs[0].cwd and reqs[1].id not in reqs[1].cwd
+
+
+async def test_completer_streams_text_deltas_to_calling_session(patched):
+    """tool_use_id 非空时,订阅 ephemeral 的 text_delta,转发成调用方 session
+    的 tool_output_delta(keyed by tool_use_id);run_turn 全文仍作为返回值。"""
+    completer = r._make_completer(
+        user_id="u1",
+        runtime_provider="claude_agent",
+        model="claude-sonnet-4-6",
+        mp=None,
+        calling_session_id="calling-sid",
+        tool_use_id="R1",
+    )
+    out = await completer("PROMPT")
+    assert out == "Chart\n  data: 1,2,3"  # run_turn 全文(canonical)
+    forwarded = patched.get("forwarded", [])
+    assert forwarded == [
+        ("calling-sid", "tool_output_delta", {"id": "R1", "text": "root "}),
+        ("calling-sid", "tool_output_delta", {"id": "R1", "text": "= Stack()"}),
+    ]
+    assert patched["deleted"] == [patched["req"].id]  # cleanup 仍跑
+
+
+async def test_completer_sync_when_no_tool_use_id(patched):
+    """tool_use_id=None → 不订阅、不转发,纯同步(行为同同步版)。"""
+    completer = r._make_completer(
+        user_id="u1",
+        runtime_provider="claude_agent",
+        model="claude-sonnet-4-6",
+        mp=None,
+        calling_session_id="calling-sid",
+        tool_use_id=None,
+    )
+    out = await completer("PROMPT")
+    assert out == "Chart\n  data: 1,2,3"
+    assert patched.get("forwarded", []) == []
+    assert patched.get("subscribed", []) == []  # 没订阅

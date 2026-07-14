@@ -3,8 +3,10 @@ import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 
 vi.mock("@openuidev/react-lang", () => ({
-  Renderer: (props: { response: string }) => (
-    <div data-testid="renderer">{props.response}</div>
+  Renderer: (props: { response: string; isStreaming?: boolean }) => (
+    <div data-testid="renderer" data-streaming={props.isStreaming ? "true" : "false"}>
+      {props.response}
+    </div>
   ),
 }));
 vi.mock("@openuidev/react-ui", () => ({
@@ -39,6 +41,18 @@ describe("GenerativeUICard", () => {
   it("shows an empty state when there is no output yet", () => {
     render(<GenerativeUICard openui={undefined} status="running" />);
     expect(screen.getByTestId("genui-empty")).toBeTruthy();
+  });
+
+  it("renders in streaming mode while running", () => {
+    render(<GenerativeUICard openui={"Chart\n  data: 1"} status="running" />);
+    const r = screen.getByTestId("renderer");
+    expect(r.getAttribute("data-streaming")).toBe("true");
+    expect(r.textContent).toBe("Chart\n  data: 1");
+  });
+
+  it("renders non-streaming on success", () => {
+    render(<GenerativeUICard openui={"Chart"} status="success" />);
+    expect(screen.getByTestId("renderer").getAttribute("data-streaming")).toBe("false");
   });
 });
 

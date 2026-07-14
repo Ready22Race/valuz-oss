@@ -9,6 +9,8 @@ error result without affecting the originating turn.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -39,15 +41,68 @@ def _resolve_provider_id(source: Any) -> str | None:
 
 
 def _make_completer(
-    *, user_id: str, runtime_provider: Any, model: str, mp: Any
+    *,
+    user_id: str,
+    runtime_provider: Any,
+    model: str,
+    mp: Any,
+    calling_session_id: str | None = None,
+    tool_use_id: str | None = None,
 ) -> Completer:
     """Build the ``complete`` seam backed by a throwaway no-tools kernel session
     cloning the source's runtime/provider/model. Each call is a fresh ephemeral
-    session (deleted after), but all of them share ONE fixed scratch cwd
-    (``FsRegistry.generative_ui_cwd``): runtimes key per-project artifacts on
-    the session cwd (claude-agent-sdk keeps transcripts under
-    ``~/.claude/projects/<encoded-cwd>/``), so a per-call cwd leaked one such
-    directory per generation."""
+    session (deleted after), sharing ONE fixed scratch cwd
+    (``FsRegistry.generative_ui_cwd``).
+
+    When ``calling_session_id`` + ``tool_use_id`` are set, the ephemeral
+    session's ``text_delta`` stream is forwarded to the CALLING session as
+    ``tool_output_delta`` (keyed by ``tool_use_id``) via the existing
+    ``kernel_client.emit_live_event`` live-injection channel, so the frontend
+    ``<Renderer isStreaming>`` paints progressively. ``run_turn`` still returns
+    the full text as the canonical ToolResult. When either is None, behaves as
+    the synchronous (non-streaming) version."""
+
+    async def _forward_deltas(ephem_id: str) -> None:
+        forwarded = 0
+        try:
+            async for ev in kernel_client.subscribe_session_events(user_id, ephem_id):
+                if getattr(ev, "type", None) != "text_delta":
+                    continue
+                text = (getattr(ev, "data", None) or {}).get("text")
+                if not text:
+                    continue
+                await kernel_client.emit_live_event(
+                    user_id,
+                    calling_session_id or "",
+                    "tool_output_delta",
+                    {"id": tool_use_id, "text": text},
+                )
+                forwarded += 1
+                logger.debug(
+                    "generate_ui: forwarded delta #%d (%d chars) tool_use_id=%s",
+                    forwarded,
+                    len(text),
+                    tool_use_id,
+                )
+        except asyncio.CancelledError:
+            logger.info(
+                "generate_ui: delta forwarding cancelled after %d deltas (tool_use_id=%s)",
+                forwarded,
+                tool_use_id,
+            )
+            raise
+        except Exception:  # noqa: BLE001 — best-effort; canonical full text still wins
+            logger.exception(
+                "generate_ui: delta forwarding stopped after %d deltas (tool_use_id=%s)",
+                forwarded,
+                tool_use_id,
+            )
+        else:
+            logger.info(
+                "generate_ui: streamed %d deltas for tool_use_id=%s",
+                forwarded,
+                tool_use_id,
+            )
 
     async def _complete(prompt: str) -> str:
         from app.schemas import AgentConfigSchema, CreateSessionRequest, ModelProviderInputSchema
@@ -83,10 +138,27 @@ def _make_completer(
             metadata=marker,
         )
         await kernel_client.create_session(user_id, req)
+        stream_task: asyncio.Task[None] | None = None
+        if calling_session_id and tool_use_id:
+            # Subscribe before run_turn: text_delta is live-only and not
+            # persisted, so the subscription must be attached before the turn
+            # emits. ``sleep(0)`` lets the task begin attaching its tap.
+            logger.info(
+                "generate_ui: streaming ephem=%s -> calling=%s tool_use_id=%s",
+                ephem_id,
+                calling_session_id,
+                tool_use_id,
+            )
+            stream_task = asyncio.create_task(_forward_deltas(ephem_id))
+            await asyncio.sleep(0)
         try:
             msg = await kernel_client.run_turn(user_id, ephem_id, prompt)
             return msg.assistant_message or ""
         finally:
+            if stream_task is not None:
+                stream_task.cancel()
+                with contextlib.suppress(BaseException):
+                    await stream_task
             try:
                 await kernel_client.delete_session(user_id, ephem_id)
             except Exception:  # noqa: BLE001
