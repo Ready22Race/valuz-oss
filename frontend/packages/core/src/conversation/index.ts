@@ -1,4 +1,8 @@
-export { buildTurns, resolveToolKind } from "./conversation-utils";
+export {
+  buildTurns,
+  mergeEventWindow,
+  resolveToolKind,
+} from "./conversation-utils";
 export {
   SESSION_BG_TASK_FINISHED_EVENT,
   SESSION_BG_TASK_STARTED_EVENT,

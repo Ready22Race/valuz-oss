@@ -146,6 +146,66 @@ const toMetaToolCall = (
   return null;
 };
 
+/* ── Event-window merge ────────────────────────────────────── */
+
+/**
+ * Merge a fetched transcript window into the live ``events`` array without
+ * disturbing what's already there.
+ *
+ * ``buildTurns`` consumes events in ARRAY ORDER, and the array mixes two kinds
+ * of entries: persisted rows (``seq > 0``, totally ordered by seq) and live
+ * unpersisted frames (``seq === 0`` — streaming deltas of the in-flight
+ * message). The merge rules follow from that:
+ *
+ * - Only genuinely-missing persisted rows are added (dedup by seq).
+ * - Each missing row is INSERTED before the first existing persisted row with
+ *   a larger seq — not tail-appended (history would render after the current
+ *   turn) and not global-sorted (``seq 0`` compares lowest, so a sort throws
+ *   the streaming deltas to the FRONT of the transcript).
+ * - ``seq === 0`` entries stay glued exactly where they arrived: a delta
+ *   re-ordered across its message's persisted seal renders as duplicated text.
+ * - Missing rows newer than every existing persisted row land at the tail —
+ *   the same position the live stream would have delivered them to.
+ */
+export const mergeEventWindow = (
+  prev: SessionEventDTO[],
+  incoming: SessionEventDTO[],
+): SessionEventDTO[] => {
+  const seen = new Set<number>();
+  for (const e of prev) {
+    if (e.seq > 0) seen.add(e.seq);
+  }
+  const missing = incoming
+    .filter((e) => e.seq > 0 && !seen.has(e.seq))
+    .sort((a, b) => a.seq - b.seq);
+  if (missing.length === 0) return prev;
+  const out: SessionEventDTO[] = [];
+  let mi = 0;
+  // A LEADING run of live entries has no persisted anchor to glue to — it is
+  // the in-flight tail of a resume that hasn't loaded history yet (the blank
+  // case), so history smaller than the first persisted row must go BEFORE it,
+  // not after.
+  const firstPersistedSeq = prev.find((e) => e.seq > 0)?.seq ?? Infinity;
+  while (mi < missing.length && missing[mi].seq < firstPersistedSeq) {
+    out.push(missing[mi]);
+    mi += 1;
+  }
+  for (const e of prev) {
+    if (e.seq > 0) {
+      while (mi < missing.length && missing[mi].seq < e.seq) {
+        out.push(missing[mi]);
+        mi += 1;
+      }
+    }
+    out.push(e);
+  }
+  while (mi < missing.length) {
+    out.push(missing[mi]);
+    mi += 1;
+  }
+  return out;
+};
+
 /* ── Turn builder ──────────────────────────────────────────── */
 
 export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
