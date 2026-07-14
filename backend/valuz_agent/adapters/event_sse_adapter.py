@@ -634,7 +634,7 @@ async def iter_events_sse(
     user_id: str,
     *,
     after_seq: int = 0,
-    is_disconnected: callable[[], bool] | None = None,
+    is_disconnected: Callable[[], Awaitable[bool]] | None = None,
 ) -> AsyncIterator[dict[str, str]]:
     """Yield ``EventSourceResponse``-shaped dicts (``{"data": ...}``) forever.
 
@@ -643,7 +643,12 @@ async def iter_events_sse(
     never persisted to the DB. When the session is idle or on reconnect,
     falls back to DB polling so historical events are always available.
 
-    The caller is expected to wrap this with ``EventSourceResponse``.
+    ``is_disconnected`` (the route passes ``request.is_disconnected``, an async
+    non-blocking check) is awaited each iteration so the ``while`` loop breaks
+    cooperatively on client disconnect — defense in depth ON TOP of
+    sse-starlette's own ``_listen_for_disconnect`` cancel, so a zombie generator
+    can't loop forever holding the live subscription even if the external cancel
+    misses. The caller is expected to wrap this with ``EventSourceResponse``.
     """
     cursor = after_seq
     last_emit = asyncio.get_event_loop().time()
@@ -682,7 +687,7 @@ async def iter_events_sse(
     last_db_poll = 0.0
     try:
         while True:
-            if is_disconnected is not None and is_disconnected():
+            if is_disconnected is not None and await is_disconnected():
                 break
 
             # Try to read from the live queue first (real-time path).
