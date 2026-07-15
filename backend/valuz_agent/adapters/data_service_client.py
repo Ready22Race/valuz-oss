@@ -82,6 +82,20 @@ class DataServiceReadClient:
         )
         return [self._row_to_event(r) for r in (data or [])]
 
+    async def get_events_after_for_user(
+        self,
+        user_id: str,
+        *,
+        after_seq: int = 0,
+        types: tuple[str, ...] | None = None,
+        limit: int = 200,
+    ) -> list[EventData]:
+        body: dict[str, Any] = {"after_seq": after_seq, "limit": limit}
+        if types is not None:
+            body["types"] = list(types)
+        data = await self._post("get_events_after_for_user", body)
+        return [self._row_to_event(r) for r in (data or [])]
+
     async def get_events_window(
         self,
         user_id: str,

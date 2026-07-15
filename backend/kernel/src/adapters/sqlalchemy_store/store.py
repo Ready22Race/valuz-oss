@@ -236,6 +236,29 @@ class SQLAlchemyStore:
             result = await db.execute(stmt)
             return [_model_to_stored_event(m) for m in result.scalars()]
 
+    async def get_events_after_for_user(
+        self,
+        user_id: str,
+        *,
+        after_seq: int = 0,
+        types: tuple[str, ...] | None = None,
+        limit: int = 200,
+    ) -> list[StoredEvent]:
+        async with self._session_factory() as db:
+            stmt = (
+                select(EventModel)
+                .where(
+                    EventModel.user_id == user_id,
+                    EventModel.id > after_seq,
+                )
+                .order_by(EventModel.id)
+                .limit(limit)
+            )
+            if types:
+                stmt = stmt.where(EventModel.type.in_(types))
+            result = await db.execute(stmt)
+            return [_model_to_stored_event(m) for m in result.scalars()]
+
     async def get_events_window(
         self, user_id: str, session_id: str, *, before_seq: int | None = None, turn_limit: int = 20
     ) -> tuple[list[StoredEvent], bool]:

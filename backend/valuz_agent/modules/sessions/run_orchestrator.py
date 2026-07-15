@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import uuid
 from collections.abc import Mapping
 from typing import Any
 
@@ -268,6 +269,62 @@ def _derive_session_name(content: str) -> str:
     return cleaned[:40].replace("\n", " ").strip()
 
 
+async def _project_conversation_run_result(
+    session: Any, owner_user_id: str, session_id: str, error_event: Any
+) -> None:
+    """Notify (or clear) a NON-task conversation run failure.
+
+    The task-failure projector (``tasks/messaging.record_task_failure_notification``)
+    covers lead/subtask runs; this is its conversation analog, keyed on the
+    session and routed to ``/conversation/{id}``. ``error_event`` is the exact
+    ``session_error`` payload finalize writes durably — passing it means we fire
+    precisely when a real failure is recorded (raised exception OR terminal
+    transport error), never on a clean idle.
+
+    - failure (``error_event`` present) → ingest one ``run_failed`` item;
+    - clean turn (``error_event`` None) → resolve any prior ``run_failed`` so a
+      recovered conversation doesn't keep the badge lit.
+
+    Task-driven sessions are skipped (they own the ``task_failed`` path).
+    Best-effort: the caller wraps this so a ledger hiccup never fails a turn.
+    """
+    from valuz_agent.modules.decisions.service import is_task_driven
+
+    if is_task_driven(session):
+        return
+
+    from valuz_agent.modules.notifications.service import notification_service
+
+    if error_event is None:
+        await notification_service.resolve_session_failures(owner_user_id, session_id)
+        return
+
+    meta = getattr(session, "metadata", None) or {}
+    valuz = meta.get("valuz") if isinstance(meta, dict) else None
+    valuz = valuz if isinstance(valuz, dict) else {}
+    project_id = valuz.get("project_id")
+    project_id = project_id if isinstance(project_id, str) and project_id else None
+    data = getattr(error_event, "data", None) or {}
+    await notification_service.ingest(
+        owner_user_id,
+        # Unique per failure occurrence (a later failure is a fresh item); a
+        # clean turn resolves the whole open set for this session. finalize is
+        # called once per turn so there's no re-fire to dedupe against.
+        dedup_key=f"e:{session_id}:{uuid.uuid4().hex}",
+        kind="run_failed",
+        title=str(valuz.get("agent_slug") or valuz.get("name") or ""),
+        body=str(data.get("message") or ""),
+        route=f"/conversation/{session_id}",
+        action="none",
+        session_id=session_id,
+        project_id=project_id,
+        payload={
+            "category": str(data.get("category") or ""),
+            "session_name": valuz.get("name"),
+        },
+    )
+
+
 async def _finalize_session(
     session_id: str,
     content: str,
@@ -347,6 +404,15 @@ async def _finalize_session(
             stop_reason_message=stop_reason_message,
         ),
     )
+
+    # Mirror a conversation run failure into the notification ledger (badge + OS
+    # notification when the window is backgrounded), or clear a prior one on
+    # recovery. Task sessions are handled by the task-failure projector — the
+    # helper self-skips them. Best-effort: never let it fail a turn.
+    try:
+        await _project_conversation_run_result(session, owner_user_id, session_id, error_event)
+    except Exception:  # noqa: BLE001
+        logger.debug("run-failure notification skipped for %s", session_id, exc_info=True)
 
     # Arm the idle memory-extraction trigger (memory-system-design §7.1). The
     # scheduler debounces, so it fires once the conversation goes quiet — not per

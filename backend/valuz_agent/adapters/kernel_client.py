@@ -51,12 +51,17 @@ from __future__ import annotations
 
 # ruff: noqa: I001 — the kernel side-effect import must precede ``app.*``.
 
-from collections.abc import AsyncIterator
+import logging
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, NoReturn, Protocol, TypedDict
 
 import valuz_agent.boot.kernel  # noqa: F401  (sys.path side-effect)
 
 from fastapi import HTTPException  # noqa: E402
+
+from valuz_agent.ports.sandbox_allocator import SandboxScope  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 from app.schemas import (  # noqa: E402
     CreateSessionRequest,
@@ -205,7 +210,9 @@ class KernelClient(Protocol):
         self, user_id: str, session_id: str
     ) -> AsyncIterator[EventData]: ...
 
-    def subscribe_all_events(self) -> AsyncIterator[EventData]: ...
+    def subscribe_all_events(
+        self, types: tuple[str, ...] | None = None
+    ) -> AsyncIterator[EventData]: ...
 
     async def usage_rollup(
         self, user_id: str, start_ms: int, end_ms: int
@@ -231,6 +238,8 @@ class KernelClient(Protocol):
     ) -> MessageData: ...
 
     async def runtime_availability(self) -> dict[str, RuntimeAvailability]: ...
+
+    async def bg_busy_session_ids(self) -> list[str]: ...
 
 
 # ---------------------------------------------------------------------------
@@ -455,9 +464,15 @@ class InProcessKernelClient:
         finally:
             await orch.detach_session_tap(session_id, sink)
 
-    async def subscribe_all_events(self) -> AsyncIterator[EventData]:
+    async def subscribe_all_events(
+        self, types: tuple[str, ...] | None = None
+    ) -> AsyncIterator[EventData]:
         """Live tap on EVERY session's event stream; frames carry
-        ``session_id``. Remote analog: SSE {KERNEL_API_PREFIX}/v1/events/stream (ADR-013)."""
+        ``session_id``. ``types`` is an event-type allowlist — a
+        lifecycle-only consumer (the host control plane) filters here so
+        token deltas are dropped at the source instead of shipped to be
+        discarded. Remote analog: SSE {KERNEL_API_PREFIX}/v1/events/stream
+        ?types=... (ADR-013)."""
         from app.event_stream import GlobalQueueTap
         from app.serializers import live_event_to_data
 
@@ -467,6 +482,8 @@ class InProcessKernelClient:
         try:
             while True:
                 session_id, event = await tap.queue.get()
+                if types is not None and str(event.type) not in types:
+                    continue
                 yield live_event_to_data(event, session_id=session_id)
         finally:
             orch.detach_global_tap(tap)
@@ -570,6 +587,12 @@ class InProcessKernelClient:
         result = await get_runtime_availability()
         return result["data"]
 
+    async def bg_busy_session_ids(self) -> list[str]:
+        """Sessions whose warm runtime carries a live background task.
+        Process-scoped, id-only — callers intersect with their own
+        owner-scoped session set (see the kernel route's docstring)."""
+        return _orchestrator().bg_busy_session_ids()
+
 
 def _make_client() -> KernelClient:
     """Bind the transport for this process from settings.
@@ -618,15 +641,91 @@ def rebind_client() -> None:
 
 _endpoint_clients: dict[str, KernelClient] = {}
 
+# ---------------------------------------------------------------------------
+# Sandbox scope resolution (per-session / per-task on-demand sandboxes).
+#
+# A scope names the unit of work a sandbox serves (see ``SandboxScope``). The
+# facade derives it once per session and caches it — the mapping is immutable
+# (a session never changes task membership). Callers that KNOW the scope at
+# creation time (tasks pass ``task:{task_id}``) supply it explicitly; every
+# other EXEC op resolves via the optional bound resolver (the tasks module
+# binds a ``valuz_task_session`` lookup at boot) and falls back to
+# ``session:{session_id}``. With the OSS ``BootSingletonAllocator`` the scope
+# is ignored entirely — zero behavior change for local / single-user hosts.
+# ---------------------------------------------------------------------------
 
-async def _kernel_for(user_id: str) -> KernelClient:
-    """Resolve the execution kernel client for ``user_id`` via the allocator."""
+_SCOPE_CACHE_MAX = 4096
+_scope_cache: dict[str, SandboxScope] = {}
+_scope_resolver: Callable[[str, str], Awaitable[SandboxScope | None]] | None = None
+
+
+def bind_sandbox_scope_resolver(
+    resolver: Callable[[str, str], Awaitable[SandboxScope | None]] | None,
+) -> None:
+    """Bind the (single) session→scope resolver — ``(user_id, session_id) ->
+    SandboxScope | None``. Bound at boot by the tasks module so task sessions
+    route to their task's sandbox; ``None`` unbinds (tests)."""
+    global _scope_resolver  # noqa: PLW0603
+    _scope_resolver = resolver
+
+
+def _scope_cache_put(session_id: str, scope: SandboxScope) -> None:
+    if len(_scope_cache) >= _SCOPE_CACHE_MAX:
+        # Bounded: drop an arbitrary ~eighth. Scopes re-derive cheaply.
+        for key in list(_scope_cache)[: _SCOPE_CACHE_MAX // 8]:
+            _scope_cache.pop(key, None)
+    _scope_cache[session_id] = scope
+
+
+async def _scope_for(user_id: str, session_id: str) -> SandboxScope:
+    """The sandbox scope serving ``session_id`` (cached; resolver-aware)."""
+    cached = _scope_cache.get(session_id)
+    if cached is not None:
+        return cached
+    scope: SandboxScope | None = None
+    if _scope_resolver is not None:
+        try:
+            scope = await _scope_resolver(user_id, session_id)
+        except Exception:  # noqa: BLE001 — resolver failure degrades to session scope
+            logger.debug("sandbox scope resolver failed for %s", session_id, exc_info=True)
+    if scope is None:
+        scope = SandboxScope(kind="session", id=session_id)
+    _scope_cache_put(session_id, scope)
+    return scope
+
+
+def _accepts(fn: Any, name: str) -> bool:
+    """Whether an allocator method takes the (additive) ``name`` kwarg.
+
+    Allocators written against an older port signature keep working — they are
+    simply never handed the kwarg they don't declare (additive contract)."""
+    import inspect
+
+    try:
+        return name in inspect.signature(fn).parameters
+    except (TypeError, ValueError):  # builtins / exotic callables
+        return False
+
+
+async def _kernel_for(
+    user_id: str, scope: SandboxScope | None = None, *, new_turn: bool = False
+) -> KernelClient:
+    """Resolve the execution kernel client for ``user_id`` via the allocator.
+
+    ``new_turn`` marks a fresh conversation turn (``run_turn``); a scoped
+    allocator may provision a NEW instance per turn for chat. Passed only when
+    the bound allocator's ``ensure`` accepts it (additive contract)."""
     from valuz_agent.ports.extensions import ext
 
     alloc = getattr(ext, "sandbox_allocator", None)
     if alloc is None:
         return client  # no allocator bound → process-global client (current behavior)
-    lease = await alloc.ensure(owner_user_id=user_id)
+    kwargs: dict[str, Any] = {"owner_user_id": user_id}
+    if scope is not None and _accepts(alloc.ensure, "scope"):
+        kwargs["scope"] = scope
+        if new_turn and _accepts(alloc.ensure, "new_turn"):
+            kwargs["new_turn"] = True
+    lease = await alloc.ensure(**kwargs)
     if lease is None or lease.endpoint is None:
         return client  # "use the process/global client" (BootSingletonAllocator default)
     ep = lease.endpoint
@@ -639,7 +738,9 @@ async def _kernel_for(user_id: str) -> KernelClient:
     return cached
 
 
-async def _kernel_for_existing(user_id: str) -> KernelClient | None:
+async def _kernel_for_existing(
+    user_id: str, scope: SandboxScope | None = None
+) -> KernelClient | None:
     """Resolve the owner's EXISTING kernel for a live tap — never provisions.
 
     Used by GLOBAL-LIVE (``subscribe_all_events``): opening the decision inbox
@@ -656,7 +757,10 @@ async def _kernel_for_existing(user_id: str) -> KernelClient | None:
     peek = getattr(alloc, "peek", None)
     if peek is None:
         return client  # allocator predates the peek seam → best-effort global client
-    lease = await peek(owner_user_id=user_id)
+    if scope is not None and _accepts(peek, "scope"):
+        lease = await peek(owner_user_id=user_id, scope=scope)
+    else:
+        lease = await peek(owner_user_id=user_id)
     if lease is None:
         return None  # no live kernel for this owner → no live tap
     if lease.endpoint is None:
@@ -671,8 +775,19 @@ async def _kernel_for_existing(user_id: str) -> KernelClient | None:
     return cached
 
 
-async def create_session(user_id: str, req: CreateSessionRequest) -> SessionData:
-    return await (await _kernel_for(user_id)).create_session(user_id, req)
+async def create_session(
+    user_id: str, req: CreateSessionRequest, *, scope: SandboxScope | None = None
+) -> SessionData:
+    # Scope precedence: explicit (tasks pass ``task:{task_id}`` — the
+    # ``valuz_task_session`` row does not exist yet at creation time, so the
+    # resolver can't see it) → derived from the host-preminted ``req.id`` →
+    # None (owner-singleton) when the caller let the kernel mint the id.
+    req_id = getattr(req, "id", None)
+    if scope is None and req_id:
+        scope = await _scope_for(user_id, req_id)
+    elif scope is not None and req_id:
+        _scope_cache_put(req_id, scope)
+    return await (await _kernel_for(user_id, scope)).create_session(user_id, req)
 
 
 async def runtime_availability() -> dict[str, RuntimeAvailability]:
@@ -682,6 +797,12 @@ async def runtime_availability() -> dict[str, RuntimeAvailability]:
     in-process for the bundled desktop (local-host probe), the boot sandbox when
     one is attached. A per-user execution kernel is an overlay concern (§8)."""
     return await client.runtime_availability()
+
+
+async def bg_busy_session_ids() -> list[str]:
+    """Sessions whose warm runtime carries a live background task (process-
+    scoped, id-only — intersect with an owner-scoped session set)."""
+    return await client.bg_busy_session_ids()
 
 
 async def get_session(user_id: str, session_id: str) -> SessionData | None:
@@ -734,7 +855,14 @@ async def append_event(user_id: str, session_id: str, event: EventPayload) -> bo
 
 
 async def emit_live_event(user_id: str, session_id: str, type: str, data: dict[str, Any]) -> None:
-    await (await _kernel_for(user_id)).emit_live_event(user_id, session_id, type, data)
+    # Live-only broadcast: with no live kernel there is nobody to receive it —
+    # peek (never provision) and no-op. Provisioning a sandbox just to emit an
+    # ephemeral frame was pure waste (and, under scoped allocation, would spin
+    # an instance on every host-side emit for an idle session).
+    k = await _kernel_for_existing(user_id, await _scope_for(user_id, session_id))
+    if k is None:
+        return
+    await k.emit_live_event(user_id, session_id, type, data)
 
 
 async def get_events(
@@ -759,32 +887,56 @@ async def get_events_window(
 
 
 async def subscribe_session_events(user_id: str, session_id: str) -> AsyncIterator[EventData]:
-    k = await _kernel_for(user_id)
+    k = await _kernel_for(user_id, await _scope_for(user_id, session_id))
     async for event in k.subscribe_session_events(user_id, session_id):
         yield event
 
 
-def subscribe_all_events() -> AsyncIterator[EventData]:
+async def subscribe_session_events_existing(
+    user_id: str, session_id: str
+) -> AsyncIterator[EventData]:
+    """Live tap on ONE session's stream via the EXISTING kernel — never provisions.
+
+    The SSE adapter uses this so that opening a (historical) conversation never
+    spins up a sandbox: history is served from the durable store; the live tap
+    only attaches when the session's kernel is already running (the adapter
+    re-peeks periodically to catch a kernel that comes up mid-stream). Yields
+    nothing when there is no live kernel for the session's scope.
+    """
+    k = await _kernel_for_existing(user_id, await _scope_for(user_id, session_id))
+    if k is None:
+        return
+    async for event in k.subscribe_session_events(user_id, session_id):
+        yield event
+
+
+def subscribe_all_events(
+    types: tuple[str, ...] | None = None,
+) -> AsyncIterator[EventData]:
     """Process-global live tap (all sessions of the process/boot kernel).
 
     Unchanged: used by the decision aggregator in LOCAL / single-kernel mode.
     Multi-tenant hosts use :func:`subscribe_all_events_for` instead.
     """
-    return client.subscribe_all_events()
+    return client.subscribe_all_events(types)
 
 
-async def subscribe_all_events_for(user_id: str) -> AsyncIterator[EventData]:
+async def subscribe_all_events_for(
+    user_id: str, types: tuple[str, ...] | None = None
+) -> AsyncIterator[EventData]:
     """Live tap on ONE owner's cross-session event stream (GLOBAL-LIVE, remote).
 
     Routed to that owner's EXISTING kernel via ``_kernel_for_existing`` (never
     provisions). A multi-tenant host runs one kernel per owner, so that kernel's
     "all events" stream IS the owner's cross-session stream. Yields nothing when
     the owner has no live kernel — callers rely on the durable snapshot.
+    ``types`` is an optional event-type allowlist, filtered at the source
+    (in-process: before translation; remote: server-side via ``?types=``).
     """
     k = await _kernel_for_existing(user_id)
     if k is None:
         return
-    async for event in k.subscribe_all_events():
+    async for event in k.subscribe_all_events(types):
         yield event
 
 
@@ -804,11 +956,13 @@ async def latest_message_id(user_id: str, session_id: str) -> str | None:
 
 
 async def submit_action(user_id: str, session_id: str, req: SubmitActionRequest) -> dict[str, Any]:
-    return await (await _kernel_for(user_id)).submit_action(user_id, session_id, req)
+    k = await _kernel_for(user_id, await _scope_for(user_id, session_id))
+    return await k.submit_action(user_id, session_id, req)
 
 
 async def interrupt(user_id: str, session_id: str) -> None:
-    await (await _kernel_for(user_id)).interrupt(user_id, session_id)
+    k = await _kernel_for(user_id, await _scope_for(user_id, session_id))
+    await k.interrupt(user_id, session_id)
 
 
 async def run_turn(
@@ -818,9 +972,10 @@ async def run_turn(
     attachments: list[dict[str, Any]] | None = None,
     additional_context: str = "",
 ) -> MessageData:
-    return await (await _kernel_for(user_id)).run_turn(
-        user_id, session_id, text, attachments, additional_context
-    )
+    # new_turn=True: a scoped allocator may run a fresh instance for this turn
+    # (chat = per-turn instance; task reuses its shared one). See sandbox §2.
+    k = await _kernel_for(user_id, await _scope_for(user_id, session_id), new_turn=True)
+    return await k.run_turn(user_id, session_id, text, attachments, additional_context)
 
 
 async def scan_orphan_pendings() -> int:

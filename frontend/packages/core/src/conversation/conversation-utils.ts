@@ -146,9 +146,79 @@ const toMetaToolCall = (
   return null;
 };
 
+/* ── Event-window merge ────────────────────────────────────── */
+
+/**
+ * Merge a fetched transcript window into the live ``events`` array without
+ * disturbing what's already there.
+ *
+ * ``buildTurns`` consumes events in ARRAY ORDER, and the array mixes two kinds
+ * of entries: persisted rows (``seq > 0``, totally ordered by seq) and live
+ * unpersisted frames (``seq === 0`` — streaming deltas of the in-flight
+ * message). The merge rules follow from that:
+ *
+ * - Only genuinely-missing persisted rows are added (dedup by seq).
+ * - Each missing row is INSERTED before the first existing persisted row with
+ *   a larger seq — not tail-appended (history would render after the current
+ *   turn) and not global-sorted (``seq 0`` compares lowest, so a sort throws
+ *   the streaming deltas to the FRONT of the transcript).
+ * - ``seq === 0`` entries stay glued exactly where they arrived: a delta
+ *   re-ordered across its message's persisted seal renders as duplicated text.
+ * - Missing rows newer than every existing persisted row land at the tail —
+ *   the same position the live stream would have delivered them to.
+ */
+export const mergeEventWindow = (
+  prev: SessionEventDTO[],
+  incoming: SessionEventDTO[],
+): SessionEventDTO[] => {
+  const seen = new Set<number>();
+  for (const e of prev) {
+    if (e.seq > 0) seen.add(e.seq);
+  }
+  const missing = incoming
+    .filter((e) => e.seq > 0 && !seen.has(e.seq))
+    .sort((a, b) => a.seq - b.seq);
+  if (missing.length === 0) return prev;
+  const out: SessionEventDTO[] = [];
+  let mi = 0;
+  // A LEADING run of live entries has no persisted anchor to glue to — it is
+  // the in-flight tail of a resume that hasn't loaded history yet (the blank
+  // case), so history smaller than the first persisted row must go BEFORE it,
+  // not after.
+  const firstPersistedSeq = prev.find((e) => e.seq > 0)?.seq ?? Infinity;
+  while (mi < missing.length && missing[mi].seq < firstPersistedSeq) {
+    out.push(missing[mi]);
+    mi += 1;
+  }
+  for (const e of prev) {
+    if (e.seq > 0) {
+      while (mi < missing.length && missing[mi].seq < e.seq) {
+        out.push(missing[mi]);
+        mi += 1;
+      }
+    }
+    out.push(e);
+  }
+  while (mi < missing.length) {
+    out.push(missing[mi]);
+    mi += 1;
+  }
+  return out;
+};
+
 /* ── Turn builder ──────────────────────────────────────────── */
 
-export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
+/**
+ * Resumable turn builder. The event-fold state (turns, currentTurn,
+ * activeToolCalls, dedup set, pending meta events) lives in this closure so a
+ * caller can feed events in successive slices — ``pushAll(sliceA)`` then
+ * ``pushAll(sliceB)`` — and get the SAME result as one ``pushAll([...A, ...B])``.
+ * That resumability is what lets the streaming transcript append a token
+ * without re-folding the whole event history each render (see
+ * ``createIncrementalTurns`` / ``useIncrementalTurns``). ``buildTurns`` below is
+ * the one-shot form used everywhere a full rebuild is wanted.
+ */
+const createTurnsBuilder = () => {
   const turns: ConversationTurn[] = [];
   let currentTurn: ConversationTurn | null = null;
   const activeToolCalls = new Map<string, PrototypeToolCall>();
@@ -203,7 +273,15 @@ export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
       last &&
       last.kind === kind &&
       last.sealed &&
-      (messageId === undefined || last.messageId === messageId)
+      (messageId === undefined || last.messageId === messageId) &&
+      // Drop only a genuine re-delivery — a chunk the sealed canonical text
+      // already contains. A chunk with NEW content is a CONTINUATION segment:
+      // runtimes that seal mid-turn (canonical per segment, e.g. around
+      // provider-native search with no tool block in between) keep streaming
+      // the next segment under the same turn-scoped message_id. The old
+      // blanket drop rendered that whole segment blank until its canonical
+      // landed ("no streaming, everything pops at once").
+      last.text.includes(text)
     ) {
       return;
     }
@@ -265,7 +343,8 @@ export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
     return null;
   };
 
-  for (const envelope of events) {
+  const pushAll = (events: SessionEventDTO[]): void => {
+    for (const envelope of events) {
     const { event_type: eventType, payload } = envelope.event;
 
     const sig = eventSig(eventType, payload);
@@ -567,17 +646,132 @@ export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
       }
     }
   }
+  };
 
-  if (metaEvents.length && turns.length > 0) {
-    const lastTurn = turns[turns.length - 1];
-    for (const [i, item] of metaEvents.entries()) {
-      const tool = toMetaToolCall(item.type, item.payload, turns.length + i);
-      if (tool) {
-        const elapsedMs = elapsedSince(lastTurn.userTimestamp, item.timestamp);
-        lastTurn.blocks.push({ kind: "tool", tool, elapsedMs });
+  // Trailing meta events (runtime.* with no following user message) attach to
+  // the last turn. Two forms: the mutating one bakes them into the persistent
+  // ``turns`` (used by the one-shot ``buildTurns``); the pure one returns them
+  // as fresh blocks so the incremental snapshot can overlay them WITHOUT
+  // mutating fold state (mutating would double-count on the next ``pushAll``).
+  const applyTrailingMetaMutating = (): void => {
+    if (metaEvents.length && turns.length > 0) {
+      const lastTurn = turns[turns.length - 1];
+      for (const [i, item] of metaEvents.entries()) {
+        const tool = toMetaToolCall(item.type, item.payload, turns.length + i);
+        if (tool) {
+          const elapsedMs = elapsedSince(lastTurn.userTimestamp, item.timestamp);
+          lastTurn.blocks.push({ kind: "tool", tool, elapsedMs });
+        }
       }
     }
-  }
+  };
 
-  return turns;
+  const computeTrailingMetaBlocks = (): ConversationBlock[] => {
+    const out: ConversationBlock[] = [];
+    if (metaEvents.length && turns.length > 0) {
+      const lastTurn = turns[turns.length - 1];
+      for (const [i, item] of metaEvents.entries()) {
+        const tool = toMetaToolCall(item.type, item.payload, turns.length + i);
+        if (tool) {
+          const elapsedMs = elapsedSince(lastTurn.userTimestamp, item.timestamp);
+          out.push({ kind: "tool", tool, elapsedMs });
+        }
+      }
+    }
+    return out;
+  };
+
+  return {
+    turns,
+    pushAll,
+    applyTrailingMetaMutating,
+    computeTrailingMetaBlocks,
+  };
+};
+
+export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
+  const builder = createTurnsBuilder();
+  builder.pushAll(events);
+  builder.applyTrailingMetaMutating();
+  return builder.turns;
+};
+
+/**
+ * Incremental transcript builder — the streaming-perf counterpart to
+ * ``buildTurns``. ``buildTurns(events)`` re-folds the ENTIRE event array on
+ * every call; driven per-token during a long streamed reply that is O(N²) (each
+ * token re-walks all prior events and re-concatenates the growing assistant
+ * text from scratch), which stalls the main thread and makes deltas arrive in
+ * visible bursts. This keeps the fold state alive across calls and, when
+ * ``events`` is an append-only extension of what it already processed, folds
+ * ONLY the new events, then clones just the growing tail turn(s) so React still
+ * sees fresh references for what changed. Non-append changes (window replace,
+ * reconcile splice, session switch) transparently fall back to a full rebuild.
+ *
+ * The returned turns honour the ``useStableTurns`` reference contract directly
+ * (stable refs for sealed turns, fresh refs + fresh block/tool refs for the
+ * mutated tail), so callers do NOT need to additionally wrap the result.
+ */
+export interface IncrementalTurns {
+  update(events: SessionEventDTO[]): ConversationTurn[];
+}
+
+export const createIncrementalTurns = (): IncrementalTurns => {
+  let builder = createTurnsBuilder();
+  let processed = 0;
+  let lastEnvelope: SessionEventDTO | null = null;
+  let snapshot: ConversationTurn[] = [];
+
+  const cloneBlock = (b: ConversationBlock): ConversationBlock =>
+    b.kind === "tool" ? { ...b, tool: { ...b.tool } } : { ...b };
+  const cloneTurn = (t: ConversationTurn): ConversationTurn => ({
+    ...t,
+    blocks: t.blocks.map(cloneBlock),
+  });
+
+  const buildSnapshot = (): ConversationTurn[] => {
+    const src = builder.turns;
+    // Reuse every turn strictly before the last of the PREVIOUS snapshot: only
+    // the last turn (deltas) and — at a turn boundary — the just-sealed
+    // second-to-last (meta flush) are ever mutated, so anything below that line
+    // is final and its reference can be shared verbatim.
+    const reuseBoundary = Math.max(0, snapshot.length - 1);
+    const out: ConversationTurn[] = [];
+    for (let i = 0; i < src.length; i += 1) {
+      out.push(i < reuseBoundary && snapshot[i] ? snapshot[i] : cloneTurn(src[i]));
+    }
+    // Overlay any pending trailing meta onto the (already fresh-cloned) last
+    // turn. Never touches builder state, so the next pushAll won't double-count.
+    const trailing = builder.computeTrailingMetaBlocks();
+    if (trailing.length > 0 && out.length > 0) {
+      const lastIdx = out.length - 1;
+      const last =
+        lastIdx < reuseBoundary ? cloneTurn(src[lastIdx]) : out[lastIdx];
+      out[lastIdx] = {
+        ...last,
+        blocks: [...last.blocks, ...trailing.map(cloneBlock)],
+      };
+    }
+    snapshot = out;
+    return out;
+  };
+
+  const update = (events: SessionEventDTO[]): ConversationTurn[] => {
+    const appendOnly =
+      events.length >= processed &&
+      (processed === 0 || events[processed - 1] === lastEnvelope);
+    if (!appendOnly) {
+      builder = createTurnsBuilder();
+      processed = 0;
+      snapshot = [];
+    }
+    if (events.length > processed) {
+      builder.pushAll(events.slice(processed));
+    }
+    processed = events.length;
+    lastEnvelope = events.length > 0 ? events[events.length - 1] : null;
+    return buildSnapshot();
+  };
+
+  return { update };
 };

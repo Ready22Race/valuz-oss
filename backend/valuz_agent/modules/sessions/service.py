@@ -267,9 +267,7 @@ class SessionService:
 
         try:
             if is_project:
-                return await self._connectors.get_project_connectors(
-                    user_id, project_id
-                )
+                return await self._connectors.get_project_connectors(user_id, project_id)
             # Chat project: all enabled connectors that are connected or unknown
             return [
                 conn.slug
@@ -540,8 +538,8 @@ class SessionService:
         )
 
     async def _resolve_bound_agent(
-        self, project_id: str, agent_slug: str,
-        user_id: str | None = None) -> tuple[str, KernelAgentConfig]:
+        self, project_id: str, agent_slug: str, user_id: str | None = None
+    ) -> tuple[str, KernelAgentConfig]:
         """Resolve a session's bound agent to ``(kernel_agent_id, AgentConfig)``.
 
         The returned config is built in memory from the host AgentRow and is
@@ -568,17 +566,13 @@ class SessionService:
         )
 
         async with async_unit_of_work() as _db:
-            member = await ProjectMemberDatastore(_db).get(
-                user_id, project_id, agent_slug
-            )
+            member = await ProjectMemberDatastore(_db).get(user_id, project_id, agent_slug)
             if member is not None:
                 # Live reference: the member points at a library AgentRow via
                 # ``source_agent_slug`` — build the snapshot from the row's
                 # CURRENT fields so every new session picks up library edits.
                 if member.source_agent_slug:
-                    row = await AgentDatastore(_db).get_agent(
-                        user_id, member.source_agent_slug
-                    )
+                    row = await AgentDatastore(_db).get_agent(user_id, member.source_agent_slug)
                     if row is not None:
                         config = await AgentService(_db).build_agent_config(row)
                         return config.id, config
@@ -614,7 +608,8 @@ class SessionService:
         override_provider_id: str | None = None,
         override_effort: str | None = None,
         worktree: SessionWorktreeSpec | None = None,
-        user_id: str | None = None) -> SessionDetail:
+        user_id: str | None = None,
+    ) -> SessionDetail:
         """Create a session bound to an agent (project member OR global library).
 
         The agent supplies the session's defaults — runtime_provider / model /
@@ -647,9 +642,7 @@ class SessionService:
         # path) so the runtime is isolated from sibling chats and the library
         # agent isn't (wrongly) looked up as a member of "chat-default".
         if project_id == "chat-default" and self._project_svc:
-            fresh_ws = await self._project_svc.create_chat_project_for_session(
-                user_id
-            )
+            fresh_ws = await self._project_svc.create_chat_project_for_session(user_id)
             project_id = fresh_ws.id
 
         kernel_agent_id, agent = await self._resolve_bound_agent(
@@ -688,9 +681,7 @@ class SessionService:
                 datastore=self._providers,
                 event_bus=event_bus,
             )
-            match = await prov_svc.resolve_provider_for_model(
-                user_id, effective_model
-            )
+            match = await prov_svc.resolve_provider_for_model(user_id, effective_model)
             if match is not None:
                 provider_id = match.id
         if not provider_id:
@@ -909,7 +900,8 @@ class SessionService:
         effort: str | None = None,
         agent_slug: str | None = None,
         worktree: SessionWorktreeSpec | None = None,
-        user_id: str | None = None) -> SessionDetail:
+        user_id: str | None = None,
+    ) -> SessionDetail:
         """Create a new kernel session for *project_id*.
 
         Resolves model + capabilities from the valuz catalog, persists a kernel
@@ -946,9 +938,7 @@ class SessionService:
         # still uses the literal ``"chat-default"`` string as the scope
         # key, independent of any specific project id.
         if project_id == "chat-default" and self._project_svc:
-            fresh_ws = await self._project_svc.create_chat_project_for_session(
-                user_id
-            )
+            fresh_ws = await self._project_svc.create_chat_project_for_session(user_id)
             project_id = fresh_ws.id
 
         # Apply app-level defaults from Settings → "Default model" (the
@@ -977,9 +967,7 @@ class SessionService:
                 if runtime_id is None:
                     runtime_id = await _prefs.get_default_runtime(_pref_db, user_id=user_id)
                 if provider_id is None and not caller_supplied_model:
-                    provider_id = await _prefs.get_default_provider_id(
-                        _pref_db, user_id=user_id
-                    )
+                    provider_id = await _prefs.get_default_provider_id(_pref_db, user_id=user_id)
                 if model_id is None:
                     model_id = await _prefs.get_default_model(_pref_db, user_id=user_id)
                 if effort is None:
@@ -1012,9 +1000,7 @@ class SessionService:
                 datastore=self._providers,
                 event_bus=event_bus,
             )
-            match = await prov_svc.resolve_provider_for_model(
-                user_id, resolution.model
-            )
+            match = await prov_svc.resolve_provider_for_model(user_id, resolution.model)
             if match is not None:
                 resolved_provider_id = match.id
 
@@ -1272,7 +1258,8 @@ class SessionService:
         *,
         provider_id: str | None = None,
         model_id: str | None = None,
-        user_id: str | None = None) -> SessionDetail:
+        user_id: str | None = None,
+    ) -> SessionDetail:
         """Kick off an async agent turn in the background.  Returns immediately."""
         # Lazy refresh — if the user bound docs to this project AFTER
         # the session was created, the docs skill+MCP would be missing
@@ -1366,10 +1353,8 @@ class SessionService:
         return _session_to_detail(updated)
 
     async def send_message_sync(
-        self,
-        session_id: str,
-        content: str,
-        user_id: str | None = None) -> SessionRunResponse:
+        self, session_id: str, content: str, user_id: str | None = None
+    ) -> SessionRunResponse:
         """Block until the agent turn completes.  Used by the schedule runner."""
         # Mirror send_message: lazy refresh of docs caps before the turn
         # so scheduled runs (which never go through the eventbus
@@ -1526,9 +1511,7 @@ class SessionService:
                     status=_map_kernel_status(reloaded.status),
                 )
 
-                events = await kernel_client.get_events(
-                    user_id, session_id, limit=500
-                )
+                events = await kernel_client.get_events(user_id, session_id, limit=500)
                 envelopes = [
                     SessionEventEnvelope(
                         seq=i,
@@ -1612,9 +1595,7 @@ class SessionService:
                 },
             )
             try:
-                persisted = await kernel_client.append_event(
-                    user_id, session_id, err_event
-                )
+                persisted = await kernel_client.append_event(user_id, session_id, err_event)
             except Exception:  # noqa: BLE001
                 persisted = False
                 logger.exception(
@@ -1637,10 +1618,7 @@ class SessionService:
         # meaningful when items are actually waiting. See session-input-queue §9.
         try:
             async with async_unit_of_work(commit=False) as db:
-                has_queued = (
-                    await SessionDatastore(db).count_queued(user_id, session_id)
-                    > 0
-                )
+                has_queued = await SessionDatastore(db).count_queued(user_id, session_id) > 0
             if has_queued:
                 await project_index.set_queue_paused(session_id, True)
         except Exception:  # noqa: BLE001 — never fail the interrupt on queue bookkeeping
@@ -1677,7 +1655,8 @@ class SessionService:
         *,
         provider_id: str | None = None,
         model_id: str | None = None,
-        user_id: str | None = None) -> QueuedInputList:
+        user_id: str | None = None,
+    ) -> QueuedInputList:
         """Append a follow-up input to the session queue.
 
         Snapshots + consumes the pending attachment set so the files ride THIS
@@ -1869,6 +1848,22 @@ class SessionService:
         _wt_snapshot = _pre_meta.get("worktree")
         _wt_project_id = str(_pre_meta.get("project_id") or "")
         await kernel_client.delete_session(user_id, session_id)
+        # Scope teardown: under per-scope sandbox allocation the deleted
+        # session's sandbox has nothing left to serve — release it now instead
+        # of waiting for the idle reaper. Best-effort and idempotent; the OSS
+        # BootSingletonAllocator no-ops, and a task session's release targets
+        # its (already gone) per-session scope, never the shared task sandbox.
+        if user_id:
+            try:
+                from valuz_agent.ports.extensions import ext
+                from valuz_agent.ports.sandbox_allocator import SandboxScope
+
+                await ext.sandbox_allocator.release(
+                    owner_user_id=user_id,
+                    scope=SandboxScope(kind="session", id=session_id),
+                )
+            except Exception:  # noqa: BLE001 — cleanup must not fail the delete
+                logger.debug("delete_session: sandbox release failed for %s", session_id)
         # Drop the chat-index row too, or the session haunts the activity feed as
         # a ghost "New chat" the user can't clear (``project_index.remove`` keys
         # on the globally-unique session_id).
@@ -1876,9 +1871,7 @@ class SessionService:
         # Drop any pending input-queue rows for the gone session.
         try:
             async with async_unit_of_work() as db:
-                await SessionDatastore(db).delete_queue_for_session(
-                    user_id, session_id
-                )
+                await SessionDatastore(db).delete_queue_for_session(user_id, session_id)
         except Exception:  # noqa: BLE001 — cleanup must not fail the delete
             logger.debug("delete_session: queue cleanup failed for %s", session_id)
 
@@ -1887,9 +1880,7 @@ class SessionService:
         # Fail-closed at every step — a dirty / unverifiable worktree stays
         # and surfaces in the project's worktrees panel instead.
         if isinstance(_wt_snapshot, dict):
-            await self._teardown_worktree_if_unused(
-                _wt_snapshot, _wt_project_id, user_id
-            )
+            await self._teardown_worktree_if_unused(_wt_snapshot, _wt_project_id, user_id)
 
     async def _teardown_worktree_if_unused(
         self,
@@ -1903,9 +1894,7 @@ class SessionService:
             if not name:
                 return
             if project_id:
-                siblings = await self.list_sessions(
-                    project_id=project_id, user_id=user_id
-                )
+                siblings = await self.list_sessions(project_id=project_id, user_id=user_id)
                 if any(s.worktree and s.worktree.name == name for s in siblings):
                     return  # still in use by a live session
             from valuz_agent.modules.worktrees.service import worktree_service
@@ -2035,7 +2024,8 @@ class SessionService:
         message: str | None = None,
         answers: dict[str, str | list[str]] | None = None,
         modified_input: dict[str, object] | None = None,
-        user_id: str | None = None) -> dict[str, object]:
+        user_id: str | None = None,
+    ) -> dict[str, object]:
         """Resolve a pending ``requires_action`` event.
 
         Thin façade over ``orchestrator.submit_action``. The orchestrator

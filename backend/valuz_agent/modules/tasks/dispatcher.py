@@ -26,6 +26,7 @@ import time
 from typing import Any, Literal, cast
 
 from valuz_agent.adapters import kernel_client
+from valuz_agent.ports.sandbox_allocator import SandboxScope
 from valuz_agent.modules.sessions import project_index
 from valuz_agent.adapters.agent_resolver import (
     build_member_session,
@@ -247,7 +248,9 @@ class DispatcherService:
                 )
                 return {"error": gap, "status": "failed", "agent": agent}
 
-            await kernel_client.create_session(user_id, member_session)
+            await kernel_client.create_session(
+                user_id, member_session, scope=SandboxScope(kind="task", id=task_id)
+            )
             await project_index.record(
                 project_id,
                 member_session.id,
@@ -612,7 +615,9 @@ class DispatcherService:
                 )
                 return {"error": gap, "status": "failed", "agent": agent}
 
-            await kernel_client.create_session(user_id, member_session)
+            await kernel_client.create_session(
+                user_id, member_session, scope=SandboxScope(kind="task", id=task_id)
+            )
             await project_index.record(
                 project_id,
                 member_session.id,

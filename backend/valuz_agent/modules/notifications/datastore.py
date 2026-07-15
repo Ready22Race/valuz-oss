@@ -149,6 +149,30 @@ class NotificationDatastore:
         await async_commit_with_retry(self._db, where="NotificationDatastore.resolve_by_dedup")
         return row
 
+    async def resolve_by_pending_id(self, pending_id: str) -> NotificationRow | None:
+        """Resolve the open question notification for ``pending_id`` regardless
+        of owner. ``pending_id`` is globally unique per question, so no user
+        scope is needed — used for conversation questions, whose owner isn't
+        held in memory at resolve time (and to survive a restart that cleared
+        the aggregator's pending map). Returns the row (carrying ``user_id`` for
+        the fan-out) or ``None`` if absent / already resolved."""
+        row = (
+            await self._db.execute(
+                select(NotificationRow).where(
+                    NotificationRow.pending_id == pending_id,
+                    NotificationRow.resolved_at.is_(None),
+                )
+            )
+        ).scalars().first()
+        if row is None:
+            return None
+        ts = now_ms()
+        row.resolved_at = ts
+        if row.read_at is None:
+            row.read_at = ts
+        await async_commit_with_retry(self._db, where="NotificationDatastore.resolve_by_pending_id")
+        return row
+
     async def resolve_open_by_task(
         self, user_id: str, task_id: str, kinds: tuple[str, ...]
     ) -> list[str]:
@@ -177,6 +201,38 @@ class NotificationDatastore:
             if row.read_at is None:
                 row.read_at = ts
         await async_commit_with_retry(self._db, where="NotificationDatastore.resolve_open_by_task")
+        return [r.id for r in rows]
+
+    async def resolve_open_by_session(
+        self, user_id: str, session_id: str, kinds: tuple[str, ...]
+    ) -> list[str]:
+        """Resolve every open notification of ``kinds`` for one session — used to
+        clear a conversation's ``run_failed`` items when a later turn recovers.
+        Returns resolved ids so the service can broadcast them."""
+        rows = list(
+            (
+                await self._db.execute(
+                    select(NotificationRow).where(
+                        NotificationRow.user_id == user_id,
+                        NotificationRow.session_id == session_id,
+                        NotificationRow.kind.in_(kinds),
+                        NotificationRow.resolved_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not rows:
+            return []
+        ts = now_ms()
+        for row in rows:
+            row.resolved_at = ts
+            if row.read_at is None:
+                row.read_at = ts
+        await async_commit_with_retry(
+            self._db, where="NotificationDatastore.resolve_open_by_session"
+        )
         return [r.id for r in rows]
 
     async def resolve_by_id(self, user_id: str, notification_id: str) -> NotificationRow | None:

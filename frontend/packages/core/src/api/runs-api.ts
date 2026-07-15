@@ -39,6 +39,10 @@ export interface RunSummary {
   model: string | null;
   runtime: string | null;
   updated_at: number;
+  /** True when the session carries a live background task (run_in_background
+   * shell command). Such sessions surface in the running view even while no
+   * turn is streaming. */
+  background?: boolean;
   /** CLIENT-side tag on multi-target editions: which execution target
    * answered the row (e.g. "local"/"cloud"). Never sent by the server. */
   exec_origin?: string;

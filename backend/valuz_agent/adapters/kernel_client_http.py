@@ -24,6 +24,7 @@ its own orphan scans at startup and owns its runtime cache.
 from __future__ import annotations
 
 import json
+from urllib.parse import quote
 from collections.abc import AsyncIterator
 from typing import Any, NoReturn
 
@@ -148,6 +149,12 @@ class HttpKernelClient:
         # the API pod. See design §3.3.
         result = await self._request("GET", f"{self._prefix}/v1/runtimes/availability")
         return result["data"]
+
+    async def bg_busy_session_ids(self) -> list[str]:
+        # Process-scoped, id-only (see the kernel route's docstring) — the
+        # host intersects with its own owner-scoped session set.
+        result = await self._request("GET", f"{self._prefix}/v1/runtimes/bg-busy-sessions")
+        return list(result["data"])
 
     async def create_session(self, user_id: str, req: CreateSessionRequest) -> SessionData:
         # Dynamic mount: the kernel runs in a sandbox, so its cwd must be
@@ -322,8 +329,15 @@ class HttpKernelClient:
         ):
             yield item
 
-    async def subscribe_all_events(self) -> AsyncIterator[EventData]:
-        async for item in self._stream_sse(f"{self._prefix}/v1/events/stream", owner=None):
+    async def subscribe_all_events(
+        self, types: tuple[str, ...] | None = None
+    ) -> AsyncIterator[EventData]:
+        # Filter server-side: a lifecycle-only consumer must not have token
+        # deltas shipped across the wire just to discard them.
+        path = f"{self._prefix}/v1/events/stream"
+        if types:
+            path += f"?types={quote(','.join(types))}"
+        async for item in self._stream_sse(path, owner=None):
             yield item
 
     async def _stream_sse(self, path: str, *, owner: str | None) -> AsyncIterator[EventData]:

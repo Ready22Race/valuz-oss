@@ -46,6 +46,18 @@ class LocalDataServiceReader:
             user_id, session_id, after_seq=after_seq or 0, limit=limit
         )
 
+    async def get_events_after_for_user(
+        self,
+        user_id: str,
+        *,
+        after_seq: int = 0,
+        types: tuple[str, ...] | None = None,
+        limit: int = 200,
+    ) -> list[Any]:
+        return await self._store.get_events_after_for_user(
+            user_id, after_seq=after_seq, types=types, limit=limit
+        )
+
     async def get_events_window(
         self,
         user_id: str,

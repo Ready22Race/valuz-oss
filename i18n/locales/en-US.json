@@ -322,6 +322,9 @@
       "summary": "Summary",
       "viewDetails": "View full result"
     },
+    "bgTask": {
+      "running": "Background tasks running ({count})"
+    },
     "brainOverride": "This chat only",
     "pillDrafted": "Task drafted",
     "pillPlanned": "Plan v{version} ({count} subtasks)",
@@ -726,6 +729,7 @@
     "taskStarting": "Starting the task…",
     "workingOn": "Working on: {input}",
     "statusRunning": "Running",
+    "statusBackground": "Background task running",
     "statusPaused": "Paused",
     "statusIdle": "Ended",
     "statusCompleted": "Completed",
@@ -2486,6 +2490,8 @@
     "notifQuestionTitle": "{agent} needs your input",
     "notifFailureTitle": "Task needs attention",
     "notifFailureBody": "{task} is blocked",
+    "notifRunFailedTitle": "{agent} run failed",
+    "kindRunFailed": "Run failed",
     "inboxTitle": "Notifications",
     "emptyTitle": "No notifications need you",
     "emptyHint": "Questions and blocked tasks show up here",

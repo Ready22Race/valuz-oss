@@ -27,6 +27,7 @@ EXPECTED_OPS = {
     "get_events",
     "get_events_for_message",
     "get_events_after",
+    "get_events_after_for_user",
     "get_events_window",
     "usage_rollup",
 }

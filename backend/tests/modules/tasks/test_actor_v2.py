@@ -1002,3 +1002,151 @@ async def test_await_members_no_dispatched_returns_immediately(monkeypatch) -> N
         assert res["timed_out"] is False
     finally:
         mailbox_registry.unregister(lead)
+
+
+@pytest.mark.asyncio
+async def test_await_members_any_running_pending_gets_keep_waiting_hint(monkeypatch) -> None:
+    """Pull-gap fix (Plan A): a mode='any' early return with a still-running
+    member must carry the ``still_running`` + 'await again' hint — regardless of
+    ``timed_out`` (which is only set for mode='all'). Previously the hint was
+    gated on ``timed_out`` and never fired here, so the lead got a bare
+    ``pending:[k] state:running`` and went silent instead of re-awaiting."""
+    from valuz_agent.modules.tasks import coordination as coord_mod
+
+    _patch_await_deps(monkeypatch, {"sA": "A"})
+
+    async def _get_session(_uid, _sid):
+        return SimpleNamespace(status="running")  # member genuinely in flight
+
+    monkeypatch.setattr(
+        coord_mod, "data_reader", lambda: SimpleNamespace(get_session=_get_session)
+    )
+    orch = TaskOrchestrator()
+    lead = "lead-await-running"
+    mailbox_registry.register(lead)
+    try:
+        # No member_done queued → the member is still running when the short
+        # window closes.
+        res = await orch.await_member_results(
+            lead_session_id=lead,
+            project_id="w1",
+            task_id="t1",
+            keys=["A"],
+            mode="any",
+            timeout_s=0.2,
+            user_id=LOCAL_USER_ID,
+        )
+        assert res["collected"] == 0
+        assert res["pending"] == ["A"]
+        assert res["timed_out"] is False  # mode='any' never sets timed_out
+        assert res["still_running"] is True
+        assert [p["state"] for p in res["pending_status"]] == ["running"]
+        assert "await_members again" in res["hint"]
+    finally:
+        mailbox_registry.unregister(lead)
+
+
+@pytest.mark.asyncio
+async def test_await_members_clamps_window_to_max(monkeypatch) -> None:
+    """A model-supplied timeout_s above _MAX_AWAIT_WINDOW_S is clamped — await
+    parks for the window unit, not the requested value. This keeps a single call
+    under the codex tool-call ceiling so a healthy wait is never aborted as a
+    transport failure. Proven by shrinking the window and passing a huge
+    timeout_s: the call must return in ~the window, not in ~9999s."""
+    from valuz_agent.modules.tasks import coordination as coord_mod
+
+    _patch_await_deps(monkeypatch, {"sA": "A"})
+    monkeypatch.setattr(coord_mod, "_MAX_AWAIT_WINDOW_S", 0.2)  # tiny cap for the test
+
+    async def _get_session(_uid, _sid):
+        return SimpleNamespace(status="running")
+
+    monkeypatch.setattr(
+        coord_mod, "data_reader", lambda: SimpleNamespace(get_session=_get_session)
+    )
+    orch = TaskOrchestrator()
+    lead = "lead-await-clamp"
+    mailbox_registry.register(lead)
+    try:
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        res = await orch.await_member_results(
+            lead_session_id=lead,
+            project_id="w1",
+            task_id="t1",
+            keys=["A"],
+            mode="any",
+            timeout_s=9999,  # would block ~forever if honored verbatim
+            user_id=LOCAL_USER_ID,
+        )
+        elapsed = loop.time() - start
+        assert elapsed < 1.0  # clamped to the 0.2s window, NOT 9999s
+        assert res["pending"] == ["A"]
+    finally:
+        mailbox_registry.unregister(lead)
+
+
+@pytest.mark.asyncio
+async def test_inbox_notice_wrapper_surfaces_queued_member_done() -> None:
+    """Pull-gap fix (Plan B): a lead tool called while a member_done sits in the
+    mailbox gets an ``inbox_pending`` notice appended (non-consuming peek), so a
+    completion that landed in the gap is surfaced at the next tool boundary."""
+    import json
+
+    from src.core import ToolResult  # type: ignore[import-not-found]
+
+    from valuz_agent.modules.tasks.tools.handlers import _with_inbox_notice
+
+    async def _inner(_args, _ctx):
+        return ToolResult(content=json.dumps({"ok": True}))
+
+    wrapped = _with_inbox_notice(_inner)
+    lead = "lead-inbox-notice"
+    ctx = SimpleNamespace(session_id=lead, user_id=LOCAL_USER_ID)
+
+    mailbox_registry.register(lead)
+    try:
+        # Empty inbox → notice absent, envelope untouched.
+        empty = await wrapped({}, ctx)
+        assert "inbox_pending" not in json.loads(empty.content)
+
+        # A queued member_done → notice appended, but the message is NOT consumed
+        # (peek-only: it must still be there for await_members to collect).
+        mailbox_registry.put(lead, InboxMsg(kind="member_done", from_session="sA", payload={}))
+        got = await wrapped({}, ctx)
+        payload = json.loads(got.content)
+        assert payload["ok"] is True
+        assert payload["inbox_pending"] is True
+        assert "await_members" in payload["inbox_hint"]
+        assert mailbox_registry.has_pending(lead)  # non-consuming — still queued
+    finally:
+        mailbox_registry.unregister(lead)
+
+
+@pytest.mark.asyncio
+async def test_inbox_notice_wrapper_leaves_errors_and_plaintext_alone() -> None:
+    """The notice wrapper must never mutate an error result or a plain-text
+    (non-JSON) envelope, even with mail queued."""
+    from src.core import ToolResult  # type: ignore[import-not-found]
+
+    from valuz_agent.modules.tasks.tools.handlers import _with_inbox_notice
+
+    lead = "lead-inbox-passthrough"
+    ctx = SimpleNamespace(session_id=lead, user_id=LOCAL_USER_ID)
+    mailbox_registry.register(lead)
+    mailbox_registry.put(lead, InboxMsg(kind="member_done", from_session="sA", payload={}))
+    try:
+
+        async def _err(_args, _ctx):
+            return ToolResult(content="boom", is_error=True)
+
+        async def _plain(_args, _ctx):
+            return ToolResult(content="Task closed. Do not continue working.")
+
+        err = await _with_inbox_notice(_err)({}, ctx)
+        assert err.is_error is True and err.content == "boom"
+
+        plain = await _with_inbox_notice(_plain)({}, ctx)
+        assert plain.content == "Task closed. Do not continue working."
+    finally:
+        mailbox_registry.unregister(lead)

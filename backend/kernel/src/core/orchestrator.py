@@ -290,6 +290,13 @@ class SessionOrchestrator:
     DEFAULT_MAX_WARM_RUNTIMES: int = 6
     DEFAULT_RUNTIME_IDLE_TTL_S: float = 300.0  # 5 min
     DEFAULT_SWEEP_INTERVAL_S: float = 60.0  # 1 min
+    # Extended idle TTL for runtimes reporting live background tasks
+    # (``run_in_background`` processes die with the CLI subprocess, so normal
+    # TTL eviction would kill user work mid-task). An EXTENSION rather than an
+    # exemption: a crashed CLI can leave the busy signal stuck, and this is
+    # the backstop against pinning a runtime forever. ``<= 0`` = full
+    # exemption (busy runtimes never TTL-evicted).
+    DEFAULT_BG_BUSY_RUNTIME_TTL_S: float = 3600.0  # 1 h
 
     def __init__(
         self,
@@ -298,6 +305,7 @@ class SessionOrchestrator:
         max_warm_runtimes: int | None = None,
         runtime_idle_ttl_s: float | None = None,
         sweep_interval_s: float | None = None,
+        bg_busy_runtime_ttl_s: float | None = None,
     ) -> None:
         self._store = store
         self._runtimes: dict[str, RuntimePort] = {}
@@ -313,6 +321,11 @@ class SessionOrchestrator:
         )
         self._sweep_interval_s = (
             self.DEFAULT_SWEEP_INTERVAL_S if sweep_interval_s is None else sweep_interval_s
+        )
+        self._bg_busy_runtime_ttl_s = (
+            self.DEFAULT_BG_BUSY_RUNTIME_TTL_S
+            if bg_busy_runtime_ttl_s is None
+            else bg_busy_runtime_ttl_s
         )
         # Background idle-sweeper task. Started by ``start()`` (composition
         # root, has a running loop), cancelled by ``shutdown()``. ``None`` when
@@ -789,32 +802,68 @@ class SessionOrchestrator:
         except asyncio.CancelledError:
             raise
 
+    def _has_live_background_tasks(self, session_id: str) -> bool:
+        """Duck-typed busy signal: the claude runtime exposes
+        ``has_live_background_tasks`` while a ``run_in_background`` process it
+        spawned is still running (the process is a child of the CLI subprocess,
+        so eviction would kill the user's work mid-task). Runtimes without the
+        attribute are never bg-busy."""
+        runtime = self._runtimes.get(session_id)
+        return bool(getattr(runtime, "has_live_background_tasks", False))
+
+    def bg_busy_session_ids(self) -> list[str]:
+        """Session ids of warm runtimes with live background tasks.
+
+        Process-scoped (the orchestrator holds no owner index) — callers
+        intersect with their own owner-scoped session set. The host's
+        activity overview uses this so a session whose turn ended but whose
+        ``run_in_background`` process is still running keeps signalling
+        in-flight work."""
+        return [sid for sid in self._runtimes if self._has_live_background_tasks(sid)]
+
     async def _sweep_idle_runtimes(self, *, exclude: str | None = None) -> None:
         """Close every cached runtime untouched for longer than the idle TTL.
         Never evicts an active turn (``_active``) — a parked approval keeps the
         session active because ``runtime.run()`` is still awaiting, so this also
-        protects sessions waiting on a user decision."""
+        protects sessions waiting on a user decision. Runtimes with live
+        background tasks get the extended ``bg_busy_runtime_ttl_s`` instead of
+        the normal TTL (see the constant's comment for the rationale)."""
         if self._runtime_idle_ttl_s <= 0:
             return
         now = time.monotonic()
-        stale = [
-            sid
-            for sid, ts in list(self._runtime_last_used.items())
-            if sid != exclude and sid not in self._active and (now - ts) >= self._runtime_idle_ttl_s
-        ]
+        stale: list[str] = []
+        for sid, ts in list(self._runtime_last_used.items()):
+            if sid == exclude or sid in self._active:
+                continue
+            ttl = self._runtime_idle_ttl_s
+            if self._has_live_background_tasks(sid):
+                if self._bg_busy_runtime_ttl_s <= 0:
+                    continue  # full exemption
+                ttl = max(ttl, self._bg_busy_runtime_ttl_s)
+            if (now - ts) >= ttl:
+                stale.append(sid)
         for sid in stale:
             await self._evict_runtime(sid)
 
     async def _enforce_runtime_cap(self, *, exclude: str | None = None) -> None:
         """Evict least-recently-used runtimes until the warm set is within the
-        cap. Skips active turns; if every over-cap entry is active, the cap is
-        briefly exceeded rather than tearing down a running subprocess."""
+        cap. Skips active turns and runtimes with live background tasks; if
+        every over-cap entry is protected, the cap is briefly exceeded rather
+        than tearing down a running subprocess (or killing background work).
+        The extended-TTL sweep remains the backstop that unwinds a prolonged
+        excess."""
         if self._max_warm_runtimes <= 0:
             return
         if len(self._runtimes) <= self._max_warm_runtimes:
             return
         evictable = sorted(
-            (sid for sid in self._runtimes if sid != exclude and sid not in self._active),
+            (
+                sid
+                for sid in self._runtimes
+                if sid != exclude
+                and sid not in self._active
+                and not self._has_live_background_tasks(sid)
+            ),
             key=lambda s: self._runtime_last_used.get(s, 0.0),
         )
         for sid in evictable:

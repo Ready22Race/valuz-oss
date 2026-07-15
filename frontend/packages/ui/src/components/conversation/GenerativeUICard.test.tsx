@@ -3,8 +3,10 @@ import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 
 vi.mock("@openuidev/react-lang", () => ({
-  Renderer: (props: { response: string }) => (
-    <div data-testid="renderer">{props.response}</div>
+  Renderer: (props: { response: string; isStreaming?: boolean }) => (
+    <div data-testid="renderer" data-streaming={props.isStreaming ? "true" : "false"}>
+      {props.response}
+    </div>
   ),
 }));
 vi.mock("@openuidev/react-ui", () => ({
@@ -27,6 +29,17 @@ describe("GenerativeUICard", () => {
     expect(screen.getByTestId("renderer").textContent).toBe("Chart\n  data: 1");
   });
 
+  it("lets horizontal charts expand to show every data row", () => {
+    const { container } = render(<GenerativeUICard openui={"HorizontalBarChart"} />);
+    const styles = Array.from(container.querySelectorAll("style"))
+      .map((style) => style.textContent)
+      .join("\n");
+
+    expect(styles).toContain(".openui-horizontal-bar-chart-container-inner-wrapper");
+    expect(styles).toContain("height: auto !important");
+    expect(styles).toContain("overflow-y: visible");
+  });
+
   it("unwraps a JSON content-block envelope before rendering", () => {
     // The kernel JSON-stringifies MCP TextContent at the SSE boundary — the
     // tool output arrives as [{"type":"text","text":"<OpenUI Lang>"}], not raw.
@@ -39,6 +52,18 @@ describe("GenerativeUICard", () => {
   it("shows an empty state when there is no output yet", () => {
     render(<GenerativeUICard openui={undefined} status="running" />);
     expect(screen.getByTestId("genui-empty")).toBeTruthy();
+  });
+
+  it("renders in streaming mode while running", () => {
+    render(<GenerativeUICard openui={"Chart\n  data: 1"} status="running" />);
+    const r = screen.getByTestId("renderer");
+    expect(r.getAttribute("data-streaming")).toBe("true");
+    expect(r.textContent).toBe("Chart\n  data: 1");
+  });
+
+  it("renders non-streaming on success", () => {
+    render(<GenerativeUICard openui={"Chart"} status="success" />);
+    expect(screen.getByTestId("renderer").getAttribute("data-streaming")).toBe("false");
   });
 });
 

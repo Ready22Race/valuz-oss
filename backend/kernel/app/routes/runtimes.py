@@ -22,3 +22,15 @@ router = APIRouter(prefix=f"{KERNEL_API_PREFIX}/v1/runtimes", tags=["runtimes"])
 async def get_runtime_availability() -> dict[str, Any]:
     """Live per-runtime availability, probed in this kernel's environment."""
     return {"data": probe_runtime_availability()}
+
+
+@router.get("/bg-busy-sessions")
+async def get_bg_busy_sessions() -> dict[str, Any]:
+    """Session ids of warm runtimes with live background tasks.
+
+    Process-scoped, id-only (the orchestrator holds no owner index); callers
+    intersect with their own owner-scoped session set. Kernel-internal auth
+    covers the surface — the host is the only caller."""
+    from app.dependencies import get_orchestrator
+
+    return {"data": get_orchestrator().bg_busy_session_ids()}
