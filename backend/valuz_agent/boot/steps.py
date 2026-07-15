@@ -813,11 +813,9 @@ async def stop_decision_aggregator(app: FastAPI) -> None:
     agg = getattr(app.state, "decision_aggregator", None)
     if agg is not None:
         await agg.stop()
-    # Close any open notification SSE streams cleanly (the ledger itself is
-    # durable — nothing to flush, just release subscribers).
-    from valuz_agent.modules.notifications.service import notification_service
-
-    await notification_service.stop()
+    # The notification ledger is durable and its SSE stream holds no in-process
+    # subscriber state (it polls the table) — open streams end on their own when
+    # the client disconnects / the server shuts down. Nothing to release here.
 
 
 def mark_boot_complete() -> None:

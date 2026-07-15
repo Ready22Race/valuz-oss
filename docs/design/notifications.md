@@ -99,7 +99,13 @@ resolved(和今天 aggregator 的 hydrate 同精神)。
 ## 4. API
 
 - `GET /v1/notifications?unread=&limit=&after=` — 列表（抽屉 + 开机快照）
-- `GET /v1/notifications/stream` — SSE：`snapshot` / `added` / `updated`(read) / `resolved`
+- `GET /v1/notifications/stream` — SSE：**每帧都是完整 `snapshot`（`{entries, unread}`）**。
+  投递是**DB 轮询**而非进程内扇出——stream 按间隔（`VALUZ_NOTIFICATION_POLL_SECONDS`，
+  默认 2.5s）重读持久化的 `valuz_notification` 表，仅在开放集/已读态变化时推一帧新
+  snapshot。前端把 snapshot 当整体 reset,无需 per-row 增量协议。**这是多 pod 正确性的
+  关键**:进程内订阅表只能覆盖同一 pod 的 SSE 客户端,pod A 写入的通知到不了连在 pod B
+  的流;持久账本共享(本地一份 SQLite、SaaS 一份 Postgres),DB 轮询流对每个 pod 都正确,
+  无需共享总线(Redis pub/sub 是未来的 overlay 优化路径)。
 - `POST /v1/notifications/{id}:read` / `:read-all`
 - `POST /v1/notifications/{id}:dismiss`
 - 动作本身走各自领域端点（答复 → `/sessions/{id}/actions`，恢复 →
@@ -143,8 +149,9 @@ resolved(和今天 aggregator 的 hydrate 同精神)。
 ## 7. 分期 / 落地状态
 
 1. **N1 durable 核心 — 已实现**:`valuz_notification` 表(migration 0020)+
-   `NotificationService`(ingest/resolve/resolve_task/read/mark_all_read/dismiss +
-   per-owner SSE 扇出)+ 两个 projector(question 在 `decisions/aggregator` 的
+   `NotificationService`(ingest/resolve/resolve_task/read/mark_all_read/dismiss,
+   纯 durable 写入——无内存扇出,SSE 由 DB 轮询投递,多 pod 安全)+ 两个 projector
+   (question 在 `decisions/aggregator` 的
    add/resolve 点、failure 在 `_auto_finalize`/`health_monitor`/kickoff 落点经
    `tasks/messaging.record_task_failure_notification`)+ REST/SSE
    `api/routes/notifications.py`。resume/abandon 时 `resolve_task` 清失败通知。
