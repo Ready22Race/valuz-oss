@@ -448,83 +448,30 @@ paths:
           description: Project or worktree not found
         "409":
           description: Worktree holds unmerged work and ``force`` was not set
-  /v1/projects/{project_id}/files/{file_path}:
-    get:
-      summary: Read a project file as an artifact preview
-      operationId: readProjectFileArtifact
-      tags: [projects]
-      parameters:
-        - name: project_id
-          in: path
-          required: true
-          schema: {type: string}
-        - name: file_path
-          in: path
-          required: true
-          schema: {type: string}
-          description: Relative project file path. May include slashes when URL-encoded by the client.
-        - name: worktree
-          in: query
-          required: false
-          schema: {type: string}
-          description: >
-            Optional worktree name. When set, the path is resolved inside that
-            worktree's checkout (a worktree session's cwd, design D7) instead of
-            the shared project cwd. 404 if the named worktree is gone.
+  /v1/files/resolve:
+    post:
+      summary: Resolve file identities to client-accessible addresses
+      description: |
+        Exchanges `valuz-file://` absolute-path identities for local paths or
+        remote presigned URLs. The API returns metadata and capabilities only;
+        file bytes are fetched directly by the client.
+      operationId: resolveFiles
+      tags: [files]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResolveFilesRequest"
       responses:
         "200":
-          description: Artifact descriptor and preview content
+          description: Resolved address descriptors in request order
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ArtifactFileResponse"
-        "403":
-          description: File is blocked by preview policy
-        "404":
-          description: Project or file not found
+                $ref: "#/components/schemas/ResolveFilesResponse"
         "422":
-          description: Invalid file path
-  /v1/projects/{project_id}/raw-files/{file_path}:
-    get:
-      summary: Stream a project file for renderer use
-      operationId: readProjectRawFile
-      tags: [projects]
-      parameters:
-        - name: project_id
-          in: path
-          required: true
-          schema: {type: string}
-        - name: file_path
-          in: path
-          required: true
-          schema: {type: string}
-          description: Relative project file path. May include slashes when URL-encoded by the client.
-        - name: worktree
-          in: query
-          required: false
-          schema: {type: string}
-          description: >
-            Optional worktree name. When set, the path is resolved inside that
-            worktree's checkout instead of the shared project cwd. 404 if the
-            named worktree is gone.
-      responses:
-        "200":
-          description: Raw file bytes
-          content:
-            application/octet-stream:
-              schema:
-                type: string
-                format: binary
-            application/pdf:
-              schema:
-                type: string
-                format: binary
-        "403":
-          description: File is blocked by preview policy
-        "404":
-          description: Project or file not found
-        "422":
-          description: Invalid file path
+          description: Invalid request or more than 256 refs
   /v1/tasks:
     get:
       summary: List tasks across every project
@@ -3109,74 +3056,52 @@ paths:
 
 components:
   schemas:
-    ArtifactCapabilities:
+    FileCapabilities:
       type: object
-      required: [canPreview, canEdit, canOpenExternal, canCopyContent, canDownload]
+      required: [canPreview, canDownload, canOpenExternal, canCopyContent]
       properties:
         canPreview: {type: boolean}
-        canEdit: {type: boolean}
+        canDownload: {type: boolean}
         canOpenExternal: {type: boolean}
         canCopyContent: {type: boolean}
-        canDownload: {type: boolean}
-    ArtifactDescriptor:
+    ResolveFilesRequest:
       type: object
-      required: [id, kind, projectId, path, name, previewKind, capabilities]
+      required: [refs]
       properties:
-        id: {type: string}
-        kind:
-          type: string
-          enum: [project_file, session_output, document_artifact, slides_artifact, webpage_artifact]
-        projectId: {type: string}
-        path: {type: string}
+        refs:
+          type: array
+          maxItems: 256
+          items: {type: string}
+    ResolvedFileDescriptor:
+      type: object
+      required: [ref, kind, name, exists, previewKind, capabilities]
+      properties:
+        ref: {type: string}
+        kind: {type: string, enum: [local, remote, ""]}
+        absPath: {type: string, nullable: true}
+        url: {type: string, nullable: true}
+        expiresAt: {type: integer, nullable: true}
         name: {type: string}
         mimeType: {type: string, nullable: true}
-        extension: {type: string, nullable: true}
         size: {type: integer, nullable: true}
-        modifiedAt: {type: string, nullable: true}
+        exists: {type: boolean}
         previewKind:
           type: string
           enum: [markdown, code, image, pdf, html, docx, media, spreadsheet, plain, unsupported]
         capabilities:
-          $ref: "#/components/schemas/ArtifactCapabilities"
-    TextArtifactContent:
+          $ref: "#/components/schemas/FileCapabilities"
+        error:
+          type: string
+          enum: [invalid_ref, forbidden, not_found]
+          nullable: true
+    ResolveFilesResponse:
       type: object
-      required: [kind, encoding, content, truncated]
+      required: [results]
       properties:
-        kind: {type: string, enum: [text]}
-        encoding: {type: string, enum: [utf-8]}
-        content: {type: string}
-        truncated: {type: boolean}
-        etag: {type: string, nullable: true}
-        modifiedAt: {type: string, nullable: true}
-    BinaryArtifactContent:
-      type: object
-      required: [kind, openUrl, mimeType]
-      properties:
-        kind: {type: string, enum: [binary]}
-        openUrl: {type: string}
-        mimeType: {type: string}
-        size: {type: integer, nullable: true}
-        reason: {type: string, nullable: true}
-    ExternalArtifactContent:
-      type: object
-      required: [kind, reason]
-      properties:
-        kind: {type: string, enum: [external]}
-        reason: {type: string}
-        openUrl: {type: string, nullable: true}
-    ArtifactContent:
-      oneOf:
-        - $ref: "#/components/schemas/TextArtifactContent"
-        - $ref: "#/components/schemas/BinaryArtifactContent"
-        - $ref: "#/components/schemas/ExternalArtifactContent"
-    ArtifactFileResponse:
-      type: object
-      required: [artifact, content]
-      properties:
-        artifact:
-          $ref: "#/components/schemas/ArtifactDescriptor"
-        content:
-          $ref: "#/components/schemas/ArtifactContent"
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/ResolvedFileDescriptor"
     BrowserStatus:
       type: object
       required: [daemon_running, mode, node_ok, cli_prefix, hints]

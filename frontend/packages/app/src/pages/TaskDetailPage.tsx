@@ -49,13 +49,9 @@ import {
   agentsApi,
   tasksApi,
   projectsApi,
-  filesApi,
-  buildFileRef,
   useNotifications,
   useTaskEvents,
   useTranslation,
-  type ArtifactContent,
-  type ArtifactDescriptor,
   type IntervenePayload,
   type MemberWithAgent,
   type TaskDetail,
@@ -70,7 +66,6 @@ import {
   type PlannedSubtask,
 } from "../components/TaskContextPanel";
 import { toFileTree } from "../lib/file-tree";
-import { resolvedToArtifactFile } from "../lib/resolve-artifact";
 import { TaskStatusLabel } from "../components/TaskStatusLabel";
 import { NotificationCard } from "../components/NotificationInbox";
 import {
@@ -79,6 +74,7 @@ import {
   useSkillSubmissionCards,
 } from "../hooks";
 import { deriveDeliverable } from "./task-detail/deliverable";
+import { useArtifactFile } from "../hooks/use-artifact-file";
 
 interface EventMeta {
   icon: ComponentType<{ className?: string }>;
@@ -403,14 +399,6 @@ export const TaskDetailPage = () => {
   const [projectName, setProjectName] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [selectedArtifactPath, setSelectedArtifactPath] = useState<
-    string | null
-  >(null);
-  const [artifact, setArtifact] = useState<ArtifactDescriptor | null>(null);
-  const [artifactContent, setArtifactContent] =
-    useState<ArtifactContent | null>(null);
-  const [artifactLoading, setArtifactLoading] = useState(false);
-  const [artifactError, setArtifactError] = useState<string | null>(null);
   const selectedFileParam = searchParams.get("file");
 
   // Deep-link origin fast path (multi-target editions): task links can carry
@@ -536,11 +524,35 @@ export const TaskDetailPage = () => {
     void openArtifact(rootPath, t as Translator);
   }, [rootPath, t]);
 
+  const locateArtifactFile = useCallback(
+    (path: string) => ({
+      absolutePath: resolveArtifactPath(path, rootPath),
+      relativePath: toProjectRelativeArtifactPath(path, rootPath) ?? path,
+    }),
+    [rootPath],
+  );
+  const artifactFile = useArtifactFile({
+    projectId: projectId ?? null,
+    platform,
+    locate: locateArtifactFile,
+    missingErrorMessage: t("task.artifactOpenInFinder" as Parameters<typeof t>[0]),
+  });
+  const {
+    selectedPath: selectedArtifactPath,
+    artifact,
+    content: artifactContent,
+    target: artifactTarget,
+    loading: artifactLoading,
+    error: artifactError,
+    open: loadArtifact,
+    reload: reloadArtifact,
+    close: closeArtifact,
+  } = artifactFile;
+
   const openArtifactFile = useCallback(
     async (relPath: string, options?: { syncUrl?: boolean }) => {
       if (!projectId) return;
       const normalized = toProjectRelativeArtifactPath(relPath, rootPath);
-      const absPath = resolveArtifactPath(relPath, rootPath);
       if (
         options?.syncUrl !== false &&
         normalized &&
@@ -555,49 +567,16 @@ export const TaskDetailPage = () => {
           { replace: false },
         );
       }
-      setSelectedArtifactPath(normalized ?? relPath);
-      setArtifactLoading(true);
-      setArtifactError(null);
-      try {
-        // Resolve identity -> access address; the client fetches bytes from the
-        // address (never proxied). See docs/design/file-address-resolution.md.
-        const descriptor = await filesApi.resolveOne(buildFileRef(absPath));
-        if (!descriptor || descriptor.error || !descriptor.exists) {
-          setArtifact(null);
-          setArtifactContent(null);
-          setArtifactError(
-            t("task.artifactOpenInFinder" as Parameters<typeof t>[0]),
-          );
-          return;
-        }
-        const result = await resolvedToArtifactFile(descriptor, {
-          projectId,
-          relPath: normalized ?? descriptor.name,
-          platform,
-        });
-        setArtifact(result.artifact);
-        setArtifactContent(result.content);
-      } catch (error) {
-        setArtifact(null);
-        setArtifactContent(null);
-        setArtifactError(
-          error instanceof Error ? error.message : String(error),
-        );
-      } finally {
-        setArtifactLoading(false);
-      }
+      await loadArtifact(relPath);
     },
-    [projectId, rootPath, searchParams, setSearchParams, t, platform],
+    [loadArtifact, projectId, rootPath, searchParams, setSearchParams],
   );
 
   useEffect(() => {
     if (!selectedFileParam) {
       if (selectedArtifactPath) {
         const timer = window.setTimeout(() => {
-          setSelectedArtifactPath(null);
-          setArtifact(null);
-          setArtifactContent(null);
-          setArtifactError(null);
+          closeArtifact();
         }, 0);
         return () => window.clearTimeout(timer);
       }
@@ -617,16 +596,15 @@ export const TaskDetailPage = () => {
     artifact,
     artifactError,
     artifactLoading,
+    closeArtifact,
     openArtifactFile,
     selectedArtifactPath,
     selectedFileParam,
   ]);
 
   const handleArtifactReload = useCallback(() => {
-    if (selectedArtifactPath) {
-      void openArtifactFile(selectedArtifactPath);
-    }
-  }, [openArtifactFile, selectedArtifactPath]);
+    void reloadArtifact();
+  }, [reloadArtifact]);
 
   const handleArtifactClose = useCallback(() => {
     setSearchParams(
@@ -637,11 +615,8 @@ export const TaskDetailPage = () => {
       },
       { replace: true },
     );
-    setSelectedArtifactPath(null);
-    setArtifact(null);
-    setArtifactContent(null);
-    setArtifactError(null);
-  }, [setSearchParams]);
+    closeArtifact();
+  }, [closeArtifact, setSearchParams]);
 
   const handleArtifactCopy = useCallback(() => {
     if (artifactContent?.kind !== "text") return;
@@ -652,12 +627,12 @@ export const TaskDetailPage = () => {
   }, [artifactContent, t]);
 
   const handleArtifactOpenExternal = useCallback(() => {
-    if (!rootPath || !selectedArtifactPath) return;
+    if (!selectedArtifactPath) return;
     void openArtifact(
-      resolveArtifactPath(selectedArtifactPath, rootPath),
+      locateArtifactFile(selectedArtifactPath).absolutePath,
       t as Translator,
     );
-  }, [rootPath, selectedArtifactPath, t]);
+  }, [locateArtifactFile, selectedArtifactPath, t]);
 
   // Open a project file from the right-rail file tree (double-click /
   // right-click → open). The tree node's ``path`` is project-relative, so
@@ -1172,6 +1147,7 @@ export const TaskDetailPage = () => {
         <ArtifactViewerShell
           artifact={artifact}
           content={artifactContent}
+          target={artifactTarget}
           loading={artifactLoading}
           error={artifactError}
           onReload={handleArtifactReload}
