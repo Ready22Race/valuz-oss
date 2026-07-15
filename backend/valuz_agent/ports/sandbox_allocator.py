@@ -32,16 +32,22 @@ class SandboxScope:
 
     ``None`` scope (the default everywhere) keeps today's owner-singleton
     semantics: one sandbox per owner, shared by everything. A non-None scope
-    lets an allocator run one sandbox per conversation (``session``), per
-    task (``task`` — lead + members share it), or per automation. The OSS
-    ``BootSingletonAllocator`` ignores scope entirely.
+    lets an allocator run one sandbox per conversation (``session``) or per
+    task (``task`` — the lead and every member session share ONE instance, so
+    the lead reviews member-written files through the same filesystem). The
+    OSS ``BootSingletonAllocator`` ignores scope entirely.
+
+    There are exactly TWO kinds. Automations are a *trigger*, not a scope: an
+    automation run lands in whatever it starts — a chat session (``session``
+    scope) or a task (``task`` scope). A caller that wants instance reuse
+    across runs (e.g. a high-frequency automation) passes an explicit stable
+    scope at creation instead of introducing a new kind.
 
     ``kind``/``id`` are business identifiers, never ambient: ``session`` uses
-    the host-preminted kernel session id; ``task`` uses ``valuz_task.id``;
-    ``automation`` uses ``valuz_automation.id``.
+    the host-preminted kernel session id; ``task`` uses ``valuz_task.id``.
     """
 
-    kind: Literal["session", "task", "automation"]
+    kind: Literal["session", "task"]
     id: str
 
     @property
