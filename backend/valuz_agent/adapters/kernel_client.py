@@ -205,7 +205,9 @@ class KernelClient(Protocol):
         self, user_id: str, session_id: str
     ) -> AsyncIterator[EventData]: ...
 
-    def subscribe_all_events(self) -> AsyncIterator[EventData]: ...
+    def subscribe_all_events(
+        self, types: tuple[str, ...] | None = None
+    ) -> AsyncIterator[EventData]: ...
 
     async def usage_rollup(
         self, user_id: str, start_ms: int, end_ms: int
@@ -457,9 +459,15 @@ class InProcessKernelClient:
         finally:
             await orch.detach_session_tap(session_id, sink)
 
-    async def subscribe_all_events(self) -> AsyncIterator[EventData]:
+    async def subscribe_all_events(
+        self, types: tuple[str, ...] | None = None
+    ) -> AsyncIterator[EventData]:
         """Live tap on EVERY session's event stream; frames carry
-        ``session_id``. Remote analog: SSE {KERNEL_API_PREFIX}/v1/events/stream (ADR-013)."""
+        ``session_id``. ``types`` is an event-type allowlist — a
+        lifecycle-only consumer (the host control plane) filters here so
+        token deltas are dropped at the source instead of shipped to be
+        discarded. Remote analog: SSE {KERNEL_API_PREFIX}/v1/events/stream
+        ?types=... (ADR-013)."""
         from app.event_stream import GlobalQueueTap
         from app.serializers import live_event_to_data
 
@@ -469,6 +477,8 @@ class InProcessKernelClient:
         try:
             while True:
                 session_id, event = await tap.queue.get()
+                if types is not None and str(event.type) not in types:
+                    continue
                 yield live_event_to_data(event, session_id=session_id)
         finally:
             orch.detach_global_tap(tap)
@@ -778,27 +788,33 @@ async def subscribe_session_events(user_id: str, session_id: str) -> AsyncIterat
         yield event
 
 
-def subscribe_all_events() -> AsyncIterator[EventData]:
+def subscribe_all_events(
+    types: tuple[str, ...] | None = None,
+) -> AsyncIterator[EventData]:
     """Process-global live tap (all sessions of the process/boot kernel).
 
     Unchanged: used by the decision aggregator in LOCAL / single-kernel mode.
     Multi-tenant hosts use :func:`subscribe_all_events_for` instead.
     """
-    return client.subscribe_all_events()
+    return client.subscribe_all_events(types)
 
 
-async def subscribe_all_events_for(user_id: str) -> AsyncIterator[EventData]:
+async def subscribe_all_events_for(
+    user_id: str, types: tuple[str, ...] | None = None
+) -> AsyncIterator[EventData]:
     """Live tap on ONE owner's cross-session event stream (GLOBAL-LIVE, remote).
 
     Routed to that owner's EXISTING kernel via ``_kernel_for_existing`` (never
     provisions). A multi-tenant host runs one kernel per owner, so that kernel's
     "all events" stream IS the owner's cross-session stream. Yields nothing when
     the owner has no live kernel — callers rely on the durable snapshot.
+    ``types`` is an optional event-type allowlist, filtered at the source
+    (in-process: before translation; remote: server-side via ``?types=``).
     """
     k = await _kernel_for_existing(user_id)
     if k is None:
         return
-    async for event in k.subscribe_all_events():
+    async for event in k.subscribe_all_events(types):
         yield event
 
 
