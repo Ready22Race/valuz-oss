@@ -37,14 +37,21 @@ async def stream_all_events(
     REST surface (sessions + events queries), then follow this stream.
     Each frame's payload carries ``session_id``.
     """
+    # Disconnect is handled by ``EventSourceResponse``'s cancel scope: when
+    # the client drops, sse-starlette cancels the generator, which fires the
+    # ``finally`` below and detaches the tap. Do NOT poll
+    # ``await request.is_disconnected()`` inside the loop — sse-starlette 3.x
+    # runs its own disconnect listener on the same ASGI ``receive`` channel,
+    # and a second concurrent reader contends with it, stalling the generator
+    # so frames batch up (the exact bug class the host's SSE routes hit and
+    # reverted; see valuz_agent/api/routes/sessions.py::subscribe_events).
+    del request
 
     async def _frames() -> AsyncIterator[dict[str, Any]]:
         tap = GlobalQueueTap()
         orchestrator.attach_global_tap(tap)
         try:
             while True:
-                if await request.is_disconnected():
-                    break
                 try:
                     session_id, event = await asyncio.wait_for(
                         tap.queue.get(), timeout=STREAM_HEARTBEAT_SECONDS
