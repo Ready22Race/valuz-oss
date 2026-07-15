@@ -21,8 +21,33 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Literal
 
 from valuz_agent.ports.sandbox_provider import SandboxEndpoint
+
+
+@dataclass(frozen=True)
+class SandboxScope:
+    """The unit of work a sandbox serves — the on-demand start/stop granularity.
+
+    ``None`` scope (the default everywhere) keeps today's owner-singleton
+    semantics: one sandbox per owner, shared by everything. A non-None scope
+    lets an allocator run one sandbox per conversation (``session``), per
+    task (``task`` — lead + members share it), or per automation. The OSS
+    ``BootSingletonAllocator`` ignores scope entirely.
+
+    ``kind``/``id`` are business identifiers, never ambient: ``session`` uses
+    the host-preminted kernel session id; ``task`` uses ``valuz_task.id``;
+    ``automation`` uses ``valuz_automation.id``.
+    """
+
+    kind: Literal["session", "task", "automation"]
+    id: str
+
+    @property
+    def key(self) -> str:
+        """Stable registry/lock key (``"{kind}:{id}"``)."""
+        return f"{self.kind}:{self.id}"
 
 
 @dataclass(frozen=True)
@@ -42,21 +67,29 @@ class SandboxAllocatorPort(ABC):
     """Resolve / release the kernel that serves ``owner_user_id``."""
 
     @abstractmethod
-    async def ensure(self, *, owner_user_id: str) -> SandboxLease:
+    async def ensure(
+        self, *, owner_user_id: str, scope: SandboxScope | None = None
+    ) -> SandboxLease:
         """Return the running kernel lease for ``owner_user_id`` (provision or
         reuse). ``owner_user_id`` is the authenticated principal, threaded
-        explicitly — never ambient."""
+        explicitly — never ambient. ``scope`` (optional) narrows the lease to
+        one unit of work (per-session / per-task sandboxes); ``None`` keeps the
+        owner-singleton semantics."""
         ...
 
     @abstractmethod
-    async def release(self, *, owner_user_id: str) -> None:
-        """Best-effort teardown for ``owner_user_id`` (idle TTL). Idempotent."""
+    async def release(self, *, owner_user_id: str, scope: SandboxScope | None = None) -> None:
+        """Best-effort teardown for ``owner_user_id`` (idle TTL / scope end).
+        Idempotent. ``scope`` selects the per-scope sandbox when the allocator
+        runs scoped instances; ``None`` targets the owner-singleton."""
         ...
 
     @abstractmethod
-    async def peek(self, *, owner_user_id: str) -> SandboxLease | None:
+    async def peek(
+        self, *, owner_user_id: str, scope: SandboxScope | None = None
+    ) -> SandboxLease | None:
         """Return the owner's CURRENT lease **without provisioning**; ``None`` if
-        the owner has no live kernel.
+        the owner has no live kernel (for that ``scope``, when given).
 
         For GLOBAL-LIVE taps (the decision inbox): opening the inbox must never
         spin up a sandbox. ``ensure`` provisions; ``peek`` only reveals what's
@@ -74,16 +107,25 @@ class BootSingletonAllocator(SandboxAllocatorPort):
     replaces it via ``ext.sandbox_allocator``.
     """
 
-    async def ensure(self, *, owner_user_id: str) -> SandboxLease:
+    async def ensure(
+        self, *, owner_user_id: str, scope: SandboxScope | None = None
+    ) -> SandboxLease:
         return SandboxLease(endpoint=None)
 
-    async def release(self, *, owner_user_id: str) -> None:
+    async def release(self, *, owner_user_id: str, scope: SandboxScope | None = None) -> None:
         return None
 
-    async def peek(self, *, owner_user_id: str) -> SandboxLease | None:
+    async def peek(
+        self, *, owner_user_id: str, scope: SandboxScope | None = None
+    ) -> SandboxLease | None:
         # The boot / in-process kernel always exists → route to the global
         # client (``endpoint=None``), same as ``ensure``.
         return SandboxLease(endpoint=None)
 
 
-__all__ = ["BootSingletonAllocator", "SandboxAllocatorPort", "SandboxLease"]
+__all__ = [
+    "BootSingletonAllocator",
+    "SandboxAllocatorPort",
+    "SandboxLease",
+    "SandboxScope",
+]

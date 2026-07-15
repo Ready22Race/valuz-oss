@@ -534,7 +534,15 @@ async def recover_active_tasks() -> None:
     """
     import logging
 
+    from valuz_agent.adapters import kernel_client
     from valuz_agent.modules.tasks.orchestrator import task_orchestrator
+    from valuz_agent.modules.tasks.sandbox_scope import resolve_sandbox_scope
+
+    # Task sessions execute in their task's sandbox (one instance per task,
+    # lead + members together). Bind the session→scope lookup so every EXEC op
+    # on a task session routes there; non-task sessions fall back to
+    # per-session scope. No-op routing under the default BootSingletonAllocator.
+    kernel_client.bind_sandbox_scope_resolver(resolve_sandbox_scope)
 
     try:
         await task_orchestrator.recover_active_tasks()
