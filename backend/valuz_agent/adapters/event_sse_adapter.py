@@ -666,16 +666,29 @@ async def iter_events_sse(
 
     async def _pump() -> None:
         # Live deltas always come from the kernel's live bus (never persisted).
-        # In remote mode the sandbox may be GONE — then the subscription fails
-        # and we degrade to history-only (the poll loop below serves it from the
-        # DataService). Swallow so a dead sandbox never breaks the stream.
-        try:
-            async for item in kernel_client.subscribe_session_events(owner_id, session_id):
-                await queue.put(item)
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001 — unreachable sandbox → history-only
-            logger.debug("live event subscription unavailable; serving history only", exc_info=True)
+        # PEEK, never provision: opening a (historical) conversation must not
+        # spin up a sandbox just to look at it. And RE-peek forever: when a
+        # later run_turn starts the session's kernel (possibly on another
+        # replica — peek reads the shared instance registry), the tap attaches
+        # within ~DB_BACKFILL_INTERVAL_SECONDS; without the retry, live-only
+        # deltas (text_delta & co) would be lost for this already-open stream.
+        # A dead/unreachable sandbox degrades to history-only (the poll loop
+        # below serves persisted events from the DataService).
+        while True:
+            try:
+                async for item in kernel_client.subscribe_session_events_existing(
+                    owner_id, session_id
+                ):
+                    await queue.put(item)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — unreachable sandbox → retry later
+                logger.debug(
+                    "live event subscription unavailable; serving history only", exc_info=True
+                )
+            # No live kernel for this session's scope (or the subscription
+            # ended — e.g. its sandbox was stopped): wait, then re-peek.
+            await asyncio.sleep(DB_BACKFILL_INTERVAL_SECONDS)
 
     pump_task = asyncio.create_task(_pump(), name=f"sse-pump-{session_id}")
     # 0.0 → 连接后的第一个空闲 tick 立即回读一次(订阅竞态窗口)。
@@ -942,18 +955,25 @@ async def iter_user_events_sse(
     async def _pump() -> None:
         # In remote mode the owner's sandbox kernel may be GONE — the tap then
         # yields nothing / fails and we degrade to the durable backfill floor.
+        # Re-peek forever (subscribe_all_events_for routes via peek — never
+        # provisions): a kernel that comes up later gets its tap attached
+        # within ~CONTROL_BACKFILL_INTERVAL_SECONDS instead of never.
         # Lifecycle-only at the SOURCE: without the allowlist the owner's
         # kernel ships every token delta across the wire (lead + N members =
         # M firehoses) just for _control_frame_from_live to discard them.
-        try:
-            async for item in kernel_client.subscribe_all_events_for(
-                user_id, types=CONTROL_LIFECYCLE_TYPES
-            ):
-                await queue.put(item)
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001 — unreachable kernel → floor-only
-            logger.debug("user live tap unavailable; serving backfill floor only", exc_info=True)
+        while True:
+            try:
+                async for item in kernel_client.subscribe_all_events_for(
+                    user_id, types=CONTROL_LIFECYCLE_TYPES
+                ):
+                    await queue.put(item)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — unreachable kernel → floor-only
+                logger.debug(
+                    "user live tap unavailable; serving backfill floor only", exc_info=True
+                )
+            await asyncio.sleep(CONTROL_BACKFILL_INTERVAL_SECONDS)
 
     pump_task = asyncio.create_task(_pump(), name=f"user-sse-pump-{user_id}")
     last_backfill = asyncio.get_event_loop().time()
@@ -971,9 +991,7 @@ async def iter_user_events_sse(
                 now = asyncio.get_event_loop().time()
                 if now - last_backfill >= CONTROL_BACKFILL_INTERVAL_SECONDS:
                     last_backfill = now
-                    for frame in await shielded(
-                        list_user_events_after(user_id, after_seq=cursor)
-                    ):
+                    for frame in await shielded(list_user_events_after(user_id, after_seq=cursor)):
                         yield {"event": frame.event_type, "data": frame.to_sse_data()}
                         cursor = frame.seq
                         last_emit = asyncio.get_event_loop().time()

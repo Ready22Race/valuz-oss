@@ -43,6 +43,7 @@ from typing import Any, Literal, cast
 from uuid import uuid4
 
 from valuz_agent.adapters import kernel_client
+from valuz_agent.ports.sandbox_allocator import SandboxScope
 from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.modules.sessions import project_index
 from valuz_agent.adapters.agent_resolver import (
@@ -374,7 +375,9 @@ class LifecycleService:
                 )
                 raise ValueError(gap)
 
-            await kernel_client.create_session(user_id, lead_session)
+            await kernel_client.create_session(
+                user_id, lead_session, scope=SandboxScope(kind="task", id=task_id)
+            )
             await project_index.record(
                 project_id,
                 lead_session.id,
@@ -700,7 +703,9 @@ class LifecycleService:
             if gap is not None:
                 return {"error": f"commit_task: {gap}"}
 
-            await kernel_client.create_session(user_id, lead_session)
+            await kernel_client.create_session(
+                user_id, lead_session, scope=SandboxScope(kind="task", id=task_id)
+            )
             await project_index.record(
                 project_id,
                 lead_session.id,

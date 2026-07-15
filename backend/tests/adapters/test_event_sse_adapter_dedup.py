@@ -63,6 +63,11 @@ def _drive(
     monkeypatch.setattr(
         event_sse_adapter.kernel_client, "subscribe_session_events", _fake_subscribe
     )
+    # The adapter's live pump attaches via the peek-only variant (never
+    # provisions) — fake it with the same stream.
+    monkeypatch.setattr(
+        event_sse_adapter.kernel_client, "subscribe_session_events_existing", _fake_subscribe
+    )
 
     async def _collect() -> list[dict]:
         frames: list[dict] = []
