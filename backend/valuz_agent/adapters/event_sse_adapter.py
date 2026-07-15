@@ -942,8 +942,13 @@ async def iter_user_events_sse(
     async def _pump() -> None:
         # In remote mode the owner's sandbox kernel may be GONE — the tap then
         # yields nothing / fails and we degrade to the durable backfill floor.
+        # Lifecycle-only at the SOURCE: without the allowlist the owner's
+        # kernel ships every token delta across the wire (lead + N members =
+        # M firehoses) just for _control_frame_from_live to discard them.
         try:
-            async for item in kernel_client.subscribe_all_events_for(user_id):
+            async for item in kernel_client.subscribe_all_events_for(
+                user_id, types=CONTROL_LIFECYCLE_TYPES
+            ):
                 await queue.put(item)
         except asyncio.CancelledError:
             raise

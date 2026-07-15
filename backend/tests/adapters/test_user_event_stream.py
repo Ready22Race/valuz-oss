@@ -64,11 +64,16 @@ def live_tap(monkeypatch):
     """Patch the owner cross-session live tap; returns a setter for live events.
 
     Defaults to an empty tap (the stream then relies on the durable backfill),
-    so ``iter_user_events_sse`` never touches a real kernel in tests.
+    so ``iter_user_events_sse`` never touches a real kernel in tests. The fake
+    deliberately IGNORES the ``types`` allowlist (recording it on
+    ``_set.seen_types``) so the downstream ``_control_frame_from_live``
+    projection keeps its own defense-in-depth coverage.
     """
     events: list = []
+    seen_types: list = []
 
-    async def _fake(user_id):
+    async def _fake(user_id, types=None):
+        seen_types.append(types)
         for e in events:
             yield e
 
@@ -78,6 +83,7 @@ def live_tap(monkeypatch):
         events.clear()
         events.extend(evs)
 
+    _set.seen_types = seen_types
     return _set
 
 
@@ -193,6 +199,21 @@ class TestIterUserEventsSse:
         assert frame["event"] == "run.finished"
         assert json.loads(frame["data"])["seq"] == 5
 
+    async def test_live_tap_requests_lifecycle_allowlist_at_source(self, bind_reader, live_tap):
+        # The pump must push the lifecycle filter DOWN to the tap (server-side
+        # in remote mode) — otherwise the owner's kernel ships every token
+        # delta across the wire just for the projection here to discard them.
+        # Driven via a LIVE frame so the pump has demonstrably started (the
+        # pump task is only created after the initial backfill).
+        bind_reader([])
+        live_tap([_live_ev(5, "s", "session_idle")])
+        gen = adapter.iter_user_events_sse("user-A", after_seq=0)
+        try:
+            await anext(gen)
+        finally:
+            await gen.aclose()
+        assert live_tap.seen_types == [adapter.CONTROL_LIFECYCLE_TYPES]
+
     async def test_disconnect_predicate_stops_the_loop(self, bind_reader, live_tap):
         bind_reader([])  # nothing to emit
         gen = adapter.iter_user_events_sse("user-A", is_disconnected=lambda: True)
@@ -206,7 +227,7 @@ class TestIterUserEventsSse:
         bind_reader([])
         torn_down = {"v": False}
 
-        async def _fake(user_id):
+        async def _fake(user_id, types=None):
             try:
                 yield _live_ev(1, "s", "session_idle")  # one frame, then park
                 await asyncio.Event().wait()

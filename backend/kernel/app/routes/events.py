@@ -18,7 +18,7 @@ from app.dependencies import get_orchestrator
 from app.event_stream import GlobalQueueTap
 from app.routes import KERNEL_API_PREFIX
 from app.serializers import live_event_to_data
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from sse_starlette.sse import EventSourceResponse
 
 router = APIRouter(prefix=f"{KERNEL_API_PREFIX}/v1/events", tags=["events"])
@@ -30,6 +30,18 @@ STREAM_HEARTBEAT_SECONDS = 15.0
 async def stream_all_events(
     request: Request,
     orchestrator: Annotated[Any, Depends(get_orchestrator)],
+    types: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Comma-separated event-type allowlist. When set, only events "
+                "whose type is in the list are emitted — e.g. a lifecycle-only "
+                "consumer (the host control plane) passes "
+                "``user_message,session_idle,session_error,session_update`` so "
+                "token deltas never cross the wire just to be dropped."
+            ),
+        ),
+    ] = None,
 ) -> EventSourceResponse:
     """Live event stream across ALL sessions, as Server-Sent Events.
 
@@ -37,6 +49,9 @@ async def stream_all_events(
     REST surface (sessions + events queries), then follow this stream.
     Each frame's payload carries ``session_id``.
     """
+    allowed: frozenset[str] | None = None
+    if types is not None:
+        allowed = frozenset(t.strip() for t in types.split(",") if t.strip()) or None
     # Disconnect is handled by ``EventSourceResponse``'s cancel scope: when
     # the client drops, sse-starlette cancels the generator, which fires the
     # ``finally`` below and detaches the tap. Do NOT poll
@@ -58,6 +73,8 @@ async def stream_all_events(
                     )
                 except TimeoutError:
                     yield {"event": "heartbeat", "data": "{}"}
+                    continue
+                if allowed is not None and str(event.type) not in allowed:
                     continue
                 yield {
                     "event": "event",

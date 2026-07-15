@@ -24,6 +24,7 @@ its own orphan scans at startup and owns its runtime cache.
 from __future__ import annotations
 
 import json
+from urllib.parse import quote
 from collections.abc import AsyncIterator
 from typing import Any, NoReturn
 
@@ -328,8 +329,15 @@ class HttpKernelClient:
         ):
             yield item
 
-    async def subscribe_all_events(self) -> AsyncIterator[EventData]:
-        async for item in self._stream_sse(f"{self._prefix}/v1/events/stream", owner=None):
+    async def subscribe_all_events(
+        self, types: tuple[str, ...] | None = None
+    ) -> AsyncIterator[EventData]:
+        # Filter server-side: a lifecycle-only consumer must not have token
+        # deltas shipped across the wire just to discard them.
+        path = f"{self._prefix}/v1/events/stream"
+        if types:
+            path += f"?types={quote(','.join(types))}"
+        async for item in self._stream_sse(path, owner=None):
             yield item
 
     async def _stream_sse(self, path: str, *, owner: str | None) -> AsyncIterator[EventData]:
