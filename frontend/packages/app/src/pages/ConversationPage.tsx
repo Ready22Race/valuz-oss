@@ -4306,25 +4306,33 @@ export const ConversationPage = () => {
       // of the composer's staging chips immediately (they stay in the
       // panel's "uploaded files" history).
       markPendingConsumed();
-      const updatedSession = sessionDetailToListItem(detail);
-      const mergeStartedSession = (current: SessionListItem) => ({
-        ...updatedSession,
-        status:
-          current.status === "idle" && updatedSession.status === "running"
-            ? current.status
-            : updatedSession.status,
-      });
+      // ``send_message`` kicks the turn off in the BACKGROUND and returns
+      // immediately — its snapshot can still carry the PRE-turn status
+      // ("idle" on a re-send, "created" on a fresh session) because the
+      // kernel only flips to "running" inside ``run_turn``. A successful
+      // send means a turn is starting, so normalize the snapshot to
+      // "running" instead of letting the stale status clobber the
+      // optimistic one set at send start. (The previous merge kept the
+      // STALE side of that race: ``isBusy = sending && !terminal(status)``
+      // read "idle" for the whole turn — Stop button, shimmer, elapsed
+      // timer and the running pill all vanished while the stream kept
+      // delivering, until a page refresh re-read the true status. Masked
+      // for months by the deleted 500ms poll's periodic status reconcile.)
+      // The data-plane terminal frames (``session.update`` / ``session.idle``)
+      // own the ending and overwrite this within the same turn.
+      const updatedSession: SessionListItem = {
+        ...sessionDetailToListItem(detail),
+        status: "running",
+      };
       setSessions((prev) =>
         prev.some((s) => s.id === updatedSession.id)
-          ? prev.map((s) =>
-              s.id === updatedSession.id ? mergeStartedSession(s) : s,
-            )
+          ? prev.map((s) => (s.id === updatedSession.id ? updatedSession : s))
           : [updatedSession, ...prev],
       );
       setSidebarSessions(
         sidebarSessions.some((s) => s.id === updatedSession.id)
           ? sidebarSessions.map((s) =>
-              s.id === updatedSession.id ? mergeStartedSession(s) : s,
+              s.id === updatedSession.id ? updatedSession : s,
             )
           : [updatedSession, ...sidebarSessions],
       );
