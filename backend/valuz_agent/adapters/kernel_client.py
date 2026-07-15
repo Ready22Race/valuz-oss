@@ -694,30 +694,38 @@ async def _scope_for(user_id: str, session_id: str) -> SandboxScope:
     return scope
 
 
-def _accepts_scope(fn: Any) -> bool:
-    """Whether an allocator method takes the (additive) ``scope`` kwarg.
+def _accepts(fn: Any, name: str) -> bool:
+    """Whether an allocator method takes the (additive) ``name`` kwarg.
 
-    Allocators written against the pre-scope port signature keep working —
-    they are simply never handed a scope (owner-singleton semantics)."""
+    Allocators written against an older port signature keep working — they are
+    simply never handed the kwarg they don't declare (additive contract)."""
     import inspect
 
     try:
-        return "scope" in inspect.signature(fn).parameters
+        return name in inspect.signature(fn).parameters
     except (TypeError, ValueError):  # builtins / exotic callables
         return False
 
 
-async def _kernel_for(user_id: str, scope: SandboxScope | None = None) -> KernelClient:
-    """Resolve the execution kernel client for ``user_id`` via the allocator."""
+async def _kernel_for(
+    user_id: str, scope: SandboxScope | None = None, *, new_turn: bool = False
+) -> KernelClient:
+    """Resolve the execution kernel client for ``user_id`` via the allocator.
+
+    ``new_turn`` marks a fresh conversation turn (``run_turn``); a scoped
+    allocator may provision a NEW instance per turn for chat. Passed only when
+    the bound allocator's ``ensure`` accepts it (additive contract)."""
     from valuz_agent.ports.extensions import ext
 
     alloc = getattr(ext, "sandbox_allocator", None)
     if alloc is None:
         return client  # no allocator bound → process-global client (current behavior)
-    if scope is not None and _accepts_scope(alloc.ensure):
-        lease = await alloc.ensure(owner_user_id=user_id, scope=scope)
-    else:
-        lease = await alloc.ensure(owner_user_id=user_id)
+    kwargs: dict[str, Any] = {"owner_user_id": user_id}
+    if scope is not None and _accepts(alloc.ensure, "scope"):
+        kwargs["scope"] = scope
+        if new_turn and _accepts(alloc.ensure, "new_turn"):
+            kwargs["new_turn"] = True
+    lease = await alloc.ensure(**kwargs)
     if lease is None or lease.endpoint is None:
         return client  # "use the process/global client" (BootSingletonAllocator default)
     ep = lease.endpoint
@@ -749,7 +757,7 @@ async def _kernel_for_existing(
     peek = getattr(alloc, "peek", None)
     if peek is None:
         return client  # allocator predates the peek seam → best-effort global client
-    if scope is not None and _accepts_scope(peek):
+    if scope is not None and _accepts(peek, "scope"):
         lease = await peek(owner_user_id=user_id, scope=scope)
     else:
         lease = await peek(owner_user_id=user_id)
@@ -964,7 +972,9 @@ async def run_turn(
     attachments: list[dict[str, Any]] | None = None,
     additional_context: str = "",
 ) -> MessageData:
-    k = await _kernel_for(user_id, await _scope_for(user_id, session_id))
+    # new_turn=True: a scoped allocator may run a fresh instance for this turn
+    # (chat = per-turn instance; task reuses its shared one). See sandbox §2.
+    k = await _kernel_for(user_id, await _scope_for(user_id, session_id), new_turn=True)
     return await k.run_turn(user_id, session_id, text, attachments, additional_context)
 
 

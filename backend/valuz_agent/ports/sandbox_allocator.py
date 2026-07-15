@@ -74,13 +74,18 @@ class SandboxAllocatorPort(ABC):
 
     @abstractmethod
     async def ensure(
-        self, *, owner_user_id: str, scope: SandboxScope | None = None
+        self, *, owner_user_id: str, scope: SandboxScope | None = None, new_turn: bool = False
     ) -> SandboxLease:
         """Return the running kernel lease for ``owner_user_id`` (provision or
         reuse). ``owner_user_id`` is the authenticated principal, threaded
         explicitly — never ambient. ``scope`` (optional) narrows the lease to
         one unit of work (per-session / per-task sandboxes); ``None`` keeps the
-        owner-singleton semantics."""
+        owner-singleton semantics.
+
+        ``new_turn`` is a hint that this ``ensure`` starts a fresh conversation
+        turn (``run_turn``), not a mid-turn op. An allocator may use it to run a
+        NEW instance per turn (chat) vs reusing one (task); the default and the
+        OSS ``BootSingletonAllocator`` ignore it."""
         ...
 
     @abstractmethod
@@ -114,7 +119,7 @@ class BootSingletonAllocator(SandboxAllocatorPort):
     """
 
     async def ensure(
-        self, *, owner_user_id: str, scope: SandboxScope | None = None
+        self, *, owner_user_id: str, scope: SandboxScope | None = None, new_turn: bool = False
     ) -> SandboxLease:
         return SandboxLease(endpoint=None)
 

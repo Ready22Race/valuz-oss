@@ -35,13 +35,15 @@ class _ScopedAllocator:
 
     def __init__(self) -> None:
         self.ensured: list[tuple[str, SandboxScope | None]] = []
+        self.new_turns: list[bool] = []
         self.peeked: list[tuple[str, SandboxScope | None]] = []
         self.live: bool = True
 
     async def ensure(
-        self, *, owner_user_id: str, scope: SandboxScope | None = None
+        self, *, owner_user_id: str, scope: SandboxScope | None = None, new_turn: bool = False
     ) -> SandboxLease:
         self.ensured.append((owner_user_id, scope))
+        self.new_turns.append(new_turn)
         key = scope.key if scope else "owner"
         return SandboxLease(
             endpoint=SandboxEndpoint(sandbox_id=key, base_url=f"https://{key}.pool", token="t")
@@ -73,6 +75,21 @@ async def test_exec_ops_default_to_session_scope(monkeypatch) -> None:
     monkeypatch.setattr(kc, "_endpoint_clients", {"https://session:s1.pool": _FakeClient()})
     await kc.run_turn("u1", "s1", "hi")
     assert alloc.ensured == [("u1", SandboxScope(kind="session", id="s1"))]
+    # run_turn signals a fresh conversation turn to the allocator.
+    assert alloc.new_turns == [True]
+
+
+async def test_non_turn_ops_do_not_set_new_turn(monkeypatch) -> None:
+    alloc = _ScopedAllocator()
+    monkeypatch.setattr(ext, "sandbox_allocator", alloc)
+
+    class _FakeClient:
+        async def submit_action(self, *a, **k):  # noqa: ANN002, ANN003
+            return {}
+
+    monkeypatch.setattr(kc, "_endpoint_clients", {"https://session:s1.pool": _FakeClient()})
+    await kc.submit_action("u1", "s1", object())
+    assert alloc.new_turns == [False]  # mid-turn op reuses the current instance
 
 
 async def test_explicit_create_scope_seeds_cache_for_later_ops(monkeypatch) -> None:
