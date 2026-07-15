@@ -52,6 +52,13 @@ export function baseViteConfig(options: BaseViteConfigOptions): UserConfig {
     define: {
       __EDITION__: JSON.stringify(edition),
     },
+    // Spreadsheet parsing runs inside a lazily-created Worker. Vite cannot
+    // discover that dependency during its normal entry scan, so the first
+    // spreadsheet opened in dev would optimize `xlsx` on demand and reload
+    // the entire renderer. Pre-bundle it at startup to keep the preview open.
+    optimizeDeps: {
+      include: ["xlsx"],
+    },
     resolve: {
       alias: {
         "@valuz/shared": path.resolve(

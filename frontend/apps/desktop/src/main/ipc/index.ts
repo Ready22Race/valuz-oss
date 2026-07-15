@@ -1,7 +1,7 @@
 import { t } from "@valuz/shared/i18n";
 import { app, dialog, ipcMain, shell } from "electron";
 import { spawn } from "node:child_process";
-import { readFile, copyFile, mkdir, unlink } from "node:fs/promises";
+import { copyFile, mkdir, open, unlink } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { getMainWindow } from "../windows";
 import { openExternalIfSafe } from "../security";
@@ -61,19 +61,23 @@ export const registerIpcHandlers = () => {
   ipcMain.handle(
     "read_file_content",
     async (_event, args: { path: string }) => {
-      if (!args?.path) return { content: null };
+      if (!args?.path) return { content: null, truncated: false };
+      const maxBytes = 5 * 1024 * 1024;
+      let handle: Awaited<ReturnType<typeof open>> | null = null;
       try {
-        const buf = await readFile(args.path);
-        if (buf.length > 100 * 1024) {
-          return {
-            content:
-              buf.subarray(0, 100 * 1024).toString("utf-8") +
-              "\n… (file too large, truncated)",
-          };
-        }
-        return { content: buf.toString("utf-8") };
+        handle = await open(args.path, "r");
+        const stat = await handle.stat();
+        const previewBytes = Math.min(stat.size, maxBytes);
+        const buf = Buffer.allocUnsafe(previewBytes);
+        const { bytesRead } = await handle.read(buf, 0, previewBytes, 0);
+        return {
+          content: buf.subarray(0, bytesRead).toString("utf-8"),
+          truncated: stat.size > maxBytes,
+        };
       } catch {
-        return { content: null };
+        return { content: null, truncated: false };
+      } finally {
+        await handle?.close();
       }
     },
   );

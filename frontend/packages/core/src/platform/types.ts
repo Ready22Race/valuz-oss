@@ -20,7 +20,9 @@ export interface PlatformCapabilities {
    * client-side — the backend never proxies bytes). Large files are truncated.
    * Returns ``{ content: null }`` on error / outside Electron.
    */
-  readFileContent?: (path: string) => Promise<{ content: string | null }>;
+  readFileContent?: (
+    path: string,
+  ) => Promise<{ content: string | null; truncated: boolean }>;
   quitApp: () => Promise<void>;
   openNewWindow: () => Promise<void>;
   isElectron: boolean;

@@ -44,8 +44,6 @@ import {
   useSessionStore,
   useProjectStore,
   projectsApi,
-  filesApi,
-  buildFileRef,
   providersApi,
   skillsApi,
   usePanelStore,
@@ -77,8 +75,6 @@ import {
   type RuntimeId,
   type MemberWithAgent,
   type Agent,
-  type ArtifactContent,
-  type ArtifactDescriptor,
 } from "@valuz/core";
 import {
   ApprovalCard,
@@ -111,6 +107,7 @@ import {
   parseAutomationToolOutput,
   type ApprovalCardSubject,
   type ApprovalResolvedDecision,
+  type ArtifactOpenTarget,
   type FileTreeNode,
   type SkillSubmissionState,
   type UploadedFileItem,
@@ -154,7 +151,7 @@ import {
   type AgentSkillItem,
 } from "../lib/agent-skill-items";
 import { getLastTempAgent, setLastTempAgent } from "../lib/last-temp-agent";
-import { resolvedToArtifactFile } from "../lib/resolve-artifact";
+import { useArtifactFile } from "../hooks/use-artifact-file";
 
 /** True while a workflow snapshot's status denotes an in-flight run (vs a
  *  terminal ``completed`` / ``killed`` / ``failed`` verb). Used to decide
@@ -1319,14 +1316,6 @@ export const ConversationPage = () => {
   }, [conversationInstanceKey]);
 
   const [fileTree, setFileTree] = useState<FileTreeNode[]>([]);
-  const [selectedArtifactPath, setSelectedArtifactPath] = useState<
-    string | null
-  >(null);
-  const [artifact, setArtifact] = useState<ArtifactDescriptor | null>(null);
-  const [artifactContent, setArtifactContent] =
-    useState<ArtifactContent | null>(null);
-  const [artifactLoading, setArtifactLoading] = useState(false);
-  const [artifactError, setArtifactError] = useState<string | null>(null);
 
   const activeProject = useMemo(
     () =>
@@ -1349,55 +1338,51 @@ export const ConversationPage = () => {
     [sessions, selectedSessionId],
   );
 
-  const openArtifactFile = useCallback(
-    async (path: string) => {
-      if (!selectedProjectId || selectedProjectId === "chat-default") return;
+  const locateArtifactFile = useCallback(
+    (path: string) => {
       // Session cwd = the worktree checkout when present, else the project cwd.
       const root = activeWorktree?.path ?? activeProjectRootPath;
-      const normalized = toConversationRelativeArtifactPath(path, root);
-      const absPath = resolveConversationArtifactPath(path, root);
-      setSelectedArtifactPath(normalized ?? path);
-      setArtifactLoading(true);
-      setArtifactError(null);
-      try {
-        // Resolve the file's identity to an access address (local path or a
-        // signed URL); the client fetches bytes from that address — the backend
-        // never proxies file streams. See docs/design/file-address-resolution.md.
-        const descriptor = await filesApi.resolveOne(buildFileRef(absPath));
-        if (!descriptor || descriptor.error || !descriptor.exists) {
-          setArtifact(null);
-          setArtifactContent(null);
-          setArtifactError(
-            t("task.artifactOpenInFinder" as Parameters<typeof t>[0]),
-          );
-          return;
-        }
-        const result = await resolvedToArtifactFile(descriptor, {
-          projectId: selectedProjectId,
-          relPath: normalized ?? descriptor.name,
-          platform,
-        });
-        setArtifact(result.artifact);
-        setArtifactContent(result.content);
-      } catch (error) {
-        setArtifact(null);
-        setArtifactContent(null);
-        setArtifactError(
-          error instanceof Error ? error.message : String(error),
-        );
-      } finally {
-        setArtifactLoading(false);
-      }
+      return {
+        absolutePath: resolveConversationArtifactPath(path, root),
+        relativePath: toConversationRelativeArtifactPath(path, root) ?? path,
+      };
     },
-    [activeProjectRootPath, activeWorktree, platform, selectedProjectId, t],
+    [activeProjectRootPath, activeWorktree],
+  );
+  const artifactFile = useArtifactFile({
+    projectId:
+      selectedProjectId && selectedProjectId !== "chat-default"
+        ? selectedProjectId
+        : null,
+    platform,
+    locate: locateArtifactFile,
+    missingErrorMessage: t("task.artifactOpenInFinder" as Parameters<typeof t>[0]),
+  });
+  const {
+    selectedPath: selectedArtifactPath,
+    artifact,
+    content: artifactContent,
+    target: artifactTarget,
+    loading: artifactLoading,
+    error: artifactError,
+    open: openArtifact,
+    reload: reloadArtifact,
+    close: closeArtifact,
+  } = artifactFile;
+
+  const openArtifactFile = useCallback(
+    async (path: string, target?: ArtifactOpenTarget) => {
+      await openArtifact(path, target);
+    },
+    [openArtifact],
   );
 
   const localFileLinkRootPath = activeWorktree?.path ?? activeProjectRootPath;
   const localFileLinks = useConversationLocalFileLinks({
     projectRootPath: localFileLinkRootPath,
     runtimeMode: directoryFieldMode === "managed" ? "managed" : "local",
-    previewFile: (path) => {
-      void openArtifactFile(path);
+    previewFile: (path, target) => {
+      void openArtifactFile(path, target);
     },
     openFile: (path) => {
       void revealInFinder(path);
@@ -1408,18 +1393,12 @@ export const ConversationPage = () => {
   });
 
   const handleArtifactReload = useCallback(() => {
-    if (selectedArtifactPath) {
-      void openArtifactFile(selectedArtifactPath);
-    }
-  }, [openArtifactFile, selectedArtifactPath]);
+    void reloadArtifact();
+  }, [reloadArtifact]);
 
   const handleArtifactClose = useCallback(() => {
-    setSelectedArtifactPath(null);
-    setArtifact(null);
-    setArtifactContent(null);
-    setArtifactLoading(false);
-    setArtifactError(null);
-  }, []);
+    closeArtifact();
+  }, [closeArtifact]);
 
   const handleArtifactCopy = useCallback(() => {
     if (artifactContent?.kind !== "text") return;
@@ -1431,13 +1410,8 @@ export const ConversationPage = () => {
 
   const handleArtifactOpenExternal = useCallback(() => {
     if (!selectedArtifactPath) return;
-    void revealInFinder(
-      resolveConversationArtifactPath(
-        selectedArtifactPath,
-        activeProjectRootPath,
-      ),
-    );
-  }, [activeProjectRootPath, revealInFinder, selectedArtifactPath]);
+    void revealInFinder(locateArtifactFile(selectedArtifactPath).absolutePath);
+  }, [locateArtifactFile, revealInFinder, selectedArtifactPath]);
 
   // Project KB bindings — loaded for project projects only and
   // rendered **read-only** in the session panel (per product rule,
@@ -5757,12 +5731,8 @@ export const ConversationPage = () => {
     }
     setSessionAttachments([]);
     setFileTree([]);
-    setSelectedArtifactPath(null);
-    setArtifact(null);
-    setArtifactContent(null);
-    setArtifactLoading(false);
-    setArtifactError(null);
-  }, [selectedSessionId, setSessionAttachments]);
+    closeArtifact();
+  }, [closeArtifact, selectedSessionId, setSessionAttachments]);
 
   // Drive the right-panel collapsed state from per-session data:
   //   * Project projects always have meaningful panel content
@@ -6524,6 +6494,7 @@ export const ConversationPage = () => {
             <ArtifactViewerShell
               artifact={artifact}
               content={artifactContent}
+              target={artifactTarget}
               loading={artifactLoading}
               error={artifactError}
               onReload={handleArtifactReload}
