@@ -25,6 +25,7 @@ export * from "./use-session-events";
 export * from "./use-task-events";
 export * from "./use-slots";
 export * from "./use-stable-turns";
+export * from "./use-incremental-turns";
 export * from "./use-system";
 export * from "./use-theme";
 export * from "./use-tools";

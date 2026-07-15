@@ -1,4 +1,9 @@
-"""NotificationService — durable ledger + fan-out (docs/design/notifications.md)."""
+"""NotificationService — durable-only ledger (docs/design/notifications.md).
+
+Delivery is by re-reading the persisted table (the SSE stream polls it), NOT an
+in-process broadcast — so these tests exercise the write→snapshot path and prove
+a second service instance (a second pod sharing the DB) sees the same state.
+"""
 
 # ruff: noqa: I001
 from __future__ import annotations
@@ -106,24 +111,6 @@ def test_resolve_pending_clears_without_owner(db_factory) -> None:
     assert unread == 0
 
 
-def test_resolve_pending_broadcasts_to_owner(db_factory) -> None:
-    """The resolve frame reaches the row's owner even though the caller never
-    passed an owner in (the datastore row carries ``user_id``)."""
-    svc = NotificationService()
-
-    async def run():
-        await svc.ingest(OWNER, **_q(route="/conversation/sess-1", task_id=None))
-        q = await svc.subscribe(OWNER)
-        await q.get()  # snapshot (has the entry)
-        await svc.resolve_pending("p1")
-        frame = await asyncio.wait_for(q.get(), timeout=1.0)
-        await svc.unsubscribe(q)
-        return frame
-
-    frame = asyncio.run(run())
-    assert frame.kind == "resolved"
-
-
 def test_resolve_pending_missing_is_noop(db_factory) -> None:
     svc = NotificationService()
     # No matching row → best-effort no-op, no raise.
@@ -145,37 +132,49 @@ def test_owner_scoped(db_factory) -> None:
     assert mine[0].pending_id == "p1"
 
 
-def test_subscribe_receives_snapshot_then_added(db_factory) -> None:
+def test_second_pod_sees_the_same_ledger(db_factory) -> None:
+    """Multi-pod safety: two independent ``NotificationService`` instances
+    (simulating two pods sharing one DB) observe each other's writes through the
+    persisted table — no in-process fan-out involved. This is exactly what the
+    DB-poll SSE stream relies on."""
+    pod_a = NotificationService()
+    pod_b = NotificationService()
+
+    async def run():
+        # Written on pod A, read on pod B.
+        await pod_a.ingest(OWNER, **_q())
+        seen_by_b, unread_b = await pod_b.snapshot(OWNER)
+        # Resolved on pod B, gone on pod A.
+        await pod_b.resolve(OWNER, "q:p1")
+        seen_by_a, unread_a = await pod_a.snapshot(OWNER)
+        return seen_by_b, unread_b, seen_by_a, unread_a
+
+    seen_by_b, unread_b, seen_by_a, unread_a = asyncio.run(run())
+    assert len(seen_by_b) == 1 and unread_b == 1
+    assert seen_by_b[0].pending_id == "p1"
+    assert seen_by_a == [] and unread_a == 0
+
+
+def test_snapshot_signature_tracks_add_read_resolve(db_factory) -> None:
+    """The stream's change key flips on add / read / resolve and is stable when
+    nothing changed — so the poll emits a fresh snapshot exactly when needed."""
+    from valuz_agent.api.routes.notifications import _snapshot_signature
+
     svc = NotificationService()
 
     async def run():
-        q = await svc.subscribe(OWNER)
-        first = await q.get()  # snapshot (empty)
-        await svc.ingest(OWNER, **_q())
-        second = await q.get()  # added
-        await svc.unsubscribe(q)
-        return first, second
-
-    first, second = asyncio.run(run())
-    assert first.kind == "snapshot"
-    assert first.payload["unread"] == 0
-    assert second.kind == "added"
-    assert second.payload["entry"]["pending_id"] == "p1"
-
-
-def test_added_not_broadcast_on_refire(db_factory) -> None:
-    svc = NotificationService()
-
-    async def run():
-        await svc.ingest(OWNER, **_q())
-        q = await svc.subscribe(OWNER)
-        await q.get()  # snapshot (already has the entry)
-        await svc.ingest(OWNER, **_q())  # re-fire — must NOT broadcast added
-        # resolve → the only further frame we should see
+        empty = _snapshot_signature(*await svc.snapshot(OWNER))
+        e = await svc.ingest(OWNER, **_q())
+        after_add = _snapshot_signature(*await svc.snapshot(OWNER))
+        after_add_again = _snapshot_signature(*await svc.snapshot(OWNER))
+        await svc.mark_read(OWNER, e.id)
+        after_read = _snapshot_signature(*await svc.snapshot(OWNER))
         await svc.resolve(OWNER, "q:p1")
-        frame = await asyncio.wait_for(q.get(), timeout=1.0)
-        await svc.unsubscribe(q)
-        return frame
+        after_resolve = _snapshot_signature(*await svc.snapshot(OWNER))
+        return empty, after_add, after_add_again, after_read, after_resolve
 
-    frame = asyncio.run(run())
-    assert frame.kind == "resolved"
+    empty, after_add, after_add_again, after_read, after_resolve = asyncio.run(run())
+    assert after_add != empty  # add changed it
+    assert after_add_again == after_add  # no change → stable (poll stays quiet)
+    assert after_read != after_add  # read-state flip changed it
+    assert after_resolve == empty  # back to empty open set
