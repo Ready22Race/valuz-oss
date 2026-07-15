@@ -123,11 +123,10 @@ import type { I18nKey } from "@valuz/shared";
 import { useProjectOutlet } from "@valuz/app/layout";
 import {
   awaitingBackgroundWakeup,
-  buildTurns,
   mergeEventWindow,
   deriveBackgroundTasks,
   runningBackgroundTasks,
-  useStableTurns,
+  useIncrementalTurns,
   subscribeUserStream,
   type PlanSubtask,
 } from "@valuz/core";
@@ -143,7 +142,7 @@ import {
   computePlanAnchors,
   extractToolOutputJson,
 } from "./conversation-plan-anchors";
-import { deriveTurnActive } from "./conversation-loading";
+import { deriveTurnActive, isTerminalSessionStatus } from "./conversation-loading";
 import { LiveTaskCard } from "../components/LiveTaskCard";
 import { QueuedInputsBar } from "../components/QueuedInputsBar";
 import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
@@ -1497,8 +1496,12 @@ export const ConversationPage = () => {
     setStoreActiveProjectId(openConversationProjectId);
     return () => setStoreActiveProjectId(null);
   }, [openConversationProjectId, setStoreActiveProjectId]);
-  const rawTurns = useMemo(() => buildTurns(events), [events]);
-  const turns = useStableTurns(rawTurns);
+  // Incremental transcript build: folds only newly-appended events per render
+  // (falls back to a full rebuild on any non-append change) and hands back
+  // turns that already satisfy the stable-ref contract — so a long streamed
+  // reply no longer re-walks the whole event history per token. Replaces the
+  // old ``useStableTurns(buildTurns(events))`` O(N²) hot path.
+  const turns = useIncrementalTurns(events);
   // Background tasks (run_in_background shell commands) — derived from the
   // same persisted event list, so the "still running" strip is correct on
   // live streams and after re-entering the page mid-run.
@@ -3823,7 +3826,21 @@ export const ConversationPage = () => {
         const status = event.event.payload.status;
         // Reconcile the authoritative status from the live frame so the derived
         // loading flag + header pill track the turn without waiting for a poll.
-        if (evType === "session.update" && status) {
+        //
+        // But NOT a terminal status before this turn's own ``message.user`` is
+        // seen (``sawTurnStart`` — false on the send path until then): the
+        // pre-turn session is legitimately still ``idle``, and with an
+        // attachment the backend stays ``idle`` longer (parse-path threading
+        // before the kernel flips to ``running``). Writing that stale ``idle``
+        // here would flip ``isBusy`` false mid-startup — the frozen elapsed
+        // timer / reverted Stop button the user sees on image upload. A live
+        // ``running`` frame still applies (keeps the turn busy); the guard is a
+        // no-op on the resume path (``sawTurnStart`` true from birth).
+        if (
+          evType === "session.update" &&
+          status &&
+          (sawTurnStart || !isTerminalSessionStatus(status))
+        ) {
           setSessions((prev) =>
             prev.map((s) =>
               s.id === sessionId
@@ -3984,21 +4001,43 @@ export const ConversationPage = () => {
           if (stopped || abort.signal.aborted) return;
           status = detail.status;
           // Push the authoritative status so the derived busy flag and
-          // header pill stay truthful while we decide what to do next.
-          setSessions((prev) =>
-            prev.map((s) =>
-              s.id === sessionId
-                ? { ...s, status: detail.status as SessionListItem["status"] }
-                : s,
-            ),
-          );
+          // header pill stay truthful while we decide what to do next — EXCEPT
+          // a terminal status before this turn's own ``message.user`` is seen
+          // (``sawTurnStart``). On the send path a stream that closes before
+          // the turn starts still reads the PRE-turn ``idle``; writing it would
+          // flip ``isBusy`` false during the reconnect backoff and freeze the
+          // elapsed timer (the image-upload symptom). The reconnect below keeps
+          // waiting for the turn to actually start.
+          if (sawTurnStart || !isTerminalSessionStatus(detail.status)) {
+            setSessions((prev) =>
+              prev.map((s) =>
+                s.id === sessionId
+                  ? { ...s, status: detail.status as SessionListItem["status"] }
+                  : s,
+              ),
+            );
+          }
         } catch {
           // Unknown status — treat like a live turn and let the capped
           // reconnect path retry (a transient GET failure shouldn't
           // strand a streaming turn).
         }
         if (stopped || abort.signal.aborted) return;
-        if (status === null || status === "running" || status === "created") {
+        // ``!sawTurnStart``: on the send path (``requireUserBeforeTerminal``) we
+        // have NOT yet seen this turn's own ``message.user``, so a non-live
+        // status here is the stale PRE-turn state — not proof the turn ended.
+        // Treating a pre-turn ``idle`` as terminal is exactly what froze the
+        // elapsed timer on image upload (the attachment turn takes longer to
+        // flip ``idle → running``, so a stream close in that window read
+        // ``idle`` and falsely completed). Reconnect and keep waiting for the
+        // turn to start instead. Symmetric with the ``sawTurnStart``-gated
+        // terminal check in ``appendEvent``; a no-op on resume (true from birth).
+        if (
+          status === null ||
+          status === "running" ||
+          status === "created" ||
+          !sawTurnStart
+        ) {
           const attempt = streamReconnectAttemptsRef.current;
           streamReconnectAttemptsRef.current = attempt + 1;
           const delay = Math.min(1000 * 2 ** Math.min(attempt, 4), 15000);

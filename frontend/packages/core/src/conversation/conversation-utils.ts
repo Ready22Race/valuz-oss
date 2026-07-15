@@ -208,7 +208,17 @@ export const mergeEventWindow = (
 
 /* ── Turn builder ──────────────────────────────────────────── */
 
-export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
+/**
+ * Resumable turn builder. The event-fold state (turns, currentTurn,
+ * activeToolCalls, dedup set, pending meta events) lives in this closure so a
+ * caller can feed events in successive slices — ``pushAll(sliceA)`` then
+ * ``pushAll(sliceB)`` — and get the SAME result as one ``pushAll([...A, ...B])``.
+ * That resumability is what lets the streaming transcript append a token
+ * without re-folding the whole event history each render (see
+ * ``createIncrementalTurns`` / ``useIncrementalTurns``). ``buildTurns`` below is
+ * the one-shot form used everywhere a full rebuild is wanted.
+ */
+const createTurnsBuilder = () => {
   const turns: ConversationTurn[] = [];
   let currentTurn: ConversationTurn | null = null;
   const activeToolCalls = new Map<string, PrototypeToolCall>();
@@ -333,7 +343,8 @@ export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
     return null;
   };
 
-  for (const envelope of events) {
+  const pushAll = (events: SessionEventDTO[]): void => {
+    for (const envelope of events) {
     const { event_type: eventType, payload } = envelope.event;
 
     const sig = eventSig(eventType, payload);
@@ -635,17 +646,132 @@ export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
       }
     }
   }
+  };
 
-  if (metaEvents.length && turns.length > 0) {
-    const lastTurn = turns[turns.length - 1];
-    for (const [i, item] of metaEvents.entries()) {
-      const tool = toMetaToolCall(item.type, item.payload, turns.length + i);
-      if (tool) {
-        const elapsedMs = elapsedSince(lastTurn.userTimestamp, item.timestamp);
-        lastTurn.blocks.push({ kind: "tool", tool, elapsedMs });
+  // Trailing meta events (runtime.* with no following user message) attach to
+  // the last turn. Two forms: the mutating one bakes them into the persistent
+  // ``turns`` (used by the one-shot ``buildTurns``); the pure one returns them
+  // as fresh blocks so the incremental snapshot can overlay them WITHOUT
+  // mutating fold state (mutating would double-count on the next ``pushAll``).
+  const applyTrailingMetaMutating = (): void => {
+    if (metaEvents.length && turns.length > 0) {
+      const lastTurn = turns[turns.length - 1];
+      for (const [i, item] of metaEvents.entries()) {
+        const tool = toMetaToolCall(item.type, item.payload, turns.length + i);
+        if (tool) {
+          const elapsedMs = elapsedSince(lastTurn.userTimestamp, item.timestamp);
+          lastTurn.blocks.push({ kind: "tool", tool, elapsedMs });
+        }
       }
     }
-  }
+  };
 
-  return turns;
+  const computeTrailingMetaBlocks = (): ConversationBlock[] => {
+    const out: ConversationBlock[] = [];
+    if (metaEvents.length && turns.length > 0) {
+      const lastTurn = turns[turns.length - 1];
+      for (const [i, item] of metaEvents.entries()) {
+        const tool = toMetaToolCall(item.type, item.payload, turns.length + i);
+        if (tool) {
+          const elapsedMs = elapsedSince(lastTurn.userTimestamp, item.timestamp);
+          out.push({ kind: "tool", tool, elapsedMs });
+        }
+      }
+    }
+    return out;
+  };
+
+  return {
+    turns,
+    pushAll,
+    applyTrailingMetaMutating,
+    computeTrailingMetaBlocks,
+  };
+};
+
+export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
+  const builder = createTurnsBuilder();
+  builder.pushAll(events);
+  builder.applyTrailingMetaMutating();
+  return builder.turns;
+};
+
+/**
+ * Incremental transcript builder — the streaming-perf counterpart to
+ * ``buildTurns``. ``buildTurns(events)`` re-folds the ENTIRE event array on
+ * every call; driven per-token during a long streamed reply that is O(N²) (each
+ * token re-walks all prior events and re-concatenates the growing assistant
+ * text from scratch), which stalls the main thread and makes deltas arrive in
+ * visible bursts. This keeps the fold state alive across calls and, when
+ * ``events`` is an append-only extension of what it already processed, folds
+ * ONLY the new events, then clones just the growing tail turn(s) so React still
+ * sees fresh references for what changed. Non-append changes (window replace,
+ * reconcile splice, session switch) transparently fall back to a full rebuild.
+ *
+ * The returned turns honour the ``useStableTurns`` reference contract directly
+ * (stable refs for sealed turns, fresh refs + fresh block/tool refs for the
+ * mutated tail), so callers do NOT need to additionally wrap the result.
+ */
+export interface IncrementalTurns {
+  update(events: SessionEventDTO[]): ConversationTurn[];
+}
+
+export const createIncrementalTurns = (): IncrementalTurns => {
+  let builder = createTurnsBuilder();
+  let processed = 0;
+  let lastEnvelope: SessionEventDTO | null = null;
+  let snapshot: ConversationTurn[] = [];
+
+  const cloneBlock = (b: ConversationBlock): ConversationBlock =>
+    b.kind === "tool" ? { ...b, tool: { ...b.tool } } : { ...b };
+  const cloneTurn = (t: ConversationTurn): ConversationTurn => ({
+    ...t,
+    blocks: t.blocks.map(cloneBlock),
+  });
+
+  const buildSnapshot = (): ConversationTurn[] => {
+    const src = builder.turns;
+    // Reuse every turn strictly before the last of the PREVIOUS snapshot: only
+    // the last turn (deltas) and — at a turn boundary — the just-sealed
+    // second-to-last (meta flush) are ever mutated, so anything below that line
+    // is final and its reference can be shared verbatim.
+    const reuseBoundary = Math.max(0, snapshot.length - 1);
+    const out: ConversationTurn[] = [];
+    for (let i = 0; i < src.length; i += 1) {
+      out.push(i < reuseBoundary && snapshot[i] ? snapshot[i] : cloneTurn(src[i]));
+    }
+    // Overlay any pending trailing meta onto the (already fresh-cloned) last
+    // turn. Never touches builder state, so the next pushAll won't double-count.
+    const trailing = builder.computeTrailingMetaBlocks();
+    if (trailing.length > 0 && out.length > 0) {
+      const lastIdx = out.length - 1;
+      const last =
+        lastIdx < reuseBoundary ? cloneTurn(src[lastIdx]) : out[lastIdx];
+      out[lastIdx] = {
+        ...last,
+        blocks: [...last.blocks, ...trailing.map(cloneBlock)],
+      };
+    }
+    snapshot = out;
+    return out;
+  };
+
+  const update = (events: SessionEventDTO[]): ConversationTurn[] => {
+    const appendOnly =
+      events.length >= processed &&
+      (processed === 0 || events[processed - 1] === lastEnvelope);
+    if (!appendOnly) {
+      builder = createTurnsBuilder();
+      processed = 0;
+      snapshot = [];
+    }
+    if (events.length > processed) {
+      builder.pushAll(events.slice(processed));
+    }
+    processed = events.length;
+    lastEnvelope = events.length > 0 ? events[events.length - 1] : null;
+    return buildSnapshot();
+  };
+
+  return { update };
 };
