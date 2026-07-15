@@ -4307,34 +4307,42 @@ export const ConversationPage = () => {
       // panel's "uploaded files" history).
       markPendingConsumed();
       // ``send_message`` kicks the turn off in the BACKGROUND and returns
-      // immediately — its snapshot can still carry the PRE-turn status
-      // ("idle" on a re-send, "created" on a fresh session) because the
-      // kernel only flips to "running" inside ``run_turn``. A successful
-      // send means a turn is starting, so normalize the snapshot to
-      // "running" instead of letting the stale status clobber the
-      // optimistic one set at send start. (The previous merge kept the
-      // STALE side of that race: ``isBusy = sending && !terminal(status)``
-      // read "idle" for the whole turn — Stop button, shimmer, elapsed
-      // timer and the running pill all vanished while the stream kept
-      // delivering, until a page refresh re-read the true status. Masked
-      // for months by the deleted 500ms poll's periodic status reconcile.)
-      // The data-plane terminal frames (``session.update`` / ``session.idle``)
-      // own the ending and overwrite this within the same turn.
-      const updatedSession: SessionListItem = {
+      // immediately — its status snapshot is stale-prone in BOTH directions:
+      //  (a) taken before the kernel flips to "running" inside ``run_turn``
+      //      → carries the PRE-turn "idle"/"created" (letting it through
+      //      killed the whole loading UI for the turn: ``isBusy = sending &&
+      //      !terminal(status)`` read a terminal status until a refresh);
+      //  (b) taken mid-turn but delivered AFTER an ultra-fast turn already
+      //      ended → carries a stale "running" that would resurrect the
+      //      running pill on a finished turn (the terminal SSE frame that
+      //      landed during the POST await already wrote "idle").
+      // So the response never writes ``status`` for a row we already track:
+      // the optimistic write at send start owns the turn's beginning and the
+      // data-plane terminal frames (``session.update`` / ``session.idle``)
+      // own its end. Only a row we DON'T have yet (fresh session) takes
+      // "running" — a successful send means its turn is starting, and its
+      // own terminal frames correct an instant failure.
+      const startedSession: SessionListItem = {
         ...sessionDetailToListItem(detail),
         status: "running",
       };
+      const keepLocalStatus = (s: SessionListItem): SessionListItem => ({
+        ...startedSession,
+        status: s.status,
+      });
       setSessions((prev) =>
-        prev.some((s) => s.id === updatedSession.id)
-          ? prev.map((s) => (s.id === updatedSession.id ? updatedSession : s))
-          : [updatedSession, ...prev],
+        prev.some((s) => s.id === startedSession.id)
+          ? prev.map((s) =>
+              s.id === startedSession.id ? keepLocalStatus(s) : s,
+            )
+          : [startedSession, ...prev],
       );
       setSidebarSessions(
-        sidebarSessions.some((s) => s.id === updatedSession.id)
+        sidebarSessions.some((s) => s.id === startedSession.id)
           ? sidebarSessions.map((s) =>
-              s.id === updatedSession.id ? updatedSession : s,
+              s.id === startedSession.id ? keepLocalStatus(s) : s,
             )
-          : [updatedSession, ...sidebarSessions],
+          : [startedSession, ...sidebarSessions],
       );
       setSelectedSessionId(detail.id);
     } catch (cause) {
