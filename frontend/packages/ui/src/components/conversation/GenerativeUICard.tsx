@@ -227,6 +227,20 @@ export interface GenerativeUICardProps {
   status?: "running" | "success" | "error";
 }
 
+const GENERATIVE_UI_LAYOUT_CSS = `
+  [data-slot="generative-ui-card"]
+    .openui-horizontal-bar-chart-container-inner-wrapper {
+    height: auto !important;
+    overflow: visible;
+  }
+
+  [data-slot="generative-ui-card"]
+    .openui-horizontal-bar-chart-main-container {
+    height: auto;
+    overflow-y: visible;
+  }
+`;
+
 /**
  * Renders the OpenUI Lang produced by the ``generate_ui`` MCP tool as live,
  * interactive components. Mounted inline via ``ConversationPage``'s
@@ -242,6 +256,7 @@ export function GenerativeUICard({ openui, status }: GenerativeUICardProps) {
       data-slot="generative-ui-card"
       className="rounded-xl border border-surface-border bg-surface overflow-hidden"
     >
+      <style>{GENERATIVE_UI_LAYOUT_CSS}</style>
       <div className="flex items-center gap-2 px-3 py-2 border-b border-surface-border">
         <span className="text-sm font-medium text-ink-heading">
           {t("genui.cardTitle" as Parameters<typeof t>[0])}

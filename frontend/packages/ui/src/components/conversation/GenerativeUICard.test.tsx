@@ -29,6 +29,17 @@ describe("GenerativeUICard", () => {
     expect(screen.getByTestId("renderer").textContent).toBe("Chart\n  data: 1");
   });
 
+  it("lets horizontal charts expand to show every data row", () => {
+    const { container } = render(<GenerativeUICard openui={"HorizontalBarChart"} />);
+    const styles = Array.from(container.querySelectorAll("style"))
+      .map((style) => style.textContent)
+      .join("\n");
+
+    expect(styles).toContain(".openui-horizontal-bar-chart-container-inner-wrapper");
+    expect(styles).toContain("height: auto !important");
+    expect(styles).toContain("overflow-y: visible");
+  });
+
   it("unwraps a JSON content-block envelope before rendering", () => {
     // The kernel JSON-stringifies MCP TextContent at the SSE boundary — the
     // tool output arrives as [{"type":"text","text":"<OpenUI Lang>"}], not raw.
