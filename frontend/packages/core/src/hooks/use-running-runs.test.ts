@@ -76,6 +76,61 @@ describe("useRunningRuns", () => {
     expect(listMock).not.toHaveBeenCalled();
   });
 
+  it("backstop-reconciles WHILE a run is running, then goes quiet when it drains", async () => {
+    // A tick's ``_poll`` is async and guarded by ``_inFlight``; flush the
+    // promise between advances so each cadence produces its own call.
+    const settle = async (): Promise<void> => {
+      await Promise.resolve();
+      await Promise.resolve();
+    };
+    // A running run is present → the dot could be stuck if the stream misses
+    // the clearing frame, so the backstop reconciles.
+    listMock.mockResolvedValue({ runs: [{ session_id: "s1" }] });
+    renderHook(() => useRunningRuns());
+    await act(settle);
+    listMock.mockClear();
+
+    // One backstop cadence → one reconciliation poll (running + visible).
+    await act(async () => {
+      vi.advanceTimersByTime(15_000);
+    });
+    await act(settle);
+    expect(listMock).toHaveBeenCalledTimes(1);
+    expect(listMock).toHaveBeenCalledWith({ status: "running" });
+
+    // The run drains — the next tick observes an empty set...
+    listMock.mockResolvedValue({ runs: [] });
+    await act(async () => {
+      vi.advanceTimersByTime(15_000);
+    });
+    await act(settle);
+    // ...and thereafter the backstop is quiet (idle client never polls).
+    listMock.mockClear();
+    await act(async () => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(listMock).not.toHaveBeenCalled();
+  });
+
+  it("pauses the backstop while the tab is hidden", async () => {
+    listMock.mockResolvedValue({ runs: [{ session_id: "s1" }] });
+    const hidden = vi
+      .spyOn(document, "visibilityState", "get")
+      .mockReturnValue("hidden");
+    renderHook(() => useRunningRuns());
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    listMock.mockClear();
+
+    await act(async () => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(listMock).not.toHaveBeenCalled(); // hidden → paused
+    hidden.mockRestore();
+  });
+
   it("closes the stream when the last consumer unmounts", () => {
     const a = renderHook(() => useRunningRuns());
     const b = renderHook(() => useRunningRuns());
