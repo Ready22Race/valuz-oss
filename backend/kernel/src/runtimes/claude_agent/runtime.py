@@ -317,7 +317,7 @@ class ClaudeAgentRuntime:
         # current turn so ``input_json_delta`` chunks (which only carry an
         # index, not the id) can be routed to the right tool_use_id when
         # we emit ``tool_input_delta``.
-        self._tool_block_by_index: dict[int, tuple[str, str]] = {}
+        self._tool_block_by_index: dict[tuple[str | None, int], tuple[str, str]] = {}
         # tool_use ids for ``Workflow`` calls in the current turn, and the
         # background poll tasks streaming their ``workflow_progress``. Both are
         # per-turn scoped and torn down in ``run()``'s finally.
@@ -2323,6 +2323,18 @@ class ClaudeAgentRuntime:
 
     async def _handle_message(self, session: Session, message: Any) -> None:
         if isinstance(message, StreamEvent):
+            # ``parent_tool_use_id`` is set when this stream event was
+            # produced INSIDE a subagent (Task/Agent tool run — including
+            # run_in_background agents executing CONCURRENTLY with the
+            # lead's own streaming). Thread it onto every emitted delta so
+            # the frontend can route each delta into its own flow instead
+            # of splicing a subagent's stream into the lead's open text
+            # block (verified incident: a background agent's events
+            # interleaved with the lead's text_delta frames shredded the
+            # streamed message into fragments). Emission itself is
+            # unchanged — subagent streaming stays live.
+            parent = message.parent_tool_use_id
+            parent_extra = {"parent_tool_use_id": parent} if parent is not None else {}
             event = message.event
             event_type = event.get("type")
             if event_type == "content_block_start":
@@ -2337,14 +2349,17 @@ class ClaudeAgentRuntime:
                         and isinstance(block_index, int)
                         and block_name != CLAUDE_TODO_TOOL_NAME
                     ):
-                        # Register index -> (id, name) so subsequent
+                        # Register (parent, index) -> (id, name) so subsequent
                         # input_json_delta chunks (which only carry an
-                        # index, not the id) can be routed. We do NOT
-                        # emit a tool_use here — that would duplicate the
-                        # canonical one from AssistantMessage. The first
+                        # index, not the id) can be routed. Keyed by parent
+                        # too: content-block indices restart per stream, so
+                        # a subagent running concurrently with the lead
+                        # would otherwise collide on the same index. We do
+                        # NOT emit a tool_use here — that would duplicate
+                        # the canonical one from AssistantMessage. The first
                         # tool_input_delta serves as the frontend's
-                        # build-card signal instead.
-                        self._tool_block_by_index[block_index] = (
+                        # build-the-card signal instead.
+                        self._tool_block_by_index[(parent, block_index)] = (
                             block_id,
                             block_name,
                         )
@@ -2352,7 +2367,10 @@ class ClaudeAgentRuntime:
                 delta = event.get("delta", {})
                 if delta.get("type") == "text_delta":
                     await self.event_sink.emit(
-                        Event(type="text_delta", data={"text": delta.get("text", "")})
+                        Event(
+                            type="text_delta",
+                            data={"text": delta.get("text", ""), **parent_extra},
+                        )
                     )
                 elif delta.get("type") == "thinking_delta":
                     # Streamed extended-thinking text. Surfacing each chunk
@@ -2361,14 +2379,14 @@ class ClaudeAgentRuntime:
                     await self.event_sink.emit(
                         Event(
                             type="thinking_delta",
-                            data={"text": delta.get("thinking", "")},
+                            data={"text": delta.get("thinking", ""), **parent_extra},
                         )
                     )
                 elif delta.get("type") == "input_json_delta":
                     block_index = event.get("index")
                     partial = delta.get("partial_json", "")
                     if isinstance(block_index, int) and isinstance(partial, str) and partial:
-                        binding = self._tool_block_by_index.get(block_index)
+                        binding = self._tool_block_by_index.get((parent, block_index))
                         if binding is not None:
                             tool_id, tool_name = binding
                             await self.event_sink.emit(
@@ -2378,6 +2396,7 @@ class ClaudeAgentRuntime:
                                         "id": tool_id,
                                         "name": tool_name,
                                         "text": partial,
+                                        **parent_extra,
                                     },
                                 )
                             )
@@ -2453,18 +2472,36 @@ class ClaudeAgentRuntime:
                 await self.event_sink.emit(Event(type="compaction", data=dict(meta)))
 
         elif isinstance(message, AssistantMessage):
+            # ``parent_tool_use_id`` is set when this message was produced
+            # INSIDE a subagent (Task/Agent tool run). Thread it onto every
+            # emitted event so downstream consumers can tell out-of-band
+            # subagent activity apart from the lead's own sequential flow —
+            # a background agent's events arrive interleaved with the lead's
+            # live stream, and the untagged form made the frontend shred the
+            # lead's streaming text at every interleaved tool event.
+            parent_extra = (
+                {"parent_tool_use_id": message.parent_tool_use_id}
+                if message.parent_tool_use_id is not None
+                else {}
+            )
             for block in message.content:
                 if isinstance(block, TextBlock):
                     text_value = getattr(block, "text", "")
                     if text_value:
                         await self.event_sink.emit(
-                            Event(type="assistant_message", data={"text": text_value})
+                            Event(
+                                type="assistant_message",
+                                data={"text": text_value, **parent_extra},
+                            )
                         )
                 elif isinstance(block, ToolUseBlock):
                     if block.name == CLAUDE_TODO_TOOL_NAME:
                         # Planning channel — emit todo_update from the tool
                         # input, remember the id so the matching ToolResultBlock
-                        # is also suppressed.
+                        # is also suppressed. (Deliberately NOT gated on
+                        # ``parent_tool_use_id``: a subagent's TodoWrite has
+                        # always fed the session Todos panel; whether to scope
+                        # that is a separate product decision.)
                         self._todo_tool_use_ids.add(block.id)
                         todos = block.input.get("todos") if isinstance(block.input, dict) else None
                         if isinstance(todos, list):
@@ -2480,7 +2517,12 @@ class ClaudeAgentRuntime:
                         await self.event_sink.emit(
                             Event(
                                 type="tool_use",
-                                data={"id": block.id, "name": block.name, "input": block.input},
+                                data={
+                                    "id": block.id,
+                                    "name": block.name,
+                                    "input": block.input,
+                                    **parent_extra,
+                                },
                             )
                         )
                 elif isinstance(block, ThinkingBlock):
@@ -2489,12 +2531,20 @@ class ClaudeAgentRuntime:
                     # ``text_delta`` streaming is done — UI uses deltas for
                     # live rendering and this block for history.
                     await self.event_sink.emit(
-                        Event(type="thinking", data={"text": block.thinking})
+                        Event(type="thinking", data={"text": block.thinking, **parent_extra})
                     )
 
         elif isinstance(message, SdkUserMessage):
             content = message.content
             if isinstance(content, list):
+                # Same subagent attribution as AssistantMessage above: tool
+                # results produced inside a Task/Agent run carry the parent
+                # tool_use id so consumers can tell them from the lead's flow.
+                parent_extra = (
+                    {"parent_tool_use_id": message.parent_tool_use_id}
+                    if message.parent_tool_use_id is not None
+                    else {}
+                )
                 for block in content:
                     if isinstance(block, ToolResultBlock):
                         if block.tool_use_id in self._todo_tool_use_ids:
@@ -2511,6 +2561,7 @@ class ClaudeAgentRuntime:
                                     "id": block.tool_use_id,
                                     "content": result_content,
                                     "is_error": bool(block.is_error),
+                                    **parent_extra,
                                 },
                             )
                         )

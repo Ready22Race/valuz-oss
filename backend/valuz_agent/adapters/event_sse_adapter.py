@@ -115,6 +115,20 @@ def _with_message_id(payload: dict[str, str], data: dict[str, Any]) -> dict[str,
     return payload
 
 
+def _with_parent_tool_use_id(payload: dict[str, str], data: dict[str, Any]) -> dict[str, str]:
+    """Tack ``parent_tool_use_id`` onto an outgoing SSE payload when present.
+
+    Set by runtimes on events produced INSIDE a subagent (Task/Agent tool
+    run). The frontend uses it to treat such events as out-of-band activity
+    — a background agent's tool calls arrive interleaved with the lead's
+    live text stream and must not split it into fragments.
+    """
+    parent_id = data.get("parent_tool_use_id")
+    if parent_id is not None and "parent_tool_use_id" not in payload:
+        payload["parent_tool_use_id"] = _stringify(parent_id)
+    return payload
+
+
 def _with_row_message_id(data: dict[str, Any], message_id: Any) -> dict[str, Any]:
     """Attach the DB row's message id before translating persisted events.
 
@@ -184,42 +198,54 @@ def _translate_kernel_event(
         )
 
     if kernel_type == "assistant_message":
-        return "message.assistant.delta", _with_message_id(
-            {
-                "text": _stringify(data.get("text") or data.get("content") or ""),
-            },
+        return "message.assistant.delta", _with_parent_tool_use_id(
+            _with_message_id(
+                {
+                    "text": _stringify(data.get("text") or data.get("content") or ""),
+                },
+                data,
+            ),
             data,
         )
 
     if kernel_type == "thinking":
         # Separate event type so the renderer can show thinking with a dimmed
         # italic style instead of mixing it into the assistant turn body.
-        return "message.assistant.thinking", _with_message_id(
-            {
-                "text": _stringify(data.get("text") or data.get("content") or ""),
-            },
+        return "message.assistant.thinking", _with_parent_tool_use_id(
+            _with_message_id(
+                {
+                    "text": _stringify(data.get("text") or data.get("content") or ""),
+                },
+                data,
+            ),
             data,
         )
 
     if kernel_type == "tool_use":
-        return "tool.call.started", _with_message_id(
-            {
-                "id": _stringify(data.get("id") or ""),
-                "tool_use_id": _stringify(data.get("id") or ""),
-                "name": _stringify(data.get("name") or ""),
-                "input": _stringify(data.get("input") or {}),
-            },
+        return "tool.call.started", _with_parent_tool_use_id(
+            _with_message_id(
+                {
+                    "id": _stringify(data.get("id") or ""),
+                    "tool_use_id": _stringify(data.get("id") or ""),
+                    "name": _stringify(data.get("name") or ""),
+                    "input": _stringify(data.get("input") or {}),
+                },
+                data,
+            ),
             data,
         )
 
     if kernel_type == "tool_result":
-        return "tool.call.completed", _with_message_id(
-            {
-                "id": _stringify(data.get("id") or ""),
-                "tool_use_id": _stringify(data.get("id") or ""),
-                "content": _stringify(data.get("content") or ""),
-                "is_error": _stringify(data.get("is_error", False)),
-            },
+        return "tool.call.completed", _with_parent_tool_use_id(
+            _with_message_id(
+                {
+                    "id": _stringify(data.get("id") or ""),
+                    "tool_use_id": _stringify(data.get("id") or ""),
+                    "content": _stringify(data.get("content") or ""),
+                    "is_error": _stringify(data.get("is_error", False)),
+                },
+                data,
+            ),
             data,
         )
 
@@ -324,18 +350,24 @@ def _translate_kernel_event(
         )
 
     if kernel_type == "text_delta":
-        return "message.assistant.text_delta", _with_message_id(
-            {
-                "text": _stringify(data.get("text") or data.get("delta") or ""),
-            },
+        return "message.assistant.text_delta", _with_parent_tool_use_id(
+            _with_message_id(
+                {
+                    "text": _stringify(data.get("text") or data.get("delta") or ""),
+                },
+                data,
+            ),
             data,
         )
 
     if kernel_type == "thinking_delta":
-        return "message.assistant.thinking_delta", _with_message_id(
-            {
-                "text": _stringify(data.get("text") or data.get("delta") or ""),
-            },
+        return "message.assistant.thinking_delta", _with_parent_tool_use_id(
+            _with_message_id(
+                {
+                    "text": _stringify(data.get("text") or data.get("delta") or ""),
+                },
+                data,
+            ),
             data,
         )
 
@@ -346,12 +378,15 @@ def _translate_kernel_event(
         # build-the-card signal, so large-file writes show progress instead
         # of a dead wait. ``id`` is the tool_use_id that started/completed
         # also key on; ``name`` lets the card render its real title at once.
-        return "tool.call.input_delta", _with_message_id(
-            {
-                "tool_use_id": _stringify(data.get("id") or ""),
-                "name": _stringify(data.get("name") or ""),
-                "text": _stringify(data.get("text") or data.get("delta") or ""),
-            },
+        return "tool.call.input_delta", _with_parent_tool_use_id(
+            _with_message_id(
+                {
+                    "tool_use_id": _stringify(data.get("id") or ""),
+                    "name": _stringify(data.get("name") or ""),
+                    "text": _stringify(data.get("text") or data.get("delta") or ""),
+                },
+                data,
+            ),
             data,
         )
 
