@@ -44,8 +44,12 @@ ARG S6_OVERLAY_VERSION
 # ca-certificates: TLS to LLM providers + host callback. git: task worktrees.
 # bash: envd spawns login/exec shells + the valuz-apply-env helper. curl:
 # health/debug + the helper's kernel readiness poll. xz-utils: unpack s6.
+# bubblewrap: codex's exec sandbox — with a system bwrap on PATH codex skips
+# extracting its BUNDLED bubblewrap under CODEX_HOME/tmp/arg0 (which takes an
+# flock on a .lock file there; on a COS/virtiofs-mounted ~/.codex that flock
+# fails with EIO and kills codex startup — verified live 2026-07-16).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates git bash curl xz-utils \
+        ca-certificates git bash curl xz-utils bubblewrap \
     && rm -rf /var/lib/apt/lists/*
 
 # Codex CLI binary: as of openai-codex 0.1.0b3 (valuz-agent #442) the pinned
@@ -74,9 +78,15 @@ COPY docker/lean/kernel-launch.py /app/kernel-launch.py
 
 # Unprivileged user (uid 1000) the kernel service drops to; owns /app so it can
 # read the venv and write the sandbox-local SQLite.
+# /mnt/valuz-cfs is CODEX_SQLITE_HOME's target (see ENV below): in the cloud
+# sandbox a per-scope CFS SubPath is mounted over it; without that mount it
+# degrades to a container-local (ephemeral) dir — codex still boots either way.
+# World-writable because the codex process may run as root or uid 1000
+# depending on the deployment's s6 run script.
 RUN useradd --create-home --uid 1000 user \
-    && mkdir -p /app/data \
-    && chown -R 1000:1000 /app
+    && mkdir -p /app/data /mnt/valuz-cfs \
+    && chown -R 1000:1000 /app \
+    && chmod 777 /mnt/valuz-cfs
 
 # s6 services: envd (root, login) + valuz-kernel (non-root). Register both in the
 # s6-overlay `user` bundle so /init supervises them. valuz-kernel starts at boot
@@ -95,11 +105,19 @@ RUN chmod +x /etc/s6-overlay/s6-rc.d/envd/run /etc/s6-overlay/s6-rc.d/valuz-kern
 # KERNEL_CONFIG_WAIT: kernel lifespan blocks until /run/valuz/env appears (the
 # host writes it post-resume over envd), then rebuilds its config from the
 # applied env. See kernel app/config_gate.py (valuz-agent #446).
+# CODEX_SQLITE_HOME: relocate codex's SQLite state DBs (state_5/logs_2/goals_1/
+# memories_1) OFF CODEX_HOME — SQLite on a COS/virtiofs-mounted ~/.codex fails
+# with "(code: 8458) disk I/O error" and can wedge the whole microVM (verified
+# live 2026-07-16). /mnt/valuz-cfs is a per-scope CFS mount in the cloud sandbox
+# (POSIX semantics, single writer per scope) and a local ephemeral dir
+# everywhere else. The durable session record stays in CODEX_HOME/sessions
+# (JSONL rollouts); the SQLite DBs are a rebuildable index (sessions backfill).
 ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONUNBUFFERED=1 \
     S6_KEEP_ENV=1 \
     IS_SANDBOX=1 \
-    KERNEL_CONFIG_WAIT=1
+    KERNEL_CONFIG_WAIT=1 \
+    CODEX_SQLITE_HOME=/mnt/valuz-cfs
 
 EXPOSE 8000 49983
 ENTRYPOINT ["/init"]
