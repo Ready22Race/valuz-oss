@@ -64,10 +64,10 @@ def guard_source_run_data_dir() -> None:
         raise RuntimeError(
             "refusing to start: this backend runs from source but its log dir "
             f"resolves to {PACKAGED_DATA_DIR / 'logs'} — the packaged app's logs "
-            "(source-run log lines there corrupt release forensics). Set "
-            "VALUZ_LOG_DIR (dev.sh pins it under VALUZ_DATA_DIR), or set "
-            "VALUZ_ALLOW_PACKAGED_DATA_DIR=1 to operate on the packaged store "
-            "on purpose."
+            "(source-run log lines there corrupt release forensics). The default "
+            "log dir follows VALUZ_DATA_DIR; unset VALUZ_LOG_DIR or point it "
+            "elsewhere, or set VALUZ_ALLOW_PACKAGED_DATA_DIR=1 to operate on "
+            "the packaged store on purpose."
         )
 
 

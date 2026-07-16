@@ -44,8 +44,9 @@ BACKEND_PORT="${VALUZ_BACKEND_PORT:-8000}"
 RELOAD_FLAG=""
 [[ "${VALUZ_RELOAD:-}" == "1" ]] && RELOAD_FLAG="--reload"
 
-# Dev data isolation (see header). VALUZ_LOG_DIR must be pinned too — the
-# backend's log dir deliberately does not derive from data_dir (infra/config.py).
+# Dev data isolation (see header). The backend's log dir now defaults under
+# VALUZ_DATA_DIR (infra/config.py); the explicit VALUZ_LOG_DIR export is kept
+# so child tooling sees the resolved path and older checkouts stay isolated.
 export VALUZ_DATA_DIR="${VALUZ_DATA_DIR:-$HOME/.valuz-oss-dev}"
 export VALUZ_LOG_DIR="${VALUZ_LOG_DIR:-$VALUZ_DATA_DIR/logs}"
 

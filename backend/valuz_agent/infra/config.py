@@ -2,7 +2,7 @@ import hashlib
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode
 
 # The packaged desktop/headless app's data root. A source-run (non-frozen)
@@ -10,6 +10,15 @@ from pydantic_settings import BaseSettings, NoDecode
 # a dev/test process running host migrations here pushes the schema stamp ahead
 # of the released build, which then fail-louds at its next boot.
 PACKAGED_DATA_DIR: Path = Path.home() / ".valuz-oss"
+
+
+def shared_root_of(root: Path | str) -> Path:
+    """The ``{user_id}``-stripped, user-expanded form of a data root — the
+    process-shared directory a per-user templated root hangs off."""
+    raw = str(root)
+    if "{user_id}" in raw:
+        raw = raw.replace("{user_id}", "")
+    return Path(raw).expanduser()
 
 
 class Settings(BaseSettings):
@@ -192,12 +201,14 @@ class Settings(BaseSettings):
     # ``infra.logging.configure_logging`` writes structured JSON lines
     # to ``log_file`` via a RotatingFileHandler so the desktop ``服务``
     # panel can display + offer "open in editor" without depending on
-    # whichever shell launched the process. Logs are process-wide, not
-    # user-owned data, so this deliberately does not derive from data_dir.
-    # Override with VALUZ_LOG_DIR for cloud deployments that template
-    # VALUZ_DATA_DIR by user. ``log_dir`` is created on first write — we don't
-    # ``mkdir`` here so the field stays pure.
-    log_dir: Path = PACKAGED_DATA_DIR / "logs"
+    # whichever shell launched the process. Defaults to ``logs/`` under the
+    # SHARED data root (``{user_id}``-stripped — logs are process-wide, not
+    # user-owned), so pointing VALUZ_DATA_DIR elsewhere moves the logs with
+    # it and a dev/test backend can't write into the packaged app's logs by
+    # omission. Override with VALUZ_LOG_DIR to place them elsewhere.
+    # ``log_dir`` is created on first write — we don't ``mkdir`` here so the
+    # field stays pure.
+    log_dir: Path = Field(default_factory=lambda data: shared_root_of(data["data_dir"]) / "logs")
     log_filename: str = "backend.log"
 
     @property
