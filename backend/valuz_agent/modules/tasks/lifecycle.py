@@ -75,6 +75,7 @@ from valuz_agent.modules.tasks.datastore import (
     TaskEventDatastore,
     TaskSessionDatastore,
 )
+from valuz_agent.modules.tasks.events import publish_task_finalized
 from valuz_agent.modules.tasks.live_member_registry import LiveMemberRegistry
 from valuz_agent.modules.tasks.models import TaskRow, TaskSessionRow
 from valuz_agent.modules.tasks.plan import PlanError, TaskPlan
@@ -354,6 +355,7 @@ class LifecycleService:
                 # the cause. The old ``"failed"`` write left an out-of-enum,
                 # un-resumable status stuck forever.
                 await task_ds.update_task_status(user_id, task_id, "blocked")
+                publish_task_finalized(task_id, user_id, "blocked")
                 kickoff_ev = await event_ds.append_event(
                     user_id,
                     project_id=project_id,
@@ -999,6 +1001,7 @@ class LifecycleService:
                 # Lead stopped with planned work undispatched — surface as blocked
                 # (not a hard error, but not done either).
                 await task_ds.update_task_status(user_id, task_id, "blocked")
+                publish_task_finalized(task_id, user_id, "blocked")
                 blocked_ev = await event_ds.append_event(
                     user_id,
                     project_id=project_id,
@@ -1031,6 +1034,7 @@ class LifecycleService:
                 "task closed automatically."
             )
             await task_ds.update_task_status(user_id, task_id, "completed")
+            publish_task_finalized(task_id, user_id, "completed")
             await run_ds.update_run_by_session(
                 session_id=lead_session_id,
                 status="completed",
@@ -1444,6 +1448,7 @@ class LifecycleService:
 
             if rejected is None:
                 await task_ds.update_task_status(user_id, task_id, final_status)
+                publish_task_finalized(task_id, user_id, final_status)
 
                 # Mark lead run as completed
                 await run_ds.update_run_by_session(

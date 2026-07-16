@@ -125,6 +125,23 @@ def _make_completer(*, user_id: str, runtime_provider: Any, model: str, mp: Any)
                 await kernel_client.delete_session(user_id, ephem_id)
             except Exception:  # noqa: BLE001
                 logger.debug("memory review: ephemeral session cleanup failed")
+            # Under per-scope sandbox allocation this ephemeral session got its
+            # own sandbox. ``kernel_client.delete_session`` is the kernel-direct
+            # adapter — it BYPASSES the sessions service delete path and its
+            # scope-release hook — so release here or the review sandbox
+            # lingers for its full TTL window (observed live: 24h). Best-effort;
+            # the OSS BootSingletonAllocator no-ops.
+            try:
+                from valuz_agent.ports.extensions import ext
+                from valuz_agent.ports.sandbox_allocator import SandboxScope
+
+                await ext.sandbox_allocator.release(
+                    owner_user_id=user_id, scope=SandboxScope(kind="session", id=ephem_id)
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "memory review: sandbox release failed for %s", ephem_id, exc_info=True
+                )
 
     return _complete
 

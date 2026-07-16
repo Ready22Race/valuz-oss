@@ -236,6 +236,9 @@ class TaskHealthMonitor:
                 reason=reason,
                 user_id=user_id,
             )
+        from valuz_agent.modules.tasks.events import publish_task_finalized
+
+        publish_task_finalized(task_id, user_id, "blocked")
         logger.warning(
             "task health monitor: task %s -> blocked (lead loop dead, session %s)",
             task_id,
