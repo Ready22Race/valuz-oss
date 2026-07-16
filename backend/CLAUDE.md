@@ -289,8 +289,10 @@ uv sync --extra dev              # + pytest, mypy, ruff
 
 VALUZ_DATA_DIR=~/.valuz-oss-dev VALUZ_LOG_DIR=~/.valuz-oss-dev/logs \
 uv run python -m valuz_agent --port 8000 --reload   # what dev.sh spawns
-# Direct invocation defaults to the PRODUCTION ~/.valuz-oss — always pin
-# VALUZ_DATA_DIR (dev.sh does this for you; see scripts/dev.sh header).
+# Direct invocation REQUIRES VALUZ_DATA_DIR: a source-run backend refuses to
+# boot on the packaged app's ~/.valuz-oss (boot/steps.py
+# guard_source_run_data_dir; override: VALUZ_ALLOW_PACKAGED_DATA_DIR=1).
+# dev.sh and `valuz start` pin ~/.valuz-oss-dev for you.
 uv run python -m valuz_agent.cli serve --port 8000  # Typer CLI
 uv run python -m valuz_agent.cli reset-providers
 

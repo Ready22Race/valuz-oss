@@ -17,12 +17,15 @@
 #   scripts/dev.sh frontend            # just the desktop dev shell
 #   VALUZ_BACKEND_PORT=18080 scripts/dev.sh
 #   VALUZ_RELOAD=1 scripts/dev.sh      # uvicorn --reload
-#   VALUZ_DATA_DIR=~/.valuz-oss scripts/dev.sh   # opt back into another data dir
+#   VALUZ_DATA_DIR=~/some-dir scripts/dev.sh     # opt into another data dir
 #
 # Data isolation: dev runs on ~/.valuz-oss-dev by default, NEVER on the
 # packaged app's ~/.valuz-oss. A dev backend carrying newer migrations stamps
 # the store ahead of the released build, and the released build then refuses
-# to boot (fail-loud schema guard in boot/schema.py).
+# to boot (fail-loud schema guard in boot/schema.py). The backend enforces
+# this itself: a source-run backend REFUSES to boot on ~/.valuz-oss
+# (boot/steps.py guard_source_run_data_dir); deliberately operating on the
+# packaged store additionally requires VALUZ_ALLOW_PACKAGED_DATA_DIR=1.
 #
 # Logs: backend writes to .ai/dev/backend.log, frontend to .ai/dev/frontend.log.
 # Both also tee to the foreground so Ctrl+C surfaces failures fast.

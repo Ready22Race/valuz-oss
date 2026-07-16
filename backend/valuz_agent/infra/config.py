@@ -5,6 +5,12 @@ from typing import Annotated, Literal
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, NoDecode
 
+# The packaged desktop/headless app's data root. A source-run (non-frozen)
+# backend is refused this root at boot (``boot.steps.guard_source_run_data_dir``):
+# a dev/test process running host migrations here pushes the schema stamp ahead
+# of the released build, which then fail-louds at its next boot.
+PACKAGED_DATA_DIR: Path = Path.home() / ".valuz-oss"
+
 
 class Settings(BaseSettings):
     app_name: str = "valuz-agent"
@@ -19,7 +25,7 @@ class Settings(BaseSettings):
     # in ``boot.migrate_data_dir`` (the one-time root relocation).
     # May contain {user_id} when the deployment mounts per-user config roots.
     # OSS defaults to the root itself, without a user-id subdirectory.
-    data_dir: Path = Path.home() / ".valuz-oss"
+    data_dir: Path = PACKAGED_DATA_DIR
     db_filename: str = "valuz.db"
     # The kernel's own SQLite file — sessions / messages / events, its
     # langgraph checkpoint tables, and the kernel ``alembic_version``. Kept
@@ -191,7 +197,7 @@ class Settings(BaseSettings):
     # Override with VALUZ_LOG_DIR for cloud deployments that template
     # VALUZ_DATA_DIR by user. ``log_dir`` is created on first write — we don't
     # ``mkdir`` here so the field stays pure.
-    log_dir: Path = Path.home() / ".valuz-oss" / "logs"
+    log_dir: Path = PACKAGED_DATA_DIR / "logs"
     log_filename: str = "backend.log"
 
     @property
