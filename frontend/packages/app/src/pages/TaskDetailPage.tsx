@@ -94,7 +94,7 @@ const EVENT_META: Record<string, EventMeta> = {
   // read as "任务已发起" on a run that actually failed.
   kickoff_failed: {
     icon: XCircle,
-    node: "bg-red-500/10 text-red-500",
+    node: "bg-error-light text-error-text",
     labelKey: "task.event.kickoffFailed",
   },
   subtask_spawned: {
@@ -141,12 +141,12 @@ const EVENT_META: Record<string, EventMeta> = {
   // Amber = needs your attention, not a failure.
   awaiting_user: {
     icon: MessageCircleQuestion,
-    node: "bg-amber-500/10 text-amber-500",
+    node: "bg-warning-light text-warning-text",
     labelKey: "task.event.awaitingUser",
   },
   user_answered: {
     icon: CheckCircle2,
-    node: "bg-emerald-500/10 text-emerald-500",
+    node: "bg-success-light text-success-text",
     labelKey: "task.event.userAnswered",
   },
   goal_revised: {
@@ -1272,7 +1272,7 @@ export const TaskDetailPage = () => {
                   full context. */}
               <div className="-mt-1 flex min-w-0 flex-1 flex-col gap-2">
                 <span className="flex items-center gap-1.5">
-                  <span className="text-sm font-semibold text-amber-900 dark:text-amber-400">
+                  <span className="text-sm font-semibold text-warning-text">
                     {t("task.needsConfirm" as Parameters<typeof t>[0])}
                   </span>
                   {taskPending.length > 1 && (
@@ -1407,7 +1407,7 @@ export const TaskDetailPage = () => {
                   header just says "Running" and the user has no signal the task
                   needs them. Amber, tappable to the inline card below. */}
               {taskPending.length > 0 && (
-                <span className="ml-2 inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:bg-amber-500/15 dark:text-amber-400">
+                <span className="ml-2 inline-flex items-center gap-1 rounded-full bg-warning-light px-2 py-0.5 text-2xs font-medium text-warning-text">
                   <MessageCircleQuestion className="h-3 w-3" />
                   {t("task.awaitingUserChip" as Parameters<typeof t>[0])}
                   {taskPending.length > 1 && ` · ${taskPending.length}`}
@@ -1768,7 +1768,7 @@ export const TaskDetailPage = () => {
             <Button
               size="sm"
               variant="outline"
-              className="text-[12px]"
+              className="text-xs"
               onClick={() => {
                 setReviseGoal(task.goal);
                 setReviseOpen(true);
@@ -1853,7 +1853,7 @@ export const TaskDetailPage = () => {
                   <Button
                     size="sm"
                     variant="outline"
-                    className="text-[12px]"
+                    className="text-xs"
                     onClick={() => {
                       setReviseGoal(task.goal);
                       setReviseOpen(true);
@@ -1868,7 +1868,7 @@ export const TaskDetailPage = () => {
                     <Button
                       size="sm"
                       variant="outline"
-                      className="text-[12px] text-red-600 hover:text-red-600"
+                      className="text-xs text-error-text hover:text-error-text"
                       onClick={() =>
                         void runIntervene({ action: "stop" }, "task.stopped")
                       }
@@ -1880,7 +1880,7 @@ export const TaskDetailPage = () => {
                 </div>
                 <Button
                   size="sm"
-                  className="text-[12px]"
+                  className="text-xs"
                   onClick={() =>
                     void runIntervene(
                       {
