@@ -770,3 +770,275 @@ describe("buildTurns — segmented assistant message (mid-turn canonical seal)",
     ]);
   });
 });
+
+describe("buildTurns — concurrent subagent events (parent_tool_use_id)", () => {
+  // Incident shape: a background Task/Agent run executes CONCURRENTLY with
+  // the lead's own streaming, so its tool events land interleaved between
+  // the lead's text_delta frames. Untagged, each one used to shred the
+  // streaming text into fragments; tagged, they are out-of-band and must
+  // leave the lead's open block alone.
+  it("should keep the lead's streaming text in one block when tagged subagent tool events interleave", () => {
+    const turns = buildTurns([
+      evt(1, "message.user", { text: "q", message_id: "u1" }),
+      evt(0, "message.assistant.text_delta", { text: "已并行", message_id: "a1" }),
+      evt(2, "tool.call.started", {
+        id: "t1",
+        tool_use_id: "t1",
+        name: "mcp__valuz-search__news_search",
+        parent_tool_use_id: "agent-1",
+      }),
+      evt(0, "message.assistant.text_delta", {
+        text: "启动两个任务",
+        message_id: "a1",
+      }),
+      evt(3, "tool.call.completed", {
+        id: "t1",
+        tool_use_id: "t1",
+        content: "401",
+        is_error: "true",
+        parent_tool_use_id: "agent-1",
+      }),
+      evt(0, "message.assistant.text_delta", { text: "，稍等", message_id: "a1" }),
+      evt(4, "message.assistant.delta", {
+        text: "已并行启动两个任务，稍等",
+        message_id: "a1",
+      }),
+    ]);
+
+    const assistantBlocks = turns[0]!.blocks.filter(
+      (b) => b.kind === "assistant",
+    );
+    expect(assistantBlocks).toEqual([
+      {
+        kind: "assistant",
+        text: "已并行启动两个任务，稍等",
+        messageId: "a1",
+        sealed: true,
+      },
+    ]);
+  });
+
+  it("should tag interleaved subagent tool blocks with parentToolUseId", () => {
+    const turns = buildTurns([
+      evt(1, "message.user", { text: "q", message_id: "u1" }),
+      evt(0, "message.assistant.text_delta", { text: "hi", message_id: "a1" }),
+      evt(2, "tool.call.started", {
+        id: "t1",
+        tool_use_id: "t1",
+        name: "mcp__valuz-stock__index_quote",
+        parent_tool_use_id: "agent-1",
+      }),
+    ]);
+
+    const toolBlock = turns[0]!.blocks.find((b) => b.kind === "tool");
+    expect(toolBlock).toMatchObject({ parentToolUseId: "agent-1" });
+  });
+
+  it("should not let a tagged subagent canonical claim the lead's open streaming block", () => {
+    const turns = buildTurns([
+      evt(1, "message.user", { text: "q", message_id: "u1" }),
+      evt(0, "message.assistant.text_delta", {
+        text: "Lead says",
+        message_id: "a1",
+      }),
+      evt(2, "message.assistant.delta", {
+        text: "Subagent report",
+        message_id: "a1",
+        parent_tool_use_id: "agent-1",
+      }),
+      evt(0, "message.assistant.text_delta", { text: " more", message_id: "a1" }),
+      evt(3, "message.assistant.delta", {
+        text: "Lead says more",
+        message_id: "a1",
+      }),
+    ]);
+
+    expect(turns[0]!.blocks).toEqual([
+      { kind: "assistant", text: "Lead says more", messageId: "a1", sealed: true },
+      {
+        kind: "assistant",
+        text: "Subagent report",
+        messageId: "a1",
+        sealed: true,
+        parentToolUseId: "agent-1",
+      },
+    ]);
+  });
+
+  it("should still split the streaming text on an UNTAGGED tool event (sequential-runtime behavior preserved)", () => {
+    const turns = buildTurns([
+      evt(1, "message.user", { text: "q", message_id: "u1" }),
+      evt(0, "message.assistant.text_delta", { text: "A", message_id: "a1" }),
+      evt(2, "tool.call.started", {
+        id: "t1",
+        tool_use_id: "t1",
+        name: "Bash",
+      }),
+      evt(0, "message.assistant.text_delta", { text: "B", message_id: "a1" }),
+    ]);
+
+    const assistantBlocks = turns[0]!.blocks.filter(
+      (b) => b.kind === "assistant",
+    );
+    expect(assistantBlocks).toEqual([
+      { kind: "assistant", text: "A", messageId: "a1", sealed: false },
+      { kind: "assistant", text: "B", messageId: "a1", sealed: false },
+    ]);
+  });
+
+  it("should keep the parentToolUseId tag when tool.call.completed lacks it but started carried it", () => {
+    const turns = buildTurns([
+      evt(1, "message.user", { text: "q", message_id: "u1" }),
+      evt(2, "tool.call.started", {
+        id: "t1",
+        tool_use_id: "t1",
+        name: "Read",
+        parent_tool_use_id: "agent-1",
+      }),
+      evt(3, "tool.call.completed", {
+        id: "t1",
+        tool_use_id: "t1",
+        content: "ok",
+      }),
+    ]);
+
+    const toolBlock = turns[0]!.blocks.find((b) => b.kind === "tool");
+    expect(toolBlock).toMatchObject({
+      parentToolUseId: "agent-1",
+      tool: { status: "success" },
+    });
+  });
+});
+
+describe("buildTurns — concurrent subagent streaming (tagged deltas)", () => {
+  it("should stream tagged subagent deltas into their own block without touching the lead's open block", () => {
+    const turns = buildTurns([
+      evt(1, "message.user", { text: "q", message_id: "u1" }),
+      evt(0, "message.assistant.text_delta", { text: "Lead ", message_id: "a1" }),
+      evt(0, "message.assistant.text_delta", {
+        text: "Sub ",
+        message_id: "a1",
+        parent_tool_use_id: "agent-1",
+      }),
+      evt(0, "message.assistant.text_delta", { text: "says", message_id: "a1" }),
+      evt(0, "message.assistant.text_delta", {
+        text: "reports",
+        message_id: "a1",
+        parent_tool_use_id: "agent-1",
+      }),
+    ]);
+
+    expect(turns[0]!.blocks).toEqual([
+      { kind: "assistant", text: "Lead says", messageId: "a1", sealed: false },
+      {
+        kind: "assistant",
+        text: "Sub reports",
+        messageId: "a1",
+        sealed: false,
+        parentToolUseId: "agent-1",
+      },
+    ]);
+  });
+
+  it("should let a tagged canonical seal the matching tagged open block", () => {
+    const turns = buildTurns([
+      evt(1, "message.user", { text: "q", message_id: "u1" }),
+      evt(0, "message.assistant.text_delta", {
+        text: "Sub par",
+        message_id: "a1",
+        parent_tool_use_id: "agent-1",
+      }),
+      evt(2, "message.assistant.delta", {
+        text: "Sub partial done",
+        message_id: "a1",
+        parent_tool_use_id: "agent-1",
+      }),
+    ]);
+
+    expect(turns[0]!.blocks).toEqual([
+      {
+        kind: "assistant",
+        text: "Sub partial done",
+        messageId: "a1",
+        sealed: true,
+        parentToolUseId: "agent-1",
+      },
+    ]);
+  });
+
+  it("should keep two concurrent subagent streams in separate blocks", () => {
+    const turns = buildTurns([
+      evt(1, "message.user", { text: "q", message_id: "u1" }),
+      evt(0, "message.assistant.text_delta", {
+        text: "A1 ",
+        message_id: "a1",
+        parent_tool_use_id: "agent-1",
+      }),
+      evt(0, "message.assistant.text_delta", {
+        text: "B1 ",
+        message_id: "a1",
+        parent_tool_use_id: "agent-2",
+      }),
+      evt(0, "message.assistant.text_delta", {
+        text: "A2",
+        message_id: "a1",
+        parent_tool_use_id: "agent-1",
+      }),
+      evt(0, "message.assistant.text_delta", {
+        text: "B2",
+        message_id: "a1",
+        parent_tool_use_id: "agent-2",
+      }),
+    ]);
+
+    const texts = turns[0]!.blocks.map((b) =>
+      b.kind === "assistant" ? [b.text, b.parentToolUseId] : null,
+    );
+    expect(texts).toEqual([
+      ["A1 A2", "agent-1"],
+      ["B1 B2", "agent-2"],
+    ]);
+  });
+
+  it("should split a subagent's own text at its OWN tool call (per-flow sequential semantics preserved)", () => {
+    const turns = buildTurns([
+      evt(1, "message.user", { text: "q", message_id: "u1" }),
+      evt(0, "message.assistant.text_delta", {
+        text: "before",
+        message_id: "a1",
+        parent_tool_use_id: "agent-1",
+      }),
+      evt(2, "tool.call.started", {
+        id: "t1",
+        tool_use_id: "t1",
+        name: "Bash",
+        parent_tool_use_id: "agent-1",
+      }),
+      evt(0, "message.assistant.text_delta", {
+        text: "after",
+        message_id: "a1",
+        parent_tool_use_id: "agent-1",
+      }),
+    ]);
+
+    const subBlocks = turns[0]!.blocks.filter(
+      (b) => b.kind === "assistant" && b.parentToolUseId === "agent-1",
+    );
+    expect(subBlocks).toEqual([
+      {
+        kind: "assistant",
+        text: "before",
+        messageId: "a1",
+        sealed: false,
+        parentToolUseId: "agent-1",
+      },
+      {
+        kind: "assistant",
+        text: "after",
+        messageId: "a1",
+        sealed: false,
+        parentToolUseId: "agent-1",
+      },
+    ]);
+  });
+});

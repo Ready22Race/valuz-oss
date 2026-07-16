@@ -229,13 +229,30 @@ export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
     return currentTurn;
   };
 
+  // A turn can carry several concurrent FLOWS: the lead's own sequential
+  // stream (``parentToolUseId === undefined``) plus one per subagent
+  // (Task/Agent tool run, keyed by that call's tool_use_id — stamped on the
+  // wire as ``parent_tool_use_id``). A background agent executes
+  // CONCURRENTLY with the lead's streaming, so its events land interleaved
+  // between the lead's delta frames. Every helper below therefore operates
+  // on ONE flow at a time and treats blocks of other flows as invisible —
+  // within a single flow the original sequential semantics (tool call
+  // terminates the open text; canonical seals per segment) are unchanged.
+  // Untagged events only ever see untagged blocks, so pre-existing behavior
+  // (and any event stream from an older backend, which carries no tags) is
+  // byte-for-byte identical.
+  const flowOf = (b: ConversationBlock): string | undefined =>
+    "parentToolUseId" in b ? b.parentToolUseId || undefined : undefined;
+
   const matchesLastUnsealed = (
     turn: ConversationTurn,
     kind: "assistant" | "thinking",
     messageId: string | undefined,
+    parentToolUseId: string | undefined,
   ): (ConversationBlock & { kind: "assistant" | "thinking" }) | null => {
     for (let i = turn.blocks.length - 1; i >= 0; i--) {
       const b = turn.blocks[i];
+      if (flowOf(b) !== parentToolUseId) continue; // other flow — invisible
       if (b.kind === "tool") return null;
       if (b.kind === kind) {
         if (b.sealed) return null;
@@ -246,19 +263,35 @@ export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
     return null;
   };
 
+  /** Last block of the given flow — so the sealed-redelivery check in
+   * ``appendDelta`` still sees this flow's sealed canonical even when
+   * another flow's events landed after it. */
+  const lastFlowBlock = (
+    turn: ConversationTurn,
+    parentToolUseId: string | undefined,
+  ): ConversationBlock | null => {
+    for (let i = turn.blocks.length - 1; i >= 0; i--) {
+      const b = turn.blocks[i];
+      if (flowOf(b) !== parentToolUseId) continue;
+      return b;
+    }
+    return null;
+  };
+
   const appendDelta = (
     turn: ConversationTurn,
     kind: "assistant" | "thinking",
     text: string,
     messageId: string | undefined,
+    parentToolUseId: string | undefined,
   ) => {
     if (!text) return;
-    const open = matchesLastUnsealed(turn, kind, messageId);
+    const open = matchesLastUnsealed(turn, kind, messageId, parentToolUseId);
     if (open) {
       open.text += text;
       return;
     }
-    const last = turn.blocks[turn.blocks.length - 1];
+    const last = lastFlowBlock(turn, parentToolUseId);
     if (
       last &&
       last.kind === kind &&
@@ -275,7 +308,7 @@ export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
     ) {
       return;
     }
-    turn.blocks.push({ kind, text, messageId, sealed: false });
+    turn.blocks.push({ kind, text, messageId, sealed: false, parentToolUseId });
   };
 
   const replaceWithCanonical = (
@@ -284,9 +317,10 @@ export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
     text: string,
     messageId: string | undefined,
     elapsedMs?: number,
+    parentToolUseId?: string,
   ) => {
     if (!text) return;
-    const open = matchesLastUnsealed(turn, kind, messageId);
+    const open = matchesLastUnsealed(turn, kind, messageId, parentToolUseId);
     if (open) {
       if (messageId != null) {
         open.text = text;
@@ -301,8 +335,15 @@ export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
     }
     turn.blocks.push(
       kind === "thinking"
-        ? { kind, text, messageId, sealed: messageId != null, elapsedMs }
-        : { kind, text, messageId, sealed: messageId != null },
+        ? {
+            kind,
+            text,
+            messageId,
+            sealed: messageId != null,
+            elapsedMs,
+            parentToolUseId,
+          }
+        : { kind, text, messageId, sealed: messageId != null, parentToolUseId },
     );
   };
 
@@ -433,12 +474,24 @@ export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
     }
 
     if (eventType === "message.assistant.text_delta") {
-      appendDelta(turn, "assistant", payload.text ?? "", payload.message_id);
+      appendDelta(
+        turn,
+        "assistant",
+        payload.text ?? "",
+        payload.message_id,
+        payload.parent_tool_use_id || undefined,
+      );
       continue;
     }
 
     if (eventType === "message.assistant.thinking_delta") {
-      appendDelta(turn, "thinking", payload.text ?? "", payload.message_id);
+      appendDelta(
+        turn,
+        "thinking",
+        payload.text ?? "",
+        payload.message_id,
+        payload.parent_tool_use_id || undefined,
+      );
       continue;
     }
 
@@ -448,6 +501,8 @@ export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
         "assistant",
         payload.text ?? "",
         payload.message_id,
+        undefined,
+        payload.parent_tool_use_id || undefined,
       );
       continue;
     }
@@ -459,6 +514,7 @@ export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
         payload.text ?? "",
         payload.message_id,
         elapsedSince(turn.userTimestamp, envelope.timestamp),
+        payload.parent_tool_use_id || undefined,
       );
       continue;
     }
@@ -507,6 +563,7 @@ export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
         kind: "tool",
         tool: card,
         elapsedMs: elapsedSince(turn.userTimestamp, envelope.timestamp),
+        parentToolUseId: payload.parent_tool_use_id || undefined,
       });
       continue;
     }
@@ -559,17 +616,26 @@ export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
       const startedIdx = turn.blocks.findIndex(
         (b) => b.kind === "tool" && b.tool.id === id,
       );
+      const startedParent =
+        payload.parent_tool_use_id ||
+        (startedIdx >= 0
+          ? (turn.blocks[startedIdx] as ConversationBlock & { kind: "tool" })
+              .parentToolUseId
+          : undefined) ||
+        undefined;
       if (startedIdx >= 0) {
         turn.blocks[startedIdx] = {
           kind: "tool",
           tool: card,
           elapsedMs: startedElapsedMs,
+          parentToolUseId: startedParent,
         };
       } else {
         turn.blocks.push({
           kind: "tool",
           tool: card,
           elapsedMs: startedElapsedMs,
+          parentToolUseId: startedParent,
         });
       }
       continue;
@@ -609,10 +675,27 @@ export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
       const blockIndex = turn.blocks.findIndex(
         (b) => b.kind === "tool" && b.tool.id === id,
       );
+      const completedParent =
+        payload.parent_tool_use_id ||
+        (blockIndex >= 0
+          ? (turn.blocks[blockIndex] as ConversationBlock & { kind: "tool" })
+              .parentToolUseId
+          : undefined) ||
+        undefined;
       if (blockIndex >= 0) {
-        turn.blocks[blockIndex] = { kind: "tool", tool: next, elapsedMs };
+        turn.blocks[blockIndex] = {
+          kind: "tool",
+          tool: next,
+          elapsedMs,
+          parentToolUseId: completedParent,
+        };
       } else {
-        turn.blocks.push({ kind: "tool", tool: next, elapsedMs });
+        turn.blocks.push({
+          kind: "tool",
+          tool: next,
+          elapsedMs,
+          parentToolUseId: completedParent,
+        });
       }
       activeToolCalls.delete(id);
       continue;

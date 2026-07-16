@@ -276,3 +276,32 @@ def test_should_drop_none_values_from_bg_task_payload():
     assert result is not None
     _legacy_type, payload = result
     assert "usage" not in payload
+
+
+def test_should_propagate_parent_tool_use_id_on_subagent_events():
+    """Events produced inside a Task/Agent run carry ``parent_tool_use_id``;
+    the wire payload must preserve it so the frontend can treat them as
+    out-of-band activity (not part of the lead's sequential flow)."""
+    for kernel_type, data in [
+        ("assistant_message", {"text": "sub", "parent_tool_use_id": "toolu_agent"}),
+        ("thinking", {"text": "hmm", "parent_tool_use_id": "toolu_agent"}),
+        ("tool_use", {"id": "t1", "name": "Read", "parent_tool_use_id": "toolu_agent"}),
+        ("tool_result", {"id": "t1", "content": "ok", "parent_tool_use_id": "toolu_agent"}),
+        ("text_delta", {"text": "chu", "parent_tool_use_id": "toolu_agent"}),
+        ("thinking_delta", {"text": "hm", "parent_tool_use_id": "toolu_agent"}),
+        (
+            "tool_input_delta",
+            {"id": "t1", "name": "Read", "text": "{", "parent_tool_use_id": "toolu_agent"},
+        ),
+    ]:
+        result = _translate_kernel_event(kernel_type, data)
+        assert result is not None, kernel_type
+        _, payload = result
+        assert payload["parent_tool_use_id"] == "toolu_agent", kernel_type
+
+
+def test_should_omit_parent_tool_use_id_when_event_is_top_level():
+    result = _translate_kernel_event("tool_use", {"id": "t1", "name": "Read"})
+    assert result is not None
+    _, payload = result
+    assert "parent_tool_use_id" not in payload
