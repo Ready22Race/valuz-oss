@@ -14,6 +14,23 @@ def test_log_dir_is_independent_from_templated_data_dir() -> None:
     assert "{user_id}" not in str(settings.log_file)
 
 
+def test_log_dir_defaults_under_data_dir(monkeypatch, tmp_path: Path) -> None:
+    """Pointing VALUZ_DATA_DIR elsewhere moves the logs with it — a dev/test
+    backend must not write into the packaged app's logs by omission."""
+    monkeypatch.delenv("VALUZ_LOG_DIR", raising=False)  # sandbox pins it
+    settings = Settings(data_dir=tmp_path / "root")
+
+    assert settings.log_dir == tmp_path / "root" / "logs"
+
+
+def test_log_dir_default_strips_user_template(monkeypatch) -> None:
+    monkeypatch.delenv("VALUZ_LOG_DIR", raising=False)  # sandbox pins it
+    settings = Settings(data_dir=Path("/data/valuz/{user_id}"))
+
+    assert settings.log_dir == Path("/data/valuz/logs")
+    assert "{user_id}" not in str(settings.log_file)
+
+
 def test_user_skill_staging_dir_env_alias(monkeypatch, tmp_path) -> None:
     staging_dir = tmp_path / "{user_id}" / "skill-staging"
 

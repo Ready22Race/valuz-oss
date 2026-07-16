@@ -8,6 +8,7 @@ expressed explicitly in ``boot/lifespan.py``.
 
 import asyncio
 import logging
+from pathlib import Path
 
 from fastapi import FastAPI
 
@@ -19,6 +20,55 @@ logger = logging.getLogger(__name__)
 
 def _startup_user_content_enabled() -> bool:
     return bool(settings.initialize_user_content_on_startup)
+
+
+def guard_source_run_data_dir() -> None:
+    """Refuse to run a source (non-frozen) backend on the packaged app's data dir.
+
+    Recurring incident class: a dev/test backend pointed at the real
+    ``~/.valuz-oss`` runs host migrations and pushes ``alembic_version_host``
+    ahead of the released build, which then fail-louds at its next boot
+    (``ensure_host_schema_migratable``). The packaged ``valuz-server`` is
+    PyInstaller-frozen (``sys.frozen``) and exempt; every other process must
+    bring its own root (dev.sh pins ``~/.valuz-oss-dev``; the test conftest
+    pins a tmp sandbox). ``VALUZ_ALLOW_PACKAGED_DATA_DIR=1`` is the explicit
+    escape hatch for deliberately operating on the packaged store from source.
+
+    Runs FIRST in the lifespan — before logging config (``log_dir`` writes
+    under the root) and before the single-writer lock (the lock file is a
+    root write). Also called by ``main.main`` and the management CLI commands,
+    which touch the data dir without going through the lifespan.
+    """
+    import os
+    import sys as _sys
+
+    if getattr(_sys, "frozen", False):
+        return
+    if os.environ.get("VALUZ_ALLOW_PACKAGED_DATA_DIR") == "1":
+        return
+
+    from valuz_agent.infra.config import PACKAGED_DATA_DIR
+
+    packaged_root = PACKAGED_DATA_DIR.resolve()
+    if fs_registry.shared_root_path().resolve() == packaged_root:
+        raise RuntimeError(
+            "refusing to start: this backend runs from source (not the packaged "
+            f"valuz-server) but its data dir resolves to {PACKAGED_DATA_DIR} — the "
+            "packaged app's store. A source backend migrating that store strands "
+            "the released app (its schema stamp moves past the release's migration "
+            "chain). Use scripts/dev.sh (defaults VALUZ_DATA_DIR=~/.valuz-oss-dev) "
+            "or set VALUZ_DATA_DIR. To operate on the packaged store on purpose, "
+            "set VALUZ_ALLOW_PACKAGED_DATA_DIR=1."
+        )
+    if Path(settings.log_dir).expanduser().resolve() == (packaged_root / "logs").resolve():
+        raise RuntimeError(
+            "refusing to start: this backend runs from source but its log dir "
+            f"resolves to {PACKAGED_DATA_DIR / 'logs'} — the packaged app's logs "
+            "(source-run log lines there corrupt release forensics). The default "
+            "log dir follows VALUZ_DATA_DIR; unset VALUZ_LOG_DIR or point it "
+            "elsewhere, or set VALUZ_ALLOW_PACKAGED_DATA_DIR=1 to operate on "
+            "the packaged store on purpose."
+        )
 
 
 def configure_structured_logging() -> None:
