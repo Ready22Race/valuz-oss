@@ -280,6 +280,14 @@ _WORKFLOW_POLL_INTERVAL_S = 2.0
 # to a late turn end, never a hang.
 _WAKEUP_BRACKET_GRACE_S = 5.0
 
+# Terminal ``patch.status`` values a ``task_updated`` push can carry — the
+# same set as ``TaskNotificationStatus``. A task whose output the model
+# retrieves synchronously (blocking on the run via the task-output tool) gets
+# NO ``task_notification`` from the CLI: the result lands in the pending
+# tool_result instead, and the terminal ``task_updated`` is the only end-of-
+# task signal on the stream.
+_TERMINAL_BG_TASK_STATUSES = frozenset({"completed", "failed", "stopped"})
+
 # ``_to_thinking_config`` was removed on 2026-05-12 along with the
 # explicit ``thinking=`` kwarg to ``ClaudeAgentOptions`` — runtimes now
 # let the SDK use its own thinking default. ``AgentConfig.thinking``
@@ -2451,13 +2459,19 @@ class ClaudeAgentRuntime:
             elif message.subtype == "task_updated":
                 # Not modeled by the SDK (generic SystemMessage); the raw
                 # payload carries {task_id, patch: {status, ...}}.
+                task_id = message.data.get("task_id")
+                patch = message.data.get("patch") or {}
+                # A terminal patch may be the ONLY end-of-task signal (see
+                # ``_TERMINAL_BG_TASK_STATUSES``) — release the live-task
+                # marker here too, or ``has_live_background_tasks`` pins the
+                # runtime (and every runs-derived "running" indicator) until
+                # the bg-busy TTL eviction, long after the task ended.
+                if task_id is not None and patch.get("status") in _TERMINAL_BG_TASK_STATUSES:
+                    self._live_bg_tasks.pop(str(task_id), None)
                 await self.event_sink.emit(
                     Event(
                         type="bg_task_updated",
-                        data={
-                            "task_id": message.data.get("task_id"),
-                            "patch": message.data.get("patch") or {},
-                        },
+                        data={"task_id": task_id, "patch": patch},
                     )
                 )
             elif message.subtype == "compact_boundary":
