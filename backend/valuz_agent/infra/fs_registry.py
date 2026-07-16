@@ -33,7 +33,7 @@ import tempfile
 from pathlib import Path
 from typing import Literal
 
-from valuz_agent.infra.config import settings
+from valuz_agent.infra.config import settings, shared_root_of
 from valuz_agent.ports.workspace import LocalWorkspaceHandle, WorkspaceHandle
 
 ProjectKind = Literal["chat", "project"]
@@ -68,10 +68,7 @@ class FsRegistry:
         return Path(raw.replace("{user_id}", self.user_dir_name(user_id))).expanduser()
 
     def _shared_root(self) -> Path:
-        raw = str(settings.data_dir)
-        if "{user_id}" in raw:
-            raw = raw.replace("{user_id}", "")
-        return Path(raw).expanduser()
+        return shared_root_of(settings.data_dir)
 
     def _expand_optional_user_template(self, root: str | Path, user_id: str | None) -> Path:
         raw = str(root)
@@ -134,6 +131,12 @@ class FsRegistry:
         path = self._shared_root()
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+    def shared_root_path(self) -> Path:
+        """The configured shared root WITHOUT creating it — for probes/guards
+        that must not touch the filesystem (e.g. the source-run data-dir guard,
+        which runs before any write is allowed)."""
+        return self._shared_root()
 
     def installation_file(self, user_id: str) -> Path:
         path = self.data_dir(user_id) / settings.installation_filename

@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -177,6 +178,27 @@ func splitTargetAndPassthrough(args []string, dash int) (target string, extras [
 	return target, extras, nil
 }
 
+// devDataEnv mirrors scripts/dev.sh's data isolation: a dev-mode backend
+// never runs on the packaged app's ~/.valuz-oss (a source backend migrating
+// that store strands the released app). VALUZ_DATA_DIR defaults to
+// ~/.valuz-oss-dev and VALUZ_LOG_DIR to <data-dir>/logs; explicit env wins.
+func devDataEnv() []string {
+	dataDir := os.Getenv("VALUZ_DATA_DIR")
+	var env []string
+	if dataDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil // no home to derive a default from — leave env untouched
+		}
+		dataDir = filepath.Join(home, ".valuz-oss-dev")
+		env = append(env, "VALUZ_DATA_DIR="+dataDir)
+	}
+	if os.Getenv("VALUZ_LOG_DIR") == "" {
+		env = append(env, "VALUZ_LOG_DIR="+filepath.Join(dataDir, "logs"))
+	}
+	return env
+}
+
 func buildSpecs(p *runtime.Paths, target, host string, port int, reload bool, backendArgs, frontendArgs []string) []proc.Spec {
 	var specs []proc.Spec
 	if target == "all" || target == "backend" {
@@ -191,6 +213,7 @@ func buildSpecs(p *runtime.Paths, target, host string, port int, reload bool, ba
 			Bin:          "uv",
 			Args:         args,
 			Cwd:          p.BackendDir,
+			Env:          devDataEnv(),
 			ReadyURL:     fmt.Sprintf("http://%s:%d/v1/projects", host, port),
 			ReadyTimeout: 30 * time.Second,
 		})

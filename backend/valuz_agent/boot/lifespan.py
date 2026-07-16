@@ -16,7 +16,11 @@ from valuz_agent.boot import steps
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # ── startup（顺序 load-bearing，注释分组）──
-    steps.configure_structured_logging()  # FIRST
+    # The data-dir guard runs before EVERYTHING — even logging config writes
+    # under the data root, and a source-run backend must not touch the
+    # packaged app's root at all.
+    steps.guard_source_run_data_dir()  # FIRST
+    steps.configure_structured_logging()
     steps.acquire_single_writer_lock()
     # Data-dir cutover runs BEFORE identity: the owner id is read from the
     # migrated ``installation.json``, so it must be in place before

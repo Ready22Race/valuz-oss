@@ -25,8 +25,6 @@ import {
 import { toast } from "sonner";
 import {
   projectsApi,
-  filesApi,
-  buildFileRef,
   ApiError,
   getEntityOrigin,
   recordEntityOrigin,
@@ -53,8 +51,6 @@ import {
   type Trigger,
   type ProjectDetail,
   type ProjectFileNode,
-  type ArtifactDescriptor,
-  type ArtifactContent,
   type LLMChannelDetail,
   type ConnectorItem,
   type Agent,
@@ -74,8 +70,8 @@ import {
   type AgentSkillItem,
 } from "../lib/agent-skill-items";
 import { toFileTree } from "../lib/file-tree";
-import { resolvedToArtifactFile } from "../lib/resolve-artifact";
 import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
+import { useArtifactFile } from "../hooks/use-artifact-file";
 
 /** One tab body: owns its own cursor-paginated feed. Radix unmounts inactive
  *  ``TabsContent``, so only the active tab's feed polls / paginates. */
@@ -615,14 +611,6 @@ export const ProjectDetailPage = () => {
     expandFolder: pickerExpandFolder,
   } = useKbDocTree(kbPickerOpen);
   const [scheduledTasks, setScheduledTasks] = useState<AutomationItem[]>([]);
-  const [selectedArtifactPath, setSelectedArtifactPath] = useState<
-    string | null
-  >(null);
-  const [artifact, setArtifact] = useState<ArtifactDescriptor | null>(null);
-  const [artifactContent, setArtifactContent] =
-    useState<ArtifactContent | null>(null);
-  const [artifactLoading, setArtifactLoading] = useState(false);
-  const [artifactError, setArtifactError] = useState<string | null>(null);
   const selectedFileParam = searchParams.get("file");
   const [newTaskOpen, setNewTaskOpen] = useState(false);
   // When set, the automation dialog opens in edit mode (PATCH the row) instead
@@ -952,6 +940,39 @@ export const ProjectDetailPage = () => {
     }
   };
 
+  const locateArtifactFile = useCallback(
+    (relPath: string) => {
+      const root = project?.root_path ?? "";
+      const isAbs = /^(\/|[a-zA-Z]:[\\/])/.test(relPath);
+      return {
+        absolutePath: isAbs
+          ? relPath
+          : root
+            ? `${root.replace(/\/+$/, "")}/${relPath}`
+            : relPath,
+        relativePath: relPath,
+      };
+    },
+    [project?.root_path],
+  );
+  const artifactFile = useArtifactFile({
+    projectId: id || null,
+    platform,
+    locate: locateArtifactFile,
+    missingErrorMessage: t("task.artifactOpenInFinder" as Parameters<typeof t>[0]),
+  });
+  const {
+    selectedPath: selectedArtifactPath,
+    artifact,
+    content: artifactContent,
+    target: artifactTarget,
+    loading: artifactLoading,
+    error: artifactError,
+    open: openArtifact,
+    reload: reloadArtifact,
+    close: closeArtifact,
+  } = artifactFile;
+
   const openArtifactFile = useCallback(
     async (relPath: string, options?: { syncUrl?: boolean }) => {
       if (!id) return;
@@ -965,58 +986,16 @@ export const ProjectDetailPage = () => {
           { replace: false },
         );
       }
-      setSelectedArtifactPath(relPath);
-      setArtifactLoading(true);
-      setArtifactError(null);
-      try {
-        // Build the file's absolute identity (project root + project-relative
-        // path), resolve it to an access address, and fetch bytes from that
-        // address — the backend never proxies file streams. See
-        // docs/design/file-address-resolution.md.
-        const root = project?.root_path ?? "";
-        const isAbs = /^(\/|[a-zA-Z]:[\\/])/.test(relPath);
-        const absPath = isAbs
-          ? relPath
-          : root
-            ? `${root.replace(/\/+$/, "")}/${relPath}`
-            : relPath;
-        const descriptor = await filesApi.resolveOne(buildFileRef(absPath));
-        if (!descriptor || descriptor.error || !descriptor.exists) {
-          setArtifact(null);
-          setArtifactContent(null);
-          setArtifactError(
-            t("task.artifactOpenInFinder" as Parameters<typeof t>[0]),
-          );
-          return;
-        }
-        const result = await resolvedToArtifactFile(descriptor, {
-          projectId: id,
-          relPath,
-          platform,
-        });
-        setArtifact(result.artifact);
-        setArtifactContent(result.content);
-      } catch (error) {
-        setArtifact(null);
-        setArtifactContent(null);
-        setArtifactError(
-          error instanceof Error ? error.message : String(error),
-        );
-      } finally {
-        setArtifactLoading(false);
-      }
+      await openArtifact(relPath);
     },
-    [id, project?.root_path, searchParams, setSearchParams, platform, t],
+    [id, openArtifact, searchParams, setSearchParams],
   );
 
   useEffect(() => {
     if (!selectedFileParam) {
       if (selectedArtifactPath) {
         const timer = window.setTimeout(() => {
-          setSelectedArtifactPath(null);
-          setArtifact(null);
-          setArtifactContent(null);
-          setArtifactError(null);
+          closeArtifact();
         }, 0);
         return () => window.clearTimeout(timer);
       }
@@ -1036,16 +1015,15 @@ export const ProjectDetailPage = () => {
     artifact,
     artifactError,
     artifactLoading,
+    closeArtifact,
     openArtifactFile,
     selectedArtifactPath,
     selectedFileParam,
   ]);
 
   const handleArtifactReload = useCallback(() => {
-    if (selectedArtifactPath) {
-      void openArtifactFile(selectedArtifactPath);
-    }
-  }, [openArtifactFile, selectedArtifactPath]);
+    void reloadArtifact();
+  }, [reloadArtifact]);
 
   const handleArtifactClose = useCallback(() => {
     setSearchParams(
@@ -1056,11 +1034,8 @@ export const ProjectDetailPage = () => {
       },
       { replace: true },
     );
-    setSelectedArtifactPath(null);
-    setArtifact(null);
-    setArtifactContent(null);
-    setArtifactError(null);
-  }, [setSearchParams]);
+    closeArtifact();
+  }, [closeArtifact, setSearchParams]);
 
   const handleArtifactCopy = useCallback(() => {
     if (artifactContent?.kind !== "text") return;
@@ -1071,9 +1046,9 @@ export const ProjectDetailPage = () => {
   }, [artifactContent, t]);
 
   const handleArtifactOpenExternal = useCallback(() => {
-    if (!project?.root_path || !selectedArtifactPath) return;
-    void revealInFinder(`${project.root_path}/${selectedArtifactPath}`);
-  }, [project, selectedArtifactPath, revealInFinder]);
+    if (!selectedArtifactPath) return;
+    void revealInFinder(locateArtifactFile(selectedArtifactPath).absolutePath);
+  }, [locateArtifactFile, selectedArtifactPath, revealInFinder]);
 
   const handleInstructionsChange = async (md: string) => {
     setInstructions(md);
@@ -1431,6 +1406,7 @@ export const ProjectDetailPage = () => {
           <ArtifactViewerShell
             artifact={artifact}
             content={artifactContent}
+            target={artifactTarget}
             loading={artifactLoading}
             error={artifactError}
             onReload={handleArtifactReload}

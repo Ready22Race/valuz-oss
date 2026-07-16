@@ -1,4 +1,4 @@
-import { createFetchJson } from "./fetch-json";
+import { createFetchJson, type RequestOptions } from "./fetch-json";
 
 let _apiBase =
   (import.meta as unknown as Record<string, Record<string, string> | undefined>)
@@ -64,8 +64,12 @@ export const filesApi = {
    * The backend never returns file bytes — the client fetches from the returned
    * address (desktop ``valuz-local://`` for local, presigned URL for remote).
    */
-  resolve(refs: string[]): Promise<{ results: ResolvedFileDescriptor[] }> {
+  resolve(
+    refs: string[],
+    options: Pick<RequestOptions, "signal"> = {},
+  ): Promise<{ results: ResolvedFileDescriptor[] }> {
     return fetchJson("/v1/files/resolve", {
+      ...options,
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ refs: refs.slice(0, MAX_REFS) }),
@@ -73,8 +77,11 @@ export const filesApi = {
   },
 
   /** Convenience: resolve a single ref (returns null on error/empty). */
-  async resolveOne(ref: string): Promise<ResolvedFileDescriptor | null> {
-    const res = await filesApi.resolve([ref]);
+  async resolveOne(
+    ref: string,
+    options: Pick<RequestOptions, "signal"> = {},
+  ): Promise<ResolvedFileDescriptor | null> {
+    const res = await filesApi.resolve([ref], options);
     return res.results[0] ?? null;
   },
 };

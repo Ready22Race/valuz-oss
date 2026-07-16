@@ -49,13 +49,9 @@ import {
   agentsApi,
   tasksApi,
   projectsApi,
-  filesApi,
-  buildFileRef,
   useNotifications,
   useTaskEvents,
   useTranslation,
-  type ArtifactContent,
-  type ArtifactDescriptor,
   type IntervenePayload,
   type MemberWithAgent,
   type TaskDetail,
@@ -70,7 +66,6 @@ import {
   type PlannedSubtask,
 } from "../components/TaskContextPanel";
 import { toFileTree } from "../lib/file-tree";
-import { resolvedToArtifactFile } from "../lib/resolve-artifact";
 import { TaskStatusLabel } from "../components/TaskStatusLabel";
 import { NotificationCard } from "../components/NotificationInbox";
 import {
@@ -79,6 +74,7 @@ import {
   useSkillSubmissionCards,
 } from "../hooks";
 import { deriveDeliverable } from "./task-detail/deliverable";
+import { useArtifactFile } from "../hooks/use-artifact-file";
 
 interface EventMeta {
   icon: ComponentType<{ className?: string }>;
@@ -98,7 +94,7 @@ const EVENT_META: Record<string, EventMeta> = {
   // read as "任务已发起" on a run that actually failed.
   kickoff_failed: {
     icon: XCircle,
-    node: "bg-red-500/10 text-red-500",
+    node: "bg-error-light text-error-text",
     labelKey: "task.event.kickoffFailed",
   },
   subtask_spawned: {
@@ -145,12 +141,12 @@ const EVENT_META: Record<string, EventMeta> = {
   // Amber = needs your attention, not a failure.
   awaiting_user: {
     icon: MessageCircleQuestion,
-    node: "bg-amber-500/10 text-amber-500",
+    node: "bg-warning-light text-warning-text",
     labelKey: "task.event.awaitingUser",
   },
   user_answered: {
     icon: CheckCircle2,
-    node: "bg-emerald-500/10 text-emerald-500",
+    node: "bg-success-light text-success-text",
     labelKey: "task.event.userAnswered",
   },
   goal_revised: {
@@ -403,14 +399,6 @@ export const TaskDetailPage = () => {
   const [projectName, setProjectName] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [selectedArtifactPath, setSelectedArtifactPath] = useState<
-    string | null
-  >(null);
-  const [artifact, setArtifact] = useState<ArtifactDescriptor | null>(null);
-  const [artifactContent, setArtifactContent] =
-    useState<ArtifactContent | null>(null);
-  const [artifactLoading, setArtifactLoading] = useState(false);
-  const [artifactError, setArtifactError] = useState<string | null>(null);
   const selectedFileParam = searchParams.get("file");
 
   // Deep-link origin fast path (multi-target editions): task links can carry
@@ -536,11 +524,35 @@ export const TaskDetailPage = () => {
     void openArtifact(rootPath, t as Translator);
   }, [rootPath, t]);
 
+  const locateArtifactFile = useCallback(
+    (path: string) => ({
+      absolutePath: resolveArtifactPath(path, rootPath),
+      relativePath: toProjectRelativeArtifactPath(path, rootPath) ?? path,
+    }),
+    [rootPath],
+  );
+  const artifactFile = useArtifactFile({
+    projectId: projectId ?? null,
+    platform,
+    locate: locateArtifactFile,
+    missingErrorMessage: t("task.artifactOpenInFinder" as Parameters<typeof t>[0]),
+  });
+  const {
+    selectedPath: selectedArtifactPath,
+    artifact,
+    content: artifactContent,
+    target: artifactTarget,
+    loading: artifactLoading,
+    error: artifactError,
+    open: loadArtifact,
+    reload: reloadArtifact,
+    close: closeArtifact,
+  } = artifactFile;
+
   const openArtifactFile = useCallback(
     async (relPath: string, options?: { syncUrl?: boolean }) => {
       if (!projectId) return;
       const normalized = toProjectRelativeArtifactPath(relPath, rootPath);
-      const absPath = resolveArtifactPath(relPath, rootPath);
       if (
         options?.syncUrl !== false &&
         normalized &&
@@ -555,49 +567,16 @@ export const TaskDetailPage = () => {
           { replace: false },
         );
       }
-      setSelectedArtifactPath(normalized ?? relPath);
-      setArtifactLoading(true);
-      setArtifactError(null);
-      try {
-        // Resolve identity -> access address; the client fetches bytes from the
-        // address (never proxied). See docs/design/file-address-resolution.md.
-        const descriptor = await filesApi.resolveOne(buildFileRef(absPath));
-        if (!descriptor || descriptor.error || !descriptor.exists) {
-          setArtifact(null);
-          setArtifactContent(null);
-          setArtifactError(
-            t("task.artifactOpenInFinder" as Parameters<typeof t>[0]),
-          );
-          return;
-        }
-        const result = await resolvedToArtifactFile(descriptor, {
-          projectId,
-          relPath: normalized ?? descriptor.name,
-          platform,
-        });
-        setArtifact(result.artifact);
-        setArtifactContent(result.content);
-      } catch (error) {
-        setArtifact(null);
-        setArtifactContent(null);
-        setArtifactError(
-          error instanceof Error ? error.message : String(error),
-        );
-      } finally {
-        setArtifactLoading(false);
-      }
+      await loadArtifact(relPath);
     },
-    [projectId, rootPath, searchParams, setSearchParams, t, platform],
+    [loadArtifact, projectId, rootPath, searchParams, setSearchParams],
   );
 
   useEffect(() => {
     if (!selectedFileParam) {
       if (selectedArtifactPath) {
         const timer = window.setTimeout(() => {
-          setSelectedArtifactPath(null);
-          setArtifact(null);
-          setArtifactContent(null);
-          setArtifactError(null);
+          closeArtifact();
         }, 0);
         return () => window.clearTimeout(timer);
       }
@@ -617,16 +596,15 @@ export const TaskDetailPage = () => {
     artifact,
     artifactError,
     artifactLoading,
+    closeArtifact,
     openArtifactFile,
     selectedArtifactPath,
     selectedFileParam,
   ]);
 
   const handleArtifactReload = useCallback(() => {
-    if (selectedArtifactPath) {
-      void openArtifactFile(selectedArtifactPath);
-    }
-  }, [openArtifactFile, selectedArtifactPath]);
+    void reloadArtifact();
+  }, [reloadArtifact]);
 
   const handleArtifactClose = useCallback(() => {
     setSearchParams(
@@ -637,11 +615,8 @@ export const TaskDetailPage = () => {
       },
       { replace: true },
     );
-    setSelectedArtifactPath(null);
-    setArtifact(null);
-    setArtifactContent(null);
-    setArtifactError(null);
-  }, [setSearchParams]);
+    closeArtifact();
+  }, [closeArtifact, setSearchParams]);
 
   const handleArtifactCopy = useCallback(() => {
     if (artifactContent?.kind !== "text") return;
@@ -652,12 +627,12 @@ export const TaskDetailPage = () => {
   }, [artifactContent, t]);
 
   const handleArtifactOpenExternal = useCallback(() => {
-    if (!rootPath || !selectedArtifactPath) return;
+    if (!selectedArtifactPath) return;
     void openArtifact(
-      resolveArtifactPath(selectedArtifactPath, rootPath),
+      locateArtifactFile(selectedArtifactPath).absolutePath,
       t as Translator,
     );
-  }, [rootPath, selectedArtifactPath, t]);
+  }, [locateArtifactFile, selectedArtifactPath, t]);
 
   // Open a project file from the right-rail file tree (double-click /
   // right-click → open). The tree node's ``path`` is project-relative, so
@@ -1172,6 +1147,7 @@ export const TaskDetailPage = () => {
         <ArtifactViewerShell
           artifact={artifact}
           content={artifactContent}
+          target={artifactTarget}
           loading={artifactLoading}
           error={artifactError}
           onReload={handleArtifactReload}
@@ -1296,7 +1272,7 @@ export const TaskDetailPage = () => {
                   full context. */}
               <div className="-mt-1 flex min-w-0 flex-1 flex-col gap-2">
                 <span className="flex items-center gap-1.5">
-                  <span className="text-sm font-semibold text-amber-900 dark:text-amber-400">
+                  <span className="text-sm font-semibold text-warning-text">
                     {t("task.needsConfirm" as Parameters<typeof t>[0])}
                   </span>
                   {taskPending.length > 1 && (
@@ -1431,7 +1407,7 @@ export const TaskDetailPage = () => {
                   header just says "Running" and the user has no signal the task
                   needs them. Amber, tappable to the inline card below. */}
               {taskPending.length > 0 && (
-                <span className="ml-2 inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:bg-amber-500/15 dark:text-amber-400">
+                <span className="ml-2 inline-flex items-center gap-1 rounded-full bg-warning-light px-2 py-0.5 text-2xs font-medium text-warning-text">
                   <MessageCircleQuestion className="h-3 w-3" />
                   {t("task.awaitingUserChip" as Parameters<typeof t>[0])}
                   {taskPending.length > 1 && ` · ${taskPending.length}`}
@@ -1792,7 +1768,7 @@ export const TaskDetailPage = () => {
             <Button
               size="sm"
               variant="outline"
-              className="text-[12px]"
+              className="text-xs"
               onClick={() => {
                 setReviseGoal(task.goal);
                 setReviseOpen(true);
@@ -1877,7 +1853,7 @@ export const TaskDetailPage = () => {
                   <Button
                     size="sm"
                     variant="outline"
-                    className="text-[12px]"
+                    className="text-xs"
                     onClick={() => {
                       setReviseGoal(task.goal);
                       setReviseOpen(true);
@@ -1892,7 +1868,7 @@ export const TaskDetailPage = () => {
                     <Button
                       size="sm"
                       variant="outline"
-                      className="text-[12px] text-red-600 hover:text-red-600"
+                      className="text-xs text-error-text hover:text-error-text"
                       onClick={() =>
                         void runIntervene({ action: "stop" }, "task.stopped")
                       }
@@ -1904,7 +1880,7 @@ export const TaskDetailPage = () => {
                 </div>
                 <Button
                   size="sm"
-                  className="text-[12px]"
+                  className="text-xs"
                   onClick={() =>
                     void runIntervene(
                       {

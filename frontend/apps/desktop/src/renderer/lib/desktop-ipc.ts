@@ -125,11 +125,12 @@ export const revealInFinder = async (path: string): Promise<void> => {
  */
 export const readFileContent = async (
   path: string,
-): Promise<{ content: string | null }> => {
+): Promise<{ content: string | null; truncated: boolean }> => {
   const bridge = getBridge();
-  if (!bridge || !path) return { content: null };
+  if (!bridge || !path) return { content: null, truncated: false };
   return (await bridge.invoke("read_file_content", { path })) as {
     content: string | null;
+    truncated: boolean;
   };
 };
 
