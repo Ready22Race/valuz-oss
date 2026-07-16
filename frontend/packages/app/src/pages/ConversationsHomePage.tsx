@@ -33,6 +33,7 @@ import {
 } from "@valuz/core";
 import { homeSuggestions } from "@valuz/app/lib/prototype-data";
 import { useTranslation } from "@valuz/core";
+import { assetUrl } from "@valuz/shared";
 import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
 import { OriginBadge } from "../components/ExecutionLocationPicker";
 import { ExecutionLocationBar } from "../components/ExecutionLocationBar";
@@ -386,7 +387,7 @@ export const ConversationsHomePage = () => {
         }
       `}</style>
       <img
-        src="./mascot-wave.png"
+        src={assetUrl("mascot-wave.png")}
         alt=""
         aria-hidden="true"
         className="mascot-fly-in pointer-events-none fixed right-6 top-[60px] z-30 h-[180px] w-auto select-none opacity-60"

@@ -42,6 +42,7 @@ import {
 import { DeleteConfirmDialog } from "../components/common/DeleteConfirmDialog";
 import type { NavLinkComponent } from "./AppShell";
 import { useI18n } from "../hooks/use-i18n";
+import { assetUrl } from "@valuz/shared";
 
 export interface DesktopSidebarItem {
   id: string;
@@ -666,7 +667,7 @@ export const DesktopSidebar = ({
   sidebarHeader,
   sidebarExtraItems,
   sidebarFooter,
-  mascotSrc = "./mascot.png",
+  mascotSrc,
   LinkComponent = DefaultNavLink,
   primaryActionHref = "/conversation/new",
   onPrimaryAction,
@@ -682,6 +683,7 @@ export const DesktopSidebar = ({
   collapsed = false,
 }: DesktopSidebarProps) => {
   const { t } = useI18n();
+  const resolvedMascotSrc = mascotSrc ?? assetUrl("mascot.png");
   const [projectRenamingId, setProjectRenamingId] = useState<string | null>(
     null,
   );
@@ -1270,9 +1272,9 @@ export const DesktopSidebar = ({
                 group and the list gets long, the nav scrolls over the
                 mascot — line-drawing bleeds through behind the
                 links so it's still felt without obscuring text. */}
-            {mascotSrc ? (
+            {resolvedMascotSrc ? (
               <img
-                src={mascotSrc}
+                src={resolvedMascotSrc}
                 alt=""
                 aria-hidden="true"
                 className="pointer-events-none absolute bottom-[64px] left-1/2 z-0 h-[170px] w-auto -translate-x-1/2 select-none opacity-60"
