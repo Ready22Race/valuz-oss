@@ -1,5 +1,6 @@
 import type { ServiceInfo, ServiceStatusType } from "@valuz/shared";
 import { t } from "@valuz/shared/i18n";
+import { assetUrl } from "@valuz/shared";
 import { WindowDragRegion, WindowControls } from "@valuz/ui";
 import { useEffect, useMemo, useState } from "react";
 import { usePlatform } from "@valuz/app/platform";
@@ -67,7 +68,6 @@ export const StartupScreen = ({
         </div>
       )}
 
-
       {/* Layer 1 — animated aurora */}
       <div className="splash-aurora splash-aurora-a" aria-hidden />
       <div className="splash-aurora splash-aurora-b" aria-hidden />
@@ -124,7 +124,7 @@ export const StartupScreen = ({
 
             <div className="splash-logo">
               <img
-                src="./logo.png"
+                src={assetUrl("logo.png")}
                 alt="Valuz"
                 className="splash-logo-mark"
                 draggable={false}
@@ -159,9 +159,7 @@ export const StartupScreen = ({
                   <div className="splash-progress-row">
                     <span className="splash-progress-label">
                       BOOT&nbsp;
-                      <span className="splash-progress-pct">
-                        {progress}%
-                      </span>
+                      <span className="splash-progress-pct">{progress}%</span>
                     </span>
                     <span className="splash-progress-meta">
                       {ready}/{total} services

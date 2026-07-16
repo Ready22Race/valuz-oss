@@ -36,6 +36,7 @@ import { SuggestionList } from "../common/SuggestionList";
 import { LogoShimmer } from "../common/PageLoader";
 import type { ConversationTurn, PrototypeToolCall } from "@valuz/shared";
 import {
+  assetUrl,
   summarizeSegmentPhrase,
   type ProcessingItem,
   type ToolCategory,
@@ -1227,7 +1228,7 @@ export function ConversationTurnList({
                   so an existing conversation still fetching its transcript (no
                   turns yet) doesn't flash this new-chat state mid-load. */}
               <img
-                src="./mascot.png"
+                src={assetUrl("mascot.png")}
                 alt=""
                 aria-hidden="true"
                 className="pointer-events-none mx-auto mb-6 h-[160px] w-auto select-none opacity-80"

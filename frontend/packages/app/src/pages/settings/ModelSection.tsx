@@ -22,6 +22,7 @@ import {
   IconBox,
 } from "@valuz/ui";
 import { useCapabilities, useTranslation } from "@valuz/core";
+import { assetUrl } from "@valuz/shared";
 import {
   useCliLoginFlow,
   type CliTool,
@@ -128,10 +129,10 @@ export const ModelSection = () => {
   const [modelOptionsLoaded, setModelOptionsLoaded] = useState(false);
   const [providers, setProviders] = useState<ProviderDescriptor[]>([]);
   const [addOpen, setAddOpen] = useState(false);
-  const [editProvider, setEditProvider] = useState<LLMChannelDetail | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<LLMChannel | null>(
+  const [editProvider, setEditProvider] = useState<LLMChannelDetail | null>(
     null,
   );
+  const [deleteTarget, setDeleteTarget] = useState<LLMChannel | null>(null);
   const [deleting, setDeleting] = useState(false);
 
   const loadProvidersList = useCallback(async () => {
@@ -826,7 +827,7 @@ export const ModelSection = () => {
                         {/* Icon */}
                         {isManaged ? (
                           <img
-                            src="./logo.png"
+                            src={assetUrl("logo.png")}
                             alt="Valuz"
                             className="h-9 w-9 shrink-0 object-contain"
                           />

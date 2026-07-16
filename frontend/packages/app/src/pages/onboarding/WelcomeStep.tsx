@@ -1,5 +1,6 @@
 import { ShieldCheck, Sparkles } from "lucide-react";
 import { useTranslation } from "@valuz/core";
+import { assetUrl } from "@valuz/shared";
 import { WELCOME_FEED, type FeedCard, type FeedStatus } from "./mock";
 
 /**
@@ -11,6 +12,8 @@ import { WELCOME_FEED, type FeedCard, type FeedStatus } from "./mock";
  */
 export const WelcomeStep = ({ onStart }: { onStart: () => void }) => {
   const { t } = useTranslation();
+  const logoUrl = assetUrl("logo.png");
+  const wordmarkUrl = assetUrl("valuz-wordmark.svg");
   return (
     <div className="relative grid min-h-screen grid-cols-1 overflow-hidden bg-background lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
       {/* ---------- Left: pitch ---------- */}
@@ -20,25 +23,21 @@ export const WelcomeStep = ({ onStart }: { onStart: () => void }) => {
           {/* Brand eyebrow */}
           <div className="mb-10 flex items-center gap-5">
             <img
-              src="./logo.png"
+              src={logoUrl}
               alt=""
               className="h-[60px] w-[60px] rounded-2xl"
               aria-hidden
             />
-            <img
-              src="./valuz-wordmark.svg"
-              alt="Valuz"
-              className="sr-only"
-            />
+            <img src={wordmarkUrl} alt="Valuz" className="sr-only" />
             <span
               className="h-[30px] w-[91px] -translate-x-[18px] translate-y-0.5 bg-ink-heading"
               aria-hidden
               style={{
-                maskImage: "url(./valuz-wordmark.svg)",
+                maskImage: `url(${wordmarkUrl})`,
                 maskRepeat: "no-repeat",
                 maskSize: "contain",
                 maskPosition: "center",
-                WebkitMaskImage: "url(./valuz-wordmark.svg)",
+                WebkitMaskImage: `url(${wordmarkUrl})`,
                 WebkitMaskRepeat: "no-repeat",
                 WebkitMaskSize: "contain",
                 WebkitMaskPosition: "center",
