@@ -51,7 +51,7 @@ function CardShell({
   children: ReactElement;
 }): ReactElement {
   return (
-    <div className="rounded-xl border border-surface-border bg-surface shadow-sm">
+    <div className="rounded-xl border border-surface-border bg-surface shadow-outline">
       <div className="flex flex-col gap-0.5 border-b border-surface-border bg-surface-soft/40 px-4 py-2.5">
         <div className="flex items-center gap-1.5 text-2xs font-medium text-ink-muted">
           {icon}
@@ -167,7 +167,7 @@ function FailureCard({ entry, onNavigateAway }: NotificationCardProps): ReactEle
 
   return (
     <CardShell
-      icon={<AlertTriangle className="h-3 w-3 text-red-500" />}
+      icon={<AlertTriangle className="h-3 w-3 text-error-text" />}
       label={t(
         (isTaskFailure
           ? "notification.kindFailure"
@@ -192,7 +192,7 @@ function FailureCard({ entry, onNavigateAway }: NotificationCardProps): ReactEle
           <Button
             size="sm"
             variant="ghost"
-            className="text-[12px]"
+            className="text-xs"
             onClick={() => void handleDismiss()}
             disabled={busy}
           >
@@ -203,7 +203,7 @@ function FailureCard({ entry, onNavigateAway }: NotificationCardProps): ReactEle
               <Button
                 size="sm"
                 variant="outline"
-                className="text-[12px]"
+                className="text-xs"
                 onClick={() => {
                   onNavigateAway?.();
                   if (entry.task_id) {
@@ -216,7 +216,7 @@ function FailureCard({ entry, onNavigateAway }: NotificationCardProps): ReactEle
               </Button>
               <Button
                 size="sm"
-                className="text-[12px]"
+                className="text-xs"
                 onClick={() => void handleResume()}
                 disabled={busy}
                 loading={busy}
