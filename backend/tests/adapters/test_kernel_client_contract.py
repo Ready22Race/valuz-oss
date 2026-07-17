@@ -35,6 +35,9 @@ EXPECTED_ROUTES: dict[str, tuple[str, str] | None] = {
     "submit_action": ("POST", "/kernel/v1/sessions/{session_id}/actions"),
     "interrupt": ("POST", "/kernel/v1/sessions/{session_id}/interrupt"),
     "run_turn": None,  # WS /kernel/v1/sessions/{session_id}/run
+    # Composite (create + run + delete) that reuses an existing scope's kernel
+    # without provisioning — no 1:1 endpoint; see memory review reuse.
+    "run_ephemeral_review_in_scope": None,
     "scan_orphan_pendings": None,
     "scan_orphan_runs": None,
     "cleanup_runtime": None,
