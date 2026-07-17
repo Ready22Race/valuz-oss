@@ -1646,7 +1646,10 @@
       "versionDeleted": "备份版本已删除",
       "filesRoot": "根目录",
       "filesEmpty": "（空）",
-      "downloadFile": "下载文件"
+      "downloadFile": "下载文件",
+      "chooseFolder": "选择文件夹",
+      "restoreStagedBanner": "恢复已安排：完全退出并重新打开应用后生效。",
+      "restartNow": "立即重启"
     }
   },
   "sidebar": {
@@ -2558,6 +2561,9 @@
     "kindFailure": "任务受阻",
     "resume": "恢复任务",
     "dismiss": "忽略",
-    "openTask": "查看任务"
+    "openTask": "查看任务",
+    "notifBackupFailedTitle": "本地备份失败",
+    "kindBackupFailed": "备份失败",
+    "openBackupSettings": "打开备份设置"
   }
 }

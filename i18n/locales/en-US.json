@@ -1646,7 +1646,10 @@
       "versionDeleted": "Backup version deleted",
       "filesRoot": "Root",
       "filesEmpty": "(empty)",
-      "downloadFile": "Download file"
+      "downloadFile": "Download file",
+      "chooseFolder": "Choose folder",
+      "restoreStagedBanner": "Restore staged: quit and reopen the app to apply.",
+      "restartNow": "Restart now"
     }
   },
   "sidebar": {
@@ -2558,6 +2561,9 @@
     "kindFailure": "Task blocked",
     "resume": "Resume task",
     "dismiss": "Dismiss",
-    "openTask": "Open task"
+    "openTask": "Open task",
+    "notifBackupFailedTitle": "Local backup failed",
+    "kindBackupFailed": "Backup failed",
+    "openBackupSettings": "Open backup settings"
   }
 }

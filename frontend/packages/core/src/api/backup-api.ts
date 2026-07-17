@@ -130,7 +130,7 @@ export const backupApi = {
   patchConfig(patch: BackupConfigPatch): Promise<BackupConfig> {
     return fetchJson(`/v1/backup/config`, {
       method: "PUT",
-      body: JSON.stringify(patch),
+      json: patch,
     });
   },
 
@@ -171,7 +171,7 @@ export const backupApi = {
   restore(versionId: string, dryRun = false): Promise<BackupRestoreResult> {
     return fetchJson(
       `/v1/backup/versions/${encodeURIComponent(versionId)}/restore`,
-      { method: "POST", body: JSON.stringify({ dry_run: dryRun }) },
+      { method: "POST", json: { dry_run: dryRun } },
     );
   },
 };

@@ -24,6 +24,7 @@ import {
   type BackupFrequency,
   type BackupVersionInfo,
 } from "@valuz/core";
+import { usePlatform } from "@valuz/app/platform";
 
 const FREQUENCIES: BackupFrequency[] = ["manual", "every_6h", "daily", "weekly"];
 
@@ -117,6 +118,7 @@ const VersionFileBrowser = ({ versionId }: { versionId: string }) => {
 
 export const BackupSection = () => {
   const { t } = useTranslation();
+  const platform = usePlatform();
   const [config, setConfig] = useState<BackupConfig | null>(null);
   const [versions, setVersions] = useState<BackupVersionInfo[]>([]);
   const [destinationDraft, setDestinationDraft] = useState("");
@@ -124,6 +126,8 @@ export const BackupSection = () => {
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [restoreTarget, setRestoreTarget] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Set after a restore is staged — drives the "restart to apply" banner.
+  const [restoreStaged, setRestoreStaged] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const load = useCallback(async () => {
@@ -206,7 +210,10 @@ export const BackupSection = () => {
     if (!restoreTarget) return;
     try {
       const res = await backupApi.restore(restoreTarget);
-      if (res.staged) toast.success(t("settings.backup.restoreStaged"));
+      if (res.staged) {
+        setRestoreStaged(true);
+        toast.success(t("settings.backup.restoreStaged"));
+      }
     } catch (err) {
       toast.error(
         err instanceof Error && err.message
@@ -216,6 +223,13 @@ export const BackupSection = () => {
     } finally {
       setRestoreTarget(null);
     }
+  };
+
+  const pickDestination = async () => {
+    const path = await platform.selectDirectory();
+    if (!path) return;
+    setDestinationDraft(path);
+    await patch({ destination: path });
   };
 
   if (!config) {
@@ -240,6 +254,21 @@ export const BackupSection = () => {
       {!config.supported && (
         <div className="mb-5 rounded-lg border border-warning-border bg-warning-light px-4 py-3 text-sm text-warning-text">
           {t("settings.backup.unsupported")}
+        </div>
+      )}
+
+      {restoreStaged && (
+        <div className="mb-5 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-warning-border bg-warning-light px-4 py-3 text-sm text-warning-text">
+          <span>{t("settings.backup.restoreStagedBanner")}</span>
+          {platform.relaunchApp && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void platform.relaunchApp?.()}
+            >
+              {t("settings.backup.restartNow")}
+            </Button>
+          )}
         </div>
       )}
 
@@ -315,6 +344,16 @@ export const BackupSection = () => {
                 onChange={(e) => setDestinationDraft(e.target.value)}
                 className="flex-1 font-mono text-xs"
               />
+              {platform.isElectron && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={!config.supported}
+                  onClick={() => void pickDestination()}
+                >
+                  {t("settings.backup.chooseFolder")}
+                </Button>
+              )}
               <Button
                 variant="outline"
                 size="sm"

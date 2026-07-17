@@ -61,6 +61,17 @@ export function notificationDisplay(entry: NotificationEntry): NotificationDispl
       tag: `run_failed:${entry.session_id ?? entry.id}`,
     };
   }
+  if (entry.kind === "backup_failed") {
+    return {
+      // Backend sends an empty title for this kind — the localized label is
+      // composed entirely here (the body carries the raw error).
+      title: _t("notification.notifBackupFailedTitle" as I18nKey),
+      body: entry.body,
+      route,
+      // One tag for all backup failures — repeats collapse in the OS.
+      tag: "backup_failed",
+    };
+  }
   // Unknown kind — render whatever the backend snapshotted.
   return { title: entry.title, body: entry.body, route, tag: `notif:${entry.id}` };
 }

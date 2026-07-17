@@ -36,7 +36,63 @@ export function NotificationCard({
   if (entry.kind === "question") {
     return <QuestionCard entry={entry} onNavigateAway={onNavigateAway} />;
   }
+  if (entry.kind === "backup_failed") {
+    return <BackupFailedCard entry={entry} onNavigateAway={onNavigateAway} />;
+  }
   return <FailureCard entry={entry} onNavigateAway={onNavigateAway} />;
+}
+
+function BackupFailedCard({
+  entry,
+  onNavigateAway,
+}: NotificationCardProps): ReactElement {
+  const { t } = useTranslation();
+  const navigate = useNavigate();
+
+  const handleDismiss = useCallback(async () => {
+    try {
+      await notificationsApi.dismiss(entry.id);
+    } catch {
+      // best-effort
+    }
+  }, [entry.id]);
+
+  return (
+    <CardShell
+      icon={<AlertTriangle className="h-3 w-3 text-error-text" />}
+      label={t("notification.kindBackupFailed" as I18nKey)}
+      title={t("notification.notifBackupFailedTitle" as I18nKey)}
+    >
+      <div className="flex flex-col gap-3 px-4 py-3">
+        {entry.body && (
+          <p className="whitespace-pre-wrap text-xs leading-5 text-ink-body">
+            {entry.body}
+          </p>
+        )}
+        <div className="flex items-center justify-end gap-2">
+          <Button
+            size="sm"
+            variant="ghost"
+            className="text-xs"
+            onClick={() => void handleDismiss()}
+          >
+            {t("notification.dismiss" as I18nKey)}
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="text-xs"
+            onClick={() => {
+              onNavigateAway?.();
+              navigate(entry.route ?? "/settings?tab=backup");
+            }}
+          >
+            {t("notification.openBackupSettings" as I18nKey)}
+          </Button>
+        </div>
+      </div>
+    </CardShell>
+  );
 }
 
 function CardShell({
