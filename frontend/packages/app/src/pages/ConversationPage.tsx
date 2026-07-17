@@ -54,7 +54,6 @@ import {
   type ProjectDetail,
   type ProjectListItem,
   type LLMChannel,
-  type LLMChannelDetail,
   type SkillView,
   type StagingSlugView,
   type StagingSyncStrategy,
@@ -861,7 +860,7 @@ export const ConversationPage = () => {
   // keys on this to keep re-subscribing until the LAST drained turn finishes —
   // not just while ``queue`` is non-empty (session-input-queue §14.5).
   const [queueDraining, setQueueDraining] = useState(false);
-  const [providers, setProviders] = useState<LLMChannelDetail[]>([]);
+  const [providers, setProviders] = useState<LLMChannel[]>([]);
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(
     null,
   );
@@ -3035,17 +3034,18 @@ export const ConversationPage = () => {
     }
     setError(null);
     try {
+      // One gated list request — the server applies the subscription-login
+      // gate across the whole list, replacing the old per-channel detail
+      // fan-out (1+N requests; each subscription detail paid a CLI login
+      // probe, adding seconds to every conversation open).
       const [wsResponse, chListResponse] = await Promise.all([
         projectsApi.list(),
-        providersApi.list().catch(() => ({ providers: [] as LLMChannel[] })),
+        providersApi
+          .list({ gated: true })
+          .catch(() => ({ providers: [] as LLMChannel[] })),
       ]);
       setProjects(wsResponse.projects);
-      const details = await Promise.all(
-        chListResponse.providers
-          .filter((c) => c.enabled)
-          .map((c) => providersApi.get(c.id).catch(() => null)),
-      );
-      setProviders(details.filter((d): d is LLMChannelDetail => d !== null));
+      setProviders(chListResponse.providers.filter((c) => c.enabled));
 
       // Two URL shapes drive the page:
       //

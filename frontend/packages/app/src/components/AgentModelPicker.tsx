@@ -4,7 +4,6 @@ import {
   useComposerProviders,
   useModelDefaults,
   useRuntimes,
-  type LLMChannelDetail,
   type LLMChannel,
   type RuntimeProvider,
 } from "@valuz/core";
@@ -55,7 +54,7 @@ export const AgentModelPicker = ({
   layout = "grid",
 }: AgentModelPickerProps) => {
   const { t } = useI18n();
-  const [providers, setProviders] = useState<LLMChannelDetail[]>([]);
+  const [providers, setProviders] = useState<LLMChannel[]>([]);
   const { runtimes } = useRuntimes();
   const { defaults } = useModelDefaults();
 
@@ -63,16 +62,11 @@ export const AgentModelPicker = ({
     let cancelled = false;
     void (async () => {
       try {
-        const list = await providersApi
-          .list()
-          .catch(() => ({ providers: [] as LLMChannel[] }));
-        const details = await Promise.all(
-          list.providers
-            .filter((p) => p.enabled)
-            .map((p) => providersApi.get(p.id).catch(() => null)),
-        );
+        // One gated list request (server-side subscription-login gate) —
+        // replaces the old per-channel detail fan-out.
+        const list = await providersApi.list({ gated: true });
         if (!cancelled) {
-          setProviders(details.filter((d): d is LLMChannelDetail => d !== null));
+          setProviders(list.providers.filter((p) => p.enabled));
         }
       } catch {
         if (!cancelled) setProviders([]);

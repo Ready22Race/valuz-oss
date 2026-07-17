@@ -79,12 +79,14 @@ async def _gate_subscription_login(channels: list[LLMChannel]) -> None:
     offer models that 422 at session creation. Clearing ``models`` /
     ``default_model`` leaves the card but removes the bad picks.
 
-    Applied on the **per-channel detail path** (``get_provider``) ONLY — that is
-    what the composer fetches. It is deliberately NOT applied to ``list_providers``:
-    that list feeds ``GET /v1/settings/model-options`` (onboarding ConnectStep +
-    Settings default-model picker), which already gate subscription rows
-    client-side on the keychain probe; stripping there drops the channel from
-    model-options and breaks the onboarding login card.
+    Applied on the **per-channel detail path** (``get_provider``) and on the
+    **opt-in gated list** (``list_providers(gated=True)``, the composer's
+    single-request feed — replaced the old 1+N detail fan-out). It is
+    deliberately NOT applied to the default ``list_providers``: that list feeds
+    ``GET /v1/settings/model-options`` (onboarding ConnectStep + Settings
+    default-model picker), which already gate subscription rows client-side on
+    the keychain probe; stripping there drops the channel from model-options
+    and breaks the onboarding login card.
 
     Mutates ``channels`` in place. Probes once per tool (cached); skipped entirely
     when subscription login is disabled (cloud / shared multi-user, no local
@@ -97,7 +99,14 @@ async def _gate_subscription_login(channels: list[LLMChannel]) -> None:
     present = {c.provider_kind for c in channels if c.provider_kind in _SUBSCRIPTION_KIND_TO_TOOL}
     if not present:
         return
-    logged_in = {kind: await detect_cli_login(_SUBSCRIPTION_KIND_TO_TOOL[kind]) for kind in present}
+    # Probe the CLIs concurrently — each cold probe is a subprocess spawn
+    # (seconds, Node CLI cold start), so sequential awaits stack claude+codex
+    # into one user-visible stall; gather pays only the slower of the two.
+    kinds = sorted(present)
+    results = await asyncio.gather(
+        *(detect_cli_login(_SUBSCRIPTION_KIND_TO_TOOL[kind]) for kind in kinds)
+    )
+    logged_in = dict(zip(kinds, results, strict=True))
     for c in channels:
         if c.provider_kind in _SUBSCRIPTION_KIND_TO_TOOL and not logged_in.get(c.provider_kind):
             c.models = []
@@ -437,7 +446,8 @@ def _load_subscription_models() -> dict[str, dict[str, Any]]:
         from valuz_agent.infra.fs_registry import fs_registry
         from valuz_agent.infra.local_identity import resolve_local_user_id
 
-        local_path = fs_registry.data_dir(resolve_local_user_id()) / "subscription_models.local.json"
+        local_dir = fs_registry.data_dir(resolve_local_user_id())
+        local_path = local_dir / "subscription_models.local.json"
         if local_path.is_file():
             with local_path.open("r", encoding="utf-8") as fh:
                 _ingest(json.load(fh))
@@ -1144,7 +1154,7 @@ class ProviderService:
 
     # ── Queries ──────────────────────────────────────────────────
 
-    async def list_providers(self, user_id: str) -> list[LLMChannel]:
+    async def list_providers(self, user_id: str, *, gated: bool = False) -> list[LLMChannel]:
         rows = await self._ds.list_providers(user_id)
         policy = ext.policy
         # When the caller's org locks custom models, hide their own
@@ -1181,13 +1191,21 @@ class ProviderService:
         hidden = await policy.hidden_provider_ids(combined, user_id=user_id)
         if hidden:
             combined = [it for it in combined if it.id not in hidden]
-        # NB: subscription-login gating is applied in ``get_provider`` (the
-        # per-channel detail the composer fetches), NOT here. The list feeds
-        # ``GET /v1/settings/model-options`` (onboarding ConnectStep + Settings
-        # default-model picker), which already gate subscription rows client-side
-        # on the CLI keychain probe (``status="client_resolved"`` +
-        # ``isModelProviderUsable``). Stripping models here would drop the channel
-        # from model-options entirely and break the onboarding login card.
+        # NB: by default subscription-login gating is NOT applied here — the
+        # bare list feeds ``GET /v1/settings/model-options`` (onboarding
+        # ConnectStep + Settings default-model picker), which already gate
+        # subscription rows client-side on the CLI keychain probe
+        # (``status="client_resolved"`` + ``isModelProviderUsable``). Stripping
+        # models there would drop the channel from model-options entirely and
+        # break the onboarding login card.
+        #
+        # ``gated=True`` (``GET /v1/providers?gated=1``) opts in to the same
+        # gate ``get_provider`` applies, so the composer surfaces can build
+        # their model pickers from ONE request instead of fanning out a
+        # per-channel detail fetch (1+N, each subscription detail paying a CLI
+        # login probe) on every conversation-page bootstrap.
+        if gated:
+            await _gate_subscription_login(combined)
         return combined
 
     async def get_provider(self, user_id: str, provider_id: str) -> LLMChannelDetail:
