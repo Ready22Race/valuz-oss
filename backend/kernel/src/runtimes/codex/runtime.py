@@ -363,6 +363,7 @@ class CodexRuntime:
             completed: TurnCompletedNotification | None = None
             error_message: str | None = None
             usage_payload: dict[str, Any] | None = None
+            saw_compaction = False
 
             # SDK declares ``stream()`` as ``AsyncIterator`` but always
             # returns an async generator; cast so we can call ``aclose``.
@@ -383,6 +384,8 @@ class CodexRuntime:
                         # ``/compact``).
                         if is_compact and event.type in ("text_delta", "assistant_message"):
                             continue
+                        if event.type == "compaction":
+                            saw_compaction = True
                         await self.event_sink.emit(event)
 
                     mcp_status = extract_mcp_server_status(notification)
@@ -492,8 +495,11 @@ class CodexRuntime:
             # ``compact_metadata``), so the marker is empty — we don't
             # synthesize trigger/pre_tokens. The real token counts are already
             # in the ``usage_update`` that follows; the upper layer can read
-            # them there if it wants.
-            if is_compact and completed is not None:
+            # them there if it wants. Skipped when the mapper already surfaced
+            # a marker from codex's native ``contextCompaction`` item this
+            # turn — this synthetic one is only the fallback for binaries
+            # that don't emit that item.
+            if is_compact and completed is not None and not saw_compaction:
                 await self.event_sink.emit(Event(type="compaction", data={}))
 
             if usage_payload is not None:
