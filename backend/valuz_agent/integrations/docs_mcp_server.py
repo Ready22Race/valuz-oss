@@ -53,12 +53,14 @@ from valuz_agent.integrations._mcp_asgi import (
     build_internal_mcp_asgi,
     get_current_mcp_session_id,
     get_current_mcp_user_id,
+    internal_mcp_transport_security,
 )
 
 logger = logging.getLogger(__name__)
 
 # Bound for the duration of one HTTP request by the ASGI wrapper in
 # ``mount_docs_mcp``. Tools read it to scope their datastore access.
+
 
 def _current_session_id() -> str:
     sid = get_current_mcp_session_id()
@@ -113,7 +115,7 @@ def _build_doc_service(db: Any, user_id: str) -> Any:  # type: ignore[no-untyped
 # FastMCP app — single module-level instance shared across sessions.
 # ---------------------------------------------------------------------------
 
-_mcp = FastMCP("valuz-project-docs")
+_mcp = FastMCP("valuz-project-docs", transport_security=internal_mcp_transport_security())
 
 
 @_mcp.tool()

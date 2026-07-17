@@ -24,12 +24,13 @@ from mcp.server.fastmcp import FastMCP
 from valuz_agent.integrations._mcp_asgi import (
     build_internal_mcp_asgi,
     get_current_mcp_user_id,
+    internal_mcp_transport_security,
 )
 from valuz_agent.modules.connectors.models import AuthType, TransportType
 
 logger = logging.getLogger(__name__)
 
-_mcp = FastMCP("valuz-connectors")
+_mcp = FastMCP("valuz-connectors", transport_security=internal_mcp_transport_security())
 
 
 def _current_user_id() -> str:

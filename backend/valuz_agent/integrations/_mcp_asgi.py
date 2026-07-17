@@ -7,9 +7,25 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from typing import Any
 
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import PlainTextResponse
 
 logger = logging.getLogger(__name__)
+
+
+def internal_mcp_transport_security() -> TransportSecuritySettings:
+    """Transport security for the built-in MCP servers: rebinding check off.
+
+    ``FastMCP`` auto-enables DNS-rebinding protection when constructed with its
+    default ``host="127.0.0.1"``, allowing only localhost ``Host`` headers — so
+    a kernel reaching the host callback through a public ingress hostname gets
+    ``421 Misdirected Request``. That protection defends *unauthenticated*
+    localhost servers against browsers; these endpoints are only reachable
+    through ``build_internal_mcp_asgi``, which rejects any request lacking a
+    valid per-owner signed token, and the deployment's public hostname isn't
+    knowable here. Auth stays with the token wrapper; the Host allowlist is off.
+    """
+    return TransportSecuritySettings(enable_dns_rebinding_protection=False)
 
 
 @dataclass(frozen=True)
@@ -132,6 +148,7 @@ def build_internal_mcp_asgi(inner: Any) -> Any:
 __all__ = [
     "BuiltinMCPContext",
     "build_internal_mcp_asgi",
+    "internal_mcp_transport_security",
     "get_current_mcp_context",
     "get_current_mcp_session_id",
     "get_current_mcp_user_id",
