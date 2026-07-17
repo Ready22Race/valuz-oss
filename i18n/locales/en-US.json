@@ -1586,10 +1586,68 @@
       "systemLogs": {
         "desc": "Backend status & log stream",
         "label": "System Logs"
+      },
+      "backup": {
+        "label": "Backup",
+        "desc": "Local data backup & restore"
       }
     },
     "timezone": "Timezone",
-    "title": "Settings"
+    "title": "Settings",
+    "backup": {
+      "unsupported": "Local backup is unavailable for this deployment (external database / remote kernel)",
+      "loadFailed": "Failed to load backup info",
+      "saveFailed": "Save failed",
+      "enabledLabel": "Automatic backup",
+      "enabledDesc": "Back up the database, conversation history, skills and documents on a schedule",
+      "frequencyLabel": "Frequency",
+      "frequencyDesc": "Missed windows run on the next app start",
+      "frequency": {
+        "manual": "Manual only",
+        "every_6h": "Every 6 hours",
+        "daily": "Daily",
+        "weekly": "Weekly"
+      },
+      "destinationLabel": "Destination",
+      "destinationDesc": "Must be outside the app data directory; an external drive works",
+      "scopeManagedProjects": "Managed project folders",
+      "scopeManagedProjectsDesc": "Back up app-managed project files under ~/Valuz",
+      "scopeExternalProjects": "External bound projects",
+      "scopeExternalProjectsDesc": "Back up external folders bound to projects (can be large; off by default)",
+      "scopeUserSkills": "User skill library",
+      "scopeUserSkillsDesc": "Back up custom skills under ~/.agents/skills",
+      "secretsExcludedNote": "For security, credentials (secrets such as API keys) are never included in backups; you will need to sign in again after a restore.",
+      "lastRun": "Last backup",
+      "lastRunFailed": "failed",
+      "nextRun": "Next backup",
+      "usage": "{count} versions · {size} total",
+      "runNow": "Back up now",
+      "running": "Backing up… {size}",
+      "runStarted": "Backup started",
+      "runFailed": "Failed to start backup",
+      "versionsTitle": "Backup versions",
+      "versionsEmpty": "No backup versions yet",
+      "versionCounts": "{sessions} sessions · {documents} docs · {skills} skills",
+      "kind": {
+        "manual": "manual",
+        "pre_restore": "pre-restore",
+        "scheduled": "auto"
+      },
+      "restore": "Restore",
+      "restoreTitle": "Restore this backup version?",
+      "restoreDesc": "Current data will be replaced by this version. A safety snapshot of the current data is taken first; the restore applies on the next app start.",
+      "restoreConfirm": "Restore",
+      "restoreStaged": "Restore staged — restart the app to apply",
+      "restoreFailed": "Restore request failed",
+      "restoreDone": "Restored from backup {version}",
+      "restoreError": "Last restore failed: {error}",
+      "deleteTitle": "Delete this backup version?",
+      "deleteDesc": "The backed-up content of this version cannot be recovered after deletion.",
+      "versionDeleted": "Backup version deleted",
+      "filesRoot": "Root",
+      "filesEmpty": "(empty)",
+      "downloadFile": "Download file"
+    }
   },
   "sidebar": {
     "automation": "Automation",

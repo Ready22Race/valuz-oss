@@ -193,6 +193,18 @@ async def project_name_map(user_id: str) -> dict[str, str]:
     return {row.id: row.name for row in rows}
 
 
+async def project_root_paths(user_id: str) -> list[tuple[str, str, str | None]]:
+    """Return ``(project_id, kind, root_path)`` triples for every project —
+    used by the backup module to resolve which external bound folders fall
+    inside the user's backup scope, without exposing the project datastore."""
+    from valuz_agent.infra.db import async_unit_of_work
+    from valuz_agent.modules.projects.datastore import ProjectDatastore
+
+    async with async_unit_of_work(commit=False) as db:
+        rows = await ProjectDatastore(db).list_projects(user_id)
+    return [(row.id, row.kind, row.root_path) for row in rows]
+
+
 async def project_brief_by_id(user_id: str, project_id: str) -> tuple[str, str, str | None] | None:
     """Return ``(kind, name, instructions_md)`` for project-scoped collaborators."""
     from valuz_agent.infra.db import async_unit_of_work

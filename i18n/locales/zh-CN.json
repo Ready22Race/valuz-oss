@@ -1586,10 +1586,68 @@
       "systemLogs": {
         "desc": "后端状态与日志流",
         "label": "服务日志"
+      },
+      "backup": {
+        "label": "备份",
+        "desc": "本地数据备份与恢复"
       }
     },
     "timezone": "时区",
-    "title": "设置"
+    "title": "设置",
+    "backup": {
+      "unsupported": "当前部署形态（外部数据库 / 远程 kernel）暂不支持本地备份",
+      "loadFailed": "加载备份信息失败",
+      "saveFailed": "保存失败",
+      "enabledLabel": "自动备份",
+      "enabledDesc": "按设定频率自动备份数据库、对话历史、技能与文档等本地数据",
+      "frequencyLabel": "备份频率",
+      "frequencyDesc": "错过的备份窗口会在下次启动应用时补跑",
+      "frequency": {
+        "manual": "仅手动",
+        "every_6h": "每 6 小时",
+        "daily": "每天",
+        "weekly": "每周"
+      },
+      "destinationLabel": "备份位置",
+      "destinationDesc": "必须位于应用数据目录之外，可指向外置磁盘",
+      "scopeManagedProjects": "托管项目目录",
+      "scopeManagedProjectsDesc": "备份 ~/Valuz 下由应用管理的项目文件",
+      "scopeExternalProjects": "外部绑定项目",
+      "scopeExternalProjectsDesc": "备份绑定到项目的外部文件夹（可能很大，默认关闭）",
+      "scopeUserSkills": "用户技能库",
+      "scopeUserSkillsDesc": "备份 ~/.agents/skills 下的自建技能",
+      "secretsExcludedNote": "出于安全考虑，API 密钥等凭据（secrets）永远不会包含在备份中；恢复后需要重新登录。",
+      "lastRun": "上次备份",
+      "lastRunFailed": "失败",
+      "nextRun": "下次备份",
+      "usage": "{count} 个版本 · 共 {size}",
+      "runNow": "立即备份",
+      "running": "备份中… {size}",
+      "runStarted": "备份已开始",
+      "runFailed": "备份启动失败",
+      "versionsTitle": "备份版本",
+      "versionsEmpty": "还没有备份版本",
+      "versionCounts": "{sessions} 会话 · {documents} 文档 · {skills} 技能",
+      "kind": {
+        "manual": "手动",
+        "pre_restore": "恢复前快照",
+        "scheduled": "自动"
+      },
+      "restore": "恢复",
+      "restoreTitle": "恢复此备份版本？",
+      "restoreDesc": "将用该版本覆盖当前数据。恢复前会自动创建一份当前数据的安全快照，恢复在下次启动应用时生效。",
+      "restoreConfirm": "恢复",
+      "restoreStaged": "恢复已安排，重启应用后生效",
+      "restoreFailed": "恢复请求失败",
+      "restoreDone": "已从备份 {version} 恢复",
+      "restoreError": "上次恢复失败：{error}",
+      "deleteTitle": "删除此备份版本？",
+      "deleteDesc": "删除后无法找回该版本的备份内容。",
+      "versionDeleted": "备份版本已删除",
+      "filesRoot": "根目录",
+      "filesEmpty": "（空）",
+      "downloadFile": "下载文件"
+    }
   },
   "sidebar": {
     "automation": "自动化",

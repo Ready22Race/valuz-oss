@@ -56,6 +56,21 @@ KEY_MEMORY_AUTO_EXTRACT = "memory.auto_extract"
 # it (never injected into normal turns). Capped to keep the review prompt bounded.
 KEY_MEMORY_CUSTOM_INSTRUCTIONS = "memory.custom_instructions"
 MEMORY_CUSTOM_INSTRUCTIONS_MAX_CHARS = 1500
+# Local backup (docs/design/client-local-backup.md §6). Config keys are
+# user-tunable; the ``last_run`` / ``next_run_at`` pair is runtime state the
+# scheduler + service maintain. Structured values (scope / retention /
+# last_run) are stored as a JSON string inside the usual ``{"value": ...}``
+# envelope — the backup module owns their shape (``modules/backup/schemas``).
+KEY_BACKUP_ENABLED = "backup.enabled"
+KEY_BACKUP_FREQUENCY = "backup.frequency"
+KEY_BACKUP_DESTINATION = "backup.destination"
+KEY_BACKUP_SCOPE = "backup.scope"
+KEY_BACKUP_RETENTION = "backup.retention"
+KEY_BACKUP_LAST_RUN = "backup.last_run"
+KEY_BACKUP_NEXT_RUN_AT = "backup.next_run_at"
+
+BACKUP_FREQUENCY_VALUES = ("manual", "every_6h", "daily", "weekly")
+FALLBACK_BACKUP_FREQUENCY = "daily"
 
 FALLBACK_TIMEZONE = "UTC"
 FALLBACK_LOCALE = "zh-CN"
@@ -360,6 +375,94 @@ async def set_memory_custom_instructions(
     )
 
 
+
+
+# ── local backup preferences ─────────────────────────────────────────
+
+
+async def get_backup_enabled(db: AsyncSession, user_id: str | None = None) -> bool:
+    """Backup master switch (default OFF — the user opts in from Settings)."""
+    return await _read_bool(db, KEY_BACKUP_ENABLED, False, user_id=user_id)
+
+
+async def set_backup_enabled(db: AsyncSession, value: bool, user_id: str | None = None) -> None:
+    await _write(db, KEY_BACKUP_ENABLED, "true" if value else "false", user_id=user_id)
+
+
+async def get_backup_frequency(db: AsyncSession, user_id: str | None = None) -> str:
+    raw = await _read(db, KEY_BACKUP_FREQUENCY, user_id=user_id)
+    return raw if raw in BACKUP_FREQUENCY_VALUES else FALLBACK_BACKUP_FREQUENCY
+
+
+async def set_backup_frequency(db: AsyncSession, value: str, user_id: str | None = None) -> None:
+    if value not in BACKUP_FREQUENCY_VALUES:
+        raise ValueError(
+            f"backup frequency must be one of {BACKUP_FREQUENCY_VALUES}, got {value!r}"
+        )
+    await _write(db, KEY_BACKUP_FREQUENCY, value, user_id=user_id)
+
+
+async def get_backup_destination(db: AsyncSession, user_id: str | None = None) -> str | None:
+    """User-chosen destination root, or None → the FsRegistry default."""
+    return await _read(db, KEY_BACKUP_DESTINATION, user_id=user_id) or None
+
+
+async def set_backup_destination(
+    db: AsyncSession, value: str, user_id: str | None = None
+) -> None:
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError("backup destination cannot be empty")
+    await _write(db, KEY_BACKUP_DESTINATION, cleaned, user_id=user_id)
+
+
+async def _read_json(db: AsyncSession, key: str, user_id: str | None = None) -> dict | None:
+    raw = await _read(db, key, user_id=user_id)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+async def get_backup_scope(db: AsyncSession, user_id: str | None = None) -> dict | None:
+    return await _read_json(db, KEY_BACKUP_SCOPE, user_id=user_id)
+
+
+async def set_backup_scope(db: AsyncSession, value: dict, user_id: str | None = None) -> None:
+    await _write(db, KEY_BACKUP_SCOPE, json.dumps(value), user_id=user_id)
+
+
+async def get_backup_retention(db: AsyncSession, user_id: str | None = None) -> dict | None:
+    return await _read_json(db, KEY_BACKUP_RETENTION, user_id=user_id)
+
+
+async def set_backup_retention(db: AsyncSession, value: dict, user_id: str | None = None) -> None:
+    await _write(db, KEY_BACKUP_RETENTION, json.dumps(value), user_id=user_id)
+
+
+async def get_backup_last_run(db: AsyncSession, user_id: str | None = None) -> dict | None:
+    return await _read_json(db, KEY_BACKUP_LAST_RUN, user_id=user_id)
+
+
+async def set_backup_last_run(db: AsyncSession, value: dict, user_id: str | None = None) -> None:
+    await _write(db, KEY_BACKUP_LAST_RUN, json.dumps(value), user_id=user_id)
+
+
+async def get_backup_next_run_at(db: AsyncSession, user_id: str | None = None) -> int | None:
+    raw = await _read(db, KEY_BACKUP_NEXT_RUN_AT, user_id=user_id)
+    try:
+        return int(raw) if raw else None
+    except ValueError:
+        return None
+
+
+async def set_backup_next_run_at(
+    db: AsyncSession, value: int | None, user_id: str | None = None
+) -> None:
+    await _write(db, KEY_BACKUP_NEXT_RUN_AT, str(value) if value else "", user_id=user_id)
 
 
 def detect_system_timezone() -> str:

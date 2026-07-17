@@ -27,6 +27,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # ``ensure_local_identity`` caches the id (else the cached id mismatches the
     # migrated rows' owner and breaks the official-skills reindex).
     steps.migrate_data_dir()
+    # Staged backup restore applies here: after the data-dir cutover, before
+    # identity caches the owner id and before any engine opens the SQLite
+    # files (it replaces them at file level).
+    steps.apply_backup_restore()
     steps.ensure_local_identity()  # seed owner ctx before any insert
     await steps.bootstrap_schema()
     await steps.configure_i18n()

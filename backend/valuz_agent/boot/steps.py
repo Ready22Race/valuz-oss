@@ -178,6 +178,23 @@ def migrate_data_dir() -> None:
     migrate_unscoped_data_root()
 
 
+def apply_backup_restore() -> None:
+    """Apply a staged local-backup restore, if one is pending.
+
+    Runs under the single-writer lock, AFTER the data-dir cutover and BEFORE
+    ``ensure_local_identity`` / any engine opens the SQLite files — a restore
+    replaces ``valuz.db`` / ``kernel.db`` / ``installation.json`` at file
+    level, which is only safe while nothing has them open. No-op (one ``stat``)
+    when nothing is pending. See docs/design/client-local-backup.md §8.
+    """
+    if not _startup_user_content_enabled():
+        return
+
+    from valuz_agent.boot.backup_restore import apply_pending_backup_restore
+
+    apply_pending_backup_restore()
+
+
 async def bootstrap_schema() -> None:
     """Host schema bootstrap — run alembic on both the kernel and host
     chains, then seed.
@@ -675,6 +692,10 @@ async def start_automation_runner(app: FastAPI) -> None:
 
     start_skill_auto_scan()
 
+    from valuz_agent.modules.backup.scheduler import start_backup_scheduler
+
+    start_backup_scheduler()
+
 
 async def start_polling_scheduler() -> None:
     """Start the parser polling scheduler's on-loop tick task. Used only
@@ -845,6 +866,10 @@ async def stop_automation_runner(app: FastAPI) -> None:
     from valuz_agent.modules.skills.scheduler import stop_skill_auto_scan
 
     stop_skill_auto_scan()
+
+    from valuz_agent.modules.backup.scheduler import stop_backup_scheduler
+
+    stop_backup_scheduler()
 
     watcher = getattr(app.state, "skill_watcher", None)
     if watcher is not None:

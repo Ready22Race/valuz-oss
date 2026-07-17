@@ -20,6 +20,7 @@ from valuz_agent.api.routes.agent_templates import router as agent_templates_rou
 from valuz_agent.api.routes.agents import router as agents_router
 from valuz_agent.api.routes.analytics import router as analytics_router
 from valuz_agent.api.routes.automations import router as automations_router
+from valuz_agent.api.routes.backup import router as backup_router
 from valuz_agent.api.routes.browser import router as browser_router
 from valuz_agent.api.routes.connectors import router as connectors_router
 from valuz_agent.api.routes.docs import router as docs_router
@@ -160,6 +161,7 @@ def create_app(
     api.include_router(skills_router)
     api.include_router(docs_router)
     api.include_router(automations_router)
+    api.include_router(backup_router)
     api.include_router(notifications_router)
     api.include_router(agents_router)
     api.include_router(agent_templates_router)
