@@ -96,3 +96,31 @@ export function useNotificationInbox(): void {
     // No teardown — the subscription lives for the app's whole lifetime.
   }, []);
 }
+
+/**
+ * Mark every open, unread notification for ``sessionId`` read — the badge-clear
+ * that fires when the user opens the conversation the notification points at
+ * (direct link, notification card, or the conversation list all land on the
+ * same page). Without this the ``markRead`` endpoint was never called from
+ * anywhere, so the unread badge lingered after the user had clearly seen the
+ * item.
+ *
+ * Optimistic: flips the store entry's ``read_at`` immediately so the derived
+ * unread badge decrements without waiting for the ~2.5s SSE re-snapshot, then
+ * persists each read via the REST endpoint. Marking read only clears the unread
+ * state — the entry stays OPEN in the drawer until it is resolved/dismissed.
+ * Fire-and-forget: a failed persist self-heals on the next snapshot (which
+ * re-reads ``read_at`` from the durable ledger). No-op when nothing matches.
+ */
+export function markSessionNotificationsRead(sessionId: string): void {
+  if (!sessionId) return;
+  const store = useNotificationStore.getState();
+  const now = Date.now();
+  for (const entry of store.entries.values()) {
+    if (entry.session_id !== sessionId || entry.read_at != null) continue;
+    store.update({ ...entry, read_at: now });
+    notificationsApi.markRead(entry.id).catch(() => {
+      // Non-fatal — the next SSE snapshot reconciles read_at from the ledger.
+    });
+  }
+}
