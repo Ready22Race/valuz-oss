@@ -115,7 +115,14 @@ def _build_doc_service(db: Any, user_id: str) -> Any:  # type: ignore[no-untyped
 # FastMCP app — single module-level instance shared across sessions.
 # ---------------------------------------------------------------------------
 
-_mcp = FastMCP("valuz-project-docs", transport_security=internal_mcp_transport_security())
+_mcp = FastMCP(
+    "valuz-project-docs",
+    transport_security=internal_mcp_transport_security(),
+    # Stateless like the toolkit server: session state in process memory 404s
+    # any follow-up request that lands on another replica/worker behind a
+    # load balancer (client surfaces it as "McpError: Session terminated").
+    stateless_http=True,
+)
 
 
 @_mcp.tool()

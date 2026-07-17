@@ -626,7 +626,14 @@ async def _dispatch(payload: AutomationToolPayload) -> AutomationToolResult:
 # ---------------------------------------------------------------------------
 
 
-_mcp = FastMCP("valuz-automations", transport_security=internal_mcp_transport_security())
+_mcp = FastMCP(
+    "valuz-automations",
+    transport_security=internal_mcp_transport_security(),
+    # Stateless like the toolkit server: session state in process memory 404s
+    # any follow-up request that lands on another replica/worker behind a
+    # load balancer (client surfaces it as "McpError: Session terminated").
+    stateless_http=True,
+)
 
 
 _AUTOMATION_DESCRIPTION = """Manage the user's automations (recurring or
