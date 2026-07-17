@@ -43,7 +43,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # long-lived runners
     await steps.start_mcp_session_managers(app)
-    await steps.start_automation_runner(app)
+    await steps.start_automation_runtime(app)
+    await steps.start_host_background_services(app)
     await steps.start_polling_scheduler()
     steps.warm_parse_pool()
     steps.warm_token_estimator()
@@ -65,7 +66,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     set_draining()
     await steps.stop_managed_browser()
     await steps.stop_decision_aggregator(app)
-    await steps.stop_automation_runner(app)
+    await steps.stop_host_background_services(app)
+    await steps.stop_automation_runtime(app)
     steps.shutdown_parse_pool()
     await steps.stop_polling_scheduler()
     await steps.stop_mcp_session_managers(app)

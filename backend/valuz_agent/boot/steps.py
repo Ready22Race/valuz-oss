@@ -643,20 +643,15 @@ async def stop_mcp_session_managers(app: FastAPI) -> None:
         app.state.docs_mcp_stack = None
 
 
-async def start_automation_runner(app: FastAPI) -> None:
-    from valuz_agent.modules.automations.failure_monitor import (
-        automation_failure_monitor,
-    )
-    from valuz_agent.modules.automations.in_process_runner import (
-        automation_runner,
-    )
+async def start_automation_runtime(app: FastAPI) -> None:
+    """Start the deployment-bound automation scheduling/runtime transport."""
+    from valuz_agent.ports.extensions import ext
 
-    await automation_runner.startup()
-    # ADR-012: auto-pause runaway-failing automations. Lives alongside
-    # the runner; same lifecycle, no shared state, single SQLite writer
-    # (ADR-011) keeps DB access safe.
-    await automation_failure_monitor.startup()
+    await ext.automation_runtime.startup()
 
+
+async def start_host_background_services(app: FastAPI) -> None:
+    """Start non-automation host monitors and optional content scanners."""
     # Task watchdog: detect a lead that died without finalizing (the hole boot
     # recovery can't see mid-process) → mark blocked so it surfaces + resumes.
     from valuz_agent.modules.tasks.health_monitor import task_health_monitor
@@ -674,6 +669,12 @@ async def start_automation_runner(app: FastAPI) -> None:
     from valuz_agent.modules.skills.scheduler import start_skill_auto_scan
 
     start_skill_auto_scan()
+
+
+async def start_automation_runner(app: FastAPI) -> None:
+    """Backward-compatible aggregate used by older embedding tests/callers."""
+    await start_automation_runtime(app)
+    await start_host_background_services(app)
 
 
 async def start_polling_scheduler() -> None:
@@ -825,18 +826,18 @@ async def start_skills(app: FastAPI) -> None:
     asyncio.get_event_loop().create_task(watcher.start())
 
 
-async def stop_automation_runner(app: FastAPI) -> None:
-    from valuz_agent.modules.automations.failure_monitor import (
-        automation_failure_monitor,
-    )
-    from valuz_agent.modules.automations.in_process_runner import (
-        automation_runner,
-    )
+async def stop_automation_runtime(app: FastAPI) -> None:
+    """Stop the deployment-bound automation scheduling/runtime transport."""
+    from valuz_agent.ports.extensions import ext
+
+    await ext.automation_runtime.shutdown()
+
+
+async def stop_host_background_services(app: FastAPI) -> None:
+    """Stop non-automation host monitors and optional content scanners."""
     from valuz_agent.modules.tasks.health_monitor import task_health_monitor
 
     await task_health_monitor.shutdown()
-    await automation_failure_monitor.shutdown()
-    await automation_runner.shutdown()
 
     from valuz_agent.modules.docs.scheduler import stop_auto_discovery
 
@@ -849,6 +850,12 @@ async def stop_automation_runner(app: FastAPI) -> None:
     watcher = getattr(app.state, "skill_watcher", None)
     if watcher is not None:
         await watcher.stop()
+
+
+async def stop_automation_runner(app: FastAPI) -> None:
+    """Backward-compatible aggregate used by older embedding tests/callers."""
+    await stop_host_background_services(app)
+    await stop_automation_runtime(app)
 
 
 async def start_decision_aggregator(app: FastAPI) -> None:

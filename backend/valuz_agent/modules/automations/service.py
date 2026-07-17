@@ -78,6 +78,8 @@ from valuz_agent.modules.automations.triggers import (
     TriggerEvaluator,
 )
 from valuz_agent.modules.projects.service import ProjectService
+from valuz_agent.ports.automation_runtime import AutomationRunCommand
+from valuz_agent.ports.extensions import ext
 
 
 def _normalise_tz(value: str | None) -> str | None:
@@ -1088,17 +1090,13 @@ class AutomationService:
         against two rapid "run now" clicks racing each other.
         """
         user_id = self._require_user_id(user_id)
-        from valuz_agent.modules.automations.in_process_runner import (
-            automation_runner,
-        )
-
-        row = await self._ds.get_automation(user_id, automation_id)
+        row = await self._ds.get_automation_for_update(user_id, automation_id)
         if row is None:
             raise AutomationNotFound()
         if row.status != "enabled":
             raise AutomationPaused()
 
-        existing = await self._ds.last_run(user_id, automation_id)
+        existing = await self._ds.active_run(user_id, automation_id)
         if existing is not None:
             if existing.status == "queued":
                 raise AutomationAlreadyQueued()
@@ -1123,7 +1121,13 @@ class AutomationService:
             run_id=run.id,
         )
 
-        automation_runner.enqueue_threadsafe(automation_id, run.id, user_id)
+        await ext.automation_runtime.enqueue(
+            AutomationRunCommand(
+                user_id=user_id,
+                automation_id=automation_id,
+                run_id=run.id,
+            )
+        )
         return AutomationRunAcceptedResponse(
             run_id=run.id, automation_id=automation_id, status="queued"
         )

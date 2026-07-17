@@ -285,17 +285,16 @@ async def test_start_skills_uses_startup_flag_not_deployment_type(monkeypatch) -
 
 
 @pytest.mark.asyncio
-async def test_start_automation_runner_keeps_runner_but_skips_scanners(monkeypatch) -> None:
+async def test_start_automation_runtime_uses_bound_port(monkeypatch) -> None:
     settings.initialize_user_content_on_startup = False
     calls: list[str] = []
 
+    from valuz_agent.ports.extensions import ext
+
     monkeypatch.setattr(
-        "valuz_agent.modules.automations.in_process_runner.automation_runner.startup",
-        lambda: _async_call(calls, "runner"),
-    )
-    monkeypatch.setattr(
-        "valuz_agent.modules.automations.failure_monitor.automation_failure_monitor.startup",
-        lambda: _async_call(calls, "failure-monitor"),
+        ext.automation_runtime,
+        "startup",
+        lambda: _async_call(calls, "automation-runtime"),
     )
     monkeypatch.setattr(
         "valuz_agent.modules.docs.scheduler.start_auto_discovery",
@@ -306,9 +305,32 @@ async def test_start_automation_runner_keeps_runner_but_skips_scanners(monkeypat
         lambda: (_ for _ in ()).throw(AssertionError("skill scanner must not start")),
     )
 
-    await steps.start_automation_runner(SimpleNamespace())
+    await steps.start_automation_runtime(SimpleNamespace())
 
-    assert calls == ["runner", "failure-monitor"]
+    assert calls == ["automation-runtime"]
+
+
+@pytest.mark.asyncio
+async def test_host_background_services_skip_scanners_when_disabled(monkeypatch) -> None:
+    settings.initialize_user_content_on_startup = False
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        "valuz_agent.modules.tasks.health_monitor.task_health_monitor.startup",
+        lambda: _async_call(calls, "task-health"),
+    )
+    monkeypatch.setattr(
+        "valuz_agent.modules.docs.scheduler.start_auto_discovery",
+        lambda: (_ for _ in ()).throw(AssertionError("docs scanner must not start")),
+    )
+    monkeypatch.setattr(
+        "valuz_agent.modules.skills.scheduler.start_skill_auto_scan",
+        lambda: (_ for _ in ()).throw(AssertionError("skill scanner must not start")),
+    )
+
+    await steps.start_host_background_services(SimpleNamespace())
+
+    assert calls == ["task-health"]
 
 
 @pytest.mark.asyncio

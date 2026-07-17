@@ -50,6 +50,8 @@ from valuz_agent.modules.automations.schemas import (
     ManualTrigger,
 )
 from valuz_agent.modules.automations.service import AutomationService
+from valuz_agent.ports.automation_runtime import AutomationRunCommand
+from valuz_agent.ports.extensions import ext
 
 TEST_USER_ID = "local-test-owner"
 
@@ -78,6 +80,11 @@ class FakeAutomationDatastore:
     async def get_automation(self, user_id: str, automation_id: str) -> AutomationRow | None:
         return self.rows.get(automation_id)
 
+    async def get_automation_for_update(
+        self, user_id: str, automation_id: str
+    ) -> AutomationRow | None:
+        return self.rows.get(automation_id)
+
     async def create_automation(self, user_id: str, row: AutomationRow) -> AutomationRow:
         self.rows[row.id] = row
         return row
@@ -101,6 +108,18 @@ class FakeAutomationDatastore:
 
     async def last_run(self, user_id: str, automation_id: str) -> AutomationRunRow | None:
         candidates = [r for r in self.runs.values() if r.automation_id == automation_id]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda r: r.triggered_at)
+
+    async def active_run(
+        self, user_id: str, automation_id: str
+    ) -> AutomationRunRow | None:
+        candidates = [
+            r
+            for r in self.runs.values()
+            if r.automation_id == automation_id and r.status in {"queued", "running"}
+        ]
         if not candidates:
             return None
         return max(candidates, key=lambda r: r.triggered_at)
@@ -139,6 +158,20 @@ class FakeAutomationDatastore:
             return []
         wanted = set(tool_call_ids)
         return [r for r in self.rows.values() if r.origin_tool_call_id in wanted]
+
+
+class CapturingAutomationRuntime:
+    def __init__(self) -> None:
+        self.commands: list[AutomationRunCommand] = []
+
+    async def startup(self) -> None:
+        pass
+
+    async def shutdown(self) -> None:
+        pass
+
+    async def enqueue(self, command: AutomationRunCommand) -> None:
+        self.commands.append(command)
 
 
 class FakeProject:
@@ -314,6 +347,30 @@ def _chat_lib_payload(**overrides: Any) -> AutomationCreatePayload:
     }
     base.update(overrides)
     return AutomationCreatePayload(**base)
+
+
+class TestRunNowRuntimePort:
+    async def test_should_enqueue_explicit_owner_command(
+        self,
+        service: AutomationService,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        detail = await service.create(
+            _project_payload(trigger=ManualTrigger()),
+            user_id=TEST_USER_ID,
+        )
+        runtime = CapturingAutomationRuntime()
+        monkeypatch.setattr(ext, "automation_runtime", runtime)
+
+        accepted = await service.run_now(detail.automation_id, user_id=TEST_USER_ID)
+
+        assert runtime.commands == [
+            AutomationRunCommand(
+                user_id=TEST_USER_ID,
+                automation_id=detail.automation_id,
+                run_id=accepted.run_id,
+            )
+        ]
 
 
 # ── Resolution: project + project_member ────────────────────────────
