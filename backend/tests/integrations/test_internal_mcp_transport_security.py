@@ -1,13 +1,22 @@
-"""The built-in MCP servers must accept requests via any public hostname.
+"""The built-in MCP servers must work behind a multi-replica public ingress.
 
-``FastMCP`` auto-enables DNS-rebinding protection when built with its default
-``host="127.0.0.1"`` — only localhost ``Host`` headers pass, so a sandbox
-kernel reaching the host callback through a public ingress hostname got
-``421 Misdirected Request`` on ``/_internal/mcp/{docs,automations,connectors}``
-(the toolkit server was unaffected: it builds a raw ``Server`` with no
-security settings). Auth for these endpoints lives in
-``build_internal_mcp_asgi``'s per-owner token check, so the Host allowlist
-must stay off — these tests pin that.
+Two FastMCP defaults break that deployment, and both bit on
+``/_internal/mcp/{docs,automations,connectors}`` while the toolkit server
+(raw ``Server`` + stateless session manager, no security settings) kept
+working:
+
+- ``FastMCP`` auto-enables DNS-rebinding protection when built with its
+  default ``host="127.0.0.1"`` — only localhost ``Host`` headers pass, so a
+  sandbox kernel reaching the host callback through a public ingress hostname
+  got ``421 Misdirected Request``. Auth for these endpoints lives in
+  ``build_internal_mcp_asgi``'s per-owner token check, so the Host allowlist
+  must stay off.
+- ``stateless_http`` defaults to ``False`` — the session manager keeps
+  ``Mcp-Session-Id`` state in process memory, so a follow-up request routed
+  to another replica/worker 404s and the client raises ``McpError: Session
+  terminated``. These servers must stay stateless like the toolkit.
+
+These tests pin both.
 """
 
 from __future__ import annotations
@@ -32,6 +41,12 @@ def test_rebinding_protection_disabled(name: str) -> None:
     settings = _SERVERS[name].settings.transport_security
     assert settings is not None
     assert settings.enable_dns_rebinding_protection is False
+
+
+@pytest.mark.parametrize("name", sorted(_SERVERS))
+def test_stateless_http(name: str) -> None:
+    """No in-memory MCP session state — replica-safe behind a load balancer."""
+    assert _SERVERS[name].settings.stateless_http is True
 
 
 @pytest.mark.parametrize("name", sorted(_SERVERS))
