@@ -140,6 +140,17 @@ export const registerIpcHandlers = () => {
     app.quit();
   });
 
+  // Full client restart — used by Settings → Backup after staging a restore
+  // (the staged restore applies at next backend boot, so quit alone would
+  // leave the user to reopen the app by hand). ``app.relaunch()`` schedules a
+  // fresh instance for after exit; ``app.quit()`` then runs the normal
+  // ``before-quit`` teardown (sidecars incl. the agent server stop cleanly),
+  // and the relaunched instance boots the backend, which applies the restore.
+  ipcMain.handle("app_relaunch", async () => {
+    app.relaunch();
+    app.quit();
+  });
+
   // Brand-logo dropdown's "新窗口" item — spawns a brand-new client
   // INSTANCE (separate Electron process), not just another
   // BrowserWindow inside this one. Each instance has its own main

@@ -61,4 +61,21 @@ describe("notificationDisplay", () => {
     const d = notificationDisplay({ ...base, route: null, task_id: null });
     expect(d.route).toBe("/conversation/s1");
   });
+
+  it("backup_failed: localized title despite empty backend title, single tag", () => {
+    const d = notificationDisplay({
+      ...base,
+      kind: "backup_failed",
+      title: "",
+      body: "not enough free space",
+      route: "/settings?tab=backup",
+      task_id: null,
+      session_id: null,
+      pending_id: null,
+    });
+    expect(d.title).not.toBe(""); // localized label composed frontend-side
+    expect(d.body).toBe("not enough free space");
+    expect(d.route).toBe("/settings?tab=backup");
+    expect(d.tag).toBe("backup_failed");
+  });
 });

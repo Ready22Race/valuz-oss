@@ -24,6 +24,12 @@ export interface PlatformCapabilities {
     path: string,
   ) => Promise<{ content: string | null; truncated: boolean }>;
   quitApp: () => Promise<void>;
+  /**
+   * Full client restart (relaunch + quit). Desktop-only; used after staging
+   * a backup restore so the relaunched backend applies it immediately.
+   * Absent in webui — callers must feature-detect.
+   */
+  relaunchApp?: () => Promise<void>;
   openNewWindow: () => Promise<void>;
   isElectron: boolean;
   /** ``true`` on macOS — used to reserve space for the traffic-light cluster. */

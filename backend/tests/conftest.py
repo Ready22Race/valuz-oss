@@ -39,6 +39,10 @@ os.environ["VALUZ_USER_SKILLS_DIR"] = str(_HOME_SANDBOX / "user-skills")
 # managed project (``ProjectService.create_project`` / import-confirm without a
 # ``root_path``) write a project marker there via ``fs_registry.project_root()``.
 os.environ["VALUZ_USER_PROJECT_ROOT"] = str(_HOME_SANDBOX / "projects")
+# ``backup_root`` defaults to ``~/.valuz-oss-backups`` — another real-home
+# location; pin it so backup tests (and any code touching the default backup
+# destination) stay inside the sandbox.
+os.environ["VALUZ_BACKUP_ROOT"] = str(_HOME_SANDBOX / "backups")
 
 # (2) Kernel durable-store tier — force the in-process/local backend so a test
 # that boots the kernel dual-writes to the SANDBOXED host db (boot injects the

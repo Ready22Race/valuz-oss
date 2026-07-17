@@ -12,6 +12,7 @@ import {
   Cpu,
   FileText,
   Globe,
+  HardDrive,
   Info,
   Palette,
   Radio,
@@ -28,6 +29,7 @@ import { GeneralSection } from "./settings/GeneralSection";
 import { MemorySection } from "./settings/MemorySection";
 import { BrowserSection } from "./settings/BrowserSection";
 import { ParsingSection } from "./settings/ParsingSection";
+import { BackupSection } from "./settings/BackupSection";
 import { SystemLogsSettingsSection } from "./settings/SystemLogsSection";
 import { AboutSection } from "./settings/AboutSection";
 
@@ -46,6 +48,8 @@ const TAB_ICON_MAP: Record<string, ReactNode> = {
   activity: <Activity className="h-4 w-4" />,
   info: <Info className="h-4 w-4" />,
   radio: <Radio className="h-4 w-4" />,
+  "hard-drive": <HardDrive className="h-4 w-4" />,
+  backup: <HardDrive className="h-4 w-4" />,
   brain: <Brain className="h-4 w-4" />,
   globe: <Globe className="h-4 w-4" />,
   browser: <Globe className="h-4 w-4" />,
@@ -74,6 +78,7 @@ const SECTION_MAP: Record<string, React.ComponentType> = {
   memory: MemorySection,
   browser: BrowserSection,
   parsing: ParsingSection,
+  backup: BackupSection,
   "system-logs": SystemLogsSettingsSection,
   about: AboutSection,
 };
