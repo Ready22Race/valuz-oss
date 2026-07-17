@@ -51,7 +51,7 @@ import {
   type Trigger,
   type ProjectDetail,
   type ProjectFileNode,
-  type LLMChannelDetail,
+  type LLMChannel,
   type ConnectorItem,
   type Agent,
   type MemberWithAgent,
@@ -417,7 +417,7 @@ export const ProjectDetailPage = () => {
   const [sending, setSending] = useState(false);
   const [connectors, setConnectors] = useState<ConnectorItem[]>([]);
   const [selectedMcpSlugs, setSelectedMcpSlugs] = useState<string[]>([]);
-  const [providers, setProviders] = useState<LLMChannelDetail[]>([]);
+  const [providers, setProviders] = useState<LLMChannel[]>([]);
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(
     null,
   );
@@ -752,22 +752,19 @@ export const ProjectDetailPage = () => {
     }
   }, [id]);
 
-  // Lazy provider-details load (see ``fetchData``): one-shot, triggered the
-  // first time the user actually composes. ``autoFocus`` rules out an onFocus
+  // Lazy provider load (see ``fetchData``): one-shot, triggered the first
+  // time the user actually composes. ``autoFocus`` rules out an onFocus
   // trigger (it would fire on mount), so we hang it off the first keystroke.
+  // One gated list request (server-side subscription-login gate) — replaces
+  // the old per-channel detail fan-out.
   const providersLoadedRef = useRef(false);
   const ensureProviderDetails = useCallback(() => {
     if (providersLoadedRef.current) return;
     providersLoadedRef.current = true;
     void (async () => {
       try {
-        const list = await providersApi.list();
-        const details = await Promise.all(
-          list.providers
-            .filter((c) => c.enabled)
-            .map((c) => providersApi.get(c.id).catch(() => null)),
-        );
-        setProviders(details.filter((d): d is LLMChannelDetail => d !== null));
+        const list = await providersApi.list({ gated: true });
+        setProviders(list.providers.filter((c) => c.enabled));
       } catch {
         providersLoadedRef.current = false; // let the next keystroke retry
       }

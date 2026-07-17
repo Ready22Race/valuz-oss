@@ -25,7 +25,7 @@ import {
   usePanelStore,
   useSessionAttachments,
   projectsApi,
-  type LLMChannelDetail,
+  type LLMChannel,
   type ProjectListItem,
   type RuntimeId,
   type SessionListItem,
@@ -49,7 +49,7 @@ export const ConversationsHomePage = () => {
   const [allProjects, setAllProjects] = useState<ProjectListItem[]>([]);
   const [dataSources, setDataSources] = useState<DataSourceOption[]>([]);
   const [enabledSlugs, setEnabledSlugs] = useState<string[]>([]);
-  const [providers, setProviders] = useState<LLMChannelDetail[]>([]);
+  const [providers, setProviders] = useState<LLMChannel[]>([]);
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(
     null,
   );
@@ -230,13 +230,10 @@ export const ConversationsHomePage = () => {
       // Silently fail — picker just shows empty state.
     }
     try {
-      const chListRes = await providersApi.list();
-      const details = await Promise.all(
-        chListRes.providers
-          .filter((c) => c.enabled)
-          .map((c) => providersApi.get(c.id).catch(() => null)),
-      );
-      setProviders(details.filter((d): d is LLMChannelDetail => d !== null));
+      // One gated list request (server-side subscription-login gate) —
+      // replaces the old per-channel detail fan-out.
+      const chListRes = await providersApi.list({ gated: true });
+      setProviders(chListRes.providers.filter((c) => c.enabled));
     } catch {
       // Silently fail — Composer model picker just shows empty state.
     }
