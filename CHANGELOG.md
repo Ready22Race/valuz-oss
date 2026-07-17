@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Automation runtime seam** — deployments can bind an
+  `AutomationRuntimePort`, dispatch and execute persisted automation runs
+  through stable facades, and initialize the canonical executor in a headless
+  worker context. The default binding preserves the existing in-process runner
+  and failure monitor.
+
 ## [0.3.3] - 2026-07-15
 
 ### Added

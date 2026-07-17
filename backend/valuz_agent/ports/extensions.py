@@ -23,6 +23,10 @@ from valuz_agent.api.middleware import AuthMiddleware
 from valuz_agent.infra.asset_store import AssetStore, LocalAssetStore
 from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.ports.agent_lifecycle import AgentLifecycleHook, NoopAgentLifecycleHook
+from valuz_agent.ports.automation_runtime import (
+    AutomationRuntimePort,
+    InProcessAutomationRuntime,
+)
 from valuz_agent.ports.billing import BillingPort, NoopBillingProvider
 from valuz_agent.ports.cache import CachePort, FileCache
 from valuz_agent.ports.connector_lifecycle import (
@@ -48,6 +52,10 @@ class Extensions:
     """Singleton holding every replaceable port with its OSS default."""
 
     def __init__(self) -> None:
+        # Automation business data and execution stay host-owned; deployments
+        # may replace only the lifecycle/enqueue transport. OSS defaults to the
+        # existing single-process tick + FIFO runner and failure monitor.
+        self.automation_runtime: AutomationRuntimePort = InProcessAutomationRuntime()
         self.billing: BillingPort = NoopBillingProvider()
         # ADR-011: an overlay's single LLMProvider — contributes provider
         # rows (list) and resolves their credentials (resolve). OSS default
