@@ -128,7 +128,7 @@ import {
 } from "@valuz/core";
 import { BackgroundTaskStrip, ConversationTurnList } from "@valuz/ui";
 import { usePlatform } from "@valuz/app/platform";
-import { useHasUsableChannel, useTranslation } from "@valuz/core";
+import { useHasUsableChannel, useTranslation, markSessionNotificationsRead } from "@valuz/core";
 import {
   useConversationLocalFileLinks,
   useProjectKbBindings,
@@ -626,6 +626,13 @@ export const ConversationPage = () => {
     }
 
     setConversationInstanceKey(`conversation:${id}`);
+  }, [id]);
+  // Opening a conversation clears the unread badge for any notification that
+  // points at it (a question answered elsewhere, a run failure the user is now
+  // looking at). Covers every entry path — direct link, notification card,
+  // conversation list — since they all land here. Skips the "new" sentinel.
+  useEffect(() => {
+    if (id && id !== NEW_SESSION_ID) markSessionNotificationsRead(id);
   }, [id]);
   const { directoryFieldMode, setRightPanel, setHeader, setHideHeader } =
     useProjectOutlet();
