@@ -978,6 +978,61 @@ async def run_turn(
     return await k.run_turn(user_id, session_id, text, attachments, additional_context)
 
 
+async def run_ephemeral_review_in_scope(
+    user_id: str,
+    req: CreateSessionRequest,
+    prompt: str,
+    *,
+    reuse_scope: SandboxScope,
+) -> str | None:
+    """Create + run + delete a throwaway (no-persistence) review session INSIDE
+    ``reuse_scope``'s ALREADY-LIVE remote sandbox, returning the assistant text —
+    or ``None`` when there is no live remote sandbox to reuse (the caller then
+    runs the review its normal way).
+
+    The memory reviewer uses this to run inside the SOURCE session's still-warm
+    sandbox instead of cold-provisioning its own. Two properties matter and are
+    the reason this doesn't just call ``create_session`` + ``run_turn``:
+
+    - **Never provisions** — it peeks (``_kernel_for_existing``); if ``reuse_scope``
+      has no live sandbox it returns ``None``. No sandbox is spun up on this path.
+    - **Never renews** — the normal ``run_turn`` path calls ``ensure`` which pushes
+      the instance's AGS TTL back to the 24h active window. That would defeat the
+      post-turn idle clamp that keeps the source sandbox alive for exactly this
+      review window, orphaning it. Reusing the peeked kernel directly leaves the
+      clamp's countdown intact, so the sandbox still expires on schedule.
+
+    Returns ``None`` unless a scoped allocator hands back a live REMOTE sandbox
+    for ``reuse_scope`` — i.e. it's inert (returns ``None``) for the local /
+    single-kernel deployment (no per-scope sandbox to reuse or renew), where the
+    caller's ordinary create/run/delete path already targets the one kernel.
+
+    The ephemeral session is routed to ``reuse_scope`` (scope cache) and its
+    durable record is deleted in ``finally``; the sandbox itself is the source's
+    and is NEVER released here — its lifecycle stays with the source's clamp.
+    """
+    k = await _kernel_for_existing(user_id, reuse_scope)
+    if k is None or k is client:
+        # ``None``: scoped allocator but the source sandbox is already gone.
+        # ``client``: no scoped allocator (or a boot-singleton lease) — the local
+        # single-kernel case has no per-scope sandbox to reuse/renew. Either way,
+        # let the caller run the review its normal way.
+        return None
+    req_id = getattr(req, "id", "") or ""
+    if req_id:
+        _scope_cache_put(req_id, reuse_scope)  # any stray op stays in-scope
+    try:
+        await k.create_session(user_id, req)
+        msg = await k.run_turn(user_id, req_id, prompt)
+        return msg.assistant_message or ""
+    finally:
+        try:
+            await client.delete_session(user_id, req_id)  # durable record cleanup
+        except Exception:  # noqa: BLE001 — best-effort throwaway cleanup
+            logger.debug("ephemeral review: durable cleanup failed for %s", req_id)
+        _scope_cache.pop(req_id, None)
+
+
 async def scan_orphan_pendings() -> int:
     return await client.scan_orphan_pendings()  # type: ignore[attr-defined]
 
