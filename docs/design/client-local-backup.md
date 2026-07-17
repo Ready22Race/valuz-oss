@@ -213,6 +213,12 @@ helper 惯例，新增 `KEY_BACKUP_*` + get/set 对）：
    **先对现状做一次自动安全备份**（版本打 `pre-restore` 标记）→ 按 manifest
    把 `db/` 与 `data/` 覆写回原位（DB 直接替换文件，WAL/SHM 残留一并清除）→
    写恢复结果 → 清 pending。失败则不动原数据、留错误报告。
+   **目录覆写必须是"先物化、后交换"**（payload 完整拷贝到同目录
+   `.restore-new` → 两次 rename 交换 → 清理 `.restore-old`），绝不允许
+   "先 rmtree 目标再 copytree"：后者在拷贝中途失败时会把目标目录留在
+   被摧毁状态（实现期冒烟中 rmtree 半途失败真实毁过一次项目根，靠
+   pre-restore 快照救回）。两次 rename 之间崩溃的残局（目标缺失、仅剩
+   `.restore-old`）在下次尝试开头自动复位。
 3. 备份的 alembic 版本 **低于** 当前应用 → 正常路径，boot 随后的迁移把它升上来；
    **高于**（用户降级了应用）→ 拒绝恢复，提示先升级应用。这与
    `drop_stale` 的既有语义方向一致。

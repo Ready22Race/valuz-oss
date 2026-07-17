@@ -238,7 +238,7 @@ export const BackupSection = () => {
       desc={t("settings.tab.backup.desc")}
     >
       {!config.supported && (
-        <div className="mb-5 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
+        <div className="mb-5 rounded-lg border border-warning-border bg-warning-light px-4 py-3 text-sm text-warning-text">
           {t("settings.backup.unsupported")}
         </div>
       )}
@@ -247,8 +247,8 @@ export const BackupSection = () => {
         <div
           className={
             restoreOk
-              ? "mb-5 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-200"
-              : "mb-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200"
+              ? "mb-5 rounded-lg border border-success-border bg-success-light px-4 py-3 text-sm text-success-text"
+              : "mb-5 rounded-lg border border-error-border bg-error-light px-4 py-3 text-sm text-error-text"
           }
         >
           {restoreOk
@@ -382,7 +382,7 @@ export const BackupSection = () => {
             <div className="text-ink-body">
               {t("settings.backup.lastRun")}: {formatTime(config.last_run.at)}
               {config.last_run.status === "failed" && (
-                <span className="ml-2 text-red-600">
+                <span className="ml-2 text-error-text">
                   {t("settings.backup.lastRunFailed")}
                 </span>
               )}

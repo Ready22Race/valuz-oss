@@ -79,17 +79,51 @@ def _replace_file(src: Path, target: Path) -> None:
 def _replace_tree(src: Path | None, target: Path) -> None:
     """Make ``target`` exactly mirror the backed-up subtree. ``src=None``
     means the category was included but empty at backup time → target becomes
-    an empty directory."""
+    an empty directory.
+
+    Materialize-then-swap, never delete-then-copy: the payload is fully
+    copied to a sibling ``.restore-new`` first, then swapped in via two
+    renames. A failure at any point leaves the target either fully old or
+    fully new — the original content is never the casualty of a half-done
+    copy (a partially-failed ``rmtree`` on a live directory is exactly how
+    an early smoke test wiped a real project root)."""
     _guard_target(target)
-    if target.exists():
-        shutil.rmtree(target)
-    if src is not None and src.is_dir():
-        shutil.copytree(src, target)
-    elif src is not None and src.is_file():
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, target)
+    tmp_new = target.parent / (target.name + ".restore-new")
+    tmp_old = target.parent / (target.name + ".restore-old")
+
+    # Crash recovery from a previous interrupted swap: if the target vanished
+    # after being renamed aside, the old content is the only copy — put it back.
+    if not target.exists() and tmp_old.exists():
+        tmp_old.rename(target)
+    # Leftover staging from an interrupted attempt is safe to discard.
+    if tmp_new.is_dir() and not tmp_new.is_symlink():
+        shutil.rmtree(tmp_new, ignore_errors=True)
     else:
-        target.mkdir(parents=True, exist_ok=True)
+        tmp_new.unlink(missing_ok=True)
+    if tmp_old.is_dir() and not tmp_old.is_symlink():
+        shutil.rmtree(tmp_old, ignore_errors=True)
+    else:
+        tmp_old.unlink(missing_ok=True)
+
+    # 1. materialize the new content NEXT TO the target (same filesystem)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if src is not None and src.is_dir():
+        shutil.copytree(src, tmp_new)
+    elif src is not None and src.is_file():
+        shutil.copy2(src, tmp_new)
+    else:
+        tmp_new.mkdir(parents=True, exist_ok=True)
+
+    # 2. swap: two renames, each atomic
+    if target.exists() or target.is_symlink():
+        target.rename(tmp_old)
+    tmp_new.rename(target)
+
+    # 3. best-effort cleanup — a surviving .restore-old is noise, never loss
+    if tmp_old.is_dir() and not tmp_old.is_symlink():
+        shutil.rmtree(tmp_old, ignore_errors=True)
+    else:
+        tmp_old.unlink(missing_ok=True)
 
 
 def _pre_restore_snapshot(

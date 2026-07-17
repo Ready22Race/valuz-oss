@@ -49,6 +49,7 @@ def _plan(tmp_path: Path, **overrides) -> BackupPlan:
     data = tmp_path / "data"
     (data / "memories").mkdir(parents=True, exist_ok=True)
     (data / "memories" / "MEMORY.md").write_text("hello", encoding="utf-8")
+    (data / "installation.json").write_text('{"id": "orig"}', encoding="utf-8")
     host_db = tmp_path / "valuz.db"
     kernel_db = tmp_path / "kernel.db"
     if not host_db.exists():
@@ -63,7 +64,12 @@ def _plan(tmp_path: Path, **overrides) -> BackupPlan:
         retention=BackupRetention(),
         host_db=host_db,
         kernel_db=kernel_db,
-        sources=[SourceSpec(rel="memories", src=data / "memories")],
+        sources=[
+            SourceSpec(rel="memories", src=data / "memories"),
+            # single-FILE source — regression: restore must unlink files,
+            # not rmtree them
+            SourceSpec(rel="installation.json", src=data / "installation.json"),
+        ],
         exclude_roots=[tmp_path / "backups"],
     )
     defaults.update(overrides)
@@ -194,6 +200,7 @@ def test_restore_apply_roundtrip(tmp_path: Path) -> None:
 
     # mutate live state after the backup
     (tmp_path / "data" / "memories" / "MEMORY.md").write_text("changed", encoding="utf-8")
+    (tmp_path / "data" / "installation.json").write_text('{"id": "mutated"}', encoding="utf-8")
     _touch_db(plan.host_db)
 
     pointer = tmp_path / "pending.json"
@@ -208,6 +215,8 @@ def test_restore_apply_roundtrip(tmp_path: Path) -> None:
 
     # data file rolled back to backed-up content
     assert (tmp_path / "data" / "memories" / "MEMORY.md").read_text() == "hello"
+    # single-file target rolled back too (regression: unlink, not rmtree)
+    assert (tmp_path / "data" / "installation.json").read_text() == '{"id": "orig"}'
     # DB rolled back: the post-backup insert is gone
     conn = sqlite3.connect(str(plan.host_db))
     try:
@@ -217,6 +226,45 @@ def test_restore_apply_roundtrip(tmp_path: Path) -> None:
     # a pre_restore safety snapshot exists alongside the source version
     kinds = {m.kind for _, m in mf.scan_versions(plan.destination)}
     assert "pre_restore" in kinds
+
+
+def test_replace_tree_failure_preserves_target(tmp_path: Path, monkeypatch) -> None:
+    """A failed payload copy must leave the live directory untouched —
+    materialize-then-swap, never delete-then-copy."""
+    from valuz_agent.modules.backup import restore as restore_mod
+
+    src = tmp_path / "payload"
+    src.mkdir()
+    (src / "new.txt").write_text("new", encoding="utf-8")
+    target = tmp_path / "deep" / "live"
+    target.mkdir(parents=True)
+    (target / "precious.txt").write_text("precious", encoding="utf-8")
+
+    def _boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(restore_mod.shutil, "copytree", _boom)
+    with pytest.raises(OSError):
+        restore_mod._replace_tree(src, target)
+    assert (target / "precious.txt").read_text() == "precious"
+
+
+def test_replace_tree_recovers_interrupted_swap(tmp_path: Path) -> None:
+    """Crash between the two swap renames leaves only ``.restore-old`` —
+    the next attempt must resurrect it before staging anew."""
+    from valuz_agent.modules.backup.restore import _replace_tree
+
+    src = tmp_path / "payload"
+    src.mkdir()
+    (src / "new.txt").write_text("new", encoding="utf-8")
+    # simulate the crash state: target gone, old content parked aside
+    parked = tmp_path / "deep" / "live.restore-old"
+    parked.mkdir(parents=True)
+    (parked / "old.txt").write_text("old", encoding="utf-8")
+
+    _replace_tree(src, tmp_path / "deep" / "live")
+    assert (tmp_path / "deep" / "live" / "new.txt").read_text() == "new"
+    assert not parked.exists()
 
 
 def test_restore_missing_manifest_reports_error(tmp_path: Path) -> None:
