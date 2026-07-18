@@ -50,6 +50,8 @@ class FakeProjectService:
 
 
 class FakeSkillDatastore:
+    session = object()
+
     def __init__(self):
         self._enabled: dict[str, set[str]] = {}
         self._rows: dict[str, object] = {}

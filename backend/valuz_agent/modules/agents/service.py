@@ -104,20 +104,23 @@ class AgentNotDeletableError(Exception):
         super().__init__(f"agent '{slug}' is protected and cannot be deleted")
 
 
-async def _after_agent_saved_hook(user_id: str, row: AgentRow, origin: str) -> None:
+async def _after_agent_saved_hook(
+    db: AsyncSession, user_id: str, row: AgentRow, origin: str
+) -> None:
     from valuz_agent.ports.extensions import ext
 
     await ext.agent_lifecycle.after_agent_saved(
+        db=db,
         user_id=user_id,
         agent=row,
         origin=origin,  # type: ignore[arg-type]
     )
 
 
-async def _before_agent_delete_hook(user_id: str, row: AgentRow) -> None:
+async def _before_agent_delete_hook(db: AsyncSession, user_id: str, row: AgentRow) -> None:
     from valuz_agent.ports.extensions import ext
 
-    await ext.agent_lifecycle.before_agent_delete(user_id=user_id, agent=row)
+    await ext.agent_lifecycle.before_agent_delete(db=db, user_id=user_id, agent=row)
 
 
 class AgentService:
@@ -271,7 +274,7 @@ class AgentService:
         # Live-reference: sessions snapshot the row at creation time, so a
         # fresh agent needs no extra materialization step.
         created = await self._agents.create(user_id, row)
-        await _after_agent_saved_hook(user_id, created, "created")
+        await _after_agent_saved_hook(self._db, user_id, created, "created")
         return created
 
     async def update_agent(self, user_id: str, slug: str, patch: dict[str, Any]) -> AgentRow:
@@ -311,7 +314,7 @@ class AgentService:
         # Live-reference semantics need no kernel cascade anymore: sessions
         # snapshot the row's fields at creation, so every NEW session (in any
         # project the agent is deployed to) picks the edit up automatically.
-        await _after_agent_saved_hook(user_id, row, "updated")
+        await _after_agent_saved_hook(self._db, user_id, row, "updated")
         return row
 
     async def delete_agent(self, user_id: str, slug: str, *, cascade: bool = False) -> None:
@@ -336,7 +339,7 @@ class AgentService:
                 raise AgentStillDeployedError(slug, len(deployments))
             for m in deployments:
                 await self._members.delete(user_id, m.project_id, m.agent_slug)
-        await _before_agent_delete_hook(user_id, existing)
+        await _before_agent_delete_hook(self._db, user_id, existing)
         if not await self._agents.delete(user_id, slug):
             raise AgentNotFoundError(slug)
         await self._cleanup_marketplace_install(user_id, slug)

@@ -1040,7 +1040,7 @@ async def oauth_callback(
         await propagate_oauth_credentials(
             user_id, updated, ds, probe=_probe_oauth_tool_count, install_missing=True
         )
-        await after_connector_oauth_authorized_hook(user_id, updated)
+        await after_connector_oauth_authorized_hook(db, user_id, updated)
 
         logger.info(
             "Connector %s (%s) OAuth connected, tool_count=%s",
