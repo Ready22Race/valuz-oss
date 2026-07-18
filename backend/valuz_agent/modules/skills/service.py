@@ -10,7 +10,7 @@ import tempfile
 import time
 import zipfile
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 from valuz_agent.infra.fs_registry import fs_registry
@@ -87,22 +87,23 @@ def _manifest_defaults_to_library_enabled(manifest: Any) -> bool:
     ) == "Built-in"
 
 
-async def _after_skill_saved_hook(user_id: str, skill: SkillView, origin: str) -> None:
+async def _after_skill_saved_hook(db: Any, user_id: str, skill: SkillView, origin: str) -> None:
     if origin not in {"created", "imported"}:
         return
     from valuz_agent.ports.extensions import ext
 
     await ext.skill_lifecycle.after_skill_saved(
+        db=db,
         user_id=user_id,
         skill=skill,
-        creation_origin=origin,
+        creation_origin=cast(Literal["created", "imported"], origin),
     )
 
 
-async def _before_skill_delete_hook(user_id: str, skill: SkillView) -> None:
+async def _before_skill_delete_hook(db: Any, user_id: str, skill: SkillView) -> None:
     from valuz_agent.ports.extensions import ext
 
-    await ext.skill_lifecycle.before_skill_delete(user_id=user_id, skill=skill)
+    await ext.skill_lifecycle.before_skill_delete(db=db, user_id=user_id, skill=skill)
 
 
 def _official_skill_view_from_index_row(
@@ -704,7 +705,7 @@ class SkillLibraryService:
                 continue
             await self._ds.set_creation_origin_by_path(user_id, written.path, "created")
             await self._ds.set_library_enabled_by_path(user_id, written.path, True)
-            await _after_skill_saved_hook(user_id, written, "created")
+            await _after_skill_saved_hook(self._ds.session, user_id, written, "created")
 
         return results
 
@@ -885,7 +886,7 @@ class SkillLibraryService:
         if mode == "dry_run":
             return preview
 
-        await _before_skill_delete_hook(user_id, skill)
+        await _before_skill_delete_hook(self._ds.session, user_id, skill)
         skill_dir = Path(skill.path)
         if skill_dir.exists():
             shutil.rmtree(skill_dir)
@@ -1883,7 +1884,7 @@ class SkillLibraryService:
         await self._ds.set_library_enabled_by_path(user_id, skill.path, True)
         skill.creation_origin = "created"
         skill.library_enabled = True
-        await _after_skill_saved_hook(user_id, skill, "created")
+        await _after_skill_saved_hook(self._ds.session, user_id, skill, "created")
 
         return skill, creation_context, bound_project_id
 
@@ -1980,7 +1981,7 @@ class SkillLibraryService:
         await self._ds.set_library_enabled_by_path(user_id, skill.path, True)
         skill.creation_origin = origin
         skill.library_enabled = True
-        await _after_skill_saved_hook(user_id, skill, origin)
+        await _after_skill_saved_hook(self._ds.session, user_id, skill, origin)
         return skill
 
     async def _allocate_skill_dir(
