@@ -109,12 +109,8 @@ async def get_skill_service_for_user(
 async def get_skill_service(
     user_id: str = Depends(get_current_user_id),
 ) -> AsyncGenerator[SkillLibraryService, None]:
-    gen = get_skill_service_for_user(user_id)
-    svc = await gen.__anext__()
-    try:
+    async for svc in get_skill_service_for_user(user_id):
         yield svc
-    finally:
-        await gen.aclose()
 
 
 @lru_cache
