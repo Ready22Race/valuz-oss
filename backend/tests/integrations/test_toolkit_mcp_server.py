@@ -337,12 +337,14 @@ def test_toolkit_mcp_url_uses_new_internal_path() -> None:
 
 
 def test_always_on_set_includes_harness_per_toolkit() -> None:
+    import asyncio
+
     from valuz_agent.adapters.capability_resolver import (
         always_on_http_mcp_servers,
         harness_toolkit_for_run_kind,
     )
 
-    base_set = always_on_http_mcp_servers("sess-1", owner_user_id="u1")
+    base_set = asyncio.run(always_on_http_mcp_servers("sess-1", owner_user_id="u1"))
     by_name = {m.name: m for m in base_set}
     # ADR-013: newly minted URLs use "/_internal/..." — the legacy
     # "/internal/..." mount stays reachable (api/app.py::_mount_internal) for
@@ -350,7 +352,9 @@ def test_always_on_set_includes_harness_per_toolkit() -> None:
     assert by_name["harness"].url.endswith("/_internal/mcp/toolkit/base/mcp")
     assert by_name["harness"].headers["X-Valuz-Session-Id"] == "sess-1"
 
-    lead_set = always_on_http_mcp_servers("sess-1", owner_user_id="u1", toolkit="lead")
+    lead_set = asyncio.run(
+        always_on_http_mcp_servers("sess-1", owner_user_id="u1", toolkit="lead")
+    )
     assert {m.name for m in lead_set} == set(by_name)
     assert next(m for m in lead_set if m.name == "harness").url.endswith(
         "/_internal/mcp/toolkit/lead/mcp"
@@ -359,3 +363,40 @@ def test_always_on_set_includes_harness_per_toolkit() -> None:
     assert harness_toolkit_for_run_kind("lead") == "lead"
     assert harness_toolkit_for_run_kind("subtask") == "base"
     assert harness_toolkit_for_run_kind(None) == "base"
+
+
+def test_always_on_set_resolves_one_opaque_credential_for_every_builtin_mcp() -> None:
+    import asyncio
+
+    from valuz_agent.adapters.capability_resolver import always_on_http_mcp_servers
+    from valuz_agent.ports.sandbox_credential import (
+        get_sandbox_credential_verifier,
+        set_sandbox_credential_verifier,
+    )
+
+    class _CredentialPort:
+        def __init__(self) -> None:
+            self.owners: list[str] = []
+
+        async def credential_for(self, owner_user_id: str) -> str:
+            self.owners.append(owner_user_id)
+            return "vzs_owner_credential"
+
+        async def verify(self, credential: str | None):  # type: ignore[no-untyped-def]
+            return None
+
+    original = get_sandbox_credential_verifier()
+    credential_port = _CredentialPort()
+    set_sandbox_credential_verifier(credential_port)
+    try:
+        servers = asyncio.run(
+            always_on_http_mcp_servers("sess-1", owner_user_id="owner-1")
+        )
+    finally:
+        set_sandbox_credential_verifier(original)
+
+    assert credential_port.owners == ["owner-1"]
+    assert servers
+    assert {
+        server.headers["X-Valuz-Internal"] for server in servers
+    } == {"vzs_owner_credential"}

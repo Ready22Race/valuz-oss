@@ -26,11 +26,14 @@ class SandboxCredentialClaims:
 
 
 class SandboxCredentialVerifierPort(Protocol):
-    """Verify an opaque sandbox credential and return its owner.
+    """Resolve and verify the opaque credential shared with a sandbox.
 
     Invalid, expired, absent, or unknown credentials return ``None``. An
     unexpected backend failure may raise; callers fail closed in that case.
     """
+
+    async def credential_for(self, owner_user_id: str) -> str:
+        """Return the credential to inject for one explicitly known owner."""
 
     async def verify(self, credential: str | None) -> SandboxCredentialClaims | None: ...
 

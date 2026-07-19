@@ -10,6 +10,11 @@ from valuz_agent.ports.sandbox_credential import SandboxCredentialClaims
 class PerOwnerHmacSandboxCredentialVerifier:
     """Adapt the existing synchronous per-owner HMAC verifier to the async port."""
 
+    async def credential_for(self, owner_user_id: str) -> str:
+        from valuz_agent.adapters.capability_resolver import _mint_internal_mcp_token
+
+        return await asyncio.to_thread(_mint_internal_mcp_token, owner_user_id)
+
     async def verify(self, credential: str | None) -> SandboxCredentialClaims | None:
         if not credential:
             return None
