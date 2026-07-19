@@ -19,6 +19,7 @@ wiring for a standalone deployment is assembled by the caller.
 from __future__ import annotations
 
 import contextvars
+import logging
 import os
 from dataclasses import replace
 from typing import Annotated, Any
@@ -30,9 +31,14 @@ from src.adapters import store_wire as sw
 from src.adapters.sqlalchemy_store.store import SQLAlchemyStore
 from src.core import StorePort
 from src.core.token_signer import HmacTokenVerifier, InvalidTokenError
-from src.core.token_verifier import TokenVerifier
+from src.core.token_verifier import (
+    AsyncTokenVerifier,
+    CompatibleAsyncTokenVerifier,
+    TokenVerifierLike,
+)
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # Request owner for the per-transaction RLS GUC bridge (PG deployments). Set per
 # request from the verified token; read by the engine "begin" listener in
@@ -54,11 +60,14 @@ def _bearer(authorization: str | None) -> str | None:
 
 async def _owner_dep(request: Request) -> str:
     """Owner from the VERIFIED token — never from the body (anti-spoof)."""
-    verifier: TokenVerifier = request.app.state.verifier
+    verifier: AsyncTokenVerifier = request.app.state.verifier
     try:
-        claims = verifier.verify(_bearer(request.headers.get("authorization")))
+        claims = await verifier.verify(_bearer(request.headers.get("authorization")))
     except InvalidTokenError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 — auth backend failure must fail closed
+        logger.warning("Data Service credential verification failed", exc_info=True)
+        raise HTTPException(status_code=401, detail="credential verification failed") from exc
     if claims is None:
         raise HTTPException(status_code=401, detail="missing or invalid token")
     # Stamp the owner for the per-transaction RLS GUC (read by the engine
@@ -230,11 +239,11 @@ async def usage_rollup(body: JsonBody, owner_id: OwnerDep, store: StoreDep) -> d
     return {"data": [sw.usage_rollup_to_row(u) for u in rows]}
 
 
-def create_data_service_app(store: StorePort, verifier: TokenVerifier) -> FastAPI:
+def create_data_service_app(store: StorePort, verifier: TokenVerifierLike) -> FastAPI:
     """Build the data-service ASGI app over ``store``, authed by ``verifier``."""
     app = FastAPI(title="Valuz Kernel Data Service", version="0.1.0")
     app.state.store = store
-    app.state.verifier = verifier
+    app.state.verifier = CompatibleAsyncTokenVerifier(verifier)
     app.include_router(router)
     return app
 

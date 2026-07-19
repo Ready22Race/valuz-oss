@@ -454,7 +454,9 @@ async def bind_data_service(app: FastAPI) -> None:
         # owner's secret exists up-front (mint side also does; idempotent).
         if _startup_user_content_enabled():
             get_or_create_ds_secret(resolve_local_user_id())
-        ds_app.state.verifier = kb.make_host_data_service_verifier_per_owner()
+        from valuz_agent.ports.sandbox_credential import get_sandbox_credential_verifier
+
+        ds_app.state.verifier = get_sandbox_credential_verifier()
         app.state._data_service_engine = engine
         # Unify host reads (sessions + events) through the DataService
         # (in-process), so reads never depend on the sandbox being alive. Bind

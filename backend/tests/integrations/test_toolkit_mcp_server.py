@@ -229,8 +229,94 @@ def test_asgi_per_owner_verification(monkeypatch) -> None:
 
     # Positive path at the verifier level (the ASGI success case would reach the
     # MCP inner app, which needs a running task group — out of scope here):
-    assert _mcp_asgi._verify_token_owner(tok_a) == "A"  # valid token → its owner
-    assert _mcp_asgi._verify_token_owner(forged) is None  # bad signature → rejected
+    assert asyncio.run(_mcp_asgi._verify_token_owner(tok_a)) == "A"  # valid token → owner
+    assert asyncio.run(_mcp_asgi._verify_token_owner(forged)) is None  # forged → rejected
+
+
+def test_asgi_awaits_bound_sandbox_credential_verifier() -> None:
+    """An overlay can bind an async opaque-credential verifier without changing MCP."""
+    from types import SimpleNamespace
+
+    from valuz_agent.adapters import data_reader as dr
+    from valuz_agent.ports.sandbox_credential import (
+        SandboxCredentialClaims,
+        get_sandbox_credential_verifier,
+        set_sandbox_credential_verifier,
+    )
+
+    calls: list[str | None] = []
+
+    class _Verifier:
+        async def verify(self, credential: str | None) -> SandboxCredentialClaims | None:
+            await asyncio.sleep(0)
+            calls.append(credential)
+            return SandboxCredentialClaims(user_id="owner-async")
+
+    class _Reader:
+        async def list_all_sessions(self, *, ids=None, limit=50, **_):
+            return [SimpleNamespace(user_id="owner-async")]
+
+    async def _inner(scope, receive, send) -> None:
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    previous = get_sandbox_credential_verifier()
+    try:
+        set_sandbox_credential_verifier(_Verifier())
+        dr.bind_data_reader(_Reader())
+        app = _mcp_asgi.build_internal_mcp_asgi(_inner)
+        status = asyncio.run(
+            _run_asgi(
+                app,
+                _scope(
+                    {
+                        "x-valuz-internal": "opaque-sandbox-credential",
+                        "x-valuz-session-id": "session-1",
+                    }
+                ),
+            )
+        )
+    finally:
+        dr.bind_data_reader(None)
+        set_sandbox_credential_verifier(previous)
+
+    assert status == 204
+    assert calls == ["opaque-sandbox-credential"]
+
+
+def test_asgi_fails_closed_when_sandbox_credential_verifier_errors() -> None:
+    from valuz_agent.ports.sandbox_credential import (
+        SandboxCredentialClaims,
+        get_sandbox_credential_verifier,
+        set_sandbox_credential_verifier,
+    )
+
+    class _BrokenVerifier:
+        async def verify(self, credential: str | None) -> SandboxCredentialClaims | None:
+            raise RuntimeError("identity backend unavailable")
+
+    async def _inner(scope, receive, send) -> None:
+        raise AssertionError("unverified requests must not reach MCP")
+
+    previous = get_sandbox_credential_verifier()
+    try:
+        set_sandbox_credential_verifier(_BrokenVerifier())
+        app = _mcp_asgi.build_internal_mcp_asgi(_inner)
+        status = asyncio.run(
+            _run_asgi(
+                app,
+                _scope(
+                    {
+                        "x-valuz-internal": "opaque-sandbox-credential",
+                        "x-valuz-session-id": "session-1",
+                    }
+                ),
+            )
+        )
+    finally:
+        set_sandbox_credential_verifier(previous)
+
+    assert status == 403
 
 
 def test_unknown_toolset_rejected() -> None:

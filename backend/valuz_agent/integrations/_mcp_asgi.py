@@ -76,7 +76,7 @@ async def _resolve_session_owner(session_id: str) -> str | None:
     return sessions[0].user_id if sessions else None
 
 
-def _verify_token_owner(token: str | None) -> str | None:
+async def _verify_token_owner(token: str | None) -> str | None:
     """Verified owner from a per-owner MCP token, or None if invalid/absent.
 
     Same per-owner signing/verification as the data service (unifies the two
@@ -85,13 +85,12 @@ def _verify_token_owner(token: str | None) -> str | None:
     """
     if not token:
         return None
-    from src.core.token_signer import InvalidTokenError
-
-    from valuz_agent.boot.kernel import make_host_data_service_verifier_per_owner
+    from valuz_agent.ports.sandbox_credential import get_sandbox_credential_verifier
 
     try:
-        claims = make_host_data_service_verifier_per_owner().verify(token)
-    except InvalidTokenError:
+        claims = await get_sandbox_credential_verifier().verify(token)
+    except Exception:  # noqa: BLE001 — auth backend failure must fail closed
+        logger.warning("Internal MCP: sandbox credential verification failed", exc_info=True)
         return None
     return claims.user_id if claims else None
 
@@ -117,7 +116,7 @@ def build_internal_mcp_asgi(inner: Any) -> Any:
         }
         # Owner comes from the VERIFIED token — never a shared secret or a trusted
         # header. A forged sub / unknown owner fails verification.
-        owner_id = _verify_token_owner(headers.get("x-valuz-internal"))
+        owner_id = await _verify_token_owner(headers.get("x-valuz-internal"))
         if not owner_id:
             response = PlainTextResponse("Forbidden", status_code=403)
             await response(scope, receive, send)
