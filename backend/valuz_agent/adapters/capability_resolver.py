@@ -285,7 +285,9 @@ async def resolve_session_capabilities(
     #      inject the same set — task lead/member sessions don't flow through
     #      this resolver but must still carry these built-in tools.
     if session_id:
-        mcp_configs_list.extend(always_on_http_mcp_servers(session_id, owner_user_id=user_id))
+        mcp_configs_list.extend(
+            await always_on_http_mcp_servers(session_id, owner_user_id=user_id)
+        )
     else:
         logger.warning(
             "session_id not provided — skipping always-on HTTP MCP injection "
@@ -384,7 +386,7 @@ def _mint_internal_mcp_token(owner_user_id: str) -> str:
 _INTERNAL_MCP_TOOL_TIMEOUT_SEC = 720.0
 
 
-def always_on_http_mcp_servers(
+async def always_on_http_mcp_servers(
     session_id: str, *, owner_user_id: str, toolkit: str = "base"
 ) -> list[McpHttpServerConfig]:
     """Built-in HTTP MCP servers every session carries: docs, schedules,
@@ -412,9 +414,12 @@ def always_on_http_mcp_servers(
     from valuz_agent.integrations.connectors_mcp_server import connectors_mcp_url
     from valuz_agent.integrations.docs_mcp_server import docs_mcp_url
     from valuz_agent.integrations.toolkit_mcp_server import toolkit_mcp_url
+    from valuz_agent.ports.sandbox_credential import get_sandbox_credential_verifier
 
     headers = {
-        "X-Valuz-Internal": _mint_internal_mcp_token(owner_user_id),
+        "X-Valuz-Internal": await get_sandbox_credential_verifier().credential_for(
+            owner_user_id
+        ),
         "X-Valuz-Session-Id": session_id,
     }
     base = _settings.backend_base_url

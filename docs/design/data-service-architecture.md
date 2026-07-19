@@ -134,10 +134,14 @@ execution-local sqlite. Rationale: a sandbox (especially a cloud sandbox) is
 ## 6. Auth & isolation boundary
 
 The DataService derives the **owner** for every request from a **verified
-bearer token** (HS256 JWT today; the `TokenVerifier` port allows RS256/JWKS for
-SaaS), never from the request body. Consequences:
+opaque bearer credential**, never from the request body. OSS credentials are
+per-owner HS256 JWTs today. The host's async
+`SandboxCredentialVerifierPort` is shared with built-in MCP, so a managed
+deployment may verify a database/cache-backed workload credential without
+changing this HTTP contract. The kernel DataService also retains the legacy
+sync `TokenVerifier` adapter for standalone OSS callers. Consequences:
 
-- A **sandbox holds only a short-lived JWT** + the DataService URL. It never
+- A **sandbox holds only a short-lived credential** + the DataService URL. It never
   receives a DB DSN, driver, or PG credential — the credential lives only on the
   host (the DataService's backend config).
 - On a **remote PG** backend, **Row-Level Security** is the DB-side backstop:
@@ -221,12 +225,12 @@ consuming OSS as a SaaS submodule.)
 
 ## 10. SaaS extension
 
-SaaS is **form 4 with no new code paths**: a cloud sandbox driver (execution
+SaaS is **form 4 with no new data paths**: a cloud sandbox driver (execution
 knob) + a central PG backend (backend knob), both already abstracted. Because
-the DataService + JWT boundary are identical to the local forms, the cloud
+the DataService credential boundary is identical to the local forms, the cloud
 sandbox and the centralized PG are **config-and-go**: the SaaS overlay binds a
-cloud `SandboxDriver` and points the DataService backend at the managed PG;
-nothing in the kernel or the data layer changes.
+cloud `SandboxDriver`, binds `SandboxCredentialVerifierPort`, and points the
+DataService backend at the managed PG; nothing in the kernel or data path changes.
 
 ---
 

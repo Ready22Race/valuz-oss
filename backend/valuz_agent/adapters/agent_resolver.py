@@ -1060,7 +1060,7 @@ async def build_member_session(
     # servers (docs / schedules / connectors) must be injected here. Generate
     # the session id up front so it can scope those servers' request headers.
     session_id = uuid4().hex
-    builtin_mcp = always_on_http_mcp_servers(
+    builtin_mcp = await always_on_http_mcp_servers(
         session_id, owner_user_id=user_id, toolkit="lead" if is_lead else "base"
     )
     # De-dupe by name in case the agent's own mcp_servers already carry a

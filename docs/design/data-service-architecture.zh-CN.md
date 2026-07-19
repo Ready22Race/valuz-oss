@@ -106,10 +106,13 @@ sqlite 后端,form 1),双写**塌缩为一次写**,读是直接调用——无�
 
 ## 6. 鉴权与隔离边界
 
-DataService 对每个请求的 **owner** 来自**验签过的 bearer token**(当前 HS256 JWT;
-`TokenVerifier` 端口允许 SaaS 用 RS256/JWKS),**绝不**取自请求体。后果:
+DataService 对每个请求的 **owner** 来自**验签过的不透明 bearer 凭证**，**绝不**
+取自请求体。OSS 当前凭证是 per-owner HS256 JWT。host 的异步
+`SandboxCredentialVerifierPort` 与内置 MCP 共用，因此托管部署可验证数据库/缓存
+支持的 workload credential，而无需改变 HTTP 契约。kernel DataService 同时保留
+旧同步 `TokenVerifier` 适配，兼容独立 OSS 调用方。后果:
 
-- **沙箱只持有短时 JWT** + DataService URL。它**永不**拿到 DB DSN、驱动或 PG 凭证
+- **沙箱只持有短时凭证** + DataService URL。它**永不**拿到 DB DSN、驱动或 PG 凭证
   ——凭证只在 host 上(DataService 的后端配置)。
 - 在 **remote PG** 后端上,**行级安全(RLS)**是 DB 侧兜底:DataService 按事务从
   验签 token 把 `app.current_user_id` 注入(`SET LOCAL`),并以**非 owner 角色**连接,
@@ -180,10 +183,11 @@ kernel.append_event → DataService(进程内) → host sqlite   (单次写)
 
 ## 10. SaaS 扩展
 
-SaaS 即 **form 4,无新代码路径**:云沙箱驱动(执行旋钮)+ 中心 PG 后端(后端旋钮),
-两者均已抽象。由于 DataService + JWT 边界与本地形态完全一致,云沙箱与中心化 PG
-**即配即用**:SaaS overlay 绑一个云 `SandboxDriver`、把 DataService 后端指向托管 PG
-即可,kernel 与数据层不变。
+SaaS 即 **form 4,无新数据路径**:云沙箱驱动(执行旋钮)+ 中心 PG 后端(后端旋钮),
+两者均已抽象。由于 DataService 凭证边界与本地形态完全一致,云沙箱与中心化 PG
+**即配即用**:SaaS overlay 绑定云 `SandboxDriver` 和
+`SandboxCredentialVerifierPort`、把 DataService 后端指向托管 PG 即可，kernel 与
+数据路径不变。
 
 ---
 

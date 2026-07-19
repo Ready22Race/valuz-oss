@@ -361,7 +361,7 @@ async def test_bind_data_service_skips_local_owner_secret_when_startup_user_cont
         lambda _engine: _async_call(calls, "schema"),
     )
     monkeypatch.setattr(
-        "valuz_agent.boot.kernel.make_host_data_service_verifier_per_owner",
+        "valuz_agent.ports.sandbox_credential.get_sandbox_credential_verifier",
         lambda: "verifier",
     )
     monkeypatch.setattr("valuz_agent.adapters.data_reader.bind_data_reader", lambda _reader: None)

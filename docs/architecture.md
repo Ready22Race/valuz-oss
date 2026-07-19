@@ -154,7 +154,14 @@ safe.
 
 The kernel's three tables are accessed through a single **DataService** layer
 (host-mounted router; backend swappable between host SQLite and a remote
-Postgres; sandbox access is JWT-authenticated). See
+Postgres). An untrusted sandbox presents one opaque credential to the trusted
+host surfaces: `Authorization: Bearer` for DataService and `X-Valuz-Internal`
+for built-in MCP. Both await the same
+`SandboxCredentialVerifierPort`, derive the owner from its verified claims, and
+fail closed; request bodies and owner headers are never identity sources. OSS
+binds the existing per-owner HMAC verifier, while managed editions may replace
+the port with an async database/cache/identity-service implementation without
+changing either wire contract. See
 [design/data-service-architecture.md](design/data-service-architecture.md).
 
 ---
