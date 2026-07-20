@@ -1,5 +1,5 @@
-import { useMemo } from "react";
-import type { LLMChannel } from "../api/providers-api";
+import { useEffect, useMemo, useState } from "react";
+import { providersApi, type LLMChannel } from "../api/providers-api";
 
 /** Runtime identifiers used by the runtime filter. Server-resolved onto each
  *  model's ``runtimes`` — not re-derived here. */
@@ -27,6 +27,53 @@ export const providerHasUsableCredentials = (
   if (c.credential_source === "account_connection") return true;
   if (c.auth_type === "oauth") return true;
   return false;
+};
+
+/**
+ * Load the composer's server-resolved model channels from one execution
+ * target. Multi-target editions pass the selected target's base URL; OSS and
+ * other single-target builds leave it undefined and keep using the providers
+ * API's module default.
+ *
+ * Switching targets clears the previous list immediately. An obsolete
+ * response is ignored if it resolves later, so a slow local request can never
+ * overwrite a newer cloud selection (or vice versa).
+ */
+export const useComposerProviderChannels = (apiBaseUrl?: string) => {
+  const [loaded, setLoaded] = useState<{
+    apiBaseUrl: string | undefined;
+    providers: LLMChannel[];
+  }>({ apiBaseUrl, providers: [] });
+
+  useEffect(() => {
+    let active = true;
+
+    void providersApi
+      .list({
+        gated: true,
+        baseUrl: apiBaseUrl,
+        // A location selection is an explicit request to consult that service.
+        // Do not reuse another visit's short-lived provider-list cache.
+        fresh: true,
+      })
+      .then(({ providers: channels }) => {
+        if (active) {
+          setLoaded({
+            apiBaseUrl,
+            providers: channels.filter((channel) => channel.enabled),
+          });
+        }
+      })
+      .catch(() => {
+        if (active) setLoaded({ apiBaseUrl, providers: [] });
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [apiBaseUrl]);
+
+  return loaded.apiBaseUrl === apiBaseUrl ? loaded.providers : [];
 };
 
 /**

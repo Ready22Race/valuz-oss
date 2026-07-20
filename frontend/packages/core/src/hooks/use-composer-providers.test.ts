@@ -1,11 +1,13 @@
 /** @vitest-environment jsdom */
-import { renderHook } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { act, renderHook, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { LLMModel } from "@valuz/shared";
 
 import type { LLMChannelDetail } from "../api/providers-api";
+import { clearRequestCacheForTests } from "../api/request";
 import {
+  useComposerProviderChannels,
   useComposerProviders,
   type RuntimeProvider,
 } from "./use-composer-providers";
@@ -45,6 +47,102 @@ const provider = (
   effective_protocol: "anthropic",
   compatible_protocols: ["anthropic"],
   ...overrides,
+});
+
+afterEach(() => {
+  clearRequestCacheForTests();
+  vi.unstubAllGlobals();
+});
+
+describe("useComposerProviderChannels", () => {
+  it("reloads the gated model list from each selected execution target", async () => {
+    const localProvider = provider({ id: "local", name: "Local" });
+    const cloudProvider = provider({ id: "cloud", name: "Cloud" });
+    const fetchSpy = vi.fn().mockImplementation((input: string) =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            providers: input.includes("cloud.example.test")
+              ? [cloudProvider]
+              : [localProvider],
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        ),
+      ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const { result, rerender } = renderHook(
+      ({ baseUrl }) => useComposerProviderChannels(baseUrl),
+      { initialProps: { baseUrl: "http://localhost:8000" } },
+    );
+
+    await waitFor(() => expect(result.current).toEqual([localProvider]));
+    rerender({ baseUrl: "https://cloud.example.test" });
+    await waitFor(() => expect(result.current).toEqual([cloudProvider]));
+    rerender({ baseUrl: "http://localhost:8000" });
+    await waitFor(() => expect(result.current).toEqual([localProvider]));
+
+    expect(fetchSpy.mock.calls.map(([url]) => url)).toEqual([
+      "http://localhost:8000/v1/providers?gated=1",
+      "https://cloud.example.test/v1/providers?gated=1",
+      "http://localhost:8000/v1/providers?gated=1",
+    ]);
+  });
+
+  it("clears the old list and ignores its response after switching targets", async () => {
+    let resolveLocal!: (value: Response) => void;
+    let resolveCloud!: (value: Response) => void;
+    const localRequest = new Promise<Response>((resolve) => {
+      resolveLocal = resolve;
+    });
+    const cloudRequest = new Promise<Response>((resolve) => {
+      resolveCloud = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockReturnValueOnce(localRequest)
+        .mockReturnValueOnce(cloudRequest),
+    );
+
+    const { result, rerender } = renderHook(
+      ({ baseUrl }) => useComposerProviderChannels(baseUrl),
+      { initialProps: { baseUrl: "http://localhost:8000" } },
+    );
+
+    rerender({ baseUrl: "https://cloud.example.test" });
+    expect(result.current).toEqual([]);
+
+    await act(async () => {
+      resolveLocal(
+        new Response(
+          JSON.stringify({
+            providers: [provider({ id: "local", name: "Local" })],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+      await localRequest;
+    });
+    expect(result.current).toEqual([]);
+
+    const cloudProvider = provider({ id: "cloud", name: "Cloud" });
+    await act(async () => {
+      resolveCloud(
+        new Response(JSON.stringify({ providers: [cloudProvider] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+      await cloudRequest;
+    });
+    expect(result.current).toEqual([cloudProvider]);
+  });
 });
 
 describe("useComposerProviders", () => {

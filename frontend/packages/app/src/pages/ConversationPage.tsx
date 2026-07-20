@@ -44,7 +44,6 @@ import {
   useSessionStore,
   useProjectStore,
   projectsApi,
-  providersApi,
   skillsApi,
   usePanelStore,
   type SessionDetail,
@@ -53,7 +52,6 @@ import {
   type TodoItem,
   type ProjectDetail,
   type ProjectListItem,
-  type LLMChannel,
   type SkillView,
   type StagingSlugView,
   type StagingSyncStrategy,
@@ -66,6 +64,7 @@ import {
   SESSION_ACTION_RESOLVED_EVENT,
   SESSION_WORKFLOW_PROGRESS_EVENT,
   type WorkflowState,
+  useComposerProviderChannels,
   useComposerProviders,
   useModelDefaults,
   useRuntimes,
@@ -867,7 +866,6 @@ export const ConversationPage = () => {
   // keys on this to keep re-subscribing until the LAST drained turn finishes —
   // not just while ``queue`` is non-empty (session-input-queue §14.5).
   const [queueDraining, setQueueDraining] = useState(false);
-  const [providers, setProviders] = useState<LLMChannel[]>([]);
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(
     null,
   );
@@ -2487,6 +2485,25 @@ export const ConversationPage = () => {
       ? null
       : t("conversation.newChat" as Parameters<typeof t>[0]));
 
+  // Existing sessions follow their observed origin. New project conversations
+  // follow the selected project's origin; new temp chats follow the explicit
+  // location chip (or the registered default). This keeps the model list on
+  // the same backend that will own the session.
+  const sessionExecOrigin = useEntityOrigin(selectedSessionId, "session");
+  const selectedProviderProject = projects.find(
+    (project) => project.id === selectedProjectId,
+  );
+  const selectedProjectOrigin = selectedProviderProject
+    ? (selectedProviderProject.exec_origin ?? "local")
+    : undefined;
+  const providerTargetId = selectedSession
+    ? sessionExecOrigin
+    : (selectedProjectOrigin ?? execTargetId);
+  const providerTarget =
+    executionTargets.find((target) => target.id === providerTargetId) ??
+    getDefaultExecutionTarget();
+  const providers = useComposerProviderChannels(providerTarget?.baseUrl);
+
   const composerProviders = useComposerProviders(
     providers,
     selectedRuntimeId ?? undefined,
@@ -2520,9 +2537,6 @@ export const ConversationPage = () => {
   // showing the bound context on existing ones. All editions render it; the
   // location chip inside it only appears on multi-target builds.
   const execBarLocked = !(selectedSession == null && isNewSession);
-  // Observed origin of the open session — drives the locked bar's location
-  // chip (multi-target editions; undefined on single-target/unknown).
-  const sessionExecOrigin = useEntityOrigin(selectedSessionId, "session");
   const execBarProjects = useMemo(
     () =>
       projects
@@ -3041,18 +3055,8 @@ export const ConversationPage = () => {
     }
     setError(null);
     try {
-      // One gated list request — the server applies the subscription-login
-      // gate across the whole list, replacing the old per-channel detail
-      // fan-out (1+N requests; each subscription detail paid a CLI login
-      // probe, adding seconds to every conversation open).
-      const [wsResponse, chListResponse] = await Promise.all([
-        projectsApi.list(),
-        providersApi
-          .list({ gated: true })
-          .catch(() => ({ providers: [] as LLMChannel[] })),
-      ]);
+      const wsResponse = await projectsApi.list();
       setProjects(wsResponse.projects);
-      setProviders(chListResponse.providers.filter((c) => c.enabled));
 
       // Two URL shapes drive the page:
       //
@@ -3381,22 +3385,20 @@ export const ConversationPage = () => {
         const createBaseUrl = isChat
           ? chatTarget?.baseUrl
           : resolveApiBase({ projectId: sessionProjectId }, "") || undefined;
-        // On a REMOTE target, provider_id / model / runtime / connector picks
-        // reference THIS backend's rows — meaningless (400) on the other
-        // backend. Drop them so the owning backend resolves its own defaults;
-        // symbolic fields (agent_slug / permission_mode / effort) stay.
+        // Connector picks still come from the local backend. The model list is
+        // loaded from ``createBaseUrl`` above, so provider/model/runtime picks
+        // are valid on the selected remote backend and must be preserved.
         const remoteCreate = chatTarget?.remote === true;
         created = await sessionsApi.create(
           {
             project_id: isChat ? "chat-default" : sessionProjectId,
             agent_slug: selectedAgentSlug ?? undefined,
-            provider_id: remoteCreate
-              ? undefined
-              : (selectedProviderId ?? undefined),
-            model_id: remoteCreate ? undefined : (selectedModelId ?? undefined),
-            runtime_id: remoteCreate
-              ? undefined
-              : (selectedRuntimeId ?? undefined),
+            provider_id: selectedProviderId ?? undefined,
+            model_id: selectedModelId ?? undefined,
+            runtime_id:
+              selectedProviderId && selectedModelId
+                ? (selectedRuntimeId ?? undefined)
+                : undefined,
             mcp_provider_slugs:
               !remoteCreate && selectedMcpSlugs.length > 0
                 ? selectedMcpSlugs
@@ -6364,6 +6366,10 @@ export const ConversationPage = () => {
                 targetId={execTargetId}
                 onTargetChange={(tid) => {
                   setExecTargetId(tid);
+                  // Provider ids are backend-local. Clear the old pick while
+                  // the newly selected service's list is loading.
+                  setSelectedProviderId(null);
+                  setSelectedModelId(null);
                   // A project belongs to ONE backend — switching location
                   // resets the pick back to 临时对话.
                   const current = projects.find(
@@ -6378,6 +6384,14 @@ export const ConversationPage = () => {
                 projects={execBarProjects}
                 selectedProjectId={isProjectProject ? selectedProjectId : null}
                 onProjectChange={(idOrNull) => {
+                  const nextTargetId = idOrNull
+                    ? (projects.find((w) => w.id === idOrNull)?.exec_origin ??
+                      "local")
+                    : (execTargetId ?? getDefaultExecutionTarget()?.id);
+                  if (nextTargetId !== providerTarget?.id) {
+                    setSelectedProviderId(null);
+                    setSelectedModelId(null);
+                  }
                   setSelectedProjectId(idOrNull ?? "chat-default");
                   // Same scope rule as the old toolbar chip: skills don't
                   // survive a project-scope change.

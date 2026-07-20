@@ -12,12 +12,12 @@ import {
 } from "@valuz/ui";
 import {
   getDefaultExecutionTarget,
-  providersApi,
   mcpProvidersApi,
   recordEntityOrigin,
   sessionsApi,
   useEntityOrigin,
   skillsApi,
+  useComposerProviderChannels,
   useComposerProviders,
   useExecutionTargets,
   useModelDefaults,
@@ -25,7 +25,6 @@ import {
   usePanelStore,
   useSessionAttachments,
   projectsApi,
-  type LLMChannel,
   type ProjectListItem,
   type RuntimeId,
   type SessionListItem,
@@ -49,7 +48,6 @@ export const ConversationsHomePage = () => {
   const [allProjects, setAllProjects] = useState<ProjectListItem[]>([]);
   const [dataSources, setDataSources] = useState<DataSourceOption[]>([]);
   const [enabledSlugs, setEnabledSlugs] = useState<string[]>([]);
-  const [providers, setProviders] = useState<LLMChannel[]>([]);
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(
     null,
   );
@@ -86,6 +84,7 @@ export const ConversationsHomePage = () => {
       getDefaultExecutionTarget()
     );
   };
+  const providers = useComposerProviderChannels(resolveExecTarget()?.baseUrl);
   const { defaults: modelDefaults, loading: defaultsLoading } =
     useModelDefaults();
 
@@ -230,14 +229,6 @@ export const ConversationsHomePage = () => {
       // Silently fail — picker just shows empty state.
     }
     try {
-      // One gated list request (server-side subscription-login gate) —
-      // replaces the old per-channel detail fan-out.
-      const chListRes = await providersApi.list({ gated: true });
-      setProviders(chListRes.providers.filter((c) => c.enabled));
-    } catch {
-      // Silently fail — Composer model picker just shows empty state.
-    }
-    try {
       const skillRes = await skillsApi.list();
       setGlobalSkills(skillRes.skills);
     } catch {
@@ -266,7 +257,10 @@ export const ConversationsHomePage = () => {
     mcp_provider_slugs: enabledSlugs.length > 0 ? enabledSlugs : undefined,
     provider_id: selectedProviderId ?? undefined,
     model_id: selectedModelId ?? undefined,
-    runtime_id: selectedRuntimeId ?? undefined,
+    runtime_id:
+      selectedProviderId && selectedModelId
+        ? (selectedRuntimeId ?? undefined)
+        : undefined,
     permission_mode: selectedPermissionMode,
   });
 
@@ -277,16 +271,12 @@ export const ConversationsHomePage = () => {
     const target = resolveExecTarget();
     let payload = sessionPayload();
     if (target?.remote) {
-      // provider_id / model / runtime / connector picks reference THIS
-      // backend's rows — meaningless (400) on a remote target. Drop them so
-      // the owning backend resolves its own defaults; symbolic fields
-      // (permission_mode) stay.
+      // Connector picks still come from the local backend. Model/provider
+      // picks are target-scoped above, so they are valid on the selected
+      // remote backend and must be preserved.
       payload = {
         ...payload,
         mcp_provider_slugs: undefined,
-        provider_id: undefined,
-        model_id: undefined,
-        runtime_id: undefined,
       };
     }
     const session = await sessionsApi.create(
@@ -567,7 +557,14 @@ export const ConversationsHomePage = () => {
                   locked={sessionId != null}
                   lockedOriginId={mintedSessionOrigin}
                   targetId={execTargetId}
-                  onTargetChange={setExecTargetId}
+                  onTargetChange={(targetId) => {
+                    setExecTargetId(targetId);
+                    // Provider ids are backend-local. Clear the old pick while
+                    // the newly selected service's list is loading.
+                    setSelectedProviderId(null);
+                    setSelectedModelId(null);
+                    setComposerTouched(true);
+                  }}
                   projects={allProjects
                     .filter((w) => w.kind === "project")
                     .map((w) => ({
