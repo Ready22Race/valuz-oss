@@ -2457,8 +2457,10 @@ class ClaudeAgentRuntime:
                 if sdk_session_id:
                     session.runtime_session_id = str(sdk_session_id)
             elif message.subtype == "task_updated":
-                # Not modeled by the SDK (generic SystemMessage); the raw
-                # payload carries {task_id, patch: {status, ...}}.
+                # Since SDK 0.2.101 this arrives as ``TaskUpdatedMessage`` — a
+                # ``SystemMessage`` SUBCLASS, so this branch still matches and
+                # ``data`` still carries the raw {task_id, patch: {status, ...}}
+                # payload; the dict access below stays valid on both shapes.
                 task_id = message.data.get("task_id")
                 patch = message.data.get("patch") or {}
                 # A terminal patch may be the ONLY end-of-task signal (see
