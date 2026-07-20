@@ -465,6 +465,12 @@ async def bind_data_service(app: FastAPI) -> None:
         from valuz_agent.adapters.data_service_local import LocalDataServiceReader
 
         bind_data_reader(LocalDataServiceReader(store))
+        # …and bind the host DATA PLANE onto the same store: non-runtime
+        # kernel_client facades (reads + at-rest control writes + stranded
+        # reset) run the kernel route semantics against the durable copy.
+        from valuz_agent.adapters import kernel_client
+
+        kernel_client.bind_host_data_store(lambda: store)
         logging.getLogger(__name__).info("host DataService bound (backend=%s)", store_mode)
     except Exception:  # noqa: BLE001 — DS binding must never break boot
         logging.getLogger(__name__).warning("host DataService bind skipped", exc_info=True)
@@ -525,14 +531,20 @@ def install_binding_change_listener() -> None:
 
 
 async def recover_stranded_sessions() -> None:
-    """Clear ``running`` sessions left over from a previous process.
+    """Reset genuinely-stranded ``running`` sessions from a previous process.
 
-    See ``domains.execution.sessions.recovery`` for rationale. Runs
-    after ``init_kernel`` so the kernel store is reachable.
+    Liveness-aware (``modules.sessions.recovery``): a ``running`` row whose
+    sandbox scope still holds a live remote sandbox is left alone (the turn may
+    be executing there — critical with multiple host replicas + per-scope
+    sandboxes on one shared durable); only confirmed-dead sessions are reset,
+    to ``idle`` + resumable ``host_restart`` (so ``recover_active_tasks`` can
+    re-drive interrupted task members). Runs after ``init_kernel`` so the
+    kernel store is reachable.
     """
-    # The orphan scans run inside the kernel store — in http mode the
-    # standalone kernel runs them itself at its own startup (B2); the
-    # HttpKernelClient deliberately has no scan_orphan_* methods.
+    # In http mode the standalone kernel reconciles its own store at its own
+    # startup (B2) — and without a sandbox allocator the host cannot prove the
+    # kernel process is NOT mid-turn, so a host-side durable reset here could
+    # clobber a live turn. Skip; the kernel's own boot scan covers it.
     if settings.is_http_kernel:
         return
 
@@ -597,8 +609,9 @@ async def recover_active_tasks() -> None:
     tasks orphaned by the previous process exit.
 
     Runs after ``recover_stranded_sessions`` / ``seal_orphan_pendings`` so the
-    kernel session rows are already reconciled (``scan_orphan_runs`` left
-    interrupted members at ``idle`` + ``host_restart``). Only ``active`` tasks
+    kernel session rows are already reconciled (stranded members sit at
+    ``idle`` + ``host_restart`` — stamped by the liveness-aware host recovery,
+    or by the kernel's own boot scan on the ``local`` tier). Only ``active`` tasks
     are touched; ``paused`` (user-stopped) wait for explicit resume.
     """
     import logging

@@ -227,6 +227,22 @@ def _apply_default_user_id_patches():
 def pytest_sessionstart(session):
     _apply_default_user_id_patches()
 
+
+@pytest.fixture(autouse=True)
+def _reset_host_data_plane():
+    """Unbind the host data-plane client between tests.
+
+    ``kernel_client.bind_host_data_store`` (run by ``bind_data_service`` during
+    boot-path tests) binds a module-global durable-backed client; in production
+    the process serves exactly one app so the global is rebound once per boot,
+    but across tests a stale binding would silently redirect every non-runtime
+    facade read to a dead temp store."""
+    yield
+    from valuz_agent.adapters import kernel_client
+
+    kernel_client.bind_host_data_store(None)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_user_skills_dir(tmp_path, monkeypatch):
     """Hard fence: NEVER let a test write the real ``~/.agents/skills``.
@@ -274,8 +290,7 @@ _REAL_HOME_WATCHED = (
 
 def _real_home_snapshot() -> dict[str, set[str] | None]:
     return {
-        str(root): (set(os.listdir(root)) if root.is_dir() else None)
-        for root in _REAL_HOME_WATCHED
+        str(root): (set(os.listdir(root)) if root.is_dir() else None) for root in _REAL_HOME_WATCHED
     }
 
 
