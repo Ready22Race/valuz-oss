@@ -229,38 +229,72 @@ async def test_terminal_turn_status_breaks_loop_immediately() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _resolve_turn_status — elevate an idle-but-errored turn to a failure
+# _resolve_turn_status — classify from the authoritative run_turn ``message``
 # ---------------------------------------------------------------------------
 
 
 def test_resolve_turn_status_elevates_error_stop_reason() -> None:
-    """The kernel leaves status=='idle' even when a turn failed at the API
-    transport layer (SDK ResultMessage(is_error=True) → stop_reason.type
-    'error'). Elevate to 'terminated' so the loop breaks and the lead/member
-    finalize treat it as a failure. Accept both dict and attr-style stop_reason."""
+    """A turn that failed at the API transport layer (SDK
+    ResultMessage(is_error=True)) returns normally with an ``Error`` stop_reason
+    on the ``message``. Elevate to 'terminated' so the loop breaks and the
+    lead/member finalize treat it as a failure. Accept dict + attr stop_reason."""
     from valuz_agent.modules.tasks.actor_runner import _resolve_turn_status
 
-    idle_err_dict = SimpleNamespace(status="idle", stop_reason={"type": "error"})
-    idle_err_attr = SimpleNamespace(status="idle", stop_reason=SimpleNamespace(type="error"))
-    assert _resolve_turn_status(idle_err_dict) == "terminated"
-    assert _resolve_turn_status(idle_err_attr) == "terminated"
+    err_dict = SimpleNamespace(status="errored", stop_reason={"type": "error"})
+    err_attr = SimpleNamespace(status="errored", stop_reason=SimpleNamespace(type="error"))
+    assert _resolve_turn_status(err_dict) == "terminated"
+    assert _resolve_turn_status(err_attr) == "terminated"
 
 
-def test_resolve_turn_status_passes_through_clean_turns() -> None:
+def test_resolve_turn_status_clean_turn_is_idle() -> None:
     from valuz_agent.modules.tasks.actor_runner import _resolve_turn_status
 
     assert _resolve_turn_status(None) == "idle"
-    # Clean end_turn stays idle.
+    # Clean end_turn.
+    assert _resolve_turn_status(SimpleNamespace(stop_reason={"type": "end_turn"})) == "idle"
+    # No stop_reason on the message.
+    assert _resolve_turn_status(SimpleNamespace(stop_reason=None)) == "idle"
+
+
+def test_resolve_turn_status_interrupt_categories() -> None:
+    """A cancellation error (user_interrupt / interrupted) is user/host intent,
+    not a failure → 'interrupted'. Branch on ``stop_reason.category`` because
+    ``message.status`` collapses a host 'interrupted' into 'errored'."""
+    from valuz_agent.modules.tasks.actor_runner import _resolve_turn_status
+
     assert (
-        _resolve_turn_status(SimpleNamespace(status="idle", stop_reason={"type": "end_turn"}))
-        == "idle"
+        _resolve_turn_status(
+            SimpleNamespace(
+                status="cancelled", stop_reason={"type": "error", "category": "user_interrupt"}
+            )
+        )
+        == "interrupted"
     )
-    # A turn with no stop_reason yet is untouched.
-    assert _resolve_turn_status(SimpleNamespace(status="idle", stop_reason=None)) == "idle"
-    # A genuinely-terminal status is passed through unchanged.
+    # A host 'interrupted' surfaces as message.status='errored', but must still
+    # resolve 'interrupted' off the category — NOT 'terminated'.
     assert (
-        _resolve_turn_status(SimpleNamespace(status="terminated", stop_reason={"type": "error"}))
-        == "terminated"
+        _resolve_turn_status(
+            SimpleNamespace(
+                status="errored", stop_reason={"type": "error", "category": "interrupted"}
+            )
+        )
+        == "interrupted"
+    )
+
+
+def test_resolve_turn_status_ignores_a_stale_running_readback() -> None:
+    """Regression: the classifier reads the authoritative ``message``, so a
+    ``running`` that the lagging durable mirror might have shown is structurally
+    impossible here — the message of a resolved turn is never 'running', and the
+    status field is not even consulted. This is what stops the finalize clobber
+    that stranded sessions at status='running'."""
+    from valuz_agent.modules.tasks.actor_runner import _resolve_turn_status
+
+    # Even if a caller handed a message-like object carrying a bogus
+    # status='running', only the (clean) stop_reason drives the result → idle.
+    assert (
+        _resolve_turn_status(SimpleNamespace(status="running", stop_reason={"type": "end_turn"}))
+        == "idle"
     )
 
 
@@ -849,9 +883,7 @@ def _patch_await_deps(monkeypatch, key_by_session: dict[str, str]):
             # for each simulated key. Keys absent here are treated as "never
             # dispatched" (heartbeat stays a no-op for them).
             return [
-                SimpleNamespace(
-                    kind="subtask", subtask_key=sk, status="active", session_id=sid
-                )
+                SimpleNamespace(kind="subtask", subtask_key=sk, status="active", session_id=sid)
                 for sid, sk in key_by_session.items()
             ]
 
@@ -1018,9 +1050,7 @@ async def test_await_members_any_running_pending_gets_keep_waiting_hint(monkeypa
     async def _get_session(_uid, _sid):
         return SimpleNamespace(status="running")  # member genuinely in flight
 
-    monkeypatch.setattr(
-        coord_mod, "data_reader", lambda: SimpleNamespace(get_session=_get_session)
-    )
+    monkeypatch.setattr(coord_mod, "data_reader", lambda: SimpleNamespace(get_session=_get_session))
     orch = TaskOrchestrator()
     lead = "lead-await-running"
     mailbox_registry.register(lead)
@@ -1061,9 +1091,7 @@ async def test_await_members_clamps_window_to_max(monkeypatch) -> None:
     async def _get_session(_uid, _sid):
         return SimpleNamespace(status="running")
 
-    monkeypatch.setattr(
-        coord_mod, "data_reader", lambda: SimpleNamespace(get_session=_get_session)
-    )
+    monkeypatch.setattr(coord_mod, "data_reader", lambda: SimpleNamespace(get_session=_get_session))
     orch = TaskOrchestrator()
     lead = "lead-await-clamp"
     mailbox_registry.register(lead)

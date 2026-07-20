@@ -38,8 +38,10 @@ class _Bus:
 def _run_to_idle_with_stop_reason(
     monkeypatch: pytest.MonkeyPatch, stop_reason: dict[str, Any] | None
 ) -> tuple[str, list[Any]]:
-    """Drive one run_session_to_idle turn whose post-run session carries
-    ``stop_reason``; return (returned final_status, finalize call args)."""
+    """Drive one run_session_to_idle turn whose AUTHORITATIVE run_turn
+    ``message`` carries ``stop_reason``; return (returned final_status, finalize
+    call args). The turn outcome is classified off the message, not a re-read of
+    the durable session (which is now only a secondary meter/error signal)."""
     monkeypatch.setattr(actor_runner, "_restamp_always_on_mcp", _as_async(lambda *a, **k: None))
 
     after_run = SimpleNamespace(status="idle", stop_reason=stop_reason, metadata={})
@@ -52,7 +54,7 @@ def _run_to_idle_with_stop_reason(
     monkeypatch.setattr(
         actor_runner.kernel_client,
         "run_turn",
-        _as_async(lambda *a, **k: SimpleNamespace(id="m1", status="ok")),
+        _as_async(lambda *a, **k: SimpleNamespace(id="m1", status="ok", stop_reason=stop_reason)),
     )
 
     finalize_calls: list[Any] = []
