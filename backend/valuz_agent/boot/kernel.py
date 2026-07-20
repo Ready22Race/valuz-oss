@@ -361,14 +361,12 @@ def build_host_data_service_store(backend_dsn: str):
     """Build a ``(StorePort, AsyncEngine)`` over the host DataService backend.
 
     The host owns the DB credential here; a sandbox reaches this DataService
-    over HTTP+JWT and never sees the DSN. RLS GUC is installed (no-op on SQLite).
+    over HTTP+JWT and never sees the DSN.
     """
-    from app.data_service import install_rls_guc
     from src.adapters.sqlalchemy_store.engine import create_engine, create_session_factory
     from src.adapters.sqlalchemy_store.store import SQLAlchemyStore
 
     engine = create_engine(backend_dsn)
-    install_rls_guc(engine)
     return SQLAlchemyStore(create_session_factory(engine)), engine
 
 

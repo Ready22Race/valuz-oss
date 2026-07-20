@@ -147,10 +147,12 @@ sync `TokenVerifier` adapter for standalone OSS callers. Consequences:
 - A **sandbox holds only a short-lived credential** + the DataService URL. It never
   receives a DB DSN, driver, or PG credential — the credential lives only on the
   host (the DataService's backend config).
-- On a **remote PG** backend, **Row-Level Security** is the DB-side backstop:
-  the DataService stamps `app.current_user_id` per transaction (`SET LOCAL`) from
-  the verified token, and connects as a **non-owner role** so the RLS policy is
-  enforced even if an app-layer filter is ever missed.
+- Owner isolation is **app-layer by construction**: every `StorePort` method
+  requires the owner, and the DataService routes inject it only from the
+  verified token. There is deliberately no DB-level RLS — the host data plane
+  performs legitimate cross-owner reads (recovery sweeps), and a policy that
+  only binds under a dedicated non-owner DB role is a backstop that silently
+  does nothing in the deployments we run.
 - The owner-from-token rule means a compromised sandbox cannot read or write
   another owner's data.
 
@@ -177,10 +179,9 @@ sandboxed kernel crosses the HTTP boundary.
 
 ```
 agent turn → kernel.append_event
-   ├─ write sandbox-local sqlite            (buffer; fast)
+   ├─ write sandbox-local sqlite            (runtime authority; fast)
    └─ POST /rpc/append_event  ─HTTP+JWT─▶  host DataService
                                               ├─ verify JWT → owner
-                                              ├─ SET LOCAL app.current_user_id
                                               └─ INSERT … RETURNING seq → PG
         on HTTP/PG failure ▶ log + continue (best-effort mirror; recovery is a later, explicit step)
 ```
@@ -241,7 +242,7 @@ DataService backend at the managed PG; nothing in the kernel or data path change
 
 **Landed:** the `/rpc/{op}` DataService app + StorePort surface
 (`kernel/app/data_service.py`), the `store_wire` codec, JWT signer/verifier +
-`TokenVerifier` port, RLS migration, `event_uid` idempotency; **env-var config**
+`TokenVerifier` port, `event_uid` idempotency; **env-var config**
 (`KERNEL_STORE` + `VALUZ_DURABLE_DATABASE_URL` / `VALUZ_DATA_API_*`) replacing the
 former settings page; the host DataService mounted as a router at
 `/internal/data`; the **typed `DataReader` port** (`adapters/data_reader.py`)
