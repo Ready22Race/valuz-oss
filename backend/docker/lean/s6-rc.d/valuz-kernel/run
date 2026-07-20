@@ -21,14 +21,16 @@
 # S6_KEEP_ENV=1, so `with-contenv` keeps the inherited process env and does NOT
 # read /run/s6/container_environment — writing env there would have no effect.
 #
-# DB ON LOCAL DISK (perf). Measured: sqlite's FIRST access over the COS FUSE
-# mount costs ~1.4s (WAL setup + page reads) and every instance's mount is fresh,
-# so a COS-backed kernel.db taxed every cold bootstrap ~2.5-3s (alembic incl.).
-# Under KERNEL_STORE=remote — the only cloud mode — PG is authoritative and the
-# sqlite db is just a write-through buffer, so it lives on LOCAL disk
-# (${VALUZ_KERNEL_DB_DIR:-/app/data}) and is deliberately ephemeral. Set
-# VALUZ_KERNEL_DB_DIR=/home/user/.valuz-kernel to put it back on the COS mount
-# (e.g. a KERNEL_STORE=local deployment that needs db durability).
+# DB ON LOCAL DISK (correctness + perf). Since valuz-oss#578 the kernel's local
+# sqlite is the RUNTIME AUTHORITY (every kernel read; the DataService/PG copy is
+# a dual-write mirror the kernel never reads back), and sqlite over the COS FUSE
+# mount both corrupts under load and taxes every cold bootstrap ~2.5-3s. So it
+# lives on LOCAL disk (${VALUZ_KERNEL_DB_DIR:-/app/data}). It is NOT ephemeral:
+# the host's apply_env prep seeds it from the per-scope COS suitcase
+# (sandbox-home/kernel-db/{scope}) before the config gate opens, and
+# sync_state_back writes it back at the post-turn clamp / release — so an
+# existing scope's history survives instance turnover. The value must agree
+# with the host's VALUZ_AGS_KERNEL_DB_DIR (both default /app/data).
 #
 # LOGS ON COS (diagnosability). boot.log + serve.log go to the per-owner COS
 # mount at ~/.valuz-kernel so a dead sandbox can still be post-mortemed.
