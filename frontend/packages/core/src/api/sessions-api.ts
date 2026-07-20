@@ -516,6 +516,12 @@ export const sessionsApi = {
     });
   },
 
+  /**
+   * HISTORY read — ``afterSeq`` and every returned item's ``seq`` are in
+   * the DURABLE store's seq space (never the kernel's local/live space).
+   * Items carry ``event_uid`` for cross-segment dedup against live frames;
+   * the raw JSON flows through unchanged.
+   */
   listEvents(
     sessionId: string,
     afterSeq?: number,
@@ -573,11 +579,26 @@ export const sessionsApi = {
     });
   },
 
+  /**
+   * Open the session SSE stream. ``afterSeq`` is a HISTORY-space cursor
+   * (durable-store seq): the server backfills persisted events strictly
+   * after it, then streams live frames. Live frames carry the kernel's
+   * LOCAL seq — a different space — so callers must not feed live frame
+   * seqs back into ``afterSeq``; dedup across the two spaces keys on
+   * ``event_uid``.
+   *
+   * ``onHistoryCursor`` (optional) reports the server's HISTORY cursor as
+   * carried by heartbeat frames (``{"seq": N}`` with no ``event_type``).
+   * Backfill and live frames are NOT distinguishable on the wire, so
+   * heartbeats are the only frames whose ``seq`` is safe to persist as a
+   * reconnect cursor.
+   */
   subscribeEvents(
     sessionId: string,
     onEvent: SessionStreamCallback,
     afterSeq?: number,
     signal?: AbortSignal,
+    onHistoryCursor?: (seq: number) => void,
   ): Promise<void> {
     return new Promise((resolve, reject) => {
       const qs = new URLSearchParams();
@@ -625,11 +646,18 @@ export const sessionsApi = {
                       event_type?: string;
                       payload?: Record<string, string>;
                       timestamp?: string;
+                      event_uid?: string | null;
                     };
-                    // Heartbeat frames ({"seq": N}) carry no event_type;
-                    // skip them — they only exist to keep the connection
-                    // alive over idle periods.
-                    if (!parsed.event_type) continue;
+                    // Heartbeat frames ({"seq": N}) carry no event_type.
+                    // Their ``seq`` is the server's HISTORY cursor — the
+                    // one frame kind whose seq is guaranteed history-space
+                    // — so surface it to the caller, then skip rendering.
+                    if (!parsed.event_type) {
+                      if (typeof parsed.seq === "number") {
+                        onHistoryCursor?.(parsed.seq);
+                      }
+                      continue;
+                    }
                     onEvent({
                       seq: typeof parsed.seq === "number" ? parsed.seq : 0,
                       event: {
@@ -640,6 +668,10 @@ export const sessionsApi = {
                         typeof parsed.timestamp === "number"
                           ? parsed.timestamp
                           : undefined,
+                      event_uid:
+                        typeof parsed.event_uid === "string"
+                          ? parsed.event_uid
+                          : null,
                     });
                   } catch {
                     // Skip malformed SSE data lines

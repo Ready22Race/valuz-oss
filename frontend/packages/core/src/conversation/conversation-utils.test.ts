@@ -665,7 +665,9 @@ describe("buildTurns — tool input/output streaming", () => {
 describe("mergeEventWindow — resume window merge", () => {
   it("returns prev unchanged when the window brings nothing new", () => {
     const prev = [evt(1, "message.user", { text: "hi" })];
-    const out = mergeEventWindow(prev, [evt(1, "message.user", { text: "hi" })]);
+    const out = mergeEventWindow(prev, [
+      evt(1, "message.user", { text: "hi" }),
+    ]);
     expect(out).toBe(prev); // identity — no re-render
   });
 
@@ -713,10 +715,152 @@ describe("mergeEventWindow — resume window merge", () => {
   it("tail-appends window rows newer than everything in prev (gap-fill)", () => {
     const prev = [
       evt(1, "message.user", { text: "hi" }),
-      evt(0, "message.assistant.text_delta", { text: "live", message_id: "a1" }),
+      evt(0, "message.assistant.text_delta", {
+        text: "live",
+        message_id: "a1",
+      }),
     ];
     const win = [evt(2, "tool.call.started", { name: "shell" })];
     expect(mergeEventWindow(prev, win).map((e) => e.seq)).toEqual([1, 0, 2]);
+  });
+});
+
+describe("mergeEventWindow — cross-segment event_uid identity", () => {
+  // History reads (durable-store seq) and live frames (kernel-local seq) are
+  // INDEPENDENT seq spaces; the store-independent ``event_uid`` is the only
+  // valid cross-segment identity.
+  const uevt = (
+    seq: number,
+    uid: string | null,
+    eventType: string,
+    payload: Record<string, string>,
+    timestamp?: number,
+  ): SessionEventDTO => ({
+    seq,
+    event: { event_type: eventType, payload },
+    timestamp,
+    event_uid: uid,
+  });
+
+  it("should collapse a history row whose uid twin already arrived live under a different seq", () => {
+    // Live frame: kernel-local seq 5. History twin: durable seq 900.
+    const prev = [
+      uevt(5, "uid-user-1", "message.user", { text: "hi", message_id: "u1" }),
+    ];
+    const win = [
+      uevt(900, "uid-user-1", "message.user", { text: "hi", message_id: "u1" }),
+    ];
+    expect(mergeEventWindow(prev, win)).toBe(prev); // identity — nothing new
+  });
+
+  it("should NOT drop a live frame's history twin match by coincidental seq equality", () => {
+    // prev holds a LIVE frame (kernel seq 2, uid A). The window brings a
+    // DIFFERENT event whose durable seq happens to be 2 (uid B). Seq-keyed
+    // dedup would wrongly drop it; uid-keyed dedup keeps it.
+    const prev = [
+      uevt(2, "uid-A", "message.user", { text: "hi", message_id: "u1" }),
+    ];
+    const win = [
+      uevt(2, "uid-B", "message.assistant.delta", {
+        text: "past",
+        message_id: "a0",
+      }),
+    ];
+    const out = mergeEventWindow(prev, win);
+    expect(out).toHaveLength(2);
+    expect(out.map((e) => e.event_uid)).toContain("uid-B");
+  });
+
+  it("should insert older history before the live segment using the uid anchor, not seq order", () => {
+    // Mid-turn resume: prev = current turn delivered LIVE (kernel seqs 5,6)
+    // plus an unpersisted delta. The window returns the whole history in
+    // durable space: older turn (900,901) + the current turn again (902,903).
+    const liveUser = uevt(5, "uid-u2", "message.user", {
+      text: "again",
+      message_id: "u2",
+    });
+    const liveReply = uevt(6, "uid-a2", "message.assistant.delta", {
+      text: "wip",
+      message_id: "a2",
+    });
+    const delta = evt(0, "message.assistant.text_delta", {
+      text: "…",
+      message_id: "a2",
+    });
+    const prev = [liveUser, liveReply, delta];
+    const win = [
+      uevt(900, "uid-u1", "message.user", { text: "hi", message_id: "u1" }),
+      uevt(901, "uid-a1", "message.assistant.delta", {
+        text: "done",
+        message_id: "a1",
+      }),
+      uevt(902, "uid-u2", "message.user", { text: "again", message_id: "u2" }),
+      uevt(903, "uid-a2", "message.assistant.delta", {
+        text: "wip",
+        message_id: "a2",
+      }),
+    ];
+    const out = mergeEventWindow(prev, win);
+    // Older turn lands BEFORE the live copies (anchored on uid-u2); the
+    // current turn's rows dedup against their live twins; the delta stays
+    // glued at the tail. No cross-segment sort by raw seq (which would have
+    // thrown 900+ after kernel-seq 5/6).
+    expect(out.map((e) => e.event_uid ?? `delta`)).toEqual([
+      "uid-u1",
+      "uid-a1",
+      "uid-u2",
+      "uid-a2",
+      "delta",
+    ]);
+    expect(out[2]).toBe(liveUser);
+    expect(out[3]).toBe(liveReply);
+    expect(out[4]).toBe(delta);
+  });
+
+  it("should put a whole history window BEFORE a purely-live prev tail when nothing overlaps", () => {
+    // Resume race where the live tail only has unpersisted-style uid frames
+    // not present in the (older) window — no anchors: history goes first.
+    const prev = [
+      uevt(3, "uid-live-only", "message.user", {
+        text: "new turn",
+        message_id: "u9",
+      }),
+    ];
+    const win = [
+      uevt(700, "uid-old-1", "message.user", { text: "hi", message_id: "u1" }),
+      uevt(701, "uid-old-2", "message.assistant.delta", {
+        text: "past",
+        message_id: "a1",
+      }),
+    ];
+    const out = mergeEventWindow(prev, win);
+    expect(out.map((e) => e.event_uid)).toEqual([
+      "uid-old-1",
+      "uid-old-2",
+      "uid-live-only",
+    ]);
+  });
+
+  it("should keep uid-less rows flowing exactly as before alongside uid rows", () => {
+    // Legacy (uid-less) incoming rows keep the seq-based dedup against
+    // uid-less prev rows; a uid-bearing prev row with a colliding seq does
+    // not swallow them.
+    const prev = [
+      evt(1, "message.user", { text: "legacy", message_id: "u1" }),
+      uevt(2, "uid-live", "message.assistant.delta", {
+        text: "live",
+        message_id: "a9",
+      }),
+    ];
+    const win = [
+      evt(1, "message.user", { text: "legacy", message_id: "u1" }), // dup — dropped
+      evt(2, "tool.call.started", { name: "shell" }), // uid-less, seq collides with uid row — kept
+    ];
+    const out = mergeEventWindow(prev, win);
+    expect(out).toHaveLength(3);
+    expect(
+      out.filter((e) => e.event.event_type === "tool.call.started"),
+    ).toHaveLength(1);
   });
 });
 
@@ -730,10 +874,22 @@ describe("buildTurns — segmented assistant message (mid-turn canonical seal)",
   it("keeps streaming a continuation segment after a mid-turn seal (same id, nothing between)", () => {
     const turns = buildTurns([
       evt(1, "message.user", { text: "q", message_id: "u1" }),
-      evt(0, "message.assistant.text_delta", { text: "seg1", message_id: "a1" }),
-      evt(2, "message.assistant.delta", { text: "seg1-full", message_id: "a1" }),
-      evt(0, "message.assistant.text_delta", { text: "seg2-part1 ", message_id: "a1" }),
-      evt(0, "message.assistant.text_delta", { text: "seg2-part2", message_id: "a1" }),
+      evt(0, "message.assistant.text_delta", {
+        text: "seg1",
+        message_id: "a1",
+      }),
+      evt(2, "message.assistant.delta", {
+        text: "seg1-full",
+        message_id: "a1",
+      }),
+      evt(0, "message.assistant.text_delta", {
+        text: "seg2-part1 ",
+        message_id: "a1",
+      }),
+      evt(0, "message.assistant.text_delta", {
+        text: "seg2-part2",
+        message_id: "a1",
+      }),
     ]);
     expect(turns[0]!.blocks).toEqual([
       { kind: "assistant", text: "seg1-full", messageId: "a1", sealed: true },
@@ -749,9 +905,18 @@ describe("buildTurns — segmented assistant message (mid-turn canonical seal)",
   it("the continuation block seals in place when segment 2's canonical arrives", () => {
     const turns = buildTurns([
       evt(1, "message.user", { text: "q", message_id: "u1" }),
-      evt(2, "message.assistant.delta", { text: "seg1-full", message_id: "a1" }),
-      evt(0, "message.assistant.text_delta", { text: "seg2 draft", message_id: "a1" }),
-      evt(3, "message.assistant.delta", { text: "seg2-full", message_id: "a1" }),
+      evt(2, "message.assistant.delta", {
+        text: "seg1-full",
+        message_id: "a1",
+      }),
+      evt(0, "message.assistant.text_delta", {
+        text: "seg2 draft",
+        message_id: "a1",
+      }),
+      evt(3, "message.assistant.delta", {
+        text: "seg2-full",
+        message_id: "a1",
+      }),
     ]);
     expect(turns[0]!.blocks).toEqual([
       { kind: "assistant", text: "seg1-full", messageId: "a1", sealed: true },
@@ -762,8 +927,14 @@ describe("buildTurns — segmented assistant message (mid-turn canonical seal)",
   it("still drops a re-delivered chunk already contained in the sealed text", () => {
     const turns = buildTurns([
       evt(1, "message.user", { text: "q", message_id: "u1" }),
-      evt(2, "message.assistant.delta", { text: "Hello world", message_id: "a1" }),
-      evt(0, "message.assistant.text_delta", { text: "world", message_id: "a1" }),
+      evt(2, "message.assistant.delta", {
+        text: "Hello world",
+        message_id: "a1",
+      }),
+      evt(0, "message.assistant.text_delta", {
+        text: "world",
+        message_id: "a1",
+      }),
     ]);
     expect(turns[0]!.blocks).toEqual([
       { kind: "assistant", text: "Hello world", messageId: "a1", sealed: true },
@@ -780,7 +951,10 @@ describe("buildTurns — concurrent subagent events (parent_tool_use_id)", () =>
   it("should keep the lead's streaming text in one block when tagged subagent tool events interleave", () => {
     const turns = buildTurns([
       evt(1, "message.user", { text: "q", message_id: "u1" }),
-      evt(0, "message.assistant.text_delta", { text: "已并行", message_id: "a1" }),
+      evt(0, "message.assistant.text_delta", {
+        text: "已并行",
+        message_id: "a1",
+      }),
       evt(2, "tool.call.started", {
         id: "t1",
         tool_use_id: "t1",
@@ -798,7 +972,10 @@ describe("buildTurns — concurrent subagent events (parent_tool_use_id)", () =>
         is_error: "true",
         parent_tool_use_id: "agent-1",
       }),
-      evt(0, "message.assistant.text_delta", { text: "，稍等", message_id: "a1" }),
+      evt(0, "message.assistant.text_delta", {
+        text: "，稍等",
+        message_id: "a1",
+      }),
       evt(4, "message.assistant.delta", {
         text: "已并行启动两个任务，稍等",
         message_id: "a1",
@@ -846,7 +1023,10 @@ describe("buildTurns — concurrent subagent events (parent_tool_use_id)", () =>
         message_id: "a1",
         parent_tool_use_id: "agent-1",
       }),
-      evt(0, "message.assistant.text_delta", { text: " more", message_id: "a1" }),
+      evt(0, "message.assistant.text_delta", {
+        text: " more",
+        message_id: "a1",
+      }),
       evt(3, "message.assistant.delta", {
         text: "Lead says more",
         message_id: "a1",
@@ -854,7 +1034,12 @@ describe("buildTurns — concurrent subagent events (parent_tool_use_id)", () =>
     ]);
 
     expect(turns[0]!.blocks).toEqual([
-      { kind: "assistant", text: "Lead says more", messageId: "a1", sealed: true },
+      {
+        kind: "assistant",
+        text: "Lead says more",
+        messageId: "a1",
+        sealed: true,
+      },
       {
         kind: "assistant",
         text: "Subagent report",
@@ -914,13 +1099,19 @@ describe("buildTurns — concurrent subagent streaming (tagged deltas)", () => {
   it("should stream tagged subagent deltas into their own block without touching the lead's open block", () => {
     const turns = buildTurns([
       evt(1, "message.user", { text: "q", message_id: "u1" }),
-      evt(0, "message.assistant.text_delta", { text: "Lead ", message_id: "a1" }),
+      evt(0, "message.assistant.text_delta", {
+        text: "Lead ",
+        message_id: "a1",
+      }),
       evt(0, "message.assistant.text_delta", {
         text: "Sub ",
         message_id: "a1",
         parent_tool_use_id: "agent-1",
       }),
-      evt(0, "message.assistant.text_delta", { text: "says", message_id: "a1" }),
+      evt(0, "message.assistant.text_delta", {
+        text: "says",
+        message_id: "a1",
+      }),
       evt(0, "message.assistant.text_delta", {
         text: "reports",
         message_id: "a1",
