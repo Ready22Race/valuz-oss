@@ -101,42 +101,50 @@ _INTERRUPT_CATEGORIES = ("user_interrupt", "interrupted")
 _NON_REVIEWABLE_DONE = frozenset({"terminated", "error", "cancelled", "interrupted"})
 
 
-def _resolve_turn_status(session: Any) -> str:
-    """Map a turn's resolved kernel session onto the actor-loop ``final_status``.
+def _resolve_turn_status(message: Any) -> str:
+    """Classify a just-run turn onto the actor-loop ``final_status`` from the
+    AUTHORITATIVE ``run_turn`` result — NOT a re-read of the durable session.
 
-    The kernel leaves ``status="idle"`` even when a turn failed at the API
-    transport layer: the SDK surfaces e.g. ``ECONNRESET`` / a dropped socket /
-    5xx as a ``ResultMessage(is_error=True)`` rather than a raised exception, so
-    ``run_turn`` returns normally and the failure lives *only* in
-    ``stop_reason`` (an ``Error``). Without this an errored lead turn would be
-    read as a clean idle → auto-finalize ``completed``, and an errored member
-    turn → ``subtask`` marked done; the lead then spins in ``await_members``.
+    ``message`` is what ``kernel_client.run_turn`` returned: the kernel builds
+    it in-process from the live session, so ``message.stop_reason`` is the
+    turn's TRUE outcome. Re-reading the session back off the DataService instead
+    (as this used to) races a lagging mirror — the durable copy trails the
+    kernel's local authority (the RuntimeStore dual-write is best-effort), so
+    the read-back can observe a stale ``running`` (or a previous turn's
+    ``stop_reason``). Threading that stale status into ``finalize_session``
+    (below) authoritatively writes it over the kernel's real ``idle``, stranding
+    the session ``running`` forever (409 on the user's next message). Off the
+    message, a resolved turn is structurally never ``running`` — the whole class
+    of stale-read mis-finalization is gone.
 
-    Elevate such a turn to ``"terminated"`` — the one valid persistable status
-    (``created|idle|running|terminated``) every consumer already treats as a
-    failure (loop break, ``_finalize_actor`` ``ok=False``, lead auto-finalize
-    error branch). ``finalize_session`` preserves the existing ``Error``
-    stop_reason when no ``stop_reason_type`` is passed, so the reason survives.
+    Classification (identical to the historical session-based rules, applied to
+    the authoritative ``stop_reason``):
 
-    Exception: an error whose ``category`` is a cancellation
-    (``user_interrupt`` / ``interrupted``) is user/host intent, not a failure —
-    return the loop-local ``"interrupted"`` status so the actor loop breaks but
-    finalize takes the user-stop path (node → rework with a "user stopped"
-    note, ``subtask_stopped`` event) instead of the failure path
-    (``subtask_failed``). ``"interrupted"`` never reaches the kernel store —
-    ``_finalize_actor`` maps it back to ``"idle"``.
+    - a failure lives ONLY in ``stop_reason`` (an ``Error``): the SDK surfaces
+      ``ECONNRESET`` / dropped socket / 5xx as a ``ResultMessage(is_error=True)``,
+      so ``run_turn`` returns normally and the kernel leaves the session idle.
+      Elevate to ``"terminated"`` — the one valid persistable failure status
+      every consumer treats as a failure (loop break, ``_finalize_actor``
+      ``ok=False``, lead auto-finalize error branch).
+    - an error whose ``category`` is a cancellation (``user_interrupt`` /
+      ``interrupted``) is user/host intent, not a failure → ``"interrupted"`` so
+      the loop takes the user-stop path (node → rework, ``subtask_stopped``).
+      ``message.status`` collapses a host ``interrupted`` into ``errored``, so we
+      MUST branch on ``stop_reason.category``, not ``message.status``.
+      ``"interrupted"`` never reaches the kernel store — ``_finalize_actor``
+      maps it back to ``"idle"``.
+    - otherwise (``end_turn`` / budget / no stop_reason) → ``"idle"``.
     """
-    if session is None:
+    if message is None:
         return "idle"
-    status = getattr(session, "status", "idle")
-    sr = getattr(session, "stop_reason", None)
+    sr = getattr(message, "stop_reason", None)
     sr_type = sr.get("type") if isinstance(sr, dict) else getattr(sr, "type", None)
-    if status == "idle" and isinstance(sr_type, str) and "error" in sr_type:
+    if isinstance(sr_type, str) and "error" in sr_type:
         category = sr.get("category") if isinstance(sr, dict) else getattr(sr, "category", None)
         if category in _INTERRUPT_CATEGORIES:
             return "interrupted"
         return "terminated"
-    return status
+    return "idle"
 
 
 def _is_error_turn(message: Any, session: Any) -> bool:
@@ -155,7 +163,8 @@ async def run_session_to_idle(
     on_message: Any | None = None,
     *,
     queued_attachments: list[dict[str, Any]] | None = None,
-    user_id: str | None = None) -> str:
+    user_id: str | None = None,
+) -> str:
     if user_id is None:
         raise ValueError("user_id is required")
 
@@ -271,8 +280,14 @@ async def run_session_to_idle(
                 ],
                 additional_context=additional_context,
             )
+            # The turn's outcome comes from the AUTHORITATIVE run_turn result
+            # (``message``), never a re-read of the lagging durable session — see
+            # ``_resolve_turn_status``. ``after_run`` is still fetched only as a
+            # secondary owner/stop_reason signal for the meter + error check
+            # (both already prefer ``message``); it does NOT decide the status
+            # that gets finalized.
             after_run = await data_reader().get_session(user_id, session_id)
-            final_status = _resolve_turn_status(after_run)
+            final_status = _resolve_turn_status(message)
             if _is_error_turn(message, after_run):
                 encountered_error = True
             if on_message is not None:
@@ -374,7 +389,8 @@ async def collect_manifest(
     run_dir: Path,
     status: str,
     since_epoch: float = 0.0,
-    user_id: str | None = None) -> dict[str, Any]:
+    user_id: str | None = None,
+) -> dict[str, Any]:
     """Build a SubtaskResult manifest after a member session completes.
 
     summary    — text of the last assistant message (best-effort)
@@ -511,15 +527,17 @@ class ActorRunner:
         # would otherwise 403 (hiding dispatch / review_subtask / finish_task).
         await _restamp_always_on_mcp(session_id, user_id)
         try:
-            # Kernel ``run_turn`` persists ``status="running"`` to the DB
-            # itself (agent-harness 3e742fc) — no host pre-persist needed.
-            await kernel_client.run_turn(user_id, session_id, content)
-            loaded = await data_reader().get_session(user_id, session_id)
-            return _resolve_turn_status(loaded)
+            # Classify off the AUTHORITATIVE run_turn result, not a re-read of
+            # the lagging durable session (see ``_resolve_turn_status``). The
+            # kernel persists ``status="running"`` at turn start itself
+            # (agent-harness 3e742fc) — no host pre-persist needed.
+            message = await kernel_client.run_turn(user_id, session_id, content)
+            return _resolve_turn_status(message)
         except Exception as exc:  # noqa: BLE001
             logger.warning("actor turn failed for session %s: %s", session_id, exc)
             # A user interrupt can also surface as a raised exception (the SDK
-            # tears the turn down). Re-read the session: if the kernel stamped
+            # tears the turn down) — there is NO ``message`` on this path, so the
+            # session re-read is the only signal available: if the kernel stamped
             # a cancellation stop_reason, this is intent, not a failure.
             try:
                 loaded = await data_reader().get_session(cast(str, user_id), session_id)
@@ -575,9 +593,7 @@ class ActorRunner:
                 if is_draining():
                     exited_on_shutdown = True
                     break
-                final_status = await host._run_turn_with_sink(
-                    session_id, prompt, user_id=user_id
-                )
+                final_status = await host._run_turn_with_sink(session_id, prompt, user_id=user_id)
                 turns += 1
 
                 # A member notifies its lead after every idle (carries manifest).
@@ -586,9 +602,7 @@ class ActorRunner:
                 # (or none, when ``stop_member`` already notified the lead) —
                 # notifying here too would double-deliver.
                 if role == "subtask" and final_status != "interrupted":
-                    await host._notify_lead_member_idle(
-                        session_id, final_status, user_id=user_id
-                    )
+                    await host._notify_lead_member_idle(session_id, final_status, user_id=user_id)
 
                 if final_status in ("terminated", "error", "interrupted"):
                     break
@@ -613,9 +627,7 @@ class ActorRunner:
                 if (
                     role == "lead"
                     and not mailbox_registry.has_pending(session_id)
-                    and await host._lead_idle_with_no_pending(
-                        task_id, project_id, user_id=user_id
-                    )
+                    and await host._lead_idle_with_no_pending(task_id, project_id, user_id=user_id)
                 ):
                     logger.info(
                         "actor loop %s (lead) idle with no in-flight members / unresolved "
