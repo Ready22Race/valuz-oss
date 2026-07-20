@@ -55,7 +55,7 @@ class DatabaseEventSink:
         for live-only types / backends that can't report the id.
 
         The uid is minted HERE (before the store call) so the SAME identity
-        lands in the local row, the durable mirror (via the write-through
+        lands in the runtime row, the DataService mirror (via the RuntimeStore
         ``request_id``), and the live broadcast — the cross-store dedup key."""
         if event.type in _NON_PERSISTED_TYPES:
             return None, None
