@@ -122,6 +122,11 @@ class SessionEventEnvelope:
     # listEvents path now mirrors it so history replay can render
     # per-message clocks too. Frontend formats via ``new Date(ms)``.
     timestamp: int | None = None
+    # Store-independent identity (the append ``request_id``) — the SAME uid the
+    # SSE frames carry, so the frontend can dedup/merge REST history rows
+    # against live/backfill frames across the two seq spaces. ``None`` for
+    # legacy rows persisted before uid minting and synthetic envelopes.
+    event_uid: str | None = None
 
 
 @dataclass

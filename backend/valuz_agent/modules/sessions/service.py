@@ -425,6 +425,7 @@ class SessionService:
                 seq=frame.seq,
                 event={"event_type": frame.event_type, "payload": frame.payload},
                 timestamp=frame.timestamp,
+                event_uid=frame.event_uid,
             )
             for frame in frames
         ]
@@ -461,6 +462,7 @@ class SessionService:
                 seq=frame.seq,
                 event={"event_type": frame.event_type, "payload": frame.payload},
                 timestamp=frame.timestamp,
+                event_uid=frame.event_uid,
             )
             for frame in window.items
         ]
