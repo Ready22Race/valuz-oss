@@ -141,6 +141,14 @@ export interface SessionDetail extends SessionListItem {
 // ---------------------------------------------------------------------------
 
 export interface SessionEventDTO {
+  /**
+   * PER-STORE row id. The backend has TWO independent seq spaces: history
+   * reads (REST list/window, SSE backfill frames, heartbeats) carry the
+   * DURABLE store's seq, while live-stream frames carry the kernel's LOCAL
+   * seq. Seqs from the two spaces must NEVER be compared against each other
+   * or fed into one cursor — cross-store identity is ``event_uid``.
+   * ``0`` marks a live unpersisted frame (streaming deltas).
+   */
   seq: number;
   event: {
     event_type: string;
@@ -153,6 +161,15 @@ export interface SessionEventDTO {
    * for synthetic envelopes that don't have one. Format via `new Date(ms)`.
    */
   timestamp?: number;
+  /**
+   * Store-independent identity of a persisted event (32-hex string), present
+   * on both history and live frames. This is the ONLY key valid for
+   * cross-segment (history ↔ live) dedup/merge — ``seq`` is per-store.
+   * ``null``/``undefined`` on live-only delta frames (never persisted) and
+   * on legacy rows persisted before uid minting; those keep the historical
+   * seq-based behavior.
+   */
+  event_uid?: string | null;
 }
 
 /**

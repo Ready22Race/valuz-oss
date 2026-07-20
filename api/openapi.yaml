@@ -5797,6 +5797,14 @@ components:
           description: >-
             Unix epoch milliseconds (UTC) the kernel persisted the event with.
             Format via new Date(ms).
+        event_uid:
+          type: string
+          nullable: true
+          description: >-
+            Store-independent event identity (the append request_id) — the same
+            uid SSE frames carry. Clients dedup/merge REST history rows against
+            live frames by uid, never by seq (seqs are per-store). Null for
+            legacy rows persisted before uid minting.
 
     SessionEventsResponse:
       type: object

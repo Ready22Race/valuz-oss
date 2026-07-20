@@ -252,7 +252,9 @@ def test_http_client_covers_the_full_protocol_surface() -> None:
     ``run_ephemeral_review_in_scope`` is a composite (create + run + delete
     reusing an existing scope's kernel — the contract table marks it "no 1:1
     endpoint"): it is orchestrated by the module facade ABOVE the transport,
-    so a pure HTTP transport never implements it as a method."""
+    so a pure HTTP transport never implements it as a method.
+    ``reset_stranded_session`` runs on the host data plane (the durable-bound
+    in-process client, ``src.core.recovery``) — never over an HTTP kernel."""
     from tests.adapters.test_kernel_client_contract import (
         EXPECTED_ROUTES,
         EXPECTED_STREAMS,
@@ -261,8 +263,9 @@ def test_http_client_covers_the_full_protocol_surface() -> None:
     in_process_only = {
         "scan_orphan_pendings",
         "scan_orphan_runs",
-        "cleanup_runtime",
+        "reset_stranded_session",
         "run_ephemeral_review_in_scope",
+        "cleanup_runtime",
     }
     for name in (set(EXPECTED_ROUTES) | set(EXPECTED_STREAMS)) - in_process_only:
         assert hasattr(HttpKernelClient, name), f"HttpKernelClient lacks {name}"

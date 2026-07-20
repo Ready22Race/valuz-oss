@@ -37,6 +37,7 @@ def _model_to_stored_event(model: EventModel) -> StoredEvent:
         type=model.type,
         data=data,
         timestamp=int(model.timestamp),
+        event_uid=model.event_uid,
     )
 
 

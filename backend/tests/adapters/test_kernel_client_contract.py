@@ -40,6 +40,10 @@ EXPECTED_ROUTES: dict[str, tuple[str, str] | None] = {
     "run_ephemeral_review_in_scope": None,
     "scan_orphan_pendings": None,
     "scan_orphan_runs": None,
+    # Host-driven per-session stranded reset (boot recovery, in-process only —
+    # the host decides liveness via the sandbox allocator, the kernel applies
+    # the reset semantics). No HTTP endpoint by design, like the scans above.
+    "reset_stranded_session": None,
     "cleanup_runtime": None,
     "runtime_availability": ("GET", "/kernel/v1/runtimes/availability"),
     "bg_busy_session_ids": ("GET", "/kernel/v1/runtimes/bg-busy-sessions"),
