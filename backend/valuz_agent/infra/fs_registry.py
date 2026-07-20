@@ -639,6 +639,38 @@ class FsRegistry:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    # ---- FS-15 — local backup (docs/design/client-local-backup.md) ----
+    #
+    # The backup destination is user-configurable (a preference); this method
+    # only resolves the DEFAULT root. It deliberately lives OUTSIDE data_dir
+    # so a backup never recursively contains itself and survives a data-dir
+    # wipe. The restore-pending pointer, in contrast, lives INSIDE data_dir:
+    # the boot restore step must find it before any preference (DB) read is
+    # possible.
+
+    def default_backup_root(self, user_id: str) -> Path:
+        """Return the default backup destination root (NOT created — the
+        backup engine creates it on first use so an unused feature leaves no
+        empty directory behind)."""
+        return self._expand_optional_user_template(settings.backup_root, user_id)
+
+    def backup_restore_pending_file(self, user_id: str) -> Path:
+        """Pointer file staging a restore request for the next boot.
+
+        Written by ``BackupService.request_restore`` (full absolute paths
+        inside), consumed by ``boot/backup_restore.py`` before any engine
+        opens the SQLite files."""
+        path = self.data_dir(user_id) / "backup-restore-pending.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def backup_restore_result_file(self, user_id: str) -> Path:
+        """Result report of the last boot-time restore attempt (read by the
+        settings UI to surface success/failure after the restart)."""
+        path = self.data_dir(user_id) / "backup-restore-result.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
 
 fs_registry = FsRegistry()
 

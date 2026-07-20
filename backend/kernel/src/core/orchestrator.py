@@ -21,6 +21,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from src.core import recovery
 from src.core.agent_config import AgentConfig
 from src.core.events import Event, EventSink, GlobalEventTap
 from src.core.prompt_builder import wrap_for_mode
@@ -1157,43 +1158,19 @@ class SessionOrchestrator:
         do better. Returns the number of synthetic resolutions emitted.
         """
         sealed = 0
-        # Cross-owner startup sweep: ``user_id=None`` spans every owner; each
-        # session's follow-up reads/writes use its own ``session.user_id``.
+        # Own-lineage sweep: ``self._store`` reads are the kernel's runtime
+        # sqlite (RuntimeStore authority) — sessions live on other processes
+        # are structurally out of reach, so this is safe in every deployment.
+        # ``user_id=None`` spans every owner within this kernel's own store.
         sessions = await self._store.list_sessions(None, status="running", limit=500)
         for session in sessions:
-            events = await self._store.get_events(
-                session.user_id,
-                session.id,
-                types=("requires_action", "action_resolved"),
-                limit=1000,
-            )
-            open_pendings: dict[str, str] = {}  # pending_id → message_id
-            for ev in events:
-                pid = ev.data.get("pending_id")
-                if not isinstance(pid, str):
-                    continue
-                if ev.type == "requires_action":
-                    msg_id = ev.data.get("message_id")
-                    if isinstance(msg_id, str):
-                        open_pendings.setdefault(pid, msg_id)
-                elif ev.type == "action_resolved":
-                    open_pendings.pop(pid, None)
-            for pid, msg_id in open_pendings.items():
-                await self._store.append_event(
-                    session.user_id,
-                    session.id,
-                    msg_id,
-                    Event(
-                        type="action_resolved",
-                        data={
-                            "pending_id": pid,
-                            "decision": "expired",
-                            "resolved_by": "system",
-                        },
-                    ),
-                )
-                sealed += 1
+            sealed += await self._seal_session_pendings(session.user_id, session.id)
         return sealed
+
+    async def _seal_session_pendings(self, user_id: str, session_id: str) -> int:
+        """Seal one session's open ``requires_action`` events (see
+        ``src.core.recovery.seal_session_pendings``) on this kernel's store."""
+        return await recovery.seal_session_pendings(self._store, user_id, session_id)
 
     async def scan_orphan_runs(self) -> int:
         """On host startup, reset sessions left in ``status="running"``.
@@ -1223,27 +1200,22 @@ class SessionOrchestrator:
         Returns the number of sessions reset.
         """
         reset = 0
-        # Cross-owner startup sweep (see scan_orphan_pendings).
+        # Own-lineage sweep (see scan_orphan_pendings). Sessions stranded on
+        # OTHER processes are the HOST's to reconcile (liveness-checked
+        # ``reset_stranded_session``) — never this kernel's.
         sessions = await self._store.list_sessions(None, status="running", limit=500)
         for session in sessions:
-            session.status = "idle"
-            session.stop_reason = Error(
-                category="host_restart",
-                retry_status="terminal",
-                message="host process restarted while turn was in flight",
-            )
-            await self._store.save_session(session)
-            messages = await self._store.list_messages_for_session(session.user_id, session.id)
-            now = now_ms()
-            for m in messages:
-                if m.status != "running":
-                    continue
-                m.status = "errored"
-                m.error_message = {
-                    "category": "host_restart",
-                    "message": "host process restarted while message was in flight",
-                }
-                m.ended_at = now
-                await self._store.save_message(session.user_id, m)
+            await self._reset_stranded(session)
             reset += 1
         return reset
+
+    async def _reset_stranded(self, session: Session) -> None:
+        """Reset one stranded session (see ``src.core.recovery.reset_stranded``)
+        on this kernel's store."""
+        await recovery.reset_stranded(self._store, session)
+
+    async def reset_stranded_session(self, user_id: str, session_id: str) -> bool:
+        """Per-session stranded reset on this kernel's own store (see
+        ``src.core.recovery.reset_stranded_session`` — the host applies the
+        same semantics to its durable for sessions whose sandbox is gone)."""
+        return await recovery.reset_stranded_session(self._store, user_id, session_id)

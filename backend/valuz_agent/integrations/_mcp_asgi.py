@@ -7,9 +7,25 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from typing import Any
 
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import PlainTextResponse
 
 logger = logging.getLogger(__name__)
+
+
+def internal_mcp_transport_security() -> TransportSecuritySettings:
+    """Transport security for the built-in MCP servers: rebinding check off.
+
+    ``FastMCP`` auto-enables DNS-rebinding protection when constructed with its
+    default ``host="127.0.0.1"``, allowing only localhost ``Host`` headers — so
+    a kernel reaching the host callback through a public ingress hostname gets
+    ``421 Misdirected Request``. That protection defends *unauthenticated*
+    localhost servers against browsers; these endpoints are only reachable
+    through ``build_internal_mcp_asgi``, which rejects any request lacking a
+    valid per-owner signed token, and the deployment's public hostname isn't
+    knowable here. Auth stays with the token wrapper; the Host allowlist is off.
+    """
+    return TransportSecuritySettings(enable_dns_rebinding_protection=False)
 
 
 @dataclass(frozen=True)
@@ -60,7 +76,7 @@ async def _resolve_session_owner(session_id: str) -> str | None:
     return sessions[0].user_id if sessions else None
 
 
-def _verify_token_owner(token: str | None) -> str | None:
+async def _verify_token_owner(token: str | None) -> str | None:
     """Verified owner from a per-owner MCP token, or None if invalid/absent.
 
     Same per-owner signing/verification as the data service (unifies the two
@@ -69,13 +85,12 @@ def _verify_token_owner(token: str | None) -> str | None:
     """
     if not token:
         return None
-    from src.core.token_signer import InvalidTokenError
-
-    from valuz_agent.boot.kernel import make_host_data_service_verifier_per_owner
+    from valuz_agent.ports.sandbox_credential import get_sandbox_credential_verifier
 
     try:
-        claims = make_host_data_service_verifier_per_owner().verify(token)
-    except InvalidTokenError:
+        claims = await get_sandbox_credential_verifier().verify(token)
+    except Exception:  # noqa: BLE001 — auth backend failure must fail closed
+        logger.warning("Internal MCP: sandbox credential verification failed", exc_info=True)
         return None
     return claims.user_id if claims else None
 
@@ -101,7 +116,7 @@ def build_internal_mcp_asgi(inner: Any) -> Any:
         }
         # Owner comes from the VERIFIED token — never a shared secret or a trusted
         # header. A forged sub / unknown owner fails verification.
-        owner_id = _verify_token_owner(headers.get("x-valuz-internal"))
+        owner_id = await _verify_token_owner(headers.get("x-valuz-internal"))
         if not owner_id:
             response = PlainTextResponse("Forbidden", status_code=403)
             await response(scope, receive, send)
@@ -132,6 +147,7 @@ def build_internal_mcp_asgi(inner: Any) -> Any:
 __all__ = [
     "BuiltinMCPContext",
     "build_internal_mcp_asgi",
+    "internal_mcp_transport_security",
     "get_current_mcp_context",
     "get_current_mcp_session_id",
     "get_current_mcp_user_id",

@@ -29,6 +29,8 @@ from dataclasses import dataclass
 from typing import Any, cast
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.connectors.datastore import ConnectorDatastore
 from valuz_agent.modules.connectors.models import AuthType, ConnectorRow, TransportType
@@ -155,6 +157,7 @@ def _oauth_snapshot(row: ConnectorRow):
 
 
 async def _after_connector_saved_hook(
+    db: AsyncSession,
     user_id: str,
     row: ConnectorRow,
     origin: str,
@@ -164,6 +167,7 @@ async def _after_connector_saved_hook(
     from valuz_agent.ports.extensions import ext
 
     await ext.connector_lifecycle.after_connector_saved(
+        db=db,
         user_id=user_id,
         connector=_row_to_view(row),
         secret_snapshot=_secret_snapshot(row),
@@ -171,20 +175,26 @@ async def _after_connector_saved_hook(
     )
 
 
-async def after_connector_oauth_authorized_hook(user_id: str, row: ConnectorRow) -> None:
+async def after_connector_oauth_authorized_hook(
+    db: AsyncSession, user_id: str, row: ConnectorRow
+) -> None:
     from valuz_agent.ports.extensions import ext
 
     await ext.connector_lifecycle.after_connector_oauth_authorized(
+        db=db,
         user_id=user_id,
         connector=_row_to_view(row),
         oauth_snapshot=_oauth_snapshot(row),
     )
 
 
-async def _before_connector_delete_hook(user_id: str, row: ConnectorRow) -> None:
+async def _before_connector_delete_hook(
+    db: AsyncSession, user_id: str, row: ConnectorRow
+) -> None:
     from valuz_agent.ports.extensions import ext
 
     await ext.connector_lifecycle.before_connector_delete(
+        db=db,
         user_id=user_id,
         connector=_row_to_view(row),
     )
@@ -340,7 +350,7 @@ class ConnectorService:
                 status="connecting",
             )
             created = await self._ds.create(user_id, row)
-            await _after_connector_saved_hook(user_id, created, "created")
+            await _after_connector_saved_hook(self._ds.session, user_id, created, "created")
             return _row_to_view(created)
 
         row = ConnectorRow(
@@ -366,7 +376,7 @@ class ConnectorService:
         saved.headers_json = storage.headers_json
         saved.params_json = storage.params_json
         updated = await self._ds.update(saved)
-        await _after_connector_saved_hook(user_id, updated, "created")
+        await _after_connector_saved_hook(self._ds.session, user_id, updated, "created")
         return _row_to_view(updated)
 
     async def update_connector(
@@ -431,7 +441,7 @@ class ConnectorService:
                 row.status = "connecting"
         row.updated_at = now_ms()
         updated = await self._ds.update(row)
-        await _after_connector_saved_hook(user_id, updated, "updated")
+        await _after_connector_saved_hook(self._ds.session, user_id, updated, "updated")
         return _row_to_view(updated)
 
     async def delete_connector(self, user_id: str, connector_id: str) -> bool:
@@ -442,7 +452,7 @@ class ConnectorService:
             return False
         # Secret material (creds + OAuth token) lives in this connector's own
         # columns, so deleting the row drops every credential with it.
-        await _before_connector_delete_hook(user_id, row)
+        await _before_connector_delete_hook(self._ds.session, user_id, row)
         return await self._ds.delete(user_id, connector_id)
 
     async def set_enabled(
@@ -474,7 +484,7 @@ class ConnectorService:
         row.error_message = None if ok else error_message
         row.updated_at = now_ms()
         updated = await self._ds.update(row)
-        await _after_connector_saved_hook(user_id, updated, "updated")
+        await _after_connector_saved_hook(self._ds.session, user_id, updated, "updated")
         return _row_to_view(updated)
 
 

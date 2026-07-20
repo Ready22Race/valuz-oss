@@ -117,22 +117,19 @@ dependencies = [
     # protect against a future transitive-dep drop.
     "pyyaml>=6.0",
     # Required by the kernel's ``CodexRuntime`` (``from openai_codex import
-    # CodexConfig``). Codex is dormant in valuz today (provider_resolver only
-    # produces ``claude_agent`` / ``deepagents``), but the kernel's
-    # ``runtimes/codex/__init__.py`` re-exports CodexRuntime eagerly, so any
-    # import of ``src.runtimes.codex`` would explode with ``ModuleNotFoundError:
-    # No module named 'openai_codex'``. Kernel pin eec331f moved codex off the
-    # vendored 0.131.0a4 wheel (``AppServerConfig``) to the PUBLISHED PyPI beta
-    # (``CodexConfig``). ``openai-codex`` is prerelease-only, so a ``>=`` floor on
-    # a beta is needed for uv to advance (a bare ``openai-codex`` sticks at the
-    # prerelease the lock first captured and won't move on ``--upgrade``). Floored
-    # at ``0.1.0b3``: the first release whose pinned ``openai-codex-cli-bin``
-    # (``==0.137.0a4``) ships ``manylinux`` glibc wheels, so the binary installs
-    # natively on the glibc Linux cloud image with NO per-platform override (see
-    # the ``[tool.uv]`` note below). The binary is pulled transitively and KEPT on
-    # every platform so ``_resolve_codex_bin`` prefers it over a stray PATH
-    # ``codex``.
-    "openai-codex>=0.1.0b3",
+    # CodexConfig``). The kernel's ``runtimes/codex/__init__.py`` re-exports
+    # CodexRuntime eagerly, so any import of ``src.runtimes.codex`` would
+    # explode with ``ModuleNotFoundError: No module named 'openai_codex'``.
+    # Kernel pin eec331f moved codex off the vendored 0.131.0a4 wheel
+    # (``AppServerConfig``) to the published PyPI package (``CodexConfig``).
+    # Floored at ``0.144.4`` — the first STABLE release (upstream PR #33213):
+    # the SDK version line switched from ``0.1.0bX`` betas to tracking the
+    # Codex CLI version, and its pinned ``openai-codex-cli-bin==0.144.4``
+    # ships wheels for every ``required-environment`` (manylinux glibc both
+    # arches, Intel + arm64 macOS — see the ``[tool.uv]`` note below). The
+    # binary is pulled transitively and KEPT on every platform so
+    # ``_resolve_codex_bin`` prefers it over a stray PATH ``codex``.
+    "openai-codex>=0.144.4",
 ]
 
 # Note: built-in parser plugins live in ``backend/parser_plugins/`` and
@@ -193,12 +190,14 @@ postgres = [
 #
 # The constraint below is NOT a dependency — ``openai-codex`` alone owns which
 # ``openai-codex-cli-bin`` ships (its transitive ``==`` pin). It exists because
-# that pin is a PRERELEASE and uv only accepts a transitive prerelease when the
-# package appears with a prerelease specifier in direct dependencies or
-# constraints. A constraint keeps the resolver hint without a second dependency
-# to hand-maintain: the floor never needs bumping when ``openai-codex`` advances
-# (it also documents the first codex binary with a ``manylinux`` wheel, which
-# the glibc Linux cloud image depends on).
+# uv only accepts a transitive PRERELEASE pin when the package appears with a
+# prerelease specifier in direct dependencies or constraints. Since
+# ``openai-codex`` 0.144.4 the transitive pin is a stable version, so the hint
+# is currently dormant — kept because it costs nothing and re-arms
+# automatically if upstream ever pins a prerelease binary again. The floor
+# never needs bumping when ``openai-codex`` advances (it also documents the
+# first codex binary with a ``manylinux`` wheel, which the glibc Linux cloud
+# image depends on).
 constraint-dependencies = ["openai-codex-cli-bin>=0.137.0a4"]
 
 # The lockfile MUST stay installable on Intel macOS (x86_64 darwin) — our

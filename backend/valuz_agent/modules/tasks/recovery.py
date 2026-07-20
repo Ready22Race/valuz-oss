@@ -94,8 +94,9 @@ def classify_member(status: str | None, stop_reason: Any) -> Disposition:
     if typ == "error":
         # Interrupted mid-flight → resumable. Three ways a turn loses its
         # process without it being a task failure:
-        #   * host_restart — a hard kill left the row ``running``;
-        #     ``scan_orphan_runs`` flipped it at boot.
+        #   * host_restart — a hard kill left the row ``running``; boot
+        #     recovery flipped it (host liveness-aware reset, or the kernel's
+        #     own scan on the ``local`` tier).
         #   * interrupted — a graceful host stop tore down the runtime
         #     subprocess and the runtime stamped it resumable itself.
         #   * user_interrupt — the user cancelled the in-flight turn (every

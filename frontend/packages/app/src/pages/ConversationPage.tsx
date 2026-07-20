@@ -54,7 +54,6 @@ import {
   type ProjectDetail,
   type ProjectListItem,
   type LLMChannel,
-  type LLMChannelDetail,
   type SkillView,
   type StagingSlugView,
   type StagingSyncStrategy,
@@ -129,7 +128,11 @@ import {
 } from "@valuz/core";
 import { BackgroundTaskStrip, ConversationTurnList } from "@valuz/ui";
 import { usePlatform } from "@valuz/app/platform";
-import { useHasUsableChannel, useTranslation } from "@valuz/core";
+import {
+  useHasUsableChannel,
+  useTranslation,
+  markSessionNotificationsRead,
+} from "@valuz/core";
 import {
   useConversationLocalFileLinks,
   useProjectKbBindings,
@@ -139,7 +142,10 @@ import {
   computePlanAnchors,
   extractToolOutputJson,
 } from "./conversation-plan-anchors";
-import { deriveTurnActive, isTerminalSessionStatus } from "./conversation-loading";
+import {
+  deriveTurnActive,
+  isTerminalSessionStatus,
+} from "./conversation-loading";
 import { LiveTaskCard } from "../components/LiveTaskCard";
 import { QueuedInputsBar } from "../components/QueuedInputsBar";
 import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
@@ -385,11 +391,21 @@ function appendUniqueEvents(
   current: SessionEventDTO[],
   incoming: SessionEventDTO[],
 ): SessionEventDTO[] {
-  const seenSeqs = new Set(
-    current.filter((event) => event.seq > 0).map((event) => event.seq),
-  );
-  const fresh = incoming.filter(
-    (event) => event.seq <= 0 || !seenSeqs.has(event.seq),
+  // Dedup keys on the store-independent ``event_uid`` when present — history
+  // reads and live frames use INDEPENDENT seq spaces, so a bare seq match is
+  // only trustworthy between uid-less (legacy) rows. uid-less incoming keeps
+  // the historical seq-based check, but only against uid-less rows (a
+  // uid-bearing row's seq may be kernel-local and collide by accident).
+  const seenUids = new Set<string>();
+  const seenLegacySeqs = new Set<number>();
+  for (const event of current) {
+    if (event.event_uid) seenUids.add(event.event_uid);
+    else if (event.seq > 0) seenLegacySeqs.add(event.seq);
+  }
+  const fresh = incoming.filter((event) =>
+    event.event_uid
+      ? !seenUids.has(event.event_uid)
+      : event.seq <= 0 || !seenLegacySeqs.has(event.seq),
   );
   if (fresh.length === 0) return current;
   return [...current, ...fresh];
@@ -628,6 +644,13 @@ export const ConversationPage = () => {
 
     setConversationInstanceKey(`conversation:${id}`);
   }, [id]);
+  // Opening a conversation clears the unread badge for any notification that
+  // points at it (a question answered elsewhere, a run failure the user is now
+  // looking at). Covers every entry path — direct link, notification card,
+  // conversation list — since they all land here. Skips the "new" sentinel.
+  useEffect(() => {
+    if (id && id !== NEW_SESSION_ID) markSessionNotificationsRead(id);
+  }, [id]);
   const { directoryFieldMode, setRightPanel, setHeader, setHideHeader } =
     useProjectOutlet();
   const panelCollapsed = usePanelStore((s) => s.collapsed);
@@ -830,13 +853,14 @@ export const ConversationPage = () => {
     text: string;
     attachments: Array<{ name: string; size: number }>;
     /**
-     * Highest event seq seen at the moment ``handleSend`` set the
-     * pending — used by ``effectiveTurns`` to disambiguate a server
-     * echo for THIS send (envelope seq > fromSeq) from a previous
-     * turn that happens to share the exact same text. Without this,
-     * sending the identical text twice in a row would falsely dedup
-     * the optimistic against the prior turn and snap-to-top would
-     * land on the older turn's position.
+     * HISTORY cursor (durable-store seq) at the moment ``handleSend`` set
+     * the pending — used by ``effectiveTurns`` to disambiguate a server
+     * echo for THIS send (history envelope seq > fromSeq) from a previous
+     * turn that happens to share the exact same text. Only comparable to
+     * HISTORY seqs; a LIVE echo (kernel-local seq) is recognized via the
+     * ``sentAt`` timestamp instead. Without this, sending the identical
+     * text twice in a row would falsely dedup the optimistic against the
+     * prior turn and snap-to-top would land on the older turn's position.
      */
     fromSeq: number;
     /**
@@ -861,7 +885,7 @@ export const ConversationPage = () => {
   // keys on this to keep re-subscribing until the LAST drained turn finishes —
   // not just while ``queue`` is non-empty (session-input-queue §14.5).
   const [queueDraining, setQueueDraining] = useState(false);
-  const [providers, setProviders] = useState<LLMChannelDetail[]>([]);
+  const [providers, setProviders] = useState<LLMChannel[]>([]);
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(
     null,
   );
@@ -1211,7 +1235,14 @@ export const ConversationPage = () => {
   // clobbers ``sending`` / ``abortRef`` set by the live one, and the user
   // sees their input rendered twice + the loading dots vanish mid-stream.
   const isSendInFlightRef = useRef(false);
-  const maxSeqRef = useRef(0);
+  // HISTORY cursor — the highest DURABLE-store seq confirmed via REST
+  // history reads (``listEvents`` / ``listEventsWindow`` responses). Used as
+  // ``after_seq`` for history reads and for the SSE subscribe/reconnect
+  // cursor. NEVER advanced from live SSE frames: those carry the kernel's
+  // LOCAL seq — an independent space — and feeding one into this cursor
+  // would skip (or endlessly replay) history. Live-path dedup is uid-based
+  // (``event_uid``), not cursor-based.
+  const historyCursorRef = useRef(0);
   // Consecutive unexpected-close reconnect attempts for the live events
   // stream. Reset whenever a live frame is delivered (a healthy stream)
   // and on every session switch; capped so a session whose stream is
@@ -1356,7 +1387,9 @@ export const ConversationPage = () => {
         : null,
     platform,
     locate: locateArtifactFile,
-    missingErrorMessage: t("task.artifactOpenInFinder" as Parameters<typeof t>[0]),
+    missingErrorMessage: t(
+      "task.artifactOpenInFinder" as Parameters<typeof t>[0],
+    ),
   });
   const {
     selectedPath: selectedArtifactPath,
@@ -1483,7 +1516,10 @@ export const ConversationPage = () => {
     () => runningBackgroundTasks(deriveBackgroundTasks(events)),
     [events],
   );
-  const awaitingBgWakeup = useMemo(() => awaitingBackgroundWakeup(events), [events]);
+  const awaitingBgWakeup = useMemo(
+    () => awaitingBackgroundWakeup(events),
+    [events],
+  );
   const bgWatchActive = runningBgTasks.length > 0 || awaitingBgWakeup;
   const runningBgCountRef = useRef(0);
   useEffect(() => {
@@ -1522,23 +1558,24 @@ export const ConversationPage = () => {
       }
       inFlight = true;
       sessionsApi
-        .listEvents(sessionId, maxSeqRef.current)
+        .listEvents(sessionId, historyCursorRef.current)
         .then((response) => {
           if (cancelled || selectedSessionIdRef.current !== sessionId) return;
           if (response.items.length === 0) return;
           quietTailTicks = 0;
+          // ``listEvents`` items are HISTORY-space — safe to advance the
+          // history cursor from them.
           for (const event of response.items) {
             if (event.seq > 0) {
-              maxSeqRef.current = Math.max(maxSeqRef.current, event.seq);
+              historyCursorRef.current = Math.max(
+                historyCursorRef.current,
+                event.seq,
+              );
             }
           }
-          setEvents((prev) => {
-            const seen = new Set(prev.map((e) => e.seq));
-            const fresh = response.items.filter(
-              (e) => !(e.seq > 0 && seen.has(e.seq)),
-            );
-            return fresh.length > 0 ? [...prev, ...fresh] : prev;
-          });
+          // uid-first dedup: an event may already be present via the live
+          // stream under a DIFFERENT (kernel-local) seq.
+          setEvents((prev) => appendUniqueEvents(prev, response.items));
         })
         .catch(() => {})
         .finally(() => {
@@ -1588,10 +1625,19 @@ export const ConversationPage = () => {
     // would silently land snap-to-top on the older turn.
     const lastTurn = turns[turns.length - 1];
     const lastTurnSeq = lastTurn?.userMessageSeq ?? 0;
+    // Two "the echo is newer than this send" signals, because the echo can
+    // arrive from either seq space: a HISTORY row satisfies
+    // ``seq > fromSeq`` (fromSeq is the history cursor at send time); a
+    // LIVE frame carries a kernel-local seq that can't be compared to
+    // fromSeq, so fall back to the store-independent event timestamp vs
+    // the moment the pending was set. A previous turn with identical text
+    // fails both (its history seq <= fromSeq; its timestamp < sentAt).
     if (
       lastTurn &&
       lastTurn.userText === pendingUserMessage.text &&
-      lastTurnSeq > pendingUserMessage.fromSeq
+      (lastTurnSeq > pendingUserMessage.fromSeq ||
+        (lastTurn.userTimestamp !== undefined &&
+          lastTurn.userTimestamp >= pendingUserMessage.sentAt))
     ) {
       return turns;
     }
@@ -2104,7 +2150,13 @@ export const ConversationPage = () => {
   );
 
   const renderToolCall = useCallback(
-    (tool: { id: string; title: string; input?: string; output?: string; status?: string }) => {
+    (tool: {
+      id: string;
+      title: string;
+      input?: string;
+      output?: string;
+      status?: string;
+    }) => {
       const name = tool.title || "";
 
       // generate_ui — generative UI. The MCP tool returns OpenUI Lang as
@@ -2771,7 +2823,7 @@ export const ConversationPage = () => {
     // pending_id against — the session we're switching to. The post-fetch
     // walk below rebuilds it from the new session's own history.
     setPendingApprovals([]);
-    maxSeqRef.current = 0;
+    historyCursorRef.current = 0;
     minSeqRef.current = Number.POSITIVE_INFINITY;
     hasMoreOlderRef.current = false;
     setHasMoreOlder(false);
@@ -2798,11 +2850,13 @@ export const ConversationPage = () => {
       // persisted rows we don't have yet, in order.
       setEvents((prev) => mergeEventWindow(prev, response.items));
       if (response.items.length > 0) {
-        // Forward-only: a concurrent subscription may have advanced the max
-        // cursor past this snapshot — never rewind it (a rewound cursor makes
-        // the next gap-fill refetch rows we already rendered).
-        maxSeqRef.current = Math.max(
-          maxSeqRef.current,
+        // ``listEventsWindow`` items are HISTORY-space, so seeding the
+        // history cursor from the last one is safe. Forward-only: a
+        // concurrent REST reconcile/poll may have advanced the cursor past
+        // this snapshot — never rewind it (a rewound cursor makes the next
+        // gap-fill refetch rows we already rendered).
+        historyCursorRef.current = Math.max(
+          historyCursorRef.current,
           response.items[response.items.length - 1].seq,
         );
         minSeqRef.current = Math.min(minSeqRef.current, response.items[0].seq);
@@ -2866,7 +2920,7 @@ export const ConversationPage = () => {
     } catch {
       if (selectedSessionIdRef.current !== sessionId) return;
       setEvents([]);
-      maxSeqRef.current = 0;
+      historyCursorRef.current = 0;
       minSeqRef.current = Number.POSITIVE_INFINITY;
       hasMoreOlderRef.current = false;
       setHasMoreOlder(false);
@@ -2934,8 +2988,19 @@ export const ConversationPage = () => {
         // Defensive dedup: SSE shouldn't backfill historical events but
         // a slow turn could in theory race with this fetch.
         setEvents((prev) => {
-          const seen = new Set(prev.map((p) => p.seq));
-          const fresh = response.items.filter((e) => !seen.has(e.seq));
+          // uid-first dedup (seq fallback restricted to uid-less rows —
+          // history and live seqs are independent spaces).
+          const seenUids = new Set<string>();
+          const seenLegacySeqs = new Set<number>();
+          for (const p of prev) {
+            if (p.event_uid) seenUids.add(p.event_uid);
+            else if (p.seq > 0) seenLegacySeqs.add(p.seq);
+          }
+          const fresh = response.items.filter((e) =>
+            e.event_uid
+              ? !seenUids.has(e.event_uid)
+              : !seenLegacySeqs.has(e.seq),
+          );
           if (fresh.length === 0) return prev;
           return [...fresh, ...prev];
         });
@@ -3035,17 +3100,18 @@ export const ConversationPage = () => {
     }
     setError(null);
     try {
+      // One gated list request — the server applies the subscription-login
+      // gate across the whole list, replacing the old per-channel detail
+      // fan-out (1+N requests; each subscription detail paid a CLI login
+      // probe, adding seconds to every conversation open).
       const [wsResponse, chListResponse] = await Promise.all([
         projectsApi.list(),
-        providersApi.list().catch(() => ({ providers: [] as LLMChannel[] })),
+        providersApi
+          .list({ gated: true })
+          .catch(() => ({ providers: [] as LLMChannel[] })),
       ]);
       setProjects(wsResponse.projects);
-      const details = await Promise.all(
-        chListResponse.providers
-          .filter((c) => c.enabled)
-          .map((c) => providersApi.get(c.id).catch(() => null)),
-      );
-      setProviders(details.filter((d): d is LLMChannelDetail => d !== null));
+      setProviders(chListResponse.providers.filter((c) => c.enabled));
 
       // Two URL shapes drive the page:
       //
@@ -3520,6 +3586,10 @@ export const ConversationPage = () => {
   const subscribeToSession = useCallback(
     (
       sessionId: string,
+      // HISTORY-space cursor (durable-store seq — pass ``historyCursorRef``):
+      // the server backfills persisted events strictly after it. Live frames
+      // on the stream carry kernel-LOCAL seqs and must never be compared to
+      // (or folded into) this value.
       afterSeq: number,
       opts: {
         requireUserBeforeTerminal?: boolean;
@@ -3559,25 +3629,33 @@ export const ConversationPage = () => {
         // Drop deliveries that outlive this subscription. A session switch
         // aborts the stream (the ``selectedSessionId`` effect) — but an
         // in-flight poll response, a gap-fill, or a frame parsed in the same
-        // tick as the abort still resolves afterwards. Without this guard the
-        // OLD session's events land in the NEW session's transcript, and —
-        // because event seqs are store-global — the cross-session seqs pass
-        // the dedupe below and poison ``maxSeqRef`` (so the new session's own
-        // later events can get skipped). The ref check also covers the abort
-        // effect's commit lag: ``selectedSessionIdRef`` flips synchronously in
-        // bootstrap, before the abort lands.
+        // tick as the abort still resolves afterwards. Without this guard
+        // the OLD session's events land in the NEW session's transcript and
+        // pass the dedupe below (event identities are session-scoped only by
+        // this check). The ref check also covers the abort effect's commit
+        // lag: ``selectedSessionIdRef`` flips synchronously in bootstrap,
+        // before the abort lands.
         if (stopped || abort.signal.aborted) return;
         if (selectedSessionIdRef.current !== sessionId) return;
-        if (event.seq > 0) {
-          maxSeqRef.current = Math.max(maxSeqRef.current, event.seq);
-        }
+        // Deliberately NO history-cursor advancement here: SSE frames mix
+        // server-side backfill (history seq) with live frames (kernel-LOCAL
+        // seq) and the two are indistinguishable on the wire — feeding a
+        // live seq into ``historyCursorRef`` would corrupt every later
+        // ``after_seq`` read. The cursor advances only from REST history
+        // responses (refreshEvents / reconcile / poll paths); the price is
+        // that a reconnect may replay a little more history, which the
+        // uid dedup below collapses.
         setEvents((prev) => {
-          if (
-            event.seq > 0 &&
-            prev.some((existing) => existing.seq === event.seq)
-          ) {
-            return prev;
-          }
+          // uid-first dedup across segments; a uid-less persisted frame
+          // falls back to the legacy seq check, but only against other
+          // uid-less rows (a uid row's seq may be from the other space).
+          const duplicate = event.event_uid
+            ? prev.some((existing) => existing.event_uid === event.event_uid)
+            : event.seq > 0 &&
+              prev.some(
+                (existing) => !existing.event_uid && existing.seq === event.seq,
+              );
+          if (duplicate) return prev;
           return [...prev, event];
         });
         // Once the kernel echoes the user's message back as the
@@ -3779,22 +3857,24 @@ export const ConversationPage = () => {
         // UI stuck in "agent running" state long after the turn
         // finished.
         const evType = event.event.event_type;
-        // Mark the turn as started once THIS turn's opening ``message.user``
-        // arrives. We key on the seq cursor, not on the text: a
-        // ``user_message`` whose seq is beyond the subscription's ``afterSeq``
-        // is unambiguously new (the backend only replays events after that
-        // cursor), so it can only be the message that opened the turn we're
-        // waiting on — while any stale terminal replayed between ``afterSeq``
-        // and it stays correctly ignored.
+        // Mark the turn as started once a ``message.user`` frame arrives on
+        // THIS subscription. Every frame the server delivers is already
+        // beyond the ``afterSeq`` HISTORY cursor we subscribed with (the
+        // backfill replays strictly after it) or a live frame of the current
+        // activity, so any user message seen here can only be the one that
+        // opened the turn we're waiting on — while a stale terminal replayed
+        // before it stays correctly ignored by the ``sawTurnStart`` gate.
         //
-        // The previous exact-text match (``payload.text === expectedUserText``)
-        // broke whenever the kernel rewrote the user message before persisting
-        // it — e.g. session-mode wrapping turns "hi" into "/goal hi"
-        // (orchestrator ``wrap_for_mode``). The echoed text then never equaled
-        // the raw sent text, ``sawTurnStart`` stayed false, the turn's
-        // ``session.idle`` was ignored, the SSE stream never closed, and
-        // ``sending`` stuck true — the composer frozen on the Stop button.
-        if (evType === "message.user" && event.seq > afterSeq) {
+        // We can NOT compare ``event.seq > afterSeq`` anymore: ``afterSeq``
+        // is history-space while a live frame's seq is the kernel's LOCAL
+        // counter — numerically unrelated, so a live echo with a small
+        // kernel seq would fail the comparison, ``sawTurnStart`` would stay
+        // false, the turn's ``session.idle`` would be ignored and
+        // ``sending`` would stick (frozen Stop button). Nor the older
+        // exact-text match (``payload.text === expectedUserText``): the
+        // kernel may rewrite the message before persisting it (session-mode
+        // wrapping "hi" → "/goal hi"), which broke it the same way.
+        if (evType === "message.user") {
           sawTurnStart = true;
         }
         const status = event.event.payload.status;
@@ -3897,7 +3977,7 @@ export const ConversationPage = () => {
             // live entries glued where they arrived.
             setEvents((prev) => mergeEventWindow(prev, resp.items));
             const top = resp.items[resp.items.length - 1].seq;
-            if (top > maxSeqRef.current) maxSeqRef.current = top;
+            if (top > historyCursorRef.current) historyCursorRef.current = top;
           })
           .catch(() => {});
       };
@@ -3951,9 +4031,20 @@ export const ConversationPage = () => {
         try {
           const resp = await sessionsApi.listEvents(
             sessionId,
-            maxSeqRef.current,
+            historyCursorRef.current,
           );
           if (stopped || abort.signal.aborted) return;
+          // ``listEvents`` results are HISTORY-space — advance the history
+          // cursor here (``appendEvent`` deliberately never does: it also
+          // handles live frames whose kernel-local seq must not leak in).
+          for (const event of resp.items) {
+            if (event.seq > 0) {
+              historyCursorRef.current = Math.max(
+                historyCursorRef.current,
+                event.seq,
+              );
+            }
+          }
           for (const event of resp.items) {
             // May deliver the turn's terminal event → ``stopSubscription``.
             appendEvent(event);
@@ -4032,7 +4123,7 @@ export const ConversationPage = () => {
             if (selectedSessionIdRef.current !== sessionId) return;
             subscribeToSession(
               sessionId,
-              maxSeqRef.current,
+              historyCursorRef.current,
               sawTurnStart
                 ? { skipReconcileBurst: true }
                 : { ...opts, skipReconcileBurst: true },
@@ -4050,7 +4141,7 @@ export const ConversationPage = () => {
       const safeReconcileStreamEnd = () => reconcileStreamEnd().catch(() => {});
 
       // Gate the stream open on the history-window hydration. A resume-class
-      // caller samples ``maxSeqRef`` at call time — but ``refreshEvents``
+      // caller samples ``historyCursorRef`` at call time — but ``refreshEvents``
       // resets that cursor synchronously and only hydrates it when its fetch
       // lands, so an ungated open could start at ``afterSeq = 0`` and replay
       // the whole session, tripping the terminal check on a PRIOR turn's
@@ -4061,7 +4152,7 @@ export const ConversationPage = () => {
       // ungated behavior instead of never opening the stream. The send path
       // (``requireUserBeforeTerminal``) keeps its caller-supplied cursor: its
       // turn-start detection needs the SSE to replay its own ``message.user``
-      // (seq > afterSeq), which a bump could skip past.
+      // frame, which a bump past that message's history seq could skip.
       const openLiveStream = () => {
         if (stopped || abort.signal.aborted) {
           // Mirror the chain's ``finally`` for a subscription that dies while
@@ -4074,47 +4165,50 @@ export const ConversationPage = () => {
           }
           return;
         }
-        if (!opts.requireUserBeforeTerminal && maxSeqRef.current > afterSeq) {
-          afterSeq = maxSeqRef.current;
+        if (
+          !opts.requireUserBeforeTerminal &&
+          historyCursorRef.current > afterSeq
+        ) {
+          afterSeq = historyCursorRef.current;
         }
         sessionsApi
-        .subscribeEvents(
-          sessionId,
-          (event) => {
-            // A delivered frame means the stream is healthy — reset the
-            // unexpected-close backoff.
-            streamReconnectAttemptsRef.current = 0;
-            appendEvent(event);
-          },
-          afterSeq,
-          abort.signal,
-        )
-        .then(safeReconcileStreamEnd)
-        .catch(safeReconcileStreamEnd)
-        .finally(() => {
-          // The resume-reconcile burst only needs the subscription's opening
-          // window; cancel any shots still pending once the stream settles.
-          reconcileBurstTimers.forEach((t) => window.clearTimeout(t));
-          // Only the CURRENT subscription may release the loading flag. A
-          // superseded one (a hung stream aborted by the next send's
-          // ``subscribeToSession``) finalises late — an unconditional
-          // ``setSending(false)`` here would clobber the new turn's flag.
-          // Paths that abort AND clear ``abortRef`` themselves (interrupt,
-          // session switch) also reset ``sending`` themselves.
-          if (abortRef.current === abort) {
-            // ``abortRef`` must clear either way — the scheduled reconnect
-            // bails on a non-null ref (it reads it as "a newer subscription
-            // owns the page").
-            abortRef.current = null;
-            // With a reconnect pending the turn is still live (status said
-            // running) — keep ``sending`` so the footer doesn't flash
-            // "turn ended" during every backoff gap. The re-subscribe (or
-            // whichever owner preempts it) takes over the flag from here.
-            if (!reconnectPending) {
-              setSending(false);
+          .subscribeEvents(
+            sessionId,
+            (event) => {
+              // A delivered frame means the stream is healthy — reset the
+              // unexpected-close backoff.
+              streamReconnectAttemptsRef.current = 0;
+              appendEvent(event);
+            },
+            afterSeq,
+            abort.signal,
+          )
+          .then(safeReconcileStreamEnd)
+          .catch(safeReconcileStreamEnd)
+          .finally(() => {
+            // The resume-reconcile burst only needs the subscription's opening
+            // window; cancel any shots still pending once the stream settles.
+            reconcileBurstTimers.forEach((t) => window.clearTimeout(t));
+            // Only the CURRENT subscription may release the loading flag. A
+            // superseded one (a hung stream aborted by the next send's
+            // ``subscribeToSession``) finalises late — an unconditional
+            // ``setSending(false)`` here would clobber the new turn's flag.
+            // Paths that abort AND clear ``abortRef`` themselves (interrupt,
+            // session switch) also reset ``sending`` themselves.
+            if (abortRef.current === abort) {
+              // ``abortRef`` must clear either way — the scheduled reconnect
+              // bails on a non-null ref (it reads it as "a newer subscription
+              // owns the page").
+              abortRef.current = null;
+              // With a reconnect pending the turn is still live (status said
+              // running) — keep ``sending`` so the footer doesn't flash
+              // "turn ended" during every backoff gap. The re-subscribe (or
+              // whichever owner preempts it) takes over the flag from here.
+              if (!reconnectPending) {
+                setSending(false);
+              }
             }
-          }
-        });
+          });
       };
       void Promise.race([
         historyHydrationRef.current,
@@ -4233,7 +4327,7 @@ export const ConversationPage = () => {
     setPendingUserMessage({
       text,
       attachments: queuedAttachmentMeta,
-      fromSeq: maxSeqRef.current,
+      fromSeq: historyCursorRef.current,
       sentAt: Date.now(),
     });
     setSending(true);
@@ -4295,7 +4389,7 @@ export const ConversationPage = () => {
       // turn's own ``message.user`` (seq > the cursor captured here) has been
       // seen, so a stale replayed ``session.idle`` can't close the stream
       // before the turn even starts.
-      subscribeToSession(session.id, maxSeqRef.current, {
+      subscribeToSession(session.id, historyCursorRef.current, {
         requireUserBeforeTerminal: true,
       });
 
@@ -4496,10 +4590,10 @@ export const ConversationPage = () => {
   // pushed ``run.started`` / ``run.status(running)`` frame on the always-on
   // control-plane stream (the same signal the created→running bridge uses) —
   // no 500ms status poll. ``subscribeToSession`` replays every event after
-  // ``maxSeqRef`` from the DB and then streams live (the same proven path as
+  // ``historyCursorRef`` from the DB and then streams live (the same proven path as
   // reopen / mid-turn reconnect), so it also renders a turn that already
   // finished. We subscribe when the session is ``running`` OR when the DB
-  // already has events past ``maxSeqRef`` — the latter catches a turn that
+  // already has events past ``historyCursorRef`` — the latter catches a turn that
   // finished before we attached (fast turns / steer-interrupted turns); the
   // replay renders it and self-terminates on the replayed ``session.idle``. We
   // must NOT subscribe on a quiet idle with nothing new (a bare subscribe hangs
@@ -4517,11 +4611,16 @@ export const ConversationPage = () => {
     let cancelled = false;
     let subscribed = false;
     const resubscribe = () => {
-      if (cancelled || subscribed || abortRef.current || isSendInFlightRef.current) {
+      if (
+        cancelled ||
+        subscribed ||
+        abortRef.current ||
+        isSendInFlightRef.current
+      ) {
         return;
       }
       subscribed = true;
-      subscribeToSession(sid, maxSeqRef.current);
+      subscribeToSession(sid, historyCursorRef.current);
     };
 
     // Level check ONCE on arm: the drain can outrace the stream subscription
@@ -4539,7 +4638,10 @@ export const ConversationPage = () => {
           resubscribe();
           return;
         }
-        const resp = await sessionsApi.listEvents(sid, maxSeqRef.current);
+        const resp = await sessionsApi.listEvents(
+          sid,
+          historyCursorRef.current,
+        );
         if (cancelled || abortRef.current || isSendInFlightRef.current) return;
         if (resp.items.length > 0) resubscribe();
       } catch {
@@ -4616,7 +4718,7 @@ export const ConversationPage = () => {
   const handleInterrupt = async () => {
     const sessionId = selectedSessionId;
     if (!sessionId) return;
-    const afterSeq = maxSeqRef.current;
+    const afterSeq = historyCursorRef.current;
     if (abortRef.current) {
       abortRef.current.abort();
       abortRef.current = null;
@@ -4634,7 +4736,10 @@ export const ConversationPage = () => {
       }
       for (const event of missed.items) {
         if (event.seq > 0) {
-          maxSeqRef.current = Math.max(maxSeqRef.current, event.seq);
+          historyCursorRef.current = Math.max(
+            historyCursorRef.current,
+            event.seq,
+          );
         }
       }
       setEvents((prev) => {
@@ -5331,7 +5436,7 @@ export const ConversationPage = () => {
   // Three things happen against the freshly-fetched detail:
   //   1. Hydrate ``todos`` from ``detail.todos`` (the persistent snapshot).
   //   2. If the agent is still ``running``, open an SSE stream from
-  //      ``maxSeqRef.current`` so the page picks up the rest of the turn
+  //      ``historyCursorRef.current`` so the page picks up the rest of the turn
   //      live. This is the path that makes refresh-mid-turn /
   //      leave-and-come-back keep streaming.
   //
@@ -5383,7 +5488,7 @@ export const ConversationPage = () => {
         !abortRef.current &&
         !isSendInFlightRef.current
       ) {
-        subscribeToSession(detail.id, maxSeqRef.current);
+        subscribeToSession(detail.id, historyCursorRef.current);
         return true;
       }
       return false;
@@ -5402,14 +5507,14 @@ export const ConversationPage = () => {
       if (cancelled || abortRef.current || isSendInFlightRef.current) return;
       const sid = selectedSessionId;
       void sessionsApi
-        .listEvents(sid, maxSeqRef.current)
+        .listEvents(sid, historyCursorRef.current)
         .then((resp) => {
           if (cancelled || abortRef.current || isSendInFlightRef.current) {
             return;
           }
           if (selectedSessionIdRef.current !== sid) return;
           if (resp.items.length > 0) {
-            subscribeToSession(sid, maxSeqRef.current);
+            subscribeToSession(sid, historyCursorRef.current);
           }
         })
         .catch(() => {});
@@ -5427,7 +5532,7 @@ export const ConversationPage = () => {
         // run one delayed reconcile: on a promoted new conversation the
         // history fetch can race the first turn, and an instant-failing
         // turn may already be terminal here with its events unfetched.
-        // The delay lets ``refreshEvents`` hydrate ``maxSeqRef`` first so
+        // The delay lets ``refreshEvents`` hydrate ``historyCursorRef`` first so
         // the common case is a cheap empty read.
         if (isTerminalStatus(detail.status)) {
           window.setTimeout(reconcileFinishedTurn, 1200);
@@ -5465,7 +5570,7 @@ export const ConversationPage = () => {
             (frame.eventType === "run.status" && status === "running");
           if (becameRunning) {
             stopStream();
-            subscribeToSession(selectedSessionId, maxSeqRef.current);
+            subscribeToSession(selectedSessionId, historyCursorRef.current);
             return;
           }
           if (frame.eventType === "run.finished") {

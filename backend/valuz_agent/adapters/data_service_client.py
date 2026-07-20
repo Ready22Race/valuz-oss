@@ -62,6 +62,7 @@ class DataServiceReadClient:
             timestamp=int(row.get("timestamp") or 0),
             seq=row.get("seq"),
             message_id=row.get("message_id"),
+            event_uid=row.get("event_uid"),
             session_id=row.get("session_id"),
         )
 

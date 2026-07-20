@@ -22,7 +22,14 @@ from typing import Any
 from valuz_agent.api.middleware import AuthMiddleware
 from valuz_agent.infra.asset_store import AssetStore, LocalAssetStore
 from valuz_agent.infra.fs_registry import fs_registry
+from valuz_agent.integrations.sandbox_credential_hmac import (
+    PerOwnerHmacSandboxCredentialVerifier,
+)
 from valuz_agent.ports.agent_lifecycle import AgentLifecycleHook, NoopAgentLifecycleHook
+from valuz_agent.ports.automation_runtime import (
+    AutomationRuntimePort,
+    InProcessAutomationRuntime,
+)
 from valuz_agent.ports.billing import BillingPort, NoopBillingProvider
 from valuz_agent.ports.cache import CachePort, FileCache
 from valuz_agent.ports.connector_lifecycle import (
@@ -40,6 +47,7 @@ from valuz_agent.ports.provider_policy import AllowAllProviderPolicy, ProviderPo
 from valuz_agent.ports.resource_list_hook import NoopResourceListHook, ResourceListHook
 from valuz_agent.ports.runtime_availability import RuntimeAvailabilityPort
 from valuz_agent.ports.sandbox_allocator import BootSingletonAllocator, SandboxAllocatorPort
+from valuz_agent.ports.sandbox_credential import SandboxCredentialVerifierPort
 from valuz_agent.ports.sandbox_policy import AllowAllSandboxPolicy, SandboxPolicyPort
 from valuz_agent.ports.skill_lifecycle import NoopSkillLifecycleHook, SkillLifecycleHook
 
@@ -48,6 +56,10 @@ class Extensions:
     """Singleton holding every replaceable port with its OSS default."""
 
     def __init__(self) -> None:
+        # Automation business data and execution stay host-owned; deployments
+        # may replace only the lifecycle/enqueue transport. OSS defaults to the
+        # existing single-process tick + FIFO runner and failure monitor.
+        self.automation_runtime: AutomationRuntimePort = InProcessAutomationRuntime()
         self.billing: BillingPort = NoopBillingProvider()
         # ADR-011: an overlay's single LLMProvider — contributes provider
         # rows (list) and resolves their credentials (resolve). OSS default
@@ -65,6 +77,13 @@ class Extensions:
         # in-process / single boot-sandbox behavior unchanged. The commercial
         # overlay binds a per-user pool allocator (one sandbox per user_id).
         self.sandbox_allocator: SandboxAllocatorPort = BootSingletonAllocator()
+        # One opaque credential authenticates an untrusted sandbox to every
+        # trusted host surface (built-in MCP + Data Service). OSS preserves the
+        # existing per-owner HMAC tokens; managed editions may bind an async
+        # database/cache-backed verifier for their workload credential.
+        self.sandbox_credential_verifier: SandboxCredentialVerifierPort = (
+            PerOwnerHmacSandboxCredentialVerifier()
+        )
         self.resource_list_hook: ResourceListHook = NoopResourceListHook()
         self.skill_lifecycle: SkillLifecycleHook = NoopSkillLifecycleHook()
         self.agent_lifecycle: AgentLifecycleHook = NoopAgentLifecycleHook()

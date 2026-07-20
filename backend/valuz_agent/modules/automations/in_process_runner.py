@@ -35,6 +35,10 @@ from valuz_agent.i18n import t
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.automations.models import AutomationRow, AutomationRunRow
 from valuz_agent.modules.automations.triggers import TriggerEvaluator
+from valuz_agent.ports.automation_runtime import (
+    AutomationExecutionLease,
+    NoopAutomationExecutionLease,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -326,11 +330,20 @@ class InProcessAutomationRunner:
 
     # ── Per-run execution ────────────────────────────────────────────
 
-    async def _execute_run(self, user_id: str, automation_id: str, run_id: str) -> None:
+    async def _execute_run(
+        self,
+        user_id: str,
+        automation_id: str,
+        run_id: str,
+        *,
+        lease: AutomationExecutionLease | None = None,
+        detach_chat: bool = True,
+    ) -> None:
         from valuz_agent.infra.db import async_unit_of_work
         from valuz_agent.modules.automations.datastore import AutomationDatastore
 
         assert self._triggers is not None
+        execution_lease: AutomationExecutionLease = lease or NoopAutomationExecutionLease()
         # Chat-mode runs hand their (possibly minutes-long) turn off to a
         # background task so the serial FIFO worker is freed immediately. This
         # carries ``(session_id, rendered_prompt)`` out of the worker's unit of
@@ -390,6 +403,7 @@ class InProcessAutomationRunner:
                         automation_id=automation_id,
                         rendered_prompt=rendered_prompt,
                         user_id=user_id,
+                        lease=execution_lease,
                     )
                     return
 
@@ -424,6 +438,9 @@ class InProcessAutomationRunner:
                     run.error_message_key = getattr(exc, "message_key", None)
                     run.error_message = str(exc)[:500]
                     run.completed_at = now_ms()
+                    if not await execution_lease.is_current():
+                        logger.warning("Run %s lost execution lease before failure write", run_id)
+                        return
                     await ds.replace_run(run)
                     logger.exception(
                         "Run %s failed to create session for automation %s",
@@ -435,6 +452,9 @@ class InProcessAutomationRunner:
                 run.status = "running"
                 run.started_at = now_ms()
                 run.session_id = session.id
+                if not await execution_lease.is_current():
+                    logger.warning("Run %s lost execution lease before running write", run_id)
+                    return
                 await ds.replace_run(run)
                 logger.info("Started run %s → session %s", run_id, session.id)
 
@@ -455,15 +475,18 @@ class InProcessAutomationRunner:
 
         if handoff_args is not None:
             session_id, prompt = handoff_args
-            asyncio.create_task(
-                self._finish_chat_run(
-                    user_id=user_id,
-                    automation_id=automation_id,
-                    run_id=run_id,
-                    session_id=session_id,
-                    rendered_prompt=prompt,
-                )
+            finish = self._finish_chat_run(
+                user_id=user_id,
+                automation_id=automation_id,
+                run_id=run_id,
+                session_id=session_id,
+                rendered_prompt=prompt,
+                lease=execution_lease,
             )
+            if detach_chat:
+                asyncio.create_task(finish)
+            else:
+                await finish
 
     async def _finish_chat_run(
         self,
@@ -473,6 +496,7 @@ class InProcessAutomationRunner:
         run_id: str,
         session_id: str,
         rendered_prompt: str,
+        lease: AutomationExecutionLease | None = None,
     ) -> None:
         """Run the chat turn and finalize the run OFF the serial worker.
 
@@ -486,6 +510,7 @@ class InProcessAutomationRunner:
         from valuz_agent.modules.automations.datastore import AutomationDatastore
 
         assert self._triggers is not None
+        execution_lease: AutomationExecutionLease = lease or NoopAutomationExecutionLease()
         try:
             async with async_unit_of_work() as db:
                 ds = AutomationDatastore(db)
@@ -553,6 +578,9 @@ class InProcessAutomationRunner:
                 run.completed_at = now_ms()
                 if run.started_at:
                     run.duration_ms = run.completed_at - run.started_at
+                if not await execution_lease.is_current():
+                    logger.warning("Run %s lost execution lease before terminal write", run_id)
+                    return
                 await ds.replace_run(run)
 
                 row.last_run_at = run.triggered_at
@@ -561,6 +589,9 @@ class InProcessAutomationRunner:
                 else:
                     row.next_run_at = None
                 row.updated_at = now_ms()
+                if not await execution_lease.is_current():
+                    logger.warning("Run %s lost execution lease before schedule advance", run_id)
+                    return
                 await ds.update_automation(row)
                 await ds.trim_runs(row.user_id, automation_id, keep=100)
 
@@ -582,9 +613,11 @@ class InProcessAutomationRunner:
         automation_id: str,
         rendered_prompt: str,
         user_id: str | None = None,
+        lease: AutomationExecutionLease | None = None,
     ) -> None:
         if user_id is None:
             raise ValueError("user_id is required")
+        execution_lease: AutomationExecutionLease = lease or NoopAutomationExecutionLease()
 
         """Fire a project task with the bound agent as Lead.
 
@@ -668,6 +701,9 @@ class InProcessAutomationRunner:
             # the task's real running time in the activity log.
             run.result_summary = title or row.name
             run.duration_ms = None
+            if not await execution_lease.is_current():
+                logger.warning("Run %s lost execution lease before terminal write", run_id)
+                return
             await ds.replace_run(run)
             logger.info(
                 "Automation %s kicked off task %s (lead session %s)",
@@ -681,6 +717,9 @@ class InProcessAutomationRunner:
             run.error_message_key = getattr(exc, "message_key", None)
             run.error_message = str(exc)[:500]
             run.completed_at = now_ms()
+            if not await execution_lease.is_current():
+                logger.warning("Run %s lost execution lease before failure write", run_id)
+                return
             await ds.replace_run(run)
             logger.exception(
                 "Run %s failed to kick off task for automation %s",
@@ -699,6 +738,9 @@ class InProcessAutomationRunner:
         else:
             row.next_run_at = None
         row.updated_at = now_ms()
+        if not await execution_lease.is_current():
+            logger.warning("Run %s lost execution lease before schedule advance", run_id)
+            return
         await ds.update_automation(row)
         await ds.trim_runs(row.user_id, automation_id, keep=100)
 

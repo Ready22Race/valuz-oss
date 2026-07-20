@@ -37,6 +37,13 @@ export const personalSettingsSections: SettingsSectionModule[] = [
     edition: "personal",
   },
   {
+    id: "backup",
+    label: "settings.tab.backup.label",
+    description: "settings.tab.backup.desc",
+    icon: "hard-drive",
+    edition: "personal",
+  },
+  {
     id: "system-logs",
     label: "settings.tab.systemLogs.label",
     description: "settings.tab.systemLogs.desc",

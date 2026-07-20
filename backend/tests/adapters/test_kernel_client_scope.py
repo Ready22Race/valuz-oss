@@ -14,6 +14,8 @@ Pins the on-demand start/stop seam:
 # ruff: noqa: I001 — kernel bootstrap side-effect import must precede src/app
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 import valuz_agent.boot.kernel  # noqa: F401  (sys.path bootstrap)
@@ -177,3 +179,74 @@ async def test_emit_live_event_noops_without_live_kernel(monkeypatch) -> None:
 
     await kc.emit_live_event("u1", "s1", "todo_update", {"todos": []})
     assert alloc.ensured == []  # never provisions just to broadcast a live frame
+
+
+# ── ephemeral review reuse (memory review inside the source's warm sandbox) ──
+
+
+class _ReviewKernel:
+    def __init__(self) -> None:
+        self.created: list[tuple[str, str | None]] = []
+        self.ran: list[tuple[str, str, str]] = []
+
+    async def create_session(self, user_id, req):  # noqa: ANN001
+        self.created.append((user_id, getattr(req, "id", None)))
+        return "SESSION"
+
+    async def run_turn(self, user_id, session_id, prompt, *a, **k):  # noqa: ANN001, ANN002, ANN003
+        self.ran.append((user_id, session_id, prompt))
+        return SimpleNamespace(assistant_message="REVIEW-OUT")
+
+
+class _Req:
+    id = "ephem-1"
+
+
+async def test_ephemeral_review_reuses_live_sandbox_without_renewing(monkeypatch) -> None:
+    # A live source sandbox is REUSED via peek — never ``ensure`` (which would
+    # renew the AGS TTL and defeat the post-turn idle clamp keeping it warm).
+    alloc = _ScopedAllocator()  # live=True
+    monkeypatch.setattr(ext, "sandbox_allocator", alloc)
+    review = _ReviewKernel()
+    monkeypatch.setattr(kc, "_endpoint_clients", {"https://session:s1.pool": review})
+    deletes: list[tuple[str, str]] = []
+
+    class _Durable:
+        async def delete_session(self, user_id, session_id):  # noqa: ANN001
+            deletes.append((user_id, session_id))
+            return True
+
+    monkeypatch.setattr(kc, "client", _Durable())
+
+    out = await kc.run_ephemeral_review_in_scope(
+        "u1", _Req(), "review this", reuse_scope=SandboxScope(kind="session", id="s1")
+    )
+    assert out == "REVIEW-OUT"
+    assert alloc.ensured == []  # reuse must NOT provision / renew
+    assert alloc.peeked == [("u1", SandboxScope(kind="session", id="s1"))]
+    assert review.created == [("u1", "ephem-1")]  # ran inside the reused kernel
+    assert review.ran == [("u1", "ephem-1", "review this")]
+    assert deletes == [("u1", "ephem-1")]  # throwaway durable record cleaned up
+
+
+async def test_ephemeral_review_returns_none_when_source_sandbox_gone(monkeypatch) -> None:
+    alloc = _ScopedAllocator()
+    alloc.live = False  # source sandbox already reclaimed
+    monkeypatch.setattr(ext, "sandbox_allocator", alloc)
+
+    out = await kc.run_ephemeral_review_in_scope(
+        "u1", _Req(), "x", reuse_scope=SandboxScope(kind="session", id="s1")
+    )
+    assert out is None  # caller falls back to its own throwaway sandbox
+    assert alloc.ensured == []  # the gone path never provisions here
+
+
+async def test_ephemeral_review_inert_without_scoped_allocator(monkeypatch) -> None:
+    # No scoped allocator → the local single-kernel case has no per-scope sandbox
+    # to reuse; the helper is inert so the caller's normal path runs.
+    monkeypatch.setattr(ext, "sandbox_allocator", None, raising=False)
+
+    out = await kc.run_ephemeral_review_in_scope(
+        "u1", _Req(), "x", reuse_scope=SandboxScope(kind="session", id="s1")
+    )
+    assert out is None

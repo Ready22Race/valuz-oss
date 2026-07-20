@@ -13,6 +13,7 @@ export const DESKTOP_CHANNELS = {
   openExternalUrl: "open_external_url",
   appGetVersion: "app_get_version",
   appQuit: "app_quit",
+  appRelaunch: "app_relaunch",
   windowOpenNew: "window_open_new",
   windowMinimize: "window_minimize",
   windowMaximize: "window_maximize",

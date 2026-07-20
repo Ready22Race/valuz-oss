@@ -425,6 +425,7 @@ class SessionService:
                 seq=frame.seq,
                 event={"event_type": frame.event_type, "payload": frame.payload},
                 timestamp=frame.timestamp,
+                event_uid=frame.event_uid,
             )
             for frame in frames
         ]
@@ -461,6 +462,7 @@ class SessionService:
                 seq=frame.seq,
                 event={"event_type": frame.event_type, "payload": frame.payload},
                 timestamp=frame.timestamp,
+                event_uid=frame.event_uid,
             )
             for frame in window.items
         ]
@@ -815,7 +817,7 @@ class SessionService:
 
         session_mcp = [mcp_to_schema(m) for m in (agent.mcp_servers or ())] + [
             m
-            for m in always_on_http_mcp_servers(session_id, owner_user_id=user_id)
+            for m in await always_on_http_mcp_servers(session_id, owner_user_id=user_id)
             if m.name not in existing_mcp_names
         ]
         import os as _os

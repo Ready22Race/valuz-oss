@@ -596,7 +596,7 @@ function HtmlRenderer({ artifact, content }: ArtifactRendererProps) {
           sandbox="allow-same-origin"
           scrolling="no"
           onLoad={resizePreview}
-          className="w-full rounded-md border border-surface-border bg-white"
+          className="w-full bg-white"
           style={{
             height: iframeHeight ? `${iframeHeight}px` : "100%",
             minHeight: "100%",

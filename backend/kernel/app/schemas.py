@@ -450,6 +450,11 @@ class EventData(BaseModel):
     # for live (non-persisted) frames and legacy offset reads.
     seq: int | None = None
     message_id: str | None = None
+    # Store-independent identity (the append request_id). ``seq`` is a
+    # PER-STORE counter (execution-local vs durable each assign their own) —
+    # cross-store dedup/merge keys on ``event_uid``, never on seq. ``None``
+    # for live-only frames and legacy rows written before uid minting.
+    event_uid: str | None = None
     # Populated on the global (all-sessions) stream so subscribers don't
     # re-derive routing; ``None`` on session-scoped reads.
     session_id: str | None = None

@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections import deque
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -60,6 +61,42 @@ def _history_reader() -> Any:
     return data_reader()
 
 
+# Cap on the shared live/history ``event_uid`` dedup set. Sized to comfortably
+# cover the subscribe/backfill overlap window (a backfill page is ≤1000 rows);
+# an infinite stream must not grow the set unbounded.
+_SEEN_UIDS_MAX = 4096
+
+
+class _SeenUids:
+    """Bounded remember-set for ``event_uid``-keyed dedup.
+
+    ``seq`` is a PER-STORE counter — the kernel's LOCAL seq (live frames) and
+    the durable store's seq (history reads) are independent and must never be
+    compared. The store-independent ``event_uid`` is the only identity that
+    bridges the two paths, so the SSE merge dedups on it: one shared set covers
+    both directions (live frame later re-read by a history backfill, and a
+    history frame later re-delivered live).
+
+    ``add(uid)`` returns ``True`` when the uid is new (emit the frame) and
+    ``False`` when already seen (duplicate — skip). FIFO-trimmed at
+    ``_SEEN_UIDS_MAX`` entries so a long-lived stream stays bounded.
+    """
+
+    def __init__(self, max_size: int = _SEEN_UIDS_MAX) -> None:
+        self._max = max_size
+        self._set: set[str] = set()
+        self._order: deque[str] = deque()
+
+    def add(self, uid: str) -> bool:
+        if uid in self._set:
+            return False
+        self._set.add(uid)
+        self._order.append(uid)
+        while len(self._order) > self._max:
+            self._set.discard(self._order.popleft())
+        return True
+
+
 @dataclass(frozen=True)
 class SessionEventFrame:
     """One row of ``events`` shaped for the existing SSE wire format."""
@@ -68,6 +105,9 @@ class SessionEventFrame:
     event_type: str
     payload: dict[str, Any]
     timestamp: int | None  # Unix epoch ms (UTC); frontend formats via new Date(ms)
+    # Store-independent identity (see ``_SeenUids``). ``None`` on live-only
+    # frames (deltas) and legacy rows persisted before uid minting.
+    event_uid: str | None = None
 
     def to_sse_data(self) -> str:
         return json.dumps(
@@ -76,6 +116,7 @@ class SessionEventFrame:
                 "event_type": self.event_type,
                 "payload": self.payload,
                 "timestamp": self.timestamp,
+                "event_uid": self.event_uid,
             },
             default=str,
         )
@@ -112,6 +153,20 @@ def _with_message_id(payload: dict[str, str], data: dict[str, Any]) -> dict[str,
     msg_id = data.get("message_id")
     if msg_id is not None and "message_id" not in payload:
         payload["message_id"] = _stringify(msg_id)
+    return payload
+
+
+def _with_parent_tool_use_id(payload: dict[str, str], data: dict[str, Any]) -> dict[str, str]:
+    """Tack ``parent_tool_use_id`` onto an outgoing SSE payload when present.
+
+    Set by runtimes on events produced INSIDE a subagent (Task/Agent tool
+    run). The frontend uses it to treat such events as out-of-band activity
+    — a background agent's tool calls arrive interleaved with the lead's
+    live text stream and must not split it into fragments.
+    """
+    parent_id = data.get("parent_tool_use_id")
+    if parent_id is not None and "parent_tool_use_id" not in payload:
+        payload["parent_tool_use_id"] = _stringify(parent_id)
     return payload
 
 
@@ -184,42 +239,54 @@ def _translate_kernel_event(
         )
 
     if kernel_type == "assistant_message":
-        return "message.assistant.delta", _with_message_id(
-            {
-                "text": _stringify(data.get("text") or data.get("content") or ""),
-            },
+        return "message.assistant.delta", _with_parent_tool_use_id(
+            _with_message_id(
+                {
+                    "text": _stringify(data.get("text") or data.get("content") or ""),
+                },
+                data,
+            ),
             data,
         )
 
     if kernel_type == "thinking":
         # Separate event type so the renderer can show thinking with a dimmed
         # italic style instead of mixing it into the assistant turn body.
-        return "message.assistant.thinking", _with_message_id(
-            {
-                "text": _stringify(data.get("text") or data.get("content") or ""),
-            },
+        return "message.assistant.thinking", _with_parent_tool_use_id(
+            _with_message_id(
+                {
+                    "text": _stringify(data.get("text") or data.get("content") or ""),
+                },
+                data,
+            ),
             data,
         )
 
     if kernel_type == "tool_use":
-        return "tool.call.started", _with_message_id(
-            {
-                "id": _stringify(data.get("id") or ""),
-                "tool_use_id": _stringify(data.get("id") or ""),
-                "name": _stringify(data.get("name") or ""),
-                "input": _stringify(data.get("input") or {}),
-            },
+        return "tool.call.started", _with_parent_tool_use_id(
+            _with_message_id(
+                {
+                    "id": _stringify(data.get("id") or ""),
+                    "tool_use_id": _stringify(data.get("id") or ""),
+                    "name": _stringify(data.get("name") or ""),
+                    "input": _stringify(data.get("input") or {}),
+                },
+                data,
+            ),
             data,
         )
 
     if kernel_type == "tool_result":
-        return "tool.call.completed", _with_message_id(
-            {
-                "id": _stringify(data.get("id") or ""),
-                "tool_use_id": _stringify(data.get("id") or ""),
-                "content": _stringify(data.get("content") or ""),
-                "is_error": _stringify(data.get("is_error", False)),
-            },
+        return "tool.call.completed", _with_parent_tool_use_id(
+            _with_message_id(
+                {
+                    "id": _stringify(data.get("id") or ""),
+                    "tool_use_id": _stringify(data.get("id") or ""),
+                    "content": _stringify(data.get("content") or ""),
+                    "is_error": _stringify(data.get("is_error", False)),
+                },
+                data,
+            ),
             data,
         )
 
@@ -324,18 +391,24 @@ def _translate_kernel_event(
         )
 
     if kernel_type == "text_delta":
-        return "message.assistant.text_delta", _with_message_id(
-            {
-                "text": _stringify(data.get("text") or data.get("delta") or ""),
-            },
+        return "message.assistant.text_delta", _with_parent_tool_use_id(
+            _with_message_id(
+                {
+                    "text": _stringify(data.get("text") or data.get("delta") or ""),
+                },
+                data,
+            ),
             data,
         )
 
     if kernel_type == "thinking_delta":
-        return "message.assistant.thinking_delta", _with_message_id(
-            {
-                "text": _stringify(data.get("text") or data.get("delta") or ""),
-            },
+        return "message.assistant.thinking_delta", _with_parent_tool_use_id(
+            _with_message_id(
+                {
+                    "text": _stringify(data.get("text") or data.get("delta") or ""),
+                },
+                data,
+            ),
             data,
         )
 
@@ -346,12 +419,15 @@ def _translate_kernel_event(
         # build-the-card signal, so large-file writes show progress instead
         # of a dead wait. ``id`` is the tool_use_id that started/completed
         # also key on; ``name`` lets the card render its real title at once.
-        return "tool.call.input_delta", _with_message_id(
-            {
-                "tool_use_id": _stringify(data.get("id") or ""),
-                "name": _stringify(data.get("name") or ""),
-                "text": _stringify(data.get("text") or data.get("delta") or ""),
-            },
+        return "tool.call.input_delta", _with_parent_tool_use_id(
+            _with_message_id(
+                {
+                    "tool_use_id": _stringify(data.get("id") or ""),
+                    "name": _stringify(data.get("name") or ""),
+                    "text": _stringify(data.get("text") or data.get("delta") or ""),
+                },
+                data,
+            ),
             data,
         )
 
@@ -534,6 +610,7 @@ def _items_to_frames(items: list[Any]) -> list[SessionEventFrame]:
                 event_type=legacy_type,
                 payload=legacy_payload,
                 timestamp=ts_ms,
+                event_uid=getattr(item, "event_uid", None),
             )
         )
     return frames
@@ -644,8 +721,20 @@ async def iter_events_sse(
     falls back to DB polling so historical events are always available.
 
     The caller is expected to wrap this with ``EventSourceResponse``.
+
+    Two INDEPENDENT seq spaces meet in this merge (the kernel store is
+    LOCAL-authority): history reads carry the DURABLE store's seq, live kernel
+    frames carry the kernel's LOCAL seq. The two must never be compared, so:
+
+    - ``history_cursor`` lives purely in durable-seq space — seeded from the
+      client's ``after_seq``, advanced ONLY by history-sourced frames, and used
+      ONLY as ``after_seq`` for durable backfill reads (and heartbeats).
+    - live/history dedup keys on the store-independent ``event_uid`` via one
+      shared ``_SeenUids`` covering both directions. A live frame without a
+      uid (live-only deltas; legacy kernels) always passes through.
     """
-    cursor = after_seq
+    history_cursor = after_seq
+    seen_uids = _SeenUids()
     last_emit = asyncio.get_event_loop().time()
 
     # First, drain any DB events we missed (replay on reconnect).
@@ -653,10 +742,14 @@ async def iter_events_sse(
     # cancellation inside an in-flight DB read would tear the pooled
     # connection down mid-checkin (see ``infra.sse.shielded``).
     owner_id = user_id
-    frames = await shielded(list_events_after(session_id, user_id=owner_id, after_seq=cursor))
+    frames = await shielded(
+        list_events_after(session_id, user_id=owner_id, after_seq=history_cursor)
+    )
     for frame in frames:
+        history_cursor = frame.seq
+        if frame.event_uid is not None and not seen_uids.add(frame.event_uid):
+            continue  # already delivered (uid seen)
         yield {"event": frame.event_type, "data": frame.to_sse_data()}
-        cursor = frame.seq
         last_emit = asyncio.get_event_loop().time()
 
     # Subscribe to the kernel's live stream. A pump task moves frames into
@@ -714,37 +807,43 @@ async def iter_events_sse(
                 now = asyncio.get_event_loop().time()
                 if now - last_db_poll < DB_BACKFILL_INTERVAL_SECONDS:
                     if now - last_emit >= IDLE_HEARTBEAT_SECONDS:
-                        yield {"event": "heartbeat", "data": json.dumps({"seq": cursor})}
+                        # Heartbeat ``seq`` is the HISTORY (durable) cursor —
+                        # the only seq-space the client may echo back as
+                        # ``after_seq`` on reconnect. Never a live/local seq.
+                        yield {"event": "heartbeat", "data": json.dumps({"seq": history_cursor})}
                         last_emit = now
                     continue
                 last_db_poll = now
                 db_frames = await shielded(
-                    list_events_after(session_id, user_id=owner_id, after_seq=cursor)
+                    list_events_after(session_id, user_id=owner_id, after_seq=history_cursor)
                 )
                 for frame in db_frames:
+                    # History frames advance the durable cursor even when the
+                    # uid was already delivered live — the cursor tracks how
+                    # far the durable log has been READ, not what was emitted.
+                    history_cursor = frame.seq
+                    if frame.event_uid is not None and not seen_uids.add(frame.event_uid):
+                        continue  # already delivered live (uid dedup)
                     yield {"event": frame.event_type, "data": frame.to_sse_data()}
-                    cursor = frame.seq
                     last_emit = asyncio.get_event_loop().time()
 
                 if asyncio.get_event_loop().time() - last_emit >= IDLE_HEARTBEAT_SECONDS:
-                    yield {"event": "heartbeat", "data": json.dumps({"seq": cursor})}
+                    # HISTORY cursor only (see the heartbeat comment above).
+                    yield {"event": "heartbeat", "data": json.dumps({"seq": history_cursor})}
                     last_emit = asyncio.get_event_loop().time()
                 continue
 
             # Live event from the subscription — translate and yield.
-            # Persisted events arrive with their row id in ``seq`` (see
-            # the kernel's PersistThenBroadcastSink): skip anything the
-            # cursor already covers (no duplicates against backfill or a
-            # previous idle poll) and ADVANCE the cursor so the idle poll
-            # below never re-reads what was already delivered live —
-            # fixing the legacy double-delivery after busy turns.
-            if event.seq is not None:
-                # ``cursor`` is int-typed today (after_seq defaults to 0),
-                # but guard anyway so a future None-cursor caller degrades
-                # to no-dedup instead of a TypeError in the SSE pump.
-                if cursor is not None and event.seq <= cursor:
-                    continue
-                cursor = event.seq
+            # Live ``seq`` is the KERNEL-LOCAL counter (LOCAL-authority store)
+            # and is NEVER compared against — or written into — the durable
+            # ``history_cursor``. Dedup keys on ``event_uid`` instead: skip a
+            # uid the backfill (or an earlier live copy) already delivered,
+            # and remember it so a later durable backfill of the same event
+            # is skipped too. Uid-less frames (live-only deltas, legacy
+            # kernels) always flow — deltas were never deduped.
+            uid = getattr(event, "event_uid", None)
+            if uid is not None and not seen_uids.add(uid):
+                continue
             translated = _translate_kernel_event(event.type, event.data)
             if translated is not None:
                 legacy_type, legacy_payload = translated
@@ -753,6 +852,7 @@ async def iter_events_sse(
                     event_type=legacy_type,
                     payload=legacy_payload,
                     timestamp=event.timestamp,  # Unix epoch ms (UTC)
+                    event_uid=uid,
                 )
                 yield {"event": frame.event_type, "data": frame.to_sse_data()}
                 last_emit = asyncio.get_event_loop().time()
@@ -814,6 +914,9 @@ class UserEventFrame:
     session_id: str
     payload: dict[str, str]
     timestamp: int | None
+    # Store-independent identity (see ``_SeenUids``). ``None`` on live-only
+    # frames and legacy rows persisted before uid minting.
+    event_uid: str | None = None
 
     def to_sse_data(self) -> str:
         return json.dumps(
@@ -823,6 +926,7 @@ class UserEventFrame:
                 "session_id": self.session_id,
                 "payload": self.payload,
                 "timestamp": self.timestamp,
+                "event_uid": self.event_uid,
             },
             default=str,
         )
@@ -896,6 +1000,7 @@ async def list_user_events_after(
                 session_id=str(getattr(item, "session_id", "") or ""),
                 payload=payload,
                 timestamp=int(item.timestamp) if item.timestamp is not None else None,
+                event_uid=getattr(item, "event_uid", None),
             )
         )
     return frames
@@ -918,6 +1023,7 @@ def _control_frame_from_live(event: Any) -> UserEventFrame | None:
         session_id=str(getattr(event, "session_id", "") or ""),
         payload=payload,
         timestamp=event.timestamp,
+        event_uid=getattr(event, "event_uid", None),
     )
 
 
@@ -937,14 +1043,23 @@ async def iter_user_events_sse(
     throttled durable backfill as the correctness floor. ``shielded`` keeps a
     client disconnect from tearing a pooled connection down mid-read. The caller
     wraps this with ``EventSourceResponse``.
+
+    Cursor discipline mirrors ``iter_events_sse``: ``history_cursor`` is
+    durable-seq space only (advanced by backfill frames, used as ``after_seq``
+    for backfill reads and heartbeats); the live tap's kernel-LOCAL seqs never
+    touch it — live/history dedup keys on ``event_uid`` via one shared
+    ``_SeenUids`` covering both directions.
     """
-    cursor = after_seq
+    history_cursor = after_seq
+    seen_uids = _SeenUids()
     last_emit = asyncio.get_event_loop().time()
 
     # Replay anything the client missed before the tap attaches.
-    for frame in await shielded(list_user_events_after(user_id, after_seq=cursor)):
+    for frame in await shielded(list_user_events_after(user_id, after_seq=history_cursor)):
+        history_cursor = frame.seq
+        if frame.event_uid is not None and not seen_uids.add(frame.event_uid):
+            continue  # already delivered (uid seen)
         yield {"event": frame.event_type, "data": frame.to_sse_data()}
-        cursor = frame.seq
         last_emit = asyncio.get_event_loop().time()
 
     # Live cross-session tap for this owner. A pump task moves frames into a
@@ -991,31 +1106,38 @@ async def iter_user_events_sse(
                 now = asyncio.get_event_loop().time()
                 if now - last_backfill >= CONTROL_BACKFILL_INTERVAL_SECONDS:
                     last_backfill = now
-                    for frame in await shielded(list_user_events_after(user_id, after_seq=cursor)):
+                    for frame in await shielded(
+                        list_user_events_after(user_id, after_seq=history_cursor)
+                    ):
+                        # Backfill frames advance the durable cursor even when
+                        # the uid was already delivered live — the cursor
+                        # tracks how far the durable log has been read.
+                        history_cursor = frame.seq
+                        if frame.event_uid is not None and not seen_uids.add(frame.event_uid):
+                            continue  # already delivered live (uid dedup)
                         yield {"event": frame.event_type, "data": frame.to_sse_data()}
-                        cursor = frame.seq
                         last_emit = asyncio.get_event_loop().time()
                 if asyncio.get_event_loop().time() - last_emit >= IDLE_HEARTBEAT_SECONDS:
-                    yield {"event": "heartbeat", "data": json.dumps({"seq": cursor})}
+                    # Heartbeat ``seq`` is the HISTORY (durable) cursor — the
+                    # only seq-space the client may echo back as ``after_seq``
+                    # on reconnect. Never a live/local seq.
+                    yield {"event": "heartbeat", "data": json.dumps({"seq": history_cursor})}
                     last_emit = asyncio.get_event_loop().time()
                 continue
 
-            # Live frame. ONLY lifecycle events matter to the control plane, and
-            # ONLY they may advance the cursor. The backfill floor reads
-            # lifecycle events *after the cursor*, so if a non-lifecycle
-            # persisted event (tool_use, assistant_message) advanced it, the
-            # floor could skip a lifecycle event whose seq sits just below it
-            # (e.g. one the drop-tolerant tap dropped). So translate first — a
-            # ``None`` (non-lifecycle) is ignored WITHOUT touching the cursor —
-            # then dedup + advance on the lifecycle seq only. (Persisted
-            # lifecycle events carry the durable seq via PersistThenBroadcastSink.)
+            # Live frame. ONLY lifecycle events matter to the control plane —
+            # translate first, a ``None`` (non-lifecycle) is ignored entirely.
+            # The tap's seq is the KERNEL-LOCAL counter (LOCAL-authority
+            # store): it never advances — and is never compared against — the
+            # durable ``history_cursor``. Dedup keys on ``event_uid`` via the
+            # shared seen-set, in both directions (a uid delivered live is
+            # skipped when the backfill floor re-reads it, and vice versa).
+            # Uid-less live frames (legacy kernels) always pass through.
             live_frame = _control_frame_from_live(event)
             if live_frame is None:
                 continue
-            if live_frame.seq and live_frame.seq <= cursor:
-                continue  # already delivered by backfill or an earlier live frame
-            if live_frame.seq:
-                cursor = live_frame.seq
+            if live_frame.event_uid is not None and not seen_uids.add(live_frame.event_uid):
+                continue  # already delivered by backfill or an earlier live copy
             yield {"event": live_frame.event_type, "data": live_frame.to_sse_data()}
             last_emit = asyncio.get_event_loop().time()
     finally:

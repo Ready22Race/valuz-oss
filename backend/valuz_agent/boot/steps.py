@@ -178,6 +178,23 @@ def migrate_data_dir() -> None:
     migrate_unscoped_data_root()
 
 
+def apply_backup_restore() -> None:
+    """Apply a staged local-backup restore, if one is pending.
+
+    Runs under the single-writer lock, AFTER the data-dir cutover and BEFORE
+    ``ensure_local_identity`` / any engine opens the SQLite files — a restore
+    replaces ``valuz.db`` / ``kernel.db`` / ``installation.json`` at file
+    level, which is only safe while nothing has them open. No-op (one ``stat``)
+    when nothing is pending. See docs/design/client-local-backup.md §8.
+    """
+    if not _startup_user_content_enabled():
+        return
+
+    from valuz_agent.boot.backup_restore import apply_pending_backup_restore
+
+    apply_pending_backup_restore()
+
+
 async def bootstrap_schema() -> None:
     """Host schema bootstrap — run alembic on both the kernel and host
     chains, then seed.
@@ -437,7 +454,9 @@ async def bind_data_service(app: FastAPI) -> None:
         # owner's secret exists up-front (mint side also does; idempotent).
         if _startup_user_content_enabled():
             get_or_create_ds_secret(resolve_local_user_id())
-        ds_app.state.verifier = kb.make_host_data_service_verifier_per_owner()
+        from valuz_agent.ports.sandbox_credential import get_sandbox_credential_verifier
+
+        ds_app.state.verifier = get_sandbox_credential_verifier()
         app.state._data_service_engine = engine
         # Unify host reads (sessions + events) through the DataService
         # (in-process), so reads never depend on the sandbox being alive. Bind
@@ -446,6 +465,12 @@ async def bind_data_service(app: FastAPI) -> None:
         from valuz_agent.adapters.data_service_local import LocalDataServiceReader
 
         bind_data_reader(LocalDataServiceReader(store))
+        # …and bind the host DATA PLANE onto the same store: non-runtime
+        # kernel_client facades (reads + at-rest control writes + stranded
+        # reset) run the kernel route semantics against the durable copy.
+        from valuz_agent.adapters import kernel_client
+
+        kernel_client.bind_host_data_store(lambda: store)
         logging.getLogger(__name__).info("host DataService bound (backend=%s)", store_mode)
     except Exception:  # noqa: BLE001 — DS binding must never break boot
         logging.getLogger(__name__).warning("host DataService bind skipped", exc_info=True)
@@ -506,14 +531,20 @@ def install_binding_change_listener() -> None:
 
 
 async def recover_stranded_sessions() -> None:
-    """Clear ``running`` sessions left over from a previous process.
+    """Reset genuinely-stranded ``running`` sessions from a previous process.
 
-    See ``domains.execution.sessions.recovery`` for rationale. Runs
-    after ``init_kernel`` so the kernel store is reachable.
+    Liveness-aware (``modules.sessions.recovery``): a ``running`` row whose
+    sandbox scope still holds a live remote sandbox is left alone (the turn may
+    be executing there — critical with multiple host replicas + per-scope
+    sandboxes on one shared durable); only confirmed-dead sessions are reset,
+    to ``idle`` + resumable ``host_restart`` (so ``recover_active_tasks`` can
+    re-drive interrupted task members). Runs after ``init_kernel`` so the
+    kernel store is reachable.
     """
-    # The orphan scans run inside the kernel store — in http mode the
-    # standalone kernel runs them itself at its own startup (B2); the
-    # HttpKernelClient deliberately has no scan_orphan_* methods.
+    # In http mode the standalone kernel reconciles its own store at its own
+    # startup (B2) — and without a sandbox allocator the host cannot prove the
+    # kernel process is NOT mid-turn, so a host-side durable reset here could
+    # clobber a live turn. Skip; the kernel's own boot scan covers it.
     if settings.is_http_kernel:
         return
 
@@ -578,8 +609,9 @@ async def recover_active_tasks() -> None:
     tasks orphaned by the previous process exit.
 
     Runs after ``recover_stranded_sessions`` / ``seal_orphan_pendings`` so the
-    kernel session rows are already reconciled (``scan_orphan_runs`` left
-    interrupted members at ``idle`` + ``host_restart``). Only ``active`` tasks
+    kernel session rows are already reconciled (stranded members sit at
+    ``idle`` + ``host_restart`` — stamped by the liveness-aware host recovery,
+    or by the kernel's own boot scan on the ``local`` tier). Only ``active`` tasks
     are touched; ``paused`` (user-stopped) wait for explicit resume.
     """
     import logging
@@ -643,20 +675,15 @@ async def stop_mcp_session_managers(app: FastAPI) -> None:
         app.state.docs_mcp_stack = None
 
 
-async def start_automation_runner(app: FastAPI) -> None:
-    from valuz_agent.modules.automations.failure_monitor import (
-        automation_failure_monitor,
-    )
-    from valuz_agent.modules.automations.in_process_runner import (
-        automation_runner,
-    )
+async def start_automation_runtime(app: FastAPI) -> None:
+    """Start the deployment-bound automation scheduling/runtime transport."""
+    from valuz_agent.ports.extensions import ext
 
-    await automation_runner.startup()
-    # ADR-012: auto-pause runaway-failing automations. Lives alongside
-    # the runner; same lifecycle, no shared state, single SQLite writer
-    # (ADR-011) keeps DB access safe.
-    await automation_failure_monitor.startup()
+    await ext.automation_runtime.startup()
 
+
+async def start_host_background_services(app: FastAPI) -> None:
+    """Start non-automation host monitors and optional content scanners."""
     # Task watchdog: detect a lead that died without finalizing (the hole boot
     # recovery can't see mid-process) → mark blocked so it surfaces + resumes.
     from valuz_agent.modules.tasks.health_monitor import task_health_monitor
@@ -674,6 +701,16 @@ async def start_automation_runner(app: FastAPI) -> None:
     from valuz_agent.modules.skills.scheduler import start_skill_auto_scan
 
     start_skill_auto_scan()
+
+    from valuz_agent.modules.backup.scheduler import start_backup_scheduler
+
+    start_backup_scheduler()
+
+
+async def start_automation_runner(app: FastAPI) -> None:
+    """Backward-compatible aggregate used by older embedding tests/callers."""
+    await start_automation_runtime(app)
+    await start_host_background_services(app)
 
 
 async def start_polling_scheduler() -> None:
@@ -825,18 +862,18 @@ async def start_skills(app: FastAPI) -> None:
     asyncio.get_event_loop().create_task(watcher.start())
 
 
-async def stop_automation_runner(app: FastAPI) -> None:
-    from valuz_agent.modules.automations.failure_monitor import (
-        automation_failure_monitor,
-    )
-    from valuz_agent.modules.automations.in_process_runner import (
-        automation_runner,
-    )
+async def stop_automation_runtime(app: FastAPI) -> None:
+    """Stop the deployment-bound automation scheduling/runtime transport."""
+    from valuz_agent.ports.extensions import ext
+
+    await ext.automation_runtime.shutdown()
+
+
+async def stop_host_background_services(app: FastAPI) -> None:
+    """Stop non-automation host monitors and optional content scanners."""
     from valuz_agent.modules.tasks.health_monitor import task_health_monitor
 
     await task_health_monitor.shutdown()
-    await automation_failure_monitor.shutdown()
-    await automation_runner.shutdown()
 
     from valuz_agent.modules.docs.scheduler import stop_auto_discovery
 
@@ -846,9 +883,19 @@ async def stop_automation_runner(app: FastAPI) -> None:
 
     stop_skill_auto_scan()
 
+    from valuz_agent.modules.backup.scheduler import stop_backup_scheduler
+
+    stop_backup_scheduler()
+
     watcher = getattr(app.state, "skill_watcher", None)
     if watcher is not None:
         await watcher.stop()
+
+
+async def stop_automation_runner(app: FastAPI) -> None:
+    """Backward-compatible aggregate used by older embedding tests/callers."""
+    await stop_host_background_services(app)
+    await stop_automation_runtime(app)
 
 
 async def start_decision_aggregator(app: FastAPI) -> None:

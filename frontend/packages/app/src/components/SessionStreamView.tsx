@@ -27,8 +27,8 @@ const RECONNECT_DELAY_MS = 2500;
 /**
  * Read-only live view of a kernel session's event stream, reusing the
  * conversation turn renderer. Hydrates history via listEvents then opens an
- * SSE subscription for live deltas; dedupes by seq so the hydrate/live
- * boundary never double-counts. No composer — purely for observing a
+ * SSE subscription for live deltas; dedupes by ``event_uid`` (seq for
+ * uid-less legacy rows) so the hydrate/live boundary never double-counts. No composer — purely for observing a
  * lead/subtask run on the task page.
  *
  * The kernel closes the SSE stream when a session goes idle (e.g. a v2 member
@@ -55,7 +55,13 @@ export const SessionStreamView = ({
   // set-state-in-effect rule). All setState below runs in async callbacks.
   useEffect(() => {
     let cancelled = false;
-    let maxSeq = 0;
+    // Cross-path dedup: REST history and live SSE frames use INDEPENDENT
+    // seq spaces (durable vs kernel-local), so persisted events dedup on
+    // the store-independent ``event_uid``. uid-less events (legacy rows)
+    // keep the historical monotonic-seq filter — only ever fed same-space
+    // values, since uid-bearing frames don't touch it.
+    const seenUids = new Set<string>();
+    let maxLegacySeq = 0;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
     const append = (incoming: SessionEventDTO[]) => {
@@ -63,8 +69,12 @@ export const SessionStreamView = ({
       setEvents((prev) => {
         const next = [...prev];
         for (const e of incoming) {
-          if (e.seq > maxSeq) {
-            maxSeq = e.seq;
+          if (e.event_uid) {
+            if (seenUids.has(e.event_uid)) continue;
+            seenUids.add(e.event_uid);
+            next.push(e);
+          } else if (e.seq > maxLegacySeq) {
+            maxLegacySeq = e.seq;
             next.push(e);
           }
         }

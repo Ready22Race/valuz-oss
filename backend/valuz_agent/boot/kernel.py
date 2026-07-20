@@ -361,30 +361,22 @@ def build_host_data_service_store(backend_dsn: str):
     """Build a ``(StorePort, AsyncEngine)`` over the host DataService backend.
 
     The host owns the DB credential here; a sandbox reaches this DataService
-    over HTTP+JWT and never sees the DSN. RLS GUC is installed (no-op on SQLite).
+    over HTTP+JWT and never sees the DSN.
     """
-    from app.data_service import install_rls_guc
     from src.adapters.sqlalchemy_store.engine import create_engine, create_session_factory
     from src.adapters.sqlalchemy_store.store import SQLAlchemyStore
 
     engine = create_engine(backend_dsn)
-    install_rls_guc(engine)
     return SQLAlchemyStore(create_session_factory(engine)), engine
 
 
 async def ensure_host_data_service_schema(engine) -> None:
-    """Create the kernel DATA schema on the host DataService backend if absent
-    (checkfirst; idempotent vs. an already-migrated PG).
-
-    Excludes ``durable_outbox`` — it is the LOCAL store's compensation queue
-    (pending durable writes), so it belongs only on the kernel's local engine
-    (kernel.db), never on the durable itself.
-    """
+    """Create the kernel data schema on the host DataService backend if absent
+    (checkfirst; idempotent vs. an already-migrated PG)."""
     from src.adapters.sqlalchemy_store.models import Base
 
-    durable_tables = [t for n, t in Base.metadata.tables.items() if n != "durable_outbox"]
     async with engine.begin() as conn:
-        await conn.run_sync(lambda c: Base.metadata.create_all(c, tables=durable_tables))
+        await conn.run_sync(Base.metadata.create_all)
 
 
 def make_host_data_service_verifier(secret: str):
@@ -419,8 +411,8 @@ class _PerOwnerDataServiceVerifier:
 
         from src.core.token_signer import HmacTokenVerifier, InvalidTokenError
 
-        from valuz_agent.infra.data_service_secret import DS_SECRET_REF
         from valuz_agent.infra import secret_store
+        from valuz_agent.infra.data_service_secret import DS_SECRET_REF
 
         parts = token.split(".")
         if len(parts) != 3:

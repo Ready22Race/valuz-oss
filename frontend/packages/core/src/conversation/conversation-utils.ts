@@ -152,52 +152,102 @@ const toMetaToolCall = (
  * Merge a fetched transcript window into the live ``events`` array without
  * disturbing what's already there.
  *
- * ``buildTurns`` consumes events in ARRAY ORDER, and the array mixes two kinds
- * of entries: persisted rows (``seq > 0``, totally ordered by seq) and live
- * unpersisted frames (``seq === 0`` — streaming deltas of the in-flight
- * message). The merge rules follow from that:
+ * ``buildTurns`` consumes events in ARRAY ORDER, and the array mixes entries
+ * from TWO independent seq spaces: history rows (durable-store seq — what the
+ * ``incoming`` window carries), live persisted frames (the kernel's LOCAL
+ * seq — numerically unrelated), and live unpersisted deltas (``seq === 0``).
+ * Cross-segment identity is ``event_uid`` (present on persisted events from
+ * both paths; absent on live-only deltas and legacy rows). The merge rules:
  *
- * - Only genuinely-missing persisted rows are added (dedup by seq).
- * - Each missing row is INSERTED before the first existing persisted row with
- *   a larger seq — not tail-appended (history would render after the current
- *   turn) and not global-sorted (``seq 0`` compares lowest, so a sort throws
- *   the streaming deltas to the FRONT of the transcript).
- * - ``seq === 0`` entries stay glued exactly where they arrived: a delta
- *   re-ordered across its message's persisted seal renders as duplicated text.
- * - Missing rows newer than every existing persisted row land at the tail —
- *   the same position the live stream would have delivered them to.
+ * - Dedup keys on ``event_uid`` when the incoming row has one; uid-less
+ *   incoming rows keep the historical seq-based dedup — but only against
+ *   uid-less prev rows (a uid-bearing prev row may be a live frame whose
+ *   kernel seq coincidentally collides with a history seq).
+ * - Missing rows keep the incoming window's own (history-seq) order.
+ * - Positioning is ANCHOR-based: a prev entry that is also present in the
+ *   incoming window (matched by uid, or by seq for uid-less rows) pins a
+ *   position in history space; each missing row is inserted before the first
+ *   anchor whose history seq exceeds it. Live entries that are not anchors
+ *   stay glued exactly where they arrived — never re-sorted by seq across
+ *   segments.
+ * - With NO anchors at all, fall back to the legacy algorithm over the
+ *   uid-less persisted prev rows only (same-space by construction); when
+ *   prev has none of those either (e.g. a resume whose prev is purely the
+ *   in-flight live tail), the whole window goes to the FRONT — history must
+ *   render before the live tail.
+ * - Missing rows newer than every anchor land at the tail — the same
+ *   position the live stream would have delivered them to.
  */
 export const mergeEventWindow = (
   prev: SessionEventDTO[],
   incoming: SessionEventDTO[],
 ): SessionEventDTO[] => {
-  const seen = new Set<number>();
+  const prevUids = new Set<string>();
+  const prevLegacySeqs = new Set<number>();
   for (const e of prev) {
-    if (e.seq > 0) seen.add(e.seq);
+    if (e.event_uid) prevUids.add(e.event_uid);
+    else if (e.seq > 0) prevLegacySeqs.add(e.seq);
   }
   const missing = incoming
-    .filter((e) => e.seq > 0 && !seen.has(e.seq))
+    .filter((e) =>
+      e.event_uid
+        ? !prevUids.has(e.event_uid)
+        : e.seq > 0 && !prevLegacySeqs.has(e.seq),
+    )
     .sort((a, b) => a.seq - b.seq);
   if (missing.length === 0) return prev;
+
+  // History-space position of each prev entry that also appears in the
+  // incoming window. For uid rows the anchor seq is the INCOMING row's seq
+  // (the prev copy may carry a kernel-local seq); uid-less rows anchor by
+  // seq equality (same store by construction).
+  const incomingUidSeq = new Map<string, number>();
+  const incomingSeqs = new Set<number>();
+  for (const e of incoming) {
+    if (e.event_uid) incomingUidSeq.set(e.event_uid, e.seq);
+    if (e.seq > 0) incomingSeqs.add(e.seq);
+  }
+  const anchorSeqOf = (e: SessionEventDTO): number | null => {
+    if (e.event_uid) return incomingUidSeq.get(e.event_uid) ?? null;
+    if (e.seq > 0 && incomingSeqs.has(e.seq)) return e.seq;
+    return null;
+  };
+
   const out: SessionEventDTO[] = [];
   let mi = 0;
-  // A LEADING run of live entries has no persisted anchor to glue to — it is
-  // the in-flight tail of a resume that hasn't loaded history yet (the blank
-  // case), so history smaller than the first persisted row must go BEFORE it,
-  // not after.
-  const firstPersistedSeq = prev.find((e) => e.seq > 0)?.seq ?? Infinity;
-  while (mi < missing.length && missing[mi].seq < firstPersistedSeq) {
-    out.push(missing[mi]);
-    mi += 1;
-  }
-  for (const e of prev) {
-    if (e.seq > 0) {
-      while (mi < missing.length && missing[mi].seq < e.seq) {
-        out.push(missing[mi]);
-        mi += 1;
+  if (prev.some((e) => anchorSeqOf(e) !== null)) {
+    for (const e of prev) {
+      const anchor = anchorSeqOf(e);
+      if (anchor !== null) {
+        while (mi < missing.length && missing[mi].seq < anchor) {
+          out.push(missing[mi]);
+          mi += 1;
+        }
       }
+      out.push(e);
     }
-    out.push(e);
+  } else {
+    // No anchors: legacy positioning over uid-less persisted rows only.
+    // A LEADING run of non-comparable entries (live deltas, uid-bearing
+    // live frames) has no persisted anchor to glue to — it is the
+    // in-flight tail of a resume that hasn't loaded history yet (the blank
+    // case), so history smaller than the first comparable row must go
+    // BEFORE it, not after.
+    const firstComparableSeq =
+      prev.find((e) => e.seq > 0 && !e.event_uid)?.seq ?? Infinity;
+    while (mi < missing.length && missing[mi].seq < firstComparableSeq) {
+      out.push(missing[mi]);
+      mi += 1;
+    }
+    for (const e of prev) {
+      if (e.seq > 0 && !e.event_uid) {
+        while (mi < missing.length && missing[mi].seq < e.seq) {
+          out.push(missing[mi]);
+          mi += 1;
+        }
+      }
+      out.push(e);
+    }
   }
   while (mi < missing.length) {
     out.push(missing[mi]);
@@ -239,13 +289,30 @@ const createTurnsBuilder = () => {
     return currentTurn;
   };
 
+  // A turn can carry several concurrent FLOWS: the lead's own sequential
+  // stream (``parentToolUseId === undefined``) plus one per subagent
+  // (Task/Agent tool run, keyed by that call's tool_use_id — stamped on the
+  // wire as ``parent_tool_use_id``). A background agent executes
+  // CONCURRENTLY with the lead's streaming, so its events land interleaved
+  // between the lead's delta frames. Every helper below therefore operates
+  // on ONE flow at a time and treats blocks of other flows as invisible —
+  // within a single flow the original sequential semantics (tool call
+  // terminates the open text; canonical seals per segment) are unchanged.
+  // Untagged events only ever see untagged blocks, so pre-existing behavior
+  // (and any event stream from an older backend, which carries no tags) is
+  // byte-for-byte identical.
+  const flowOf = (b: ConversationBlock): string | undefined =>
+    "parentToolUseId" in b ? b.parentToolUseId || undefined : undefined;
+
   const matchesLastUnsealed = (
     turn: ConversationTurn,
     kind: "assistant" | "thinking",
     messageId: string | undefined,
+    parentToolUseId: string | undefined,
   ): (ConversationBlock & { kind: "assistant" | "thinking" }) | null => {
     for (let i = turn.blocks.length - 1; i >= 0; i--) {
       const b = turn.blocks[i];
+      if (flowOf(b) !== parentToolUseId) continue; // other flow — invisible
       if (b.kind === "tool") return null;
       if (b.kind === kind) {
         if (b.sealed) return null;
@@ -256,19 +323,35 @@ const createTurnsBuilder = () => {
     return null;
   };
 
+  /** Last block of the given flow — so the sealed-redelivery check in
+   * ``appendDelta`` still sees this flow's sealed canonical even when
+   * another flow's events landed after it. */
+  const lastFlowBlock = (
+    turn: ConversationTurn,
+    parentToolUseId: string | undefined,
+  ): ConversationBlock | null => {
+    for (let i = turn.blocks.length - 1; i >= 0; i--) {
+      const b = turn.blocks[i];
+      if (flowOf(b) !== parentToolUseId) continue;
+      return b;
+    }
+    return null;
+  };
+
   const appendDelta = (
     turn: ConversationTurn,
     kind: "assistant" | "thinking",
     text: string,
     messageId: string | undefined,
+    parentToolUseId: string | undefined,
   ) => {
     if (!text) return;
-    const open = matchesLastUnsealed(turn, kind, messageId);
+    const open = matchesLastUnsealed(turn, kind, messageId, parentToolUseId);
     if (open) {
       open.text += text;
       return;
     }
-    const last = turn.blocks[turn.blocks.length - 1];
+    const last = lastFlowBlock(turn, parentToolUseId);
     if (
       last &&
       last.kind === kind &&
@@ -285,7 +368,7 @@ const createTurnsBuilder = () => {
     ) {
       return;
     }
-    turn.blocks.push({ kind, text, messageId, sealed: false });
+    turn.blocks.push({ kind, text, messageId, sealed: false, parentToolUseId });
   };
 
   const replaceWithCanonical = (
@@ -294,9 +377,10 @@ const createTurnsBuilder = () => {
     text: string,
     messageId: string | undefined,
     elapsedMs?: number,
+    parentToolUseId?: string,
   ) => {
     if (!text) return;
-    const open = matchesLastUnsealed(turn, kind, messageId);
+    const open = matchesLastUnsealed(turn, kind, messageId, parentToolUseId);
     if (open) {
       if (messageId != null) {
         open.text = text;
@@ -311,8 +395,15 @@ const createTurnsBuilder = () => {
     }
     turn.blocks.push(
       kind === "thinking"
-        ? { kind, text, messageId, sealed: messageId != null, elapsedMs }
-        : { kind, text, messageId, sealed: messageId != null },
+        ? {
+            kind,
+            text,
+            messageId,
+            sealed: messageId != null,
+            elapsedMs,
+            parentToolUseId,
+          }
+        : { kind, text, messageId, sealed: messageId != null, parentToolUseId },
     );
   };
 
@@ -345,307 +436,354 @@ const createTurnsBuilder = () => {
 
   const pushAll = (events: SessionEventDTO[]): void => {
     for (const envelope of events) {
-    const { event_type: eventType, payload } = envelope.event;
+      const { event_type: eventType, payload } = envelope.event;
 
-    const sig = eventSig(eventType, payload);
-    if (sig !== null) {
-      if (seenEventSigs.has(sig)) continue;
-      seenEventSigs.add(sig);
-    }
-
-    // Track the latest timestamp seen within the current turn so the
-    // header can show ``已处理 X 秒`` even for turns that never fired a
-    // thinking/tool block (a plain Q&A would otherwise have totalElapsedMs
-    // = 0 and skip the header). Updated on EVERY event in the turn so
-    // ``endTimestamp`` always reflects the most recent activity.
-    if (currentTurn && envelope.timestamp) {
-      currentTurn.endTimestamp = envelope.timestamp;
-    }
-
-    if (eventType === "message.user") {
-      const userText = payload.text ?? "";
-      const userSig = `${payload.message_id ?? ""}::${userText}`;
-      if (userSig === lastUserSig) {
-        continue;
+      const sig = eventSig(eventType, payload);
+      if (sig !== null) {
+        if (seenEventSigs.has(sig)) continue;
+        seenEventSigs.add(sig);
       }
-      lastUserSig = userSig;
-      if (metaEvents.length && turns.length > 0) {
-        const previousTurn = turns[turns.length - 1];
-        for (const [i, item] of metaEvents.entries()) {
-          const tool = toMetaToolCall(
-            item.type,
-            item.payload,
-            envelope.seq + i,
-          );
-          if (tool) {
-            const elapsedMs = elapsedSince(
-              previousTurn.userTimestamp,
-              item.timestamp,
-            );
-            previousTurn.blocks.push({ kind: "tool", tool, elapsedMs });
-          }
+
+      // Track the latest timestamp seen within the current turn so the
+      // header can show ``已处理 X 秒`` even for turns that never fired a
+      // thinking/tool block (a plain Q&A would otherwise have totalElapsedMs
+      // = 0 and skip the header). Updated on EVERY event in the turn so
+      // ``endTimestamp`` always reflects the most recent activity.
+      if (currentTurn && envelope.timestamp) {
+        currentTurn.endTimestamp = envelope.timestamp;
+      }
+
+      if (eventType === "message.user") {
+        const userText = payload.text ?? "";
+        const userSig = `${payload.message_id ?? ""}::${userText}`;
+        if (userSig === lastUserSig) {
+          continue;
         }
-        metaEvents.length = 0;
-      }
-      currentTurn = {
-        // ``envelope.seq`` is 0 for live SSE frames that haven't been
-        // persisted yet (the kernel's broadcast sink emits them with
-        // ``seq=0`` before the DB id is assigned). Two unpersisted
-        // user-message frames in the same render — the broadcast +
-        // its later DB-replay copy — would both produce ``turn-0`` and
-        // collide on the React key, so the virtualizer would reuse
-        // the same DOM node for two distinct turns. Prefer the stable
-        // ``message_id`` (UUID) when available, fall back to the
-        // ``envelope.seq`` only when message_id is missing.
-        id: payload.message_id
-          ? `turn-${payload.message_id}`
-          : `turn-${envelope.seq}`,
-        userMessageSeq: envelope.seq,
-        userText,
-        blocks: [],
-        failedMessage: null,
-        cancelled: false,
-        attachments: payload.attachments
-          ? parseTurnAttachments(payload.attachments)
-          : undefined,
-        userTimestamp: envelope.timestamp,
-      };
-      turns.push(currentTurn);
-      activeToolCalls.clear();
-      continue;
-    }
-
-    if (eventType === "session.idle") {
-      if (currentTurn) {
-        const kind = interruptKind(payload.stop_reason);
-        if (kind === "user") currentTurn.cancelled = true;
-        else if (kind === "runtime") currentTurn.interrupted = true;
-      }
-      continue;
-    }
-
-    if (eventType === "session.update") {
-      if (payload.status === "cancelled" && currentTurn) {
-        currentTurn.cancelled = true;
-      }
-      continue;
-    }
-
-    const turn = ensureTurn();
-
-    if (eventType === "session.compaction") {
-      // A context compaction happened in this turn (``/compact`` or
-      // autocompact). Push a single label-only marker block; the event's
-      // raw data is intentionally NOT parsed for display. For codex's
-      // ``/compact`` the "Compacted." reply is suppressed upstream, so this
-      // marker is the only visible artifact of the turn.
-      turn.blocks.push({ kind: "compaction", messageId: payload.message_id });
-      continue;
-    }
-
-    if (eventType === "message.assistant.text_delta") {
-      appendDelta(turn, "assistant", payload.text ?? "", payload.message_id);
-      continue;
-    }
-
-    if (eventType === "message.assistant.thinking_delta") {
-      appendDelta(turn, "thinking", payload.text ?? "", payload.message_id);
-      continue;
-    }
-
-    if (eventType === "message.assistant.delta") {
-      replaceWithCanonical(
-        turn,
-        "assistant",
-        payload.text ?? "",
-        payload.message_id,
-      );
-      continue;
-    }
-
-    if (eventType === "message.assistant.thinking") {
-      replaceWithCanonical(
-        turn,
-        "thinking",
-        payload.text ?? "",
-        payload.message_id,
-        elapsedSince(turn.userTimestamp, envelope.timestamp),
-      );
-      continue;
-    }
-
-    if (
-      eventType === "runtime.context.compiled" ||
-      eventType === "runtime.engine.bound" ||
-      eventType === "runtime.engine.cost"
-    ) {
-      metaEvents.push({
-        type: eventType,
-        payload,
-        timestamp: envelope.timestamp,
-      });
-      continue;
-    }
-
-    if (eventType === "tool.call.input_delta") {
-      // Live, non-persisted: partial tool-call input JSON streaming in
-      // before the canonical tool.call.started. The first chunk builds a
-      // provisional running card so a large file write shows immediate
-      // progress instead of a dead wait; later chunks accumulate onto it.
-      // started reconciles the card with the canonical full input.
-      const id = payload.tool_use_id || "";
-      if (!id) continue;
-      const text = payload.text ?? "";
-      const streaming = activeToolCalls.get(id);
-      if (streaming) {
-        streaming.input = (streaming.input ?? "") + text;
+        lastUserSig = userSig;
+        if (metaEvents.length && turns.length > 0) {
+          const previousTurn = turns[turns.length - 1];
+          for (const [i, item] of metaEvents.entries()) {
+            const tool = toMetaToolCall(
+              item.type,
+              item.payload,
+              envelope.seq + i,
+            );
+            if (tool) {
+              const elapsedMs = elapsedSince(
+                previousTurn.userTimestamp,
+                item.timestamp,
+              );
+              previousTurn.blocks.push({ kind: "tool", tool, elapsedMs });
+            }
+          }
+          metaEvents.length = 0;
+        }
+        currentTurn = {
+          // ``envelope.seq`` is 0 for live SSE frames that haven't been
+          // persisted yet (the kernel's broadcast sink emits them with
+          // ``seq=0`` before the DB id is assigned). Two unpersisted
+          // user-message frames in the same render — the broadcast +
+          // its later DB-replay copy — would both produce ``turn-0`` and
+          // collide on the React key, so the virtualizer would reuse
+          // the same DOM node for two distinct turns. Prefer the stable
+          // ``message_id`` (UUID) when available, then the store-independent
+          // ``event_uid`` (a bare seq can collide across the history/live
+          // seq spaces), and only then ``envelope.seq``.
+          id: payload.message_id
+            ? `turn-${payload.message_id}`
+            : `turn-${envelope.event_uid ?? envelope.seq}`,
+          userMessageSeq: envelope.seq,
+          userText,
+          blocks: [],
+          failedMessage: null,
+          cancelled: false,
+          attachments: payload.attachments
+            ? parseTurnAttachments(payload.attachments)
+            : undefined,
+          userTimestamp: envelope.timestamp,
+        };
+        turns.push(currentTurn);
+        activeToolCalls.clear();
         continue;
       }
-      const title = payload.name || "tool";
-      const card: PrototypeToolCall = {
-        id,
-        kind: resolveToolKind(title.toLowerCase()),
-        title,
-        // Left empty while input streams — raw partial JSON would look
-        // noisy in the always-visible header; started fills in a proper
-        // summary and the expandable Input block shows the live content.
-        subtitle: "",
-        status: "running",
-        input: text,
-      };
-      activeToolCalls.set(id, card);
-      turn.blocks.push({
-        kind: "tool",
-        tool: card,
-        elapsedMs: elapsedSince(turn.userTimestamp, envelope.timestamp),
-      });
-      continue;
-    }
 
-    if (eventType === "tool.call.output_delta") {
-      // Live, non-persisted: streamed tool output between started and
-      // completed. The card already exists; accumulate onto it. completed
-      // later replaces it with the canonical aggregated output.
-      const id = payload.tool_use_id || "";
-      if (!id) continue;
-      const streaming = activeToolCalls.get(id);
-      if (streaming) {
-        streaming.output = (streaming.output ?? "") + (payload.text ?? "");
+      if (eventType === "session.idle") {
+        if (currentTurn) {
+          const kind = interruptKind(payload.stop_reason);
+          if (kind === "user") currentTurn.cancelled = true;
+          else if (kind === "runtime") currentTurn.interrupted = true;
+        }
+        continue;
       }
-      continue;
-    }
 
-    if (eventType === "tool.call.started") {
-      const title = payload.name || payload.tool_name || payload.tool || "tool";
-      const id =
-        payload.id ||
-        payload.call_id ||
-        payload.tool_use_id ||
-        `${title}-${envelope.seq}`;
-      // A preceding tool.call.input_delta may already have built a
-      // provisional running card for this id (streaming the partial input).
-      const streamed = activeToolCalls.get(id);
-      const card: PrototypeToolCall = {
-        id,
-        kind: resolveToolKind(title.toLowerCase()),
-        title,
-        subtitle:
-          payload.summary ||
-          payload.input ||
-          payload.arguments ||
-          streamed?.subtitle ||
-          "",
-        status: "running",
-        // Canonical full input replaces the partial-JSON preview; fall back
-        // to the streamed text if the started event omits the input.
-        input: payload.input || payload.arguments || streamed?.input,
-      };
-      activeToolCalls.set(id, card);
-      const startedElapsedMs = elapsedSince(
-        turn.userTimestamp,
-        envelope.timestamp,
-      );
-      // Reconcile the provisional block in place when input_delta already
-      // pushed one, so started doesn't render a duplicate card.
-      const startedIdx = turn.blocks.findIndex(
-        (b) => b.kind === "tool" && b.tool.id === id,
-      );
-      if (startedIdx >= 0) {
-        turn.blocks[startedIdx] = {
-          kind: "tool",
-          tool: card,
-          elapsedMs: startedElapsedMs,
+      if (eventType === "session.update") {
+        if (payload.status === "cancelled" && currentTurn) {
+          currentTurn.cancelled = true;
+        }
+        continue;
+      }
+
+      const turn = ensureTurn();
+
+      if (eventType === "session.compaction") {
+        // A context compaction happened in this turn (``/compact`` or
+        // autocompact). Push a single label-only marker block; the event's
+        // raw data is intentionally NOT parsed for display. For codex's
+        // ``/compact`` the "Compacted." reply is suppressed upstream, so this
+        // marker is the only visible artifact of the turn.
+        turn.blocks.push({ kind: "compaction", messageId: payload.message_id });
+        continue;
+      }
+
+      if (eventType === "message.assistant.text_delta") {
+        appendDelta(
+          turn,
+          "assistant",
+          payload.text ?? "",
+          payload.message_id,
+          payload.parent_tool_use_id || undefined,
+        );
+        continue;
+      }
+
+      if (eventType === "message.assistant.thinking_delta") {
+        appendDelta(
+          turn,
+          "thinking",
+          payload.text ?? "",
+          payload.message_id,
+          payload.parent_tool_use_id || undefined,
+        );
+        continue;
+      }
+
+      if (eventType === "message.assistant.delta") {
+        replaceWithCanonical(
+          turn,
+          "assistant",
+          payload.text ?? "",
+          payload.message_id,
+          undefined,
+          payload.parent_tool_use_id || undefined,
+        );
+        continue;
+      }
+
+      if (eventType === "message.assistant.thinking") {
+        replaceWithCanonical(
+          turn,
+          "thinking",
+          payload.text ?? "",
+          payload.message_id,
+          elapsedSince(turn.userTimestamp, envelope.timestamp),
+          payload.parent_tool_use_id || undefined,
+        );
+        continue;
+      }
+
+      if (
+        eventType === "runtime.context.compiled" ||
+        eventType === "runtime.engine.bound" ||
+        eventType === "runtime.engine.cost"
+      ) {
+        metaEvents.push({
+          type: eventType,
+          payload,
+          timestamp: envelope.timestamp,
+        });
+        continue;
+      }
+
+      if (eventType === "tool.call.input_delta") {
+        // Live, non-persisted: partial tool-call input JSON streaming in
+        // before the canonical tool.call.started. The first chunk builds a
+        // provisional running card so a large file write shows immediate
+        // progress instead of a dead wait; later chunks accumulate onto it.
+        // started reconciles the card with the canonical full input.
+        const id = payload.tool_use_id || "";
+        if (!id) continue;
+        const text = payload.text ?? "";
+        const streaming = activeToolCalls.get(id);
+        if (streaming) {
+          streaming.input = (streaming.input ?? "") + text;
+          continue;
+        }
+        const title = payload.name || "tool";
+        const card: PrototypeToolCall = {
+          id,
+          kind: resolveToolKind(title.toLowerCase()),
+          title,
+          // Left empty while input streams — raw partial JSON would look
+          // noisy in the always-visible header; started fills in a proper
+          // summary and the expandable Input block shows the live content.
+          subtitle: "",
+          status: "running",
+          input: text,
         };
-      } else {
+        activeToolCalls.set(id, card);
         turn.blocks.push({
           kind: "tool",
           tool: card,
-          elapsedMs: startedElapsedMs,
+          elapsedMs: elapsedSince(turn.userTimestamp, envelope.timestamp),
+          parentToolUseId: payload.parent_tool_use_id || undefined,
         });
+        continue;
       }
-      continue;
-    }
 
-    if (eventType === "tool.call.completed") {
-      const id =
-        payload.id ||
-        payload.call_id ||
-        payload.tool_use_id ||
-        `tool-${envelope.seq}`;
-      const existing = activeToolCalls.get(id);
-      const title =
-        existing?.title ||
-        payload.name ||
-        payload.tool_name ||
-        payload.tool ||
-        "tool";
-      const isError =
-        payload.is_error === "True" ||
-        payload.is_error === "true" ||
-        Boolean(payload.error_message);
-      const next: PrototypeToolCall = {
-        id,
-        kind: resolveToolKind(title.toLowerCase()),
-        title,
-        subtitle: existing?.subtitle ?? payload.summary ?? "",
-        status: isError ? "error" : "success",
-        input: existing?.input || payload.input || payload.arguments,
-        output:
-          payload.content ||
-          payload.output ||
-          payload.result ||
-          payload.error_message,
-      };
-      const elapsedMs = elapsedSince(turn.userTimestamp, envelope.timestamp);
-      const blockIndex = turn.blocks.findIndex(
-        (b) => b.kind === "tool" && b.tool.id === id,
-      );
-      if (blockIndex >= 0) {
-        turn.blocks[blockIndex] = { kind: "tool", tool: next, elapsedMs };
-      } else {
-        turn.blocks.push({ kind: "tool", tool: next, elapsedMs });
+      if (eventType === "tool.call.output_delta") {
+        // Live, non-persisted: streamed tool output between started and
+        // completed. The card already exists; accumulate onto it. completed
+        // later replaces it with the canonical aggregated output.
+        const id = payload.tool_use_id || "";
+        if (!id) continue;
+        const streaming = activeToolCalls.get(id);
+        if (streaming) {
+          streaming.output = (streaming.output ?? "") + (payload.text ?? "");
+        }
+        continue;
       }
-      activeToolCalls.delete(id);
-      continue;
-    }
 
-    if (eventType === "run.failed") {
-      const kind = interruptKind(payload.category);
-      if (kind === "user") {
-        // User cancelled the run — render a quiet grey line, not the
-        // ``ErrorMessageCard`` (with retry / switch-model) a real failure gets.
-        turn.cancelled = true;
-      } else if (kind === "runtime") {
-        // Runtime/agent subprocess torn down or crashed mid-turn — same quiet
-        // grey line, but a distinct label (NOT "user cancelled").
-        turn.interrupted = true;
-      } else {
-        turn.failedMessage =
-          payload.message ??
-          t("conversation.runFailed" as Parameters<typeof t>[0]);
+      if (eventType === "tool.call.started") {
+        const title =
+          payload.name || payload.tool_name || payload.tool || "tool";
+        const id =
+          payload.id ||
+          payload.call_id ||
+          payload.tool_use_id ||
+          // Stable fallback key: ``event_uid`` can't collide across the
+          // history/live seq spaces the way a bare seq can.
+          `${title}-${envelope.event_uid ?? envelope.seq}`;
+        // A preceding tool.call.input_delta may already have built a
+        // provisional running card for this id (streaming the partial input).
+        const streamed = activeToolCalls.get(id);
+        const card: PrototypeToolCall = {
+          id,
+          kind: resolveToolKind(title.toLowerCase()),
+          title,
+          subtitle:
+            payload.summary ||
+            payload.input ||
+            payload.arguments ||
+            streamed?.subtitle ||
+            "",
+          status: "running",
+          // Canonical full input replaces the partial-JSON preview; fall back
+          // to the streamed text if the started event omits the input.
+          input: payload.input || payload.arguments || streamed?.input,
+        };
+        activeToolCalls.set(id, card);
+        const startedElapsedMs = elapsedSince(
+          turn.userTimestamp,
+          envelope.timestamp,
+        );
+        // Reconcile the provisional block in place when input_delta already
+        // pushed one, so started doesn't render a duplicate card.
+        const startedIdx = turn.blocks.findIndex(
+          (b) => b.kind === "tool" && b.tool.id === id,
+        );
+        const startedParent =
+          payload.parent_tool_use_id ||
+          (startedIdx >= 0
+            ? (turn.blocks[startedIdx] as ConversationBlock & { kind: "tool" })
+                .parentToolUseId
+            : undefined) ||
+          undefined;
+        if (startedIdx >= 0) {
+          turn.blocks[startedIdx] = {
+            kind: "tool",
+            tool: card,
+            elapsedMs: startedElapsedMs,
+            parentToolUseId: startedParent,
+          };
+        } else {
+          turn.blocks.push({
+            kind: "tool",
+            tool: card,
+            elapsedMs: startedElapsedMs,
+            parentToolUseId: startedParent,
+          });
+        }
+        continue;
+      }
+
+      if (eventType === "tool.call.completed") {
+        const id =
+          payload.id ||
+          payload.call_id ||
+          payload.tool_use_id ||
+          // Same cross-space-safe fallback as ``tool.call.started``.
+          `tool-${envelope.event_uid ?? envelope.seq}`;
+        const existing = activeToolCalls.get(id);
+        const title =
+          existing?.title ||
+          payload.name ||
+          payload.tool_name ||
+          payload.tool ||
+          "tool";
+        const isError =
+          payload.is_error === "True" ||
+          payload.is_error === "true" ||
+          Boolean(payload.error_message);
+        const next: PrototypeToolCall = {
+          id,
+          kind: resolveToolKind(title.toLowerCase()),
+          title,
+          subtitle: existing?.subtitle ?? payload.summary ?? "",
+          status: isError ? "error" : "success",
+          input: existing?.input || payload.input || payload.arguments,
+          output:
+            payload.content ||
+            payload.output ||
+            payload.result ||
+            payload.error_message,
+        };
+        const elapsedMs = elapsedSince(turn.userTimestamp, envelope.timestamp);
+        const blockIndex = turn.blocks.findIndex(
+          (b) => b.kind === "tool" && b.tool.id === id,
+        );
+        const completedParent =
+          payload.parent_tool_use_id ||
+          (blockIndex >= 0
+            ? (turn.blocks[blockIndex] as ConversationBlock & { kind: "tool" })
+                .parentToolUseId
+            : undefined) ||
+          undefined;
+        if (blockIndex >= 0) {
+          turn.blocks[blockIndex] = {
+            kind: "tool",
+            tool: next,
+            elapsedMs,
+            parentToolUseId: completedParent,
+          };
+        } else {
+          turn.blocks.push({
+            kind: "tool",
+            tool: next,
+            elapsedMs,
+            parentToolUseId: completedParent,
+          });
+        }
+        activeToolCalls.delete(id);
+        continue;
+      }
+
+      if (eventType === "run.failed") {
+        const kind = interruptKind(payload.category);
+        if (kind === "user") {
+          // User cancelled the run — render a quiet grey line, not the
+          // ``ErrorMessageCard`` (with retry / switch-model) a real failure gets.
+          turn.cancelled = true;
+        } else if (kind === "runtime") {
+          // Runtime/agent subprocess torn down or crashed mid-turn — same quiet
+          // grey line, but a distinct label (NOT "user cancelled").
+          turn.interrupted = true;
+        } else {
+          turn.failedMessage =
+            payload.message ??
+            t("conversation.runFailed" as Parameters<typeof t>[0]);
+        }
       }
     }
-  }
   };
 
   // Trailing meta events (runtime.* with no following user message) attach to
@@ -659,7 +797,10 @@ const createTurnsBuilder = () => {
       for (const [i, item] of metaEvents.entries()) {
         const tool = toMetaToolCall(item.type, item.payload, turns.length + i);
         if (tool) {
-          const elapsedMs = elapsedSince(lastTurn.userTimestamp, item.timestamp);
+          const elapsedMs = elapsedSince(
+            lastTurn.userTimestamp,
+            item.timestamp,
+          );
           lastTurn.blocks.push({ kind: "tool", tool, elapsedMs });
         }
       }
@@ -673,7 +814,10 @@ const createTurnsBuilder = () => {
       for (const [i, item] of metaEvents.entries()) {
         const tool = toMetaToolCall(item.type, item.payload, turns.length + i);
         if (tool) {
-          const elapsedMs = elapsedSince(lastTurn.userTimestamp, item.timestamp);
+          const elapsedMs = elapsedSince(
+            lastTurn.userTimestamp,
+            item.timestamp,
+          );
           out.push({ kind: "tool", tool, elapsedMs });
         }
       }
@@ -738,7 +882,9 @@ export const createIncrementalTurns = (): IncrementalTurns => {
     const reuseBoundary = Math.max(0, snapshot.length - 1);
     const out: ConversationTurn[] = [];
     for (let i = 0; i < src.length; i += 1) {
-      out.push(i < reuseBoundary && snapshot[i] ? snapshot[i] : cloneTurn(src[i]));
+      out.push(
+        i < reuseBoundary && snapshot[i] ? snapshot[i] : cloneTurn(src[i]),
+      );
     }
     // Overlay any pending trailing meta onto the (already fresh-cloned) last
     // turn. Never touches builder state, so the next pushAll won't double-count.

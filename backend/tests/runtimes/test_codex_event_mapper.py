@@ -1,17 +1,21 @@
-"""Codex event mapper: ``webSearch`` thread items must surface as tool events.
+"""Codex event mapper: thread items that must surface as harness events.
 
-Regression for a silent drop: codex's built-in web search emits
-``item/started`` / ``item/completed`` with a ``WebSearchThreadItem``
-(app-server item type ``webSearch — {id, query, action?}``), but the
-mapper only handled command / fileChange / mcpToolCall items, so a
-web search never produced ``tool_use`` / ``tool_result`` events and
-the client showed nothing for it.
+Regression for silent drops: codex's app-server delivers built-in tool
+activity as ``item/started`` / ``item/completed`` thread items, but the
+mapper originally only handled command / fileChange / mcpToolCall items —
+everything else fell through to ``[]`` and the client showed nothing.
 
-Mapping semantics: the started snapshot is an empty placeholder
-(``query: ""``, ``action: {type: "other"}``) and is ignored. Codex never
-exposes the fetched results — the action is all there is — so the pair
-splits it: tool_use input carries just the action *type*, tool_result
-content carries the full action.
+Covered here:
+
+- ``webSearch — {id, query, action?}``: the started snapshot is an empty
+  placeholder (``query: ""``, ``action: {type: "other"}``) and is ignored.
+  Codex never exposes the fetched results — the action is all there is —
+  so the pair splits it: tool_use input carries just the action *type*,
+  tool_result content carries the full action.
+- ``imageView — {id, path}``: started+completed arrive back-to-back with
+  identical data; the pair is emitted at completed (``view_image``).
+- ``contextCompaction — {id}``: completed becomes the shared ``compaction``
+  marker (started is skipped — compaction can still fail after it fires).
 """
 
 # ruff: noqa: I001 — kernel bootstrap side-effect import must precede src.*
@@ -22,6 +26,8 @@ import json
 import valuz_agent.boot.kernel  # noqa: F401 — sys.path side-effect
 
 from openai_codex.generated.v2_all import (
+    ContextCompactionThreadItem,
+    ImageViewThreadItem,
     ItemCompletedNotification,
     ItemStartedNotification,
     ThreadItem,
@@ -43,6 +49,15 @@ def _web_search_item(query: str, action: dict | None = None) -> ThreadItem:
     )
 
 
+def _started(item: ThreadItem) -> Notification:
+    return Notification(
+        method="item/started",
+        payload=ItemStartedNotification.model_validate(
+            {"item": item, "startedAtMs": 1, "threadId": "th_1", "turnId": "tu_1"}
+        ),
+    )
+
+
 def _completed(item: ThreadItem) -> Notification:
     return Notification(
         method="item/completed",
@@ -56,19 +71,7 @@ def test_web_search_item_started_placeholder_is_dropped() -> None:
     # Codex's started snapshot carries no real data — query is empty and
     # the action is the "other" placeholder. Emitting it would render a
     # junk `{"query": "", "action": {"type": "other"}}` input in the UI.
-    notification = Notification(
-        method="item/started",
-        payload=ItemStartedNotification.model_validate(
-            {
-                "item": _web_search_item("", {"type": "other"}),
-                "startedAtMs": 1,
-                "threadId": "th_1",
-                "turnId": "tu_1",
-            }
-        ),
-    )
-
-    assert map_notification(notification) == []
+    assert map_notification(_started(_web_search_item("", {"type": "other"}))) == []
 
 
 def test_web_search_search_action_type_in_input_full_action_in_result() -> None:
@@ -116,3 +119,50 @@ def test_web_search_without_action_falls_back_to_query() -> None:
         "type": "webSearch",
         "query": "moutai investor relations",
     }
+
+
+def _image_view_item(path: str) -> ThreadItem:
+    return ThreadItem(root=ImageViewThreadItem(id="img_1", type="imageView", path=path))
+
+
+def test_image_view_item_started_is_dropped() -> None:
+    # Core emits started+completed back-to-back with identical data; only
+    # the completed item is surfaced (as the tool_use/tool_result pair).
+    assert map_notification(_started(_image_view_item("/tmp/chart.png"))) == []
+
+
+def test_image_view_completed_emits_pair_with_path() -> None:
+    events = map_notification(_completed(_image_view_item("/tmp/图表.png")))
+
+    assert [e.type for e in events] == ["tool_use", "tool_result"]
+    assert events[0].data == {
+        "id": "img_1",
+        "name": "view_image",
+        "input": {"path": "/tmp/图表.png"},
+    }
+    assert events[1].data["id"] == "img_1"
+    assert events[1].data["is_error"] is False
+    assert json.loads(events[1].data["content"]) == {
+        "id": "img_1",
+        "type": "imageView",
+        "path": "/tmp/图表.png",
+    }
+
+
+def _context_compaction_item() -> ThreadItem:
+    return ThreadItem(root=ContextCompactionThreadItem(id="cc_1", type="contextCompaction"))
+
+
+def test_context_compaction_started_is_dropped() -> None:
+    # Started fires before the compact turn runs — the compaction can still
+    # fail or be aborted, so only completed produces the marker.
+    assert map_notification(_started(_context_compaction_item())) == []
+
+
+def test_context_compaction_completed_emits_compaction_marker() -> None:
+    events = map_notification(_completed(_context_compaction_item()))
+
+    assert [e.type for e in events] == ["compaction"]
+    # Same empty payload as the runtime's synthetic ``/compact`` marker —
+    # codex exposes no compaction metadata (the item is bare ``{id}``).
+    assert events[0].data == {}

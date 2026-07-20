@@ -21,13 +21,17 @@ from valuz_agent.adapters import event_sse_adapter as adapter
 from valuz_agent.adapters.data_reader import bind_data_reader
 
 
-def _ev(seq: int, session_id: str, type_: str, **data):
-    return SimpleNamespace(seq=seq, session_id=session_id, type=type_, data=data, timestamp=seq)
+def _ev(seq: int, session_id: str, type_: str, *, uid: str | None = None, **data):
+    return SimpleNamespace(
+        seq=seq, session_id=session_id, type=type_, data=data, timestamp=seq, event_uid=uid
+    )
 
 
-def _live_ev(seq: int, session_id: str, type_: str, **data):
+def _live_ev(seq: int, session_id: str, type_: str, *, uid: str | None = None, **data):
     """An ``EventData``-shaped live frame from the owner cross-session tap."""
-    return SimpleNamespace(seq=seq, session_id=session_id, type=type_, data=data, timestamp=seq)
+    return SimpleNamespace(
+        seq=seq, session_id=session_id, type=type_, data=data, timestamp=seq, event_uid=uid
+    )
 
 
 class FakeReader:
@@ -143,24 +147,31 @@ class TestIterUserEventsSse:
 
     async def test_live_tap_emits_lifecycle_and_dedups(self, bind_reader, live_tap):
         # The live cross-session tap is the primary path; a lifecycle frame it
-        # delivers is emitted, text-free, and a frame at/under the cursor is
-        # deduped against the backfill.
-        bind_reader([])  # nothing to backfill
+        # delivers is emitted, text-free. Dedup keys on ``event_uid`` (seqs
+        # are per-store — the tap's kernel-LOCAL seq is never compared to the
+        # durable backfill cursor): a live frame whose uid the backfill
+        # already delivered is skipped.
+        bind_reader([_ev(3, "s1", "user_message", uid="u3")])
         live_tap(
             [
-                _live_ev(3, "s1", "user_message", message="secret"),  # seq 3 ≤ cursor → deduped
-                _live_ev(7, "s1", "session_idle", stop_reason="end_turn"),
+                # Same event, re-broadcast live under a DIFFERENT (local) seq.
+                _live_ev(103, "s1", "user_message", uid="u3", message="secret"),
+                _live_ev(107, "s1", "session_idle", uid="u7", stop_reason="end_turn"),
             ]
         )
-        gen = adapter.iter_user_events_sse("user-A", after_seq=3)  # cursor already at 3
+        gen = adapter.iter_user_events_sse("user-A", after_seq=0)
         try:
-            frame = await anext(gen)
+            first = await anext(gen)  # the backfill copy
+            second = await anext(gen)  # the fresh live frame (dup skipped)
         finally:
             await gen.aclose()
-        assert frame["event"] == "run.finished"
-        payload = json.loads(frame["data"])
-        assert payload["seq"] == 7
+        assert first["event"] == "run.started"
+        assert json.loads(first["data"])["event_uid"] == "u3"
+        assert second["event"] == "run.finished"
+        payload = json.loads(second["data"])
+        assert payload["seq"] == 107
         assert payload["session_id"] == "s1"
+        assert payload["event_uid"] == "u7"
 
     async def test_live_tap_drops_non_lifecycle(self, bind_reader, live_tap):
         bind_reader([])

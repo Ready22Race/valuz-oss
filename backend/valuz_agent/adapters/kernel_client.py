@@ -271,18 +271,57 @@ def _orchestrator() -> Any:
         raise KernelUnavailableError(503, str(exc)) from exc
 
 
+class _NoRuntimeOrchestrator:
+    """Orchestrator stand-in for the durable-bound data-plane client.
+
+    An at-rest session has no runtime and no live subscribers in THIS process,
+    so the runtime-facing side of the session routes (interrupt/cleanup on
+    delete, live mode/error broadcast) is a structural no-op — the store
+    mutation is the whole operation."""
+
+    active_sessions: frozenset[str] = frozenset()
+
+    async def interrupt(self, session_id: str) -> None:  # pragma: no cover — unreachable
+        return None
+
+    async def cleanup(self, session_id: str) -> None:
+        return None
+
+    async def emit_session_event(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
 class InProcessKernelClient:
-    """Default transport: the kernel lives in this process.
+    """In-process transport: kernel route functions driven directly.
 
     Each method drives the same route function the HTTP surface mounts, so
     validation/serialization behaviour is identical by construction.
+
+    ``store_getter`` selects which store the route functions run against:
+
+    - default (``None``) → the process kernel's own store (``app.dependencies``)
+      — the execution kernel client.
+    - an explicit getter → that store. The host binds one over the DataService
+      durable (``bind_host_data_store``) as its NON-RUNTIME data plane: same
+      kernel semantics, applied to the durable copy.
+
+    Orchestrator-backed methods (run/interrupt/subscribe/scans) always use the
+    process orchestrator — only the execution client meaningfully serves them.
     """
+
+    def __init__(self, store_getter: Callable[[], Any] | None = None) -> None:
+        self._store = store_getter or _store
+        # The execution client drives the process orchestrator; a durable-bound
+        # data-plane client has no runtime side (see _NoRuntimeOrchestrator).
+        self._orchestrator: Callable[[], Any] = (
+            _orchestrator if store_getter is None else _NoRuntimeOrchestrator
+        )
 
     async def create_session(self, user_id: str, req: CreateSessionRequest) -> SessionData:
         from app.routes.sessions import create_session
 
         try:
-            result = await create_session(req, _store(), user_id)
+            result = await create_session(req, self._store(), user_id)
         except HTTPException as exc:
             _raise_mapped(exc)
         return result["data"]
@@ -291,7 +330,7 @@ class InProcessKernelClient:
         from app.routes.sessions import get_session
 
         try:
-            result = await get_session(session_id, _store(), user_id)
+            result = await get_session(session_id, self._store(), user_id)
         except HTTPException as exc:
             if exc.status_code == 404:
                 return None
@@ -311,7 +350,7 @@ class InProcessKernelClient:
 
         try:
             result = await list_sessions(
-                _store(),
+                self._store(),
                 user_id,
                 status=status,
                 ids=",".join(ids) if ids is not None else None,
@@ -335,7 +374,7 @@ class InProcessKernelClient:
         # express "every owner". Serializes with the route's projection.
         from app.serializers import session_to_data
 
-        sessions = await _store().list_sessions(
+        sessions = await self._store().list_sessions(
             None, status=status, ids=ids, limit=limit, offset=offset
         )
         return [session_to_data(s) for s in sessions]
@@ -346,7 +385,7 @@ class InProcessKernelClient:
         from app.routes.sessions import update_session
 
         try:
-            result = await update_session(session_id, req, _store(), user_id)
+            result = await update_session(session_id, req, self._store(), user_id)
         except HTTPException as exc:
             _raise_mapped(exc)
         return result["data"]
@@ -355,7 +394,7 @@ class InProcessKernelClient:
         from app.routes.sessions import delete_session
 
         try:
-            await delete_session(session_id, _store(), user_id, _orchestrator())
+            await delete_session(session_id, self._store(), user_id, self._orchestrator())
         except HTTPException as exc:
             if exc.status_code == 404:
                 return False
@@ -367,7 +406,11 @@ class InProcessKernelClient:
 
         try:
             result = await set_session_mode(
-                session_id, SetSessionModeRequest(mode=mode), _store(), _orchestrator(), user_id
+                session_id,
+                SetSessionModeRequest(mode=mode),
+                self._store(),
+                self._orchestrator(),
+                user_id,
             )
         except HTTPException as exc:
             _raise_mapped(exc)
@@ -379,7 +422,7 @@ class InProcessKernelClient:
         from app.routes.sessions import finalize_session
 
         try:
-            result = await finalize_session(session_id, req, _store(), user_id)
+            result = await finalize_session(session_id, req, self._store(), user_id)
         except HTTPException as exc:
             _raise_mapped(exc)
         return result["data"]
@@ -389,7 +432,7 @@ class InProcessKernelClient:
 
         try:
             result = await append_session_event(
-                session_id, event, _store(), _orchestrator(), user_id, live_only=False
+                session_id, event, self._store(), self._orchestrator(), user_id, live_only=False
             )
         except HTTPException as exc:
             _raise_mapped(exc)
@@ -404,8 +447,8 @@ class InProcessKernelClient:
             await append_session_event(
                 session_id,
                 EventPayload(type=type, data=data),
-                _store(),
-                _orchestrator(),
+                self._store(),
+                self._orchestrator(),
                 user_id,
                 live_only=True,
             )
@@ -425,7 +468,7 @@ class InProcessKernelClient:
 
         try:
             result = await get_session_events(
-                session_id, _store(), user_id, limit=limit, offset=offset, after_seq=after_seq
+                session_id, self._store(), user_id, limit=limit, offset=offset, after_seq=after_seq
             )
         except HTTPException as exc:
             _raise_mapped(exc)
@@ -438,7 +481,7 @@ class InProcessKernelClient:
 
         try:
             result = await get_session_events_window(
-                session_id, _store(), user_id, before_seq=before_seq, turn_limit=turn_limit
+                session_id, self._store(), user_id, before_seq=before_seq, turn_limit=turn_limit
             )
         except HTTPException as exc:
             _raise_mapped(exc)
@@ -492,7 +535,9 @@ class InProcessKernelClient:
         from app.routes.usage import get_usage_rollup
 
         try:
-            result = await get_usage_rollup(_store(), user_id, start_ms=start_ms, end_ms=end_ms)
+            result = await get_usage_rollup(
+                self._store(), user_id, start_ms=start_ms, end_ms=end_ms
+            )
         except HTTPException as exc:
             _raise_mapped(exc)
         return result["data"]
@@ -504,7 +549,7 @@ class InProcessKernelClient:
 
         try:
             result = await list_session_messages(
-                session_id, _store(), user_id, limit=limit, offset=offset
+                session_id, self._store(), user_id, limit=limit, offset=offset
             )
         except HTTPException as exc:
             _raise_mapped(exc)
@@ -530,7 +575,7 @@ class InProcessKernelClient:
         from app.routes.run import interrupt_session
 
         try:
-            await interrupt_session(session_id, _store(), user_id)
+            await interrupt_session(session_id, self._store(), user_id)
         except HTTPException as exc:
             if exc.status_code == 404:
                 return
@@ -573,6 +618,14 @@ class InProcessKernelClient:
 
     async def scan_orphan_runs(self) -> int:
         return await _orchestrator().scan_orphan_runs()
+
+    async def reset_stranded_session(self, user_id: str, session_id: str) -> bool:
+        # Pure store-driven kernel semantics (src.core.recovery) on THIS
+        # client's store — the host's durable-bound client repairs the durable
+        # copy of a session whose sandbox is gone.
+        from src.core import recovery
+
+        return await recovery.reset_stranded_session(self._store(), user_id, session_id)
 
     async def cleanup_runtime(self, session_id: str) -> None:
         """Evict the cached runtime for ``session_id`` (in-process only —
@@ -626,6 +679,46 @@ def rebind_client() -> None:
     client = _make_client()
 
 
+# ---------------------------------------------------------------------------
+# Host data plane (NON-RUNTIME reads + at-rest control writes).
+#
+# The kernel's runtime store is its local sqlite; every kernel write is
+# dual-written to the DataService durable (RuntimeStore). The HOST therefore
+# never reads history/state out of an execution kernel — it reads the durable.
+# ``bind_host_data_store`` (boot, right after the DataService backend store is
+# built) binds an ``InProcessKernelClient`` over that store: identical kernel
+# route semantics, applied to the durable copy.
+#
+# Unbound (unit tests / bare embedding) → the process-global ``client`` — in
+# the OSS single-process default that is the same data either way.
+
+_host_data_client: KernelClient | None = None
+
+
+def bind_host_data_store(store_getter: Callable[[], Any] | None) -> None:
+    """Bind the host's non-runtime data plane onto the DataService durable
+    store (``None`` unbinds — tests)."""
+    global _host_data_client  # noqa: PLW0603
+    _host_data_client = None if store_getter is None else InProcessKernelClient(store_getter)
+
+
+def _data_plane() -> KernelClient:
+    """The host's durable-bound client, else the process-global ``client``."""
+    return _host_data_client if _host_data_client is not None else client
+
+
+async def _control_kernel(user_id: str, session_id: str) -> KernelClient:
+    """Route a session CONTROL write (update/mode/finalize/append/delete).
+
+    The session's LIVE execution kernel first — while a kernel holds the
+    session its runtime sqlite is the authority, so the write must land there
+    (its dual-write mirrors it to the durable). No live kernel (at-rest
+    session, sandbox gone) → write the durable directly via the data plane.
+    """
+    k = await _kernel_for_existing(user_id, await _scope_for(user_id, session_id))
+    return k if k is not None else _data_plane()
+
+
 # Module-level facade — call-site ergonomics match the former kernel_store
 # (``await kernel_client.get_session(...)``), while the swappable object
 # lives behind ``client`` for the HTTP transport.
@@ -633,10 +726,12 @@ def rebind_client() -> None:
 
 # ---------------------------------------------------------------------------
 # Per-user kernel resolution (fleet seam). EXECUTION / LIVE facade methods route
-# through ``_kernel_for(user_id)``; STORE reads/writes stay on the durable path.
-# The OSS default allocator returns endpoint=None → the process-global ``client``
-# (in-process or boot-attached sandbox) — behavior unchanged. A commercial
-# allocator returns a per-user endpoint; we cache one HttpKernelClient per URL.
+# through ``_kernel_for(user_id)``; non-runtime reads go to the host data plane
+# (``_data_plane``); session control writes route live-kernel-first
+# (``_control_kernel``). The OSS default allocator returns endpoint=None → the
+# process-global ``client`` (in-process or boot-attached sandbox) — behavior
+# unchanged. A commercial allocator returns a per-user endpoint; we cache one
+# HttpKernelClient per URL.
 # ---------------------------------------------------------------------------
 
 _endpoint_clients: dict[str, KernelClient] = {}
@@ -806,7 +901,7 @@ async def bg_busy_session_ids() -> list[str]:
 
 
 async def get_session(user_id: str, session_id: str) -> SessionData | None:
-    return await client.get_session(user_id, session_id)
+    return await _data_plane().get_session(user_id, session_id)
 
 
 async def list_sessions(
@@ -817,7 +912,9 @@ async def list_sessions(
     limit: int = 50,
     offset: int = 0,
 ) -> list[SessionData]:
-    return await client.list_sessions(user_id, status=status, ids=ids, limit=limit, offset=offset)
+    return await _data_plane().list_sessions(
+        user_id, status=status, ids=ids, limit=limit, offset=offset
+    )
 
 
 async def list_all_sessions(
@@ -829,29 +926,40 @@ async def list_all_sessions(
 ) -> list[SessionData]:
     """Cross-owner session list — startup recovery + host aggregators only.
     Every request-serving caller uses ``list_sessions(user_id, ...)``."""
-    return await client.list_all_sessions(status=status, ids=ids, limit=limit, offset=offset)
+    return await _data_plane().list_all_sessions(status=status, ids=ids, limit=limit, offset=offset)
+
+
+# Control writes route live-kernel-first (see ``_control_kernel``): the live
+# runtime is the single writer for its session; the durable is written directly
+# only for at-rest sessions.
 
 
 async def update_session(user_id: str, session_id: str, req: UpdateSessionRequest) -> SessionData:
-    return await client.update_session(user_id, session_id, req)
+    return await (await _control_kernel(user_id, session_id)).update_session(
+        user_id, session_id, req
+    )
 
 
 async def delete_session(user_id: str, session_id: str) -> bool:
-    return await client.delete_session(user_id, session_id)
+    return await (await _control_kernel(user_id, session_id)).delete_session(user_id, session_id)
 
 
 async def set_mode(user_id: str, session_id: str, mode: str) -> SessionData:
-    return await client.set_mode(user_id, session_id, mode)
+    return await (await _control_kernel(user_id, session_id)).set_mode(user_id, session_id, mode)
 
 
 async def finalize_session(
     user_id: str, session_id: str, req: FinalizeSessionRequest
 ) -> SessionData:
-    return await client.finalize_session(user_id, session_id, req)
+    return await (await _control_kernel(user_id, session_id)).finalize_session(
+        user_id, session_id, req
+    )
 
 
 async def append_event(user_id: str, session_id: str, event: EventPayload) -> bool:
-    return await client.append_event(user_id, session_id, event)
+    return await (await _control_kernel(user_id, session_id)).append_event(
+        user_id, session_id, event
+    )
 
 
 async def emit_live_event(user_id: str, session_id: str, type: str, data: dict[str, Any]) -> None:
@@ -873,7 +981,7 @@ async def get_events(
     offset: int = 0,
     after_seq: int | None = None,
 ) -> list[EventData]:
-    return await client.get_events(
+    return await _data_plane().get_events(
         user_id, session_id, limit=limit, offset=offset, after_seq=after_seq
     )
 
@@ -881,7 +989,7 @@ async def get_events(
 async def get_events_window(
     user_id: str, session_id: str, *, before_seq: int | None = None, turn_limit: int = 20
 ) -> EventWindowData:
-    return await client.get_events_window(
+    return await _data_plane().get_events_window(
         user_id, session_id, before_seq=before_seq, turn_limit=turn_limit
     )
 
@@ -941,17 +1049,17 @@ async def subscribe_all_events_for(
 
 
 async def usage_rollup(user_id: str, start_ms: int, end_ms: int) -> list[UsageRollupData]:
-    return await client.usage_rollup(user_id, start_ms, end_ms)
+    return await _data_plane().usage_rollup(user_id, start_ms, end_ms)
 
 
 async def list_messages(
     user_id: str, session_id: str, *, limit: int = 50, offset: int = 0
 ) -> list[MessageData]:
-    return await client.list_messages(user_id, session_id, limit=limit, offset=offset)
+    return await _data_plane().list_messages(user_id, session_id, limit=limit, offset=offset)
 
 
 async def latest_message_id(user_id: str, session_id: str) -> str | None:
-    messages = await client.list_messages(user_id, session_id, limit=1)
+    messages = await _data_plane().list_messages(user_id, session_id, limit=1)
     return messages[0].id if messages else None
 
 
@@ -978,12 +1086,79 @@ async def run_turn(
     return await k.run_turn(user_id, session_id, text, attachments, additional_context)
 
 
+async def run_ephemeral_review_in_scope(
+    user_id: str,
+    req: CreateSessionRequest,
+    prompt: str,
+    *,
+    reuse_scope: SandboxScope,
+) -> str | None:
+    """Create + run + delete a throwaway (no-persistence) review session INSIDE
+    ``reuse_scope``'s ALREADY-LIVE remote sandbox, returning the assistant text —
+    or ``None`` when there is no live remote sandbox to reuse (the caller then
+    runs the review its normal way).
+
+    The memory reviewer uses this to run inside the SOURCE session's still-warm
+    sandbox instead of cold-provisioning its own. Two properties matter and are
+    the reason this doesn't just call ``create_session`` + ``run_turn``:
+
+    - **Never provisions** — it peeks (``_kernel_for_existing``); if ``reuse_scope``
+      has no live sandbox it returns ``None``. No sandbox is spun up on this path.
+    - **Never renews** — the normal ``run_turn`` path calls ``ensure`` which pushes
+      the instance's AGS TTL back to the 24h active window. That would defeat the
+      post-turn idle clamp that keeps the source sandbox alive for exactly this
+      review window, orphaning it. Reusing the peeked kernel directly leaves the
+      clamp's countdown intact, so the sandbox still expires on schedule.
+
+    Returns ``None`` unless a scoped allocator hands back a live REMOTE sandbox
+    for ``reuse_scope`` — i.e. it's inert (returns ``None``) for the local /
+    single-kernel deployment (no per-scope sandbox to reuse or renew), where the
+    caller's ordinary create/run/delete path already targets the one kernel.
+
+    The ephemeral session is routed to ``reuse_scope`` (scope cache) and its
+    durable record is deleted in ``finally``; the sandbox itself is the source's
+    and is NEVER released here — its lifecycle stays with the source's clamp.
+    """
+    k = await _kernel_for_existing(user_id, reuse_scope)
+    if k is None or k is client:
+        # ``None``: scoped allocator but the source sandbox is already gone.
+        # ``client``: no scoped allocator (or a boot-singleton lease) — the local
+        # single-kernel case has no per-scope sandbox to reuse/renew. Either way,
+        # let the caller run the review its normal way.
+        return None
+    req_id = getattr(req, "id", "") or ""
+    if req_id:
+        _scope_cache_put(req_id, reuse_scope)  # any stray op stays in-scope
+    try:
+        await k.create_session(user_id, req)
+        msg = await k.run_turn(user_id, req_id, prompt)
+        return msg.assistant_message or ""
+    finally:
+        try:
+            await _data_plane().delete_session(user_id, req_id)  # durable record cleanup
+        except Exception:  # noqa: BLE001 — best-effort throwaway cleanup
+            logger.debug("ephemeral review: durable cleanup failed for %s", req_id)
+        _scope_cache.pop(req_id, None)
+
+
 async def scan_orphan_pendings() -> int:
     return await client.scan_orphan_pendings()  # type: ignore[attr-defined]
 
 
 async def scan_orphan_runs() -> int:
     return await client.scan_orphan_runs()  # type: ignore[attr-defined]
+
+
+async def reset_stranded_session(user_id: str, session_id: str) -> bool:
+    """Per-session stranded reset (host-driven recovery, multi-sandbox-safe).
+
+    The HOST decides which ``running`` sessions are genuinely stranded (their
+    sandbox is gone — ``ext.sandbox_allocator.peek``) and applies the kernel's
+    reset semantics (``src.core.recovery``: seal pendings, stamp ``idle`` +
+    resumable ``host_restart``, error out running messages) DIRECTLY to the
+    durable via the data plane — the stranded session's runtime store died
+    with its sandbox, so there is no kernel to round-trip through."""
+    return await _data_plane().reset_stranded_session(user_id, session_id)  # type: ignore[attr-defined]
 
 
 async def cleanup_runtime(session_id: str) -> None:

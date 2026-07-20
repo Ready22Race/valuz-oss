@@ -27,6 +27,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # ``ensure_local_identity`` caches the id (else the cached id mismatches the
     # migrated rows' owner and breaks the official-skills reindex).
     steps.migrate_data_dir()
+    # Staged backup restore applies here: after the data-dir cutover, before
+    # identity caches the owner id and before any engine opens the SQLite
+    # files (it replaces them at file level).
+    steps.apply_backup_restore()
     steps.ensure_local_identity()  # seed owner ctx before any insert
     await steps.bootstrap_schema()
     await steps.configure_i18n()
@@ -43,7 +47,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # long-lived runners
     await steps.start_mcp_session_managers(app)
-    await steps.start_automation_runner(app)
+    await steps.start_automation_runtime(app)
+    await steps.start_host_background_services(app)
     await steps.start_polling_scheduler()
     steps.warm_parse_pool()
     steps.warm_token_estimator()
@@ -65,7 +70,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     set_draining()
     await steps.stop_managed_browser()
     await steps.stop_decision_aggregator(app)
-    await steps.stop_automation_runner(app)
+    await steps.stop_host_background_services(app)
+    await steps.stop_automation_runtime(app)
     steps.shutdown_parse_pool()
     await steps.stop_polling_scheduler()
     await steps.stop_mcp_session_managers(app)

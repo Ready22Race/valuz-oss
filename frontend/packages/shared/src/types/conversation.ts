@@ -17,7 +17,8 @@ export interface PrototypeToolCall {
 
 /* ── Background tasks (run_in_background shell commands) ──── */
 
-export type BackgroundTaskStatus = "running" | "completed" | "failed" | "stopped";
+export type BackgroundTaskStatus =
+  "running" | "completed" | "failed" | "stopped";
 
 /**
  * One background task the agent launched (``run_in_background`` Bash).
@@ -44,15 +45,33 @@ export interface BackgroundTaskState {
 /* ── Conversation turn types ─────────────────────────────── */
 
 export type ConversationBlock =
-  | { kind: "assistant"; text: string; messageId?: string; sealed?: boolean }
+  // ``parentToolUseId`` (assistant/thinking/tool): set when the event was
+  // produced INSIDE a subagent (Task/Agent tool run). Such blocks are
+  // out-of-band relative to the lead's sequential flow — a background
+  // agent's events arrive interleaved with the lead's live stream, so the
+  // turn builder must not let them split or seal the lead's open streaming
+  // block.
+  | {
+      kind: "assistant";
+      text: string;
+      messageId?: string;
+      sealed?: boolean;
+      parentToolUseId?: string;
+    }
   | {
       kind: "thinking";
       text: string;
       messageId?: string;
       sealed?: boolean;
       elapsedMs?: number;
+      parentToolUseId?: string;
     }
-  | { kind: "tool"; tool: PrototypeToolCall; elapsedMs?: number }
+  | {
+      kind: "tool";
+      tool: PrototypeToolCall;
+      elapsedMs?: number;
+      parentToolUseId?: string;
+    }
   // Context-compaction marker (``/compact`` or autocompact), for either
   // runtime. Label-only — the kernel ``compaction`` event's raw data is
   // intentionally not parsed for display; it just marks where the context

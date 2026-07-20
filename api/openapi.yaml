@@ -3054,6 +3054,204 @@ paths:
         "200":
           description: OK
 
+  # ── Local backup (docs/design/client-local-backup.md) ──────────────
+  /v1/backup/config:
+    get:
+      summary: Backup configuration + runtime status (last/next run, usage)
+      operationId: getBackupConfig
+      tags: [backup]
+      responses:
+        "200":
+          description: Backup config
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupConfig"
+    put:
+      summary: Update backup configuration (only sent keys change)
+      operationId: putBackupConfig
+      tags: [backup]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BackupConfigPatch"
+      responses:
+        "200":
+          description: Updated config
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupConfig"
+        "400":
+          description: Invalid destination
+  /v1/backup/runs:
+    post:
+      summary: Run a backup now
+      operationId: runBackupNow
+      tags: [backup]
+      responses:
+        "202":
+          description: Backup started
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [started, run]
+                properties:
+                  started: {type: boolean}
+                  run:
+                    $ref: "#/components/schemas/BackupRunProgress"
+        "409":
+          description: A backup is already running
+        "422":
+          description: Backup unsupported for this deployment
+  /v1/backup/runs/current:
+    get:
+      summary: Progress of the in-flight backup, if any
+      operationId: getCurrentBackupRun
+      tags: [backup]
+      responses:
+        "200":
+          description: Run progress
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupRunProgress"
+  /v1/backup/versions:
+    get:
+      summary: List backup versions (newest first)
+      operationId: listBackupVersions
+      tags: [backup]
+      responses:
+        "200":
+          description: Versions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [versions]
+                properties:
+                  versions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/BackupVersionInfo"
+  /v1/backup/versions/{version_id}:
+    get:
+      summary: One backup version's detail (manifest meta + business summary)
+      operationId: getBackupVersion
+      tags: [backup]
+      parameters:
+        - name: version_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: Version detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupVersionDetail"
+        "404":
+          description: Version not found
+    delete:
+      summary: Delete one backup version
+      operationId: deleteBackupVersion
+      tags: [backup]
+      parameters:
+        - name: version_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "204":
+          description: Deleted
+        "404":
+          description: Version not found
+  /v1/backup/versions/{version_id}/files:
+    get:
+      summary: Browse the file tree inside a backup version (one level)
+      operationId: listBackupFiles
+      tags: [backup]
+      parameters:
+        - name: version_id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: path
+          in: query
+          required: false
+          schema: {type: string, default: ""}
+      responses:
+        "200":
+          description: Directory listing
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [path, entries]
+                properties:
+                  path: {type: string}
+                  entries:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/BackupFileEntry"
+        "404":
+          description: Version not found
+  /v1/backup/versions/{version_id}/files/download:
+    get:
+      summary: Download one file out of a backup version
+      operationId: downloadBackupFile
+      tags: [backup]
+      parameters:
+        - name: version_id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: path
+          in: query
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: File content
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+        "404":
+          description: Version or file not found
+  /v1/backup/versions/{version_id}/restore:
+    post:
+      summary: Stage a full restore of this version (applies on next app start)
+      operationId: restoreBackupVersion
+      tags: [backup]
+      parameters:
+        - name: version_id
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                dry_run: {type: boolean, default: false}
+      responses:
+        "200":
+          description: Restore staged (or dry-run plan)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupRestoreResult"
+        "404":
+          description: Version not found
+        "409":
+          description: Version schema newer than app / backup running
+
 components:
   schemas:
     FileCapabilities:
@@ -5599,6 +5797,14 @@ components:
           description: >-
             Unix epoch milliseconds (UTC) the kernel persisted the event with.
             Format via new Date(ms).
+        event_uid:
+          type: string
+          nullable: true
+          description: >-
+            Store-independent event identity (the append request_id) — the same
+            uid SSE frames carry. Clients dedup/merge REST history rows against
+            live frames by uid, never by seq (seqs are per-store). Null for
+            legacy rows persisted before uid minting.
 
     SessionEventsResponse:
       type: object
@@ -6066,3 +6272,168 @@ components:
         latency_ms:
           type: integer
           nullable: true
+
+    # ── Local backup (docs/design/client-local-backup.md) ────────────
+    BackupScope:
+      type: object
+      properties:
+        managed_projects: {type: boolean, default: true}
+        external_projects: {type: boolean, default: false}
+        user_skills: {type: boolean, default: true}
+
+    BackupRetention:
+      type: object
+      properties:
+        keep_recent: {type: integer, default: 7, minimum: 1, maximum: 100}
+        keep_daily_days: {type: integer, default: 56, minimum: 0}
+        max_total_gb: {type: integer, default: 20, minimum: 0}
+
+    BackupLastRun:
+      type: object
+      properties:
+        at: {type: integer, nullable: true, description: epoch ms}
+        status:
+          type: string
+          nullable: true
+          enum: [ok, failed, skipped_no_change]
+        error: {type: string, nullable: true}
+        version_id: {type: string, nullable: true}
+
+    BackupRunProgress:
+      type: object
+      required: [running, processed_bytes]
+      properties:
+        running: {type: boolean}
+        phase:
+          type: string
+          nullable: true
+          enum: [preflight, db, files, summary, finalize]
+        started_at: {type: integer, nullable: true, description: epoch ms}
+        processed_bytes: {type: integer}
+        trigger:
+          type: string
+          nullable: true
+          enum: [manual, scheduled]
+
+    BackupConfig:
+      type: object
+      required:
+        [supported, enabled, frequency, destination, scope, retention,
+         last_run, run, versions_count, total_bytes]
+      properties:
+        supported: {type: boolean}
+        unsupported_reason:
+          type: string
+          nullable: true
+          enum: [external_database, remote_kernel, external_kernel_database]
+        enabled: {type: boolean}
+        frequency:
+          type: string
+          enum: [manual, every_6h, daily, weekly]
+        destination: {type: string}
+        scope:
+          $ref: "#/components/schemas/BackupScope"
+        retention:
+          $ref: "#/components/schemas/BackupRetention"
+        last_run:
+          $ref: "#/components/schemas/BackupLastRun"
+        next_run_at: {type: integer, nullable: true, description: epoch ms}
+        run:
+          $ref: "#/components/schemas/BackupRunProgress"
+        versions_count: {type: integer}
+        total_bytes: {type: integer}
+        restore_result:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: Boot-time restore report, if a restore ran
+
+    BackupConfigPatch:
+      type: object
+      properties:
+        enabled: {type: boolean, nullable: true}
+        frequency:
+          type: string
+          nullable: true
+          enum: [manual, every_6h, daily, weekly]
+        destination: {type: string, nullable: true}
+        scope:
+          $ref: "#/components/schemas/BackupScope"
+        retention:
+          $ref: "#/components/schemas/BackupRetention"
+
+    BackupSummaryCounts:
+      type: object
+      properties:
+        sessions: {type: integer, default: 0}
+        messages: {type: integer, default: 0}
+        projects: {type: integer, default: 0}
+        agents: {type: integer, default: 0}
+        skills: {type: integer, default: 0}
+        knowledge_bases: {type: integer, default: 0}
+        documents: {type: integer, default: 0}
+        automations: {type: integer, default: 0}
+
+    BackupVersionInfo:
+      type: object
+      required: [id, created_at, kind, total_bytes, new_bytes, file_count, duration_ms, counts]
+      properties:
+        id: {type: string}
+        created_at: {type: integer, description: epoch ms}
+        kind:
+          type: string
+          enum: [scheduled, manual, pre_restore]
+        total_bytes: {type: integer}
+        new_bytes:
+          type: integer
+          description: Bytes actually copied (not hardlink-deduped)
+        file_count: {type: integer}
+        duration_ms: {type: integer}
+        app_version: {type: string, nullable: true}
+        counts:
+          $ref: "#/components/schemas/BackupSummaryCounts"
+
+    BackupVersionDetail:
+      allOf:
+        - $ref: "#/components/schemas/BackupVersionInfo"
+        - type: object
+          required: [scope, dedup]
+          properties:
+            host_alembic: {type: string, nullable: true}
+            kernel_alembic: {type: string, nullable: true}
+            scope:
+              $ref: "#/components/schemas/BackupScope"
+            dedup:
+              type: string
+              enum: [hardlink, none]
+            kb_source_count: {type: integer, default: 0}
+            kb_source_missing: {type: integer, default: 0}
+
+    BackupFileEntry:
+      type: object
+      required: [name, path, kind]
+      properties:
+        name: {type: string}
+        path: {type: string, description: "version-relative, /-separated"}
+        kind:
+          type: string
+          enum: [dir, file, link]
+        size: {type: integer, default: 0}
+
+    BackupRestoreResult:
+      type: object
+      required: [staged, requires_restart]
+      properties:
+        staged: {type: boolean}
+        requires_restart: {type: boolean}
+        plan:
+          type: array
+          items:
+            type: object
+            required: [target, action, bytes]
+            properties:
+              target: {type: string}
+              action:
+                type: string
+                enum: [replace, create]
+              bytes: {type: integer}

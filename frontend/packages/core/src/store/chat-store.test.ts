@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { SessionEventDTO } from "../api/sessions-api";
-import { reduce, type ChatStoreState } from "./chat-store";
+import { reduce, useChatStore, type ChatStoreState } from "./chat-store";
 
 const makeState = (overrides: Partial<ChatStoreState> = {}): ChatStoreState => {
   return {
@@ -453,5 +453,139 @@ describe("chat-store reducer", () => {
       };
       expect(s2.lastSeq).toBe(5);
     });
+
+    it("should advance lastSeq from history-source envelopes (durable seq space)", () => {
+      const s0 = makeState({ lastSeq: 10 });
+      const next = {
+        ...s0,
+        ...reduce(s0, frame(900, "session.update", { status: "running" }), {
+          source: "history",
+        }),
+      };
+      expect(next.lastSeq).toBe(900);
+    });
+
+    it("should NOT advance lastSeq from live-source envelopes (kernel-local seq space)", () => {
+      // The history cursor is durable-store space; a live frame's seq is the
+      // kernel's independent local counter. Folding it in would corrupt the
+      // ``after_seq`` handed to the server on reconnect.
+      const s0 = makeState({ lastSeq: 10 });
+      const next = {
+        ...s0,
+        ...reduce(s0, frame(9999, "session.update", { status: "running" }), {
+          source: "live",
+        }),
+      };
+      expect(next.lastSeq).toBe(10);
+    });
+
+    it("should still apply a live envelope's content while leaving the cursor alone", () => {
+      const s0 = makeState({ lastSeq: 10 });
+      const next = {
+        ...s0,
+        ...reduce(
+          s0,
+          {
+            seq: 7,
+            event: {
+              event_type: "message.assistant.text_delta",
+              payload: { text: "Hi", message_id: "m1" },
+            },
+            event_uid: null,
+          },
+          { source: "live" },
+        ),
+      };
+      expect(next.streaming.text).toBe("Hi");
+      expect(next.lastSeq).toBe(10);
+    });
+  });
+});
+
+describe("chat-store _ingest — event_uid dedup across history/live", () => {
+  const uidFrame = (
+    seq: number,
+    uid: string | null,
+    eventType: string,
+    payload: Record<string, string>,
+  ): SessionEventDTO => ({
+    seq,
+    event: { event_type: eventType, payload },
+    event_uid: uid,
+  });
+
+  it("should collapse the same persisted event delivered via history replay and live stream", () => {
+    const store = useChatStore.getState();
+    store.detach(); // reset messages + the seen-uid set
+    // ``message.assistant.thinking`` has NO reducer-level dedup — every
+    // application appends to ``thinking[]`` — so a collapsed duplicate can
+    // only come from the uid gate in ``_ingest``.
+    // History replay: durable seq 900.
+    useChatStore.getState()._ingest(
+      uidFrame(900, "uid-x", "message.assistant.thinking", {
+        text: "pondering",
+        message_id: "a1",
+      }),
+      { source: "history" },
+    );
+    // Live redelivery of the SAME event: kernel-local seq 5, same uid.
+    useChatStore.getState()._ingest(
+      uidFrame(5, "uid-x", "message.assistant.thinking", {
+        text: "pondering",
+        message_id: "a1",
+      }),
+      { source: "live" },
+    );
+    const state = useChatStore.getState();
+    expect(state.messages).toHaveLength(1);
+    expect(state.messages[0]!.thinking).toEqual(["pondering"]);
+    // Cursor holds the history seq; the live duplicate neither re-applied
+    // nor advanced anything.
+    expect(state.lastSeq).toBe(900);
+    useChatStore.getState().detach();
+  });
+
+  it("should NOT drop a different live event whose kernel seq collides with a history seq", () => {
+    const store = useChatStore.getState();
+    store.detach();
+    useChatStore
+      .getState()
+      ._ingest(
+        uidFrame(2, "uid-a", "message.user", { text: "one", message_id: "u1" }),
+        { source: "history" },
+      );
+    // Different event (different uid), numerically identical seq from the
+    // OTHER space — must flow through.
+    useChatStore
+      .getState()
+      ._ingest(
+        uidFrame(2, "uid-b", "message.user", { text: "two", message_id: "u2" }),
+        { source: "live" },
+      );
+    expect(useChatStore.getState().messages).toHaveLength(2);
+    useChatStore.getState().detach();
+  });
+
+  it("should keep uid-less delta frames flowing (never uid-deduped)", () => {
+    const store = useChatStore.getState();
+    store.detach();
+    useChatStore.getState()._ingest(
+      uidFrame(0, null, "message.assistant.text_delta", {
+        text: "He",
+        message_id: "m1",
+      }),
+      { source: "live" },
+    );
+    useChatStore.getState()._ingest(
+      uidFrame(0, null, "message.assistant.text_delta", {
+        text: "y",
+        message_id: "m1",
+      }),
+      { source: "live" },
+    );
+    const state = useChatStore.getState();
+    expect(state.streaming.text).toBe("Hey");
+    expect(state.lastSeq).toBe(0);
+    useChatStore.getState().detach();
   });
 });

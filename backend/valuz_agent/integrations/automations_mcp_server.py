@@ -67,6 +67,7 @@ from valuz_agent.integrations._mcp_asgi import (
     build_internal_mcp_asgi,
     get_current_mcp_session_id,
     get_current_mcp_user_id,
+    internal_mcp_transport_security,
 )
 from valuz_agent.modules.automations.schemas import (
     AutomationToolPayload,
@@ -360,9 +361,7 @@ async def _handle_list(
     else:
         # Chat sessions narrowed to ``this`` use the singleton chat-default
         # sentinel; project sessions pass their project_id directly.
-        items = await svc.list_automations_in_project(
-            project_id or "chat-default", user_id=user_id
-        )
+        items = await svc.list_automations_in_project(project_id or "chat-default", user_id=user_id)
     if not items:
         return AutomationToolResult(
             action="list",
@@ -490,6 +489,7 @@ async def _handle_status_change(
         AutomationNotFound,
         AutomationPaused,
     )
+
     if not payload.automation_id:
         return _err(
             action, f"automation_id is required for {action}.", code="MISSING_AUTOMATION_ID"
@@ -585,9 +585,7 @@ async def _dispatch(payload: AutomationToolPayload) -> AutomationToolResult:
     async with async_unit_of_work() as db:
         svc = await _build_automation_service(db, user_id)
         if payload.action == "list":
-            return await _handle_list(
-                svc=svc, project_id=project_id, scope=scope, user_id=user_id
-            )
+            return await _handle_list(svc=svc, project_id=project_id, scope=scope, user_id=user_id)
         if payload.action == "create":
             return await _handle_create(
                 svc=svc,
@@ -628,7 +626,14 @@ async def _dispatch(payload: AutomationToolPayload) -> AutomationToolResult:
 # ---------------------------------------------------------------------------
 
 
-_mcp = FastMCP("valuz-automations")
+_mcp = FastMCP(
+    "valuz-automations",
+    transport_security=internal_mcp_transport_security(),
+    # Stateless like the toolkit server: session state in process memory 404s
+    # any follow-up request that lands on another replica/worker behind a
+    # load balancer (client surfaces it as "McpError: Session terminated").
+    stateless_http=True,
+)
 
 
 _AUTOMATION_DESCRIPTION = """Manage the user's automations (recurring or

@@ -261,6 +261,14 @@ class Settings(BaseSettings):
     # May contain {user_id} when the deployment mounts per-user workspaces.
     user_project_root: Path = Path.home() / "Valuz"
 
+    # ── Local backup ────────────────────────────────────────────────
+    # Default root for versioned local backups (docs/design/client-local-backup.md).
+    # MUST live outside ``data_dir`` so a backup never recursively contains
+    # itself and survives a data-dir wipe. May contain {user_id}. The user can
+    # point it elsewhere (e.g. an external drive) via Settings; this is only
+    # the initial default. Override with VALUZ_BACKUP_ROOT.
+    backup_root: Path = Path.home() / ".valuz-oss-backups"
+
     # ── Browser feature (chrome-devtools-mcp) ──────────────────────
     # A dedicated, persistent Chrome profile the managed browser uses —
     # an ISOLATED profile (never the user's everyday Chrome) so a
