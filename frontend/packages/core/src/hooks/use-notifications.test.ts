@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const markReadMock = vi.fn((_id: string) => Promise.resolve({ ok: true }));
+const markReadMock = vi.fn((id: string) => {
+  void id;
+  return Promise.resolve({ ok: true });
+});
 vi.mock("../api/notifications-api", () => ({
   notificationsApi: {
     markRead: (id: string) => markReadMock(id),

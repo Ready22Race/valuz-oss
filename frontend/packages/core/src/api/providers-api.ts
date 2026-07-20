@@ -114,10 +114,17 @@ export const providersApi = {
    * detail fan-out (1+N requests, each subscription detail paying a CLI login
    * probe). Leave it off for surfaces that must keep logged-out subscription
    * models visible (onboarding login card / model-options). */
-  async list(opts?: { gated?: boolean }): Promise<{ providers: LLMChannel[] }> {
+  async list(opts?: {
+    gated?: boolean;
+    baseUrl?: string;
+    fresh?: boolean;
+  }): Promise<{ providers: LLMChannel[] }> {
     const res = await fetchJson<{ providers: LLMChannel[] }>(
       opts?.gated ? "/v1/providers?gated=1" : "/v1/providers",
-      { cache: PROVIDERS_LIST_CACHE },
+      {
+        cache: opts?.fresh ? undefined : PROVIDERS_LIST_CACHE,
+        baseUrl: opts?.baseUrl,
+      },
     );
     _hydrateModelLabels(res.providers);
     return res;
