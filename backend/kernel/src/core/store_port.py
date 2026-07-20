@@ -26,6 +26,11 @@ class StoredEvent:
     type: str
     data: dict[str, Any] = field(default_factory=dict)
     timestamp: int = 0  # Unix epoch ms (UTC)
+    # Store-independent identity (the append ``request_id``). ``seq`` is a
+    # PER-STORE autoincrement — the execution-local store and the durable each
+    # assign their own — so cross-store dedup/merge keys on ``event_uid``,
+    # never on seq. ``None`` only for legacy rows written before uid minting.
+    event_uid: str | None = None
 
 
 @dataclass(frozen=True)

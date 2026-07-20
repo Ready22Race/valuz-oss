@@ -1,7 +1,7 @@
-"""kernel: SaaS-ready store (event_uid idempotency + RLS backstop + durable outbox)
+"""kernel: SaaS-ready store (event_uid idempotency + RLS backstop)
 
-Consolidated schema change for the model-A remote/durable store work. Three
-parts, all additive over the 0001 baseline:
+Consolidated schema change for the model-A remote/durable store work. Two
+parts, both additive over the 0001 baseline:
 
 1. ``events.event_uid`` (nullable) + UNIQUE ``(user_id, event_uid)`` — at-least-once
    append idempotency: a retried append (same client ``request_id``) conflicts on
@@ -15,9 +15,6 @@ parts, all additive over the 0001 baseline:
    SQLite (no RLS; OSS local-first relies on app-layer scoping). RLS does NOT
    apply to the table owner (no ``FORCE``) — the data service must connect as a
    NON-owner role for it to take effect.
-3. ``durable_outbox`` table (local DB) — backs best-effort write-through
-   (``kernel_store=pg``): a failed durable mirror is queued here so the local
-   write still succeeds and a background drainer re-pushes it on recovery.
 
 Revision ID: 0002
 Revises: 0001
@@ -56,23 +53,8 @@ def upgrade() -> None:
                 f"WITH CHECK (user_id = current_setting('{_GUC}', true))"
             )
 
-    # 3. Durable write-through outbox (local DB).
-    op.create_table(
-        "durable_outbox",
-        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
-        sa.Column("op", sa.String(length=40), nullable=False),
-        sa.Column("user_id", sa.String(length=64), nullable=False),
-        sa.Column("body", sa.JSON(), nullable=False),
-        sa.Column("attempts", sa.Integer(), nullable=False, server_default="0"),
-        sa.Column("last_error", sa.Text(), nullable=True),
-        sa.Column("created_at", sa.BigInteger(), nullable=True),
-    )
-    op.create_index("ix_durable_outbox_id", "durable_outbox", ["id"])
-
 
 def downgrade() -> None:
-    op.drop_index("ix_durable_outbox_id", table_name="durable_outbox")
-    op.drop_table("durable_outbox")
 
     if op.get_bind().dialect.name == "postgresql":
         for table in _RLS_TABLES:

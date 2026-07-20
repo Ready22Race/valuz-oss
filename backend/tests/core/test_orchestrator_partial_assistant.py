@@ -18,7 +18,7 @@ class _FakeStore:
         self._next_seq = 100
 
     async def append_event(
-        self, user_id: str, session_id: str, message_id: str, event: Event
+        self, user_id: str, session_id: str, message_id: str, event: Event, **kw: object
     ) -> int:
         self.appended.append(event)
         self._next_seq += 1

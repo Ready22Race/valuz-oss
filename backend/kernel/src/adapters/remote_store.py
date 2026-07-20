@@ -194,7 +194,7 @@ class RemoteStore(abc.ABC):
         request_id: str | None = None,
         seq: int | None = None,
     ) -> int | None:
-        rid = request_id or self._new_request_id()  # shared key when WriteThrough mints it
+        rid = request_id or self._new_request_id()  # RuntimeStore passes the shared event_uid
         return await self._retry(
             "append_event",
             lambda: self._append_event_once(

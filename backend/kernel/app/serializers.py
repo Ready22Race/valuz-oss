@@ -151,6 +151,7 @@ def stored_event_to_data(ev: Any, *, include_session_id: bool = False) -> EventD
         timestamp=ev.timestamp,
         seq=ev.seq,
         message_id=ev.message_id,
+        event_uid=getattr(ev, "event_uid", None),
         session_id=ev.session_id if include_session_id else None,
     )
 
@@ -165,6 +166,9 @@ def live_event_to_data(event: Event, *, session_id: str | None = None) -> EventD
     """
     data = dict(event.data)
     raw_seq = data.pop("seq", None)
+    event_uid = data.pop("event_uid", None)
+    if not isinstance(event_uid, str):
+        event_uid = None
     seq: int | None = None
     if raw_seq is not None:
         # Defensive coercion: a JSON round-trip through a bus can turn the
@@ -179,6 +183,7 @@ def live_event_to_data(event: Event, *, session_id: str | None = None) -> EventD
         data=data,
         timestamp=event.timestamp,
         seq=seq,
+        event_uid=event_uid,
         session_id=session_id,
     )
 

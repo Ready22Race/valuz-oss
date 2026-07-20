@@ -12,9 +12,9 @@ from fastapi import Header, HTTPException
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from src.adapters.remote_store import build_remote_store
+from src.adapters.runtime_store import RuntimeStore
 from src.adapters.sqlalchemy_store.engine import create_engine, create_session_factory
 from src.adapters.sqlalchemy_store.store import SQLAlchemyStore
-from src.adapters.write_through_store import WriteThroughStore
 from src.core import NullTokenVerifier, StorePort, TokenVerifier
 from src.core.orchestrator import SessionOrchestrator
 
@@ -27,10 +27,10 @@ _durable_engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 _store: StorePort | None = None
 _orchestrator: SessionOrchestrator | None = None
-# The write-through wrapper (if any), held by its concrete type so its
-# background lifecycle (outbox drainer) is driven without the call sites
-# re-deriving the store policy. ``None`` in local-only mode.
-_write_through: WriteThroughStore | None = None
+# The kernel's runtime store (sqlite authority + DataService mirror), held by
+# its concrete type for introspection/tests. ``None`` only when no mirror
+# backend is configured (bare local / collapsed DSN → plain local store).
+_runtime_store: RuntimeStore | None = None
 # Owner-from-token seam: OSS default never derives identity from a token, so
 # ``get_owner_id`` keeps using the trusted ``X-Valuz-Owner-Id`` header. A SaaS
 # overlay binds a real verifier via ``set_token_verifier``.
@@ -46,23 +46,33 @@ async def init_dependencies(config: AppConfig) -> None:
     (per design doc §6.3 — D6 contract symmetry across runtimes).
     """
     global _engine, _session_factory, _store, _orchestrator  # noqa: PLW0603
-    global _durable_engine, _write_through  # noqa: PLW0603
+    global _durable_engine, _runtime_store  # noqa: PLW0603
     # Model A: the LOCAL store ALWAYS exists (local-first). The kernel keeps its
     # own SQLite/PG via this engine; when a durable backend is configured
     # (remote DataService / central PG) every write is mirrored through it
-    # (WriteThroughStore). No "remote replaces local" branch.
+    # (RuntimeStore). No "remote replaces local" branch.
     _engine = create_engine(config.database_url)
     _session_factory = create_session_factory(_engine)
     local: StorePort = SQLAlchemyStore(_session_factory)
     durable = _build_durable_store(config)
     if _durable_engine is not None:
-        # In-process durable (``kernel_store=pg``): create the kernel schema if
-        # absent. ``create_all`` is checkfirst (idempotent) — a no-op when the
-        # DB was already provisioned by alembic, and it materializes the full
-        # current model (incl. the ``event_uid`` unique index) on a fresh PG.
+        # In-process durable: create the kernel schema if absent. ``create_all``
+        # is checkfirst (idempotent) — a no-op when the DB was already
+        # provisioned by alembic, and it materializes the full current model
+        # (incl. the ``event_uid`` unique index) on a fresh backend.
         await _ensure_durable_schema(_durable_engine)
-    _write_through = _wrap_durable(config, local, durable)
-    store: StorePort = _write_through or local
+    # ONE composition, every tier (see the RuntimeStore module docstring):
+    # local sqlite is the kernel's sole runtime persistence source, and every
+    # write is dual-written to the DataService mirror. ``KERNEL_STORE`` only
+    # selects the mirror backend (local → host valuz.db, pg → central Postgres,
+    # remote → HTTP DataService). No mirror configured (bare local / collapsed
+    # DSN) → the plain local store alone.
+    _runtime_store = None
+    if durable is None:
+        store: StorePort = local
+    else:
+        _runtime_store = RuntimeStore(local, durable)
+        store = _runtime_store
     _store = store
     _orchestrator = SessionOrchestrator(
         store,
@@ -74,11 +84,10 @@ async def init_dependencies(config: AppConfig) -> None:
     # subprocesses; see SessionOrchestrator). Safe before the orphan scan's
     # possible early return so it runs regardless of migration state.
     _orchestrator.start()
-    # Drive the write-through lifecycle (currently a no-op for the durable-
-    # authority store; kept for the dormant outbox-drainer path).
-    if _write_through is not None:
-        _write_through.start()
-    # Orphan scans run against the always-present local store.
+    # Boot orphan scans sweep the kernel's OWN lineage — its runtime sqlite —
+    # unconditionally: sessions live on other processes are structurally out of
+    # reach (the kernel has no remote read path), so the sweep is safe in every
+    # deployment. Cross-process reconciliation is the HOST's job.
     # Best-effort — schema may not be migrated yet (typical in unit tests that
     # skip Alembic and run against an empty in-memory DB).
     try:
@@ -96,9 +105,7 @@ async def init_dependencies(config: AppConfig) -> None:
 async def shutdown_dependencies() -> None:
     """Dispose engine and clear singletons. Called during app lifespan shutdown."""
     global _engine, _durable_engine, _session_factory, _store, _orchestrator  # noqa: PLW0603
-    global _write_through  # noqa: PLW0603
-    if _write_through is not None:
-        await _write_through.aclose()  # stop the outbox drainer if one is running
+    global _runtime_store  # noqa: PLW0603
     if _orchestrator is not None:
         # Cancel the idle sweeper and close every warm runtime — terminates all
         # live claude/codex subprocesses deterministically on shutdown.
@@ -115,7 +122,7 @@ async def shutdown_dependencies() -> None:
     _session_factory = None
     _store = None
     _orchestrator = None
-    _write_through = None
+    _runtime_store = None
 
 
 def _env_int(name: str) -> int | None:
@@ -188,6 +195,18 @@ def set_token_verifier(verifier: TokenVerifier) -> None:
     _token_verifier = verifier
 
 
+async def _ensure_durable_schema(engine: AsyncEngine) -> None:
+    """Create the kernel data schema on the in-process mirror engine if missing.
+
+    Idempotent (``create_all`` is checkfirst): ``sessions`` / ``messages`` /
+    ``events``, ready to receive the RuntimeStore's dual-writes.
+    """
+    from src.adapters.sqlalchemy_store.models import Base
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+
 def _build_durable_store(config: AppConfig) -> StorePort | None:
     """The durable write-through target (the DataService backend), or ``None``.
 
@@ -235,47 +254,6 @@ def _build_durable_store(config: AppConfig) -> StorePort | None:
         base_url=config.data_api_url,
         access_token=_access_token,
     )
-
-
-def _wrap_durable(
-    config: AppConfig, local: StorePort, durable: StorePort | None
-) -> WriteThroughStore | None:
-    """Wrap the (always-present) local store with a durable backend, by tier.
-
-    Returns ``None`` for local-only (no durable → single write); otherwise a
-    :class:`WriteThroughStore` whose own lifecycle (``start``/``aclose``) the
-    caller drives:
-
-    - ``remote`` → STRICT write-through (durable-first events, fail-loud).
-    - ``pg`` → BEST-EFFORT write-through: local is authoritative; durable failures
-      land in a :class:`DurableOutbox` over the LOCAL session factory so a Postgres
-      outage never blocks local-first writes.
-    """
-    if durable is None:
-        return None
-    # ``pg`` and ``remote`` are the SAME behaviour — both are "durable is the
-    # system of record" (read + central seq + fail-loud write go to the durable;
-    # local is a best-effort write buffer). ``pg`` is just a remote whose durable
-    # backend is an in-process Postgres; ``remote`` reaches the durable over the
-    # HTTP DataService. The only difference is the transport, decided in
-    # ``_build_durable_store``.
-    return WriteThroughStore(local, durable, authority="durable")
-
-
-async def _ensure_durable_schema(engine: AsyncEngine) -> None:
-    """Create the kernel DATA schema on the in-process durable engine if missing.
-
-    Idempotent (``create_all`` is checkfirst). The durable holds the system of
-    record: ``sessions`` / ``messages`` / ``events``. It does NOT get
-    ``durable_outbox`` — that is the LOCAL store's compensation queue (pending
-    durable writes when the durable is unreachable), so it belongs only on the
-    local (kernel.db) engine, never on the durable itself.
-    """
-    from src.adapters.sqlalchemy_store.models import Base
-
-    durable_tables = [t for n, t in Base.metadata.tables.items() if n != "durable_outbox"]
-    async with engine.begin() as conn:
-        await conn.run_sync(lambda c: Base.metadata.create_all(c, tables=durable_tables))
 
 
 def _ensure_remote_backend(kind: str) -> None:

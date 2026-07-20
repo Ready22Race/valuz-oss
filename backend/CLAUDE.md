@@ -56,40 +56,46 @@ kernel tables *out* of `valuz.db` — is retired; it contradicts co-location.)
 Both layers run **async** SQLAlchemy on aiosqlite; WAL +
 per-connection `busy_timeout` make concurrent access safe.
 
-**Kernel store.** The kernel ALWAYS binds the local `SQLAlchemyStore` on
-`database_url`. `KERNEL_STORE` then selects whether a **durable** store fronts it:
+**Kernel store — ONE composition, everywhere.** The kernel's runtime
+persistence source is ALWAYS its local sqlite (`SQLAlchemyStore` on
+`database_url` = `kernel.db`), and every write is dual-written to the
+DataService mirror (`RuntimeStore`, `src/adapters/runtime_store.py`).
+`KERNEL_STORE` selects only the MIRROR BACKEND — never a different
+composition (`app/dependencies.init_dependencies` is the one factory):
 
-| `KERNEL_STORE` | Durable backend (transport) |
-|----------------|------------------------------|
-| `local` (default) | in-process `SQLAlchemyStore` on the **host `valuz.db`** (the host injects it as `VALUZ_DURABLE_DATABASE_URL` in `_set_kernel_env`) — the DataService IS the data layer, not a bypass (design §3 form 1) |
-| `pg` | in-process `SQLAlchemyStore` on `VALUZ_DURABLE_DATABASE_URL` (schema auto-created, `_ensure_durable_schema`) |
-| `remote` | `RemoteStoreHttp` → the HTTP DataService; the sandbox holds ONLY a JWT (`VALUZ_DATA_API_*`), never a DSN |
+| `KERNEL_STORE` | Mirror backend |
+|----------------|----------------|
+| `local` (default) | the host `valuz.db` DataService backend (in-process `SQLAlchemyStore` on `VALUZ_DURABLE_DATABASE_URL`; the host injects `valuz.db`). |
+| `pg` | central Postgres (`VALUZ_DURABLE_DATABASE_URL`) — the SaaS host / a sovereign process on its own Postgres. |
+| `remote` | the HTTP DataService (`RemoteStoreHttp`, JWT via `VALUZ_DATA_API_*` — the sandbox never holds a DSN). |
 
-**All three tiers are the SAME behaviour** — one config→backend factory
-(`_build_durable_store`), no per-tier branch. Each wraps the local store
-(`kernel.db`) in a `WriteThroughStore(authority="durable")`: the **durable is the
-system of record** (reads + the central event seq come from it; the durable write
-is **fail-loud**), and `kernel.db` is the execution-local write **buffer**, never
-the read source. The only difference is the durable backend: `local` → host
-`valuz.db` sqlite, `pg` → in-process Postgres, `remote` → HTTP DataService. If the
-durable DSN equals the kernel's own `database_url` (a shared/co-located DB) the
-dual-write **collapses** to a single write. A one-time boot step
-(`boot/kernel_db_colocate.py`) seeds `valuz.db` from a pre-flip `kernel.db` so
-existing history stays visible. Each store owns its own `events` autoincrement (the seqs
-are independent; `event_uid` bridges identity) — NEVER force one store's seq onto
-the other's PK (collides with overlapping local ids and drops events).
+No mirror resolvable (no durable DSN, or it equals `database_url` — already
+one file) → the plain local store alone.
 
-Because the SaaS sandbox is **ephemeral**, in `remote` mode the host reads event
-history straight from the DataService (`DataServiceReadClient`, routed in
-`event_sse_adapter._history_reader`) so a dead sandbox still serves history; live
-deltas still come from the kernel SSE when the sandbox is alive. The data service
-(`kernel/app/data_service.py`, `POST /rpc/{op}` per StorePort method) has its
-route↔client↔StorePort contract pinned by `test_data_service_contract.py`.
+The contract: the kernel has **no remote read path** — runtime reads (turn
+state, the event seq the broadcast carries, WS replay, pending derivation,
+unconditional own-lineage boot scans) are local; non-runtime readers (host
+UI, reconciliation) read the durable HOST-side (`kernel_client` data plane,
+below). The mirror is sequential-inline (durable receives ops in local commit
+order) and best-effort — a down durable never blocks a turn; a lost mirror op
+is a logged gap (recovery/reconciliation is an explicit later step). Seqs are
+per-store — the cross-store identity is `event_uid` (the append
+`request_id`), stamped on live frames and store reads alike; dedup/merge keys
+on the uid, never on seq, and mirror redelivery is uid-idempotent. NEVER
+force one store's seq onto the other's PK.
 
-> Note: `WriteThroughStore` still carries a dormant `authority="local"` +
-> `DurableOutbox` best-effort path (local-first read, queued durable
-> compensation). It is currently unused — no tier wires it — and is a candidate
-> for removal.
+**Host data plane.** The host never reads history/state out of an execution
+kernel. `boot/steps.bind_data_service` builds the DataService backend store
+and binds it twice: as the typed `data_reader` (SSE history) and as the
+`kernel_client` data plane (`bind_host_data_store`) — an in-process kernel
+client over the durable, serving all non-runtime facade reads, at-rest
+control writes and the liveness-driven stranded reset (`src/core/recovery`).
+Session CONTROL writes (update/mode/finalize/append/delete) route
+live-kernel-first: while a kernel holds the session its runtime sqlite is the
+authority (the write mirrors down); only an at-rest session is written on the
+durable directly. The data service (`kernel/app/data_service.py`,
+`POST /rpc/{op}` per StorePort method) has its route↔client↔StorePort
+contract pinned by `test_data_service_contract.py`.
 
 ## The two boundary contracts
 
