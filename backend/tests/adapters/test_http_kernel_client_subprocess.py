@@ -247,13 +247,23 @@ async def test_tokenless_ws_run_channel_is_rejected(kernel_proc) -> None:
 
 def test_http_client_covers_the_full_protocol_surface() -> None:
     """Method-for-method parity with the contract table (minus the declared
-    in-process-only supervision hooks)."""
+    in-process-only supervision hooks and host-side composites).
+
+    ``run_ephemeral_review_in_scope`` is a composite (create + run + delete
+    reusing an existing scope's kernel — the contract table marks it "no 1:1
+    endpoint"): it is orchestrated by the module facade ABOVE the transport,
+    so a pure HTTP transport never implements it as a method."""
     from tests.adapters.test_kernel_client_contract import (
         EXPECTED_ROUTES,
         EXPECTED_STREAMS,
     )
 
-    in_process_only = {"scan_orphan_pendings", "scan_orphan_runs", "cleanup_runtime"}
+    in_process_only = {
+        "scan_orphan_pendings",
+        "scan_orphan_runs",
+        "cleanup_runtime",
+        "run_ephemeral_review_in_scope",
+    }
     for name in (set(EXPECTED_ROUTES) | set(EXPECTED_STREAMS)) - in_process_only:
         assert hasattr(HttpKernelClient, name), f"HttpKernelClient lacks {name}"
 
