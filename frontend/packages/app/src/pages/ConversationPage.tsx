@@ -118,12 +118,10 @@ import { t as _t } from "@valuz/shared/i18n";
 import type { I18nKey } from "@valuz/shared";
 import { useProjectOutlet } from "@valuz/app/layout";
 import {
-  awaitingBackgroundWakeup,
   mergeEventWindow,
   deriveBackgroundTasks,
   runningBackgroundTasks,
   useIncrementalTurns,
-  subscribeUserStream,
   type PlanSubtask,
 } from "@valuz/core";
 import { BackgroundTaskStrip, ConversationTurnList } from "@valuz/ui";
@@ -828,15 +826,13 @@ export const ConversationPage = () => {
   }, [selectedSessionId]);
   const [events, setEvents] = useState<SessionEventDTO[]>([]);
   // Every ``event_uid`` this transcript has already consumed via the SSE
-  // path. The send-path subscription reuses ``historyCursorRef`` as its
-  // ``after_seq`` — and that cursor only advances from REST history reads
-  // (live frames carry kernel-local seqs, a different space), so a follow-up
-  // send after a live-streamed turn replays that turn's frames. The replayed
-  // OLD ``message.user`` must not flip ``sawTurnStart`` and the replayed OLD
-  // ``session.idle`` must not trip the terminal check (it killed the fresh
-  // stream before the new turn's frames arrived — follow-ups rendered
-  // nothing until a reload). Uid-less legacy frames bypass the guard and
-  // keep today's behavior. Cleared wherever the transcript resets.
+  // path. Reconnect gap-fills and the server's initial drain legitimately
+  // redeliver frames (the history cursor only advances from REST reads; live
+  // frames carry kernel-local seqs, a different space) — replays must stay
+  // render-inert AND terminal-gate-inert (a redelivered old terminal frame
+  // must not re-run turn-end handling). Uid-less legacy frames bypass the
+  // guard. Bounded in ``appendEvent`` (a session-lifetime page keeps this
+  // set for its whole stay); cleared wherever the transcript resets.
   const seenEventUidsRef = useRef<Set<string>>(new Set());
   // Live TODO list for the active session. Hydrated from
   // ``session.todos`` on session switch and from ``session.todos.update``
@@ -910,10 +906,10 @@ export const ConversationPage = () => {
   // resolve after the enqueue's response and clobber the fresh list — making
   // the just-accepted item vanish until the next turn boundary.
   const queueListTicketRef = useRef(0);
-  // "The drain chain continues after this turn" — mirrored into a ref for
-  // ``stopSubscription`` (a closure inside the stable ``subscribeToSession``
-  // callback that can't take queue state as a dep). Gates the per-boundary
-  // sidebar refetch: refetching between every drained item is visible churn.
+  // "The drain chain continues after this turn" — mirrored into a ref so the
+  // turn-end bookkeeping effect reads the freshest value without re-arming.
+  // Gates the per-boundary sidebar refetch: refetching between every drained
+  // item is visible churn.
   const queueContinuesRef = useRef(false);
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(
     null,
@@ -1254,15 +1250,14 @@ export const ConversationPage = () => {
   const askUserQuestionSubmitRef = useRef<
     (toolId: string, answers: Record<string, string>) => void
   >(() => {});
+  // The session-lifetime stream's controller. Owned by the session-open
+  // effect via ``subscribeToSession`` (which supersedes the previous one);
+  // aborted on unmount. Nothing else opens or closes streams.
   const abortRef = useRef<AbortController | null>(null);
-  // Set while ``handleSend`` is between ``ensureSession`` and its own
-  // ``subscribeToSession`` call. The auto-resume effect (which fires when
-  // ``selectedSessionId`` changes to the freshly-created session id) must
-  // skip its own subscribe in that window, otherwise it races with
-  // ``handleSend`` — both subscriptions deliver ``message.user`` before the
-  // older one is aborted, the late ``.finally`` from the aborted promise
-  // clobbers ``sending`` / ``abortRef`` set by the live one, and the user
-  // sees their input rendered twice + the loading dots vanish mid-stream.
+  // Set while ``handleSend`` is between ``ensureSession`` and its POST
+  // settling. Remaining consumer: the bootstrap promote-fast-path, which
+  // skips the history refetch on the ``/conversation/new`` → real-id
+  // promotion so the optimistic transcript isn't clobbered mid-send.
   const isSendInFlightRef = useRef(false);
   // HISTORY cursor — the highest DURABLE-store seq confirmed via REST
   // history reads (``listEvents`` / ``listEventsWindow`` responses). Used as
@@ -1507,22 +1502,19 @@ export const ConversationPage = () => {
   );
 
   // The composer's loading / Stop state (and the streaming logo + "已处理 X 秒"
-  // timer) is DERIVED, not a bare flag: the optimistic ``sending`` gated by the
-  // authoritative, reconciled session status. The instant the session is
-  // terminal the turn is over — so a missed terminal SSE frame can no longer
-  // strand the UI in a loading state. ``sending`` itself stays the internal
-  // send/queue gate; only the displayed state derives from status.
+  // timer) is DERIVED (session-stream-lifetime §2.1): ``sending`` is only the
+  // optimistic click → turn-start bridge (released by the turn's start /
+  // terminal events or a send error); the reconciled session ``status``
+  // carries busy for the turn itself — including turns started by the queue
+  // drain, a schedule, or another client. The stream being open says nothing.
   const isBusy = deriveTurnActive(sending, selectedSession?.status);
   // Queue continuity for the LOADING AFFORDANCES only (shimmer / Stop /
-  // timer). Every drained queue item is its own kernel turn whose ``session.
-  // idle`` tears the SSE down before the follower re-subscribes the next one —
-  // gating the loading UI on raw ``isBusy`` made it collapse and re-assert
-  // once per item (the "闪屏" between queued messages). While the host drain
-  // chain is in flight (``queueDraining``; authoritative, refreshed at every
-  // boundary and by the backstop below) keep the affordances up across the
-  // sub-second gaps. Display + send-routing only — the turn-boundary effects
-  // (queue refetch, file-tree refresh) stay on raw ``isBusy`` because they
-  // must fire per drained turn.
+  // timer): between two drained items the session is briefly idle — while the
+  // host drain chain is in flight (``queueDraining``; authoritative, refreshed
+  // at every boundary and by the backstop below) keep the affordances up
+  // across those sub-second gaps. Display + send-routing only — the
+  // turn-boundary effects (queue refetch, file-tree refresh, bookkeeping)
+  // stay on raw ``isBusy`` because they must fire per drained turn.
   const displayBusy = isBusy || (queueDraining && !queuePaused);
 
   // The agent actually bound to this composer: an existing session is frozen to
@@ -1556,77 +1548,10 @@ export const ConversationPage = () => {
     () => runningBackgroundTasks(deriveBackgroundTasks(events)),
     [events],
   );
-  const awaitingBgWakeup = useMemo(
-    () => awaitingBackgroundWakeup(events),
-    [events],
-  );
-  const bgWatchActive = runningBgTasks.length > 0 || awaitingBgWakeup;
-  const runningBgCountRef = useRef(0);
-  useEffect(() => {
-    runningBgCountRef.current = runningBgTasks.length;
-  }, [runningBgTasks.length]);
-
-  // Live delivery of background-task progress while the session sits IDLE.
-  // The per-turn subscription deliberately closes at the turn's terminal
-  // event (connection budget), so once the launching turn ends nobody would
-  // receive the idle-time pushes — the bg_task terminal frames and the CLI's
-  // spontaneous wake-up reply would only show up after a reload. While any
-  // bg task is running, or its wake-up reply hasn't landed yet
-  // (``awaitingBackgroundWakeup``), slow-poll the persisted events into the
-  // same ``events`` array the transcript renders from. The watcher yields to
-  // an active turn (``isBusy`` — that subscription covers the stream) and
-  // stops on its own: when the wake-up turn's ``session.idle`` lands, or
-  // after a ~60s quiet tail with nothing running (a synthetic ``stopped``
-  // terminal from a closed runtime has no wake-up turn behind it).
-  useEffect(() => {
-    if (!selectedSessionId || isBusy || !bgWatchActive) return;
-    const sessionId = selectedSessionId;
-    let cancelled = false;
-    let inFlight = false;
-    let quietTailTicks = 0;
-    const timer = window.setInterval(() => {
-      if (cancelled || inFlight) return;
-      if (selectedSessionIdRef.current !== sessionId) return;
-      if (runningBgCountRef.current === 0) {
-        quietTailTicks += 1;
-        if (quietTailTicks > 20) {
-          window.clearInterval(timer);
-          return;
-        }
-      } else {
-        quietTailTicks = 0;
-      }
-      inFlight = true;
-      sessionsApi
-        .listEvents(sessionId, historyCursorRef.current)
-        .then((response) => {
-          if (cancelled || selectedSessionIdRef.current !== sessionId) return;
-          if (response.items.length === 0) return;
-          quietTailTicks = 0;
-          // ``listEvents`` items are HISTORY-space — safe to advance the
-          // history cursor from them.
-          for (const event of response.items) {
-            if (event.seq > 0) {
-              historyCursorRef.current = Math.max(
-                historyCursorRef.current,
-                event.seq,
-              );
-            }
-          }
-          // uid-first dedup: an event may already be present via the live
-          // stream under a DIFFERENT (kernel-local) seq.
-          setEvents((prev) => appendUniqueEvents(prev, response.items));
-        })
-        .catch(() => {})
-        .finally(() => {
-          inFlight = false;
-        });
-    }, 3000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [selectedSessionId, isBusy, bgWatchActive]);
+  // No idle-time bg-task poll anymore: the session-lifetime stream stays open
+  // between turns (the server generator drains bus events between turns too),
+  // so bg_task terminal frames and the CLI's spontaneous wake-up turn arrive
+  // live on the same connection that carried the launching turn.
 
   // VALUZ-CHATPLAN — track the LATEST ``plan_task`` / ``modify_plan`` tool
   // result per task_id. That position in the conversation gets the rich
@@ -2160,15 +2085,16 @@ export const ConversationPage = () => {
     };
 
     void tick();
-    // Poll faster while sending (agent actively writing), slower once
-    // the turn is done.
-    const intervalMs = sending ? 1500 : 5000;
+    // Poll faster while a turn is active (agent actively writing), slower
+    // once the turn is done. Derived ``isBusy``, not the raw pending flag —
+    // the flag only bridges the click → turn-start window now.
+    const intervalMs = isBusy ? 1500 : 5000;
     const interval = window.setInterval(() => void tick(), intervalMs);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [selectedSessionId, turns, sending]);
+  }, [selectedSessionId, turns, isBusy]);
 
   // Mark an AskUserQuestion card as *foldable* so it collapses away with the
   // process trail once the turn ends — but ONLY after it's been answered. An
@@ -2841,12 +2767,10 @@ export const ConversationPage = () => {
 
   // Settles when the CURRENT history-window load has finished (success or
   // failure). ``refreshEvents`` resets the seq cursors synchronously and only
-  // hydrates them (and ``events``) when its fetch lands — any subscription
-  // opened in that gap would capture ``afterSeq = 0`` and make the SSE replay
-  // the session's whole history, including a PRIOR turn's ``session.idle``,
-  // which the resume path (``sawTurnStart`` true from birth) misreads as "this
-  // turn ended": sending flips false mid-run, the elapsed timer freezes, and
-  // the Stop button reverts while the header still says running.
+  // hydrates them (and ``events``) when its fetch lands — a stream opened in
+  // that gap would capture ``afterSeq = 0`` and make the SSE replay the
+  // session's whole history over the wire (pure waste; the uid dedup would
+  // absorb it, but the transfer + churn are avoidable).
   // ``subscribeToSession`` awaits this before opening the stream.
   const historyHydrationRef = useRef<Promise<void>>(Promise.resolve());
 
@@ -3629,6 +3553,14 @@ export const ConversationPage = () => {
     ],
   );
 
+  // SESSION-LIFETIME data-plane stream (docs/design/session-stream-lifetime.md).
+  // One call per opened session: the stream stays up across every turn — the
+  // server generator never closes at turn end and the kernel bus survives
+  // turns, so drained queue items, scheduled turns, bg-task wake-ups and
+  // other-client turns all arrive on this one connection with no per-turn
+  // re-subscription. Terminal frames are ordinary events (they update status
+  // and bookkeeping; they do NOT tear the stream down). The stream ends only
+  // when superseded by the next session's open, or on unmount.
   const subscribeToSession = useCallback(
     (
       sessionId: string,
@@ -3637,44 +3569,15 @@ export const ConversationPage = () => {
       // on the stream carry kernel-LOCAL seqs and must never be compared to
       // (or folded into) this value.
       afterSeq: number,
-      opts: {
-        requireUserBeforeTerminal?: boolean;
-        /**
-         * Set by the unexpected-close reconnect path: ``reconcileStreamEnd``
-         * has JUST gap-filled from the DB, so the resume-reconcile burst would
-         * only duplicate those reads. Without this, a flaky stream (e.g. a
-         * local proxy cutting long-lived SSE) re-fires the 3-shot window burst
-         * on every reconnect — which reads as ``events/window`` polling.
-         */
-        skipReconcileBurst?: boolean;
-      } = {},
     ) => {
       if (abortRef.current) {
         abortRef.current.abort();
       }
       const abort = new AbortController();
-      let sawTurnStart = !opts.requireUserBeforeTerminal;
-      let stopped = false;
-      // Bounded resume-reconcile burst (see below the appendEvent def). Tracked
-      // here so ``stopSubscription`` / the stream ``finally`` can cancel any
-      // still-pending shots when this subscription ends or is superseded.
+      // Bounded open-reconcile burst (see below the appendEvent def), cancelled
+      // once the stream settles or the subscription is superseded.
       const reconcileBurstTimers: number[] = [];
       abortRef.current = abort;
-      setSending(true);
-
-      const stopSubscription = () => {
-        if (stopped) return;
-        stopped = true;
-        reconcileBurstTimers.forEach((t) => window.clearTimeout(t));
-        void refreshActiveSession(sessionId);
-        // Sidebar refetch is per-QUEUE, not per-turn: while more drained items
-        // are about to run, refetching (and reordering) the sidebar at every
-        // sub-second boundary reads as flicker. The final boundary (queue
-        // quiet) still lands it, and the drain-quiet effect below covers the
-        // case where the ref was still true at the last item's terminal frame.
-        if (!queueContinuesRef.current) void fetchSidebarSessions();
-        abort.abort();
-      };
 
       const appendEvent = (event: SessionEventDTO) => {
         // Drop deliveries that outlive this subscription. A session switch
@@ -3686,20 +3589,29 @@ export const ConversationPage = () => {
         // this check). The ref check also covers the abort effect's commit
         // lag: ``selectedSessionIdRef`` flips synchronously in bootstrap,
         // before the abort lands.
-        if (stopped || abort.signal.aborted) return;
+        if (abort.signal.aborted) return;
         if (selectedSessionIdRef.current !== sessionId) return;
-        // Replay detection for the turn-lifecycle gates below. The send path
-        // subscribes with a cursor that only REST reads advance, so after a
-        // live-streamed turn the server legitimately replays frames this
-        // transcript already consumed. Those replays must stay render-inert
-        // AND gate-inert: an old ``message.user`` must not flip
-        // ``sawTurnStart``, an old ``session.idle`` must not stop the fresh
-        // stream (that combination blanked every follow-up turn until a
-        // reload). Uid-less legacy frames keep the pre-uid behavior.
+        // Replay detection for the terminal gates below. Reconnect gap-fills
+        // and the server's initial drain can legitimately redeliver frames
+        // this transcript already consumed; replays must stay render-inert
+        // AND gate-inert (a replayed terminal frame must not re-run turn-end
+        // handling). Uid-less legacy frames keep the pre-uid behavior. The
+        // set is bounded: a session-lifetime page accumulates uids for its
+        // whole stay, so shed the oldest half at the cap.
         const frameUid = event.event_uid ?? null;
         const isReplayOfSeen =
           frameUid != null && seenEventUidsRef.current.has(frameUid);
-        if (frameUid != null) seenEventUidsRef.current.add(frameUid);
+        if (frameUid != null) {
+          const seen = seenEventUidsRef.current;
+          if (seen.size >= 8192) {
+            let shed = 0;
+            for (const uid of seen) {
+              seen.delete(uid);
+              if (++shed >= 4096) break;
+            }
+          }
+          seen.add(frameUid);
+        }
         // Deliberately NO history-cursor advancement here: SSE frames mix
         // server-side backfill (history seq) with live frames (kernel-LOCAL
         // seq) and the two are indistinguishable on the wire — feeding a
@@ -3913,56 +3825,33 @@ export const ConversationPage = () => {
             }, 2000);
           }
         }
-        // Terminal turn signals — close the SSE stream so ``sending``
-        // releases (loading dots disappear). The backend SSE generator
-        // loops forever, so without an explicit abort here the
-        // connection hangs until the user navigates away, leaving the
-        // UI stuck in "agent running" state long after the turn
-        // finished.
+        // Turn lifecycle on a SESSION-LIFETIME stream: terminal frames are
+        // ordinary events. They update status/bookkeeping below but never
+        // close the stream — the next turn (queue drain, schedule, another
+        // client, a follow-up send) arrives on this same connection.
         const evType = event.event.event_type;
-        // Mark the turn as started once a ``message.user`` frame arrives on
-        // THIS subscription. Every frame the server delivers is already
-        // beyond the ``afterSeq`` HISTORY cursor we subscribed with (the
-        // backfill replays strictly after it) or a live frame of the current
-        // activity, so any user message seen here can only be the one that
-        // opened the turn we're waiting on — while a stale terminal replayed
-        // before it stays correctly ignored by the ``sawTurnStart`` gate.
-        //
-        // We can NOT compare ``event.seq > afterSeq`` anymore: ``afterSeq``
-        // is history-space while a live frame's seq is the kernel's LOCAL
-        // counter — numerically unrelated, so a live echo with a small
-        // kernel seq would fail the comparison, ``sawTurnStart`` would stay
-        // false, the turn's ``session.idle`` would be ignored and
-        // ``sending`` would stick (frozen Stop button). Nor the older
-        // exact-text match (``payload.text === expectedUserText``): the
-        // kernel may rewrite the message before persisting it (session-mode
-        // wrapping "hi" → "/goal hi"), which broke it the same way.
-        // ``!isReplayOfSeen``: with a stale send-path cursor the server
-        // replays PRIOR turns first — their ``message.user`` frames are
-        // already in this transcript and must not stand in for the turn
-        // we're waiting on (they let the matching stale ``session.idle``
-        // close the stream before the new turn's frames arrived).
+        // A non-replayed ``message.user`` means a turn genuinely started —
+        // release the optimistic send-pending flag (its only job is bridging
+        // the click → turn-start window; ``status === "running"`` carries the
+        // busy state from here). Replays (reconnect backfill) stay inert.
         if (evType === "message.user" && !isReplayOfSeen) {
-          sawTurnStart = true;
+          setSending(false);
         }
         const status = event.event.payload.status;
         // Reconcile the authoritative status from the live frame so the derived
         // loading flag + header pill track the turn without waiting for a poll.
-        //
-        // But NOT a terminal status before this turn's own ``message.user`` is
-        // seen (``sawTurnStart`` — false on the send path until then): the
-        // pre-turn session is legitimately still ``idle``, and with an
-        // attachment the backend stays ``idle`` longer (parse-path threading
-        // before the kernel flips to ``running``). Writing that stale ``idle``
-        // here would flip ``isBusy`` false mid-startup — the frozen elapsed
-        // timer / reverted Stop button the user sees on image upload. A live
-        // ``running`` frame still applies (keeps the turn busy); the guard is a
-        // no-op on the resume path (``sawTurnStart`` true from birth).
+        // Non-terminal statuses always apply (the turn-start
+        // ``session.update{running}`` is what flips the pill to 运行中);
+        // a terminal status applies only when it is NOT a replay — a
+        // redelivered old terminal must not clobber a newer running turn.
+        // The send path's stale-pre-turn-``idle`` hazard (image-upload slow
+        // start) is handled by the busy derivation instead: ``sendPending``
+        // overrides a terminal status until the turn's start event or a send
+        // error (see ``deriveTurnActive``).
         if (
           evType === "session.update" &&
           status &&
-          ((sawTurnStart && !isReplayOfSeen) ||
-            !isTerminalSessionStatus(status))
+          (!isTerminalSessionStatus(status) || !isReplayOfSeen)
         ) {
           setSessions((prev) =>
             prev.map((s) =>
@@ -3972,11 +3861,9 @@ export const ConversationPage = () => {
             ),
           );
         }
-        // ``!isReplayOfSeen``: a terminal frame this transcript already
-        // consumed is a stale replay (send-path cursor lag) — honoring it
-        // stopped the stream instantly and blinded the whole follow-up turn.
+        // ``!isReplayOfSeen``: a redelivered terminal frame must not re-run
+        // turn-end handling for a turn that is long over.
         const terminal =
-          sawTurnStart &&
           !isReplayOfSeen &&
           (evType === "session.idle" ||
             evType === "run.failed" ||
@@ -3986,15 +3873,17 @@ export const ConversationPage = () => {
               status !== "running" &&
               status !== "created"));
         if (terminal) {
+          // The turn is over — release any lingering optimistic pending flag
+          // (a send whose turn just finished, or a stale one after an error).
+          setSending(false);
           // Safety net for workflow cards: the turn is over, so any Workflow
           // run is definitively finished (the kernel blocks the turn until the
-          // run completes, then force-emits a terminal snapshot). But that
-          // snapshot is live-only and can lose the race against this terminal
-          // event — which immediately ``stopSubscription()``s the SSE stream
-          // below, so a late terminal frame would never arrive. Coerce any
-          // still-"running" card to ``completed`` here so it can't get stuck
-          // pulsing. A card that already received a terminal status (completed
-          // / killed / failed) is left untouched.
+          // run completes, then force-emits a terminal snapshot). The snapshot
+          // is live-only; if it lost the race against this terminal event, a
+          // still-"running" card would pulse forever. Coerce it to
+          // ``completed``; cards that already received a terminal status are
+          // left untouched. (With the stream no longer closing at terminal, a
+          // late snapshot now also arrives on its own — this is pure backstop.)
           setWorkflowStates((prev) => {
             let changed = false;
             const next = new Map(prev);
@@ -4006,39 +3895,32 @@ export const ConversationPage = () => {
             }
             return changed ? next : prev;
           });
-          stopSubscription();
         }
       };
 
-      // No forever-poll here — the old 500ms ``events?after_seq`` loop is gone
-      // (it spammed ~2 req/s for the WHOLE turn). Ongoing delivery is stream-
-      // driven: live frames via the SSE reader, plus the server-side backfill
-      // inside ``iter_events_sse`` re-emitting any missed persisted events on
-      // THIS stream (~2s); a full stream drop is handled by
-      // ``reconcileStreamEnd`` below; a missed terminal frame is re-delivered by
-      // that same backfill and stops the subscription under the ``sawTurnStart``
-      // guard.
+      // No forever-poll here — ongoing delivery is stream-driven: live frames
+      // via the SSE reader, plus the server-side backfill inside
+      // ``iter_events_sse`` re-emitting any missed persisted events on THIS
+      // stream (~2s); a full stream drop is handled by the unconditional
+      // reconnect below (gap-fill + backoff).
       //
-      // BUT on a RESUME (opening an already-running session), the initial
-      // transcript window (``refreshEvents``) and this subscription race — and
-      // under some interleavings the loaded window lands empty / superseded,
-      // leaving the transcript BLANK until a later event forces a re-render
-      // (the "reload mid-turn shows nothing until you jostle it" bug; the
-      // content IS persisted, just not painted). Close that race determinist
-      // -ally with a BOUNDED, self-terminating reconcile burst: re-fetch the
-      // transcript window a few times over the first ~2.5s and idempotently
-      // merge it via ``appendEvent`` (dedups on seq), forcing the persisted
-      // transcript to paint regardless of which async path won. Bounded — NOT a
-      // per-turn poll — so it converges the load without reviving the spam, and
-      // it doubles as a safety net: any transient blank self-heals within one
-      // burst window instead of waiting for a manual "jostle".
+      // On OPEN (this now runs once per session stay, not per turn) the
+      // initial transcript window (``refreshEvents``) and this subscription
+      // race — under some interleavings the loaded window lands empty /
+      // superseded, leaving the transcript BLANK until a later event forces a
+      // re-render (the "reload mid-turn shows nothing until you jostle it"
+      // bug; the content IS persisted, just not painted). Close that race
+      // deterministically with a BOUNDED, self-terminating reconcile burst:
+      // re-fetch the transcript window a few times over the first ~2.5s and
+      // idempotently merge it, forcing the persisted transcript to paint
+      // regardless of which async path won.
       const reconcileTranscript = () => {
-        if (stopped || abort.signal.aborted) return;
+        if (abort.signal.aborted) return;
         if (selectedSessionIdRef.current !== sessionId) return;
         void sessionsApi
           .listEventsWindow(sessionId, { turnLimit: TURN_PAGE_SIZE })
           .then((resp) => {
-            if (stopped || abort.signal.aborted) return;
+            if (abort.signal.aborted) return;
             if (selectedSessionIdRef.current !== sessionId) return;
             if (resp.items.length === 0) return;
             // Order-safe merge, NOT ``appendEvent`` (tail-append would render
@@ -4054,59 +3936,31 @@ export const ConversationPage = () => {
           })
           .catch(() => {});
       };
-      // Only the RESUME / queue-drain / auto-reconnect subscriptions race the
-      // window load — a fresh user send drives ``events`` optimistically and has
-      // nothing pre-loaded to lose, so it skips the burst. These are exactly the
-      // ``!requireUserBeforeTerminal`` subscriptions (born for an already-running
-      // session).
-      if (!opts.requireUserBeforeTerminal && !opts.skipReconcileBurst) {
-        for (const ms of [400, 1200, 2500]) {
-          reconcileBurstTimers.push(window.setTimeout(reconcileTranscript, ms));
-        }
+      for (const ms of [400, 1200, 2500]) {
+        reconcileBurstTimers.push(window.setTimeout(reconcileTranscript, ms));
       }
 
-      // A live stream can end for reasons other than "turn finished and
-      // fully delivered" — a proxy cutting the localhost connection, a
-      // server-side hiccup, a dropped socket. Treating every close as
-      // completion silently loses the rest of the turn (verified
-      // incident: the kernel finished its reply in 8s, but the stream
-      // died right after the first ``thinking`` frame — the transcript
-      // froze with no error, no spinner, and no retry, because nothing
-      // ever fetched the remaining events). On an unexpected close:
-      //   1. gap-fill whatever the stream missed from the DB;
-      //   2. if the turn is still live (status running/created),
-      //      re-subscribe from the advanced cursor with exponential
-      //      backoff — for as long as the authoritative status stays
-      //      live. There is deliberately NO give-up cap: capping at N
-      //      attempts turned a flaky stream into a silent fake
-      //      completion (verified incident: a long quiet tool call kept
-      //      the stream frame-free, five closes exhausted the cap
-      //      mid-turn, and the page showed copy/retry while the kernel
-      //      was still working). The delay is capped at 15s, and each
-      //      cycle's gap-fill keeps delivering content, so the steady
-      //      state degrades to cheap polling — never to a lie.
-      //   3. otherwise run the normal end-of-turn bookkeeping.
-      // A close we initiated ourselves (terminal event seen →
-      // ``stopSubscription``; session switch / unmount / superseding
-      // subscribe / interrupt → ``abort``) is fully handled by its
-      // closer and skips all of this.
-      let reconciled = false;
-      // True from "re-subscribe scheduled" until the timeout fires: the
-      // stream promise has already settled, so ``.finally`` runs during
-      // the backoff gap — without this flag it would release ``sending``
-      // and the footer would flash "turn ended" between attempts.
-      let reconnectPending = false;
-      const reconcileStreamEnd = async () => {
-        // Idempotent: wired to both ``.then`` and ``.catch`` of the
-        // stream promise, so a handler-side rejection can't run it twice.
-        if (reconciled || stopped || abort.signal.aborted) return;
-        reconciled = true;
+      // Connection controller: the server generator never closes on its own,
+      // so ANY stream end that we didn't abort ourselves is abnormal (proxy
+      // cut, server restart, dropped socket). Recover unconditionally:
+      // gap-fill what the stream missed from the DB, then reconnect with
+      // exponential backoff — for as long as this subscription owns the page.
+      // There is deliberately NO give-up cap: capping at N attempts turned a
+      // flaky stream into a silent fake completion (verified incident: a long
+      // quiet tool call kept the stream frame-free, five closes exhausted the
+      // cap mid-turn, and the page showed copy/retry while the kernel was
+      // still working). The delay is capped at 15s, and each cycle's gap-fill
+      // keeps delivering content, so the steady state degrades to cheap
+      // polling — never to a lie. No turn-liveness decision is needed anymore:
+      // an idle session's open stream just sits on server heartbeats.
+      const gapFillAndReconnect = async () => {
+        if (abort.signal.aborted) return;
         try {
           const resp = await sessionsApi.listEvents(
             sessionId,
             historyCursorRef.current,
           );
-          if (stopped || abort.signal.aborted) return;
+          if (abort.signal.aborted) return;
           // ``listEvents`` results are HISTORY-space — advance the history
           // cursor here (``appendEvent`` deliberately never does: it also
           // handles live frames whose kernel-local seq must not leak in).
@@ -4119,7 +3973,7 @@ export const ConversationPage = () => {
             }
           }
           for (const event of resp.items) {
-            // May deliver the turn's terminal event → ``stopSubscription``.
+            // May deliver a missed terminal event → status + bookkeeping.
             appendEvent(event);
           }
           // Content flowed — the server is alive and producing; keep the
@@ -4129,121 +3983,32 @@ export const ConversationPage = () => {
             streamReconnectAttemptsRef.current = 0;
           }
         } catch {
-          // Gap-fill is best-effort — the status check below still
-          // decides between reconnect and shutdown.
+          // Gap-fill is best-effort — the reconnect below retries anyway.
         }
-        if (stopped || abort.signal.aborted) return;
-        let status: string | null = null;
-        try {
-          const detail = await sessionsApi.get(sessionId);
-          if (stopped || abort.signal.aborted) return;
-          status = detail.status;
-          // Push the authoritative status so the derived busy flag and
-          // header pill stay truthful while we decide what to do next — EXCEPT
-          // a terminal status before this turn's own ``message.user`` is seen
-          // (``sawTurnStart``). On the send path a stream that closes before
-          // the turn starts still reads the PRE-turn ``idle``; writing it would
-          // flip ``isBusy`` false during the reconnect backoff and freeze the
-          // elapsed timer (the image-upload symptom). The reconnect below keeps
-          // waiting for the turn to actually start.
-          if (sawTurnStart || !isTerminalSessionStatus(detail.status)) {
-            setSessions((prev) =>
-              prev.map((s) =>
-                s.id === sessionId
-                  ? { ...s, status: detail.status as SessionListItem["status"] }
-                  : s,
-              ),
-            );
-          }
-        } catch {
-          // Unknown status — treat like a live turn and let the capped
-          // reconnect path retry (a transient GET failure shouldn't
-          // strand a streaming turn).
-        }
-        if (stopped || abort.signal.aborted) return;
-        // ``!sawTurnStart``: on the send path (``requireUserBeforeTerminal``) we
-        // have NOT yet seen this turn's own ``message.user``, so a non-live
-        // status here is the stale PRE-turn state — not proof the turn ended.
-        // Treating a pre-turn ``idle`` as terminal is exactly what froze the
-        // elapsed timer on image upload (the attachment turn takes longer to
-        // flip ``idle → running``, so a stream close in that window read
-        // ``idle`` and falsely completed). Reconnect and keep waiting for the
-        // turn to start instead. Symmetric with the ``sawTurnStart``-gated
-        // terminal check in ``appendEvent``; a no-op on resume (true from birth).
-        if (
-          status === null ||
-          status === "running" ||
-          status === "created" ||
-          !sawTurnStart
-        ) {
-          const attempt = streamReconnectAttemptsRef.current;
-          streamReconnectAttemptsRef.current = attempt + 1;
-          const delay = Math.min(1000 * 2 ** Math.min(attempt, 4), 15000);
-          // Diagnosability: unexpected closes are invisible otherwise —
-          // the last verified incident could only be reconstructed from
-          // the DB. One line per close, throttle-free (≤1 per delay).
-          console.warn(
-            `[Conversation] events stream closed unexpectedly (attempt ${attempt + 1}, status=${status ?? "unknown"}) — reconnecting in ${delay}ms`,
-          );
-          reconnectPending = true;
-          window.setTimeout(() => {
-            reconnectPending = false;
-            if (stopped || abort.signal.aborted) return;
-            // A newer subscription (fresh send / session switch) owns
-            // the page now — it covers this turn's tail itself.
-            if (abortRef.current) return;
-            if (isSendInFlightRef.current) return;
-            if (selectedSessionIdRef.current !== sessionId) return;
-            subscribeToSession(
-              sessionId,
-              historyCursorRef.current,
-              sawTurnStart
-                ? { skipReconcileBurst: true }
-                : { ...opts, skipReconcileBurst: true },
-            );
-          }, delay);
-          return;
-        }
-        // Terminal status: the turn is genuinely over — run the normal
-        // end-of-turn bookkeeping (session row + sidebar refresh).
-        stopSubscription();
+        if (abort.signal.aborted) return;
+        const attempt = streamReconnectAttemptsRef.current;
+        streamReconnectAttemptsRef.current = attempt + 1;
+        const delay = Math.min(1000 * 2 ** Math.min(attempt, 4), 15000);
+        // Diagnosability: unexpected closes are invisible otherwise — the
+        // last verified incident could only be reconstructed from the DB.
+        console.warn(
+          `[Conversation] events stream closed unexpectedly (attempt ${attempt + 1}) — reconnecting in ${delay}ms`,
+        );
+        window.setTimeout(() => {
+          if (abort.signal.aborted) return;
+          if (selectedSessionIdRef.current !== sessionId) return;
+          connect();
+        }, delay);
       };
-      // Never let a reconcile rejection escape past ``.finally`` as an
-      // unhandled promise rejection — every recoverable branch inside is
-      // already try/caught; this is the belt-and-braces wrapper.
-      const safeReconcileStreamEnd = () => reconcileStreamEnd().catch(() => {});
+      // Never let the recovery chain escape as an unhandled rejection —
+      // every recoverable branch inside is already try/caught.
+      const safeRecover = () => gapFillAndReconnect().catch(() => {});
 
-      // Gate the stream open on the history-window hydration. A resume-class
-      // caller samples ``historyCursorRef`` at call time — but ``refreshEvents``
-      // resets that cursor synchronously and only hydrates it when its fetch
-      // lands, so an ungated open could start at ``afterSeq = 0`` and replay
-      // the whole session, tripping the terminal check on a PRIOR turn's
-      // ``session.idle`` (resume subs have ``sawTurnStart`` true from birth):
-      // sending flipped false mid-run — frozen elapsed timer, Stop button
-      // reverted, header pill still "running". Await hydration, then re-sample
-      // the cursor. Time-capped so a hung history fetch degrades to the old
-      // ungated behavior instead of never opening the stream. The send path
-      // (``requireUserBeforeTerminal``) keeps its caller-supplied cursor: its
-      // turn-start detection needs the SSE to replay its own ``message.user``
-      // frame, which a bump past that message's history seq could skip.
-      const openLiveStream = () => {
-        if (stopped || abort.signal.aborted) {
-          // Mirror the chain's ``finally`` for a subscription that dies while
-          // gate-waiting (superseded send / session switch): drop any pending
-          // burst shots and release the loading flag if we still own it.
-          reconcileBurstTimers.forEach((t) => window.clearTimeout(t));
-          if (abortRef.current === abort) {
-            abortRef.current = null;
-            setSending(false);
-          }
-          return;
-        }
-        if (
-          !opts.requireUserBeforeTerminal &&
-          historyCursorRef.current > afterSeq
-        ) {
-          afterSeq = historyCursorRef.current;
-        }
+      const connect = () => {
+        if (abort.signal.aborted) return;
+        // Re-sample the cursor on every (re)connect so the server's initial
+        // drain replays as little as possible; the uid dedup absorbs overlap.
+        const startSeq = Math.max(afterSeq, historyCursorRef.current);
         sessionsApi
           .subscribeEvents(
             sessionId,
@@ -4253,42 +4018,30 @@ export const ConversationPage = () => {
               streamReconnectAttemptsRef.current = 0;
               appendEvent(event);
             },
-            afterSeq,
+            startSeq,
             abort.signal,
           )
-          .then(safeReconcileStreamEnd)
-          .catch(safeReconcileStreamEnd)
-          .finally(() => {
-            // The resume-reconcile burst only needs the subscription's opening
-            // window; cancel any shots still pending once the stream settles.
-            reconcileBurstTimers.forEach((t) => window.clearTimeout(t));
-            // Only the CURRENT subscription may release the loading flag. A
-            // superseded one (a hung stream aborted by the next send's
-            // ``subscribeToSession``) finalises late — an unconditional
-            // ``setSending(false)`` here would clobber the new turn's flag.
-            // Paths that abort AND clear ``abortRef`` themselves (interrupt,
-            // session switch) also reset ``sending`` themselves.
-            if (abortRef.current === abort) {
-              // ``abortRef`` must clear either way — the scheduled reconnect
-              // bails on a non-null ref (it reads it as "a newer subscription
-              // owns the page").
-              abortRef.current = null;
-              // With a reconnect pending the turn is still live (status said
-              // running) — keep ``sending`` so the footer doesn't flash
-              // "turn ended" during every backoff gap. The re-subscribe (or
-              // whichever owner preempts it) takes over the flag from here.
-              if (!reconnectPending) {
-                setSending(false);
-              }
-            }
-          });
+          .then(safeRecover)
+          .catch(safeRecover);
       };
+
+      // Gate the FIRST open on the history-window hydration: ``refreshEvents``
+      // resets the cursor synchronously and only hydrates it when its fetch
+      // lands, so an ungated open could start at ``afterSeq = 0`` and replay
+      // the whole session over SSE. Time-capped so a hung history fetch
+      // degrades to an ungated open instead of never opening the stream.
       void Promise.race([
         historyHydrationRef.current,
         new Promise<void>((resolve) => window.setTimeout(resolve, 3000)),
-      ]).then(openLiveStream);
+      ]).then(() => {
+        if (abort.signal.aborted) {
+          reconcileBurstTimers.forEach((t) => window.clearTimeout(t));
+          return;
+        }
+        connect();
+      });
     },
-    [fetchSidebarSessions, refreshActiveSession],
+    [],
   );
 
   const handleOpenKbPicker = useCallback(() => {
@@ -4458,13 +4211,11 @@ export const ConversationPage = () => {
       // Prompt text is sent verbatim — no attachment hint appended.
       const outboundText = text;
 
-      // ``requireUserBeforeTerminal``: don't honor a terminal event until this
-      // turn's own ``message.user`` (seq > the cursor captured here) has been
-      // seen, so a stale replayed ``session.idle`` can't close the stream
-      // before the turn even starts.
-      subscribeToSession(session.id, historyCursorRef.current, {
-        requireUserBeforeTerminal: true,
-      });
+      // No subscription here: the session-lifetime stream (opened by the
+      // session-open effect, including right after the ``/conversation/new``
+      // promotion above) carries this turn's events. ``sending`` bridges the
+      // click → turn-start window; the turn's ``message.user`` echo on the
+      // stream releases it.
 
       const detail = await sessionsApi.sendMessage(
         session.id,
@@ -4549,21 +4300,17 @@ export const ConversationPage = () => {
       setError(msg);
       toast.error(msg);
       setSending(false);
-      if (abortRef.current) {
-        abortRef.current.abort();
-        abortRef.current = null;
-      }
       pinNextTurnToTopRef.current = false;
       keepCurrentTurnAtTopRef.current = false;
       // Optimistic turn never got a real ``message.user`` echo because
       // the send failed — drop it so the user can retry without a
-      // phantom card lingering.
+      // phantom card lingering. The session-lifetime stream stays up.
       setPendingUserMessage(null);
+      // The optimistic ``running`` status write above must be reconciled:
+      // under the derived busy (``sendPending || status === "running"``) a
+      // stale optimistic ``running`` would pin the loading state forever.
+      if (selectedSessionId) void refreshActiveSession(selectedSessionId);
     } finally {
-      // ``subscribeToSession`` (success path) has already set abortRef, so
-      // the auto-resume effect's ``!abortRef.current`` guard is now active
-      // and the flag can be released. On the error path we abort the send
-      // outright, so likewise safe to clear.
       isSendInFlightRef.current = false;
     }
   };
@@ -4647,8 +4394,7 @@ export const ConversationPage = () => {
     try {
       const list = await queueApi.resume(selectedSessionId);
       applyQueueList(list, ticket);
-      // The drain-follower effect picks up from here (status → running →
-      // re-subscribe), the same path as a drain after a normal turn.
+      // The resumed drain's turns stream in on the session-lifetime stream.
     } catch (cause) {
       toast.error(cause instanceof Error ? cause.message : "Resume failed.");
     }
@@ -4659,8 +4405,7 @@ export const ConversationPage = () => {
     const ticket = ++queueListTicketRef.current;
     try {
       // Send-now: the backend silently interrupts the active turn and drains
-      // this item. The drain-follower effect re-subscribes (status → running)
-      // so the steered turn streams live, same path as a normal drain.
+      // this item. The steered turn streams in on the session-lifetime stream.
       const list = await queueApi.steer(selectedSessionId, queueId);
       applyQueueList(list, ticket);
     } catch (cause) {
@@ -4681,118 +4426,11 @@ export const ConversationPage = () => {
     void refreshQueue();
   }, [refreshQueue]);
 
-  // Stream queued items as they drain. Each queued item runs as its OWN kernel
-  // turn after the previous one idles (which tears down that turn's SSE), so
-  // while a drain is in flight or items remain (and nothing is streaming), we
-  // re-subscribe when the next drained turn starts. That start now arrives as a
-  // pushed ``run.started`` / ``run.status(running)`` frame on the always-on
-  // control-plane stream (the same signal the created→running bridge uses) —
-  // no 500ms status poll. ``subscribeToSession`` replays every event after
-  // ``historyCursorRef`` from the DB and then streams live (the same proven path as
-  // reopen / mid-turn reconnect), so it also renders a turn that already
-  // finished. We subscribe when the session is ``running`` OR when the DB
-  // already has events past ``historyCursorRef`` — the latter catches a turn that
-  // finished before we attached (fast turns / steer-interrupted turns); the
-  // replay renders it and self-terminates on the replayed ``session.idle``. We
-  // must NOT subscribe on a quiet idle with nothing new (a bare subscribe hangs
-  // the SSE open — fine between items, but after the LAST item it would never
-  // release ``sending``), which is why the stream only fires on a running
-  // transition and the level check gates on events-past-cursor. ``queueDraining``
-  // (a dispatched item is invisible in ``queue``) keeps this armed until the
-  // last item finishes; then the effect goes quiet (§14.5). Subscribing flips
-  // ``sending`` → this effect re-runs and its guard parks it until that turn
-  // idles, exactly as the poll's ``sending`` guard did.
-  useEffect(() => {
-    if (!selectedSessionId || sending || queuePaused) return;
-    if (!queueDraining && !queue.some((i) => i.status === "queued")) return;
-    const sid = selectedSessionId;
-    let cancelled = false;
-    let subscribed = false;
-    const resubscribe = () => {
-      if (
-        cancelled ||
-        subscribed ||
-        abortRef.current ||
-        isSendInFlightRef.current
-      ) {
-        return;
-      }
-      subscribed = true;
-      subscribeToSession(sid, historyCursorRef.current);
-    };
-
-    // Level check on arm: the drain can outrace the stream subscription
-    // below, so the next turn may already be ``running`` — or already have
-    // finished with events past our cursor — by the time this effect runs. The
-    // stream only carries transitions AFTER we attach, so this catches an
-    // in-flight / just-finished turn the stream would miss.
-    const checkNow = async () => {
-      if (cancelled || abortRef.current || isSendInFlightRef.current) return;
-      try {
-        const detail = await sessionsApi.get(sid);
-        if (cancelled || abortRef.current || isSendInFlightRef.current) return;
-        if (detail.status === "running") {
-          resubscribe();
-          return;
-        }
-        const resp = await sessionsApi.listEvents(
-          sid,
-          historyCursorRef.current,
-        );
-        if (cancelled || abortRef.current || isSendInFlightRef.current) return;
-        if (resp.items.length > 0) resubscribe();
-      } catch {
-        // best-effort — the control stream still catches the next transition.
-      }
-    };
-
-    // Edge trigger: each subsequent drained turn arrives as a pushed
-    // ``run.started`` / ``run.status(running)`` frame for this session. As with
-    // the P1 bridge, control frames ONLY trigger a subscribe — they never write
-    // status directly (the data-plane sub owns that under its ``sawTurnStart``
-    // guard).
-    const unsub = subscribeUserStream((frame) => {
-      if (cancelled || abortRef.current || isSendInFlightRef.current) return;
-      if (frame.sessionId !== sid) return;
-      const status = frame.payload.status;
-      if (
-        frame.eventType === "run.started" ||
-        (frame.eventType === "run.status" && status === "running")
-      ) {
-        resubscribe();
-      }
-    });
-
-    // Probe with a short retry while a drain is IN FLIGHT: the one-shot probe
-    // could land in the sub-second gap between two drained turns (session
-    // still idle, no new events yet) and — if the pushed ``run.started`` frame
-    // was also missed (registration race on the shared control stream) —
-    // nothing ever re-probed, so the drained turn ran invisibly until reload.
-    // Bounded by the drain itself: ``queueDraining`` false (or a successful
-    // subscribe / a newer arm of this effect) stops the loop, so a quiet
-    // queue never turns this into a standing poll.
-    let retryTimer: number | null = null;
-    const probe = async () => {
-      await checkNow();
-      if (cancelled || subscribed || abortRef.current) return;
-      if (!queueDraining) return;
-      retryTimer = window.setTimeout(() => void probe(), 2000);
-    };
-    void probe();
-
-    return () => {
-      cancelled = true;
-      if (retryTimer !== null) window.clearTimeout(retryTimer);
-      unsub();
-    };
-  }, [
-    selectedSessionId,
-    sending,
-    queuePaused,
-    queueDraining,
-    queue,
-    subscribeToSession,
-  ]);
+  // NO drain-follower here anymore: drained queue turns arrive on the
+  // session-lifetime stream like any other turn (the whole
+  // resubscribe/checkNow/control-frame-trigger machinery this effect used to
+  // carry existed only because the stream was torn down at every turn end —
+  // see docs/design/session-stream-lifetime.md).
 
   // Refetch on a turn boundary (busy → idle): drained items drop and any
   // blocked / paused state surfaces (session-input-queue §8.4). Keyed on the
@@ -4805,7 +4443,22 @@ export const ConversationPage = () => {
     prevQueueBusyRef.current = isBusy;
   }, [isBusy, refreshQueue]);
 
-  // Keep ``queueContinuesRef`` (read by ``stopSubscription``) in step with the
+  // Turn-end bookkeeping, formerly smuggled into the per-turn stream teardown
+  // (``stopSubscription``): reconcile the authoritative session row, and
+  // refresh the sidebar — per QUEUE, not per turn (while more drained items
+  // are about to run, reordering the sidebar at every sub-second boundary
+  // reads as flicker; the drain-quiet effect below lands the final refresh).
+  const prevTurnBusyRef = useRef(false);
+  useEffect(() => {
+    const sid = selectedSessionId;
+    if (prevTurnBusyRef.current && !isBusy && sid) {
+      void refreshActiveSession(sid);
+      if (!queueContinuesRef.current) void fetchSidebarSessions();
+    }
+    prevTurnBusyRef.current = isBusy;
+  }, [isBusy, selectedSessionId, refreshActiveSession, fetchSidebarSessions]);
+
+  // Keep ``queueContinuesRef`` (read by the turn-end bookkeeping effect) in step with the
   // queue states so the per-boundary sidebar refetch is skipped only while the
   // chain genuinely continues.
   useEffect(() => {
@@ -4871,10 +4524,11 @@ export const ConversationPage = () => {
     const sessionId = selectedSessionId;
     if (!sessionId) return;
     const afterSeq = historyCursorRef.current;
-    if (abortRef.current) {
-      abortRef.current.abort();
-      abortRef.current = null;
-    }
+    // Do NOT tear the session-lifetime stream down: the cancel tail
+    // (partial assistant text, ``session.idle`` with the interrupt stop
+    // reason) arrives on it, and follow-up turns keep streaming. The
+    // explicit gap-fill below just renders the tail without waiting on
+    // stream latency; uid dedup absorbs the overlap.
     try {
       const detail = await sessionsApi.interrupt(sessionId);
       const missed = await sessionsApi
@@ -5541,137 +5195,37 @@ export const ConversationPage = () => {
     selectedSession?.effort,
   ]);
 
-  // Tear down the previous session's in-flight SSE stream on a real
-  // session→session switch.
-  //
-  // Without this, a previous running session's ``AbortController`` stays
-  // in ``abortRef`` after the user switches away, with two consequences:
-  //   1. The old stream keeps emitting ``appendEvent`` into the shared
-  //      ``events`` state, which now displays the NEW session — the old
-  //      session's deltas leak into the new session's transcript.
-  //   2. The auto-resume effect below gates on ``!abortRef.current``;
-  //      with the stale controller still set, the new session never
-  //      starts its own SSE, so neither historical replay (events the
-  //      kernel persisted before we attached) nor live deltas reach
-  //      the UI. Switching to a running session would silently strand.
-  //
-  // We deliberately skip the ``null → sessionId`` transition: ``handleSend``
-  // creates a new session via ``ensureSession`` (which calls
-  // ``setSelectedSessionId``), then synchronously calls
-  // ``subscribeToSession`` for that same id BEFORE React commits the
-  // state change. When the commit lands, ``abortRef.current`` already
-  // belongs to the just-created session — aborting here would kill the
-  // SSE we just opened. Page unmount is still covered by the ``[]``
-  // cleanup further below.
+  // Reset per-session optimistic state on a real session→session switch.
+  // The session-open effect below supersedes the previous stream on its own
+  // (``subscribeToSession`` aborts the prior controller), so the only job
+  // left here is releasing ``sending`` — the new session must not inherit
+  // the previous one's click→turn-start pending flag. The ``null → id``
+  // transition (the ``/conversation/new`` promotion) is skipped: the pending
+  // flag there belongs to the send that minted the session.
   const prevSelectedSessionIdRef = useRef<string | null>(null);
   useEffect(() => {
     const prev = prevSelectedSessionIdRef.current;
     prevSelectedSessionIdRef.current = selectedSessionId;
     if (prev === null || prev === selectedSessionId) return;
-    if (abortRef.current) {
-      abortRef.current.abort();
-      abortRef.current = null;
-    }
-    // Release the loading state so the new session doesn't inherit
-    // the previous session's "agent running" composer disable.
     setSending(false);
   }, [selectedSessionId]);
 
-  // Session-load side effects — refresh the canonical session detail
-  // every time we navigate onto a session id. This used to only hydrate
-  // ``todos`` from ``session.todos`` but is now also load-bearing for
-  // SSE auto-reconnect: the sessions LIST that ``bootstrap`` populates
-  // can be stale by the time React commits (the kernel may have flipped
-  // ``status`` between the list fetch and our render), so we re-fetch
-  // the detail to learn the current status before deciding to resume.
-  //
-  // Three things happen against the freshly-fetched detail:
-  //   1. Hydrate ``todos`` from ``detail.todos`` (the persistent snapshot).
-  //   2. If the agent is still ``running``, open an SSE stream from
-  //      ``historyCursorRef.current`` so the page picks up the rest of the turn
-  //      live. This is the path that makes refresh-mid-turn /
-  //      leave-and-come-back keep streaming.
-  //
-  //      ``created`` is intentionally NOT a live status here: a freshly
-  //      minted session (e.g. ``handleNewChat`` from the home page, or
-  //      the skill-creator entry point) sits at ``created`` until its
-  //      first user message lands. Subscribing in that window would call
-  //      ``setSending(true)`` and leave the page stuck on the loading
-  //      dots forever — there is nothing for the SSE stream to wait on.
-  //      The ``handleSend`` race (send fired, kernel hasn't flipped to
-  //      ``running`` yet) is already blocked by ``isSendInFlightRef``.
+  // SESSION-OPEN effect — the ONE owner of the data-plane stream
+  // (docs/design/session-stream-lifetime.md). Opening a session:
+  //   1. hydrates ``todos`` from the canonical detail (persistent snapshot);
+  //   2. opens the session-lifetime stream. It carries EVERY turn for as long
+  //      as the page stays here — resumed mid-turn sessions, fresh sends,
+  //      drained queue items, scheduled turns, bg-task wake-ups — so the old
+  //      created→running control-plane bridge, the finished-turn reconcile
+  //      and the "subscribe only while running" dance are all gone: an open
+  //      stream on an idle session is harmless (it parks on server
+  //      heartbeats; busy is derived from events + status, not from the
+  //      stream being open).
+  // The stream is superseded by the next session's open (subscribeToSession
+  // aborts the previous controller) and torn down on unmount.
   useEffect(() => {
     if (!selectedSessionId) return;
     let cancelled = false;
-    let unsubStream: (() => void) | null = null;
-
-    // The created→running bridge exists for one race: a session sits in
-    // ``created`` for a hair before the kernel flips it to ``running``
-    // (schedule-driven sessions and the moment between create + first
-    // turn are the practical windows). We used to poll ``GET /sessions/{id}``
-    // every 2s to catch that flip; now we ride the always-on user
-    // control-plane stream (``run.started`` / ``run.status`` / ``run.finished``
-    // for the caller's sessions, each stamped with ``session_id``) and react
-    // to the pushed transition instead of polling. Once the session is in any
-    // terminal state — ``idle`` (turn finished, awaiting user input),
-    // ``failed`` / ``cancelled`` / ``archived`` (will not transition
-    // again without a fresh send) — there is nothing to wait for.
-    const TERMINAL_STATUSES = new Set([
-      "idle",
-      "failed",
-      "cancelled",
-      "archived",
-    ]);
-    const isTerminalStatus = (status: string) => TERMINAL_STATUSES.has(status);
-
-    const stopStream = () => {
-      unsubStream?.();
-      unsubStream = null;
-    };
-
-    const tryResume = (detail: { id: string; status: string }) => {
-      if (cancelled) return false;
-      // Skip when ``handleSend`` is mid-flight: it will subscribe itself
-      // once ``sendMessage`` returns, and a competing subscribe here
-      // would double-deliver ``message.user`` and clobber the live
-      // sending/abortRef state when its older promise finalises.
-      if (
-        detail.status === "running" &&
-        !abortRef.current &&
-        !isSendInFlightRef.current
-      ) {
-        subscribeToSession(detail.id, historyCursorRef.current);
-        return true;
-      }
-      return false;
-    };
-
-    // A turn can start AND finish inside one poll interval — an instant
-    // provider failure, a trivial cached reply. Both terminal exits below
-    // used to give up silently, so a fast turn whose events landed after
-    // the history fetch never rendered (permanently blank transcript
-    // until a manual refresh). Reconcile instead: if the DB has events
-    // past our cursor, open a replay subscribe — it renders them and
-    // self-terminates on the replayed terminal event (the same proven
-    // path as the queue-drain follower). Gated on ``items.length > 0``
-    // so a quiet idle never hangs a bare SSE open.
-    const reconcileFinishedTurn = () => {
-      if (cancelled || abortRef.current || isSendInFlightRef.current) return;
-      const sid = selectedSessionId;
-      void sessionsApi
-        .listEvents(sid, historyCursorRef.current)
-        .then((resp) => {
-          if (cancelled || abortRef.current || isSendInFlightRef.current) {
-            return;
-          }
-          if (selectedSessionIdRef.current !== sid) return;
-          if (resp.items.length > 0) {
-            subscribeToSession(sid, historyCursorRef.current);
-          }
-        })
-        .catch(() => {});
-    };
-
     sessionsApi
       .get(selectedSessionId)
       .then((detail) => {
@@ -5679,68 +5233,14 @@ export const ConversationPage = () => {
         if (detail.todos !== undefined && detail.todos !== null) {
           setTodos(detail.todos);
         }
-        if (tryResume(detail)) return;
-        // The session has already settled — nothing to poll for. Still
-        // run one delayed reconcile: on a promoted new conversation the
-        // history fetch can race the first turn, and an instant-failing
-        // turn may already be terminal here with its events unfetched.
-        // The delay lets ``refreshEvents`` hydrate ``historyCursorRef`` first so
-        // the common case is a cheap empty read.
-        if (isTerminalStatus(detail.status)) {
-          window.setTimeout(reconcileFinishedTurn, 1200);
-          return;
-        }
-
-        // Status race window: a schedule-driven session (or any caller
-        // that creates a session a hair before its first turn flips to
-        // ``running``) may briefly read non-running on the initial GET.
-        // Follow the always-on control-plane stream while the page is open
-        // so we pick up the turn whenever the kernel flips it — push, not
-        // poll. The subscription self-stops when (a) we resume, (b) a
-        // terminal frame lands, (c) ``handleSend`` claims the page via
-        // ``abortRef`` / ``isSendInFlightRef``, or (d) the effect's cleanup
-        // runs (session id change / unmount).
-        //
-        // Discipline: control frames only TRIGGER a subscribe/reconcile —
-        // they NEVER write session status directly (``setSessions``). The
-        // data-plane subscription owns status derivation under its
-        // ``sawTurnStart`` guard, so a stale lifecycle frame can't flip
-        // ``isBusy`` and break the timer / queue / turn-boundary (the
-        // regression that a blind ``setSessions`` on control frames caused).
-        unsubStream = subscribeUserStream((frame) => {
-          if (cancelled) return;
-          if (frame.sessionId !== selectedSessionId) return;
-          // ``handleSend`` has claimed the page — it subscribes itself; a
-          // competing subscribe here would double-deliver ``message.user``.
-          if (abortRef.current || isSendInFlightRef.current) {
-            stopStream();
-            return;
-          }
-          const status = frame.payload.status;
-          const becameRunning =
-            frame.eventType === "run.started" ||
-            (frame.eventType === "run.status" && status === "running");
-          if (becameRunning) {
-            stopStream();
-            subscribeToSession(selectedSessionId, historyCursorRef.current);
-            return;
-          }
-          if (frame.eventType === "run.finished") {
-            // The turn ran to completion before we subscribed (created →
-            // running → idle in one gap) — replay what it produced instead
-            // of abandoning it unrendered. Same path the old poll took.
-            stopStream();
-            reconcileFinishedTurn();
-          }
-        });
       })
       .catch(() => {
         // Non-fatal — refreshEvents already hydrated todos from the
-        // historical event log; we just won't auto-resume.
+        // historical event log.
       });
+    subscribeToSession(selectedSessionId, historyCursorRef.current);
     return () => {
       cancelled = true;
-      stopStream();
     };
   }, [selectedSessionId, subscribeToSession]);
 
@@ -6516,11 +6016,11 @@ export const ConversationPage = () => {
               <QueuedInputsBar
                 queue={queue}
                 // The dispatched head bridges the gap between "left the queue"
-                // and "visible in the transcript": show it only while nothing
-                // is streaming — once the follower re-subscribes (``sending``)
-                // the replayed ``message.user`` renders it in the transcript
-                // and the bubble would just duplicate it.
-                dispatching={sending ? null : queueDispatching}
+                // and "visible in the transcript": show it only while no turn
+                // is active — once the drained turn's ``message.user`` streams
+                // in (``isBusy`` via the running status), the transcript
+                // renders it and the bubble would just duplicate it.
+                dispatching={isBusy ? null : queueDispatching}
                 paused={queuePaused}
                 onEdit={handleEditQueued}
                 onDelete={handleDeleteQueued}
