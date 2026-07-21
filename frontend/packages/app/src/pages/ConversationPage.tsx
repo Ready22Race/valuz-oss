@@ -65,7 +65,7 @@ import {
   SESSION_ACTION_RESOLVED_EVENT,
   SESSION_WORKFLOW_PROGRESS_EVENT,
   type WorkflowState,
-  useComposerProviderChannels,
+  useComposerProviderChannelState,
   useComposerProviders,
   useModelDefaults,
   useRuntimes,
@@ -145,7 +145,10 @@ import {
 import {
   deriveTurnActive,
   isTerminalSessionStatus,
+  shouldRefreshConversationHistory,
+  shouldShowNoModelEmptyState,
 } from "./conversation-loading";
+import { createConversationBootstrapGuard } from "./conversation-bootstrap";
 import { LiveTaskCard } from "../components/LiveTaskCard";
 import { QueuedInputsBar } from "../components/QueuedInputsBar";
 import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
@@ -823,6 +826,7 @@ export const ConversationPage = () => {
   // rows ASC, so a refetch on a long session silently drops the most
   // recent turn — which is exactly what we just streamed).
   const selectedSessionIdRef = useRef<string | null>(null);
+  const bootstrapGuardRef = useRef(createConversationBootstrapGuard());
   useEffect(() => {
     selectedSessionIdRef.current = selectedSessionId;
   }, [selectedSessionId]);
@@ -2577,20 +2581,28 @@ export const ConversationPage = () => {
   // follow the selected project's origin; new temp chats follow the explicit
   // location chip (or the registered default). This keeps the model list on
   // the same backend that will own the session.
-  const sessionExecOrigin = useEntityOrigin(selectedSessionId, "session");
+  // The route id is authoritative during navigation. ``selectedSessionId``
+  // intentionally lags until session detail resolves, so preferring it here
+  // would briefly query the previous conversation's execution target.
+  const providerSessionId = id !== NEW_SESSION_ID ? id : null;
+  const sessionExecOrigin = useEntityOrigin(providerSessionId, "session");
   const selectedProviderProject = projects.find(
     (project) => project.id === selectedProjectId,
   );
   const selectedProjectOrigin = selectedProviderProject
     ? (selectedProviderProject.exec_origin ?? "local")
     : undefined;
-  const providerTargetId = selectedSession
-    ? sessionExecOrigin
-    : (selectedProjectOrigin ?? execTargetId);
+  const providerTargetId =
+    id !== NEW_SESSION_ID
+      ? sessionExecOrigin
+      : (selectedProjectOrigin ?? execTargetId);
   const providerTarget =
     executionTargets.find((target) => target.id === providerTargetId) ??
     getDefaultExecutionTarget();
-  const providers = useComposerProviderChannels(providerTarget?.baseUrl);
+  const providerChannelState = useComposerProviderChannelState(
+    providerTarget?.baseUrl,
+  );
+  const providers = providerChannelState.providers;
 
   const composerProviders = useComposerProviders(
     providers,
@@ -2849,8 +2861,18 @@ export const ConversationPage = () => {
   // the Stop button reverts while the header still says running.
   // ``subscribeToSession`` awaits this before opening the stream.
   const historyHydrationRef = useRef<Promise<void>>(Promise.resolve());
+  // A same-session bootstrap may skip REST history only after that session's
+  // window completed successfully. Keeping selection and hydration separate
+  // makes a failed/blank load retryable without a hard refresh.
+  const historyHydratedSessionIdRef = useRef<string | null>(null);
 
   const refreshEventsInner = useCallback(async (sessionId: string | null) => {
+    if (
+      sessionId === null ||
+      selectedSessionIdRef.current === sessionId
+    ) {
+      historyHydratedSessionIdRef.current = null;
+    }
     // Switching sessions invalidates any optimistic pending message —
     // it belongs to whatever session was active before, not this one.
     setPendingUserMessage(null);
@@ -2974,6 +2996,7 @@ export const ConversationPage = () => {
       setTodos(lastTodos);
       currentClarifyingPendingRef.current = unresolvedClarifyingPending;
       setPendingApprovals(rebuiltApprovals);
+      historyHydratedSessionIdRef.current = sessionId;
     } catch {
       if (selectedSessionIdRef.current !== sessionId) return;
       setEvents([]);
@@ -3131,7 +3154,7 @@ export const ConversationPage = () => {
     [refreshEvents],
   );
 
-  const bootstrap = useCallback(async () => {
+  const bootstrap = useCallback(async (isCurrent: () => boolean) => {
     const routeState = location.state as {
       promotedFromNew?: boolean;
       promotedSessionId?: string;
@@ -3159,6 +3182,7 @@ export const ConversationPage = () => {
     setError(null);
     try {
       const wsResponse = await projectsApi.list();
+      if (!isCurrent()) return;
       setProjects(wsResponse.projects);
 
       // Two URL shapes drive the page:
@@ -3214,6 +3238,7 @@ export const ConversationPage = () => {
       // itself (composer status + optimistic-merge target).
       try {
         const sessionDetail = await sessionsApi.get(id);
+        if (!isCurrent()) return;
         const routePromotedSession =
           routeState?.promotedFromNew === true &&
           routeState.promotedSessionId === sessionDetail.id &&
@@ -3227,8 +3252,6 @@ export const ConversationPage = () => {
           isSendInFlightRef.current &&
           (promotingSessionIdRef.current === sessionDetail.id ||
             routePromotedSession);
-        const wasSameSession =
-          selectedSessionIdRef.current === sessionDetail.id;
         setSessionTriggerMode(sessionDetail.trigger_meta?.mode ?? null);
         setSessionAgentSlug(sessionDetail.agent_slug ?? null);
         setSelectedProjectId(sessionDetail.project_id);
@@ -3238,19 +3261,21 @@ export const ConversationPage = () => {
         if (isPromotedNewSession) {
           promotingSessionIdRef.current = null;
           consumedPromoteSessionIdsRef.current.add(sessionDetail.id);
-          return;
         }
-        // Skip the events refetch when bootstrap re-fires onto the
-        // same session id we're already on — the URL change from
-        // ``/conversation/new`` → ``/conversation/{real-id}`` (issued
-        // by ``ensureSession`` after a fresh send) re-runs bootstrap
-        // while an in-flight SSE subscription is already pushing
-        // events into local state. Refetching here would clobber the
-        // first few streamed deltas with the server's truncated list.
-        if (!wasSameSession) {
+        // Selection alone is not proof that history loaded. Skip only when
+        // this exact session already hydrated successfully, or while the
+        // promoted session's live stream is supplying the first turn.
+        if (
+          shouldRefreshConversationHistory({
+            hydratedSessionId: historyHydratedSessionIdRef.current,
+            sessionId: sessionDetail.id,
+            promotedWithLiveStream: isPromotedNewSession,
+          })
+        ) {
           await refreshEvents(sessionDetail.id);
         }
       } catch {
+        if (!isCurrent()) return;
         // 404 / network — render the page in "no session" state and
         // surface an error banner. Don't fall back to the sentinel
         // because that would silently move the user off the URL they
@@ -3264,19 +3289,28 @@ export const ConversationPage = () => {
         setError("Session not found.");
       }
     } catch (cause) {
+      if (!isCurrent()) return;
       setError(
         cause instanceof Error ? cause.message : "Failed to load project.",
       );
     } finally {
-      if (!isPromoteBootstrap) {
+      if (isCurrent() && !isPromoteBootstrap) {
         setLoading(false);
       }
     }
   }, [id, location.state, refreshEvents, searchParams]);
 
   useEffect(() => {
-    void bootstrap();
-  }, [bootstrap]);
+    const request = bootstrapGuardRef.current.start();
+    // Invalidate stale history/subscription writes as soon as the route effect
+    // starts, rather than waiting for the new session detail request to land.
+    selectedSessionIdRef.current = id === NEW_SESSION_ID ? null : id;
+    void bootstrap(request.isCurrent);
+    return request.cancel;
+  // ``location.key`` changes even when the user clicks the currently-selected
+  // history link again. Re-run bootstrap in that case so a failed/blank
+  // hydration can recover without requiring a hard refresh.
+  }, [bootstrap, id, location.key]);
 
   // Load all skills for composer autocomplete
   useEffect(() => {
@@ -6249,7 +6283,12 @@ export const ConversationPage = () => {
           </div>
         </header>
 
-        {providers.length === 0 && !loading ? (
+        {shouldShowNoModelEmptyState({
+          isNewConversation: id === NEW_SESSION_ID,
+          pageLoading: loading,
+          providerCount: providers.length,
+          providerStatus: providerChannelState.status,
+        }) ? (
           <div className="flex flex-1 items-center justify-center p-8">
             <EmptyState
               icon={<Settings />}

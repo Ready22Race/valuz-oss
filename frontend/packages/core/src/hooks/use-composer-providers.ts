@@ -5,6 +5,13 @@ import { providersApi, type LLMChannel } from "../api/providers-api";
  *  model's ``runtimes`` — not re-derived here. */
 export type RuntimeProvider = "claude_agent" | "codex" | "deepagents";
 
+export type ComposerProviderChannelStatus = "loading" | "ready" | "error";
+
+export interface ComposerProviderChannelState {
+  providers: LLMChannel[];
+  status: ComposerProviderChannelStatus;
+}
+
 /**
  * A provider is "usable" when picking it in the model dropdown could actually
  * run a turn. The frontend can't fully prove this — only the backend knows
@@ -39,11 +46,22 @@ export const providerHasUsableCredentials = (
  * response is ignored if it resolves later, so a slow local request can never
  * overwrite a newer cloud selection (or vice versa).
  */
-export const useComposerProviderChannels = (apiBaseUrl?: string) => {
+export const useComposerProviderChannelState = (
+  apiBaseUrl?: string,
+): ComposerProviderChannelState => {
   const [loaded, setLoaded] = useState<{
     apiBaseUrl: string | undefined;
     providers: LLMChannel[];
-  }>({ apiBaseUrl, providers: [] });
+    status: ComposerProviderChannelStatus;
+  }>({ apiBaseUrl, providers: [], status: "loading" });
+  let current = loaded;
+  if (loaded.apiBaseUrl !== apiBaseUrl) {
+    // Adjust during render so a target switch can never paint the previous
+    // target's catalog as current. React discards this render and immediately
+    // retries with the loading state before committing the UI.
+    current = { apiBaseUrl, providers: [], status: "loading" };
+    setLoaded(current);
+  }
 
   useEffect(() => {
     let active = true;
@@ -61,11 +79,14 @@ export const useComposerProviderChannels = (apiBaseUrl?: string) => {
           setLoaded({
             apiBaseUrl,
             providers: channels.filter((channel) => channel.enabled),
+            status: "ready",
           });
         }
       })
       .catch(() => {
-        if (active) setLoaded({ apiBaseUrl, providers: [] });
+        if (active) {
+          setLoaded({ apiBaseUrl, providers: [], status: "error" });
+        }
       });
 
     return () => {
@@ -73,8 +94,12 @@ export const useComposerProviderChannels = (apiBaseUrl?: string) => {
     };
   }, [apiBaseUrl]);
 
-  return loaded.apiBaseUrl === apiBaseUrl ? loaded.providers : [];
+  return { providers: current.providers, status: current.status };
 };
+
+/** Compatibility wrapper for consumers that only need the current channels. */
+export const useComposerProviderChannels = (apiBaseUrl?: string) =>
+  useComposerProviderChannelState(apiBaseUrl).providers;
 
 /**
  * Transforms enabled ``LLMChannel[]`` (from the gated list —

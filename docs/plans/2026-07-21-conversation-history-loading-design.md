@@ -21,7 +21,9 @@ Guard the conversation bootstrap with a latest-request token. Route changes
 invalidate the previous token before its async work can commit state. Track the
 session whose history completed hydration successfully and skip a same-session
 refresh only when that exact session is already hydrated. Failed hydration is
-therefore retryable without a hard refresh.
+therefore retryable without a hard refresh. Use the route session id as the
+provider-target source while session detail is loading, and treat a repeated
+navigation to the same history URL as an explicit bootstrap retry.
 
 ## Verification
 
