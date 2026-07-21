@@ -2016,3 +2016,196 @@ def test_commit_task_creates_lead_session_with_task_scope(
     assert created["session_id"] == "lead-sess-1"
     scope = created["scope"]
     assert scope is not None and scope.kind == "task" and scope.id == "t1"
+
+
+# ---------------------------------------------------------------------------
+# Event-trace golden — the frontend's stream contract in one test.
+#
+# Drives the full chat-plan lifecycle (draft → plan → commit → dispatch →
+# member-in-review → approve → finish) with the kernel/actor layer stubbed,
+# and pins the EXACT ordered event-type sequence plus the payload fields the
+# frontend reads (agent_name, subtask_key). Any refactor that reorders,
+# drops, renames, or de-stamps an event fails here first.
+# ---------------------------------------------------------------------------
+
+
+def test_task_lifecycle_event_trace_golden(db_factory, tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from valuz_agent.modules.tasks import lifecycle as lc_mod
+    from valuz_agent.modules.tasks import resolution as res_mod
+
+    class _FakeWsDs:
+        def __init__(self, _db):
+            pass
+
+        async def get_by_id(self, _uid, _wid):
+            return SimpleNamespace(id="w1", kind="project", root_path=str(tmp_path), name="W1")
+
+        async def get_context(self, _uid, _wid):
+            return None
+
+    class _FakeMemberDs:
+        def __init__(self, _db):
+            pass
+
+        async def get(self, _uid, _wid, _slug):
+            return SimpleNamespace(agent_slug="lead")
+
+    _next_sid = iter(["lead-sess-1", "member-sess-1"])
+
+    async def _fake_build(**_k):
+        return SimpleNamespace(id=next(_next_sid))
+
+    monkeypatch.setattr(res_mod, "ProjectDatastore", _FakeWsDs)
+    monkeypatch.setattr(res_mod, "ProjectMemberDatastore", _FakeMemberDs)
+    monkeypatch.setattr(
+        res_mod, "fs_registry", SimpleNamespace(project_cwd=lambda *a, **k: tmp_path)
+    )
+    monkeypatch.setattr(res_mod, "_member_agent_config", _as_async(lambda *_a, **_k: None))
+    monkeypatch.setattr(res_mod, "build_member_session", _fake_build)
+    monkeypatch.setattr(res_mod, "_credential_gap", _as_async(lambda *_a, **_k: None))
+    monkeypatch.setattr(res_mod, "_provider_resolver_deps", lambda _db: {})
+    monkeypatch.setattr(
+        res_mod, "resolve_agent_display_name", _as_async(lambda _w, slug, _u: f"Agent {slug}")
+    )
+    # planning resolves display names through its own imports (module-level
+    # ``from ... import``), so stub those bindings too.
+    monkeypatch.setattr(
+        planning, "resolve_agent_display_name", _as_async(lambda _w, slug, _u: f"Agent {slug}")
+    )
+    monkeypatch.setattr(
+        planning,
+        "resolve_agent_display_names",
+        _as_async(lambda _w, slugs, _u: {s: f"Agent {s}" for s in slugs}),
+    )
+    monkeypatch.setattr(
+        lc_mod.kernel_client, "create_session", _as_async(lambda *_a, **_k: None)
+    )
+    monkeypatch.setattr(kernel_client_mod, "get_session", _as_async(lambda *_a, **_k: None))
+    monkeypatch.setattr(kernel_client_mod, "set_mode", _as_async(lambda *_a, **_k: None))
+    monkeypatch.setattr(
+        lc_mod, "project_index", SimpleNamespace(record=_as_async(lambda *_a, **_k: None))
+    )
+    # draft_task needs a project row + task file path via lifecycle namespace too.
+    import valuz_agent.modules.projects.datastore as ws_src
+
+    monkeypatch.setattr(ws_src, "ProjectDatastore", _FakeWsDs)
+    monkeypatch.setattr(lc_mod, "ProjectMemberDatastore", _FakeMemberDs)
+    monkeypatch.setattr(
+        lc_mod,
+        "fs_registry",
+        SimpleNamespace(
+            project_cwd=lambda *a, **k: tmp_path,
+            task_path=lambda cwd, tid, slug: tmp_path / f"{tid}.md",
+        ),
+    )
+
+    from valuz_agent.modules.sessions import project_index as pi_mod
+
+    monkeypatch.setattr(pi_mod, "record", _as_async(lambda *_a, **_k: None))
+
+    async def _run() -> None:
+        orch = TaskOrchestrator()
+        monkeypatch.setattr(orch._actor, "run_actor_loop", _as_async(lambda **_k: None))
+        from valuz_agent.modules.tasks.dispatcher import (
+            kernel_client as disp_kernel,  # shared module object
+        )
+
+        monkeypatch.setattr(disp_kernel, "create_session", _as_async(lambda *_a, **_k: None))
+
+        # 1) draft → 2) plan → 3) commit
+        row = await orch.draft_task(
+            project_id="w1",
+            goal="build the thing",
+            lead_agent_slug="lead",
+            originating_session_id="chat-1",
+            user_id=OWNER,
+        )
+        task_id = row.id
+        await planning.plan_task(
+            task_id=task_id,
+            project_id="w1",
+            user_id=OWNER,
+            lead_session_id="chat-1",
+            subtasks=[{"key": "a", "title": "A", "agent": "worker"}],
+        )
+        res = await orch.commit_task(
+            task_id=task_id, project_id="w1", caller_session_id="chat-1", user_id=OWNER
+        )
+        assert res.get("status") == "active", res
+
+        # 4) dispatch the planned node (async spawn, actor stubbed)
+        res = await orch.dispatch_async(
+            task_id=task_id,
+            project_id="w1",
+            lead_session_id="lead-sess-1",
+            subtask_key="a",
+            user_id=OWNER,
+        )
+        assert res.get("status") == "dispatched", res
+
+        # 5) member reports done → in_review, 6) lead approves
+        await planning.mark_in_review(
+            task_id=task_id,
+            project_id="w1",
+            member_session_id="member-sess-1",
+            user_id=OWNER,
+        )
+        res = await planning.review_subtask(
+            task_id=task_id,
+            project_id="w1",
+            user_id=OWNER,
+            lead_session_id="lead-sess-1",
+            decision="approve",
+            subtask_key="a",
+        )
+        assert res.get("decision") == "approve", res
+
+        # 7) finish
+        res = await orch.finish_task(
+            task_id=task_id,
+            project_id="w1",
+            lead_session_id="lead-sess-1",
+            summary="done",
+            user_id=OWNER,
+        )
+        assert res.get("ok") is True, res
+        await asyncio.sleep(0)  # drain the stubbed actor spawn
+
+    asyncio.run(_run())
+
+    # ---- the golden: exact ordered event-type sequence ----
+    db = db_factory()
+    try:
+        rows = (
+            db.execute(select(TaskEventRow).order_by(TaskEventRow.sequence)).scalars().all()
+        )
+    finally:
+        db.close()
+    assert [e.type for e in rows] == [
+        "task_drafted",
+        "task_planned",
+        "task_plan_update",  # plan_task projects the fresh plan to the panel
+        "committed",
+        "subtask_spawned",
+        "task_plan_update",  # node → in_progress (mark_node_dispatched)
+        "task_plan_update",  # node → in_review (member idle)
+        "subtask_reviewed",
+        "subtask_completed",
+        "task_plan_update",  # node → done (approve unlocks dependents)
+        "task_completed",
+    ], [e.type for e in rows]
+
+    # ---- payload fields the frontend reads ----
+    by_type = {}
+    for e in rows:
+        by_type.setdefault(e.type, e)
+    spawned = by_type["subtask_spawned"].payload
+    assert spawned["subtask_key"] == "a"
+    assert spawned["agent_name"] == "Agent worker"
+    completed_sub = by_type["subtask_completed"].payload
+    assert completed_sub["subtask_key"] == "a"
+    assert "agent_name" in completed_sub
+    finished = by_type["task_completed"].payload
+    assert finished["summary"] == "done" and finished["artifacts"] == []
