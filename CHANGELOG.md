@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Composer catalog extension** — editions can register one generic adapter
+  for model and agent catalog loading while OSS keeps its single-backend
+  module-default behavior.
 - **Automation runtime seam** — deployments can bind an
   `AutomationRuntimePort`, dispatch and execute persisted automation runs
   through stable facades, and initialize the canonical executor in a headless
