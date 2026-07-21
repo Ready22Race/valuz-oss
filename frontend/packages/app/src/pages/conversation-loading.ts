@@ -46,3 +46,32 @@ export const deriveTurnActive = (
   sending: boolean,
   status: string | null | undefined,
 ): boolean => sending && !isTerminalSessionStatus(status);
+
+export type ProviderCatalogStatus = "loading" | "ready" | "error";
+
+export const shouldShowNoModelEmptyState = ({
+  isNewConversation,
+  pageLoading,
+  providerCount,
+  providerStatus,
+}: {
+  isNewConversation: boolean;
+  pageLoading: boolean;
+  providerCount: number;
+  providerStatus: ProviderCatalogStatus;
+}): boolean =>
+  isNewConversation &&
+  !pageLoading &&
+  providerStatus === "ready" &&
+  providerCount === 0;
+
+export const shouldRefreshConversationHistory = ({
+  hydratedSessionId,
+  sessionId,
+  promotedWithLiveStream,
+}: {
+  hydratedSessionId: string | null;
+  sessionId: string;
+  promotedWithLiveStream: boolean;
+}): boolean =>
+  !promotedWithLiveStream && hydratedSessionId !== sessionId;

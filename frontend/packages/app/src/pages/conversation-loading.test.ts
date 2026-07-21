@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { deriveTurnActive, isTerminalSessionStatus } from "./conversation-loading";
+import {
+  deriveTurnActive,
+  isTerminalSessionStatus,
+  shouldRefreshConversationHistory,
+  shouldShowNoModelEmptyState,
+} from "./conversation-loading";
 
 describe("deriveTurnActive", () => {
   it("is not loading when nothing was sent", () => {
@@ -45,5 +50,72 @@ describe("isTerminalSessionStatus", () => {
     for (const s of ["idle", "failed", "cancelled", "archived", "terminated"]) {
       expect(isTerminalSessionStatus(s)).toBe(true);
     }
+  });
+});
+
+describe("shouldShowNoModelEmptyState", () => {
+  it("only shows after a new conversation receives a successful empty catalog", () => {
+    expect(
+      shouldShowNoModelEmptyState({
+        isNewConversation: true,
+        pageLoading: false,
+        providerCount: 0,
+        providerStatus: "ready",
+      }),
+    ).toBe(true);
+  });
+
+  it.each(["loading", "error"] as const)(
+    "does not mistake provider status %s for an empty configuration",
+    (providerStatus) => {
+      expect(
+        shouldShowNoModelEmptyState({
+          isNewConversation: true,
+          pageLoading: false,
+          providerCount: 0,
+          providerStatus,
+        }),
+      ).toBe(false);
+    },
+  );
+
+  it("never replaces an existing conversation transcript", () => {
+    expect(
+      shouldShowNoModelEmptyState({
+        isNewConversation: false,
+        pageLoading: false,
+        providerCount: 0,
+        providerStatus: "ready",
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("shouldRefreshConversationHistory", () => {
+  it("retries the same session when its previous hydration did not succeed", () => {
+    expect(
+      shouldRefreshConversationHistory({
+        hydratedSessionId: null,
+        sessionId: "session-1",
+        promotedWithLiveStream: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("skips an already hydrated session and a live promotion", () => {
+    expect(
+      shouldRefreshConversationHistory({
+        hydratedSessionId: "session-1",
+        sessionId: "session-1",
+        promotedWithLiveStream: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldRefreshConversationHistory({
+        hydratedSessionId: null,
+        sessionId: "session-1",
+        promotedWithLiveStream: true,
+      }),
+    ).toBe(false);
   });
 });

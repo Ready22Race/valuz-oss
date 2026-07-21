@@ -6,6 +6,13 @@ import { getComposerCatalogAdapter } from "../edition/composer-catalog";
  *  model's ``runtimes`` — not re-derived here. */
 export type RuntimeProvider = "claude_agent" | "codex" | "deepagents";
 
+export type ComposerProviderChannelStatus = "loading" | "ready" | "error";
+
+export interface ComposerProviderChannelState {
+  providers: LLMChannel[];
+  status: ComposerProviderChannelStatus;
+}
+
 /**
  * A provider is "usable" when picking it in the model dropdown could actually
  * run a turn. The frontend can't fully prove this — only the backend knows
@@ -39,13 +46,24 @@ export const providerHasUsableCredentials = (
  * is ignored if it resolves later, so a slower old-scope request can never
  * overwrite the active scope.
  */
-export const useComposerProviderChannels = (targetId?: string | null) => {
+export const useComposerProviderChannelState = (
+  targetId?: string | null,
+): ComposerProviderChannelState => {
   const adapter = getComposerCatalogAdapter();
   const scopeKey = adapter.getScopeKey({ targetId });
   const [loaded, setLoaded] = useState<{
     scopeKey: string;
     providers: LLMChannel[];
-  }>({ scopeKey, providers: [] });
+    status: ComposerProviderChannelStatus;
+  }>({ scopeKey, providers: [], status: "loading" });
+  let current = loaded;
+  if (loaded.scopeKey !== scopeKey) {
+    // Adjust during render so a scope switch can never paint the previous
+    // scope's catalog as current. React discards this render and immediately
+    // retries with the loading state before committing the UI.
+    current = { scopeKey, providers: [], status: "loading" };
+    setLoaded(current);
+  }
 
   useEffect(() => {
     let active = true;
@@ -57,11 +75,14 @@ export const useComposerProviderChannels = (targetId?: string | null) => {
           setLoaded({
             scopeKey,
             providers: channels.filter((channel) => channel.enabled),
+            status: "ready",
           });
         }
       })
       .catch(() => {
-        if (active) setLoaded({ scopeKey, providers: [] });
+        if (active) {
+          setLoaded({ scopeKey, providers: [], status: "error" });
+        }
       });
 
     return () => {
@@ -69,8 +90,12 @@ export const useComposerProviderChannels = (targetId?: string | null) => {
     };
   }, [adapter, scopeKey, targetId]);
 
-  return loaded.scopeKey === scopeKey ? loaded.providers : [];
+  return { providers: current.providers, status: current.status };
 };
+
+/** Compatibility wrapper for consumers that only need the current channels. */
+export const useComposerProviderChannels = (targetId?: string | null) =>
+  useComposerProviderChannelState(targetId).providers;
 
 /**
  * Transforms enabled ``LLMChannel[]`` (from the gated list —

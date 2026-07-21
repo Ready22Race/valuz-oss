@@ -8,6 +8,7 @@ import type { LLMChannelDetail } from "../api/providers-api";
 import { clearRequestCacheForTests } from "../api/request";
 import { setComposerCatalogAdapter } from "../edition/composer-catalog";
 import {
+  useComposerProviderChannelState,
   useComposerProviderChannels,
   useComposerProviders,
   type RuntimeProvider,
@@ -57,6 +58,112 @@ afterEach(() => {
 });
 
 describe("useComposerProviderChannels", () => {
+  it("distinguishes a pending request from a successful empty catalog", async () => {
+    let resolveRequest!: (value: Response) => void;
+    const request = new Promise<Response>((resolve) => {
+      resolveRequest = resolve;
+    });
+    vi.stubGlobal("fetch", vi.fn().mockReturnValue(request));
+
+    const { result } = renderHook(() =>
+      useComposerProviderChannelState("http://localhost:8000"),
+    );
+
+    expect(result.current).toEqual({ providers: [], status: "loading" });
+
+    await act(async () => {
+      resolveRequest(
+        new Response(JSON.stringify({ providers: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+      await request;
+    });
+
+    await waitFor(() =>
+      expect(result.current).toEqual({ providers: [], status: "ready" }),
+    );
+  });
+
+  it("reports a failed catalog request without treating it as ready", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValue(new Error("provider catalog unavailable")),
+    );
+
+    const { result } = renderHook(() =>
+      useComposerProviderChannelState("http://localhost:8000"),
+    );
+
+    await waitFor(() =>
+      expect(result.current).toEqual({ providers: [], status: "error" }),
+    );
+  });
+
+  it("returns loading immediately when the execution target changes", async () => {
+    const localProvider = provider({ id: "local", name: "Local" });
+    let resolveCloud!: (value: Response) => void;
+    let resolveLocalRefresh!: (value: Response) => void;
+    const cloudRequest = new Promise<Response>((resolve) => {
+      resolveCloud = resolve;
+    });
+    const localRefreshRequest = new Promise<Response>((resolve) => {
+      resolveLocalRefresh = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ providers: [localProvider] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        )
+        .mockReturnValueOnce(cloudRequest)
+        .mockReturnValueOnce(localRefreshRequest),
+    );
+
+    const { result, rerender } = renderHook(
+      ({ baseUrl }) => useComposerProviderChannelState(baseUrl),
+      { initialProps: { baseUrl: "http://localhost:8000" } },
+    );
+    await waitFor(() => expect(result.current.status).toBe("ready"));
+
+    rerender({ baseUrl: "https://cloud.example.test" });
+    expect(result.current).toEqual({ providers: [], status: "loading" });
+    rerender({ baseUrl: "http://localhost:8000" });
+    expect(result.current).toEqual({ providers: [], status: "loading" });
+
+    await act(async () => {
+      resolveCloud(
+        new Response(JSON.stringify({ providers: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+      await cloudRequest;
+    });
+    expect(result.current).toEqual({ providers: [], status: "loading" });
+
+    await act(async () => {
+      resolveLocalRefresh(
+        new Response(JSON.stringify({ providers: [localProvider] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+      await localRefreshRequest;
+    });
+    await waitFor(() =>
+      expect(result.current).toEqual({
+        providers: [localProvider],
+        status: "ready",
+      }),
+    );
+  });
+
   it("reloads the gated model list from each selected execution target", async () => {
     const localProvider = provider({ id: "local", name: "Local" });
     const cloudProvider = provider({ id: "cloud", name: "Cloud" });
