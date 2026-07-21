@@ -12,9 +12,14 @@ import {
   Input,
 } from "@valuz/ui";
 import { DirectoryPicker } from "@valuz/ui";
-import { useTranslation } from "@valuz/core";
+import {
+  getDefaultExecutionTarget,
+  useExecutionTargets,
+  useTranslation,
+} from "@valuz/core";
 import { usePlatform } from "@valuz/app/platform";
 import type { DirectoryFieldMode } from "../layout";
+import { ExecutionLocationPicker } from "./ExecutionLocationPicker";
 
 export interface CreateKbDialogProps {
   open: boolean;
@@ -24,9 +29,14 @@ export interface CreateKbDialogProps {
   directoryFieldMode?: DirectoryFieldMode;
   onSubmit: (data: {
     name: string;
-    /** Undefined when ``directoryFieldMode="managed"``. */
+    /** Undefined when ``directoryFieldMode="managed"`` or a remote
+     * (cloud) execution target is chosen — both force a managed root. */
     root_path?: string;
     auto_discover: boolean;
+    /** Chosen execution target id (``"local"``/``"cloud"``) on multi-target
+     * editions; ``undefined`` on single-backend builds. The caller resolves
+     * it to a ``baseUrl`` for the create call and records the origin. */
+    target_id?: string;
   }) => Promise<void>;
 }
 
@@ -38,7 +48,21 @@ export const CreateKbDialog = ({
 }: CreateKbDialogProps) => {
   const { t } = useTranslation();
   const { selectDirectory } = usePlatform();
-  const managed = directoryFieldMode === "managed";
+  const targets = useExecutionTargets();
+  const [targetId, setTargetId] = useState<string | null>(null);
+  // A remote (cloud) target can't see this machine's filesystem — its KBs are
+  // always backed by a managed root. The overlay-passed managed mode
+  // (browser/webui) forces the same. On single-target builds ``targets`` is
+  // empty, the picker renders null, and ``effectiveManaged`` collapses to the
+  // prop — zero behaviour change.
+  const effectiveTarget =
+    targets.length === 0
+      ? undefined
+      : (targets.find((tt) => tt.id === targetId) ??
+        getDefaultExecutionTarget());
+  const isRemoteTarget = effectiveTarget?.remote === true;
+  const propManaged = directoryFieldMode === "managed";
+  const effectiveManaged = propManaged || isRemoteTarget;
 
   const [name, setName] = useState("");
   const [rootPath, setRootPath] = useState("");
@@ -46,17 +70,19 @@ export const CreateKbDialog = ({
   const [creating, setCreating] = useState(false);
 
   const handleCreate = async () => {
-    if (!name.trim() || (!managed && !rootPath.trim())) return;
+    if (!name.trim() || (!effectiveManaged && !rootPath.trim())) return;
     setCreating(true);
     try {
       await onSubmit({
         name: name.trim(),
-        root_path: managed ? undefined : rootPath.trim(),
+        root_path: effectiveManaged ? undefined : rootPath.trim(),
         auto_discover: autoDiscover,
+        target_id: targets.length >= 2 ? effectiveTarget?.id : undefined,
       });
       onOpenChange(false);
       setName("");
       setRootPath("");
+      setTargetId(null);
       setAutoDiscover(true);
     } catch {
       // Error handling is delegated to the caller via onSubmit rejection
@@ -73,7 +99,7 @@ export const CreateKbDialog = ({
             {t("knowledge.newKb" as Parameters<typeof t>[0])}
           </DialogTitle>
           <DialogDescription>
-            {managed
+            {effectiveManaged
               ? t("knowledge.managedKbHint" as Parameters<typeof t>[0])
               : t("knowledge.linkLocalDir" as Parameters<typeof t>[0])}
           </DialogDescription>
@@ -88,7 +114,17 @@ export const CreateKbDialog = ({
               )}
             />
           </FormField>
-          {managed ? (
+          {targets.length >= 2 ? (
+            <FormField
+              label={t("project.execLocation" as Parameters<typeof t>[0])}
+            >
+              <ExecutionLocationPicker
+                value={targetId}
+                onChange={setTargetId}
+              />
+            </FormField>
+          ) : null}
+          {effectiveManaged ? (
             <FormField
               label={t("knowledge.sourcePath" as Parameters<typeof t>[0])}
             >
@@ -134,10 +170,7 @@ export const CreateKbDialog = ({
           <Button
             onClick={handleCreate}
             loading={creating}
-            disabled={
-              !name.trim() ||
-              (!managed && !rootPath.trim())
-            }
+            disabled={!name.trim() || (!effectiveManaged && !rootPath.trim())}
           >
             {t("common.create" as Parameters<typeof t>[0])}
           </Button>
