@@ -1,11 +1,11 @@
 """DispatcherService — subtask dispatch (ADR-023, Step 3a).
 
-Peeled verbatim out of ``TaskOrchestrator`` (the sync ``dispatch`` /
-``dispatch_batch`` paths + the live async ``dispatch_async`` path). Owns no
-task state — it receives the shared :class:`LiveMemberRegistry` and the runtime
+Owns the async member-spawn path (``dispatch_async`` — the only dispatch
+surface since the tool collapse, decision doc §14; the legacy sync
+``dispatch`` / ``dispatch_batch`` paths are deleted). Owns no task state — it
+receives the shared :class:`LiveMemberRegistry` and the runtime
 :class:`ActorRunner` by constructor injection (the same instances the
-composition root wires into every other task service), plus the event bus and
-the max-concurrent fan-out cap.
+composition root wires into every other task service).
 
 Collaboration with sibling MODULES (planning, the build-session helpers) stays
 direct-import; only the registry + runner are injected.
@@ -34,9 +34,7 @@ from valuz_agent.adapters.agent_resolver import (
     spill_goal_brief_if_too_long,
 )
 from valuz_agent.infra.db import async_unit_of_work
-from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.infra.fs_registry import fs_registry
-from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.agents.datastore import ProjectMemberDatastore
 from valuz_agent.modules.tasks import planning
 from valuz_agent.modules.tasks._session_build import (
@@ -45,8 +43,6 @@ from valuz_agent.modules.tasks._session_build import (
 )
 from valuz_agent.modules.tasks.actor_runner import (
     ActorRunner,
-    collect_manifest,
-    run_session_to_idle,
     _member_run_dir,
 )
 from valuz_agent.modules.tasks.datastore import (
@@ -67,11 +63,10 @@ logger = logging.getLogger(__name__)
 
 
 class DispatcherService:
-    """Drives single + batch + async subtask dispatch.
+    """Drives async subtask dispatch (member actor spawn).
 
     Constructed once at the composition root with the shared registry and the
-    runtime ActorRunner; ``max_concurrent`` mirrors the orchestrator's fan-out
-    cap and ``bus`` is the event bus the sync dispatch path drives turns on.
+    runtime ActorRunner (the same instances every other task service shares).
     """
 
     def __init__(
@@ -79,381 +74,9 @@ class DispatcherService:
         *,
         registry: LiveMemberRegistry,
         actor_runner: ActorRunner,
-        bus: EventBus,
-        max_concurrent: int = 4,
     ) -> None:
         self._members = registry
         self._actor = actor_runner
-        self._bus = bus
-        self.max_concurrent = max_concurrent
-
-    # ------------------------------------------------------------------
-    # dispatch (single subtask)
-    # ------------------------------------------------------------------
-
-    async def dispatch(
-        self,
-        *,
-        task_id: str,
-        project_id: str,
-        lead_session_id: str,
-        subtask_key: str,
-        agent: str | None = None,
-        goal: str | None = None,
-        refs: list[str] | None = None,
-        project_mode: str | None = None,
-        user_id: str | None = None,
-    ) -> dict[str, Any]:
-        if user_id is None:
-            raise ValueError("user_id is required")
-
-        """Dispatch one planned subtask (by key) and await its completion.
-
-        Plan-first (VALUZ-TASK D2/D4): the subtask must exist in the plan and be
-        dispatchable (status planned/rework, deps done). agent/goal default to
-        the plan node. Called from the dispatch MCP handler while the lead's
-        run_turn is in progress. Returns the manifest dict as the tool_result.
-        On member idle the node goes to ``in_review`` (the lead then reviews) —
-        completion is decided by ``review_subtask``, not by this method.
-        """
-        async with async_unit_of_work() as db:
-            task_ds = TaskDatastore(db)
-            event_ds = TaskEventDatastore(db)
-            run_ds = TaskSessionDatastore(db)
-            member_ds = ProjectMemberDatastore(db)
-
-            task_row = await task_ds.get_task_by_project(
-                user_id, project_id, task_id
-            )
-            if task_row is None:
-                return {"error": f"task {task_id!r} not found", "status": "failed"}
-            # Plan-first gate: resolve agent/goal from the planned node.
-            resolved = planning.resolve_dispatch_node(
-                TaskPlan.from_dict(task_row.plan), subtask_key, agent, goal
-            )
-            if isinstance(resolved, str):
-                return {"error": resolved, "status": "failed"}
-            agent, goal = resolved
-
-            # Determine project cwd
-            from valuz_agent.modules.projects.datastore import ProjectDatastore
-
-            ws_ds = ProjectDatastore(db)
-            ws_row = await ws_ds.get_by_id(task_row.user_id, project_id)
-            if ws_row is None:
-                return {"error": f"project {project_id!r} not found", "status": "failed"}
-            project_cwd = fs_registry.project_cwd(
-                task_row.user_id,
-                ws_row.id,
-                cast(
-                    Literal["chat", "project"],
-                    ws_row.kind if ws_row.kind in ("chat", "project") else "chat",
-                ),
-                ws_row.root_path,
-            )
-
-            # Resolve member working dir: shared project cwd by default (v2.1).
-            # Task-level worktree (design §5): every member shares the task's
-            # ONE worktree cwd — no per-member isolation on top; the plan
-            # DAG's dependencies remain the write-conflict discipline, same as
-            # shared mode in the main workspace.
-            run_seq = await run_ds.next_sequence(task_id)
-            wt_snapshot = task_worktree_snapshot(task_row)
-            if wt_snapshot is not None:
-                mode = "shared"
-                work_cwd = await resolve_task_cwd(task_row, str(project_cwd))
-            else:
-                mode = project_mode or "shared"
-                work_cwd = str(project_cwd)
-            # Legacy per-member ``repo-worktree`` shells out to ``git worktree
-            # add`` (blocking subprocess); offload so dispatch never blocks the
-            # event loop. The default ``shared`` mode is a no-op Path().
-            run_dir = await asyncio.to_thread(_member_run_dir, work_cwd, task_id, run_seq, mode)
-            started = time.time()
-
-            # Build brief for the member
-            refs_text = "\n".join(f"- {r}" for r in (refs or []))
-            # Goal mode prepends ``/goal `` (wrap_for_mode); drop the redundant
-            # ``## Goal`` header so it doesn't land inside the goal condition.
-            member_brief = goal + (f"\n\n## References\n\n{refs_text}" if refs_text else "")
-            # Fence the goal-mode payload: spill an over-cap member brief to a
-            # doc and pass a short pointer (used as both the embedded brief and
-            # the member's initial ``/goal`` prompt).
-            # Spill anchored at the MAIN project cwd: a brief doc written
-            # into the (work)tree would register as work worth keeping and
-            # defeat the task worktree's clean-teardown (design R5).
-            member_brief = spill_goal_brief_if_too_long(
-                member_brief,
-                run_dir=str(project_cwd),
-                task_id=task_id,
-                label=f"{agent}-{subtask_key}",
-                is_lead=False,
-            )
-
-            # Fetch project context
-            ws_ctx = await ws_ds.get_context(task_row.user_id, project_id)
-            project_instructions_md = ws_ctx.instructions_md if ws_ctx else None
-
-            # Build and save member session
-            member_session = await build_member_session(
-                project_id=project_id,
-                agent_slug=agent,
-                members=member_ds,
-                is_lead=False,
-                task_id=task_id,
-                run_dir=str(run_dir),
-                brief=member_brief,
-                project_name=ws_row.name,
-                project_instructions_md=project_instructions_md,
-                # Member sub-run in goal mode: self-loops until its scoped
-                # goal is met, then auto-exits to default before returning
-                # its SubtaskResult to the lead. Lead's review_subtask
-                # (approve / rework) authority is unchanged.
-                goal_mode=True,
-                worktree_notice=task_worktree_notice(wt_snapshot),
-                user_id=task_row.user_id,
-                **_provider_resolver_deps(db),
-            )
-            if member_session is None:
-                return {
-                    "error": f"agent {agent!r} not found in project {project_id!r}",
-                    "status": "failed",
-                }
-
-            # Capture the member's display name once, here where the agent is
-            # guaranteed resolvable, and stamp it into every event payload below
-            # (``agent_name``). This makes the name durable — the frontend reads
-            # it straight from the event instead of joining the ``actor`` slug
-            # against an async members list that races the load and misses
-            # removed agents ("成员智能体名称查询不到").
-            agent_name = await resolve_agent_display_name(project_id, agent, user_id)
-
-            # Fail fast on a credential-less member — return a clear reason to
-            # the lead instead of spawning a doomed "Not logged in" run.
-            gap = await _credential_gap(member_session, agent, db=db, user_id=user_id)
-            if gap is not None:
-                await event_ds.append_event(
-                    user_id,
-                    project_id=project_id,
-                    task_id=task_id,
-                    type="subtask_failed",
-                    actor=agent,
-                    session_id=member_session.id,
-                    payload={
-                        "agent": agent,
-                        "agent_name": agent_name,
-                        "status": "failed",
-                        "error": gap,
-                    },
-                )
-                return {"error": gap, "status": "failed", "agent": agent}
-
-            await kernel_client.create_session(
-                user_id, member_session, scope=SandboxScope(kind="task", id=task_id)
-            )
-            await project_index.record(
-                project_id,
-                member_session.id,
-                kind="task_subtask",
-                origin="task",
-                user_id=user_id,
-            )
-
-            # Record run in index (linked to the plan node via subtask_key)
-            run_row = TaskSessionRow(
-                project_id=project_id,
-                task_id=task_id,
-                session_id=member_session.id,
-                agent_slug=agent,
-                sequence=run_seq,
-                kind="subtask",
-                status="active",
-                goal=goal,
-                dispatched_by=lead_session_id,
-                project_mode=mode,
-                run_dir=str(run_dir),
-                subtask_key=subtask_key,
-            )
-            await run_ds.create_run(user_id, run_row)
-
-            # Append spawned event
-            await event_ds.append_event(
-                user_id,
-                project_id=project_id,
-                task_id=task_id,
-                type="subtask_spawned",
-                actor=agent,
-                session_id=member_session.id,
-                payload={
-                    "agent": agent,
-                    "agent_name": agent_name,
-                    "goal": goal,
-                    "run_dir": str(run_dir),
-                    "subtask_key": subtask_key,
-                },
-            )
-
-        # Flip the plan node to in_progress (attempts++, link this run).
-            await planning.mark_node_dispatched(
-                project_id=project_id,
-                task_id=task_id,
-                subtask_key=subtask_key,
-                agent=agent,
-                session_id=member_session.id,
-                user_id=user_id,
-            )
-
-        # Run member as sibling asyncio task (proven non-recursive, §8)
-        member_task = asyncio.create_task(
-            run_session_to_idle(
-                session_id=member_session.id,
-                content=member_brief,
-                event_bus=self._bus,
-                user_id=user_id,
-            )
-        )
-        final_status = await member_task
-
-        # Collect manifest (attribute artifacts by mtime since dispatch — the
-        # member shares the project cwd under v2.1).
-        manifest = await collect_manifest(
-            member_session.id, run_dir, final_status, since_epoch=started, user_id=user_id
-        )
-
-        # Persist result
-        async with async_unit_of_work() as db2:
-            run_ds2 = TaskSessionDatastore(db2)
-            event_ds2 = TaskEventDatastore(db2)
-            task_ds2 = TaskDatastore(db2)
-
-            failed = final_status in ("terminated", "error")
-            await run_ds2.update_run_by_session(
-                session_id=member_session.id,
-                status="archived" if failed else "completed",
-                result_manifest=manifest,
-                ended_at=now_ms(),
-            )
-
-            # Review model (VALUZ-TASK §6.1): a member going idle is NOT
-            # completion — the lead decides via review_subtask. A genuine run
-            # failure (terminated/error) goes to ``rework`` (recoverable +
-            # dispatchable), NOT ``failed`` (which the gate refuses and resume
-            # can't relaunch) — matching ``_finalize_actor`` / ``reconcile`` /
-            # ``stop_member``; the error rides along as ``review_feedback``.
-            # Otherwise the node goes to in_review awaiting the lead's call.
-            task_row2 = await task_ds2.get_task_by_project(
-                user_id, project_id, task_id
-            )
-            plan2 = TaskPlan.from_dict(task_row2.plan) if task_row2 else None
-            if plan2 is not None and plan2.get(subtask_key) is not None:
-                if failed:
-                    plan2.update_node(
-                        subtask_key,
-                        status="rework",
-                        review_feedback=manifest.get("summary") or "上次运行因错误中断,请重试。",
-                    )
-                else:
-                    plan2.update_node(subtask_key, status="in_review")
-                task_row2.plan = plan2.to_dict()  # type: ignore[union-attr]
-                await task_ds2.update_task(task_row2)  # type: ignore[arg-type]
-                await planning.emit_plan_update(
-                    event_ds2,
-                    project_id=project_id,
-                    task_id=task_id,
-                    plan=plan2,
-                    actor=agent,
-                    session_id=member_session.id,
-                    user_id=user_id,
-                )
-            if failed:
-                await event_ds2.append_event(
-                    user_id,
-                    project_id=project_id,
-                    task_id=task_id,
-                    type="subtask_failed",
-                    actor=agent,
-                    session_id=member_session.id,
-                    payload={"agent_name": agent_name, **manifest, "subtask_key": subtask_key},
-                )
-
-        return manifest
-
-    # ------------------------------------------------------------------
-    # dispatch_batch
-    # ------------------------------------------------------------------
-
-    async def dispatch_batch(
-        self,
-        *,
-        task_id: str,
-        project_id: str,
-        lead_session_id: str,
-        keys: list[str],
-        user_id: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """Dispatch multiple planned subtasks (by key) with concurrency control.
-
-        Groups by the node's agent skill-set fingerprint — keys sharing the same
-        skill set run in parallel (within the semaphore); groups with different
-        skill sets run sequentially to avoid skill-dir conflicts (§7.2.2). Each
-        key goes through the same plan-first gate as ``dispatch``.
-
-        Returns a list of manifests in the same order as *keys*.
-        """
-        sem = asyncio.Semaphore(self.max_concurrent)
-
-        # Resolve each key's agent from the plan for skill grouping.
-        async with async_unit_of_work(commit=False) as db0:
-            task_row0 = await TaskDatastore(db0).get_task_by_project(
-                user_id, project_id, task_id
-            )
-            plan0 = TaskPlan.from_dict(task_row0.plan) if task_row0 else TaskPlan()
-
-        async def _skill_key(agent_slug: str, user_id: str | None = None) -> str:
-            """Return a deterministic string representing the agent's skills."""
-            async with async_unit_of_work(commit=False) as db:
-                member_ds = ProjectMemberDatastore(db)
-                member = await member_ds.get(user_id, project_id, agent_slug)
-                if member is None:
-                    return agent_slug
-                from valuz_agent.adapters.agent_resolver import _member_agent_config
-
-                agent_cfg = await _member_agent_config(member, member_ds, user_id=user_id)
-                if agent_cfg is None:
-                    return agent_slug
-                skill_names = sorted(
-                    s.name if hasattr(s, "name") else str(s) for s in (agent_cfg.skills or [])
-                )
-                return "|".join(skill_names) or agent_slug
-
-        # Group keys by skill fingerprint (preserve first-seen order).
-        groups: dict[str, list[tuple[int, str]]] = {}
-        for idx, key in enumerate(keys):
-            node = plan0.get(key)
-            skill = await _skill_key(
-                node.agent if node and node.agent else key, user_id=user_id
-            )
-            groups.setdefault(skill, []).append((idx, key))
-
-        results: dict[int, dict[str, Any]] = {}
-
-        async def _dispatch_one(idx: int, subtask_key: str) -> None:
-            async with sem:
-                results[idx] = await self.dispatch(
-                    task_id=task_id,
-                    project_id=project_id,
-                    lead_session_id=lead_session_id,
-                    subtask_key=subtask_key,
-                    user_id=user_id,
-                )
-
-        # Sequential across groups, parallel within each group
-        for group_keys in groups.values():
-            group_tasks = [asyncio.create_task(_dispatch_one(idx, key)) for idx, key in group_keys]
-            await asyncio.gather(*group_tasks)
-
-        # Return in original order
-        return [results[i] for i in range(len(keys))]
 
     # ==================================================================
     # v2 actor dispatch (M10 附录 B) — async member spawn

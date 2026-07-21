@@ -6,16 +6,12 @@ Architecture (lead-dispatch-mvp §S5, §1.3):
                     → appends kickoff event
                     → drives lead session via asyncio.create_task (background)
 
-  dispatch()      → builds member Session (is_lead=False, cwd=subrun_dir)
+  dispatch_async()→ builds member Session (is_lead=False, cwd=subrun_dir)
                     → saves session to kernel store
-                    → spawns member as sibling asyncio task (NOT recursive)
-                    → awaits it (synchronous manifest return inside lead's tool call)
-                    → appends subtask_spawned / subtask_completed / subtask_failed events
-                    → returns manifest dict as the tool_result payload
-
-  dispatch_batch()→ dispatches multiple items with asyncio.Semaphore(max_concurrent=4)
-                    → groups by agent skill-set, parallel within group / sequential
-                      across groups (§7.2.2 safety valve)
+                    → spawns the member's actor loop as a sibling asyncio task
+                      (NOT recursive) and returns its handle immediately
+                    → appends subtask_spawned / subtask_failed events; the lead
+                      is re-woken via ``member_done`` and reviews the result
 
   finish_task()   → appends task_completed event, updates task status
 
@@ -128,12 +124,10 @@ class TaskOrchestrator:
     def __init__(
         self,
         bus: EventBus | None = None,
-        max_concurrent: int = 4,
         registry: LiveMemberRegistry | None = None,
         actor_runner: ActorRunner | None = None,
     ) -> None:
         self._bus = bus or _global_bus
-        self.max_concurrent = max_concurrent
         # Live member tracking: task_id → live member session ids (so
         # finish_task can broadcast shutdown to every still-running member) and
         # session_id → dispatch-start epoch (manifest attribution under the
@@ -146,15 +140,13 @@ class TaskOrchestrator:
         # where the loop drives those methods (and lets tests stub them).
         self._actor = actor_runner or ActorRunner()
         self._actor.bind(self)
-        # Subtask dispatch (sync / batch / async) lives in DispatcherService
+        # Subtask dispatch (async member spawn) lives in DispatcherService
         # (ADR-023 Step 3a). It shares this orchestrator's registry + runtime
-        # ActorRunner (same instances) plus the event bus + fan-out cap; the
-        # orchestrator's public dispatch methods delegate straight onto it.
+        # ActorRunner (same instances); the orchestrator's public
+        # dispatch_async delegates straight onto it.
         self._dispatcher = DispatcherService(
             registry=self._members,
             actor_runner=self._actor,
-            bus=self._bus,
-            max_concurrent=self.max_concurrent,
         )
         # Lead ↔ member coordination (await_members / heartbeat / shutdown
         # broadcast / member-idle notify / text delivery) lives in
@@ -617,74 +609,6 @@ class TaskOrchestrator:
                 payload={"reason": reason} if reason else {},
             )
             return {"task_id": task_id, "status": "abandoned"}
-
-    # ------------------------------------------------------------------
-    # dispatch (single subtask)
-    # ------------------------------------------------------------------
-
-    async def dispatch(
-        self,
-        *,
-        task_id: str,
-        project_id: str,
-        lead_session_id: str,
-        subtask_key: str,
-        agent: str | None = None,
-        goal: str | None = None,
-        refs: list[str] | None = None,
-        project_mode: str | None = None,
-        user_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Dispatch one planned subtask (by key) and await its completion.
-
-        Plan-first (VALUZ-TASK D2/D4): the subtask must exist in the plan and be
-        dispatchable (status planned/rework, deps done). agent/goal default to
-        the plan node. Called from the dispatch MCP handler while the lead's
-        run_turn is in progress. Returns the manifest dict as the tool_result.
-        On member idle the node goes to ``in_review`` (the lead then reviews) —
-        completion is decided by ``review_subtask``, not by this method.
-        """
-        return await self._dispatcher.dispatch(
-            task_id=task_id,
-            project_id=project_id,
-            lead_session_id=lead_session_id,
-            subtask_key=subtask_key,
-            agent=agent,
-            goal=goal,
-            refs=refs,
-            project_mode=project_mode,
-            user_id=user_id,
-        )
-
-    # ------------------------------------------------------------------
-    # dispatch_batch
-    # ------------------------------------------------------------------
-
-    async def dispatch_batch(
-        self,
-        *,
-        task_id: str,
-        project_id: str,
-        lead_session_id: str,
-        keys: list[str],
-        user_id: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """Dispatch multiple planned subtasks (by key) with concurrency control.
-
-        Groups by the node's agent skill-set fingerprint — keys sharing the same
-        skill set run in parallel (within the semaphore); groups with different
-        skill sets run sequentially to avoid skill-dir conflicts (§7.2.2). Each
-        key goes through the same plan-first gate as ``dispatch``.
-
-        Returns a list of manifests in the same order as *keys*.
-        """
-        return await self._dispatcher.dispatch_batch(
-            task_id=task_id,
-            project_id=project_id,
-            lead_session_id=lead_session_id,
-            keys=keys,
-            user_id=user_id,
-        )
 
     # ==================================================================
     # v2 actor dispatch (M10 附录 B) — persistent lead + member actors

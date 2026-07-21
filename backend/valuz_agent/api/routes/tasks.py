@@ -41,6 +41,7 @@ from valuz_agent.modules.tasks.datastore import (
 )
 from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow
 from valuz_agent.modules.tasks.orchestrator import task_orchestrator
+from valuz_agent.modules.tasks.task_state import TERMINAL_STATUSES
 
 router = APIRouter(tags=["tasks"])
 
@@ -348,11 +349,11 @@ _TASK_EVENTS_POLL_INTERVAL_S = 0.5
 # an idle connection. 15s matches the kernel session SSE.
 _TASK_EVENTS_HEARTBEAT_S = 15.0
 
-# Task statuses whose stream is allowed to end: no further events can
-# arrive without a revival event first. ``stopped`` is deliberately NOT
-# here — a stopped task can be revived by chat/inject with no action from
+# Task statuses whose stream is allowed to end: ``task_state.TERMINAL_STATUSES``
+# (completed / abandoned) — no further events can arrive without a revival
+# event first. ``stopped`` and ``blocked`` are deliberately NOT terminal — a
+# stopped/blocked task can be revived by chat/inject with no action from
 # the subscriber, so its stream must stay open to deliver ``resumed``.
-_TASK_TERMINAL_STATUSES = frozenset({"completed", "failed", "abandoned"})
 
 # Event types that flip an open stream into / out of the terminal state
 # (mirrors the status transitions above without extra status queries).
@@ -403,7 +404,7 @@ async def _iter_task_events_sse(
     """
     cursor = after_seq
     silent_for = 0.0
-    terminal = not keep_alive and initial_status in _TASK_TERMINAL_STATUSES
+    terminal = not keep_alive and initial_status in TERMINAL_STATUSES
     terminal_silent = 0.0
     while True:
         if is_disconnected is not None and is_disconnected():

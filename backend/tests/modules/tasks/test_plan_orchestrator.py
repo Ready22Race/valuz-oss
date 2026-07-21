@@ -279,7 +279,7 @@ def test_dispatch_rejects_unknown_subtask_key(db_factory, tmp_path) -> None:
     _make_task(db_factory, tmp_path)
     orch = TaskOrchestrator()
     res = asyncio.run(
-        orch.dispatch(
+        orch.dispatch_async(
             task_id="t1",
             project_id="w1",
             lead_session_id="lead",
@@ -306,7 +306,7 @@ def test_dispatch_rejects_blocked_subtask(db_factory, tmp_path) -> None:
         )
     )
     res = asyncio.run(
-        orch.dispatch(
+        orch.dispatch_async(
             task_id="t1",
             project_id="w1",
             lead_session_id="lead",
