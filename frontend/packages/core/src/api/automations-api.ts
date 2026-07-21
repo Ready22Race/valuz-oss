@@ -14,6 +14,8 @@
 
 import { createFetchJson } from "./fetch-json";
 import { resolveApiBase } from "./base-resolver";
+import { fanOutTargets, getListFanOutTargets } from "../edition/list-fanout";
+import { recordEntityOrigins } from "../edition/entity-origin";
 
 let _apiBase =
   (import.meta as unknown as Record<string, Record<string, string> | undefined>)
@@ -92,6 +94,10 @@ export interface AutomationItem {
   next_run_at: number | null;
   last_run_at: number | null;
   last_run_status: string | null;
+  /** CLIENT-side tag on multi-target editions: which execution target
+   * answered the list row (e.g. "local"/"cloud"). Never sent by the server;
+   * absent on single-backend builds. */
+  exec_origin?: string;
 }
 
 export interface AutomationGroup {
@@ -271,34 +277,108 @@ export interface AutomationProposalStatusResult {
 }
 
 const fetchJson = createFetchJson(() => _apiBase);
+const automationBase = (automationId: string): string | undefined =>
+  resolveApiBase({ automationId }, "") || undefined;
+const sessionBase = (sessionId: string): string | undefined =>
+  resolveApiBase({ sessionId }, "") || undefined;
 
 export const automationsApi = {
-  listGroups(projectId?: string): Promise<{ groups: AutomationGroup[] }> {
+  async listGroups(projectId?: string): Promise<{ groups: AutomationGroup[] }> {
     const qs = new URLSearchParams();
     if (projectId) qs.set("project_id", projectId);
     const suffix = qs.toString() ? `?${qs}` : "";
-    // Project-scoped list follows the project's execution origin
-    // (multi-target editions); global list stays on the module default.
-    return fetchJson(`/v1/automations${suffix}`, {
-      baseUrl: projectId
-        ? resolveApiBase({ projectId }, "") || undefined
-        : undefined,
-    });
+    // Project-scoped list follows the project's execution origin.
+    if (projectId) {
+      return fetchJson(`/v1/automations${suffix}`, {
+        baseUrl: resolveApiBase({ projectId }, "") || undefined,
+      });
+    }
+    // Global list: fan out to every registered target on multi-target
+    // editions, tag each automation's ``exec_origin``, and feed the origin
+    // index so automation-scoped calls route to the owning backend. Zero
+    // targets (OSS) keeps the single-backend path unchanged. A project lives
+    // on exactly one backend, so groups never overlap across targets — a flat
+    // concat is the merge.
+    if (getListFanOutTargets().length === 0) {
+      return fetchJson(`/v1/automations${suffix}`);
+    }
+    const outcome = await fanOutTargets((target) =>
+      fetchJson<{ groups: AutomationGroup[] }>(`/v1/automations`, {
+        baseUrl: target.baseUrl,
+      }),
+    );
+    recordEntityOrigins(
+      outcome.values.flatMap(({ target, value }) =>
+        value.groups.flatMap((g) =>
+          g.automations.map(
+            (a) => [a.automation_id, target.id] as [string, string],
+          ),
+        ),
+      ),
+    );
+    const merged: AutomationGroup[] = [];
+    for (const { target, value } of outcome.values) {
+      for (const g of value.groups) {
+        merged.push({
+          ...g,
+          automations: g.automations.map((a) => ({
+            ...a,
+            exec_origin: target.id,
+          })),
+        });
+      }
+    }
+    return { groups: merged };
   },
 
-  listProjectTargets(): Promise<{ targets: AutomationProjectTarget[] }> {
-    return fetchJson(`/v1/automations/project-targets`);
+  async listProjectTargets(): Promise<{ targets: AutomationProjectTarget[] }> {
+    // The target picker must show BOTH backends' projects on multi-target
+    // editions. The Chat sentinel ("chat-default", project_id=null) is
+    // returned by every backend — keep only the first; its backend is chosen
+    // by the location picker at create time, not by which backend listed it.
+    if (getListFanOutTargets().length === 0) {
+      return fetchJson(`/v1/automations/project-targets`);
+    }
+    const outcome = await fanOutTargets((target) =>
+      fetchJson<{ targets: AutomationProjectTarget[] }>(
+        `/v1/automations/project-targets`,
+        { baseUrl: target.baseUrl },
+      ),
+    );
+    recordEntityOrigins(
+      outcome.values.flatMap(({ target, value }) =>
+        value.targets
+          .filter((t) => t.project_id)
+          .map((t) => [t.project_id!, target.id] as [string, string]),
+      ),
+    );
+    const seen = new Set<string>();
+    const merged: AutomationProjectTarget[] = [];
+    for (const { value } of outcome.values) {
+      for (const t of value.targets) {
+        if (seen.has(t.id)) continue;
+        seen.add(t.id);
+        merged.push(t);
+      }
+    }
+    return { targets: merged };
   },
 
   get(automationId: string): Promise<AutomationDetail> {
-    return fetchJson(`/v1/automations/${encodeURIComponent(automationId)}`);
+    return fetchJson(`/v1/automations/${encodeURIComponent(automationId)}`, {
+      baseUrl: automationBase(automationId),
+    });
   },
 
-  create(payload: AutomationCreatePayload): Promise<AutomationDetail> {
+  create(
+    payload: AutomationCreatePayload,
+    opts?: { baseUrl?: string },
+  ): Promise<AutomationDetail> {
     return fetchJson("/v1/automations", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      baseUrl: opts?.baseUrl,
     });
   },
 
@@ -310,33 +390,35 @@ export const automationsApi = {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      baseUrl: automationBase(automationId),
     });
   },
 
   delete(automationId: string): Promise<void> {
     return fetchJson(`/v1/automations/${encodeURIComponent(automationId)}`, {
       method: "DELETE",
+      baseUrl: automationBase(automationId),
     });
   },
 
   pause(automationId: string): Promise<AutomationDetail> {
     return fetchJson(
       `/v1/automations/${encodeURIComponent(automationId)}/pause`,
-      { method: "POST" },
+      { method: "POST", baseUrl: automationBase(automationId) },
     );
   },
 
   resume(automationId: string): Promise<AutomationDetail> {
     return fetchJson(
       `/v1/automations/${encodeURIComponent(automationId)}/resume`,
-      { method: "POST" },
+      { method: "POST", baseUrl: automationBase(automationId) },
     );
   },
 
   runNow(automationId: string): Promise<AutomationRunAccepted> {
     return fetchJson(
       `/v1/automations/${encodeURIComponent(automationId)}/run-now`,
-      { method: "POST" },
+      { method: "POST", baseUrl: automationBase(automationId) },
     );
   },
 
@@ -351,6 +433,7 @@ export const automationsApi = {
     const suffix = qs.toString() ? `?${qs}` : "";
     return fetchJson(
       `/v1/automations/${encodeURIComponent(automationId)}/runs${suffix}`,
+      { baseUrl: automationBase(automationId) },
     );
   },
 
@@ -374,7 +457,8 @@ export const automationsApi = {
   },
 
   /** Confirm an automation the ``create`` tool proposed (the user clicked
-   *  "Create" on the proposal card). Persists + returns the created row. */
+   *  "Create" on the proposal card). Persists + returns the created row.
+   *  Routes to the backend that owns the proposing session. */
   confirmProposal(
     sessionId: string,
     payload: AutomationProposalConfirmPayload,
@@ -385,12 +469,14 @@ export const automationsApi = {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+        baseUrl: sessionBase(sessionId),
       },
     );
   },
 
   /** Map proposing ``tool_call_id``s → already-created automations, so the page
-   *  can seed confirmed proposal cards on session re-entry. */
+   *  can seed confirmed proposal cards on session re-entry. Routes to the
+   *  backend that owns the proposing session. */
   proposalStatus(
     sessionId: string,
     toolCallIds: string[],
@@ -401,6 +487,7 @@ export const automationsApi = {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ tool_call_ids: toolCallIds }),
+        baseUrl: sessionBase(sessionId),
       },
     );
   },
