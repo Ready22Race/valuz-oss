@@ -274,6 +274,9 @@ def _patch_drain(monkeypatch, *, budget_raises=False):
     async def _fake_get_session(uid, sid):
         return _FakeSession()
 
+    async def _fake_bg_busy():
+        return []
+
     async def _budget(session, user_id=None):
         assert session.user_id == OWNER
         assert user_id == OWNER
@@ -286,6 +289,7 @@ def _patch_drain(monkeypatch, *, budget_raises=False):
     # namespace (module-level import), so patch it there, not on actor_runner.
     monkeypatch.setattr(run_orchestrator, "run_session_to_idle", _fake_run)
     monkeypatch.setattr(kc, "get_session", _fake_get_session)
+    monkeypatch.setattr(kc, "bg_busy_session_ids", _fake_bg_busy)
     monkeypatch.setattr(svc, "_enforce_budget", _budget)
     return calls
 
@@ -428,6 +432,66 @@ async def test_list_queue_surfaces_dispatching_item() -> None:
     # Pointer gone (turn returned) → the field is empty again.
     after = await svc.list_queue("dp1", user_id=OWNER)
     assert after.dispatching is None
+
+
+async def test_drain_waits_until_session_not_busy(monkeypatch) -> None:
+    """The dispatch gate: "上一条处理完" = kernel turn over AND background tasks
+    done. A turn that spawns a bg task goes idle while the bg work (and the
+    user-visible "processing" chip) continues — dispatching at that instant
+    read as the queue interrupting the previous message. The drain must wait
+    out the busy signal, then dispatch."""
+    import valuz_agent.adapters.kernel_client as kc
+    from valuz_agent.modules.sessions import run_orchestrator
+
+    async with async_unit_of_work() as db:
+        await SessionDatastore(db).create_queued(OWNER, _row("bz1", "after-busy"))
+
+    calls = _patch_drain(monkeypatch)
+    monkeypatch.setattr(run_orchestrator, "_BUSY_POLL_SECONDS", 0.01)
+
+    busy_reads: list[int] = []
+
+    async def _bg_busy():
+        # Busy for the first two polls (live background task), then clear.
+        busy_reads.append(1)
+        return ["bz1"] if len(busy_reads) <= 2 else []
+
+    monkeypatch.setattr(kc, "bg_busy_session_ids", _bg_busy)
+
+    await run_orchestrator._drain_queue_after_turn("bz1", _FakeBus(), user_id=OWNER)
+
+    assert calls == ["after-busy"]  # dispatched only after the busy signal cleared
+    assert len(busy_reads) >= 3  # actually waited through the busy polls
+
+
+async def test_drain_wait_exits_on_pause(monkeypatch) -> None:
+    """Stop/interrupt is the escape hatch while the drain waits on a busy
+    session: the soft-pause must break the wait loop without dispatching."""
+    import valuz_agent.adapters.kernel_client as kc
+    from valuz_agent.modules.sessions import run_orchestrator
+
+    await project_index.record("proj-1", "bz2", kind="chat", user_id=OWNER)
+    async with async_unit_of_work() as db:
+        await SessionDatastore(db).create_queued(OWNER, _row("bz2", "never-runs"))
+
+    calls = _patch_drain(monkeypatch)
+    monkeypatch.setattr(run_orchestrator, "_BUSY_POLL_SECONDS", 0.01)
+
+    polls: list[int] = []
+
+    async def _bg_busy():
+        polls.append(1)
+        if len(polls) == 2:  # user hits Stop while the drain is waiting
+            await project_index.set_queue_paused("bz2", True)
+        return ["bz2"]  # busy forever
+
+    monkeypatch.setattr(kc, "bg_busy_session_ids", _bg_busy)
+
+    await run_orchestrator._drain_queue_after_turn("bz2", _FakeBus(), user_id=OWNER)
+
+    assert calls == []  # never dispatched
+    async with async_unit_of_work(commit=False) as db:
+        assert await SessionDatastore(db).count_queued(OWNER, "bz2") == 1  # item intact
 
 
 async def test_drain_clears_dispatching_pointer(monkeypatch) -> None:
