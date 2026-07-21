@@ -35,6 +35,13 @@ logger = logging.getLogger(__name__)
 # design — the queue itself is durable (DB), the drain task is transient.
 _active_drains: set[str] = set()
 
+# session_id → queued-row id the drain is executing RIGHT NOW. Set just before
+# the row is marked ``dispatched`` (which drops it from ``list_queued``) and
+# cleared when its turn returns — bridging the window where the item is in
+# neither the queue list nor the transcript, so ``list_queue`` can keep it
+# visible to clients (see docs/design/session-input-queue.md §14.5).
+_dispatching_heads: dict[str, str] = {}
+
 
 def _require_user_id(user_id: str | None) -> str:
     if user_id is None:
@@ -54,6 +61,16 @@ def is_draining_queue(session_id: str) -> bool:
     slip into the sub-second idle gap between two drained queue items.
     """
     return session_id in _active_drains
+
+
+def get_dispatching_queue_id(session_id: str) -> str | None:
+    """Id of the queued row the drain is currently executing, if any.
+
+    The row is already ``dispatched`` (invisible in ``list_queued``) but its
+    turn may not have landed a durable user message yet — callers use this to
+    keep the item visible across that gap.
+    """
+    return _dispatching_heads.get(session_id)
 
 
 def _chat_billing_meter(session_id: str, user_id: str | None = None) -> Any:
@@ -141,6 +158,8 @@ async def _drain_queue_after_turn(
     event_bus: EventBus,
     on_message: Any | None = None,
     user_id: str | None = None,
+    *,
+    claimed: bool = False,
 ) -> None:
     """Run queued follow-up inputs FIFO after a turn finishes (host-driven).
 
@@ -150,6 +169,9 @@ async def _drain_queue_after_turn(
     else mark ``dispatched`` and drive it through ``run_session_to_idle`` with
     its frozen attachment snapshot, then loop. Single-flighted via
     ``_active_drains`` so an idle-kick enqueue can't double-run an item.
+
+    ``claimed=True`` means the caller (``schedule_drain``) already put the
+    session in ``_active_drains`` — skip the claim, keep the release.
     """
     from valuz_agent.infra.db import async_unit_of_work
     from valuz_agent.infra.lifecycle import is_draining
@@ -159,9 +181,10 @@ async def _drain_queue_after_turn(
     from valuz_agent.modules.sessions.events import SESSION_FINISHED
 
     owner_user_id = _require_user_id(user_id)
-    if session_id in _active_drains:
-        return
-    _active_drains.add(session_id)
+    if not claimed:
+        if session_id in _active_drains:
+            return
+        _active_drains.add(session_id)
     try:
         while True:
             if is_draining():
@@ -212,18 +235,26 @@ async def _drain_queue_after_turn(
                     "drain: worktree heal failed for %s", session_id, exc_info=True
                 )
 
+            # Point at the head BEFORE it flips to ``dispatched`` so there is
+            # no instant where the item is gone from ``list_queued`` but not
+            # yet exposed as the in-flight one.
+            _dispatching_heads[session_id] = head_id
             async with async_unit_of_work() as db:
                 await SessionDatastore(db).mark_queued_status(head_id, "dispatched")
 
-            await run_session_to_idle(
-                session_id,
-                text,
-                event_bus,
-                on_message=on_message,
-                queued_attachments=attachments,
-                user_id=owner_user_id,
-            )
+            try:
+                await run_session_to_idle(
+                    session_id,
+                    text,
+                    event_bus,
+                    on_message=on_message,
+                    queued_attachments=attachments,
+                    user_id=owner_user_id,
+                )
+            finally:
+                _dispatching_heads.pop(session_id, None)
     finally:
+        _dispatching_heads.pop(session_id, None)
         _active_drains.discard(session_id)
 
 
@@ -233,24 +264,43 @@ def schedule_drain(session_id: str, event_bus: EventBus) -> None:
     Background path: resolve the owner from ``session_id`` before draining; do
     not rely on request ContextVar propagation.
     A no-op if a drain is already in flight for the session.
+
+    Claims ``_active_drains`` SYNCHRONOUSLY (released by the spawned task) so
+    the caller's own ``list_queue`` response already reports ``draining=true``.
+    The previous late claim (inside the task, after an awaited owner lookup)
+    let an idle-kick enqueue answer ``items=[], draining=false`` — the client's
+    drain-follower then never armed and the turn ran invisibly until reload.
     """
     if session_id in _active_drains:
         return
+    _active_drains.add(session_id)
 
     async def _spawn() -> None:
-        owner_user_id = await _resolve_session_owner(session_id)
-        if not owner_user_id:
-            logger.warning("skip queue drain for %s: unknown session owner", session_id)
-            return
-        meter = _chat_billing_meter(session_id, user_id=owner_user_id)
-        await _drain_queue_after_turn(
-            session_id,
-            event_bus,
-            on_message=meter,
-            user_id=owner_user_id,
-        )
+        try:
+            owner_user_id = await _resolve_session_owner(session_id)
+            if not owner_user_id:
+                logger.warning("skip queue drain for %s: unknown session owner", session_id)
+                return
+            meter = _chat_billing_meter(session_id, user_id=owner_user_id)
+            await _drain_queue_after_turn(
+                session_id,
+                event_bus,
+                on_message=meter,
+                user_id=owner_user_id,
+                claimed=True,
+            )
+        finally:
+            # ``_drain_queue_after_turn`` releases on its own; this covers the
+            # early returns/raises before it runs. discard is idempotent.
+            _active_drains.discard(session_id)
 
-    asyncio.create_task(_spawn())
+    try:
+        asyncio.create_task(_spawn())
+    except RuntimeError:
+        # No running loop (shutdown) — never leak the claim: it gates
+        # ``send_message`` 409s and future drain kicks for this session.
+        _active_drains.discard(session_id)
+        raise
 
 
 # Strip leading skill-trigger tokens (``/<slug>``) when deriving a

@@ -204,6 +204,7 @@
     "queueContinue": "继续",
     "queueBlocked": "无法运行",
     "queueSteer": "立即发送",
+    "queueSending": "正在发送",
     "starting": "启动中",
     "stop": "停止",
     "success": "成功",

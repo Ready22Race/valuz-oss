@@ -585,6 +585,19 @@ class SessionOrchestrator:
                     },
                 )
             )
+            # The ``running`` flip above is persisted but was never announced:
+            # the only ``session_update`` used to be the terminal one after the
+            # turn. Clients that derive status from the event stream (session
+            # header pill, control-plane ``run.status``) therefore sat on
+            # ``created``/stale until end of turn. Emit the interim status here
+            # so every follower — including per-turn re-subscribers on queue
+            # drains — sees ``running`` the moment the turn actually starts.
+            await observer.emit(
+                Event(
+                    type="session_update",
+                    data={"status": "running", "message_id": message.id},
+                )
+            )
             await runtime.run(session, user_message)
             await observer.ensure_partial_assistant_message()
             # finalize must run BEFORE save_session — it writes session.todos
