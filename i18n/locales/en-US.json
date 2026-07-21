@@ -204,6 +204,7 @@
     "queueContinue": "Continue",
     "queueBlocked": "Could not run",
     "queueSteer": "Send now",
+    "queueSending": "Sending",
     "starting": "Starting",
     "stop": "Stop",
     "success": "Success",

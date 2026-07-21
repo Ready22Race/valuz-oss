@@ -93,8 +93,8 @@ export function useActivityFeed(opts: {
         cursor: { kind: "single", cursor: page.next_cursor },
       };
     }
-    const outcome = await fanOutTargets((target) =>
-      activityApi.list(params, { baseUrl: target.baseUrl }),
+    const outcome = await fanOutTargets((target, signal) =>
+      activityApi.list(params, { baseUrl: target.baseUrl, signal }),
     );
     const merged: ActivityItem[] = [];
     const seen = new Set<string>();

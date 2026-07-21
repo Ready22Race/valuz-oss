@@ -124,6 +124,13 @@ export interface UpdateAgentPayload {
   avatar?: string | null;
 }
 
+export interface ListAgentsOptions {
+  /** Route this request to a specific execution target. */
+  baseUrl?: string;
+  /** Bypass the shared list cache when the active target or roster changes. */
+  fresh?: boolean;
+}
+
 /** Spec of an agent the user is confirming after the assistant proposed it
  *  via the ``propose_agent`` tool. Backend derives a unique slug from name. */
 export interface ProposeAgentConfirmPayload {
@@ -171,9 +178,15 @@ function invalidateAgents(projectId?: string | null): void {
 }
 
 export const agentsApi = {
-  listAgents(source?: string): Promise<{ agents: Agent[] }> {
+  listAgents(
+    source?: string,
+    options?: ListAgentsOptions,
+  ): Promise<{ agents: Agent[] }> {
     const params = source ? `?source=${encodeURIComponent(source)}` : "";
-    return fetchJson(`/v1/agents${params}`, { cache: AGENTS_LIST_CACHE });
+    return fetchJson(`/v1/agents${params}`, {
+      baseUrl: options?.baseUrl,
+      cache: options?.fresh ? undefined : AGENTS_LIST_CACHE,
+    });
   },
 
   getAgent(slug: string): Promise<Agent> {

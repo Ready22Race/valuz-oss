@@ -249,10 +249,11 @@ export const projectsApi = {
     if (getListFanOutTargets().length === 0) {
       return fetchJson("/v1/projects", { cache: PROJECTS_LIST_CACHE });
     }
-    const outcome = await fanOutTargets((target) =>
+    const outcome = await fanOutTargets((target, signal) =>
       fetchJson<{ projects: ProjectListItem[] }>("/v1/projects", {
         cache: PROJECTS_LIST_CACHE,
         baseUrl: target.baseUrl,
+        signal,
       }),
     );
     const seen = new Set<string>();

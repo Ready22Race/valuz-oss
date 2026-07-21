@@ -249,7 +249,7 @@ import { resolveApiBase } from "./base-resolver";
 import { fanOutTargets, getListFanOutTargets } from "../edition/list-fanout";
 import { recordEntityOrigins } from "../edition/entity-origin";
 import { createFetchJson, ApiError } from "./fetch-json";
-import { requestRaw } from "./request";
+import { invalidateRequestCache, requestRaw } from "./request";
 
 let _apiBase =
   (import.meta as unknown as Record<string, Record<string, string> | undefined>)
@@ -457,6 +457,19 @@ const sessionBase = (sessionId: string): string =>
 
 export type SessionStreamCallback = (event: SessionEventDTO) => void;
 
+// Global-list (Recents) cache: the sidebar refetches on every navigation, and
+// on multi-target editions each refetch also round-trips the CLOUD backend.
+// A short TTL absorbs rapid navigations without changing what the list shows;
+// list-shape mutations (create / rename / cancel / delete) invalidate so a
+// new or removed conversation appears immediately. Project-scoped lists keep
+// their uncached path (project pages own their refresh cadence).
+const SESSIONS_LIST_TAG = "sessions-list";
+const SESSIONS_LIST_CACHE = { ttlMs: 10_000, tags: [SESSIONS_LIST_TAG] };
+
+function invalidateSessionsList(): void {
+  invalidateRequestCache({ tags: [SESSIONS_LIST_TAG] });
+}
+
 export const sessionsApi = {
   async list(
     projectId?: string,
@@ -477,12 +490,17 @@ export const sessionsApi = {
     // feed the origin index. Zero targets (OSS) keeps the single-backend
     // path unchanged. ``init`` (e.g. an ``AbortSignal``) is forwarded.
     if (getListFanOutTargets().length === 0) {
-      return fetchJson(`/v1/sessions${suffix}`, init);
+      return fetchJson(`/v1/sessions${suffix}`, {
+        ...init,
+        cache: SESSIONS_LIST_CACHE,
+      });
     }
-    const outcome = await fanOutTargets((target) =>
+    const outcome = await fanOutTargets((target, signal) =>
       fetchJson<{ sessions: SessionListItem[] }>(`/v1/sessions${suffix}`, {
         ...init,
+        cache: SESSIONS_LIST_CACHE,
         baseUrl: target.baseUrl,
+        signal,
       }),
     );
     const seen = new Set<string>();
@@ -504,16 +522,18 @@ export const sessionsApi = {
     });
   },
 
-  create(
+  async create(
     payload: SessionCreateRequest,
     opts?: { baseUrl?: string },
   ): Promise<SessionDetail> {
-    return fetchJson("/v1/sessions", {
+    const created = await fetchJson<SessionDetail>("/v1/sessions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
       baseUrl: opts?.baseUrl,
     });
+    invalidateSessionsList();
+    return created;
   },
 
   /**
@@ -704,11 +724,16 @@ export const sessionsApi = {
     );
   },
 
-  cancel(sessionId: string): Promise<SessionDetail> {
-    return fetchJson(`/v1/sessions/${encodeURIComponent(sessionId)}/cancel`, {
-      method: "POST",
-      baseUrl: sessionBase(sessionId),
-    });
+  async cancel(sessionId: string): Promise<SessionDetail> {
+    const detail = await fetchJson<SessionDetail>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/cancel`,
+      {
+        method: "POST",
+        baseUrl: sessionBase(sessionId),
+      },
+    );
+    invalidateSessionsList();
+    return detail;
   },
 
   regenerate(sessionId: string): Promise<SessionDetail> {
@@ -721,12 +746,17 @@ export const sessionsApi = {
     );
   },
 
-  rename(sessionId: string, name: string): Promise<SessionDetail> {
+  async rename(sessionId: string, name: string): Promise<SessionDetail> {
     const qs = new URLSearchParams({ name });
-    return fetchJson(`/v1/sessions/${encodeURIComponent(sessionId)}?${qs}`, {
-      method: "PATCH",
-      baseUrl: sessionBase(sessionId),
-    });
+    const detail = await fetchJson<SessionDetail>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}?${qs}`,
+      {
+        method: "PATCH",
+        baseUrl: sessionBase(sessionId),
+      },
+    );
+    invalidateSessionsList();
+    return detail;
   },
 
   async delete(sessionId: string): Promise<void> {
@@ -741,9 +771,13 @@ export const sessionsApi = {
       // double-click, or an empty draft the user is trying to clear — the
       // backend returns 404 "session not found". Swallow it so the caller still
       // drops the row instead of surfacing "no session" and leaving it stuck.
-      if (err instanceof ApiError && err.status === 404) return;
+      if (err instanceof ApiError && err.status === 404) {
+        invalidateSessionsList();
+        return;
+      }
       throw err;
     }
+    invalidateSessionsList();
   },
 
   // Per-session attached skill list. skill-creator is always active and is

@@ -4,6 +4,7 @@ import { useTranslation, type QueuedInput } from "@valuz/core";
 import {
   Check,
   CornerDownRight,
+  Loader2,
   Paperclip,
   Pencil,
   Play,
@@ -13,6 +14,13 @@ import {
 
 interface QueuedInputsBarProps {
   queue: QueuedInput[];
+  /**
+   * The item the drain is executing right now (already out of ``queue``, its
+   * turn possibly not yet visible in the transcript). Rendered as a
+   * non-editable "sending" bubble so the accepted message never disappears
+   * from both the queue bar and the transcript at once.
+   */
+  dispatching?: QueuedInput | null;
   paused: boolean;
   onEdit: (queueId: string, text: string) => void | Promise<void>;
   onDelete: (queueId: string) => void | Promise<void>;
@@ -30,6 +38,7 @@ interface QueuedInputsBarProps {
  */
 export const QueuedInputsBar = ({
   queue,
+  dispatching = null,
   paused,
   onEdit,
   onDelete,
@@ -40,7 +49,7 @@ export const QueuedInputsBar = ({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
 
-  if (queue.length === 0) return null;
+  if (queue.length === 0 && !dispatching) return null;
 
   const startEdit = (id: string, text: string) => {
     setEditingId(id);
@@ -59,7 +68,9 @@ export const QueuedInputsBar = ({
     <div className="mx-auto mb-1.5 w-full max-w-[760px] space-y-1.5">
       <div className="flex items-center justify-between px-1">
         <span className="text-[11px] text-ink-meta">
-          {t("common.queueRunsAfter")} ({queue.length})
+          {queue.length > 0
+            ? `${t("common.queueRunsAfter")} (${queue.length})`
+            : t("common.queueSending")}
         </span>
         {paused && (
           <Button
@@ -74,6 +85,34 @@ export const QueuedInputsBar = ({
           </Button>
         )}
       </div>
+
+      {dispatching && (
+        <div
+          key={dispatching.id}
+          className="rounded-lg border border-surface-border bg-surface-soft px-3 py-2"
+        >
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0 flex-1">
+              <p className="line-clamp-2 text-[13px] text-ink-body">
+                {dispatching.text}
+              </p>
+              {dispatching.attachment_count > 0 && (
+                <p className="mt-0.5 flex items-center gap-1 text-xs text-ink-meta">
+                  <Paperclip className="size-3" />
+                  {dispatching.attachment_count}
+                </p>
+              )}
+            </div>
+            <span
+              className="flex h-6 shrink-0 items-center gap-1 text-xs text-ink-meta"
+              title={t("common.queueSending")}
+            >
+              <Loader2 className="size-3 animate-spin" />
+              {t("common.queueSending")}
+            </span>
+          </div>
+        </div>
+      )}
 
       {queue.map((item) => (
         <div

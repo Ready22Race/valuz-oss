@@ -48,7 +48,7 @@ export const activityApi = {
       limit?: number;
       cursor?: string | null;
     },
-    opts?: { baseUrl?: string },
+    opts?: { baseUrl?: string; signal?: AbortSignal },
   ): Promise<ActivityPage> {
     const qs = new URLSearchParams();
     if (params.projectId) qs.set("project_id", params.projectId);
@@ -56,6 +56,9 @@ export const activityApi = {
     if (params.limit) qs.set("limit", String(params.limit));
     if (params.cursor) qs.set("cursor", params.cursor);
     const suffix = qs.toString() ? `?${qs}` : "";
-    return fetchJson(`/v1/activity${suffix}`, { baseUrl: opts?.baseUrl });
+    return fetchJson(`/v1/activity${suffix}`, {
+      baseUrl: opts?.baseUrl,
+      signal: opts?.signal,
+    });
   },
 };
