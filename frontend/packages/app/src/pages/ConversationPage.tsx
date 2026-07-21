@@ -826,6 +826,17 @@ export const ConversationPage = () => {
     selectedSessionIdRef.current = selectedSessionId;
   }, [selectedSessionId]);
   const [events, setEvents] = useState<SessionEventDTO[]>([]);
+  // Every ``event_uid`` this transcript has already consumed via the SSE
+  // path. The send-path subscription reuses ``historyCursorRef`` as its
+  // ``after_seq`` — and that cursor only advances from REST history reads
+  // (live frames carry kernel-local seqs, a different space), so a follow-up
+  // send after a live-streamed turn replays that turn's frames. The replayed
+  // OLD ``message.user`` must not flip ``sawTurnStart`` and the replayed OLD
+  // ``session.idle`` must not trip the terminal check (it killed the fresh
+  // stream before the new turn's frames arrived — follow-ups rendered
+  // nothing until a reload). Uid-less legacy frames bypass the guard and
+  // keep today's behavior. Cleared wherever the transcript resets.
+  const seenEventUidsRef = useRef<Set<string>>(new Set());
   // Live TODO list for the active session. Hydrated from
   // ``session.todos`` on session switch and from ``session.todos.update``
   // SSE frames during a turn. ``null`` means "agent has never emitted
@@ -2838,6 +2849,7 @@ export const ConversationPage = () => {
     // walk below rebuilds it from the new session's own history.
     setPendingApprovals([]);
     historyCursorRef.current = 0;
+    seenEventUidsRef.current.clear();
     minSeqRef.current = Number.POSITIVE_INFINITY;
     hasMoreOlderRef.current = false;
     setHasMoreOlder(false);
@@ -2935,6 +2947,7 @@ export const ConversationPage = () => {
       if (selectedSessionIdRef.current !== sessionId) return;
       setEvents([]);
       historyCursorRef.current = 0;
+      seenEventUidsRef.current.clear();
       minSeqRef.current = Number.POSITIVE_INFINITY;
       hasMoreOlderRef.current = false;
       setHasMoreOlder(false);
@@ -3639,6 +3652,18 @@ export const ConversationPage = () => {
         // before the abort lands.
         if (stopped || abort.signal.aborted) return;
         if (selectedSessionIdRef.current !== sessionId) return;
+        // Replay detection for the turn-lifecycle gates below. The send path
+        // subscribes with a cursor that only REST reads advance, so after a
+        // live-streamed turn the server legitimately replays frames this
+        // transcript already consumed. Those replays must stay render-inert
+        // AND gate-inert: an old ``message.user`` must not flip
+        // ``sawTurnStart``, an old ``session.idle`` must not stop the fresh
+        // stream (that combination blanked every follow-up turn until a
+        // reload). Uid-less legacy frames keep the pre-uid behavior.
+        const frameUid = event.event_uid ?? null;
+        const isReplayOfSeen =
+          frameUid != null && seenEventUidsRef.current.has(frameUid);
+        if (frameUid != null) seenEventUidsRef.current.add(frameUid);
         // Deliberately NO history-cursor advancement here: SSE frames mix
         // server-side backfill (history seq) with live frames (kernel-LOCAL
         // seq) and the two are indistinguishable on the wire — feeding a
@@ -3876,7 +3901,12 @@ export const ConversationPage = () => {
         // exact-text match (``payload.text === expectedUserText``): the
         // kernel may rewrite the message before persisting it (session-mode
         // wrapping "hi" → "/goal hi"), which broke it the same way.
-        if (evType === "message.user") {
+        // ``!isReplayOfSeen``: with a stale send-path cursor the server
+        // replays PRIOR turns first — their ``message.user`` frames are
+        // already in this transcript and must not stand in for the turn
+        // we're waiting on (they let the matching stale ``session.idle``
+        // close the stream before the new turn's frames arrived).
+        if (evType === "message.user" && !isReplayOfSeen) {
           sawTurnStart = true;
         }
         const status = event.event.payload.status;
@@ -3895,7 +3925,8 @@ export const ConversationPage = () => {
         if (
           evType === "session.update" &&
           status &&
-          (sawTurnStart || !isTerminalSessionStatus(status))
+          ((sawTurnStart && !isReplayOfSeen) ||
+            !isTerminalSessionStatus(status))
         ) {
           setSessions((prev) =>
             prev.map((s) =>
@@ -3905,8 +3936,12 @@ export const ConversationPage = () => {
             ),
           );
         }
+        // ``!isReplayOfSeen``: a terminal frame this transcript already
+        // consumed is a stale replay (send-path cursor lag) — honoring it
+        // stopped the stream instantly and blinded the whole follow-up turn.
         const terminal =
           sawTurnStart &&
+          !isReplayOfSeen &&
           (evType === "session.idle" ||
             evType === "run.failed" ||
             (evType === "session.update" &&
