@@ -19,16 +19,18 @@ export interface AgentDeployPicker {
 }
 
 /** Shared state for the create-project dialogs' "deploy agents" multi-select.
- *  Loads the library once and defaults the selection to Valuz Helper when
- *  present. Used by both create entry points (projects page + sidebar) so they
- *  can't drift. */
-export function useAgentDeployPicker(): AgentDeployPicker {
+ *  Loads the library and defaults the selection to Valuz Helper when present.
+ *  Used by both create entry points (projects page + sidebar) so they can't
+ *  drift. Pass the chosen execution target's ``baseUrl`` (multi-target
+ *  editions) so a cloud-bound project lists cloud-deployable agents — a cloud
+ *  backend can't instantiate a slug that only exists in the local library. */
+export function useAgentDeployPicker(baseUrl?: string): AgentDeployPicker {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
 
   useEffect(() => {
     void agentsApi
-      .listAgents()
+      .listAgents(undefined, baseUrl ? { baseUrl } : undefined)
       .then((d) => {
         // Surface the default assistant first so it reads as the primary pick
         // (stable sort keeps the rest in the library's order).
@@ -49,7 +51,7 @@ export function useAgentDeployPicker(): AgentDeployPicker {
       .catch(() => {
         /* non-fatal: the picker just shows no agents to deploy */
       });
-  }, []);
+  }, [baseUrl]);
 
   const reset = useCallback(() => {
     setSelected(

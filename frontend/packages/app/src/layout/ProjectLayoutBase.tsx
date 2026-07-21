@@ -220,11 +220,15 @@ export function ProjectLayoutBase({
   const [newName, setNewName] = useState("");
   const [newRootPath, setNewRootPath] = useState("");
   const [createError, setCreateError] = useState("");
-  // Initial members for the create dialog (shared with the projects-page entry).
-  const memberPicker = useAgentDeployPicker();
   // Execution location for the create dialog (multi-target editions; inert
   // no-target state on single-backend builds).
   const execLocation = useProjectExecutionLocation();
+  // Initial members for the create dialog (shared with the projects-page
+  // entry). Source candidates from the chosen target's backend so a cloud-
+  // bound project only lists cloud-deployable agents.
+  const memberPicker = useAgentDeployPicker(
+    execLocation.effectiveTarget?.baseUrl,
+  );
   const [historyIdx, setHistoryIdx] = useState<number>(
     () => (window.history.state as { idx?: number } | null)?.idx ?? 0,
   );
@@ -594,9 +598,7 @@ export function ProjectLayoutBase({
     return degradedTargets
       .map((id) => {
         const target = registered.find((candidate) => candidate.id === id);
-        return target
-          ? t(target.labelKey as Parameters<typeof t>[0])
-          : id;
+        return target ? t(target.labelKey as Parameters<typeof t>[0]) : id;
       })
       .join(" / ");
   }, [degradedTargets, t]);
