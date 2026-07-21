@@ -85,18 +85,6 @@ from valuz_agent.modules.tasks.provenance import resolve_trigger_provenance
 logger = logging.getLogger(__name__)
 
 
-def _notify_task_memory(task_id: str, user_id: str) -> None:
-    """Fire the task-finish memory extraction (memory-system-design §7.1): graduate
-    a completed task's multi-agent lessons + project progress into project memory.
-    Best-effort, non-blocking, fully isolated — never affects task finalization."""
-    try:
-        from valuz_agent.modules.memory.scheduler import task_finish_scheduler
-
-        task_finish_scheduler.notify_finished(task_id, user_id)
-    except Exception:  # noqa: BLE001 — never let the memory hook break finalize
-        logger.debug("task-finish memory trigger skipped for %s", task_id, exc_info=True)
-
-
 class LifecycleService:
     """Task lifecycle — kickoff / draft / commit / abandon / finish + the
     actor-loop finalize callbacks and the lead-clone builder.
@@ -294,9 +282,11 @@ class LifecycleService:
                     actor=created_by,
                     payload={"error": gap},
                 )
-                from valuz_agent.modules.tasks import messaging as _msg
+                from valuz_agent.modules.notifications.projectors import (
+                    record_task_failure_notification,
+                )
 
-                await _msg.record_task_failure_notification(
+                await record_task_failure_notification(
                     task_id=task_id,
                     project_id=project_id,
                     event_id=kickoff_ev.id,
@@ -828,9 +818,11 @@ class LifecycleService:
                         "pending_subtasks": unresolved,
                     },
                 )
-                from valuz_agent.modules.tasks import messaging as _msg
+                from valuz_agent.modules.notifications.projectors import (
+                    record_task_failure_notification,
+                )
 
-                await _msg.record_task_failure_notification(
+                await record_task_failure_notification(
                     task_id=task_id,
                     project_id=project_id,
                     event_id=blocked_ev.id,
@@ -859,9 +851,11 @@ class LifecycleService:
                     session_id=lead_session_id,
                     payload={"reason": "unresolved_subtasks", "pending_subtasks": unresolved},
                 )
-                from valuz_agent.modules.tasks import messaging as _msg
+                from valuz_agent.modules.notifications.projectors import (
+                    record_task_failure_notification,
+                )
 
-                await _msg.record_task_failure_notification(
+                await record_task_failure_notification(
                     task_id=task_id,
                     project_id=project_id,
                     event_id=blocked_ev.id,
@@ -901,7 +895,6 @@ class LifecycleService:
                 "auto-finalize: task %s completed (lead natural end, no explicit finish_task)",
                 task_id,
             )
-            _notify_task_memory(task_id, user_id=user_id)
 
     # ------------------------------------------------------------------
     # _finalize_actor — the run_actor_loop finally callback
@@ -1321,11 +1314,6 @@ class LifecycleService:
 
         if rejected is not None:
             return rejected
-
-        # Graduate the finished task's multi-agent lessons into project memory
-        # (only on a real completion, not a user-requested 'stopped').
-        if final_status == "completed":
-            _notify_task_memory(task_id, user_id=user_id)
 
         # Session-modes reconciliation (task-goal-mode.md §Key decisions):
         # ``finish_task`` is the authoritative terminal. Force the lead

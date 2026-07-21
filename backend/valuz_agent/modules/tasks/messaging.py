@@ -203,52 +203,6 @@ async def inject_into_task(
     }
 
 
-async def record_task_failure_notification(
-    *,
-    task_id: str,
-    project_id: str,
-    event_id: str,
-    event_type: str,
-    reason: str | None,
-    task_title: str | None = None,
-    user_id: str,
-) -> None:
-    """Failure PROJECTOR: mirror a ``task_blocked`` / ``kickoff_failed`` event
-    into the durable notification ledger (kind=``task_failed``, action=resume).
-
-    This is the "强提醒" persistence: a failure is now a durable attention item
-    that survives restart, drives the badge + OS notification, and clears when
-    the user resumes (see ``notification_service.resolve_task`` on resume).
-    Deduped by event id. Best-effort — never break the failure's own event flow.
-
-    ``task_title`` is looked up if not supplied so call sites stay terse.
-    """
-    from valuz_agent.modules.notifications.service import notification_service
-
-    title = task_title
-    if title is None:
-        try:
-            async with async_unit_of_work(commit=False) as db:
-                task = await TaskDatastore(db).get_task(user_id or "", task_id)
-            title = task.title if task is not None else task_id
-        except Exception:  # noqa: BLE001
-            title = task_id
-
-    await notification_service.ingest(
-        user_id or "",
-        dedup_key=f"f:{event_id}",
-        kind="task_failed",
-        title=title or task_id,  # frontend builds "任务受阻: {title}"
-        body=reason or "",
-        route=f"/tasks/{task_id}",
-        action="resume",
-        task_id=task_id,
-        project_id=project_id,
-        source_event_id=event_id,
-        payload={"reason": reason, "event_type": event_type},
-    )
-
-
 async def record_awaiting_user(
     *,
     task_id: str,

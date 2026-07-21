@@ -226,9 +226,11 @@ class TaskHealthMonitor:
                 session_id=lead_session_id,
                 payload={"reason": "lead_dead", "error": reason},
             )
-            from valuz_agent.modules.tasks import messaging as _msg
+            from valuz_agent.modules.notifications.projectors import (
+                record_task_failure_notification,
+            )
 
-            await _msg.record_task_failure_notification(
+            await record_task_failure_notification(
                 task_id=task_id,
                 project_id=project_id,
                 event_id=blocked_ev.id,

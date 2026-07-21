@@ -408,6 +408,11 @@ async def init_kernel(app: FastAPI) -> None:
     # Task-finish trigger (§7.1): when a multi-agent task completes, graduate its
     # durable multi-agent lessons + project progress into project memory.
     task_finish_scheduler.set_runner(run_task_finish_extraction)
+    # Event-first memory trigger: graduate a completed task's lessons when
+    # tasks/events.finalize_task announces task.finalized.
+    from valuz_agent.modules.memory.scheduler import wire_task_finalized_trigger
+
+    wire_task_finalized_trigger()
 
 
 async def bind_data_service(app: FastAPI) -> None:

@@ -1877,9 +1877,6 @@ def test_finish_task_completed_publishes_finalized_and_notifies_memory(
     monkeypatch.setattr(
         events_mod, "publish_task_finalized", lambda tid, uid, st: calls.append(("pub", tid, st))
     )
-    monkeypatch.setattr(
-        lc_mod, "_notify_task_memory", lambda tid, user_id=None: calls.append(("mem", tid))
-    )
 
     orch = TaskOrchestrator()
     res = asyncio.run(
@@ -1892,8 +1889,9 @@ def test_finish_task_completed_publishes_finalized_and_notifies_memory(
         )
     )
     assert res["ok"] is True
+    # Memory graduation rides this announce (see the task.finalized wiring
+    # test below) — the terminal write itself must publish it.
     assert ("pub", "t1", "completed") in calls
-    assert ("mem", "t1") in calls
 
 
 def test_finish_task_stopped_publishes_finalized_without_memory(
@@ -1910,9 +1908,6 @@ def test_finish_task_stopped_publishes_finalized_without_memory(
     monkeypatch.setattr(
         events_mod, "publish_task_finalized", lambda tid, uid, st: calls.append(("pub", tid, st))
     )
-    monkeypatch.setattr(
-        lc_mod, "_notify_task_memory", lambda tid, user_id=None: calls.append(("mem", tid))
-    )
 
     orch = TaskOrchestrator()
     res = asyncio.run(
@@ -1927,7 +1922,6 @@ def test_finish_task_stopped_publishes_finalized_without_memory(
     )
     assert res["ok"] is True
     assert ("pub", "t1", "stopped") in calls
-    assert not any(c[0] == "mem" for c in calls)
 
 
 def test_commit_task_creates_lead_session_with_task_scope(
@@ -2210,3 +2204,26 @@ def test_task_lifecycle_event_trace_golden(db_factory, tmp_path, monkeypatch) ->
     assert "agent_name" in completed_sub
     finished = by_type["task_completed"].payload
     assert finished["summary"] == "done" and finished["artifacts"] == []
+
+
+
+def test_task_finalized_wiring_triggers_memory_on_completed(monkeypatch) -> None:
+    """Event-first memory trigger: the scheduler subscribes to task.finalized
+    (wired at boot) and graduates ONLY real completions — stopped/blocked
+    terminals must not fire an extraction."""
+    from valuz_agent.infra.eventbus import event_bus
+    from valuz_agent.modules.memory import scheduler as sched_mod
+    from valuz_agent.modules.tasks.events import TASK_FINALIZED
+
+    sched_mod.wire_task_finalized_trigger()
+
+    notified: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        sched_mod.task_finish_scheduler,
+        "notify_finished",
+        lambda tid, uid: notified.append((tid, uid)),
+    )
+    event_bus.publish(TASK_FINALIZED, task_id="t-x", owner_user_id=OWNER, status="completed")
+    event_bus.publish(TASK_FINALIZED, task_id="t-y", owner_user_id=OWNER, status="stopped")
+    event_bus.publish(TASK_FINALIZED, task_id="t-z", owner_user_id=OWNER, status="blocked")
+    assert notified == [("t-x", OWNER)]
