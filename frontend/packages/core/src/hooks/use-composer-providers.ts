@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { providersApi, type LLMChannel } from "../api/providers-api";
+import type { LLMChannel } from "../api/providers-api";
+import { getComposerCatalogAdapter } from "../edition/composer-catalog";
 
 /** Runtime identifiers used by the runtime filter. Server-resolved onto each
  *  model's ``runtimes`` — not re-derived here. */
@@ -30,50 +31,45 @@ export const providerHasUsableCredentials = (
 };
 
 /**
- * Load the composer's server-resolved model channels from one execution
- * target. Multi-target editions pass the selected target's base URL; OSS and
- * other single-target builds leave it undefined and keep using the providers
- * API's module default.
+ * Load the composer's server-resolved model channels through the active
+ * edition's catalog adapter. OSS treats ``targetId`` as opaque and its default
+ * adapter always uses the providers API's module default.
  *
- * Switching targets clears the previous list immediately. An obsolete
- * response is ignored if it resolves later, so a slow local request can never
- * overwrite a newer cloud selection (or vice versa).
+ * Switching scopes clears the previous list immediately. An obsolete response
+ * is ignored if it resolves later, so a slower old-scope request can never
+ * overwrite the active scope.
  */
-export const useComposerProviderChannels = (apiBaseUrl?: string) => {
+export const useComposerProviderChannels = (targetId?: string | null) => {
+  const adapter = getComposerCatalogAdapter();
+  const scopeKey = adapter.getScopeKey({ targetId });
   const [loaded, setLoaded] = useState<{
-    apiBaseUrl: string | undefined;
+    scopeKey: string;
     providers: LLMChannel[];
-  }>({ apiBaseUrl, providers: [] });
+  }>({ scopeKey, providers: [] });
 
   useEffect(() => {
     let active = true;
 
-    void providersApi
-      .list({
-        gated: true,
-        baseUrl: apiBaseUrl,
-        // A location selection is an explicit request to consult that service.
-        // Do not reuse another visit's short-lived provider-list cache.
-        fresh: true,
-      })
+    void adapter
+      .listProviderChannels({ targetId })
       .then(({ providers: channels }) => {
         if (active) {
           setLoaded({
-            apiBaseUrl,
+            scopeKey,
             providers: channels.filter((channel) => channel.enabled),
           });
         }
       })
       .catch(() => {
-        if (active) setLoaded({ apiBaseUrl, providers: [] });
+        if (active) setLoaded({ scopeKey, providers: [] });
       });
 
     return () => {
       active = false;
     };
-  }, [apiBaseUrl]);
+  }, [adapter, scopeKey, targetId]);
 
-  return loaded.apiBaseUrl === apiBaseUrl ? loaded.providers : [];
+  return loaded.scopeKey === scopeKey ? loaded.providers : [];
 };
 
 /**

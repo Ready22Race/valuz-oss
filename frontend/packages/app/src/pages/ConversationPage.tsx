@@ -2570,26 +2570,23 @@ export const ConversationPage = () => {
       : t("conversation.newChat" as Parameters<typeof t>[0]));
 
   // Existing sessions follow their observed origin. New project conversations
-  // follow the selected project's origin; new temp chats follow the explicit
-  // location chip (or the registered default). This keeps the model list on
-  // the same backend that will own the session.
+  // follow the selected project's origin; new temp chats pass the explicit
+  // location chip. The catalog adapter owns target resolution and routing.
   const sessionExecOrigin = useEntityOrigin(selectedSessionId, "session");
   const selectedProviderProject = projects.find(
     (project) => project.id === selectedProjectId,
   );
-  const selectedProjectOrigin = selectedProviderProject
-    ? (selectedProviderProject.exec_origin ?? "local")
-    : undefined;
+  const selectedProjectOrigin = selectedProviderProject?.exec_origin;
   const providerTargetId = selectedSession
     ? sessionExecOrigin
     : (selectedProjectOrigin ?? execTargetId);
   const providerTarget =
     executionTargets.find((target) => target.id === providerTargetId) ??
     getDefaultExecutionTarget();
-  const providers = useComposerProviderChannels(providerTarget?.baseUrl);
+  const providers = useComposerProviderChannels(providerTargetId);
   const { agents: myAgents, loaded: myAgentsLoaded } =
     useComposerAgentLibrary(
-      providerTarget?.baseUrl,
+      providerTargetId,
       `${agentParam ?? ""}:${agentLibraryRevision}`,
     );
 
