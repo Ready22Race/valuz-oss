@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 import {
+  DEGRADED_REPROBE_MS,
   fanOutTargets,
   getListFanOutTargets,
   LIST_TARGET_TIMEOUT_MS,
@@ -68,24 +69,66 @@ describe("fanOutTargets", () => {
     ).rejects.toThrow("all down");
   });
 
-  it("degrades a target that never settles instead of pinning the list", async () => {
+  it("degrades and aborts a target that never settles instead of pinning the list", async () => {
     // A black-holed backend accepts the connection and never responds —
     // browser fetch has no default timeout, so without the per-target race
     // this fan-out would await forever and every list surface would sit on
-    // "loading" despite the healthy target having answered.
+    // "loading" despite the healthy target having answered. The timeout must
+    // also fire the target's AbortSignal, otherwise every poll tick leaks one
+    // hung connection until the browser's per-origin limit starves the rest.
     vi.useFakeTimers();
     try {
       setExecutionTargets([LOCAL, CLOUD]);
-      const outcome = fanOutTargets((target) =>
-        target.id === "cloud"
-          ? new Promise<string>(() => {}) // never settles
-          : Promise.resolve("ok"),
-      );
+      let cloudSignal: AbortSignal | undefined;
+      const outcome = fanOutTargets((target, signal) => {
+        if (target.id === "cloud") {
+          cloudSignal = signal;
+          return new Promise<string>(() => {}); // never settles
+        }
+        return Promise.resolve("ok");
+      });
       await vi.advanceTimersByTimeAsync(LIST_TARGET_TIMEOUT_MS + 1);
       const { values, failedTargets } = await outcome;
       expect(values).toHaveLength(1);
       expect(values[0]!.target.id).toBe("local");
       expect(failedTargets).toEqual(["cloud"]);
+      expect(cloudSignal?.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("re-probes degraded targets and clears the banner when they recover", async () => {
+    // The hint is set by failed requests and cleared by successful ones — on
+    // a quiet page no further list fetch may ever run, so recovery must be
+    // active: replay the last fan-out against the failed target on a timer.
+    vi.useFakeTimers();
+    try {
+      setExecutionTargets([LOCAL, CLOUD]);
+      let cloudHealthy = false;
+      const fetchOne = (target: { id: string }) =>
+        target.id === "cloud" && !cloudHealthy
+          ? Promise.reject(new Error("down"))
+          : Promise.resolve("ok");
+      const { result } = renderHook(() => useDegradedListTargets());
+      await act(async () => {
+        await fanOutTargets(fetchOne);
+      });
+      expect(result.current).toEqual(["cloud"]);
+
+      // First probe while still down: banner stays, probe reschedules.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(DEGRADED_REPROBE_MS + 1);
+      });
+      expect(result.current).toEqual(["cloud"]);
+
+      // Backend recovers: the next probe clears the banner without any list
+      // surface having refreshed.
+      cloudHealthy = true;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(DEGRADED_REPROBE_MS + 1);
+      });
+      expect(result.current).toEqual([]);
     } finally {
       vi.useRealTimers();
     }
