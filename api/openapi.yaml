@@ -4180,18 +4180,6 @@ components:
           items: {type: string}
         title: {type: string, nullable: true}
         created_by: {type: string, default: user}
-        dispatch_mode:
-          type: string
-          enum: [sync, async]
-          default: async
-          description: >-
-            Dispatch architecture (M10). Both share one lead toolset
-            (non-blocking dispatch + await_members + plan/review/finish) and
-            goal mode; they differ only in the session driver. "async"
-            (default) runs the lead as a persistent actor re-woken by
-            member_done/send until finish_task (robust for multi-turn / long
-            members); "sync" (legacy) drives the lead in a single turn then
-            finalizes, with no re-drive.
         worktree:
           type: boolean
           default: false

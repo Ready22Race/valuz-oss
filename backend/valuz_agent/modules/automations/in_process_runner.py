@@ -646,7 +646,6 @@ class InProcessAutomationRunner:
                 goal=rendered_prompt,
                 lead_agent_slug=row.agent_slug,
                 title=title or row.name,
-                dispatch_mode="async",
                 created_by="automation",
                 # Worktree isolation (design §5): the automation's flag rides
                 # into every fired task — each run gets its own worktree.

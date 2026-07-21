@@ -125,20 +125,18 @@ async def _credential_gap(
 # ---------------------------------------------------------------------------
 
 
-def materialize_lead_clone(
-    base_agent: Any, dispatch_mode: Literal["sync", "async"] = "sync"
-) -> Any:  # returns the lead-clone AgentConfig
+def materialize_lead_clone(base_agent: Any) -> Any:  # returns the lead-clone AgentConfig
     """Materialize a per-task **lead clone** of *base_agent*.
 
     Tool surfaces ride the session's ``harness`` MCP entry
     (``build_member_session(is_lead=True)`` points it at the ``lead``
     toolset of the host toolkit MCP server) — the clone carries no tool
     declarations of its own. It survives as an identity stamp: the
-    ``__lead__{mode}`` id marks the embedded snapshot as a lead clone for
-    queries/diagnostics. Stable per (base, mode); the clone exists only as
-    the lead session's embedded snapshot — the kernel has no agents table.
+    ``__lead__async`` id marks the embedded snapshot as a lead clone for
+    queries/diagnostics. Stable per base; the clone exists only as the lead
+    session's embedded snapshot — the kernel has no agents table.
     """
-    clone_id = f"{base_agent.id}__lead__{dispatch_mode}"
+    clone_id = f"{base_agent.id}__lead__async"
     return replace(base_agent, id=clone_id, tools=())
 
 
@@ -223,7 +221,6 @@ class TaskSessionResolver:
         cwd: str,
         brief: str,
         user_id: str,
-        dispatch_mode: Literal["sync", "async"] = "async",
         plan_pre_committed: bool = False,
         worktree_notice: str | None = None,
     ) -> ResolvedTaskSession | str:
@@ -238,9 +235,7 @@ class TaskSessionResolver:
         if lead_member is None:
             return f"lead agent {agent_slug!r} is not a member of project {project_id!r}"
         lead_agent = await _member_agent_config(lead_member, member_ds, user_id=user_id)
-        lead_clone = (
-            materialize_lead_clone(lead_agent, dispatch_mode) if lead_agent is not None else None
-        )
+        lead_clone = materialize_lead_clone(lead_agent) if lead_agent is not None else None
 
         brief = spill_goal_brief_if_too_long(
             brief,
@@ -260,7 +255,6 @@ class TaskSessionResolver:
             brief=brief,
             project_name=env.project_row.name,
             project_instructions_md=env.instructions_md,
-            dispatch_mode=dispatch_mode,
             # Lead runs the whole task in goal mode: the kernel auto-loops
             # until the task goal is met. ``finish_task`` remains the
             # authoritative terminal (it forces mode back to default).

@@ -377,11 +377,6 @@ Protocol:
    pre-restart state still holds.
 """
 
-# Single unified protocol now that dispatch is non-blocking + await_members
-# collects (v0.14). The async kickoff path reuses the same playbook.
-DISPATCH_PLAYBOOK_V2 = DISPATCH_PLAYBOOK
-
-
 # Playbook variant for leads spawned from a chat draft commit_task path
 # (VALUZ-CHATPLAN). The plan is already laid out (and signed off by the user),
 # so the lead skips step 1 "PLAN FIRST" and goes straight to dispatch. The
@@ -864,7 +859,6 @@ async def build_member_session(
     model_override: str | None = None,
     providers: object | None = None,
     lead_session_id: str | None = None,
-    dispatch_mode: str = "sync",
     goal_mode: bool = False,
     plan_pre_committed: bool = False,
     worktree_notice: str | None = None,
@@ -944,7 +938,7 @@ async def build_member_session(
             # non-empty plan as belt-and-suspenders.
             playbook_block = COMMITTED_LEAD_PLAYBOOK
         else:
-            playbook_block = DISPATCH_PLAYBOOK_V2 if dispatch_mode == "async" else DISPATCH_PLAYBOOK
+            playbook_block = DISPATCH_PLAYBOOK
     roster_block = (
         await build_member_roster(
             project_id=project_id,

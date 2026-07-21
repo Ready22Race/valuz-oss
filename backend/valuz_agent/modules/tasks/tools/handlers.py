@@ -684,10 +684,6 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
                 content="create_task: no lead_agent given and conversation has no agent",
                 is_error=True,
             )
-        dispatch_mode = args.get("dispatch_mode") or "async"
-        if dispatch_mode not in ("sync", "async"):
-            dispatch_mode = "async"
-
         try:
             task_row = await orchestrator.kickoff(
                 project_id=project_id,
@@ -696,7 +692,6 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
                 refs=args.get("refs") or [],
                 created_by=ctx.session_id,
                 title=args.get("title"),
-                dispatch_mode=dispatch_mode,  # type: ignore[arg-type]
                 originating_session_id=ctx.session_id,
                 user_id=ctx.user_id,
             )
@@ -706,7 +701,6 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
                         "task_id": task_row.id,
                         "title": task_row.title,
                         "lead_agent": lead_agent,
-                        "dispatch_mode": dispatch_mode,
                         "status": "active",
                     },
                     ensure_ascii=False,

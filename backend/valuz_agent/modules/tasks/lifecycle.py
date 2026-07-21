@@ -70,7 +70,6 @@ from valuz_agent.modules.tasks.resolution import (
 from valuz_agent.modules.tasks.actor_runner import (
     ActorRunner,
     collect_manifest,
-    run_session_to_idle,
 )
 from valuz_agent.modules.tasks.coordination import CoordinationService
 from valuz_agent.modules.tasks.datastore import (
@@ -144,7 +143,6 @@ class LifecycleService:
         refs: list[str] | None = None,
         created_by: str = "user",
         title: str | None = None,
-        dispatch_mode: Literal["sync", "async"] = "async",
         originating_session_id: str | None = None,
         trigger_type: str | None = None,
         trigger_automation_id: str | None = None,
@@ -158,14 +156,9 @@ class LifecycleService:
             raise ValueError("user_id is required")
         """Create a task and start its lead session in the background.
 
-        ``dispatch_mode`` selects the dispatch architecture (M10):
-          - ``sync`` (v1): lead drives a single turn; ``dispatch`` blocks until
-            each member finishes and returns the manifest as the tool_result.
-          - ``async`` (v2): lead is a persistent actor; ``dispatch_async``
-            starts member actors and returns immediately, members notify the
-            lead via the mailbox, and the lead loops until ``finish_task``.
-
-        Returns the newly created TaskRow.
+        The lead runs as a persistent actor (``run_actor_loop``): it ends a
+        turn and is re-woken by ``member_done`` / ``send`` until
+        ``finish_task``. Returns the newly created TaskRow.
 
         An over-long ``goal`` is no longer rejected: the lead brief is *spilled*
         to a doc and the lead receives a short pointer to read (see
@@ -249,7 +242,7 @@ class LifecycleService:
                 trigger_agent_slug=prov.trigger_agent_slug,
                 trigger_automation_id=prov.trigger_automation_id,
                 metadata_={
-                    "dispatch_mode": dispatch_mode,
+                    "dispatch_mode": "async",
                     # v3: when a project conversation spawns this task via the
                     # ``create_task`` tool, record the originating session so
                     # the task panel / conversation can cross-reference.
@@ -288,7 +281,6 @@ class LifecycleService:
                 cwd=lead_cwd,
                 brief=lead_brief,
                 user_id=user_id,
-                dispatch_mode=dispatch_mode,
                 worktree_notice=task_worktree_notice(wt_snapshot),
             )
             if isinstance(resolved, str):
@@ -366,55 +358,22 @@ class LifecycleService:
                 payload={"goal": goal, "lead_agent_slug": lead_agent_slug},
             )
 
-        # Drive the lead session in the background. Both modes share one lead
-        # toolset (non-blocking dispatch + await_members + plan/review/finish)
-        # and goal mode; they differ only in the session driver:
-        #   async (default): persistent actor loop — the lead ends a turn and is
-        #              re-woken by member_done / send until finish_task. Robust
-        #              for multi-turn / long-running members.
-        #   sync (legacy): one turn to idle, then finalize — no re-drive. Fine
-        #              for tasks the lead completes within a single goal turn.
-        if dispatch_mode == "async":
-            from valuz_agent.modules.tasks.mailbox import mailbox_registry
+        # Drive the lead as a persistent actor: it ends a turn and is re-woken
+        # by member_done / send until finish_task (the actor loop's finalize
+        # callback auto-closes a lead that ends without an explicit finish).
+        from valuz_agent.modules.tasks.mailbox import mailbox_registry
 
-            mailbox_registry.register(lead_session.id)
-            asyncio.create_task(
-                self._actor.run_actor_loop(
-                    session_id=lead_session.id,
-                    initial_prompt=lead_brief,
-                    role="lead",
-                    task_id=task_id,
-                    project_id=project_id,
-                    user_id=user_id,
-                )
+        mailbox_registry.register(lead_session.id)
+        asyncio.create_task(
+            self._actor.run_actor_loop(
+                session_id=lead_session.id,
+                initial_prompt=lead_brief,
+                role="lead",
+                task_id=task_id,
+                project_id=project_id,
+                user_id=user_id,
             )
-        else:
-
-            async def _drive_sync_lead() -> None:
-                # Sync (v1) path: one lead turn to idle; dispatch blocks in-turn.
-                # run_session_to_idle finalizes the kernel SESSION but NOT the
-                # task — so a sync lead that answers inline (e.g. user-created
-                # "你好") never calls finish_task and the task is orphaned
-                # "active". Apply the same terminal fallback the async actor
-                # loop gets via _finalize_actor.
-                final_status = await run_session_to_idle(
-                    session_id=lead_session.id,
-                    content=lead_brief,
-                    event_bus=self._bus,
-                    user_id=user_id,
-                )
-                try:
-                    await self._auto_finalize_lead_task(
-                        lead_session_id=lead_session.id,
-                        task_id=task_id,
-                        project_id=project_id,
-                        final_status=final_status,
-                        user_id=user_id,
-                    )
-                except Exception:  # noqa: BLE001
-                    logger.exception("sync kickoff: auto-finalize failed for task %s", task_id)
-
-            asyncio.create_task(_drive_sync_lead())
+        )
 
         return task_row
 
@@ -615,7 +574,6 @@ class LifecycleService:
                 cwd=lead_cwd,
                 brief=lead_brief,
                 user_id=user_id,
-                dispatch_mode="async",
                 plan_pre_committed=True,  # ← key flag (VALUZ-CHATPLAN D10)
                 worktree_notice=task_worktree_notice(task_worktree_snapshot(task_row)),
             )
@@ -1502,9 +1460,7 @@ class LifecycleService:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    async def _materialize_lead_agent(
-        self, base_agent: Any, dispatch_mode: Literal["sync", "async"] = "sync"
-    ) -> Any:  # returns the lead-clone AgentConfig
+    async def _materialize_lead_agent(self, base_agent: Any) -> Any:
         """Materialize a per-task lead clone of *base_agent*.
 
         Thin wrapper over :func:`tasks.resolution.materialize_lead_clone`
@@ -1512,7 +1468,7 @@ class LifecycleService:
         ``orch._materialize_lead_agent``); the resolver calls the function
         directly on the lead-resolution path.
         """
-        return materialize_lead_clone(base_agent, dispatch_mode)
+        return materialize_lead_clone(base_agent)
 
 
 __all__ = ["LifecycleService"]

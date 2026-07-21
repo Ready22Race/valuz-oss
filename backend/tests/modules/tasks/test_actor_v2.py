@@ -702,7 +702,7 @@ async def test_materialize_lead_agent_builds_clone_without_tool_decls() -> None:
 
     base = AgentConfig(id="base1", name="lead", tools=())
     orch = TaskOrchestrator()
-    clone = await orch._materialize_lead_agent(base, dispatch_mode="async")
+    clone = await orch._materialize_lead_agent(base)
     assert clone.id == "base1__lead__async"
     assert tuple(clone.tools or ()) == ()
 
@@ -802,7 +802,7 @@ async def test_toolset_partition_matches_declaration_sets() -> None:
 
     # The clone is a pure identity stamp.
     clone = await TaskOrchestrator()._materialize_lead_agent(
-        AgentConfig(id="a", name="a", tools=()), dispatch_mode="async"
+        AgentConfig(id="a", name="a", tools=())
     )
     assert tuple(clone.tools or ()) == ()
 

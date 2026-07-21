@@ -163,7 +163,6 @@ class TaskOrchestrator:
         refs: list[str] | None = None,
         created_by: str = "user",
         title: str | None = None,
-        dispatch_mode: Literal["sync", "async"] = "async",
         originating_session_id: str | None = None,
         trigger_type: str | None = None,
         trigger_automation_id: str | None = None,
@@ -172,14 +171,8 @@ class TaskOrchestrator:
     ) -> TaskRow:
         """Create a task and start its lead session in the background.
 
-        ``dispatch_mode`` selects the dispatch architecture (M10):
-          - ``sync`` (v1): lead drives a single turn; ``dispatch`` blocks until
-            each member finishes and returns the manifest as the tool_result.
-          - ``async`` (v2): lead is a persistent actor; ``dispatch_async``
-            starts member actors and returns immediately, members notify the
-            lead via the mailbox, and the lead loops until ``finish_task``.
-
-        Returns the newly created TaskRow.
+        The lead runs as a persistent actor re-woken by ``member_done`` /
+        ``send`` until ``finish_task``. Returns the newly created TaskRow.
 
         An over-long ``goal`` is spilled to a doc and the lead receives a short
         pointer to read (see ``spill_goal_brief_if_too_long``) rather than
@@ -201,7 +194,6 @@ class TaskOrchestrator:
             refs=refs,
             created_by=created_by,
             title=title,
-            dispatch_mode=dispatch_mode,
             originating_session_id=originating_session_id,
             trigger_type=trigger_type,
             trigger_automation_id=trigger_automation_id,
@@ -613,17 +605,13 @@ class TaskOrchestrator:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    async def _materialize_lead_agent(
-        self, base_agent: Any, dispatch_mode: Literal["sync", "async"] = "sync"
-    ) -> Any:  # returns the lead-clone AgentConfig
+    async def _materialize_lead_agent(self, base_agent: Any) -> Any:
         """Materialize a per-task lead clone of *base_agent*.
 
         Thin delegator onto :class:`LifecycleService` (ADR-023 Step 3c) —
         kept as a method so tests keep driving ``orch._materialize_lead_agent``.
         """
-        return await self._lifecycle._materialize_lead_agent(
-            base_agent, dispatch_mode=dispatch_mode
-        )
+        return await self._lifecycle._materialize_lead_agent(base_agent)
 
 
 # ---------------------------------------------------------------------------

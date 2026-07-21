@@ -57,9 +57,6 @@ class KickoffTaskRequest(BaseModel):
     refs: list[str] | None = None
     title: str | None = None
     created_by: str = "user"
-    # Dispatch architecture (M10): "sync" (v1, lead drives one turn, dispatch
-    # blocks) or "async" (v2, lead + members are persistent actors).
-    dispatch_mode: Literal["sync", "async"] = "async"
     # Task-level worktree isolation (design §5): the whole task — lead and
     # every member — runs in ONE git worktree of the project repo; the
     # branch merges back (or is discarded) when the task ends. Requires the
@@ -270,7 +267,6 @@ async def kickoff_task(
             refs=payload.refs,
             created_by=payload.created_by,
             title=payload.title,
-            dispatch_mode=payload.dispatch_mode,
             worktree=payload.worktree,
             user_id=user_id,
         )
