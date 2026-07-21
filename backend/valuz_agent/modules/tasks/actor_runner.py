@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 from valuz_agent.adapters import kernel_client
 from valuz_agent.adapters.data_reader import data_reader
@@ -43,7 +43,7 @@ from valuz_agent.infra.lifecycle import is_draining
 logger = logging.getLogger(__name__)
 
 
-async def _restamp_always_on_mcp(session_id: str, user_id: str | None = None) -> None:
+async def _restamp_always_on_mcp(session_id: str, user_id: str) -> None:
     """Refresh the always-on in-process MCP token before driving a turn.
 
     A session re-driven after a backend restart — task **resume / recovery**,
@@ -162,11 +162,8 @@ async def run_session_to_idle(
     on_message: Any | None = None,
     *,
     queued_attachments: list[dict[str, Any]] | None = None,
-    user_id: str | None = None,
+    user_id: str,
 ) -> str:
-    if user_id is None:
-        raise ValueError("user_id is required")
-
     """Drive one agent turn to completion and return the final session status.
 
     Equivalent to _run_agent_background but awaitable — callers get back the
@@ -387,8 +384,9 @@ async def collect_manifest(
     session_id: str,
     run_dir: Path,
     status: str,
+    *,
     since_epoch: float = 0.0,
-    user_id: str | None = None,
+    user_id: str,
 ) -> dict[str, Any]:
     """Build a SubtaskResult manifest after a member session completes.
 
@@ -510,7 +508,7 @@ class ActorRunner:
         self._host = host
 
     async def _run_turn_with_sink(
-        self, session_id: str, content: str, user_id: str | None = None
+        self, session_id: str, content: str, user_id: str
     ) -> str:
         """Run ONE turn on a persistent session and return its final status.
 
@@ -537,7 +535,7 @@ class ActorRunner:
             # session re-read is the only signal available: if the kernel stamped
             # a cancellation stop_reason, this is intent, not a failure.
             try:
-                loaded = await data_reader().get_session(cast(str, user_id), session_id)
+                loaded = await data_reader().get_session(user_id, session_id)
                 if _resolve_turn_status(loaded) == "interrupted":
                     return "interrupted"
             except Exception:  # noqa: BLE001
@@ -553,7 +551,7 @@ class ActorRunner:
         task_id: str,
         project_id: str,
         idle_ttl: float | None = None,
-        user_id: str | None = None,
+        user_id: str,
     ) -> None:
         """Persistent actor loop: run turn → idle → await mailbox → repeat.
 

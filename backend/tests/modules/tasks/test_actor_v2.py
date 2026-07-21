@@ -566,13 +566,13 @@ async def test_collect_manifest_attributes_by_mtime(tmp_path: object) -> None:
     os.utime(new, (5000.0, 5000.0))  # mtime after dispatch
 
     # since_epoch between the two → only the member's post-dispatch file.
-    m = await collect_manifest("s1", d, "idle", since_epoch=3000.0)
+    m = await collect_manifest("s1", d, "idle", since_epoch=3000.0, user_id=LOCAL_USER_ID)
     paths = [a["path"] for a in m["artifacts"]]
     assert str(new) in paths
     assert str(old) not in paths
 
     # since_epoch=0 → include everything (worktree / private-dir behaviour).
-    m_all = await collect_manifest("s1", d, "idle", since_epoch=0.0)
+    m_all = await collect_manifest("s1", d, "idle", since_epoch=0.0, user_id=LOCAL_USER_ID)
     paths_all = [a["path"] for a in m_all["artifacts"]]
     assert str(old) in paths_all and str(new) in paths_all
 

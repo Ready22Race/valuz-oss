@@ -84,7 +84,7 @@ class DispatcherService:
         goal: str | None = None,
         refs: list[str] | None = None,
         project_mode: str | None = None,
-        user_id: str | None = None,
+        user_id: str,
     ) -> dict[str, Any]:
         """Start a planned subtask's member actor (non-blocking); return its handle.
 

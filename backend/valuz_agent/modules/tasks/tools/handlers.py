@@ -236,13 +236,16 @@ async def _check_orchestration_gate(ctx: ExecContext) -> tuple[str, str] | ToolR
     project_id, agent_slug = verdict
 
     # Restrict to projects — chat projects are per-session ephemeral.
-    # (Needs the DB, so it stays host-side outside the pure policy.)
+    # (Needs the DB, so it stays outside the pure policy; project knowledge
+    # is read through the resolver seam.)
     from valuz_agent.infra.db import async_unit_of_work
-    from valuz_agent.modules.projects.datastore import ProjectDatastore
+    from valuz_agent.modules.tasks.resolution import task_session_resolver
 
     async with async_unit_of_work(commit=False) as db:
-        ws = await ProjectDatastore(db).get_by_id(sess.user_id, project_id)
-    if ws is None or ws.kind != "project":
+        env = await task_session_resolver.resolve_project_env(
+            db, user_id=sess.user_id, project_id=project_id
+        )
+    if env is None or env.project_row.kind != "project":
         return ToolResult(
             content="create_task is only available inside a project",
             is_error=True,

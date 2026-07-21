@@ -25,11 +25,8 @@ async def send_to_member(
     text: str,
     project_id: str,
     task_id: str,
-    user_id: str | None = None,
+    user_id: str,
 ) -> dict[str, Any]:
-    if user_id is None:
-        raise ValueError("user_id is required")
-
     """Deliver a free-text follow-up from the lead to a running member.
 
     Task-level isolation (dual isolation): the target must be a member of
@@ -83,7 +80,7 @@ async def inject_into_task(
     project_id: str,
     text: str,
     from_session_id: str,
-    user_id: str | None = None,
+    user_id: str,
 ) -> dict[str, Any]:
     """Inject a free-text instruction from a chat session into a running task's lead.
 
@@ -214,7 +211,7 @@ async def record_task_failure_notification(
     event_type: str,
     reason: str | None,
     task_title: str | None = None,
-    user_id: str | None = None,
+    user_id: str,
 ) -> None:
     """Failure PROJECTOR: mirror a ``task_blocked`` / ``kickoff_failed`` event
     into the durable notification ledger (kind=``task_failed``, action=resume).
@@ -262,7 +259,7 @@ async def record_awaiting_user(
     agent_name: str | None,
     question: str,
     pending_id: str,
-    user_id: str | None = None,
+    user_id: str,
 ) -> None:
     """Append an ``awaiting_user`` task event when an agent (lead or member)
     raises a question through the Decision Inbox.
@@ -278,7 +275,7 @@ async def record_awaiting_user(
     """
     async with async_unit_of_work() as db:
         await TaskEventDatastore(db).append_event(
-            user_id,  # type: ignore[arg-type]
+            user_id,
             project_id=project_id,
             task_id=task_id,
             type="awaiting_user",
@@ -299,13 +296,13 @@ async def record_user_answered(
     project_id: str,
     pending_id: str,
     session_id: str | None = None,
-    user_id: str | None = None,
+    user_id: str,
 ) -> None:
     """Append a ``user_answered`` task event when a pending question resolves
     (the counterpart to :func:`record_awaiting_user`)."""
     async with async_unit_of_work() as db:
         await TaskEventDatastore(db).append_event(
-            user_id,  # type: ignore[arg-type]
+            user_id,
             project_id=project_id,
             task_id=task_id,
             type="user_answered",
@@ -320,7 +317,7 @@ async def notify_lead_goal_revised(
     task_id: str,
     project_id: str,
     new_goal: str,
-    user_id: str | None = None,
+    user_id: str,
 ) -> dict[str, Any]:
     """Wake a running task's lead after the user revised ``task.goal``.
 

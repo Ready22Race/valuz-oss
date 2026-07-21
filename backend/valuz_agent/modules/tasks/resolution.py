@@ -32,6 +32,7 @@ from valuz_agent.adapters.agent_resolver import (
     embed_agent_config,
     resolve_agent_display_name,
     spill_goal_brief_if_too_long,
+    summarize_role,
 )
 from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.modules.agents.datastore import ProjectMemberDatastore
@@ -60,7 +61,7 @@ async def _credential_gap(
     agent_slug: str,
     *,
     db: Any | None = None,
-    user_id: str | None = None,
+    user_id: str,
 ) -> str | None:
     """Return a clear reason when a built session has no usable credentials.
 
@@ -82,9 +83,6 @@ async def _credential_gap(
     Returns ``None`` when a provider resolved (or is an OAuth
     subscription), else a human-readable reason.
     """
-    if user_id is None:
-        raise ValueError("user_id is required")
-
     if getattr(session, "model_provider", None) is not None:
         return None
 
@@ -209,6 +207,36 @@ class TaskSessionResolver:
             project_cwd=project_cwd,
             instructions_md=ws_ctx.instructions_md if ws_ctx else None,
         )
+
+    async def member_exists(
+        self, db: Any, *, user_id: str, project_id: str, agent_slug: str
+    ) -> bool:
+        """True when *agent_slug* is deployed into *project_id* (membership)."""
+        return await ProjectMemberDatastore(db).get(user_id, project_id, agent_slug) is not None
+
+    async def list_member_descriptors(
+        self, db: Any, *, user_id: str, project_id: str
+    ) -> list[dict[str, Any]]:
+        """Roster rows for the lead's ``list_members`` tool.
+
+        slug / display name / runtime / source agent / role summary — the
+        facts the lead needs to dispatch accurately (lead-dispatch-mvp §1.5).
+        """
+        member_ds = ProjectMemberDatastore(db)
+        rows = await member_ds.list_by_project(user_id, project_id)
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            agent_cfg = await _member_agent_config(row, member_ds, user_id=user_id)
+            result.append(
+                {
+                    "slug": row.agent_slug,
+                    "name": agent_cfg.name if agent_cfg else row.agent_slug,
+                    "runtime": agent_cfg.runtime_provider if agent_cfg else "unknown",
+                    "source_agent_slug": row.source_agent_slug,
+                    "role_summary": summarize_role(agent_cfg.instructions) if agent_cfg else "",
+                }
+            )
+        return result
 
     async def resolve_lead(
         self,

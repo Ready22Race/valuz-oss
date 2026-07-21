@@ -2093,7 +2093,6 @@ def test_task_lifecycle_event_trace_golden(db_factory, tmp_path, monkeypatch) ->
     import valuz_agent.modules.projects.datastore as ws_src
 
     monkeypatch.setattr(ws_src, "ProjectDatastore", _FakeWsDs)
-    monkeypatch.setattr(lc_mod, "ProjectMemberDatastore", _FakeMemberDs)
     monkeypatch.setattr(
         lc_mod,
         "fs_registry",

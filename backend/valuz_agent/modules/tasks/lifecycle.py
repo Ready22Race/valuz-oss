@@ -56,7 +56,6 @@ from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.infra.time_utils import now_ms
-from valuz_agent.modules.agents.datastore import ProjectMemberDatastore
 from valuz_agent.modules.tasks import planning
 from valuz_agent.modules.tasks.task_worktree import (
     resolve_task_cwd,
@@ -86,16 +85,7 @@ from valuz_agent.modules.tasks.provenance import resolve_trigger_provenance
 logger = logging.getLogger(__name__)
 
 
-def _require_user_id(user_id: str | None) -> str:
-    if user_id is None:
-        raise ValueError("user_id is required")
-    return user_id
-
-
-def _notify_task_memory(task_id: str, user_id: str | None = None) -> None:
-    if user_id is None:
-        raise ValueError("user_id is required")
-
+def _notify_task_memory(task_id: str, user_id: str) -> None:
     """Fire the task-finish memory extraction (memory-system-design §7.1): graduate
     a completed task's multi-agent lessons + project progress into project memory.
     Best-effort, non-blocking, fully isolated — never affects task finalization."""
@@ -140,6 +130,7 @@ class LifecycleService:
         project_id: str,
         goal: str,
         lead_agent_slug: str,
+        *,
         refs: list[str] | None = None,
         created_by: str = "user",
         title: str | None = None,
@@ -147,13 +138,8 @@ class LifecycleService:
         trigger_type: str | None = None,
         trigger_automation_id: str | None = None,
         worktree: bool = False,
-        user_id: str | None = None,
+        user_id: str,
     ) -> TaskRow:
-        # Fail loud rather than silently looking the project up under
-        # ``user_id=None`` (which always misses → a misleading "project not
-        # found"). Every caller must thread the owner explicitly.
-        if user_id is None:
-            raise ValueError("user_id is required")
         """Create a task and start its lead session in the background.
 
         The lead runs as a persistent actor (``run_actor_loop``): it ends a
@@ -390,7 +376,7 @@ class LifecycleService:
         originating_session_id: str,
         refs: list[str] | None = None,
         title: str | None = None,
-        user_id: str | None = None,
+        user_id: str,
     ) -> TaskRow:
         """Create a task in ``draft`` status without starting a lead session.
 
@@ -406,35 +392,22 @@ class LifecycleService:
         ``commit_task`` builds the lead session it spills an over-cap brief to a
         doc and passes a pointer (see ``spill_goal_brief_if_too_long``).
         """
-        if user_id is None:
-            raise ValueError("user_id is required")
-
         async with async_unit_of_work() as db:
             task_ds = TaskDatastore(db)
             event_ds = TaskEventDatastore(db)
-            member_ds = ProjectMemberDatastore(db)
 
-            from valuz_agent.modules.projects.datastore import ProjectDatastore
-
-            ws_ds = ProjectDatastore(db)
-            ws_row = await ws_ds.get_by_id(user_id, project_id)
-            if ws_row is None:
+            env = await task_session_resolver.resolve_project_env(
+                db, user_id=user_id, project_id=project_id
+            )
+            if env is None:
                 raise ValueError(f"project {project_id!r} not found")
-            lead_member = await member_ds.get(user_id, project_id, lead_agent_slug)
-            if lead_member is None:
+            if not await task_session_resolver.member_exists(
+                db, user_id=user_id, project_id=project_id, agent_slug=lead_agent_slug
+            ):
                 raise ValueError(
                     f"lead agent {lead_agent_slug!r} is not a member of project {project_id!r}"
                 )
-
-            project_cwd = fs_registry.project_cwd(
-                user_id,
-                ws_row.id,
-                cast(
-                    Literal["chat", "project"],
-                    ws_row.kind if ws_row.kind in ("chat", "project") else "chat",
-                ),
-                ws_row.root_path,
-            )
+            project_cwd = env.project_cwd
 
             slug = lead_agent_slug.replace("/", "-")[:32]
             task_id = uuid4().hex
@@ -501,7 +474,7 @@ class LifecycleService:
         project_id: str,
         caller_session_id: str,
         lead_agent_slug_override: str | None = None,
-        user_id: str | None = None,
+        user_id: str,
     ) -> dict[str, Any]:
         """Transition a draft task to active by spawning its lead session.
 
@@ -519,7 +492,6 @@ class LifecycleService:
         Returns ``{lead_session_id, status: "active", committed_at}`` on success,
         ``{"error": ...}`` on validation failure.
         """
-        user_id = _require_user_id(user_id)
         async with async_unit_of_work() as db:
             task_ds = TaskDatastore(db)
             event_ds = TaskEventDatastore(db)
@@ -670,14 +642,13 @@ class LifecycleService:
         project_id: str,
         caller_session_id: str,
         reason: str = "",
-        user_id: str | None = None,
+        user_id: str,
     ) -> dict[str, Any]:
         """Discard a draft task (status: draft → abandoned).
 
         Terminal — abandoned tasks cannot be resurrected. Use stop_task
         (intervene) for active tasks; abandon_task is draft-only.
         """
-        user_id = _require_user_id(user_id)
         async with async_unit_of_work() as db:
             task_ds = TaskDatastore(db)
             event_ds = TaskEventDatastore(db)
@@ -711,7 +682,7 @@ class LifecycleService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    async def _last_assistant_summary(session_id: str, user_id: str | None = None) -> str:
+    async def _last_assistant_summary(session_id: str, user_id: str) -> str:
         """Best-effort last assistant-message text, for an auto-finalize summary."""
         try:
             events = await kernel_client.get_events(
@@ -734,7 +705,7 @@ class LifecycleService:
         task_id: str,
         project_id: str,
         final_status: str,
-        user_id: str | None = None,
+        user_id: str,
     ) -> None:
         """Close a task when its lead actor-loop ends without an explicit
         ``finish_task`` call.
@@ -757,8 +728,6 @@ class LifecycleService:
         # lookup below (``get_task_by_project`` filters ``user_id``), which would
         # no-op this finalize and orphan the task ``active`` forever — the exact
         # bug this fallback exists to prevent. Every caller must thread the owner.
-        if user_id is None:
-            raise ValueError("user_id is required")
         async with async_unit_of_work() as db:
             task_ds = TaskDatastore(db)
             run_ds = TaskSessionDatastore(db)
@@ -948,7 +917,7 @@ class LifecycleService:
         task_id: str,
         project_id: str,
         via_shutdown: bool = False,
-        user_id: str | None = None,
+        user_id: str,
     ) -> None:
         """Finalize a session once its actor loop ends; record member result.
 
@@ -1224,7 +1193,7 @@ class LifecycleService:
         artifacts: list[str] | None = None,
         status: str = "completed",
         force: bool = False,
-        user_id: str | None = None,
+        user_id: str,
     ) -> dict[str, Any]:
         """Close the task — append a terminal event and set the task status.
 
@@ -1410,7 +1379,7 @@ class LifecycleService:
         lead_session_id: str,
         summary: str,
         artifacts: list[str] | None = None,
-        user_id: str | None = None,
+        user_id: str,
     ) -> dict[str, Any]:
         """Refresh the deliverable card on a completed task (follow-up chat).
 
@@ -1421,7 +1390,6 @@ class LifecycleService:
         dict (``status`` ``"updated"`` or ``"rejected"``) rather than raising,
         mirroring the sibling ``finish_task`` tool-facing method.
         """
-        user_id = _require_user_id(user_id)
         async with async_unit_of_work() as db:
             task_ds = TaskDatastore(db)
             event_ds = TaskEventDatastore(db)

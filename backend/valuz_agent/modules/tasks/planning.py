@@ -39,12 +39,6 @@ from valuz_agent.modules.tasks.plan import PlanError, TaskPlan
 logger = logging.getLogger(__name__)
 
 
-def _require_user_id(user_id: str | None) -> str:
-    if user_id is None:
-        raise ValueError("user_id is required")
-    return user_id
-
-
 # ---------------------------------------------------------------------------
 # Shared primitives
 # ---------------------------------------------------------------------------
@@ -58,11 +52,8 @@ async def emit_plan_update(
     plan: TaskPlan,
     actor: str,
     session_id: str | None,
-    user_id: str | None = None,
+    user_id: str,
 ) -> None:
-    if user_id is None:
-        raise ValueError("user_id is required")
-
     """Append a ``task_plan_update`` snapshot event (frontend Todo panel)."""
     panel = plan.to_panel()
     # Stamp each node's member display name so the Todo panel renders it
@@ -117,7 +108,7 @@ async def plan_task(
     project_id: str,
     lead_session_id: str,
     subtasks: list[dict[str, Any]],
-    user_id: str | None = None,
+    user_id: str,
 ) -> dict[str, Any]:
     """Lay down the structured subtask plan (DAG) before any dispatch.
 
@@ -174,7 +165,7 @@ async def plan_task(
         }
 
 
-async def get_plan(*, task_id: str, project_id: str, user_id: str | None = None) -> dict[str, Any]:
+async def get_plan(*, task_id: str, project_id: str, user_id: str) -> dict[str, Any]:
     """Return the plan snapshot + ready keys + status counts (read-only).
 
     Includes ``current_version`` so the caller knows what to pass as
@@ -203,7 +194,7 @@ async def modify_plan(
     add: list[dict[str, Any]] | None = None,
     update: list[dict[str, Any]] | None = None,
     expected_version: int | None = None,
-    user_id: str | None = None,
+    user_id: str,
 ) -> dict[str, Any]:
     """Mutate the plan: add nodes / patch nodes (by key).
 
@@ -291,7 +282,7 @@ async def review_subtask(
     subtask_key: str | None = None,
     session_id: str | None = None,
     feedback: str | None = None,
-    user_id: str | None = None,
+    user_id: str,
 ) -> dict[str, Any]:
     """Lead quality gate on a subtask: approve (→done) or rework (→re-run).
 
@@ -498,10 +489,9 @@ async def mark_node_dispatched(
     subtask_key: str,
     agent: str,
     session_id: str,
-    user_id: str | None = None,
+    user_id: str,
 ) -> None:
     """Flip a plan node to in_progress on dispatch (attempts++, link run)."""
-    user_id = _require_user_id(user_id)
     async with async_unit_of_work() as db:
         task_ds = TaskDatastore(db)
         event_ds = TaskEventDatastore(db)
@@ -533,7 +523,7 @@ async def mark_node_dispatched(
 
 
 async def mark_in_review(
-    *, task_id: str, project_id: str, member_session_id: str, user_id: str | None = None
+    *, task_id: str, project_id: str, member_session_id: str, user_id: str
 ) -> None:
     """Lead-side: flip the member's plan node to in_review on member_done.
 

@@ -47,12 +47,6 @@ from valuz_agent.modules.tasks.recovery import RecoveryService
 logger = logging.getLogger(__name__)
 
 
-def _require_user_id(user_id: str | None) -> str:
-    if user_id is None:
-        raise ValueError("user_id is required")
-    return user_id
-
-
 # ---------------------------------------------------------------------------
 # TaskOrchestrator
 # ---------------------------------------------------------------------------
@@ -134,6 +128,7 @@ class TaskOrchestrator:
         project_id: str,
         goal: str,
         lead_agent_slug: str,
+        *,
         refs: list[str] | None = None,
         created_by: str = "user",
         title: str | None = None,
@@ -141,7 +136,7 @@ class TaskOrchestrator:
         trigger_type: str | None = None,
         trigger_automation_id: str | None = None,
         worktree: bool = False,
-        user_id: str | None = None,
+        user_id: str,
     ) -> TaskRow:
         """Create a task and start its lead session in the background.
 
@@ -188,7 +183,7 @@ class TaskOrchestrator:
         originating_session_id: str,
         refs: list[str] | None = None,
         title: str | None = None,
-        user_id: str | None = None,
+        user_id: str,
     ) -> TaskRow:
         """Create a ``draft`` task without a lead session (VALUZ-CHATPLAN).
 
@@ -211,7 +206,7 @@ class TaskOrchestrator:
         project_id: str,
         caller_session_id: str,
         lead_agent_slug_override: str | None = None,
-        user_id: str | None = None,
+        user_id: str,
     ) -> dict[str, Any]:
         """Flip a draft task to ``active`` by spawning its lead session.
 
@@ -232,7 +227,7 @@ class TaskOrchestrator:
         project_id: str,
         caller_session_id: str,
         reason: str = "",
-        user_id: str | None = None,
+        user_id: str,
     ) -> dict[str, Any]:
         """Discard a draft task (status: draft → abandoned).
 
@@ -251,7 +246,7 @@ class TaskOrchestrator:
     # ==================================================================
 
     async def _run_turn_with_sink(
-        self, session_id: str, content: str, user_id: str | None = None
+        self, session_id: str, content: str, user_id: str
     ) -> str:
         """Run ONE turn on a persistent session and return its final status.
 
@@ -270,7 +265,7 @@ class TaskOrchestrator:
         task_id: str,
         project_id: str,
         idle_ttl: float | None = None,
-        user_id: str | None = None,
+        user_id: str,
     ) -> None:
         """Persistent actor loop: run turn → idle → await mailbox → repeat.
 
@@ -295,7 +290,7 @@ class TaskOrchestrator:
         return ActorRunner._format_member_done(msg)
 
     async def _notify_lead_member_idle(
-        self, session_id: str, status: str, user_id: str | None = None
+        self, session_id: str, status: str, user_id: str
     ) -> None:
         """After a member turn, push a member_done message to its lead's inbox.
 
@@ -306,7 +301,7 @@ class TaskOrchestrator:
         await self._coordination._notify_lead_member_idle(session_id, status, user_id=user_id)
 
     async def _lead_idle_with_no_pending(
-        self, task_id: str, project_id: str, user_id: str | None = None
+        self, task_id: str, project_id: str, user_id: str
     ) -> bool:
         """True when a lead has nothing left to wait for after a turn.
 
@@ -325,7 +320,7 @@ class TaskOrchestrator:
         task_id: str,
         project_id: str,
         final_status: str,
-        user_id: str | None = None,
+        user_id: str,
     ) -> None:
         """Host-side terminal fallback when a lead loop ends without finish_task
         (ADR-023 Step 3c). Thin delegator onto :class:`LifecycleService` (kept as
@@ -347,11 +342,11 @@ class TaskOrchestrator:
         return await self._recovery.recover_active_tasks()
 
     async def _recover_one_task(
-        self, task_id: str, project_id: str, user_id: str | None = None
+        self, task_id: str, project_id: str, user_id: str
     ) -> bool:
         return await self._recovery._recover_one_task(task_id, project_id, user_id=user_id)
 
-    async def _interrupt_kernel_session(self, session_id: str, user_id: str | None = None) -> None:
+    async def _interrupt_kernel_session(self, session_id: str, user_id: str) -> None:
         await self._recovery._interrupt_kernel_session(session_id, user_id=user_id)
 
     async def stop_task(
@@ -360,7 +355,7 @@ class TaskOrchestrator:
         project_id: str,
         *,
         target_status: str = "paused",
-        user_id: str | None = None,
+        user_id: str,
     ) -> bool:
         return await self._recovery.stop_task(
             task_id, project_id, target_status=target_status, user_id=user_id
@@ -372,14 +367,14 @@ class TaskOrchestrator:
         project_id: str,
         *,
         actor: str = "user",
-        user_id: str | None = None,
+        user_id: str,
         instruction: str | None = None,
     ) -> dict[str, Any]:
         return await self._recovery.resume_task(
             task_id, project_id, actor=actor, user_id=user_id, instruction=instruction
         )
 
-    async def stop_member(self, session_id: str, user_id: str | None = None) -> bool:
+    async def stop_member(self, session_id: str, user_id: str) -> bool:
         return await self._recovery.stop_member(session_id, user_id=user_id)
 
     async def _finalize_actor(
@@ -392,7 +387,7 @@ class TaskOrchestrator:
         task_id: str,
         project_id: str,
         via_shutdown: bool = False,
-        user_id: str | None = None,
+        user_id: str,
     ) -> None:
         """Finalize a session once its actor loop ends (ADR-023 Step 3c).
 
@@ -423,7 +418,7 @@ class TaskOrchestrator:
         goal: str | None = None,
         refs: list[str] | None = None,
         project_mode: str | None = None,
-        user_id: str | None = None,
+        user_id: str,
     ) -> dict[str, Any]:
         """Start a planned subtask's member actor (non-blocking); return its handle.
 
@@ -462,7 +457,7 @@ class TaskOrchestrator:
         keys: list[str] | None = None,
         mode: str = "all",
         timeout_s: float | None = None,
-        user_id: str | None = None,
+        user_id: str,
     ) -> dict[str, Any]:
         """Block (inside the lead's turn) until dispatched members finish.
 
@@ -487,7 +482,7 @@ class TaskOrchestrator:
         task_id: str,
         project_id: str,
         pending_keys: set[str],
-        user_id: str | None = None,
+        user_id: str,
     ) -> dict[str, dict[str, Any]]:
         """Backstop for bad-case #3 (VALUZ-RESUME §5.4): a member whose kernel
         session went terminal but whose ``member_done`` never reached the lead's
@@ -526,7 +521,7 @@ class TaskOrchestrator:
         artifacts: list[str] | None = None,
         status: str = "completed",
         force: bool = False,
-        user_id: str | None = None,
+        user_id: str,
     ) -> dict[str, Any]:
         """Close the task — append the terminal event and set the task status.
 
@@ -551,7 +546,7 @@ class TaskOrchestrator:
         lead_session_id: str,
         summary: str,
         artifacts: list[str] | None = None,
-        user_id: str | None = None,
+        user_id: str,
     ) -> dict[str, Any]:
         """Refresh the deliverable card on a completed task (follow-up chat).
 

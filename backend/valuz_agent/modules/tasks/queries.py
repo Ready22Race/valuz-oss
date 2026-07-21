@@ -18,15 +18,14 @@ from dataclasses import dataclass
 from typing import Any
 
 import valuz_agent.boot.kernel  # noqa: F401 — puts kernel on sys.path
-from valuz_agent.adapters.agent_resolver import _member_agent_config, summarize_role
 from valuz_agent.infra.db import async_unit_of_work
-from valuz_agent.modules.agents.datastore import ProjectMemberDatastore
 from valuz_agent.modules.tasks.datastore import (
     TaskDatastore,
     TaskEventDatastore,
     TaskSessionDatastore,
 )
 from valuz_agent.modules.tasks.plan import TaskPlan
+from valuz_agent.modules.tasks.resolution import task_session_resolver
 
 
 @dataclass(frozen=True)
@@ -77,32 +76,16 @@ async def get_task_with_runs(user_id: str, task_id: str) -> tuple[Any | None, li
     return task, runs
 
 
-async def list_members(project_id: str, user_id: str | None = None) -> list[dict[str, Any]]:
-    if user_id is None:
-        raise ValueError("user_id is required")
+async def list_members(project_id: str, user_id: str) -> list[dict[str, Any]]:
+    """Return member descriptors for dispatch tool list_members().
 
-    """Return member descriptors for dispatch tool list_members()."""
+    Host membership knowledge lives behind the resolver seam
+    (tasks/resolution.py) — this stays a thin read wrapper.
+    """
     async with async_unit_of_work(commit=False) as db:
-        member_ds = ProjectMemberDatastore(db)
-        rows = await member_ds.list_by_project(user_id, project_id)
-        result: list[dict[str, Any]] = []
-        for row in rows:
-            agent_cfg = await _member_agent_config(row, member_ds, user_id=user_id)
-            runtime = agent_cfg.runtime_provider if agent_cfg else "unknown"
-            name = agent_cfg.name if agent_cfg else row.agent_slug
-            role_summary = summarize_role(agent_cfg.instructions) if agent_cfg else ""
-            result.append(
-                {
-                    "slug": row.agent_slug,
-                    "name": name,
-                    "runtime": runtime,
-                    "source_agent_slug": row.source_agent_slug,
-                    # Member role/capability summary so the lead can
-                    # dispatch accurately (lead-dispatch-mvp §1.5).
-                    "role_summary": role_summary,
-                }
-            )
-        return result
+        return await task_session_resolver.list_member_descriptors(
+            db, user_id=user_id, project_id=project_id
+        )
 
 
 async def list_tasks(
@@ -111,7 +94,7 @@ async def list_tasks(
     status: str | None = None,
     mine_session_id: str | None = None,
     limit: int = 20,
-    user_id: str | None = None,
+    user_id: str,
 ) -> list[dict[str, Any]]:
     """Return task summaries for *project_id* (newest first).
 
@@ -158,7 +141,7 @@ async def list_tasks(
 async def get_task(
     task_id: str,
     project_id: str,
-    user_id: str | None = None,
+    user_id: str,
 ) -> dict[str, Any] | None:
     """Return one task's status + per-run states + latest summary.
 

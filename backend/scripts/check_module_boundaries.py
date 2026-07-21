@@ -202,9 +202,6 @@ def check_kernel_boundary() -> list[str]:
 # the resolver (or queries/service APIs) — never add.
 TASKS_HOST_DATASTORE_ALLOWLIST = {
     "tasks/resolution.py",
-    "tasks/lifecycle.py",  # draft_task membership validation
-    "tasks/queries.py",  # member listing read path
-    "tasks/tools/handlers.py",  # create-task project gate
 }
 _TASKS_HOST_DATASTORE_OWNERS = {"projects", "agents"}
 
