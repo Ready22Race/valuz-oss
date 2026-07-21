@@ -3,6 +3,7 @@ import { renderHook, act } from "@testing-library/react";
 import {
   fanOutTargets,
   getListFanOutTargets,
+  LIST_TARGET_TIMEOUT_MS,
   useDegradedListTargets,
 } from "./list-fanout";
 import { setExecutionTargets } from "./execution-targets";
@@ -65,6 +66,29 @@ describe("fanOutTargets", () => {
     await expect(
       fanOutTargets(() => Promise.reject(new Error("all down"))),
     ).rejects.toThrow("all down");
+  });
+
+  it("degrades a target that never settles instead of pinning the list", async () => {
+    // A black-holed backend accepts the connection and never responds —
+    // browser fetch has no default timeout, so without the per-target race
+    // this fan-out would await forever and every list surface would sit on
+    // "loading" despite the healthy target having answered.
+    vi.useFakeTimers();
+    try {
+      setExecutionTargets([LOCAL, CLOUD]);
+      const outcome = fanOutTargets((target) =>
+        target.id === "cloud"
+          ? new Promise<string>(() => {}) // never settles
+          : Promise.resolve("ok"),
+      );
+      await vi.advanceTimersByTimeAsync(LIST_TARGET_TIMEOUT_MS + 1);
+      const { values, failedTargets } = await outcome;
+      expect(values).toHaveLength(1);
+      expect(values[0]!.target.id).toBe("local");
+      expect(failedTargets).toEqual(["cloud"]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("publishes and clears the degraded-targets store", async () => {

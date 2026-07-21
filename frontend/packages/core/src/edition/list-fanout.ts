@@ -12,6 +12,14 @@
  * other target's rows and the failing target id is published through
  * ``useDegradedListTargets`` so shells can render a "list may be incomplete"
  * hint. Only when EVERY target fails does the fan-out throw.
+ *
+ * A target that never settles counts as failed too: browser fetch has no
+ * default timeout, so a black-holed backend (connection accepted, response
+ * never sent — e.g. an OOM-wedged cloud deployment) would otherwise hold
+ * ``Promise.allSettled`` open forever and pin every list surface on
+ * "loading" even though the healthy target answered in milliseconds. Each
+ * target therefore races ``LIST_TARGET_TIMEOUT_MS``; on timeout the target
+ * goes down the same degraded path as a rejection.
  */
 
 import { useSyncExternalStore } from "react";
@@ -30,16 +38,55 @@ export interface FanOutOutcome<T> {
   failedTargets: string[];
 }
 
+/** Per-target budget before a hung list fetch counts as a failed target. */
+export const LIST_TARGET_TIMEOUT_MS = 10_000;
+
+/**
+ * Reject after ``LIST_TARGET_TIMEOUT_MS`` when ``promise`` hasn't settled.
+ * The late settlement of the losing promise stays observed (routed into the
+ * already-settled deferred, a no-op) so it can't surface as an unhandled
+ * rejection.
+ */
+function withTargetTimeout<T>(
+  promise: Promise<T>,
+  targetId: string,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () =>
+        reject(
+          new Error(
+            `list target '${targetId}' timed out after ${LIST_TARGET_TIMEOUT_MS}ms`,
+          ),
+        ),
+      LIST_TARGET_TIMEOUT_MS,
+    );
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
 /**
  * Run ``fetchOne`` against every registered target concurrently. Publishes
  * failures to the degraded-targets store. Throws (the first rejection) only
- * when no target answered.
+ * when no target answered. A target that neither resolves nor rejects within
+ * ``LIST_TARGET_TIMEOUT_MS`` is treated as failed.
  */
 export async function fanOutTargets<T>(
   fetchOne: (target: ExecutionTarget) => Promise<T>,
 ): Promise<FanOutOutcome<T>> {
   const targets = getListFanOutTargets();
-  const settled = await Promise.allSettled(targets.map(fetchOne));
+  const settled = await Promise.allSettled(
+    targets.map((target) => withTargetTimeout(fetchOne(target), target.id)),
+  );
   const values: Array<{ target: ExecutionTarget; value: T }> = [];
   const failedTargets: string[] = [];
   let firstError: unknown;
