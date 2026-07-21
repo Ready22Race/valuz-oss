@@ -66,6 +66,7 @@ import {
   SESSION_WORKFLOW_PROGRESS_EVENT,
   type WorkflowState,
   useComposerProviderChannels,
+  useComposerAgentLibrary,
   useComposerProviders,
   useModelDefaults,
   useRuntimes,
@@ -73,7 +74,6 @@ import {
   useSessionAttachments,
   type RuntimeId,
   type MemberWithAgent,
-  type Agent,
 } from "@valuz/core";
 import {
   ApprovalCard,
@@ -668,15 +668,11 @@ export const ConversationPage = () => {
   // model. ``projectAgents`` is the member roster for the active project;
   // ``selectedAgentSlug`` is the user's pick for the next (new) session.
   const [projectAgents, setProjectAgents] = useState<MemberWithAgent[]>([]);
-  // 09-assistant: the "我的" agent library, candidates for the 🤖 chip when
-  // the 📁 chip is on 临时对话 (no project). Loaded once on mount.
-  const [myAgents, setMyAgents] = useState<Agent[]>([]);
-  // Gates the empty-library banner so it doesn't flash before the first load
-  // resolves (10-new-conversation-guidance).
-  const [myAgentsLoaded, setMyAgentsLoaded] = useState(false);
   // 10-new-conversation-guidance: the 🤖 「+ Agent」 menu item opens a create
   // dialog for temp conversations (the project path navigates to the project).
   const [createAgentOpen, setCreateAgentOpen] = useState(false);
+  // Invalidate the selected target's roster after an agent is created.
+  const [agentLibraryRevision, setAgentLibraryRevision] = useState(0);
   // 10-new-conversation-guidance (slice 2): is there any usable model channel?
   // Drives the setup banner's "no channel" state.
   const { hasChannel, loaded: channelLoaded } = useHasUsableChannel();
@@ -685,7 +681,7 @@ export const ConversationPage = () => {
   );
   // 「去临时对话」after creating an agent navigates here with ?agent=<slug>;
   // honour it as the pre-selected agent for the next (new) chat. The roster
-  // reload (myAgents effect) keys off the same param so the new agent is
+  // roster reload keys off the same param so the new agent is
   // actually present, and the defaulting effect below treats it as top priority.
   const agentParam = searchParams.get("agent");
   useEffect(() => {
@@ -2591,6 +2587,11 @@ export const ConversationPage = () => {
     executionTargets.find((target) => target.id === providerTargetId) ??
     getDefaultExecutionTarget();
   const providers = useComposerProviderChannels(providerTarget?.baseUrl);
+  const { agents: myAgents, loaded: myAgentsLoaded } =
+    useComposerAgentLibrary(
+      providerTarget?.baseUrl,
+      `${agentParam ?? ""}:${agentLibraryRevision}`,
+    );
 
   const composerProviders = useComposerProviders(
     providers,
@@ -3320,28 +3321,6 @@ export const ConversationPage = () => {
     };
   }, [selectedProjectId, activeProject?.kind]);
 
-  // 09-assistant: load the "我的" agent library once. These back the 🤖 chip
-  // when the 📁 chip is on 临时对话 (no project member roster).
-  useEffect(() => {
-    let cancelled = false;
-    agentsApi
-      .listAgents()
-      .then((res) => {
-        if (!cancelled) setMyAgents(res.agents);
-      })
-      .catch(() => {
-        if (!cancelled) setMyAgents([]);
-      })
-      .finally(() => {
-        if (!cancelled) setMyAgentsLoaded(true);
-      });
-    return () => {
-      cancelled = true;
-    };
-    // Reload when 「去临时对话」 hands off a freshly-created agent via ?agent=,
-    // so the new agent is present in the roster the composer renders from.
-  }, [agentParam]);
-
   // 09-assistant: when the 📁 chip sits on 临时对话 (non-project project)
   // and no session exists yet, default the 🤖 chip to the first "我的" agent.
   // Empty library → null; handleSend then nudges the user to pick/create
@@ -3351,6 +3330,7 @@ export const ConversationPage = () => {
   useEffect(() => {
     if (selectedSession) return; // existing session is frozen (ADR-006)
     if (activeProject?.kind === "project") return; // project path elsewhere
+    if (!myAgentsLoaded) return; // do not clear the old selection mid-switch
     setSelectedAgentSlug((prev) => {
       // A freshly-created agent handed off via ?agent= (「去临时对话」) wins as
       // soon as it appears in the reloaded roster.
@@ -3377,6 +3357,7 @@ export const ConversationPage = () => {
   }, [
     activeProject?.kind,
     myAgents,
+    myAgentsLoaded,
     selectedSession,
     agentParam,
     isSkillCreatorMode,
@@ -6497,13 +6478,8 @@ export const ConversationPage = () => {
           <CreateAgentDialog
             open={createAgentOpen}
             onOpenChange={setCreateAgentOpen}
-            onCreated={async (slug) => {
-              try {
-                const res = await agentsApi.listAgents();
-                setMyAgents(res.agents);
-              } catch {
-                // best-effort refresh — the new agent still selects below
-              }
+            onCreated={(slug) => {
+              setAgentLibraryRevision((revision) => revision + 1);
               setSelectedAgentSlug(slug);
               setComposerTouched(true);
             }}
