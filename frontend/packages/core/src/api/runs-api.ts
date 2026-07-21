@@ -63,9 +63,10 @@ export const runsApi = {
     if (getListFanOutTargets().length === 0) {
       return fetchJson(`/v1/runs${suffix}`);
     }
-    const outcome = await fanOutTargets((target) =>
+    const outcome = await fanOutTargets((target, signal) =>
       fetchJson<{ runs: RunSummary[] }>(`/v1/runs${suffix}`, {
         baseUrl: target.baseUrl,
+        signal,
       }),
     );
     const seen = new Set<string>();

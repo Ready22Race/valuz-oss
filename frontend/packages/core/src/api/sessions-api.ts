@@ -479,10 +479,11 @@ export const sessionsApi = {
     if (getListFanOutTargets().length === 0) {
       return fetchJson(`/v1/sessions${suffix}`, init);
     }
-    const outcome = await fanOutTargets((target) =>
+    const outcome = await fanOutTargets((target, signal) =>
       fetchJson<{ sessions: SessionListItem[] }>(`/v1/sessions${suffix}`, {
         ...init,
         baseUrl: target.baseUrl,
+        signal,
       }),
     );
     const seen = new Set<string>();
