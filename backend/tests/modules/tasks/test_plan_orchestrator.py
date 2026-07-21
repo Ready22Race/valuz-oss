@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from valuz_agent.infra.database import Base
 from valuz_agent.modules.tasks import orchestrator as orch_mod
+from valuz_agent.adapters import kernel_client as kernel_client_mod
 from valuz_agent.modules.tasks import planning
 from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionRow
 from valuz_agent.modules.tasks.orchestrator import TaskOrchestrator
@@ -743,7 +744,6 @@ def test_auto_finalize_blocks_on_stop_reason_error_with_empty_plan(
     task failed-but-resumable instead of ``completed``."""
     from types import SimpleNamespace
 
-    from valuz_agent.modules.tasks import orchestrator as orch_mod
 
     _make_task(db_factory, tmp_path)
     fake_sess = SimpleNamespace(
@@ -754,7 +754,7 @@ def test_auto_finalize_blocks_on_stop_reason_error_with_empty_plan(
         }
     )
     monkeypatch.setattr(
-        orch_mod.kernel_client, "get_session", _as_async(lambda _uid, _sid: fake_sess)
+        kernel_client_mod, "get_session", _as_async(lambda _uid, _sid: fake_sess)
     )
     orch = TaskOrchestrator()
     asyncio.run(
@@ -781,14 +781,13 @@ def test_auto_finalize_cancel_with_empty_plan_stays_active(
     *genuine* failure (other categories) blocks — see the sibling tests."""
     from types import SimpleNamespace
 
-    from valuz_agent.modules.tasks import orchestrator as orch_mod
 
     _make_task(db_factory, tmp_path)
     fake_sess = SimpleNamespace(
         stop_reason={"type": "error", "category": "user_interrupt", "message": "cancelled"}
     )
     monkeypatch.setattr(
-        orch_mod.kernel_client, "get_session", _as_async(lambda _uid, _sid: fake_sess)
+        kernel_client_mod, "get_session", _as_async(lambda _uid, _sid: fake_sess)
     )
     orch = TaskOrchestrator()
     asyncio.run(
@@ -837,7 +836,6 @@ def test_finalize_actor_member_error_sets_rework_not_failed(
     stop_member; the error rides along as ``review_feedback`` and the timeline
     still records a ``subtask_failed`` event."""
     from valuz_agent.modules.sessions import run_orchestrator as run_orch
-    from valuz_agent.modules.tasks import orchestrator as orch_mod
     from valuz_agent.modules.tasks.plan import TaskPlan
 
     _make_task(db_factory, tmp_path)
@@ -1078,7 +1076,7 @@ def test_recover_one_task_reconciles_members_and_redrives_lead(
         ),
     }
     monkeypatch.setattr(
-        orch_mod.kernel_client, "get_session", _as_async(lambda _uid, sid: sessions.get(sid))
+        kernel_client_mod, "get_session", _as_async(lambda _uid, sid: sessions.get(sid))
     )
 
     orch = TaskOrchestrator()
@@ -1245,7 +1243,7 @@ def test_resume_task_only_paused_flips_active_and_redrives(
     )
     # paused member kernel session was interrupted (idle + UserInterrupt-ish) → resume.
     monkeypatch.setattr(
-        orch_mod.kernel_client,
+        kernel_client_mod,
         "get_session",
         _as_async(
             lambda _uid, sid: SimpleNamespace(status="idle", stop_reason={"type": "user_interrupt"})
@@ -1295,13 +1293,12 @@ def test_resume_task_accepts_blocked(db_factory, tmp_path, monkeypatch) -> None:
     be able to revive them by calling resume_task."""
     from types import SimpleNamespace
 
-    from valuz_agent.modules.tasks import orchestrator as orch_mod
 
     _seed_lead_and_members(
         db_factory, tmp_path, members=[], task_status="blocked", run_status="rejected"
     )
     monkeypatch.setattr(
-        orch_mod.kernel_client,
+        kernel_client_mod,
         "get_session",
         _as_async(lambda _uid, sid: SimpleNamespace(status="idle", stop_reason={"type": "error"})),
     )
@@ -1326,13 +1323,12 @@ def test_resume_task_accepts_stopped(db_factory, tmp_path, monkeypatch) -> None:
     consistent, then _recover_one_task respawns a fresh lead."""
     from types import SimpleNamespace
 
-    from valuz_agent.modules.tasks import orchestrator as orch_mod
 
     _seed_lead_and_members(
         db_factory, tmp_path, members=[], task_status="stopped", run_status="completed"
     )
     monkeypatch.setattr(
-        orch_mod.kernel_client,
+        kernel_client_mod,
         "get_session",
         _as_async(lambda _uid, sid: SimpleNamespace(status="idle", stop_reason=None)),
     )
@@ -1357,13 +1353,12 @@ def test_resume_task_accepts_completed(db_factory, tmp_path, monkeypatch) -> Non
     back to 'active' and _recover_one_task respawns a fresh lead."""
     from types import SimpleNamespace
 
-    from valuz_agent.modules.tasks import orchestrator as orch_mod
 
     _seed_lead_and_members(
         db_factory, tmp_path, members=[], task_status="completed", run_status="completed"
     )
     monkeypatch.setattr(
-        orch_mod.kernel_client,
+        kernel_client_mod,
         "get_session",
         _as_async(lambda _uid, sid: SimpleNamespace(status="idle", stop_reason=None)),
     )
@@ -1390,14 +1385,13 @@ def test_resume_task_with_instruction_embeds_brief_and_logs_event(
     step (":intervene action=resume text=…" / chat inject on a halted task)."""
     from types import SimpleNamespace
 
-    from valuz_agent.modules.tasks import orchestrator as orch_mod
     from valuz_agent.modules.tasks.mailbox import mailbox_registry
 
     _seed_lead_and_members(
         db_factory, tmp_path, members=[], task_status="stopped", run_status="completed"
     )
     monkeypatch.setattr(
-        orch_mod.kernel_client,
+        kernel_client_mod,
         "get_session",
         _as_async(lambda _uid, sid: SimpleNamespace(status="idle", stop_reason=None)),
     )
@@ -1429,14 +1423,13 @@ def test_resume_task_accepts_legacy_failed(db_factory, tmp_path, monkeypatch) ->
     resume exactly like blocked (datastore tolerates the unknown source)."""
     from types import SimpleNamespace
 
-    from valuz_agent.modules.tasks import orchestrator as orch_mod
     from valuz_agent.modules.tasks.mailbox import mailbox_registry
 
     _seed_lead_and_members(
         db_factory, tmp_path, members=[], task_status="failed", run_status="archived"
     )
     monkeypatch.setattr(
-        orch_mod.kernel_client,
+        kernel_client_mod,
         "get_session",
         _as_async(lambda _uid, sid: SimpleNamespace(status="idle", stop_reason=None)),
     )
@@ -1515,7 +1508,7 @@ def test_heartbeat_pending_synthesizes_terminal_completed(
         "sC": SimpleNamespace(status="running", stop_reason=None),  # still in flight
     }
     monkeypatch.setattr(
-        orch_mod.kernel_client, "get_session", _as_async(lambda _uid, sid: sessions.get(sid))
+        kernel_client_mod, "get_session", _as_async(lambda _uid, sid: sessions.get(sid))
     )
     # ``_heartbeat_pending`` lives in tasks/coordination.py (ADR-023 Step 3b);
     # the orchestrator delegates to it, so stub the coordination module's
@@ -1576,7 +1569,7 @@ def test_e2e_stop_resume_closed_loop_through_routes(db_factory, tmp_path, monkey
     monkeypatch.setattr(orch._actor, "run_actor_loop", _fake_loop)
     # On resume, paused members read as interrupted-idle → resumable.
     monkeypatch.setattr(
-        orch_mod.kernel_client,
+        kernel_client_mod,
         "get_session",
         _as_async(
             lambda _uid, sid: SimpleNamespace(status="idle", stop_reason={"type": "user_interrupt"})
@@ -1739,7 +1732,7 @@ def test_resume_evicts_kernel_runtime_before_respawn(db_factory, tmp_path, monke
         run_status="paused",
     )
     monkeypatch.setattr(
-        orch_mod.kernel_client,
+        kernel_client_mod,
         "get_session",
         _as_async(
             lambda _uid, sid: SimpleNamespace(status="idle", stop_reason={"type": "user_interrupt"})
@@ -1814,3 +1807,191 @@ def test_lead_shutdown_exit_skips_auto_finalize(monkeypatch) -> None:
     # natural exit (idle-TTL / end_turn) → auto-finalize RUNS
     asyncio.run(orch._finalize_actor(via_shutdown=False, **common))  # type: ignore[arg-type]
     assert called == ["t1"]
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle extraction regression pins — the two fossil-edit bugs (the fixes
+# landed on the dead lifecycle copies while the live bodies sat on the
+# orchestrator; the extraction merged them — keep them pinned).
+# ---------------------------------------------------------------------------
+
+
+def _mark_all_done(db_factory, task_id="t1") -> None:
+    from valuz_agent.modules.tasks.plan import TaskPlan
+
+    db = db_factory()
+    try:
+        row = db.execute(select(TaskRow).filter_by(id=task_id)).scalars().one()
+        plan = TaskPlan.from_dict(row.plan)
+        for n in plan.nodes:
+            plan.update_node(n.key, status="done")
+        row.plan = plan.to_dict()
+        db.commit()
+    finally:
+        db.close()
+
+
+def test_finish_task_completed_publishes_finalized_and_notifies_memory(
+    db_factory, tmp_path, monkeypatch
+) -> None:
+    """finish_task is a terminal write site of the task.finalized contract
+    (tasks/events.py): the commercial allocator's TTL clamp listens on it.
+    A completed finish must also graduate lessons into project memory."""
+    from valuz_agent.modules.tasks import lifecycle as lc_mod
+
+    _make_task(db_factory, tmp_path)
+    asyncio.run(
+        planning.plan_task(
+            task_id="t1",
+            project_id="w1",
+            user_id=OWNER,
+            lead_session_id="lead",
+            subtasks=[{"key": "a", "title": "A", "agent": "x"}],
+        )
+    )
+    _mark_all_done(db_factory)
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        lc_mod, "publish_task_finalized", lambda tid, uid, st: calls.append(("pub", tid, st))
+    )
+    monkeypatch.setattr(
+        lc_mod, "_notify_task_memory", lambda tid, user_id=None: calls.append(("mem", tid))
+    )
+
+    orch = TaskOrchestrator()
+    res = asyncio.run(
+        orch.finish_task(
+            task_id="t1",
+            project_id="w1",
+            lead_session_id="lead",
+            summary="done",
+            user_id=OWNER,
+        )
+    )
+    assert res["ok"] is True
+    assert ("pub", "t1", "completed") in calls
+    assert ("mem", "t1") in calls
+
+
+def test_finish_task_stopped_publishes_finalized_without_memory(
+    db_factory, tmp_path, monkeypatch
+) -> None:
+    """A 'stopped' finish still announces task.finalized (sandbox reclaim)
+    but must NOT graduate memory — that's reserved for real completions."""
+    from valuz_agent.modules.tasks import lifecycle as lc_mod
+
+    _make_task(db_factory, tmp_path)
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        lc_mod, "publish_task_finalized", lambda tid, uid, st: calls.append(("pub", tid, st))
+    )
+    monkeypatch.setattr(
+        lc_mod, "_notify_task_memory", lambda tid, user_id=None: calls.append(("mem", tid))
+    )
+
+    orch = TaskOrchestrator()
+    res = asyncio.run(
+        orch.finish_task(
+            task_id="t1",
+            project_id="w1",
+            lead_session_id="lead",
+            summary="stop",
+            status="stopped",
+            user_id=OWNER,
+        )
+    )
+    assert res["ok"] is True
+    assert ("pub", "t1", "stopped") in calls
+    assert not any(c[0] == "mem" for c in calls)
+
+
+def test_commit_task_creates_lead_session_with_task_scope(
+    db_factory, tmp_path, monkeypatch
+) -> None:
+    """The committed lead must ride the task's sandbox scope
+    (``SandboxScope(kind='task')``) exactly like the kickoff lead and every
+    dispatched member — c81ab288 originally landed this on the dead copy."""
+    from types import SimpleNamespace
+
+    import valuz_agent.modules.projects.datastore as ws_ds_src
+    from valuz_agent.modules.tasks import lifecycle as lc_mod
+
+    # Draft task with a plan (commit refuses empty plans).
+    _make_task(db_factory, tmp_path)
+    asyncio.run(
+        planning.plan_task(
+            task_id="t1",
+            project_id="w1",
+            user_id=OWNER,
+            lead_session_id="chat",
+            subtasks=[{"key": "a", "title": "A", "agent": "x"}],
+        )
+    )
+    db = db_factory()
+    try:
+        row = db.execute(select(TaskRow).filter_by(id="t1")).scalars().one()
+        row.status = "draft"
+        db.commit()
+    finally:
+        db.close()
+
+    class _FakeWsDs:
+        def __init__(self, _db):
+            pass
+
+        async def get_by_id(self, _uid, _wid):
+            return SimpleNamespace(id="w1", kind="project", root_path=str(tmp_path), name="W1")
+
+        async def get_context(self, _uid, _wid):
+            return None
+
+    class _FakeMemberDs:
+        def __init__(self, _db):
+            pass
+
+        async def get(self, _uid, _wid, _slug):
+            return SimpleNamespace(agent_slug="lead")
+
+    created: dict = {}
+
+    async def _capture_create_session(_uid, session, scope=None):
+        created["session_id"] = session.id
+        created["scope"] = scope
+
+    monkeypatch.setattr(ws_ds_src, "ProjectDatastore", _FakeWsDs)
+    monkeypatch.setattr(lc_mod, "ProjectMemberDatastore", _FakeMemberDs)
+    monkeypatch.setattr(
+        lc_mod, "fs_registry", SimpleNamespace(project_cwd=lambda *a, **k: tmp_path)
+    )
+    monkeypatch.setattr(lc_mod, "_member_agent_config", _as_async(lambda *_a, **_k: None))
+    monkeypatch.setattr(
+        lc_mod,
+        "build_member_session",
+        _as_async(lambda **_k: SimpleNamespace(id="lead-sess-1")),
+    )
+    monkeypatch.setattr(lc_mod, "_credential_gap", _as_async(lambda *_a, **_k: None))
+    monkeypatch.setattr(lc_mod, "_provider_resolver_deps", lambda _db: {})
+    monkeypatch.setattr(lc_mod.kernel_client, "create_session", _capture_create_session)
+    monkeypatch.setattr(
+        lc_mod, "project_index", SimpleNamespace(record=_as_async(lambda *_a, **_k: None))
+    )
+
+    async def _run() -> dict:
+        orch = TaskOrchestrator()
+        monkeypatch.setattr(orch._actor, "run_actor_loop", _as_async(lambda **_k: None))
+        res = await orch.commit_task(
+            task_id="t1",
+            project_id="w1",
+            caller_session_id="chat",
+            user_id=OWNER,
+        )
+        await asyncio.sleep(0)  # let the spawned (stubbed) lead loop settle
+        return res
+
+    res = asyncio.run(_run())
+    assert res.get("status") == "active", res
+    assert created["session_id"] == "lead-sess-1"
+    scope = created["scope"]
+    assert scope is not None and scope.kind == "task" and scope.id == "t1"

@@ -463,7 +463,7 @@ async def test_await_breaks_early_when_all_pending_awaiting_user(
 async def test_finish_task_stopped_rejected_while_members_live(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from valuz_agent.modules.tasks import orchestrator as orch_mod
+    from valuz_agent.modules.tasks import lifecycle as lc_mod
 
     class _FakeRunDs:
         def __init__(self, _db):
@@ -478,8 +478,8 @@ async def test_finish_task_stopped_rejected_while_members_live(
     async def _fake_uow(*_a, **_k):
         yield SimpleNamespace()
 
-    monkeypatch.setattr(orch_mod, "async_unit_of_work", _fake_uow)
-    monkeypatch.setattr(orch_mod, "TaskSessionDatastore", _FakeRunDs)
+    monkeypatch.setattr(lc_mod, "async_unit_of_work", _fake_uow)
+    monkeypatch.setattr(lc_mod, "TaskSessionDatastore", _FakeRunDs)
 
     orch = TaskOrchestrator()
     orch._members.add_member("t-guard", "mem-live-1")
@@ -504,7 +504,7 @@ async def test_finish_task_stopped_force_bypasses_guard(
 ) -> None:
     """force=True must get PAST the live-member guard (proven by reaching the
     terminal-write path, stubbed here)."""
-    from valuz_agent.modules.tasks import orchestrator as orch_mod
+    from valuz_agent.modules.tasks import lifecycle as lc_mod
 
     writes: list[str] = []
 
@@ -542,11 +542,11 @@ async def test_finish_task_stopped_force_bypasses_guard(
     async def _no_session(*_a, **_k):
         return None
 
-    monkeypatch.setattr(orch_mod, "async_unit_of_work", _fake_uow)
-    monkeypatch.setattr(orch_mod, "TaskDatastore", _FakeTaskDs)
-    monkeypatch.setattr(orch_mod, "TaskSessionDatastore", _FakeRunDs)
-    monkeypatch.setattr(orch_mod, "TaskEventDatastore", _FakeEventDs)
-    monkeypatch.setattr(orch_mod.kernel_client, "get_session", _no_session)
+    monkeypatch.setattr(lc_mod, "async_unit_of_work", _fake_uow)
+    monkeypatch.setattr(lc_mod, "TaskDatastore", _FakeTaskDs)
+    monkeypatch.setattr(lc_mod, "TaskSessionDatastore", _FakeRunDs)
+    monkeypatch.setattr(lc_mod, "TaskEventDatastore", _FakeEventDs)
+    monkeypatch.setattr(lc_mod.kernel_client, "get_session", _no_session)
 
     orch = TaskOrchestrator()
     orch._members.add_member("t-force", "mem-live-2")

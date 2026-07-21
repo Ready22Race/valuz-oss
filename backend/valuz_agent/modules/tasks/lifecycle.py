@@ -1,6 +1,8 @@
 """LifecycleService — task lifecycle (ADR-023, Step 3c).
 
-Peeled verbatim out of ``TaskOrchestrator``. Owns the task lifecycle surface:
+The single owner of the task lifecycle surface (the orchestrator keeps thin
+delegators only — the earlier split left stale duplicate bodies on both
+sides, and fixes kept landing on whichever copy the author found first):
 
   * :meth:`kickoff` — create TaskRow + lead session; async-mode spawns the lead
     actor loop, sync-mode runs the lead one turn to idle then auto-finalizes.
@@ -14,6 +16,7 @@ Peeled verbatim out of ``TaskOrchestrator``. Owns the task lifecycle surface:
     lead → auto-finalize, subtask → discard + terminal run write.
   * :meth:`_auto_finalize_lead_task` — host-side terminal fallback for a lead
     that ends without an explicit ``finish_task``.
+  * :meth:`update_deliverable` — refresh a completed task's deliverable card.
   * :meth:`_last_assistant_summary` — best-effort summary helper for the above.
   * :meth:`_materialize_lead_agent` — per-task lead-clone builder.
 
@@ -59,7 +62,11 @@ from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.agents.datastore import ProjectMemberDatastore
 from valuz_agent.modules.tasks import planning
-from valuz_agent.modules.tasks.task_worktree import task_worktree_notice
+from valuz_agent.modules.tasks.task_worktree import (
+    resolve_task_cwd,
+    task_worktree_notice,
+    task_worktree_snapshot,
+)
 from valuz_agent.modules.tasks._session_build import (
     _credential_gap,
     _provider_resolver_deps,
@@ -82,6 +89,12 @@ from valuz_agent.modules.tasks.plan import PlanError, TaskPlan
 from valuz_agent.modules.tasks.provenance import resolve_trigger_provenance
 
 logger = logging.getLogger(__name__)
+
+
+def _require_user_id(user_id: str | None) -> str:
+    if user_id is None:
+        raise ValueError("user_id is required")
+    return user_id
 
 
 def _notify_task_memory(task_id: str, user_id: str | None = None) -> None:
@@ -496,6 +509,9 @@ class LifecycleService:
         ``commit_task`` builds the lead session it spills an over-cap brief to a
         doc and passes a pointer (see ``spill_goal_brief_if_too_long``).
         """
+        if user_id is None:
+            raise ValueError("user_id is required")
+
         async with async_unit_of_work() as db:
             task_ds = TaskDatastore(db)
             event_ds = TaskEventDatastore(db)
@@ -507,9 +523,7 @@ class LifecycleService:
             ws_row = await ws_ds.get_by_id(user_id, project_id)
             if ws_row is None:
                 raise ValueError(f"project {project_id!r} not found")
-            lead_member = await member_ds.get(
-                user_id, project_id, lead_agent_slug
-            )
+            lead_member = await member_ds.get(user_id, project_id, lead_agent_slug)
             if lead_member is None:
                 raise ValueError(
                     f"lead agent {lead_agent_slug!r} is not a member of project {project_id!r}"
@@ -537,6 +551,13 @@ class LifecycleService:
             if refs:
                 metadata["refs"] = list(refs)
 
+            # Classify the trigger source (chat, or agent when drafted from
+            # within another task) so the task list shows "由 … 触发" even for
+            # drafts that haven't been committed yet.
+            prov = await resolve_trigger_provenance(
+                db, originating_session_id=originating_session_id
+            )
+
             task_row = TaskRow(
                 id=task_id,
                 project_id=project_id,
@@ -551,6 +572,10 @@ class LifecycleService:
                 # writer gate uses metadata.originating_session_id +
                 # project match (see dispatch_mcp._check_plan_writer_gate).
                 current_holder=lead_agent_slug,
+                trigger_type=prov.trigger_type,
+                trigger_task_id=prov.trigger_task_id,
+                trigger_agent_slug=prov.trigger_agent_slug,
+                trigger_automation_id=prov.trigger_automation_id,
                 metadata_=metadata,
                 plan_version=0,
                 committed_at=None,
@@ -603,9 +628,7 @@ class LifecycleService:
             run_ds = TaskSessionDatastore(db)
             member_ds = ProjectMemberDatastore(db)
 
-            task_row = await task_ds.get_task_by_project(
-                user_id, project_id, task_id
-            )
+            task_row = await task_ds.get_task_by_project(user_id, project_id, task_id)
             if task_row is None:
                 return {"error": f"task {task_id!r} not found"}
             if task_row.status != "draft":
@@ -643,7 +666,10 @@ class LifecycleService:
                 ),
                 ws_row.root_path,
             )
-            lead_cwd = str(project_cwd)
+            # Task-level worktree (design §5): a task carrying a worktree
+            # snapshot keeps every session — including this committed lead —
+            # in the worktree cwd (heals it first if it was removed).
+            lead_cwd = await resolve_task_cwd(task_row, str(project_cwd))
 
             lead_agent = await _member_agent_config(lead_member, member_ds, user_id=user_id)
             lead_clone = None
@@ -664,9 +690,11 @@ class LifecycleService:
             # Fence the goal-mode payload: spill an over-cap committed brief to a
             # doc and hand the lead a short pointer (used as both the embedded
             # brief and the initial ``/goal`` prompt below).
+            # Spill anchored at the MAIN project cwd (design R5) — never
+            # into a task worktree, where it would defeat clean-teardown.
             lead_brief = spill_goal_brief_if_too_long(
                 lead_brief,
-                run_dir=lead_cwd,
+                run_dir=str(project_cwd),
                 task_id=task_id,
                 label=lead_slug,
                 is_lead=True,
@@ -691,6 +719,7 @@ class LifecycleService:
                 dispatch_mode="async",
                 goal_mode=True,
                 plan_pre_committed=True,  # ← key flag (VALUZ-CHATPLAN D10)
+                worktree_notice=task_worktree_notice(task_worktree_snapshot(task_row)),
                 user_id=user_id,
                 **_provider_resolver_deps(db),
             )
@@ -699,9 +728,7 @@ class LifecycleService:
             if lead_clone is not None:
                 lead_session = embed_agent_config(lead_session, lead_clone)
 
-            gap = await _credential_gap(
-                lead_session, lead_slug, db=db, user_id=user_id
-            )
+            gap = await _credential_gap(lead_session, lead_slug, db=db, user_id=user_id)
             if gap is not None:
                 return {"error": f"commit_task: {gap}"}
 
@@ -797,13 +824,12 @@ class LifecycleService:
         Terminal — abandoned tasks cannot be resurrected. Use stop_task
         (intervene) for active tasks; abandon_task is draft-only.
         """
+        user_id = _require_user_id(user_id)
         async with async_unit_of_work() as db:
             task_ds = TaskDatastore(db)
             event_ds = TaskEventDatastore(db)
 
-            task_row = await task_ds.get_task_by_project(
-                user_id, project_id, task_id
-            )
+            task_row = await task_ds.get_task_by_project(user_id, project_id, task_id)
             if task_row is None:
                 return {"error": f"task {task_id!r} not found"}
             if task_row.status != "draft":
@@ -1367,11 +1393,11 @@ class LifecycleService:
         modify_plan, or finish with status='stopped' to terminate the task).
 
         Live-member guard: a ``stopped`` finish is REJECTED while members are
-        still running (a long build looks exactly like a hang from the lead's
-        side — killing the whole task is almost never the right call). The lead
-        must first check them (``await_members`` reports pending members'
-        live status), stop them individually, or pass ``force=True`` after a
-        deliberate decision.
+        still running (a member deep in a long build looks exactly like a hang
+        from the lead's side — killing the whole task is almost never right).
+        The lead must first check them (``await_members`` reports pending
+        members' live status), stop them individually (``stop_subtask``), or
+        pass ``force=True`` after a deliberate decision.
         """
         if status not in ("completed", "stopped"):
             return {
@@ -1388,10 +1414,10 @@ class LifecycleService:
         event_type = "task_stopped" if final_status == "stopped" else "task_completed"
 
         # Live-member guard: don't let a lead kill the task while members are
-        # mid-flight (the case-B failure mode: a member deep in a long build is
-        # indistinguishable from a hang, the lead "tries a few times" and stops
-        # the whole task). Name the live subtasks so the lead can check or stop
-        # them individually; ``force=True`` overrides after a deliberate call.
+        # mid-flight (the observed failure mode: a member deep in a long build
+        # is indistinguishable from a hang, the lead "tries a few times" and
+        # stops the whole task). Name the live subtasks so the lead can check
+        # or stop them individually; ``force=True`` overrides deliberately.
         if final_status == "stopped" and not force and self._members.has_live_members(task_id):
             async with async_unit_of_work(commit=False) as db:
                 live_keys = sorted(
@@ -1415,16 +1441,19 @@ class LifecycleService:
             }
 
         rejected: dict[str, Any] | None = None
+        finished_task_row: Any | None = None
         async with async_unit_of_work() as db:
             task_ds = TaskDatastore(db)
             event_ds = TaskEventDatastore(db)
             run_ds = TaskSessionDatastore(db)
 
+            # Fetched for the plan guard below AND for the task-worktree
+            # teardown after the terminal writes commit.
+            finished_task_row = await task_ds.get_task_by_project(user_id, project_id, task_id)
+
             # Guard: don't let a "completed" finish leave planned work behind.
             if final_status == "completed":
-                task_row = await task_ds.get_task_by_project(
-                    user_id, project_id, task_id
-                )
+                task_row = finished_task_row
                 if task_row is not None:
                     plan = TaskPlan.from_dict(task_row.plan)
                     unresolved = [
@@ -1485,7 +1514,7 @@ class LifecycleService:
         # and so a re-opened conversation on this session isn't stuck in
         # goal mode. Best-effort — a missing session is not fatal here.
         try:
-            lead_sess = await data_reader().get_session(user_id, lead_session_id)
+            lead_sess = await kernel_client.get_session(user_id, lead_session_id)
             if lead_sess is not None and getattr(lead_sess, "mode", "default") != "default":
                 await kernel_client.set_mode(user_id, lead_session_id, "default")
         except Exception:  # noqa: BLE001 — terminal bookkeeping, never block close
@@ -1501,7 +1530,80 @@ class LifecycleService:
 
         self._coordination._broadcast_shutdown(task_id)
         mailbox_registry.put(lead_session_id, InboxMsg(kind="shutdown"))
+
+        # Task-worktree teardown (design §5): drop the task's worktree iff
+        # it holds no work worth keeping (fail-closed inside). Work left
+        # behind surfaces in the project's Worktrees panel instead.
+        if finished_task_row is not None:
+            from valuz_agent.modules.tasks.task_worktree import (
+                cleanup_task_worktree_if_clean,
+            )
+
+            await cleanup_task_worktree_if_clean(finished_task_row)
+
         return {"ok": True, "status": final_status}
+
+    # ------------------------------------------------------------------
+    # update_deliverable — refresh the deliverable card after the task is
+    # completed (post-completion follow-up chat). Append-only: emits a
+    # ``deliverable_updated`` event the detail page reads as the latest
+    # deliverable, without mutating the original ``task_completed`` event.
+    # Does NOT touch task status / plan / runs — the task stays completed.
+    # ------------------------------------------------------------------
+
+    async def update_deliverable(
+        self,
+        *,
+        task_id: str,
+        project_id: str,
+        lead_session_id: str,
+        summary: str,
+        artifacts: list[str] | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Refresh the deliverable card on a completed task (follow-up chat).
+
+        Append-only: emits a ``deliverable_updated`` event carrying the latest
+        ``summary`` / ``artifacts`` without mutating the original
+        ``task_completed`` event or the task's status / plan / runs — the task
+        stays ``completed``. The caller is the lead session. Returns a result
+        dict (``status`` ``"updated"`` or ``"rejected"``) rather than raising,
+        mirroring the sibling ``finish_task`` tool-facing method.
+        """
+        user_id = _require_user_id(user_id)
+        async with async_unit_of_work() as db:
+            task_ds = TaskDatastore(db)
+            event_ds = TaskEventDatastore(db)
+
+            task_row = await task_ds.get_task_by_project(user_id, project_id, task_id)
+            if task_row is None:
+                return {
+                    "ok": False,
+                    "error": f"update_deliverable: task {task_id!r} not found",
+                    "status": "rejected",
+                }
+            if task_row.status != "completed":
+                return {
+                    "ok": False,
+                    "error": (
+                        "update_deliverable: task is "
+                        f"{task_row.status!r}; only a 'completed' task can "
+                        "refresh its deliverable card."
+                    ),
+                    "status": "rejected",
+                }
+
+            await event_ds.append_event(
+                user_id,
+                project_id=project_id,
+                task_id=task_id,
+                type="deliverable_updated",
+                actor=lead_session_id,
+                session_id=lead_session_id,
+                payload={"summary": summary, "artifacts": artifacts or []},
+            )
+
+        return {"ok": True, "status": "updated"}
 
     # ------------------------------------------------------------------
     # Internal helpers

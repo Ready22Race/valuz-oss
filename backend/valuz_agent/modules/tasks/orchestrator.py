@@ -32,26 +32,12 @@ Lead gate enforcement lives in dispatch_mcp.py handlers, not here.
 # ruff: noqa: I001
 from __future__ import annotations
 
-import asyncio
 import logging
-from typing import Any, Literal, cast
-from uuid import uuid4
+from typing import Any, Literal
 
 import valuz_agent.boot.kernel  # noqa: F401
 
-from valuz_agent.adapters import kernel_client
-from valuz_agent.modules.sessions import project_index
-from valuz_agent.adapters.agent_resolver import (
-    _member_agent_config,
-    build_member_session,
-    embed_agent_config,
-    spill_goal_brief_if_too_long,
-)
-from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.eventbus import EventBus, event_bus as _global_bus
-from valuz_agent.infra.fs_registry import fs_registry
-from valuz_agent.infra.time_utils import now_ms
-from valuz_agent.modules.agents.datastore import ProjectMemberDatastore
 from valuz_agent.modules.tasks._session_build import (
     _credential_gap,
     _provider_resolver_deps,
@@ -62,23 +48,11 @@ from valuz_agent.modules.tasks.actor_runner import (
     run_session_to_idle,
     _member_run_dir,  # noqa: F401 — re-exported for tests + back-compat
 )
-from valuz_agent.modules.tasks.datastore import (
-    TaskDatastore,
-    TaskEventDatastore,
-    TaskSessionDatastore,
-)
 from valuz_agent.modules.tasks.coordination import CoordinationService
 from valuz_agent.modules.tasks.dispatcher import DispatcherService
 from valuz_agent.modules.tasks.lifecycle import LifecycleService
 from valuz_agent.modules.tasks.live_member_registry import LiveMemberRegistry
-from valuz_agent.modules.tasks.models import TaskRow, TaskSessionRow
-from valuz_agent.modules.tasks.plan import TaskPlan
-from valuz_agent.modules.tasks.task_worktree import (
-    resolve_task_cwd,
-    task_worktree_notice,
-    task_worktree_snapshot,
-)
-from valuz_agent.modules.tasks.provenance import resolve_trigger_provenance
+from valuz_agent.modules.tasks.models import TaskRow
 from valuz_agent.modules.tasks.recovery import RecoveryService
 
 
@@ -254,107 +228,19 @@ class TaskOrchestrator:
         title: str | None = None,
         user_id: str | None = None,
     ) -> TaskRow:
-        if user_id is None:
-            raise ValueError("user_id is required")
+        """Create a ``draft`` task without a lead session (VALUZ-CHATPLAN).
 
-        """Create a task in ``draft`` status without starting a lead session.
-
-        The originating chat session is recorded in ``metadata.originating_session_id``
-        and becomes the plan-writer holder until ``commit_task`` flips control
-        to the lead. ``plan_version`` starts at 0; the chat session is expected
-        to follow up with ``plan_task`` (lifting plan_version to 1) before
-        committing.
-
-        Raises ``ValueError`` if the project doesn't exist or the agent isn't
-        a member of it (same validations as ``kickoff``). An over-long ``goal``
-        is accepted as-is: the draft only stores the goal text — when
-        ``commit_task`` builds the lead session it spills an over-cap brief to a
-        doc and passes a pointer (see ``spill_goal_brief_if_too_long``).
+        Thin delegator onto :class:`LifecycleService` (ADR-023 Step 3c).
         """
-        async with async_unit_of_work() as db:
-            task_ds = TaskDatastore(db)
-            event_ds = TaskEventDatastore(db)
-            member_ds = ProjectMemberDatastore(db)
-
-            from valuz_agent.modules.projects.datastore import ProjectDatastore
-
-            ws_ds = ProjectDatastore(db)
-            ws_row = await ws_ds.get_by_id(user_id, project_id)
-            if ws_row is None:
-                raise ValueError(f"project {project_id!r} not found")
-            lead_member = await member_ds.get(user_id, project_id, lead_agent_slug)
-            if lead_member is None:
-                raise ValueError(
-                    f"lead agent {lead_agent_slug!r} is not a member of project {project_id!r}"
-                )
-
-            project_cwd = fs_registry.project_cwd(
-                user_id,
-                ws_row.id,
-                cast(
-                    Literal["chat", "project"],
-                    ws_row.kind if ws_row.kind in ("chat", "project") else "chat",
-                ),
-                ws_row.root_path,
-            )
-
-            slug = lead_agent_slug.replace("/", "-")[:32]
-            task_id = uuid4().hex
-            file_path = str(fs_registry.task_path(project_cwd, task_id, slug))
-            task_title = title or goal[:100]
-
-            metadata: dict[str, Any] = {
-                "originating_session_id": originating_session_id,
-                "dispatch_mode": "async",  # commit_task always uses async
-            }
-            if refs:
-                metadata["refs"] = list(refs)
-
-            # Classify the trigger source (chat, or agent when drafted from
-            # within another task) so the task list shows "由 … 触发" even for
-            # drafts that haven't been committed yet.
-            prov = await resolve_trigger_provenance(
-                db, originating_session_id=originating_session_id
-            )
-
-            task_row = TaskRow(
-                id=task_id,
-                project_id=project_id,
-                file_path=file_path,
-                title=task_title,
-                goal=goal,
-                status="draft",
-                created_by="user",
-                lead_agent_slug=lead_agent_slug,
-                # Draft-period holder = originating chat (logically); we still
-                # record the lead agent slug for UI clarity. The actual plan
-                # writer gate uses metadata.originating_session_id +
-                # project match (see dispatch_mcp._check_plan_writer_gate).
-                current_holder=lead_agent_slug,
-                trigger_type=prov.trigger_type,
-                trigger_task_id=prov.trigger_task_id,
-                trigger_agent_slug=prov.trigger_agent_slug,
-                trigger_automation_id=prov.trigger_automation_id,
-                metadata_=metadata,
-                plan_version=0,
-                committed_at=None,
-            )
-            await task_ds.create_task(user_id, task_row)
-
-            await event_ds.append_event(
-                user_id,
-                project_id=project_id,
-                task_id=task_id,
-                type="task_drafted",
-                actor=originating_session_id,
-                session_id=None,
-                payload={
-                    "goal": goal,
-                    "lead_agent_slug": lead_agent_slug,
-                    "refs": list(refs or []),
-                },
-            )
-            return task_row
+        return await self._lifecycle.draft_task(
+            project_id=project_id,
+            goal=goal,
+            lead_agent_slug=lead_agent_slug,
+            originating_session_id=originating_session_id,
+            refs=refs,
+            title=title,
+            user_id=user_id,
+        )
 
     async def commit_task(
         self,
@@ -365,207 +251,17 @@ class TaskOrchestrator:
         lead_agent_slug_override: str | None = None,
         user_id: str | None = None,
     ) -> dict[str, Any]:
-        """Transition a draft task to active by spawning its lead session.
+        """Flip a draft task to ``active`` by spawning its lead session.
 
-        Atomicity (D2 — half-atomic): the DB writes (lead session row + task
-        status flip + committed event) commit together. If the actor loop fails
-        to spawn afterwards we do NOT roll the task back to draft (the state
-        machine forbids ``active → draft``); the task stays ``active`` with no
-        running actor — the sweeper picks it up and marks it ``blocked`` so the
-        user can resume.
-
-        The new lead session gets the ``plan_pre_committed=True`` brief
-        variant which tells it to skip ``plan_task`` and dispatch directly
-        against the already-laid-down plan.
-
-        Returns ``{lead_session_id, status: "active", committed_at}`` on success,
-        ``{"error": ...}`` on validation failure.
+        Thin delegator onto :class:`LifecycleService` (ADR-023 Step 3c).
         """
-        async with async_unit_of_work() as db:
-            task_ds = TaskDatastore(db)
-            event_ds = TaskEventDatastore(db)
-            run_ds = TaskSessionDatastore(db)
-            member_ds = ProjectMemberDatastore(db)
-
-            task_row = await task_ds.get_task_by_project(user_id, project_id, task_id)
-            if task_row is None:
-                return {"error": f"task {task_id!r} not found"}
-            if task_row.status != "draft":
-                return {
-                    "error": (
-                        f"commit_task: task is in {task_row.status!r}, only draft tasks "
-                        "can be committed"
-                    )
-                }
-            plan = TaskPlan.from_dict(task_row.plan)
-            if plan.is_empty:
-                return {"error": "commit_task: plan is empty — call plan_task first to lay it down"}
-            if plan.all_done():
-                return {"error": "commit_task: plan has no work to do (all nodes already done)"}
-
-            lead_slug = lead_agent_slug_override or task_row.lead_agent_slug
-            lead_member = await member_ds.get(user_id, project_id, lead_slug)
-            if lead_member is None:
-                return {
-                    "error": (f"lead agent {lead_slug!r} is not a member of project {project_id!r}")
-                }
-
-            from valuz_agent.modules.projects.datastore import ProjectDatastore
-
-            ws_ds = ProjectDatastore(db)
-            ws_row = await ws_ds.get_by_id(user_id, project_id)
-            if ws_row is None:
-                return {"error": f"project {project_id!r} not found"}
-            project_cwd = fs_registry.project_cwd(
-                user_id,
-                ws_row.id,
-                cast(
-                    Literal["chat", "project"],
-                    ws_row.kind if ws_row.kind in ("chat", "project") else "chat",
-                ),
-                ws_row.root_path,
-            )
-            # Task-level worktree (design §5): a task carrying a worktree
-            # snapshot keeps every session — including this committed lead —
-            # in the worktree cwd (heals it first if it was removed).
-            lead_cwd = await resolve_task_cwd(task_row, str(project_cwd))
-
-            lead_agent = await _member_agent_config(lead_member, member_ds, user_id=user_id)
-            lead_clone = None
-            if lead_agent is not None:
-                lead_clone = await self._materialize_lead_agent(lead_agent, dispatch_mode="async")
-
-            refs = (task_row.metadata_ or {}).get("refs") or []
-            refs_text = "\n".join(f"- {r}" for r in refs) if refs else ""
-            # The committed brief points at the existing plan; the playbook
-            # (COMMITTED_LEAD_PLAYBOOK) tells the lead not to call plan_task.
-            plan_summary_lines = "\n".join(f"- {n.key}: {n.title}" for n in plan.nodes)
-            lead_brief = (
-                f"{task_row.goal}\n\n"
-                f"## Plan Summary (already committed; do not re-plan)\n\n"
-                f"{plan_summary_lines}\n"
-                + (f"\n## References\n\n{refs_text}\n" if refs_text else "")
-            )
-            # Fence the goal-mode payload: spill an over-cap committed brief to a
-            # doc and hand the lead a short pointer (used as both the embedded
-            # brief and the initial ``/goal`` prompt below).
-            # Spill anchored at the MAIN project cwd (design R5) — never
-            # into a task worktree, where it would defeat clean-teardown.
-            lead_brief = spill_goal_brief_if_too_long(
-                lead_brief,
-                run_dir=str(project_cwd),
-                task_id=task_id,
-                label=lead_slug,
-                is_lead=True,
-            )
-
-            from valuz_agent.modules.projects.datastore import ProjectDatastore as WsDs
-
-            ws_ds2 = WsDs(db)
-            ws_ctx = await ws_ds2.get_context(user_id, project_id)
-            project_instructions_md = ws_ctx.instructions_md if ws_ctx else None
-
-            lead_session = await build_member_session(
-                project_id=project_id,
-                agent_slug=lead_slug,
-                members=member_ds,
-                is_lead=True,
-                task_id=task_id,
-                run_dir=lead_cwd,
-                brief=lead_brief,
-                project_name=ws_row.name,
-                project_instructions_md=project_instructions_md,
-                dispatch_mode="async",
-                goal_mode=True,
-                plan_pre_committed=True,  # ← key flag (VALUZ-CHATPLAN D10)
-                worktree_notice=task_worktree_notice(task_worktree_snapshot(task_row)),
-                user_id=user_id,
-                **_provider_resolver_deps(db),
-            )
-            if lead_session is None:
-                return {"error": f"could not build lead session for {lead_slug!r}"}
-            if lead_clone is not None:
-                lead_session = embed_agent_config(lead_session, lead_clone)
-
-            gap = await _credential_gap(lead_session, lead_slug, db=db, user_id=user_id)
-            if gap is not None:
-                return {"error": f"commit_task: {gap}"}
-
-            await kernel_client.create_session(user_id, lead_session)
-            await project_index.record(
-                project_id,
-                lead_session.id,
-                kind="task_lead",
-                origin="task",
-                user_id=user_id,
-            )
-
-            # DB writes: create lead run row + flip task status + append event
-            lead_run = TaskSessionRow(
-                project_id=project_id,
-                task_id=task_id,
-                session_id=lead_session.id,
-                agent_slug=lead_slug,
-                sequence=0,
-                kind="lead",
-                status="active",
-                label="Committed",
-                goal=task_row.goal,
-                project_mode="shared",
-                run_dir=lead_cwd,
-            )
-            await run_ds.create_run(user_id, lead_run)
-
-            committed_at = now_ms()
-            task_row.status = "active"
-            task_row.committed_at = committed_at
-            task_row.current_holder = lead_session.id
-            # Stamp the lead session id back into metadata so subsequent
-            # tooling (UI, inject) can resolve "the lead" without joining
-            # against valuz_task_session.
-            md = dict(task_row.metadata_ or {})
-            md["lead_session_id"] = lead_session.id
-            md["dispatch_mode"] = "async"
-            task_row.metadata_ = md
-            await task_ds.update_task(task_row)
-
-            await event_ds.append_event(
-                user_id,
-                project_id=project_id,
-                task_id=task_id,
-                type="committed",
-                actor=caller_session_id,
-                session_id=lead_session.id,
-                payload={
-                    "lead_session_id": lead_session.id,
-                    "plan_version": task_row.plan_version,
-                    "plan_summary": plan.counts(),
-                },
-            )
-
-        # Half-atomic D2: actor spawn happens AFTER the DB txn. If spawn
-        # fails the DB is already in `active` — the sweeper will mark
-        # the task blocked so the user can resume.
-        from valuz_agent.modules.tasks.mailbox import mailbox_registry
-
-        mailbox_registry.register(lead_session.id)
-        asyncio.create_task(
-            self.run_actor_loop(
-                session_id=lead_session.id,
-                initial_prompt=lead_brief,
-                role="lead",
-                task_id=task_id,
-                project_id=project_id,
-                user_id=user_id,
-            )
+        return await self._lifecycle.commit_task(
+            task_id=task_id,
+            project_id=project_id,
+            caller_session_id=caller_session_id,
+            lead_agent_slug_override=lead_agent_slug_override,
+            user_id=user_id,
         )
-
-        return {
-            "task_id": task_id,
-            "lead_session_id": lead_session.id,
-            "status": "active",
-            "committed_at": committed_at,
-        }
 
     async def abandon_task(
         self,
@@ -578,37 +274,15 @@ class TaskOrchestrator:
     ) -> dict[str, Any]:
         """Discard a draft task (status: draft → abandoned).
 
-        Terminal — abandoned tasks cannot be resurrected. Use stop_task
-        (intervene) for active tasks; abandon_task is draft-only.
+        Thin delegator onto :class:`LifecycleService` (ADR-023 Step 3c).
         """
-        user_id = _require_user_id(user_id)
-        async with async_unit_of_work() as db:
-            task_ds = TaskDatastore(db)
-            event_ds = TaskEventDatastore(db)
-
-            task_row = await task_ds.get_task_by_project(user_id, project_id, task_id)
-            if task_row is None:
-                return {"error": f"task {task_id!r} not found"}
-            if task_row.status != "draft":
-                return {
-                    "error": (
-                        f"abandon_task: task is {task_row.status!r}, only draft tasks "
-                        "can be abandoned (use stop_task for active tasks)"
-                    )
-                }
-
-            task_row.status = "abandoned"
-            await task_ds.update_task(task_row)
-            await event_ds.append_event(
-                user_id,
-                project_id=project_id,
-                task_id=task_id,
-                type="abandoned",
-                actor=caller_session_id,
-                session_id=None,
-                payload={"reason": reason} if reason else {},
-            )
-            return {"task_id": task_id, "status": "abandoned"}
+        return await self._lifecycle.abandon_task(
+            task_id=task_id,
+            project_id=project_id,
+            caller_session_id=caller_session_id,
+            reason=reason,
+            user_id=user_id,
+        )
 
     # ==================================================================
     # v2 actor dispatch (M10 附录 B) — persistent lead + member actors
@@ -892,177 +566,20 @@ class TaskOrchestrator:
         force: bool = False,
         user_id: str | None = None,
     ) -> dict[str, Any]:
-        """Close the task — append a terminal event and set the task status.
+        """Close the task — append the terminal event and set the task status.
 
-        ``status`` is ``completed`` (goal achieved) or ``stopped`` (user-
-        requested terminate or lead-judged unreachable). Emits
-        ``task_completed`` / ``task_stopped`` accordingly.
-
-        Note: task-level ``failed`` is intentionally NOT a valid finish status
-        — see ``task_state.py``. Hard lead-turn crashes are surfaced as
-        ``blocked`` by ``recover_active_tasks`` / auto-finalize, not via this
-        path. Any caller still passing ``status='failed'`` is rejected loudly
-        rather than silently aliased — fail fast keeps stale prompts visible.
-
-        Plan-completeness guard (v0.14): a ``completed`` finish is REJECTED
-        while the plan still has unresolved nodes (planned / in_progress /
-        in_review / rework) — otherwise the lead can silently skip a planned
-        subtask (e.g. a final aggregation node) and still mark the task done.
-        The lead must dispatch+review those nodes first (or drop them via
-        modify_plan, or finish with status='stopped' to terminate the task).
-
-        Live-member guard: a ``stopped`` finish is REJECTED while members are
-        still running (a member deep in a long build looks exactly like a hang
-        from the lead's side — killing the whole task is almost never right).
-        The lead must first check them (``await_members`` reports pending
-        members' live status), stop them individually (``stop_subtask``), or
-        pass ``force=True`` after a deliberate decision.
+        Thin delegator onto :class:`LifecycleService` (ADR-023 Step 3c).
         """
-        if status not in ("completed", "stopped"):
-            return {
-                "ok": False,
-                "error": (
-                    f"finish_task: invalid status={status!r}. Allowed: "
-                    "'completed' (goal achieved) or 'stopped' (user-requested "
-                    "terminate / goal unreachable). Task-level 'failed' is no "
-                    "longer accepted — use 'stopped' instead."
-                ),
-                "status": "rejected",
-            }
-        final_status = "stopped" if status == "stopped" else "completed"
-        event_type = "task_stopped" if final_status == "stopped" else "task_completed"
-
-        # Live-member guard: don't let a lead kill the task while members are
-        # mid-flight (the observed failure mode: a member deep in a long build
-        # is indistinguishable from a hang, the lead "tries a few times" and
-        # stops the whole task). Name the live subtasks so the lead can check
-        # or stop them individually; ``force=True`` overrides deliberately.
-        if final_status == "stopped" and not force and self._members.has_live_members(task_id):
-            async with async_unit_of_work(commit=False) as db:
-                live_keys = sorted(
-                    r.subtask_key
-                    for r in await TaskSessionDatastore(db).list_runs(cast(str, user_id), task_id)
-                    if r.kind == "subtask" and r.subtask_key and r.status == "active"
-                )
-            return {
-                "ok": False,
-                "error": (
-                    "finish_task(stopped) rejected: members are still running "
-                    f"(subtasks {live_keys or '<unknown>'}). A silent member is "
-                    "usually still working (e.g. a long build), not dead — call "
-                    "await_members to see each pending member's live status, or "
-                    "stop_subtask the ones you no longer need. If you have "
-                    "deliberately decided to terminate the task anyway, call "
-                    "finish_task again with force=true."
-                ),
-                "live_subtasks": live_keys,
-                "status": "rejected",
-            }
-
-        rejected: dict[str, Any] | None = None
-        finished_task_row: Any | None = None
-        async with async_unit_of_work() as db:
-            task_ds = TaskDatastore(db)
-            event_ds = TaskEventDatastore(db)
-            run_ds = TaskSessionDatastore(db)
-
-            # Fetched for the plan guard below AND for the task-worktree
-            # teardown after the terminal writes commit.
-            finished_task_row = await task_ds.get_task_by_project(user_id, project_id, task_id)
-
-            # Guard: don't let a "completed" finish leave planned work behind.
-            if final_status == "completed":
-                task_row = finished_task_row
-                if task_row is not None:
-                    plan = TaskPlan.from_dict(task_row.plan)
-                    unresolved = [
-                        n.key
-                        for n in plan.nodes
-                        if n.status in ("planned", "in_progress", "in_review", "rework")
-                    ]
-                    if unresolved:
-                        rejected = {
-                            "error": (
-                                "finish_task rejected: the plan still has "
-                                f"unresolved subtasks {unresolved}. Dispatch and "
-                                "review them first (a dependent node like a final "
-                                "summary becomes ready once its deps are done), or "
-                                "drop them with modify_plan, or call finish_task "
-                                "with status='stopped' to terminate the task."
-                            ),
-                            "pending_subtasks": unresolved,
-                            "status": "rejected",
-                        }
-
-            if rejected is None:
-                await task_ds.update_task_status(user_id, task_id, final_status)
-
-                # Mark lead run as completed
-                await run_ds.update_run_by_session(
-                    session_id=lead_session_id,
-                    status="completed",
-                    ended_at=now_ms(),
-                )
-
-                await event_ds.append_event(
-                    user_id,
-                    project_id=project_id,
-                    task_id=task_id,
-                    type=event_type,
-                    actor=lead_session_id,
-                    session_id=lead_session_id,
-                    payload={
-                        "summary": summary,
-                        "artifacts": artifacts or [],
-                    },
-                )
-
-        if rejected is not None:
-            return rejected
-
-        # Session-modes reconciliation (task-goal-mode.md §Key decisions):
-        # ``finish_task`` is the authoritative terminal. Force the lead
-        # session's mode back to ``default`` so the kernel's goal evaluator
-        # cannot keep (or re-enter) the auto-loop after the task is closed,
-        # and so a re-opened conversation on this session isn't stuck in
-        # goal mode. Best-effort — a missing session is not fatal here.
-        try:
-            lead_sess = await kernel_client.get_session(user_id, lead_session_id)
-            if lead_sess is not None and getattr(lead_sess, "mode", "default") != "default":
-                await kernel_client.set_mode(user_id, lead_session_id, "default")
-        except Exception:  # noqa: BLE001 — terminal bookkeeping, never block close
-            logger.warning(
-                "finish_task: could not reset lead session %s mode to default",
-                lead_session_id,
-                exc_info=True,
-            )
-
-        # v2: tell any still-running members to finalize, and break the lead's
-        # own actor loop after this turn (no-op for sync/v1 — no live mailboxes).
-        from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
-
-        self._broadcast_shutdown(task_id)
-        mailbox_registry.put(lead_session_id, InboxMsg(kind="shutdown"))
-
-        # Task-worktree teardown (design §5): drop the task's worktree iff
-        # it holds no work worth keeping (fail-closed inside). Work left
-        # behind surfaces in the project's Worktrees panel instead.
-        if finished_task_row is not None:
-            from valuz_agent.modules.tasks.task_worktree import (
-                cleanup_task_worktree_if_clean,
-            )
-
-            await cleanup_task_worktree_if_clean(finished_task_row)
-
-        return {"ok": True, "status": final_status}
-
-    # ------------------------------------------------------------------
-    # update_deliverable — refresh the deliverable card after the task is
-    # completed (post-completion follow-up chat). Append-only: emits a
-    # ``deliverable_updated`` event the detail page reads as the latest
-    # deliverable, without mutating the original ``task_completed`` event.
-    # Does NOT touch task status / plan / runs — the task stays completed.
-    # ------------------------------------------------------------------
+        return await self._lifecycle.finish_task(
+            task_id=task_id,
+            project_id=project_id,
+            lead_session_id=lead_session_id,
+            summary=summary,
+            artifacts=artifacts,
+            status=status,
+            force=force,
+            user_id=user_id,
+        )
 
     async def update_deliverable(
         self,
@@ -1076,47 +593,16 @@ class TaskOrchestrator:
     ) -> dict[str, Any]:
         """Refresh the deliverable card on a completed task (follow-up chat).
 
-        Append-only: emits a ``deliverable_updated`` event carrying the latest
-        ``summary`` / ``artifacts`` without mutating the original
-        ``task_completed`` event or the task's status / plan / runs — the task
-        stays ``completed``. The caller is the lead session. Returns a result
-        dict (``status`` ``"updated"`` or ``"rejected"``) rather than raising,
-        mirroring the sibling ``finish_task`` tool-facing method.
+        Thin delegator onto :class:`LifecycleService` (ADR-023 Step 3c).
         """
-        user_id = _require_user_id(user_id)
-        async with async_unit_of_work() as db:
-            task_ds = TaskDatastore(db)
-            event_ds = TaskEventDatastore(db)
-
-            task_row = await task_ds.get_task_by_project(user_id, project_id, task_id)
-            if task_row is None:
-                return {
-                    "ok": False,
-                    "error": f"update_deliverable: task {task_id!r} not found",
-                    "status": "rejected",
-                }
-            if task_row.status != "completed":
-                return {
-                    "ok": False,
-                    "error": (
-                        "update_deliverable: task is "
-                        f"{task_row.status!r}; only a 'completed' task can "
-                        "refresh its deliverable card."
-                    ),
-                    "status": "rejected",
-                }
-
-            await event_ds.append_event(
-                user_id,
-                project_id=project_id,
-                task_id=task_id,
-                type="deliverable_updated",
-                actor=lead_session_id,
-                session_id=lead_session_id,
-                payload={"summary": summary, "artifacts": artifacts or []},
-            )
-
-        return {"ok": True, "status": "updated"}
+        return await self._lifecycle.update_deliverable(
+            task_id=task_id,
+            project_id=project_id,
+            lead_session_id=lead_session_id,
+            summary=summary,
+            artifacts=artifacts,
+            user_id=user_id,
+        )
 
     # ------------------------------------------------------------------
     # Plan / review — lead orchestration (VALUZ-TASK)
@@ -1134,34 +620,14 @@ class TaskOrchestrator:
     async def _materialize_lead_agent(
         self, base_agent: Any, dispatch_mode: Literal["sync", "async"] = "sync"
     ) -> Any:  # returns the lead-clone AgentConfig
-        """Materialize a per-task **lead clone** of *base_agent* and return its id.
+        """Materialize a per-task lead clone of *base_agent*.
 
-        Tools live only on ``AgentConfig`` (the kernel has no per-session tool
-        override), so the lead needs an agent that carries the dispatch tools.
-        Rather than mutate the shared base agent in place (which would leak
-        dispatch tools into every plain conversation that uses the same agent —
-        and race with concurrent sessions), we build a dedicated clone whose
-        ``id`` is ``{base}__lead__{mode}``. The clone shares the base's identity
-        (model/instructions/skills/provider/permission) and adds exactly the
-        dispatch toolset for the mode; orchestration/launcher tools are dropped.
-
-        Stable per (base, mode): re-materializing is idempotent (overwrites the
-        same row), so clones don't accumulate per task. The lead session points
-        its ``agent_id`` at the returned clone id.
+        Thin delegator onto :class:`LifecycleService` (ADR-023 Step 3c) —
+        kept as a method so tests keep driving ``orch._materialize_lead_agent``.
         """
-        from dataclasses import replace
-
-        # Tool surfaces ride the session's ``harness`` MCP entry now
-        # (``build_member_session(is_lead=True)`` points it at the ``lead``
-        # toolset of the host toolkit MCP server) — the clone carries no
-        # tool declarations of its own. It survives as an identity stamp:
-        # the ``__lead__{mode}`` id marks the embedded snapshot as a lead
-        # clone for queries/diagnostics.
-        clone_id = f"{base_agent.id}__lead__{dispatch_mode}"
-        clone = replace(base_agent, id=clone_id, tools=())
-        # The clone exists only as the lead session's embedded snapshot —
-        # the kernel has no agents table to materialize it into.
-        return clone
+        return await self._lifecycle._materialize_lead_agent(
+            base_agent, dispatch_mode=dispatch_mode
+        )
 
 
 # ---------------------------------------------------------------------------
