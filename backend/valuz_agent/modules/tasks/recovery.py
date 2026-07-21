@@ -36,6 +36,7 @@ from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.tasks import planning
 from valuz_agent.modules.tasks.actor_runner import ActorRunner, collect_manifest
 from valuz_agent.modules.tasks.coordination import CoordinationService
+from valuz_agent.modules.tasks.events import finalize_task  # noqa: I001
 from valuz_agent.modules.tasks.datastore import (
     TaskDatastore,
     TaskEventDatastore,
@@ -505,9 +506,7 @@ class RecoveryService:
                     parked += 1
             if parked:
                 task.plan = plan.to_dict()
-            task.status = target_status
-            await task_ds.update_task(task)
-            if parked:
+                await task_ds.update_task(task)
                 await planning.emit_plan_update(
                     event_ds,
                     project_id=project_id,
@@ -517,14 +516,32 @@ class RecoveryService:
                     session_id=lead_session_id,
                     user_id=user_id,
                 )
-            await event_ds.append_event(
-                user_id,
-                project_id,
-                task_id,
-                target_status,  # "paused" | "stopped" — drives UI status + timer
-                actor="user",
-                payload={"members_paused": len(member_sids)},
-            )
+            if target_status == "stopped":
+                # Terminal write — goes through finalize_task so the status
+                # flip rides the task_state guard AND ``task.finalized`` is
+                # announced (the sandbox-TTL clamp listens on it; the old
+                # direct ``update_task`` write here skipped both). The event
+                # type stays the raw "stopped" — it drives UI status + timer.
+                await finalize_task(
+                    db,
+                    user_id=user_id,
+                    project_id=project_id,
+                    task_id=task_id,
+                    status="stopped",
+                    event_type="stopped",
+                    actor="user",
+                    payload={"members_paused": len(member_sids)},
+                )
+            else:
+                await task_ds.update_task_status(user_id, task_id, "paused")
+                await event_ds.append_event(
+                    user_id,
+                    project_id,
+                    task_id,
+                    "paused",  # drives UI status + timer
+                    actor="user",
+                    payload={"members_paused": len(member_sids)},
+                )
 
         # Cascade interrupt + shutdown (outside the DB txn).
         for sid in member_sids:

@@ -542,10 +542,16 @@ async def test_finish_task_stopped_force_bypasses_guard(
     async def _no_session(*_a, **_k):
         return None
 
+    from valuz_agent.modules.tasks import events as events_mod
+
     monkeypatch.setattr(lc_mod, "async_unit_of_work", _fake_uow)
     monkeypatch.setattr(lc_mod, "TaskDatastore", _FakeTaskDs)
     monkeypatch.setattr(lc_mod, "TaskSessionDatastore", _FakeRunDs)
     monkeypatch.setattr(lc_mod, "TaskEventDatastore", _FakeEventDs)
+    # finish_task's terminal write now runs through events.finalize_task —
+    # stub the same fakes on its namespace.
+    monkeypatch.setattr(events_mod, "TaskDatastore", _FakeTaskDs)
+    monkeypatch.setattr(events_mod, "TaskEventDatastore", _FakeEventDs)
     monkeypatch.setattr(lc_mod.kernel_client, "get_session", _no_session)
 
     orch = TaskOrchestrator()

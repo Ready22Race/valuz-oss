@@ -756,6 +756,12 @@ def test_auto_finalize_blocks_on_stop_reason_error_with_empty_plan(
     monkeypatch.setattr(
         kernel_client_mod, "get_session", _as_async(lambda _uid, _sid: fake_sess)
     )
+    from valuz_agent.modules.tasks import events as events_mod
+
+    published: list[tuple] = []
+    monkeypatch.setattr(
+        events_mod, "publish_task_finalized", lambda tid, uid, st: published.append((tid, st))
+    )
     orch = TaskOrchestrator()
     asyncio.run(
         orch._auto_finalize_lead_task(
@@ -768,6 +774,9 @@ def test_auto_finalize_blocks_on_stop_reason_error_with_empty_plan(
     )
     assert _task_status(db_factory) == "blocked"
     assert "task_blocked" in _events(db_factory)
+    # Terminal contract (tasks/events.py): every terminal write announces
+    # task.finalized — the lead-turn-error → blocked path used to skip it.
+    assert ("t1", "blocked") in published
 
 
 def test_auto_finalize_cancel_with_empty_plan_stays_active(
@@ -1565,6 +1574,12 @@ def test_e2e_stop_resume_closed_loop_through_routes(db_factory, tmp_path, monkey
     async def _fake_loop(*, session_id, role, **_kw) -> None:
         spawned.append((session_id, role))
 
+    from valuz_agent.modules.tasks import events as events_mod
+
+    published: list[tuple] = []
+    monkeypatch.setattr(
+        events_mod, "publish_task_finalized", lambda tid, uid, st: published.append((tid, st))
+    )
     monkeypatch.setattr(orch._recovery, "_interrupt_kernel_session", _fake_interrupt)
     monkeypatch.setattr(orch._actor, "run_actor_loop", _fake_loop)
     # On resume, paused members read as interrupted-idle → resumable.
@@ -1584,6 +1599,10 @@ def test_e2e_stop_resume_closed_loop_through_routes(db_factory, tmp_path, monkey
                 "t1", tasks_route.InterveneRequest(action="stop"), db, "local-test-owner"
             )
         assert resp.status == "stopped"
+        # Terminal contract: a user stop is a terminal write → task.finalized
+        # must be announced (sandbox TTL clamp). The old direct update_task
+        # write in stop_task skipped both the announce and the state guard.
+        assert ("t1", "stopped") in published
         assert set(interrupted) == {"sA", "sB", "lead-s"}
         runs = _runs(db_factory)
         assert runs["sA"] == "paused" and runs["sB"] == "paused"
@@ -1837,6 +1856,7 @@ def test_finish_task_completed_publishes_finalized_and_notifies_memory(
     """finish_task is a terminal write site of the task.finalized contract
     (tasks/events.py): the commercial allocator's TTL clamp listens on it.
     A completed finish must also graduate lessons into project memory."""
+    from valuz_agent.modules.tasks import events as events_mod
     from valuz_agent.modules.tasks import lifecycle as lc_mod
 
     _make_task(db_factory, tmp_path)
@@ -1853,7 +1873,7 @@ def test_finish_task_completed_publishes_finalized_and_notifies_memory(
 
     calls: list[tuple] = []
     monkeypatch.setattr(
-        lc_mod, "publish_task_finalized", lambda tid, uid, st: calls.append(("pub", tid, st))
+        events_mod, "publish_task_finalized", lambda tid, uid, st: calls.append(("pub", tid, st))
     )
     monkeypatch.setattr(
         lc_mod, "_notify_task_memory", lambda tid, user_id=None: calls.append(("mem", tid))
@@ -1879,13 +1899,14 @@ def test_finish_task_stopped_publishes_finalized_without_memory(
 ) -> None:
     """A 'stopped' finish still announces task.finalized (sandbox reclaim)
     but must NOT graduate memory — that's reserved for real completions."""
+    from valuz_agent.modules.tasks import events as events_mod
     from valuz_agent.modules.tasks import lifecycle as lc_mod
 
     _make_task(db_factory, tmp_path)
 
     calls: list[tuple] = []
     monkeypatch.setattr(
-        lc_mod, "publish_task_finalized", lambda tid, uid, st: calls.append(("pub", tid, st))
+        events_mod, "publish_task_finalized", lambda tid, uid, st: calls.append(("pub", tid, st))
     )
     monkeypatch.setattr(
         lc_mod, "_notify_task_memory", lambda tid, user_id=None: calls.append(("mem", tid))

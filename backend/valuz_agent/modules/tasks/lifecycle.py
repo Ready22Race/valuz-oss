@@ -78,7 +78,7 @@ from valuz_agent.modules.tasks.datastore import (
     TaskEventDatastore,
     TaskSessionDatastore,
 )
-from valuz_agent.modules.tasks.events import publish_task_finalized
+from valuz_agent.modules.tasks.events import finalize_task
 from valuz_agent.modules.tasks.live_member_registry import LiveMemberRegistry
 from valuz_agent.modules.tasks.models import TaskRow, TaskSessionRow
 from valuz_agent.modules.tasks.plan import PlanError, TaskPlan
@@ -306,15 +306,14 @@ class LifecycleService:
                 # the lead). The ``kickoff_failed`` event below still records
                 # the cause. The old ``"failed"`` write left an out-of-enum,
                 # un-resumable status stuck forever.
-                await task_ds.update_task_status(user_id, task_id, "blocked")
-                publish_task_finalized(task_id, user_id, "blocked")
-                kickoff_ev = await event_ds.append_event(
-                    user_id,
+                kickoff_ev = await finalize_task(
+                    db,
+                    user_id=user_id,
                     project_id=project_id,
                     task_id=task_id,
-                    type="kickoff_failed",
+                    status="blocked",
+                    event_type="kickoff_failed",
                     actor=created_by,
-                    session_id=None,
                     payload={"error": gap},
                 )
                 from valuz_agent.modules.tasks import messaging as _msg
@@ -804,7 +803,6 @@ class LifecycleService:
             raise ValueError("user_id is required")
         async with async_unit_of_work() as db:
             task_ds = TaskDatastore(db)
-            event_ds = TaskEventDatastore(db)
             run_ds = TaskSessionDatastore(db)
 
             task = await task_ds.get_task_by_project(user_id, project_id, task_id)
@@ -887,12 +885,13 @@ class LifecycleService:
                 # rebuilds the lead). The ``reason`` payload tags this as a
                 # lead-turn-error to distinguish from the unresolved-subtasks
                 # blocked case below.
-                await task_ds.update_task_status(user_id, task_id, "blocked")
-                blocked_ev = await event_ds.append_event(
-                    user_id,
+                blocked_ev = await finalize_task(
+                    db,
+                    user_id=user_id,
                     project_id=project_id,
                     task_id=task_id,
-                    type="task_blocked",
+                    status="blocked",
+                    event_type="task_blocked",
                     actor=lead_session_id,
                     session_id=lead_session_id,
                     payload={
@@ -922,13 +921,13 @@ class LifecycleService:
             if unresolved:
                 # Lead stopped with planned work undispatched — surface as blocked
                 # (not a hard error, but not done either).
-                await task_ds.update_task_status(user_id, task_id, "blocked")
-                publish_task_finalized(task_id, user_id, "blocked")
-                blocked_ev = await event_ds.append_event(
-                    user_id,
+                blocked_ev = await finalize_task(
+                    db,
+                    user_id=user_id,
                     project_id=project_id,
                     task_id=task_id,
-                    type="task_blocked",
+                    status="blocked",
+                    event_type="task_blocked",
                     actor=lead_session_id,
                     session_id=lead_session_id,
                     payload={"reason": "unresolved_subtasks", "pending_subtasks": unresolved},
@@ -955,18 +954,18 @@ class LifecycleService:
                 "(auto-finalized) Lead ended its turn with no pending subtasks; "
                 "task closed automatically."
             )
-            await task_ds.update_task_status(user_id, task_id, "completed")
-            publish_task_finalized(task_id, user_id, "completed")
             await run_ds.update_run_by_session(
                 session_id=lead_session_id,
                 status="completed",
                 ended_at=now_ms(),
             )
-            await event_ds.append_event(
-                user_id,
+            await finalize_task(
+                db,
+                user_id=user_id,
                 project_id=project_id,
                 task_id=task_id,
-                type="task_completed",
+                status="completed",
+                event_type="task_completed",
                 actor=lead_session_id,
                 session_id=lead_session_id,
                 payload={"summary": summary, "artifacts": [], "auto_finalized": True},
@@ -1340,7 +1339,6 @@ class LifecycleService:
         finished_task_row: Any | None = None
         async with async_unit_of_work() as db:
             task_ds = TaskDatastore(db)
-            event_ds = TaskEventDatastore(db)
             run_ds = TaskSessionDatastore(db)
 
             # Fetched for the plan guard below AND for the task-worktree
@@ -1372,9 +1370,6 @@ class LifecycleService:
                         }
 
             if rejected is None:
-                await task_ds.update_task_status(user_id, task_id, final_status)
-                publish_task_finalized(task_id, user_id, final_status)
-
                 # Mark lead run as completed
                 await run_ds.update_run_by_session(
                     session_id=lead_session_id,
@@ -1382,11 +1377,13 @@ class LifecycleService:
                     ended_at=now_ms(),
                 )
 
-                await event_ds.append_event(
-                    user_id,
+                await finalize_task(
+                    db,
+                    user_id=user_id,
                     project_id=project_id,
                     task_id=task_id,
-                    type=event_type,
+                    status=final_status,
+                    event_type=event_type,
                     actor=lead_session_id,
                     session_id=lead_session_id,
                     payload={
