@@ -2372,6 +2372,8 @@
     "stopped": "Task stopped",
     "event": {
       "kickoff": "Task kicked off",
+      "taskDrafted": "Task drafted",
+      "committed": "Plan confirmed — task started",
       "kickoffFailed": "Kickoff failed",
       "subtaskSpawned": "Subtask dispatched",
       "subtaskCompleted": "Subtask completed",

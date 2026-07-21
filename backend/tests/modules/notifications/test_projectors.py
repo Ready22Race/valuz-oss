@@ -20,7 +20,7 @@ from valuz_agent.modules.decisions.aggregator import DecisionAggregator
 from valuz_agent.modules.notifications.models import NotificationRow
 from valuz_agent.modules.notifications.service import notification_service
 from valuz_agent.modules.projects.models import ProjectRow
-from valuz_agent.modules.tasks import messaging
+from valuz_agent.modules.notifications import projectors
 from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionRow
 
 OWNER = "local-test-owner"
@@ -151,7 +151,7 @@ def test_failure_projects_notification_and_resolves_on_resume(db_factory) -> Non
     _seed_task(db_factory)
     # Simulate a task_blocked event landing, then the projector call.
     async def run_ingest():
-        await messaging.record_task_failure_notification(
+        await projectors.record_task_failure_notification(
             task_id="t1", project_id="w1", event_id="ev-9",
             event_type="task_blocked", reason="lead crashed", user_id=OWNER,
         )
@@ -175,11 +175,11 @@ def test_failure_deduped_by_event_id(db_factory) -> None:
     _seed_task(db_factory)
 
     async def run():
-        await messaging.record_task_failure_notification(
+        await projectors.record_task_failure_notification(
             task_id="t1", project_id="w1", event_id="ev-1",
             event_type="task_blocked", reason="x", user_id=OWNER,
         )
-        await messaging.record_task_failure_notification(
+        await projectors.record_task_failure_notification(
             task_id="t1", project_id="w1", event_id="ev-1",  # same event → no dup
             event_type="task_blocked", reason="x", user_id=OWNER,
         )

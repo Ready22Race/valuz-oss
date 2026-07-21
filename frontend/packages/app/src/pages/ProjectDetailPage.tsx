@@ -1134,12 +1134,10 @@ export const ProjectDetailPage = () => {
 
     // PRD-PAAT §3.2 Task mode: treat the composer text as a task goal,
     // kick off via tasksApi.kickoff(), and route the user to the task
-    // detail page. The composer's selected agent becomes the lead.
-    // ``dispatch_mode: "async"`` (the default): the lead runs as a persistent
-    // actor that can be re-woken across turns until finish_task — robust for
-    // multi-turn orchestration / long-running members, and it gets the
-    // host-side completion fallback. Title auto-derives from the first 60
-    // chars of the goal so the task list stays readable.
+    // detail page. The composer's selected agent becomes the lead — it runs
+    // as a persistent actor re-woken across turns until finish_task, with
+    // the host-side completion fallback. Title auto-derives from the first
+    // 60 chars of the goal so the task list stays readable.
     if (composerMode === "task") {
       if (!selectedAgentSlug) {
         toast.error(t("task.noLeadAgents" as Parameters<typeof t>[0]));
@@ -1151,7 +1149,6 @@ export const ProjectDetailPage = () => {
           goal: text,
           lead_agent_slug: selectedAgentSlug,
           title: text.length > 60 ? text.slice(0, 60) : null,
-          dispatch_mode: "async",
           // Task-level worktree (design §5): lead + every member share ONE
           // worktree; clean ones auto-remove at finish.
           worktree: worktreeEnabled,

@@ -2,6 +2,14 @@
 
 [English](task-kernel-migration.md)
 
+> **状态:暂缓(2026-07-20)。** Task 子系统**暂定常驻 host** —— 本迁移当前不再
+> 执行,host 侧 task 模块应按**终局形态**(而非过渡态)来治理。§2 的锁定决策保留,
+> 作为未来若重启迁移时的参考基线。已落地的迁移前置 seam 独立成立、无论迁移与否都
+> 保留:`tasks/resolution.py`(host 知识的会话解析,按 §5.1 形状)、
+> `tasks/events.finalize_task`(组合式终态写入)、`tasks/tools/gate.py`(纯工具门禁
+> 策略)。**不再计划执行**的部分:`valuz_task*` 表迁移、actor 迁入 kernel 侧运行、
+> task MCP 工具由 kernel serve。
+
 > Task 子系统**整体迁入 kernel**。它的表变为 kernel 所有(去掉前缀、保留
 > `user_id`),并像 `sessions`/`messages`/`events` 一样通过 **DataService** 持久化。
 > 它的 **actor**(lead + member、mailbox、live registry、recovery、watchdog)**完全

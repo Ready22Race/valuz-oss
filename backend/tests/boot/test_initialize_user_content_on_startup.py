@@ -213,7 +213,7 @@ async def test_init_kernel_skips_browser_cli_bootstrap_when_startup_user_content
         lambda: (),
     )
     monkeypatch.setattr(
-        "valuz_agent.modules.tasks.dispatch_mcp.build_task_tool_defs",
+        "valuz_agent.modules.tasks.tools.handlers.build_task_tool_defs",
         lambda _orchestrator: (),
     )
 

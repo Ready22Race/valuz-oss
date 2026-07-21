@@ -36,6 +36,7 @@ from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.tasks import planning
 from valuz_agent.modules.tasks.actor_runner import ActorRunner, collect_manifest
 from valuz_agent.modules.tasks.coordination import CoordinationService
+from valuz_agent.modules.tasks.events import finalize_task  # noqa: I001
 from valuz_agent.modules.tasks.datastore import (
     TaskDatastore,
     TaskEventDatastore,
@@ -56,12 +57,6 @@ Disposition = Literal["resume", "completed", "failed", "in_flight"]
 # Resume retry cap (VALUZ-RESUME §5.0): a member node may be resumed at most this
 # many times before we give up and hand it back to the lead as rework.
 RESUME_RETRY_CAP = 3
-
-
-def _require_user_id(user_id: str | None) -> str:
-    if user_id is None:
-        raise ValueError("user_id is required")
-    return user_id
 
 
 def _stop_reason_dict(stop_reason: Any) -> dict[str, Any]:
@@ -241,7 +236,7 @@ class RecoveryService:
         self,
         task_id: str,
         project_id: str,
-        user_id: str | None = None,
+        user_id: str,
         *,
         lead_instruction: str | None = None,
     ) -> bool:
@@ -429,14 +424,13 @@ class RecoveryService:
     # Layer 2 (VALUZ-RESUME §5.5): user-initiated stop / resume
     # ------------------------------------------------------------------
 
-    async def _interrupt_kernel_session(self, session_id: str, user_id: str | None = None) -> None:
+    async def _interrupt_kernel_session(self, session_id: str, user_id: str) -> None:
         """Best-effort: ask the kernel runtime to stop an in-flight turn.
 
         Returns silently whether or not a runtime was active — a member parked
         between turns has no live runtime (``interrupt`` returns False), and the
         ``shutdown`` mailbox message is what stops its actor loop instead.
         """
-        user_id = _require_user_id(user_id)
         try:
             await kernel_client.interrupt(user_id, session_id)
         except Exception:  # noqa: BLE001
@@ -448,7 +442,7 @@ class RecoveryService:
         project_id: str,
         *,
         target_status: str = "paused",
-        user_id: str | None = None,
+        user_id: str,
     ) -> bool:
         """User-initiated cascade halt → ``paused`` (pause) or ``stopped`` (stop).
 
@@ -468,7 +462,6 @@ class RecoveryService:
         revivable by design); only the task status + the emitted event differ.
         Returns False if the task is gone or the transition is illegal.
         """
-        user_id = _require_user_id(user_id)
         async with async_unit_of_work() as db:
             task_ds = TaskDatastore(db)
             run_ds = TaskSessionDatastore(db)
@@ -505,9 +498,7 @@ class RecoveryService:
                     parked += 1
             if parked:
                 task.plan = plan.to_dict()
-            task.status = target_status
-            await task_ds.update_task(task)
-            if parked:
+                await task_ds.update_task(task)
                 await planning.emit_plan_update(
                     event_ds,
                     project_id=project_id,
@@ -517,14 +508,32 @@ class RecoveryService:
                     session_id=lead_session_id,
                     user_id=user_id,
                 )
-            await event_ds.append_event(
-                user_id,
-                project_id,
-                task_id,
-                target_status,  # "paused" | "stopped" — drives UI status + timer
-                actor="user",
-                payload={"members_paused": len(member_sids)},
-            )
+            if target_status == "stopped":
+                # Terminal write — goes through finalize_task so the status
+                # flip rides the task_state guard AND ``task.finalized`` is
+                # announced (the sandbox-TTL clamp listens on it; the old
+                # direct ``update_task`` write here skipped both). The event
+                # type stays the raw "stopped" — it drives UI status + timer.
+                await finalize_task(
+                    db,
+                    user_id=user_id,
+                    project_id=project_id,
+                    task_id=task_id,
+                    status="stopped",
+                    event_type="stopped",
+                    actor="user",
+                    payload={"members_paused": len(member_sids)},
+                )
+            else:
+                await task_ds.update_task_status(user_id, task_id, "paused")
+                await event_ds.append_event(
+                    user_id,
+                    project_id,
+                    task_id,
+                    "paused",  # drives UI status + timer
+                    actor="user",
+                    payload={"members_paused": len(member_sids)},
+                )
 
         # Cascade interrupt + shutdown (outside the DB txn).
         for sid in member_sids:
@@ -544,7 +553,7 @@ class RecoveryService:
         project_id: str,
         *,
         actor: str = "user",
-        user_id: str | None = None,
+        user_id: str,
         instruction: str | None = None,
     ) -> dict[str, Any]:
         """User-initiated resume of a ``paused`` / ``blocked`` / ``stopped`` /
@@ -674,7 +683,7 @@ class RecoveryService:
         )
         return {"ok": ok, "prior_status": prior_status, "resumed": ok}
 
-    async def stop_member(self, session_id: str, user_id: str | None = None) -> bool:
+    async def stop_member(self, session_id: str, user_id: str) -> bool:
         """User-initiated single-member stop (task stays ``active``).
 
         Interrupts one subtask session, notifies the lead with a
@@ -682,7 +691,6 @@ class RecoveryService:
         run ``→rejected`` and the plan node ``→rework``. The lead decides next
         (redispatch / modify_plan / finish) on its next ``get_plan``.
         """
-        user_id = _require_user_id(user_id)
         from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 
         async with async_unit_of_work() as db:

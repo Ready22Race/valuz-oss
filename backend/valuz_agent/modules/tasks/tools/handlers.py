@@ -90,6 +90,8 @@ from valuz_agent.modules.tasks.tools.declarations import (
 if TYPE_CHECKING:
     from valuz_agent.modules.tasks.orchestrator import TaskOrchestrator
 
+from valuz_agent.modules.tasks.tools import gate
+
 logger = logging.getLogger(__name__)
 
 
@@ -101,7 +103,8 @@ logger = logging.getLogger(__name__)
 async def _check_lead_gate(ctx: ExecContext) -> tuple[str, str] | ToolResult:
     """Verify the caller is a lead session and return (task_id, project_id).
 
-    Returns a ToolResult(is_error=True) when the check fails.
+    I/O wrapper: loads the caller session, applies the pure policy in
+    ``tools/gate.py`` and wraps a rejection into ToolResult(is_error=True).
     """
     # Source the caller from the per-request built-in MCP context when not
     # passed explicitly (the toolkit MCP server publishes the session owner).
@@ -109,22 +112,10 @@ async def _check_lead_gate(ctx: ExecContext) -> tuple[str, str] | ToolResult:
     sess = await data_reader().get_session(user_id, ctx.session_id)
     if sess is None:
         return ToolResult(content="dispatch: caller session not found", is_error=True)
-
-    v: dict[str, Any] = (sess.metadata or {}).get("valuz", {})
-    if v.get("run_kind") != "lead":
-        return ToolResult(
-            content="only the lead session may call dispatch tools",
-            is_error=True,
-        )
-
-    task_id = v.get("task_id", "")
-    project_id = v.get("project_id", "")
-    if not task_id or not project_id:
-        return ToolResult(
-            content="dispatch: lead session is missing task_id or project_id in metadata",
-            is_error=True,
-        )
-    return task_id, project_id
+    verdict = gate.check_lead_gate(sess)
+    if isinstance(verdict, str):
+        return ToolResult(content=verdict, is_error=True)
+    return verdict
 
 
 async def _resolve_plan_writer_task(
@@ -207,68 +198,22 @@ async def _resolve_plan_reader_task(
     if task is None:
         return ToolResult(content=f"plan tool: task {task_id!r} not found", is_error=True)
 
-    caller_ws = getattr(sess, "project_id", "") or v.get("project_id", "")
-    if caller_ws != task.project_id:
-        return ToolResult(
-            content=(
-                f"plan tool: caller project {caller_ws!r} does not match "
-                f"task project {task.project_id!r}"
-            ),
-            is_error=True,
-        )
+    reason = gate.check_plan_reader_gate(sess, task)
+    if reason is not None:
+        return ToolResult(content=reason, is_error=True)
     return task, task.project_id, task_id
 
 
 def _check_plan_writer_gate(sess: Any, task: Any) -> ToolResult | None:
     """Verify ``sess`` is allowed to write plan / state on ``task``.
 
-    Returns ``None`` on success, ``ToolResult(is_error=True)`` otherwise.
-
-    Policy (VALUZ-CHATPLAN D6 strict):
-      - ``status == draft``: originating session OR any session in the task's
-        project (personal-desktop trust boundary — Q3).
-      - ``status == active``: STRICT lead-only. Chat that wants to revise the
-        plan mid-execution must go through ``inject_into_task`` (S4) and let
-        the lead make the change itself.
-      - ``status == paused``: read-only; resume the task to edit.
-      - ``status in (completed, stopped, blocked, abandoned)``: read-only.
+    Pure policy lives in ``tools/gate.py`` (VALUZ-CHATPLAN D6 strict) — this
+    wrapper only shapes the rejection for the tool wire.
     """
-    v: dict[str, Any] = (sess.metadata or {}).get("valuz", {})
-    if task.status == "draft":
-        meta = task.metadata_ or {}
-        origin = meta.get("originating_session_id")
-        if sess.id == origin:
-            return None
-        caller_ws = getattr(sess, "project_id", "") or v.get("project_id", "")
-        if caller_ws == task.project_id:
-            return None
-        return ToolResult(
-            content=(
-                f"not authorized: draft task {task.id!r} is held by its originator and "
-                f"project members; caller is in project {caller_ws!r}, task is in "
-                f"{task.project_id!r}"
-            ),
-            is_error=True,
-        )
-    if task.status == "active":
-        if v.get("run_kind") == "lead" and v.get("task_id") == task.id:
-            return None
-        return ToolResult(
-            content=(
-                "active task plan is lead-owned; chat sessions must use "
-                "inject_into_task to ask the lead to revise it (D6 strict)"
-            ),
-            is_error=True,
-        )
-    if task.status == "paused":
-        return ToolResult(
-            content=f"task {task.id!r} is paused; resume it before editing the plan",
-            is_error=True,
-        )
-    return ToolResult(
-        content=f"task {task.id!r} is {task.status!r}; plan is read-only",
-        is_error=True,
-    )
+    reason = gate.check_plan_writer_gate(sess, task)
+    if reason is not None:
+        return ToolResult(content=reason, is_error=True)
+    return None
 
 
 async def _check_orchestration_gate(ctx: ExecContext) -> tuple[str, str] | ToolResult:
@@ -285,40 +230,27 @@ async def _check_orchestration_gate(ctx: ExecContext) -> tuple[str, str] | ToolR
     if sess is None:
         return ToolResult(content="create_task: caller session not found", is_error=True)
 
-    v: dict[str, Any] = (sess.metadata or {}).get("valuz", {})
-    run_kind = v.get("run_kind")
-    if run_kind in ("lead", "subtask"):
-        return ToolResult(
-            content=(
-                "create_task is only available in a project conversation, not "
-                "inside a running task (nested tasks are not supported)"
-            ),
-            is_error=True,
-        )
-
-    # Project = the kernel Session.project_id (authoritative). Plain
-    # conversation sessions don't echo project_id into valuz metadata, so
-    # read project_id directly (valuz.project_id only exists on task runs).
-    project_id = getattr(sess, "project_id", "") or v.get("project_id", "")
-    if not project_id:
-        return ToolResult(
-            content="create_task: caller session has no project",
-            is_error=True,
-        )
+    verdict = gate.check_orchestration_caller(sess)
+    if isinstance(verdict, str):
+        return ToolResult(content=verdict, is_error=True)
+    project_id, agent_slug = verdict
 
     # Restrict to projects — chat projects are per-session ephemeral.
+    # (Needs the DB, so it stays outside the pure policy; project knowledge
+    # is read through the resolver seam.)
     from valuz_agent.infra.db import async_unit_of_work
-    from valuz_agent.modules.projects.datastore import ProjectDatastore
+    from valuz_agent.modules.tasks.resolution import task_session_resolver
 
     async with async_unit_of_work(commit=False) as db:
-        ws = await ProjectDatastore(db).get_by_id(sess.user_id, project_id)
-    if ws is None or ws.kind != "project":
+        env = await task_session_resolver.resolve_project_env(
+            db, user_id=sess.user_id, project_id=project_id
+        )
+    if env is None or env.project_row.kind != "project":
         return ToolResult(
             content="create_task is only available inside a project",
             is_error=True,
         )
 
-    agent_slug: str = v.get("agent_slug") or ""
     return project_id, agent_slug
 
 
@@ -755,10 +687,6 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
                 content="create_task: no lead_agent given and conversation has no agent",
                 is_error=True,
             )
-        dispatch_mode = args.get("dispatch_mode") or "async"
-        if dispatch_mode not in ("sync", "async"):
-            dispatch_mode = "async"
-
         try:
             task_row = await orchestrator.kickoff(
                 project_id=project_id,
@@ -767,7 +695,6 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
                 refs=args.get("refs") or [],
                 created_by=ctx.session_id,
                 title=args.get("title"),
-                dispatch_mode=dispatch_mode,  # type: ignore[arg-type]
                 originating_session_id=ctx.session_id,
                 user_id=ctx.user_id,
             )
@@ -777,7 +704,6 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
                         "task_id": task_row.id,
                         "title": task_row.title,
                         "lead_agent": lead_agent,
-                        "dispatch_mode": dispatch_mode,
                         "status": "active",
                     },
                     ensure_ascii=False,

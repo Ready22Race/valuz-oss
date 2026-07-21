@@ -36,9 +36,9 @@ from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.lifecycle import is_draining
 from valuz_agent.modules.tasks.datastore import (
     TaskDatastore,
-    TaskEventDatastore,
     TaskSessionDatastore,
 )
+from valuz_agent.modules.tasks.events import finalize_task
 from valuz_agent.modules.tasks.mailbox import mailbox_registry
 
 logger = logging.getLogger(__name__)
@@ -201,7 +201,6 @@ class TaskHealthMonitor:
     ) -> bool:
         async with async_unit_of_work() as db:
             task_ds = TaskDatastore(db)
-            event_ds = TaskEventDatastore(db)
             # Re-read under the write UoW — the task may have moved off
             # ``active`` since the read snapshot (a late finalize won the race).
             task = await task_ds.get_task_by_project(user_id, project_id, task_id)
@@ -211,24 +210,27 @@ class TaskHealthMonitor:
             # re-registered (a resume landed) in the sweep gap.
             if mailbox_registry.is_registered(lead_session_id):
                 return False
-            await task_ds.update_task_status(user_id, task_id, "blocked")
             reason = (
                 "The lead stopped without finishing the task (the process "
                 "stayed up but its loop exited). Resume to rebuild the lead "
                 "and continue."
             )
-            blocked_ev = await event_ds.append_event(
-                user_id,
+            blocked_ev = await finalize_task(
+                db,
+                user_id=user_id,
                 project_id=project_id,
                 task_id=task_id,
-                type="task_blocked",
+                status="blocked",
+                event_type="task_blocked",
                 actor=lead_session_id,
                 session_id=lead_session_id,
                 payload={"reason": "lead_dead", "error": reason},
             )
-            from valuz_agent.modules.tasks import messaging as _msg
+            from valuz_agent.modules.notifications.projectors import (
+                record_task_failure_notification,
+            )
 
-            await _msg.record_task_failure_notification(
+            await record_task_failure_notification(
                 task_id=task_id,
                 project_id=project_id,
                 event_id=blocked_ev.id,
@@ -236,9 +238,6 @@ class TaskHealthMonitor:
                 reason=reason,
                 user_id=user_id,
             )
-        from valuz_agent.modules.tasks.events import publish_task_finalized
-
-        publish_task_finalized(task_id, user_id, "blocked")
         logger.warning(
             "task health monitor: task %s -> blocked (lead loop dead, session %s)",
             task_id,
