@@ -31,6 +31,7 @@ import {
   sessionsApi,
   queueApi,
   type QueuedInput,
+  type QueuedInputList,
   agentsApi,
   automationsApi,
   connectorsApi,
@@ -895,6 +896,25 @@ export const ConversationPage = () => {
   // keys on this to keep re-subscribing until the LAST drained turn finishes —
   // not just while ``queue`` is non-empty (session-input-queue §14.5).
   const [queueDraining, setQueueDraining] = useState(false);
+  // The item the drain is executing RIGHT NOW (status ``dispatched``): already
+  // out of ``queue`` but its turn may not have landed a durable user message
+  // yet. Rendered as a non-editable bubble while nothing is streaming so the
+  // accepted message is never invisible in BOTH the queue bar and the
+  // transcript (session-input-queue §14.5 补强③).
+  const [queueDispatching, setQueueDispatching] = useState<QueuedInput | null>(
+    null,
+  );
+  // Monotonic ticket for queue-list responses. Every fetch/mutation takes a
+  // ticket before its await; only the NEWEST ticket may write the four queue
+  // states. Without this, a slow ``GET /queue`` issued before an enqueue could
+  // resolve after the enqueue's response and clobber the fresh list — making
+  // the just-accepted item vanish until the next turn boundary.
+  const queueListTicketRef = useRef(0);
+  // "The drain chain continues after this turn" — mirrored into a ref for
+  // ``stopSubscription`` (a closure inside the stable ``subscribeToSession``
+  // callback that can't take queue state as a dep). Gates the per-boundary
+  // sidebar refetch: refetching between every drained item is visible churn.
+  const queueContinuesRef = useRef(false);
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(
     null,
   );
@@ -1493,6 +1513,17 @@ export const ConversationPage = () => {
   // strand the UI in a loading state. ``sending`` itself stays the internal
   // send/queue gate; only the displayed state derives from status.
   const isBusy = deriveTurnActive(sending, selectedSession?.status);
+  // Queue continuity for the LOADING AFFORDANCES only (shimmer / Stop /
+  // timer). Every drained queue item is its own kernel turn whose ``session.
+  // idle`` tears the SSE down before the follower re-subscribes the next one —
+  // gating the loading UI on raw ``isBusy`` made it collapse and re-assert
+  // once per item (the "闪屏" between queued messages). While the host drain
+  // chain is in flight (``queueDraining``; authoritative, refreshed at every
+  // boundary and by the backstop below) keep the affordances up across the
+  // sub-second gaps. Display + send-routing only — the turn-boundary effects
+  // (queue refetch, file-tree refresh) stay on raw ``isBusy`` because they
+  // must fire per drained turn.
+  const displayBusy = isBusy || (queueDraining && !queuePaused);
 
   // The agent actually bound to this composer: an existing session is frozen to
   // its ``sessionAgentSlug`` (ADR-006), a fresh draft uses the picker's
@@ -3636,7 +3667,12 @@ export const ConversationPage = () => {
         stopped = true;
         reconcileBurstTimers.forEach((t) => window.clearTimeout(t));
         void refreshActiveSession(sessionId);
-        void fetchSidebarSessions();
+        // Sidebar refetch is per-QUEUE, not per-turn: while more drained items
+        // are about to run, refetching (and reordering) the sidebar at every
+        // sub-second boundary reads as flicker. The final boundary (queue
+        // quiet) still lands it, and the drain-quiet effect below covers the
+        // case where the ref was still true at the last item's terminal frame.
+        if (!queueContinuesRef.current) void fetchSidebarSessions();
         abort.abort();
       };
 
@@ -4472,7 +4508,15 @@ export const ConversationPage = () => {
       };
       const keepLocalStatus = (s: SessionListItem): SessionListItem => ({
         ...startedSession,
-        status: s.status,
+        // Forward-upgrade only: a row still on the PRE-turn ``created`` takes
+        // the send's ``running`` (a successful send means its turn is
+        // starting — without this the header pill sat on 等待中 for the whole
+        // first turn of a new session, since ``created`` isn't terminal and
+        // nothing else wrote ``running`` mid-turn). Any other local status —
+        // the optimistic ``running`` or a terminal frame that landed during
+        // the POST await — stays authoritative, preserving both stale-status
+        // protections documented above.
+        status: s.status === "created" ? "running" : s.status,
       });
       setSessions((prev) =>
         prev.some((s) => s.id === startedSession.id)
@@ -4529,31 +4573,44 @@ export const ConversationPage = () => {
   // (no parsed content / doc-search until parsing finishes).
   // ---- Session input queue (docs/design/session-input-queue.md) ----
 
-  const refreshQueue = useCallback(async () => {
-    if (!selectedSessionId) return;
-    try {
-      const list = await queueApi.list(selectedSessionId);
+  // Single writer for the queue states. Every fetch/mutation takes a ticket
+  // BEFORE its await and applies through here — a response whose ticket is no
+  // longer the newest is stale (issued earlier, resolved later) and dropped,
+  // so an in-flight refetch can never clobber a mutation's fresher list.
+  const applyQueueList = useCallback(
+    (list: QueuedInputList, ticket: number) => {
+      if (ticket !== queueListTicketRef.current) return;
       setQueue(list.items);
       setQueuePaused(list.paused);
       setQueueDraining(list.draining ?? false);
+      setQueueDispatching(list.dispatching ?? null);
+    },
+    [],
+  );
+
+  const refreshQueue = useCallback(async () => {
+    if (!selectedSessionId) return;
+    const ticket = ++queueListTicketRef.current;
+    try {
+      const list = await queueApi.list(selectedSessionId);
+      applyQueueList(list, ticket);
     } catch {
       /* best-effort — a queue fetch failure must not break the conversation */
     }
-  }, [selectedSessionId]);
+  }, [selectedSessionId, applyQueueList]);
 
   const performEnqueue = async () => {
     const text = draft.trim();
     if (!text || !selectedSessionId) return;
     setDraft("");
     setSelectedComposerSkill(null);
+    const ticket = ++queueListTicketRef.current;
     try {
       const list = await queueApi.enqueue(selectedSessionId, text, {
         providerId: selectedProviderId,
         modelId: selectedModelId,
       });
-      setQueue(list.items);
-      setQueuePaused(list.paused);
-      setQueueDraining(list.draining ?? false);
+      applyQueueList(list, ticket);
     } catch (cause) {
       toast.error(
         cause instanceof Error ? cause.message : "Failed to queue message.",
@@ -4564,11 +4621,10 @@ export const ConversationPage = () => {
 
   const handleEditQueued = async (queueId: string, text: string) => {
     if (!selectedSessionId) return;
+    const ticket = ++queueListTicketRef.current;
     try {
       const list = await queueApi.edit(selectedSessionId, queueId, text);
-      setQueue(list.items);
-      setQueuePaused(list.paused);
-      setQueueDraining(list.draining ?? false);
+      applyQueueList(list, ticket);
     } catch (cause) {
       toast.error(cause instanceof Error ? cause.message : "Edit failed.");
     }
@@ -4576,11 +4632,10 @@ export const ConversationPage = () => {
 
   const handleDeleteQueued = async (queueId: string) => {
     if (!selectedSessionId) return;
+    const ticket = ++queueListTicketRef.current;
     try {
       const list = await queueApi.remove(selectedSessionId, queueId);
-      setQueue(list.items);
-      setQueuePaused(list.paused);
-      setQueueDraining(list.draining ?? false);
+      applyQueueList(list, ticket);
     } catch (cause) {
       toast.error(cause instanceof Error ? cause.message : "Delete failed.");
     }
@@ -4588,11 +4643,10 @@ export const ConversationPage = () => {
 
   const handleResumeQueue = async () => {
     if (!selectedSessionId) return;
+    const ticket = ++queueListTicketRef.current;
     try {
       const list = await queueApi.resume(selectedSessionId);
-      setQueue(list.items);
-      setQueuePaused(list.paused);
-      setQueueDraining(list.draining ?? false);
+      applyQueueList(list, ticket);
       // The drain-follower effect picks up from here (status → running →
       // re-subscribe), the same path as a drain after a normal turn.
     } catch (cause) {
@@ -4602,21 +4656,28 @@ export const ConversationPage = () => {
 
   const handleSteerQueued = async (queueId: string) => {
     if (!selectedSessionId) return;
+    const ticket = ++queueListTicketRef.current;
     try {
       // Send-now: the backend silently interrupts the active turn and drains
       // this item. The drain-follower effect re-subscribes (status → running)
       // so the steered turn streams live, same path as a normal drain.
       const list = await queueApi.steer(selectedSessionId, queueId);
-      setQueue(list.items);
-      setQueuePaused(list.paused);
-      setQueueDraining(list.draining ?? false);
+      applyQueueList(list, ticket);
     } catch (cause) {
       toast.error(cause instanceof Error ? cause.message : "Send failed.");
     }
   };
 
-  // Hydrate the persisted queue when the active session changes.
+  // Hydrate the persisted queue when the active session changes. Clear the
+  // previous session's list synchronously first (ticket bump invalidates any
+  // still-in-flight response of the old session) so its bubbles never bleed
+  // into the new conversation while the fetch is out.
   useEffect(() => {
+    queueListTicketRef.current++;
+    setQueue([]);
+    setQueuePaused(false);
+    setQueueDraining(false);
+    setQueueDispatching(null);
     void refreshQueue();
   }, [refreshQueue]);
 
@@ -4660,12 +4721,11 @@ export const ConversationPage = () => {
       subscribeToSession(sid, historyCursorRef.current);
     };
 
-    // Level check ONCE on arm: the drain can outrace the stream subscription
+    // Level check on arm: the drain can outrace the stream subscription
     // below, so the next turn may already be ``running`` — or already have
     // finished with events past our cursor — by the time this effect runs. The
-    // stream only carries transitions AFTER we attach, so this one-shot catches
-    // an in-flight / just-finished turn the stream would miss. This is a single
-    // read per drain cycle, not a periodic poll.
+    // stream only carries transitions AFTER we attach, so this catches an
+    // in-flight / just-finished turn the stream would miss.
     const checkNow = async () => {
       if (cancelled || abortRef.current || isSendInFlightRef.current) return;
       try {
@@ -4703,10 +4763,26 @@ export const ConversationPage = () => {
       }
     });
 
-    void checkNow();
+    // Probe with a short retry while a drain is IN FLIGHT: the one-shot probe
+    // could land in the sub-second gap between two drained turns (session
+    // still idle, no new events yet) and — if the pushed ``run.started`` frame
+    // was also missed (registration race on the shared control stream) —
+    // nothing ever re-probed, so the drained turn ran invisibly until reload.
+    // Bounded by the drain itself: ``queueDraining`` false (or a successful
+    // subscribe / a newer arm of this effect) stops the loop, so a quiet
+    // queue never turns this into a standing poll.
+    let retryTimer: number | null = null;
+    const probe = async () => {
+      await checkNow();
+      if (cancelled || subscribed || abortRef.current) return;
+      if (!queueDraining) return;
+      retryTimer = window.setTimeout(() => void probe(), 2000);
+    };
+    void probe();
 
     return () => {
       cancelled = true;
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
       unsub();
     };
   }, [
@@ -4729,6 +4805,40 @@ export const ConversationPage = () => {
     prevQueueBusyRef.current = isBusy;
   }, [isBusy, refreshQueue]);
 
+  // Keep ``queueContinuesRef`` (read by ``stopSubscription``) in step with the
+  // queue states so the per-boundary sidebar refetch is skipped only while the
+  // chain genuinely continues.
+  useEffect(() => {
+    queueContinuesRef.current =
+      !queuePaused &&
+      (queueDraining || queue.some((i) => i.status === "queued"));
+  }, [queue, queueDraining, queuePaused]);
+
+  // Deferred sidebar refetch: ``stopSubscription`` skips it while the chain
+  // continues, so land it once the drain goes quiet (draining true → false
+  // with nothing streaming) — one reorder per queue instead of one per item.
+  const prevQueueDrainingRef = useRef(false);
+  useEffect(() => {
+    if (prevQueueDrainingRef.current && !queueDraining && !isBusy) {
+      void fetchSidebarSessions();
+    }
+    prevQueueDrainingRef.current = queueDraining;
+  }, [queueDraining, isBusy, fetchSidebarSessions]);
+
+  // Backstop: while the queue claims pending/in-flight work but nothing is
+  // streaming locally, re-poll the list every 5s. This converges every stale
+  // corner the event-driven paths can miss — a ``draining`` flag gone stale in
+  // either direction (which would otherwise pin ``displayBusy``'s loading
+  // affordances or hide them), a blocked head surfacing, another client
+  // draining the same session. Bounded: idle sessions with an empty quiet
+  // queue never poll.
+  useEffect(() => {
+    if (!selectedSessionId || isBusy) return;
+    if (!queueDraining && !queue.some((i) => i.status === "queued")) return;
+    const timer = window.setInterval(() => void refreshQueue(), 5000);
+    return () => window.clearInterval(timer);
+  }, [selectedSessionId, isBusy, queueDraining, queue, refreshQueue]);
+
   // Send entry point. While a turn is running, a follow-up is queued (drains
   // after the active turn). Otherwise it blocks on attachments still parsing —
   // the confirm dialog lets the user wait or submit with only the raw file.
@@ -4741,7 +4851,12 @@ export const ConversationPage = () => {
   // ran), but a phantom queue bubble stayed pinned under the composer.
   const handleSend = () => {
     if (!draft.trim()) return;
-    if (isBusy) {
+    // Route on ``displayBusy`` (= isBusy OR an unpaused drain chain in
+    // flight): between two drained items nothing is streaming (``isBusy``
+    // false) but the backend still 409s a direct send (``is_draining_queue``
+    // guards the gap) — a follow-up typed in that window must queue, exactly
+    // as the Composer's queue affordance (also ``displayBusy``) advertises.
+    if (displayBusy) {
       void performEnqueue();
       return;
     }
@@ -6200,7 +6315,7 @@ export const ConversationPage = () => {
                 key={conversationInstanceKey}
                 turns={effectiveTurns}
                 scrollContainerRef={scrollContainerRef}
-                sending={isBusy}
+                sending={displayBusy}
                 loading={id === NEW_SESSION_ID ? false : loading}
                 error={error}
                 onRetry={handleRetry}
@@ -6347,7 +6462,7 @@ export const ConversationPage = () => {
               onClick={handleScrollToBottom}
               className={cn(
                 "absolute bottom-full left-1/2 z-20 mb-3 flex h-8 w-8 -translate-x-1/2 items-center justify-center rounded-full border border-surface-border bg-surface shadow-md transition-opacity hover:bg-surface-soft",
-                isBusy &&
+                displayBusy &&
                   "animate-[border-breathe_1.8s_ease-in-out_infinite] border-brand/60",
               )}
             >
@@ -6400,6 +6515,12 @@ export const ConversationPage = () => {
             <div className="px-5">
               <QueuedInputsBar
                 queue={queue}
+                // The dispatched head bridges the gap between "left the queue"
+                // and "visible in the transcript": show it only while nothing
+                // is streaming — once the follower re-subscribes (``sending``)
+                // the replayed ``message.user`` renders it in the transcript
+                // and the bubble would just duplicate it.
+                dispatching={sending ? null : queueDispatching}
                 paused={queuePaused}
                 onEdit={handleEditQueued}
                 onDelete={handleDeleteQueued}
@@ -6431,7 +6552,7 @@ export const ConversationPage = () => {
             onSend={() => {
               void handleSend();
             }}
-            sending={isBusy}
+            sending={displayBusy}
             onStop={() => interruptRef.current()}
             // Upload cap counts only the *pending* server rows — the
             // ones staged for the next turn. Consumed rows live on in

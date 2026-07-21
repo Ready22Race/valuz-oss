@@ -414,6 +414,7 @@ export type KnownI18nKey =
   | "common.queueContinue"
   | "common.queueRunsAfter"
   | "common.queueSend"
+  | "common.queueSending"
   | "common.queueSteer"
   | "common.refresh"
   | "common.reload"
