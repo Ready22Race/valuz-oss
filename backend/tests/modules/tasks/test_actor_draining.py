@@ -20,7 +20,6 @@ from valuz_agent.infra import lifecycle
 from valuz_agent.modules.tasks import actor_runner
 from valuz_agent.modules.tasks.actor_runner import ActorRunner, run_session_to_idle
 
-
 LOCAL_USER_ID = "local-test-owner"
 
 

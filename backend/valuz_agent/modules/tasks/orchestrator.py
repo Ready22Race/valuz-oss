@@ -35,16 +35,7 @@ from typing import Any, Literal
 import valuz_agent.boot.kernel  # noqa: F401
 
 from valuz_agent.infra.eventbus import EventBus, event_bus as _global_bus
-from valuz_agent.modules.tasks.resolution import (  # noqa: F401 — re-exported
-    _credential_gap,
-    _provider_resolver_deps,
-)
-from valuz_agent.modules.tasks.actor_runner import (
-    ActorRunner,
-    collect_manifest,
-    run_session_to_idle,
-    _member_run_dir,  # noqa: F401 — re-exported for tests + back-compat
-)
+from valuz_agent.modules.tasks.actor_runner import ActorRunner
 from valuz_agent.modules.tasks.coordination import CoordinationService
 from valuz_agent.modules.tasks.dispatcher import DispatcherService
 from valuz_agent.modules.tasks.lifecycle import LifecycleService
@@ -60,23 +51,6 @@ def _require_user_id(user_id: str | None) -> str:
     if user_id is None:
         raise ValueError("user_id is required")
     return user_id
-
-
-# ``run_session_to_idle`` / ``collect_manifest`` / ``_member_run_dir`` and the
-# actor-loop tuning constants now live in the runtime layer
-# (``tasks/actor_runner.py``, ADR-023). They are imported above and re-exported
-# from this module so existing call sites + tests keep importing them here.
-
-# ``await_member_results`` / ``_heartbeat_pending`` / the member-idle notify +
-# lead-idle-no-pending callbacks / ``_broadcast_shutdown`` and the lead↔member
-# text delivery (send_to_member / inject_into_task / notify_lead_goal_revised)
-# now live in :class:`CoordinationService` (``tasks/coordination.py``, ADR-023
-# Step 3b). The orchestrator keeps thin delegators so its public coordination
-# surface + the actor-loop role callbacks keep resolving on ``self``.
-
-# ``_credential_gap`` / ``_provider_resolver_deps`` now live in the session
-# resolver (``tasks/resolution.py``). They are imported above and re-exported
-# here so existing call sites + tests keep importing them from this module.
 
 
 # ---------------------------------------------------------------------------
@@ -615,17 +589,9 @@ class TaskOrchestrator:
 
 
 # ---------------------------------------------------------------------------
-# Module-level singleton (used by app.py startup + dispatch_mcp handlers)
+# Module-level singleton (used by app.py startup + the tool handlers)
 # ---------------------------------------------------------------------------
 
 task_orchestrator = TaskOrchestrator()
 
-__all__ = [
-    "TaskOrchestrator",
-    "task_orchestrator",
-    "run_session_to_idle",
-    "collect_manifest",
-    "_member_run_dir",
-    "_credential_gap",
-    "_provider_resolver_deps",
-]
+__all__ = ["TaskOrchestrator", "task_orchestrator"]

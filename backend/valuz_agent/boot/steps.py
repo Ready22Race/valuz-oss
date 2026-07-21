@@ -355,12 +355,12 @@ async def init_kernel(app: FastAPI) -> None:
     from valuz_agent.modules.memory.tools import build_memory_tool_defs
     from valuz_agent.modules.projects.tools import build_project_instructions_tool_defs
     from valuz_agent.modules.sessions.artifacts_tool import build_deliver_artifacts_tool_defs
-    from valuz_agent.modules.tasks.dispatch_mcp import build_task_tool_defs
     from valuz_agent.modules.tasks.orchestrator import task_orchestrator
     from valuz_agent.modules.tasks.tools.declarations import (
         DISPATCH_TOOL_DECLARATIONS,
         ORCHESTRATION_TOOL_DECLARATIONS,
     )
+    from valuz_agent.modules.tasks.tools.handlers import build_task_tool_defs
 
     task_defs = build_task_tool_defs(task_orchestrator)
     by_name = {t.name: t for t in task_defs}

@@ -18,7 +18,6 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from valuz_agent.infra.database import Base
-from valuz_agent.modules.tasks import orchestrator as orch_mod
 from valuz_agent.adapters import kernel_client as kernel_client_mod
 from valuz_agent.modules.tasks import planning
 from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionRow
@@ -864,8 +863,11 @@ def test_finalize_actor_member_error_sets_rework_not_failed(
     async def _fake_manifest(*_a: object, **_k: object) -> dict[str, str]:
         return {"session_id": "mem-1", "status": "terminated", "summary": "API Error: ECONNRESET"}
 
+    from valuz_agent.modules.tasks import lifecycle as lc_mod
+
     monkeypatch.setattr(run_orch, "_finalize_session", _noop)
-    monkeypatch.setattr(orch_mod, "collect_manifest", _fake_manifest)
+    # _finalize_actor resolves collect_manifest from the lifecycle namespace.
+    monkeypatch.setattr(lc_mod, "collect_manifest", _fake_manifest)
 
     orch = TaskOrchestrator()
     asyncio.run(

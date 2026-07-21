@@ -876,8 +876,8 @@ async def build_member_session(
         is_lead: True for the task lead session; False for subtask sessions.
         task_id: The valuz task id (for metadata).
         run_dir: Absolute path to this session's working directory. Under v2.1
-                 both lead and members default to the shared project cwd;
-                 subrun_dir is only used for opt-in repo-worktree isolation.
+                 both lead and members run in the shared project cwd (a
+                 task-level worktree relocates that cwd wholesale).
         brief: Text injected as the session brief — for leads this is the
                full task goal/md; for subtasks it is the scoped goal+refs.
         project_name: Optional project display name (for system prompt).

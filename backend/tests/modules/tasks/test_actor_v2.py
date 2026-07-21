@@ -13,17 +13,14 @@ from types import SimpleNamespace
 import pytest
 
 from valuz_agent.modules.tasks import planning
+from valuz_agent.modules.tasks.actor_runner import _member_run_dir, collect_manifest
 from valuz_agent.modules.tasks.mailbox import (
     InboxMsg,
     MailboxRegistry,
     mailbox_registry,
 )
-from valuz_agent.modules.tasks.orchestrator import (
-    TaskOrchestrator,
-    _credential_gap,
-    _member_run_dir,
-    collect_manifest,
-)
+from valuz_agent.modules.tasks.orchestrator import TaskOrchestrator
+from valuz_agent.modules.tasks.resolution import _credential_gap
 
 LOCAL_USER_ID = "local-test-owner"
 
@@ -606,7 +603,7 @@ def test_ensure_orchestration_tools_adds_create_task() -> None:
     """A bare agent gains the create_task ToolDef; re-applying is a no-op."""
     from src.core import AgentConfig  # type: ignore[import-not-found]
 
-    from valuz_agent.modules.tasks.dispatch_mcp import (
+    from valuz_agent.modules.tasks.tools.declarations import (
         CREATE_TASK_TOOL_NAME,
         ensure_orchestration_tools_on_agent,
     )
@@ -627,7 +624,8 @@ def test_create_task_gate_rejects_task_sessions(
     """A lead/subtask session may not spawn nested tasks; missing ws_id fails."""
     from src.core import ToolResult  # type: ignore[import-not-found]
 
-    from valuz_agent.modules.tasks import dispatch_mcp
+    from valuz_agent.adapters import kernel_client as kc_mod
+    from valuz_agent.modules.tasks.tools import handlers as handlers_mod
 
     def _sess(valuz: dict) -> SimpleNamespace:
         return SimpleNamespace(metadata={"valuz": valuz})
@@ -636,29 +634,29 @@ def test_create_task_gate_rejects_task_sessions(
 
     # run_kind="lead" → rejected before any DB lookup.
     monkeypatch.setattr(
-        dispatch_mcp.kernel_client,
+        kc_mod,
         "get_session",
         _as_async(lambda _uid, _sid: _sess({"run_kind": "lead", "project_id": "w1"})),
     )
-    res = asyncio.run(dispatch_mcp._check_orchestration_gate(ctx))  # type: ignore[arg-type]
+    res = asyncio.run(handlers_mod._check_orchestration_gate(ctx))  # type: ignore[arg-type]
     assert isinstance(res, ToolResult) and res.is_error
 
     # run_kind="subtask" → rejected.
     monkeypatch.setattr(
-        dispatch_mcp.kernel_client,
+        kc_mod,
         "get_session",
         _as_async(lambda _uid, _sid: _sess({"run_kind": "subtask", "project_id": "w1"})),
     )
-    res = asyncio.run(dispatch_mcp._check_orchestration_gate(ctx))  # type: ignore[arg-type]
+    res = asyncio.run(handlers_mod._check_orchestration_gate(ctx))  # type: ignore[arg-type]
     assert isinstance(res, ToolResult) and res.is_error
 
     # plain conversation but no project_id → rejected.
     monkeypatch.setattr(
-        dispatch_mcp.kernel_client,
+        kc_mod,
         "get_session",
         _as_async(lambda _uid, _sid: _sess({"agent_slug": "x"})),
     )
-    res = asyncio.run(dispatch_mcp._check_orchestration_gate(ctx))  # type: ignore[arg-type]
+    res = asyncio.run(handlers_mod._check_orchestration_gate(ctx))  # type: ignore[arg-type]
     assert isinstance(res, ToolResult) and res.is_error
 
 
@@ -666,7 +664,7 @@ def test_strip_dispatch_tools_removes_lead_only() -> None:
     """strip_dispatch_tools drops dispatch/finish_task but keeps create_task."""
     from src.core import AgentConfig  # type: ignore[import-not-found]
 
-    from valuz_agent.modules.tasks.dispatch_mcp import (
+    from valuz_agent.modules.tasks.tools.declarations import (
         CREATE_TASK_TOOL_DECLARATION,
         DISPATCH_TOOL_DECLARATION,
         FINISH_TASK_TOOL_DECLARATION,
@@ -754,11 +752,11 @@ async def test_toolset_partition_matches_declaration_sets() -> None:
     declarations — its surface rides the session's ``harness`` MCP entry."""
     from src.core import AgentConfig  # type: ignore[import-not-found]
 
-    from valuz_agent.modules.tasks.dispatch_mcp import (
+    from valuz_agent.modules.tasks.orchestrator import TaskOrchestrator
+    from valuz_agent.modules.tasks.tools.declarations import (
         DISPATCH_TOOL_DECLARATIONS,
         ORCHESTRATION_TOOL_DECLARATIONS,
     )
-    from valuz_agent.modules.tasks.orchestrator import TaskOrchestrator
 
     names = {d.name for d in ORCHESTRATION_TOOL_DECLARATIONS}
     # Launcher + observability + VALUZ-CHATPLAN draft-mode tools all surfaced

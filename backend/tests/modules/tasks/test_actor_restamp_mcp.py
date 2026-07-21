@@ -21,7 +21,6 @@ import pytest
 
 from valuz_agent.modules.tasks import actor_runner
 
-
 LOCAL_USER_ID = "local-test-owner"
 
 

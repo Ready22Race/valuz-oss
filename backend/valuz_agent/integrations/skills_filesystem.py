@@ -7,7 +7,6 @@ from pathlib import Path
 
 import yaml
 
-from valuz_agent.infra.config import settings
 from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.modules.skills.contracts import RuntimeContext, SkillManifest
 

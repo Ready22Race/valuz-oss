@@ -467,7 +467,7 @@ class LifecycleService:
                 # Draft-period holder = originating chat (logically); we still
                 # record the lead agent slug for UI clarity. The actual plan
                 # writer gate uses metadata.originating_session_id +
-                # project match (see dispatch_mcp._check_plan_writer_gate).
+                # project match (see tools/gate.check_plan_writer_gate).
                 current_holder=lead_agent_slug,
                 trigger_type=prov.trigger_type,
                 trigger_task_id=prov.trigger_task_id,

@@ -38,7 +38,6 @@ from typing import Any, Literal, cast
 from valuz_agent.adapters import kernel_client
 from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.infra.eventbus import EventBus
-from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.infra.lifecycle import is_draining
 
 logger = logging.getLogger(__name__)
@@ -454,15 +453,13 @@ async def collect_manifest(
 
 
 def _member_run_dir(project_cwd: Any, task_id: str, run_seq: int, mode: str) -> Path:
-    """Resolve a member's working directory by isolation mode (M10 附录 D / v2.1).
+    """Resolve a member's working directory (v2.1: always the project cwd).
 
-    Default ("shared"/legacy "isolated"): the **project cwd itself** — members
-    read and write project files natively (skills are scoped via prompt, see
-    build_member_session). ``repo-worktree``: an isolated git worktree (opt-in
-    hard isolation when the project is a git repo).
+    Members read and write project files natively in the SHARED project cwd
+    (task-level worktrees relocate that cwd wholesale — see task_worktree.py);
+    the legacy per-member ``repo-worktree`` isolation mode is retired. ``mode``
+    is still recorded on the run row for display.
     """
-    if mode == "repo-worktree":
-        return fs_registry.subrun_dir(project_cwd, task_id, run_seq, "repo-worktree")
     return Path(project_cwd)
 
 
