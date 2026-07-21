@@ -73,6 +73,36 @@ def get_dispatching_queue_id(session_id: str) -> str | None:
     return _dispatching_heads.get(session_id)
 
 
+# How often the drain re-checks a busy session before dispatching the next
+# queued item, and how many polls between "still waiting" log lines.
+_BUSY_POLL_SECONDS = 2.0
+_BUSY_LOG_EVERY_POLLS = 30  # ≈ once a minute
+
+
+async def _session_busy(user_id: str, session_id: str) -> bool:
+    """True while the session is NOT genuinely done with the previous message.
+
+    "上一条处理完" for the queue gate means BOTH:
+    - no turn in flight (``status == "running"`` — covers a turn started by
+      another client / any dispatch race), AND
+    - no live ``run_in_background`` work from the previous turn
+      (``bg_busy_session_ids``). A turn that spawns a background task goes
+      kernel-idle the moment its reply streams out, but the user still sees
+      "processing" (the bg-task chip) — dispatching the next queued item at
+      that instant reads as the queue interrupting the previous message.
+
+    Best-effort on the bg probe: if it fails, treat as not busy — a drain that
+    can never dispatch is worse than an occasional early dispatch.
+    """
+    session = await kernel_client.get_session(user_id, session_id)
+    if session is not None and str(getattr(session, "status", "")) == "running":
+        return True
+    try:
+        return session_id in await kernel_client.bg_busy_session_ids()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _chat_billing_meter(session_id: str, user_id: str | None = None) -> Any:
     """Build the chat-path billing meter callback for a session.
 
@@ -185,6 +215,7 @@ async def _drain_queue_after_turn(
         if session_id in _active_drains:
             return
         _active_drains.add(session_id)
+    busy_polls = 0
     try:
         while True:
             if is_draining():
@@ -196,6 +227,24 @@ async def _drain_queue_after_turn(
                 head = await SessionDatastore(db).peek_next_queued(session_id)
             if head is None:
                 return
+
+            # Busy gate: dispatch only when the previous message is GENUINELY
+            # done — no turn in flight AND no live background tasks (see
+            # ``_session_busy``). Poll rather than exit so the claim stays held
+            # (``draining=true`` keeps followers/routing coherent) and every
+            # iteration re-checks shutdown / pause / queue mutations, which are
+            # the user's escape hatches (Stop soft-pauses; steer interrupts).
+            if await _session_busy(owner_user_id, session_id):
+                busy_polls += 1
+                if busy_polls % _BUSY_LOG_EVERY_POLLS == 0:
+                    logger.info(
+                        "queue drain for %s waiting on busy session (%.0fs)",
+                        session_id,
+                        busy_polls * _BUSY_POLL_SECONDS,
+                    )
+                await asyncio.sleep(_BUSY_POLL_SECONDS)
+                continue
+            busy_polls = 0
 
             head_id = head.id
             payload = head.input or {}
