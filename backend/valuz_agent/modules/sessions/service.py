@@ -99,6 +99,7 @@ from valuz_agent.modules.sessions.models import QueuedInputRow
 from valuz_agent.modules.sessions.run_orchestrator import (
     _derive_session_name,
     _run_agent_background,
+    get_dispatching_queue_id,
     is_draining_queue,
     schedule_drain,
 )
@@ -1638,8 +1639,18 @@ class SessionService:
 
     async def list_queue(self, session_id: str, user_id: str | None = None) -> QueuedInputList:
         uid = user_id
+        # Snapshot BEFORE the reads: if the head flips to ``dispatched`` while
+        # we query, we'd rather show it in both ``items`` and ``dispatching``
+        # for one response than in neither.
+        dispatching_id = get_dispatching_queue_id(session_id)
         async with async_unit_of_work(commit=False) as db:
-            rows = await SessionDatastore(db).list_queued(uid, session_id)
+            ds = SessionDatastore(db)
+            rows = await ds.list_queued(uid, session_id)
+            dispatching = (
+                await ds.get_queued(uid, session_id, dispatching_id)
+                if uid is not None and dispatching_id
+                else None
+            )
         paused = await project_index.get_queue_paused_at(session_id) is not None
         return QueuedInputList(
             session_id=session_id,
@@ -1648,6 +1659,9 @@ class SessionService:
             # A dispatched item is invisible in ``items`` — surface the in-flight
             # drain so per-turn re-subscribers keep following (§14.5).
             draining=is_draining_queue(session_id),
+            # ...and surface the dispatched head itself so its bubble survives
+            # the gap until the turn's user message lands in the transcript.
+            dispatching=_queued_input_to_dto(dispatching) if dispatching else None,
         )
 
     async def enqueue(

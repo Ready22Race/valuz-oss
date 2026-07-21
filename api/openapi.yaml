@@ -5838,7 +5838,9 @@ components:
           type: string
         status:
           type: string
-          description: "queued | blocked (dispatched/cancelled are not listed)"
+          description: >-
+            queued | blocked in ``items``; ``dispatched`` appears only as the
+            list's ``dispatching`` item (cancelled is never listed).
         position:
           type: integer
           description: FIFO order within the session (ascending).
@@ -5888,6 +5890,16 @@ components:
             item is not present in ``items`` (only queued/blocked are listed), so
             clients that re-subscribe per drained turn use this to keep following
             until the last item finishes.
+        dispatching:
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/QueuedInput"
+          description: >-
+            The item the drain chain is executing right now (status
+            ``dispatched``). Already out of ``items``, but its turn may not
+            have landed a durable user message yet — clients keep its bubble
+            visible until it shows up in the transcript instead of dropping
+            it one refetch too early.
 
     QueuedInputCreate:
       type: object

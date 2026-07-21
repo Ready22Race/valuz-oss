@@ -163,3 +163,8 @@ class QueuedInputList:
     # following until the LAST item finishes — not just while ``items`` is
     # non-empty. See docs/design/session-input-queue.md §14.5.
     draining: bool = False
+    # The item the drain is executing RIGHT NOW (status ``dispatched``): out of
+    # ``items`` but possibly not yet visible in the transcript. Clients keep
+    # its bubble rendered until the user message lands instead of dropping it
+    # one refetch too early.
+    dispatching: QueuedInput | None = None
