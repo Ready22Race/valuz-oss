@@ -66,6 +66,7 @@ import {
   SESSION_WORKFLOW_PROGRESS_EVENT,
   type WorkflowState,
   useComposerProviderChannelState,
+  useComposerAgentLibrary,
   useComposerProviders,
   useModelDefaults,
   useRuntimes,
@@ -73,7 +74,6 @@ import {
   useSessionAttachments,
   type RuntimeId,
   type MemberWithAgent,
-  type Agent,
 } from "@valuz/core";
 import {
   ApprovalCard,
@@ -671,15 +671,11 @@ export const ConversationPage = () => {
   // model. ``projectAgents`` is the member roster for the active project;
   // ``selectedAgentSlug`` is the user's pick for the next (new) session.
   const [projectAgents, setProjectAgents] = useState<MemberWithAgent[]>([]);
-  // 09-assistant: the "我的" agent library, candidates for the 🤖 chip when
-  // the 📁 chip is on 临时对话 (no project). Loaded once on mount.
-  const [myAgents, setMyAgents] = useState<Agent[]>([]);
-  // Gates the empty-library banner so it doesn't flash before the first load
-  // resolves (10-new-conversation-guidance).
-  const [myAgentsLoaded, setMyAgentsLoaded] = useState(false);
   // 10-new-conversation-guidance: the 🤖 「+ Agent」 menu item opens a create
   // dialog for temp conversations (the project path navigates to the project).
   const [createAgentOpen, setCreateAgentOpen] = useState(false);
+  // Invalidate the selected target's roster after an agent is created.
+  const [agentLibraryRevision, setAgentLibraryRevision] = useState(0);
   // 10-new-conversation-guidance (slice 2): is there any usable model channel?
   // Drives the setup banner's "no channel" state.
   const { hasChannel, loaded: channelLoaded } = useHasUsableChannel();
@@ -688,7 +684,7 @@ export const ConversationPage = () => {
   );
   // 「去临时对话」after creating an agent navigates here with ?agent=<slug>;
   // honour it as the pre-selected agent for the next (new) chat. The roster
-  // reload (myAgents effect) keys off the same param so the new agent is
+  // roster reload keys off the same param so the new agent is
   // actually present, and the defaulting effect below treats it as top priority.
   const agentParam = searchParams.get("agent");
   useEffect(() => {
@@ -2579,8 +2575,8 @@ export const ConversationPage = () => {
 
   // Existing sessions follow their observed origin. New project conversations
   // follow the selected project's origin; new temp chats follow the explicit
-  // location chip (or the registered default). This keeps the model list on
-  // the same backend that will own the session.
+  // location chip (or the registered default). The catalog adapter owns
+  // target resolution and routing.
   // The route id is authoritative during navigation. ``selectedSessionId``
   // intentionally lags until session detail resolves, so preferring it here
   // would briefly query the previous conversation's execution target.
@@ -2599,10 +2595,13 @@ export const ConversationPage = () => {
   const providerTarget =
     executionTargets.find((target) => target.id === providerTargetId) ??
     getDefaultExecutionTarget();
-  const providerChannelState = useComposerProviderChannelState(
-    providerTarget?.baseUrl,
-  );
+  const providerChannelState =
+    useComposerProviderChannelState(providerTargetId);
   const providers = providerChannelState.providers;
+  const { agents: myAgents, loaded: myAgentsLoaded } = useComposerAgentLibrary(
+    providerTargetId,
+    `${agentParam ?? ""}:${agentLibraryRevision}`,
+  );
 
   const composerProviders = useComposerProviders(
     providers,
@@ -2867,10 +2866,7 @@ export const ConversationPage = () => {
   const historyHydratedSessionIdRef = useRef<string | null>(null);
 
   const refreshEventsInner = useCallback(async (sessionId: string | null) => {
-    if (
-      sessionId === null ||
-      selectedSessionIdRef.current === sessionId
-    ) {
+    if (sessionId === null || selectedSessionIdRef.current === sessionId) {
       historyHydratedSessionIdRef.current = null;
     }
     // Switching sessions invalidates any optimistic pending message —
@@ -3154,151 +3150,154 @@ export const ConversationPage = () => {
     [refreshEvents],
   );
 
-  const bootstrap = useCallback(async (isCurrent: () => boolean) => {
-    const routeState = location.state as {
-      promotedFromNew?: boolean;
-      promotedSessionId?: string;
-    } | null;
-    // The promotion fast-path (skip the loading flash + skip the history
-    // refetch) is only valid while a send is genuinely IN FLIGHT — that live
-    // subscription is what fills ``events`` for the freshly promoted session,
-    // so the refetch is redundant and the loader would just flash. On a cold
-    // page reload there is no in-flight send: ``history.state`` still carries
-    // ``promotedFromNew`` (the hash router restores it across refreshes) and
-    // the ``promotingSessionIdRef`` / ``consumedPromoteSessionIdsRef`` refs
-    // reset with the page, so without this ``isSendInFlightRef`` guard bootstrap
-    // would replay the promotion skip on every refresh — never calling
-    // ``refreshEvents`` — and leave the conversation body blank.
-    const isPromoteBootstrap =
-      isSendInFlightRef.current &&
-      id !== NEW_SESSION_ID &&
-      (promotingSessionIdRef.current === id ||
-        (routeState?.promotedFromNew === true &&
-          routeState.promotedSessionId === id &&
-          !consumedPromoteSessionIdsRef.current.has(id)));
-    if (!isPromoteBootstrap) {
-      setLoading(true);
-    }
-    setError(null);
-    try {
-      const wsResponse = await projectsApi.list();
-      if (!isCurrent()) return;
-      setProjects(wsResponse.projects);
-
-      // Two URL shapes drive the page:
-      //
-      //   /conversation/new           — fresh draft, no session yet
-      //   /conversation/{session_id}  — existing session, fetch detail
-      //
-      // For the fresh-draft case we set ``selectedProjectId`` to the
-      // ``"chat-default"`` sentinel so skill autocomplete still loads
-      // (the backend skills router treats it as the global chat-scope
-      // key); ``refreshFileTree`` skips the sentinel (no project row /
-      // workdir exists yet) and renders an empty tree. The real project
-      // materializes when the user sends the first message and
-      // ``ensureSession`` navigates us to ``/conversation/{real-id}``.
-      if (id === NEW_SESSION_ID) {
-        setSessionTriggerMode(null);
-        setSessionAgentSlug(null);
-        // 09-assistant D4: ``/conversation/new?project=<id>`` (e.g. a
-        // project-page "+ 新对话" entry) pre-selects that project so the 📁
-        // chip lands on it instead of 临时对话. The user can flip back to
-        // 临时 with one click. Falls back to the ``"chat-default"`` sentinel
-        // (临时) when the query is absent or doesn't match a project.
-        const projectParam = searchParams.get("project");
-        const presetProject =
-          projectParam &&
-          wsResponse.projects.some(
-            (w) => w.id === projectParam && w.kind === "project",
-          )
-            ? projectParam
-            : null;
-        setSelectedProjectId(presetProject ?? "chat-default");
-        // Preset project (e.g. home-page footer bar hand-off): same reveal
-        // rule as an in-page pick.
-        if (presetProject) panelSetCollapsed(false);
-        setSessions([]);
-        selectedSessionIdRef.current = null;
-        setSelectedSessionId(null);
-        // CRITICAL: also clear the conversation state (events / todos
-        // / optimistic pending message) so navigating from a real
-        // session ``/conversation/{X}`` → ``/conversation/new`` shows
-        // an empty composer instead of leaving session X's turns on
-        // screen. ``refreshEvents(null)`` is the canonical "switch
-        // away from any session" path — it nulls every per-session
-        // ref + state synchronously.
-        await refreshEvents(null);
-        return;
+  const bootstrap = useCallback(
+    async (isCurrent: () => boolean) => {
+      const routeState = location.state as {
+        promotedFromNew?: boolean;
+        promotedSessionId?: string;
+      } | null;
+      // The promotion fast-path (skip the loading flash + skip the history
+      // refetch) is only valid while a send is genuinely IN FLIGHT — that live
+      // subscription is what fills ``events`` for the freshly promoted session,
+      // so the refetch is redundant and the loader would just flash. On a cold
+      // page reload there is no in-flight send: ``history.state`` still carries
+      // ``promotedFromNew`` (the hash router restores it across refreshes) and
+      // the ``promotingSessionIdRef`` / ``consumedPromoteSessionIdsRef`` refs
+      // reset with the page, so without this ``isSendInFlightRef`` guard bootstrap
+      // would replay the promotion skip on every refresh — never calling
+      // ``refreshEvents`` — and leave the conversation body blank.
+      const isPromoteBootstrap =
+        isSendInFlightRef.current &&
+        id !== NEW_SESSION_ID &&
+        (promotingSessionIdRef.current === id ||
+          (routeState?.promotedFromNew === true &&
+            routeState.promotedSessionId === id &&
+            !consumedPromoteSessionIdsRef.current.has(id)));
+      if (!isPromoteBootstrap) {
+        setLoading(true);
       }
-
-      // Existing session path — one round-trip via the dedicated
-      // ``GET /v1/sessions/{id}`` endpoint feeds every piece of state
-      // the page needs: trigger_meta (skill-creator banner restore),
-      // project_id (right panel cwd / file tree), the session row
-      // itself (composer status + optimistic-merge target).
+      setError(null);
       try {
-        const sessionDetail = await sessionsApi.get(id);
+        const wsResponse = await projectsApi.list();
         if (!isCurrent()) return;
-        const routePromotedSession =
-          routeState?.promotedFromNew === true &&
-          routeState.promotedSessionId === sessionDetail.id &&
-          !consumedPromoteSessionIdsRef.current.has(sessionDetail.id);
-        // Same guard as ``isPromoteBootstrap`` above: only treat this as a
-        // promotion — and therefore SKIP ``refreshEvents`` — while a send is
-        // in flight (the live subscription is already streaming this turn's
-        // events in). On a reload the restored ``promotedFromNew`` state must
-        // NOT suppress the history load, or the transcript stays empty.
-        const isPromotedNewSession =
-          isSendInFlightRef.current &&
-          (promotingSessionIdRef.current === sessionDetail.id ||
-            routePromotedSession);
-        setSessionTriggerMode(sessionDetail.trigger_meta?.mode ?? null);
-        setSessionAgentSlug(sessionDetail.agent_slug ?? null);
-        setSelectedProjectId(sessionDetail.project_id);
-        setSessions([sessionDetailToListItem(sessionDetail)]);
-        selectedSessionIdRef.current = sessionDetail.id;
-        setSelectedSessionId(sessionDetail.id);
-        if (isPromotedNewSession) {
-          promotingSessionIdRef.current = null;
-          consumedPromoteSessionIdsRef.current.add(sessionDetail.id);
+        setProjects(wsResponse.projects);
+
+        // Two URL shapes drive the page:
+        //
+        //   /conversation/new           — fresh draft, no session yet
+        //   /conversation/{session_id}  — existing session, fetch detail
+        //
+        // For the fresh-draft case we set ``selectedProjectId`` to the
+        // ``"chat-default"`` sentinel so skill autocomplete still loads
+        // (the backend skills router treats it as the global chat-scope
+        // key); ``refreshFileTree`` skips the sentinel (no project row /
+        // workdir exists yet) and renders an empty tree. The real project
+        // materializes when the user sends the first message and
+        // ``ensureSession`` navigates us to ``/conversation/{real-id}``.
+        if (id === NEW_SESSION_ID) {
+          setSessionTriggerMode(null);
+          setSessionAgentSlug(null);
+          // 09-assistant D4: ``/conversation/new?project=<id>`` (e.g. a
+          // project-page "+ 新对话" entry) pre-selects that project so the 📁
+          // chip lands on it instead of 临时对话. The user can flip back to
+          // 临时 with one click. Falls back to the ``"chat-default"`` sentinel
+          // (临时) when the query is absent or doesn't match a project.
+          const projectParam = searchParams.get("project");
+          const presetProject =
+            projectParam &&
+            wsResponse.projects.some(
+              (w) => w.id === projectParam && w.kind === "project",
+            )
+              ? projectParam
+              : null;
+          setSelectedProjectId(presetProject ?? "chat-default");
+          // Preset project (e.g. home-page footer bar hand-off): same reveal
+          // rule as an in-page pick.
+          if (presetProject) panelSetCollapsed(false);
+          setSessions([]);
+          selectedSessionIdRef.current = null;
+          setSelectedSessionId(null);
+          // CRITICAL: also clear the conversation state (events / todos
+          // / optimistic pending message) so navigating from a real
+          // session ``/conversation/{X}`` → ``/conversation/new`` shows
+          // an empty composer instead of leaving session X's turns on
+          // screen. ``refreshEvents(null)`` is the canonical "switch
+          // away from any session" path — it nulls every per-session
+          // ref + state synchronously.
+          await refreshEvents(null);
+          return;
         }
-        // Selection alone is not proof that history loaded. Skip only when
-        // this exact session already hydrated successfully, or while the
-        // promoted session's live stream is supplying the first turn.
-        if (
-          shouldRefreshConversationHistory({
-            hydratedSessionId: historyHydratedSessionIdRef.current,
-            sessionId: sessionDetail.id,
-            promotedWithLiveStream: isPromotedNewSession,
-          })
-        ) {
-          await refreshEvents(sessionDetail.id);
+
+        // Existing session path — one round-trip via the dedicated
+        // ``GET /v1/sessions/{id}`` endpoint feeds every piece of state
+        // the page needs: trigger_meta (skill-creator banner restore),
+        // project_id (right panel cwd / file tree), the session row
+        // itself (composer status + optimistic-merge target).
+        try {
+          const sessionDetail = await sessionsApi.get(id);
+          if (!isCurrent()) return;
+          const routePromotedSession =
+            routeState?.promotedFromNew === true &&
+            routeState.promotedSessionId === sessionDetail.id &&
+            !consumedPromoteSessionIdsRef.current.has(sessionDetail.id);
+          // Same guard as ``isPromoteBootstrap`` above: only treat this as a
+          // promotion — and therefore SKIP ``refreshEvents`` — while a send is
+          // in flight (the live subscription is already streaming this turn's
+          // events in). On a reload the restored ``promotedFromNew`` state must
+          // NOT suppress the history load, or the transcript stays empty.
+          const isPromotedNewSession =
+            isSendInFlightRef.current &&
+            (promotingSessionIdRef.current === sessionDetail.id ||
+              routePromotedSession);
+          setSessionTriggerMode(sessionDetail.trigger_meta?.mode ?? null);
+          setSessionAgentSlug(sessionDetail.agent_slug ?? null);
+          setSelectedProjectId(sessionDetail.project_id);
+          setSessions([sessionDetailToListItem(sessionDetail)]);
+          selectedSessionIdRef.current = sessionDetail.id;
+          setSelectedSessionId(sessionDetail.id);
+          if (isPromotedNewSession) {
+            promotingSessionIdRef.current = null;
+            consumedPromoteSessionIdsRef.current.add(sessionDetail.id);
+          }
+          // Selection alone is not proof that history loaded. Skip only when
+          // this exact session already hydrated successfully, or while the
+          // promoted session's live stream is supplying the first turn.
+          if (
+            shouldRefreshConversationHistory({
+              hydratedSessionId: historyHydratedSessionIdRef.current,
+              sessionId: sessionDetail.id,
+              promotedWithLiveStream: isPromotedNewSession,
+            })
+          ) {
+            await refreshEvents(sessionDetail.id);
+          }
+        } catch {
+          if (!isCurrent()) return;
+          // 404 / network — render the page in "no session" state and
+          // surface an error banner. Don't fall back to the sentinel
+          // because that would silently move the user off the URL they
+          // typed / clicked.
+          setSessionTriggerMode(null);
+          setSessionAgentSlug(null);
+          setSelectedProjectId(null);
+          setSessions([]);
+          selectedSessionIdRef.current = null;
+          setSelectedSessionId(null);
+          setError("Session not found.");
         }
-      } catch {
+      } catch (cause) {
         if (!isCurrent()) return;
-        // 404 / network — render the page in "no session" state and
-        // surface an error banner. Don't fall back to the sentinel
-        // because that would silently move the user off the URL they
-        // typed / clicked.
-        setSessionTriggerMode(null);
-        setSessionAgentSlug(null);
-        setSelectedProjectId(null);
-        setSessions([]);
-        selectedSessionIdRef.current = null;
-        setSelectedSessionId(null);
-        setError("Session not found.");
+        setError(
+          cause instanceof Error ? cause.message : "Failed to load project.",
+        );
+      } finally {
+        if (isCurrent() && !isPromoteBootstrap) {
+          setLoading(false);
+        }
       }
-    } catch (cause) {
-      if (!isCurrent()) return;
-      setError(
-        cause instanceof Error ? cause.message : "Failed to load project.",
-      );
-    } finally {
-      if (isCurrent() && !isPromoteBootstrap) {
-        setLoading(false);
-      }
-    }
-  }, [id, location.state, refreshEvents, searchParams]);
+    },
+    [id, location.state, refreshEvents, searchParams],
+  );
 
   useEffect(() => {
     const request = bootstrapGuardRef.current.start();
@@ -3307,9 +3306,9 @@ export const ConversationPage = () => {
     selectedSessionIdRef.current = id === NEW_SESSION_ID ? null : id;
     void bootstrap(request.isCurrent);
     return request.cancel;
-  // ``location.key`` changes even when the user clicks the currently-selected
-  // history link again. Re-run bootstrap in that case so a failed/blank
-  // hydration can recover without requiring a hard refresh.
+    // ``location.key`` changes even when the user clicks the currently-selected
+    // history link again. Re-run bootstrap in that case so a failed/blank
+    // hydration can recover without requiring a hard refresh.
   }, [bootstrap, id, location.key]);
 
   // Load all skills for composer autocomplete
@@ -3354,28 +3353,6 @@ export const ConversationPage = () => {
     };
   }, [selectedProjectId, activeProject?.kind]);
 
-  // 09-assistant: load the "我的" agent library once. These back the 🤖 chip
-  // when the 📁 chip is on 临时对话 (no project member roster).
-  useEffect(() => {
-    let cancelled = false;
-    agentsApi
-      .listAgents()
-      .then((res) => {
-        if (!cancelled) setMyAgents(res.agents);
-      })
-      .catch(() => {
-        if (!cancelled) setMyAgents([]);
-      })
-      .finally(() => {
-        if (!cancelled) setMyAgentsLoaded(true);
-      });
-    return () => {
-      cancelled = true;
-    };
-    // Reload when 「去临时对话」 hands off a freshly-created agent via ?agent=,
-    // so the new agent is present in the roster the composer renders from.
-  }, [agentParam]);
-
   // 09-assistant: when the 📁 chip sits on 临时对话 (non-project project)
   // and no session exists yet, default the 🤖 chip to the first "我的" agent.
   // Empty library → null; handleSend then nudges the user to pick/create
@@ -3385,6 +3362,7 @@ export const ConversationPage = () => {
   useEffect(() => {
     if (selectedSession) return; // existing session is frozen (ADR-006)
     if (activeProject?.kind === "project") return; // project path elsewhere
+    if (!myAgentsLoaded) return; // do not clear the old selection mid-switch
     setSelectedAgentSlug((prev) => {
       // A freshly-created agent handed off via ?agent= (「去临时对话」) wins as
       // soon as it appears in the reloaded roster.
@@ -3411,6 +3389,7 @@ export const ConversationPage = () => {
   }, [
     activeProject?.kind,
     myAgents,
+    myAgentsLoaded,
     selectedSession,
     agentParam,
     isSkillCreatorMode,
@@ -6536,13 +6515,8 @@ export const ConversationPage = () => {
           <CreateAgentDialog
             open={createAgentOpen}
             onOpenChange={setCreateAgentOpen}
-            onCreated={async (slug) => {
-              try {
-                const res = await agentsApi.listAgents();
-                setMyAgents(res.agents);
-              } catch {
-                // best-effort refresh — the new agent still selects below
-              }
+            onCreated={(slug) => {
+              setAgentLibraryRevision((revision) => revision + 1);
               setSelectedAgentSlug(slug);
               setComposerTouched(true);
             }}

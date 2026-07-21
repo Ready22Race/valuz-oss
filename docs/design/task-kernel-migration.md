@@ -2,6 +2,17 @@
 
 [中文版](task-kernel-migration.zh-CN.md)
 
+> **Status: DEFERRED (2026-07-20).** The Task subsystem stays **host-resident
+> for now** — this migration is not being executed, and the host task module
+> should be treated as an end state, not a transitional one. The governing
+> decisions (§2) remain the locked reference if the migration is ever revived.
+> The pre-migration seams that already landed stand on their own merit and are
+> kept regardless: `tasks/resolution.py` (host-knowledge session resolution,
+> §5.1-shaped), `tasks/events.finalize_task` (composed terminal write), and
+> `tasks/tools/gate.py` (pure tool-gate policy). What is **no longer planned**:
+> moving the `valuz_task*` tables, running actors kernel-side, and serving the
+> task MCP tools from the kernel.
+
 > The Task subsystem moves **wholesale into the kernel**. Its tables become
 > kernel-owned (unprefixed, `user_id` retained) and are persisted through the
 > **DataService** exactly like `sessions`/`messages`/`events`. Its **actors**

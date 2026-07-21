@@ -84,7 +84,7 @@ export const ConversationsHomePage = () => {
       getDefaultExecutionTarget()
     );
   };
-  const providers = useComposerProviderChannels(resolveExecTarget()?.baseUrl);
+  const providers = useComposerProviderChannels(execTargetId);
   const { defaults: modelDefaults, loading: defaultsLoading } =
     useModelDefaults();
 

@@ -89,6 +89,19 @@ const EVENT_META: Record<string, EventMeta> = {
     node: "bg-brand/10 text-brand",
     labelKey: "task.event.kickoff",
   },
+  // Chat-plan flow (draft → commit): without these entries both events fell
+  // into FALLBACK_META and rendered as "任务已发起" — twice, with the raw
+  // originating-session UUID as the actor.
+  task_drafted: {
+    icon: FileText,
+    node: "bg-ink-meta/10 text-ink-body",
+    labelKey: "task.event.taskDrafted",
+  },
+  committed: {
+    icon: Flag,
+    node: "bg-brand/10 text-brand",
+    labelKey: "task.event.committed",
+  },
   // Kickoff couldn't start the lead (missing credentials / build failure).
   // Without this entry the row fell back to the generic "kickoff" label and
   // read as "任务已发起" on a run that actually failed.
@@ -1978,6 +1991,12 @@ function resolveActor(
 ): string {
   const { actor, type } = evt;
   if (actor === "user") return t("task.actorYou");
+  // Chat-plan events carry the ORIGINATING CHAT session id as actor (the
+  // draft/commit came from the user's conversation) — show "你", never the
+  // raw session UUID.
+  if (type === "task_drafted" || type === "committed") {
+    return t("task.actorYou");
+  }
   // Lead-driven events carry the lead SESSION id as actor — collapse to the
   // lead agent name (VALUZ-TASK adds plan/review events on this path).
   if (

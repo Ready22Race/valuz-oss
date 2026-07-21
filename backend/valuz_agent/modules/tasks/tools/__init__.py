@@ -8,6 +8,4 @@ pure agent-config transforms ``strip_dispatch_tools`` /
 async closure handlers that translate args → composition-root service call →
 ``ToolResult``.
 
-``valuz_agent.modules.tasks.dispatch_mcp`` re-exports both so existing import
-sites keep working unchanged.
 """

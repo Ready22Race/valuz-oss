@@ -90,8 +90,6 @@ export interface KickoffTaskPayload {
   refs?: string[] | null;
   title?: string | null;
   created_by?: string;
-  /** Dispatch architecture (M10): "sync" (v1) or "async" (v2 actor). */
-  dispatch_mode?: "sync" | "async";
   /**
    * Task-level worktree isolation: the whole task (lead + every member)
    * runs in ONE git worktree of the project repo. A clean worktree is

@@ -15,7 +15,6 @@ from valuz_agent.modules.tasks import messaging
 from valuz_agent.modules.tasks.mailbox import mailbox_registry
 from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionRow
 
-
 LOCAL_USER_ID = "local-test-owner"
 
 

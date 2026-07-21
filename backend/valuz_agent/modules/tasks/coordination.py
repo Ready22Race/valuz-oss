@@ -93,11 +93,8 @@ class CoordinationService:
         keys: list[str] | None = None,
         mode: str = "all",
         timeout_s: float | None = None,
-        user_id: str | None = None,
+        user_id: str,
     ) -> dict[str, Any]:
-        if user_id is None:
-            raise ValueError("user_id is required")
-
         """Block (inside the lead's turn) until dispatched members finish.
 
         v0.14 real-time dispatch (see decision doc §14): the lead calls this
@@ -346,7 +343,7 @@ class CoordinationService:
         task_id: str,
         project_id: str,
         pending_keys: set[str],
-        user_id: str | None = None,
+        user_id: str,
     ) -> dict[str, dict[str, Any]]:
         """Backstop for bad-case #3 (VALUZ-RESUME §5.4): a member whose kernel
         session went terminal but whose ``member_done`` never reached the lead's
@@ -483,7 +480,7 @@ class CoordinationService:
         *,
         task_id: str,
         pending_keys: set[str],
-        user_id: str | None = None,
+        user_id: str,
     ) -> list[dict[str, Any]]:
         """Best-effort live status of still-pending members — READ ONLY.
 
@@ -566,7 +563,7 @@ class CoordinationService:
     # ------------------------------------------------------------------
 
     async def _notify_lead_member_idle(
-        self, session_id: str, status: str, user_id: str | None = None
+        self, session_id: str, status: str, user_id: str
     ) -> None:
         """After a member turn, push a member_done message to its lead's inbox.
 
@@ -615,7 +612,7 @@ class CoordinationService:
             )
 
     async def _lead_idle_with_no_pending(
-        self, task_id: str, project_id: str, user_id: str | None = None
+        self, task_id: str, project_id: str, user_id: str
     ) -> bool:
         """True when a lead has nothing left to wait for after a turn.
 
