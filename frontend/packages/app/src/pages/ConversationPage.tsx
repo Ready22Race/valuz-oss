@@ -4413,14 +4413,21 @@ export const ConversationPage = () => {
   // carry existed only because the stream was torn down at every turn end —
   // see docs/design/session-stream-lifetime.md).
 
-  // Refetch on a turn boundary (busy → idle): drained items drop and any
-  // blocked / paused state surfaces (session-input-queue §8.4). Keyed on the
-  // derived ``isBusy`` (not raw ``sending``) so the resync still fires when a
-  // missed terminal frame leaves ``sending`` stuck and only the status
-  // reconciliation ends the turn.
+  // Refetch on BOTH turn boundaries (session-input-queue §8.4):
+  // - busy → idle: drained items drop, blocked / paused state surfaces;
+  // - idle → busy: the drain consumed the head to START this turn — without
+  //   this edge the already-dispatched item kept rendering as "queued" under
+  //   the composer for the WHOLE next turn (its message is simultaneously
+  //   streaming in the transcript above), because the busy-gated 5s backstop
+  //   is off while a turn runs and the fall-edge refetch raced the dispatch.
+  //   The backend marks the row ``dispatched`` BEFORE the turn's first event,
+  //   so a refetch triggered by the turn start always reads post-dispatch
+  //   state; the ticket guard absorbs any stragglers.
+  // Keyed on the derived ``isBusy`` (not raw ``sending``) so the resync still
+  // fires when only the status reconciliation ends the turn.
   const prevQueueBusyRef = useRef(false);
   useEffect(() => {
-    if (prevQueueBusyRef.current && !isBusy) void refreshQueue();
+    if (prevQueueBusyRef.current !== isBusy) void refreshQueue();
     prevQueueBusyRef.current = isBusy;
   }, [isBusy, refreshQueue]);
 
