@@ -1,32 +1,29 @@
-"""TaskOrchestrator — drives task lifecycle and subtask dispatch.
+"""TaskOrchestrator — the task subsystem's single composed facade.
 
-Architecture (lead-dispatch-mvp §S5, §1.3):
+Holds NO implementation of its own: the composition root wires the shared
+collaborators (LiveMemberRegistry, ActorRunner, event bus) into the four
+services and every public method is a thin delegator. Routes and tool
+handlers depend on this one name (``task_orchestrator``); when the Task
+subsystem moves kernel-side (task-kernel-migration.md), this facade's method
+surface is the draft for the ``KernelClient.task_*`` wire surface.
 
-  kickoff()       → creates TaskRow + lead Session (is_lead=True, cwd=shared project cwd)
-                    → appends kickoff event
-                    → drives lead session via asyncio.create_task (background)
+  Lifecycle  (``tasks/lifecycle.py``)     kickoff · draft/commit/abandon ·
+                                          finish · update_deliverable ·
+                                          auto-finalize + actor finalize
+  Dispatch   (``tasks/dispatcher.py``)    dispatch_async (member spawn)
+  Coordination (``tasks/coordination.py``) await_members · heartbeat ·
+                                          shutdown broadcast
+  Recovery   (``tasks/recovery.py``)      startup recovery · stop/resume ·
+                                          stop_member
 
-  dispatch_async()→ builds member Session (is_lead=False, cwd=subrun_dir)
-                    → saves session to kernel store
-                    → spawns the member's actor loop as a sibling asyncio task
-                      (NOT recursive) and returns its handle immediately
-                    → appends subtask_spawned / subtask_failed events; the lead
-                      is re-woken via ``member_done`` and reviews the result
-
-  finish_task()   → appends task_completed event, updates task status
-
-  (Read-side queries — list_members / list_tasks / get_task — live in
-   ``tasks/queries.py``; they hold no orchestrator state. T1.1 split.)
-
-run_session_to_idle()  → extracted from _run_agent_background; used by both the
-                         existing send_message path (unchanged) and dispatch.
-                         Attaches BroadcastEventSink, drives run_turn, finalises,
-                         returns final_status string.
-
-collect_manifest() → gathers final_status + last assistant message (summary)
-                     + scans run_dir for artifact file paths.
-
-Lead gate enforcement lives in dispatch_mcp.py handlers, not here.
+Related seams, deliberately NOT here:
+  - host-knowledge session resolution → ``tasks/resolution.py``
+    (the future MemberResolverPort host implementation, design §5.1)
+  - composed terminal writes → ``tasks/events.finalize_task``
+  - tool gate policy → ``tasks/tools/gate.py`` (pure; moves with the D5
+    kernel-served tool surface); wire enforcement in ``tools/handlers.py``
+  - read-side queries → ``tasks/queries.py`` · plan authoring/review →
+    ``tasks/planning.py`` · messaging/inject → ``tasks/messaging.py``
 """
 
 # ruff: noqa: I001
