@@ -196,8 +196,8 @@ def check_kernel_boundary() -> list[str]:
 # ── Tasks resolver seam ─────────────────────────────────────────────
 # Within ``modules/tasks/``, host-knowledge datastores (projects / agents)
 # may only be imported by the session resolver — the one file that turns
-# host definitions into kernel sessions, and the future host implementation
-# of ``MemberResolverPort`` (docs/design/task-kernel-migration.md §5.1/D4).
+# host definitions into kernel sessions (shaped after ``MemberResolverPort``,
+# docs/design/task-kernel-migration.md §5.1/D4 — migration deferred).
 # The other entries are grandfathered read paths; burn them down through
 # the resolver (or queries/service APIs) — never add.
 TASKS_HOST_DATASTORE_ALLOWLIST = {

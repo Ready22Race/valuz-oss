@@ -3,9 +3,9 @@
 Holds NO implementation of its own: the composition root wires the shared
 collaborators (LiveMemberRegistry, ActorRunner, event bus) into the four
 services and every public method is a thin delegator. Routes and tool
-handlers depend on this one name (``task_orchestrator``); when the Task
-subsystem moves kernel-side (task-kernel-migration.md), this facade's method
-surface is the draft for the ``KernelClient.task_*`` wire surface.
+handlers depend on this one name (``task_orchestrator``) — the module's
+public contract. (Were the deferred kernel migration ever revived, this
+method surface drafts the ``KernelClient.task_*`` wire surface.)
 
   Lifecycle  (``tasks/lifecycle.py``)     kickoff · draft/commit/abandon ·
                                           finish · update_deliverable ·

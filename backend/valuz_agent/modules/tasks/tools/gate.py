@@ -1,11 +1,11 @@
 """Task tool gate POLICY — pure, I/O-free authorization rules.
 
-Who may call which task tool is load-bearing policy that must move with the
-tool surface when it is served kernel-side (task-kernel-migration.md D5).
-Keeping it pure — plain functions over already-loaded session/task objects,
-returning an error *string* (or the granted value) — means the move drags no
-host I/O (``data_reader``), no transport types (``ToolResult``) and no DB
-along. ``handlers.py`` owns the reads and wraps error strings for the wire.
+Who may call which task tool is load-bearing policy. Keeping it pure —
+plain functions over already-loaded session/task objects, returning an error
+*string* (or the granted value) — makes the rules unit-testable without DB or
+transport fixtures, and keeps them portable (task-kernel-migration.md D5 would
+move them with the tool surface; that migration is currently deferred).
+``handlers.py`` owns the reads and wraps error strings for the wire.
 
 Rules mirror VALUZ-CHATPLAN D4/D6 and M10 附录 E — see each function.
 """

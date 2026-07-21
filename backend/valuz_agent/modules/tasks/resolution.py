@@ -6,10 +6,11 @@ Kickoff, commit and dispatch used to each carry their own copy of this
 resolution block; they now consume this module, and no other task file may
 import ``ProjectDatastore`` / ``ProjectMemberDatastore`` for session building.
 
-The interface is deliberately shaped after ``MemberResolverPort``
-(docs/design/task-kernel-migration.md §5.1): when the Task subsystem moves
-kernel-side, this class becomes the port's host implementation — the kernel
-receives a fully resolved session and never learns *how* it was resolved.
+The seam stands on its own: callers receive a fully resolved session and
+never learn *how* it was resolved. The interface is shaped after
+``MemberResolverPort`` (docs/design/task-kernel-migration.md §5.1) so that if
+the — currently deferred — kernel migration is ever revived, this class
+graduates into the port's host implementation verbatim.
 
 Error convention (mirrors ``planning.resolve_dispatch_node``): resolve
 methods return the resolved value on success or a human-readable ``str`` on
