@@ -5204,11 +5204,22 @@ export const ConversationPage = () => {
   //      stream being open).
   // The stream is superseded by the next session's open (subscribeToSession
   // aborts the previous controller) and torn down on unmount.
+  //
+  // CONNECTION-BUDGET guard: Chromium caps ~6 connections per origin
+  // (HTTP/1.1), and held SSE streams count against it — a pool exhaustion
+  // blocks every fetch (the verified white-screen incident class). A hidden
+  // tab / minimized window doesn't need live paint, so release the held
+  // stream on ``visibilitychange: hidden`` and reopen on return — the
+  // (re)open path resumes from the history cursor and the server's initial
+  // drain + reconcile burst deliver everything missed while hidden. This
+  // keeps the always-open model's steady-state cost scoped to the ONE
+  // visible conversation tab.
   useEffect(() => {
     if (!selectedSessionId) return;
+    const sid = selectedSessionId;
     let cancelled = false;
     sessionsApi
-      .get(selectedSessionId)
+      .get(sid)
       .then((detail) => {
         if (cancelled) return;
         if (detail.todos !== undefined && detail.todos !== null) {
@@ -5219,9 +5230,24 @@ export const ConversationPage = () => {
         // Non-fatal — refreshEvents already hydrated todos from the
         // historical event log.
       });
-    subscribeToSession(selectedSessionId, historyCursorRef.current);
+    if (document.visibilityState !== "hidden") {
+      subscribeToSession(sid, historyCursorRef.current);
+    }
+    const onVisibility = () => {
+      if (cancelled) return;
+      if (document.visibilityState === "hidden") {
+        if (abortRef.current) {
+          abortRef.current.abort();
+          abortRef.current = null;
+        }
+      } else if (selectedSessionIdRef.current === sid && !abortRef.current) {
+        subscribeToSession(sid, historyCursorRef.current);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       cancelled = true;
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [selectedSessionId, subscribeToSession]);
 
