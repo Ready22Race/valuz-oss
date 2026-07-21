@@ -50,11 +50,7 @@ from valuz_agent.ports.sandbox_allocator import SandboxScope
 from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.modules.sessions import project_index
 from valuz_agent.adapters.agent_resolver import (
-    _member_agent_config,
-    build_member_session,
-    embed_agent_config,
     resolve_agent_display_name,
-    spill_goal_brief_if_too_long,
 )
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.eventbus import EventBus
@@ -67,9 +63,9 @@ from valuz_agent.modules.tasks.task_worktree import (
     task_worktree_notice,
     task_worktree_snapshot,
 )
-from valuz_agent.modules.tasks._session_build import (
-    _credential_gap,
-    _provider_resolver_deps,
+from valuz_agent.modules.tasks.resolution import (
+    materialize_lead_clone,
+    task_session_resolver,
 )
 from valuz_agent.modules.tasks.actor_runner import (
     ActorRunner,
@@ -180,24 +176,15 @@ class LifecycleService:
             task_ds = TaskDatastore(db)
             event_ds = TaskEventDatastore(db)
             run_ds = TaskSessionDatastore(db)
-            member_ds = ProjectMemberDatastore(db)
 
-            # Resolve project cwd
-            from valuz_agent.modules.projects.datastore import ProjectDatastore
-
-            ws_ds = ProjectDatastore(db)
-            ws_row = await ws_ds.get_by_id(user_id, project_id)
-            if ws_row is None:
-                raise ValueError(f"project {project_id!r} not found")
-            project_cwd = fs_registry.project_cwd(
-                user_id,
-                ws_row.id,
-                cast(
-                    Literal["chat", "project"],
-                    ws_row.kind if ws_row.kind in ("chat", "project") else "chat",
-                ),
-                ws_row.root_path,
+            # Resolve the project env (row + main cwd + instructions) through
+            # the single host-knowledge seam (tasks/resolution.py).
+            env = await task_session_resolver.resolve_project_env(
+                db, user_id=user_id, project_id=project_id
             )
+            if env is None:
+                raise ValueError(f"project {project_id!r} not found")
+            project_cwd = env.project_cwd
 
             # Create the task narrative file path (file-as-truth). Always
             # anchored at the MAIN project cwd — even in worktree mode —
@@ -219,7 +206,7 @@ class LifecycleService:
 
                 handle = await worktree_service.get_or_create(
                     user_id,
-                    ws_row,
+                    env.project_row,
                     name=f"task-{task_id[:12]}",
                     origin="task",
                 )
@@ -279,24 +266,10 @@ class LifecycleService:
             )
             await task_ds.create_task(user_id, task_row)
 
-            # Resolve lead agent and materialize a per-task lead clone that
-            # carries the dispatch tools (base agent stays clean — see
-            # _materialize_lead_agent). The lead session points at the clone.
-            lead_member = await member_ds.get(
-                user_id, project_id, lead_agent_slug
-            )
-            if lead_member is None:
-                raise ValueError(
-                    f"lead agent {lead_agent_slug!r} is not a member of project {project_id!r}"
-                )
-            lead_agent = await _member_agent_config(lead_member, member_ds, user_id=user_id)
-            lead_clone = None
-            if lead_agent is not None:
-                lead_clone = await self._materialize_lead_agent(
-                    lead_agent, dispatch_mode=dispatch_mode
-                )
-
-            # Build the lead kernel Session
+            # Build the lead brief (caller-specific), then resolve the lead
+            # session through the single host-knowledge seam — membership,
+            # lead clone, brief spill, session build and the credential
+            # pre-flight all live in tasks/resolution.py.
             refs_text = "\n".join(f"- {r}" for r in refs) if refs else ""
             # Goal mode (claude_agent/codex) prepends ``/goal `` to this brief
             # via the kernel's wrap_for_mode, so the directive already reads as
@@ -305,61 +278,27 @@ class LifecycleService:
             # context. (deepagents fallback sends the brief unwrapped, where a
             # bare goal + refs is still clear.)
             lead_brief = goal + (f"\n\n## References\n\n{refs_text}" if refs_text else "")
-            # Fence the goal-mode payload: if the lead brief is over the ``/goal``
-            # cap, spill it to a doc and pass the lead a short pointer instead
-            # (used both as the embedded brief and the initial ``/goal`` prompt).
-            # Spill anchored at the MAIN project cwd (not ``lead_cwd``): in
-            # worktree mode a brief doc written into the worktree would
-            # register as "work worth keeping" and defeat clean-teardown.
-            lead_brief = spill_goal_brief_if_too_long(
-                lead_brief,
-                run_dir=str(project_cwd),
-                task_id=task_id,
-                label=lead_agent_slug,
-                is_lead=True,
-            )
 
-            # Fetch project instructions for system prompt
-            from valuz_agent.modules.projects.datastore import ProjectDatastore as WsDs
-
-            ws_ds2 = WsDs(db)
-            ws_ctx = await ws_ds2.get_context(user_id, project_id)
-            project_instructions_md = ws_ctx.instructions_md if ws_ctx else None
-
-            lead_session = await build_member_session(
+            resolved = await task_session_resolver.resolve_lead(
+                db,
+                env=env,
                 project_id=project_id,
-                agent_slug=lead_agent_slug,
-                members=member_ds,
-                is_lead=True,
                 task_id=task_id,
-                run_dir=lead_cwd,
+                agent_slug=lead_agent_slug,
+                cwd=lead_cwd,
                 brief=lead_brief,
-                project_name=ws_row.name,
-                project_instructions_md=project_instructions_md,
-                dispatch_mode=dispatch_mode,
-                # Lead runs the whole task in goal mode: the kernel auto-loops
-                # until the task goal is met. ``finish_task`` remains the
-                # authoritative terminal (it forces mode back to default).
-                goal_mode=True,
-                worktree_notice=task_worktree_notice(wt_snapshot),
                 user_id=user_id,
-                **_provider_resolver_deps(db),
+                dispatch_mode=dispatch_mode,
+                worktree_notice=task_worktree_notice(wt_snapshot),
             )
-            if lead_session is None:
-                raise ValueError(f"could not build lead session for {lead_agent_slug!r}")
-
-            # Swap the embedded snapshot for the per-task lead clone so the
-            # runtime surfaces the dispatch tools (build_member_session
-            # embedded the base agent; everything else on the session —
-            # instructions / skills / model / provider — already came from it).
-            if lead_clone is not None:
-                lead_session = embed_agent_config(lead_session, lead_clone)
+            if isinstance(resolved, str):
+                raise ValueError(resolved)
+            lead_session = resolved.session
+            lead_brief = resolved.brief
 
             # Fail fast: don't spawn a lead that has no usable credentials —
             # it would only fail mid-turn with a cryptic "Not logged in".
-            gap = await _credential_gap(
-                lead_session, lead_agent_slug, db=db, user_id=user_id
-            )
+            gap = resolved.credential_gap
             if gap is not None:
                 # ``failed`` is NOT in the task status enum (task_state.py) —
                 # task-level failure folds into ``blocked`` (recoverable: the
@@ -622,11 +561,11 @@ class LifecycleService:
         Returns ``{lead_session_id, status: "active", committed_at}`` on success,
         ``{"error": ...}`` on validation failure.
         """
+        user_id = _require_user_id(user_id)
         async with async_unit_of_work() as db:
             task_ds = TaskDatastore(db)
             event_ds = TaskEventDatastore(db)
             run_ds = TaskSessionDatastore(db)
-            member_ds = ProjectMemberDatastore(db)
 
             task_row = await task_ds.get_task_by_project(user_id, project_id, task_id)
             if task_row is None:
@@ -645,36 +584,16 @@ class LifecycleService:
                 return {"error": "commit_task: plan has no work to do (all nodes already done)"}
 
             lead_slug = lead_agent_slug_override or task_row.lead_agent_slug
-            lead_member = await member_ds.get(user_id, project_id, lead_slug)
-            if lead_member is None:
-                return {
-                    "error": (f"lead agent {lead_slug!r} is not a member of project {project_id!r}")
-                }
 
-            from valuz_agent.modules.projects.datastore import ProjectDatastore
-
-            ws_ds = ProjectDatastore(db)
-            ws_row = await ws_ds.get_by_id(user_id, project_id)
-            if ws_row is None:
-                return {"error": f"project {project_id!r} not found"}
-            project_cwd = fs_registry.project_cwd(
-                user_id,
-                ws_row.id,
-                cast(
-                    Literal["chat", "project"],
-                    ws_row.kind if ws_row.kind in ("chat", "project") else "chat",
-                ),
-                ws_row.root_path,
+            env = await task_session_resolver.resolve_project_env(
+                db, user_id=user_id, project_id=project_id
             )
+            if env is None:
+                return {"error": f"project {project_id!r} not found"}
             # Task-level worktree (design §5): a task carrying a worktree
             # snapshot keeps every session — including this committed lead —
             # in the worktree cwd (heals it first if it was removed).
-            lead_cwd = await resolve_task_cwd(task_row, str(project_cwd))
-
-            lead_agent = await _member_agent_config(lead_member, member_ds, user_id=user_id)
-            lead_clone = None
-            if lead_agent is not None:
-                lead_clone = await self._materialize_lead_agent(lead_agent, dispatch_mode="async")
+            lead_cwd = await resolve_task_cwd(task_row, str(env.project_cwd))
 
             refs = (task_row.metadata_ or {}).get("refs") or []
             refs_text = "\n".join(f"- {r}" for r in refs) if refs else ""
@@ -687,50 +606,27 @@ class LifecycleService:
                 f"{plan_summary_lines}\n"
                 + (f"\n## References\n\n{refs_text}\n" if refs_text else "")
             )
-            # Fence the goal-mode payload: spill an over-cap committed brief to a
-            # doc and hand the lead a short pointer (used as both the embedded
-            # brief and the initial ``/goal`` prompt below).
-            # Spill anchored at the MAIN project cwd (design R5) — never
-            # into a task worktree, where it would defeat clean-teardown.
-            lead_brief = spill_goal_brief_if_too_long(
-                lead_brief,
-                run_dir=str(project_cwd),
-                task_id=task_id,
-                label=lead_slug,
-                is_lead=True,
-            )
 
-            from valuz_agent.modules.projects.datastore import ProjectDatastore as WsDs
-
-            ws_ds2 = WsDs(db)
-            ws_ctx = await ws_ds2.get_context(user_id, project_id)
-            project_instructions_md = ws_ctx.instructions_md if ws_ctx else None
-
-            lead_session = await build_member_session(
+            resolved = await task_session_resolver.resolve_lead(
+                db,
+                env=env,
                 project_id=project_id,
-                agent_slug=lead_slug,
-                members=member_ds,
-                is_lead=True,
                 task_id=task_id,
-                run_dir=lead_cwd,
+                agent_slug=lead_slug,
+                cwd=lead_cwd,
                 brief=lead_brief,
-                project_name=ws_row.name,
-                project_instructions_md=project_instructions_md,
+                user_id=user_id,
                 dispatch_mode="async",
-                goal_mode=True,
                 plan_pre_committed=True,  # ← key flag (VALUZ-CHATPLAN D10)
                 worktree_notice=task_worktree_notice(task_worktree_snapshot(task_row)),
-                user_id=user_id,
-                **_provider_resolver_deps(db),
             )
-            if lead_session is None:
-                return {"error": f"could not build lead session for {lead_slug!r}"}
-            if lead_clone is not None:
-                lead_session = embed_agent_config(lead_session, lead_clone)
+            if isinstance(resolved, str):
+                return {"error": resolved}
+            lead_session = resolved.session
+            lead_brief = resolved.brief
 
-            gap = await _credential_gap(lead_session, lead_slug, db=db, user_id=user_id)
-            if gap is not None:
-                return {"error": f"commit_task: {gap}"}
+            if resolved.credential_gap is not None:
+                return {"error": f"commit_task: {resolved.credential_gap}"}
 
             await kernel_client.create_session(
                 user_id, lead_session, scope=SandboxScope(kind="task", id=task_id)
@@ -1612,34 +1508,14 @@ class LifecycleService:
     async def _materialize_lead_agent(
         self, base_agent: Any, dispatch_mode: Literal["sync", "async"] = "sync"
     ) -> Any:  # returns the lead-clone AgentConfig
-        """Materialize a per-task **lead clone** of *base_agent* and return its id.
+        """Materialize a per-task lead clone of *base_agent*.
 
-        Tools live only on ``AgentConfig`` (the kernel has no per-session tool
-        override), so the lead needs an agent that carries the dispatch tools.
-        Rather than mutate the shared base agent in place (which would leak
-        dispatch tools into every plain conversation that uses the same agent —
-        and race with concurrent sessions), we build a dedicated clone whose
-        ``id`` is ``{base}__lead__{mode}``. The clone shares the base's identity
-        (model/instructions/skills/provider/permission) and adds exactly the
-        dispatch toolset for the mode; orchestration/launcher tools are dropped.
-
-        Stable per (base, mode): re-materializing is idempotent (overwrites the
-        same row), so clones don't accumulate per task. The lead session points
-        its ``agent_id`` at the returned clone id.
+        Thin wrapper over :func:`tasks.resolution.materialize_lead_clone`
+        (kept as an async method so tests keep awaiting
+        ``orch._materialize_lead_agent``); the resolver calls the function
+        directly on the lead-resolution path.
         """
-        from dataclasses import replace
-
-        # Tool surfaces ride the session's ``harness`` MCP entry now
-        # (``build_member_session(is_lead=True)`` points it at the ``lead``
-        # toolset of the host toolkit MCP server) — the clone carries no
-        # tool declarations of its own. It survives as an identity stamp:
-        # the ``__lead__{mode}`` id marks the embedded snapshot as a lead
-        # clone for queries/diagnostics.
-        clone_id = f"{base_agent.id}__lead__{dispatch_mode}"
-        clone = replace(base_agent, id=clone_id, tools=())
-        # The clone exists only as the lead session's embedded snapshot —
-        # the kernel has no agents table to materialize it into.
-        return clone
+        return materialize_lead_clone(base_agent, dispatch_mode)
 
 
 __all__ = ["LifecycleService"]

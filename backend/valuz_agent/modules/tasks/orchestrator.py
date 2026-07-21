@@ -38,7 +38,7 @@ from typing import Any, Literal
 import valuz_agent.boot.kernel  # noqa: F401
 
 from valuz_agent.infra.eventbus import EventBus, event_bus as _global_bus
-from valuz_agent.modules.tasks._session_build import (
+from valuz_agent.modules.tasks.resolution import (  # noqa: F401 — re-exported
     _credential_gap,
     _provider_resolver_deps,
 )
@@ -77,10 +77,9 @@ def _require_user_id(user_id: str | None) -> str:
 # Step 3b). The orchestrator keeps thin delegators so its public coordination
 # surface + the actor-loop role callbacks keep resolving on ``self``.
 
-# ``_credential_gap`` / ``_provider_resolver_deps`` now live in the shared
-# build-session helper (``tasks/_session_build.py``, ADR-023). They are imported
-# above and re-exported here so existing call sites + tests keep importing them
-# from this module.
+# ``_credential_gap`` / ``_provider_resolver_deps`` now live in the session
+# resolver (``tasks/resolution.py``). They are imported above and re-exported
+# here so existing call sites + tests keep importing them from this module.
 
 
 # ---------------------------------------------------------------------------

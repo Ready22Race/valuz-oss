@@ -1915,8 +1915,8 @@ def test_commit_task_creates_lead_session_with_task_scope(
     dispatched member — c81ab288 originally landed this on the dead copy."""
     from types import SimpleNamespace
 
-    import valuz_agent.modules.projects.datastore as ws_ds_src
     from valuz_agent.modules.tasks import lifecycle as lc_mod
+    from valuz_agent.modules.tasks import resolution as res_mod
 
     # Draft task with a plan (commit refuses empty plans).
     _make_task(db_factory, tmp_path)
@@ -1960,19 +1960,19 @@ def test_commit_task_creates_lead_session_with_task_scope(
         created["session_id"] = session.id
         created["scope"] = scope
 
-    monkeypatch.setattr(ws_ds_src, "ProjectDatastore", _FakeWsDs)
-    monkeypatch.setattr(lc_mod, "ProjectMemberDatastore", _FakeMemberDs)
+    monkeypatch.setattr(res_mod, "ProjectDatastore", _FakeWsDs)
+    monkeypatch.setattr(res_mod, "ProjectMemberDatastore", _FakeMemberDs)
     monkeypatch.setattr(
-        lc_mod, "fs_registry", SimpleNamespace(project_cwd=lambda *a, **k: tmp_path)
+        res_mod, "fs_registry", SimpleNamespace(project_cwd=lambda *a, **k: tmp_path)
     )
-    monkeypatch.setattr(lc_mod, "_member_agent_config", _as_async(lambda *_a, **_k: None))
+    monkeypatch.setattr(res_mod, "_member_agent_config", _as_async(lambda *_a, **_k: None))
     monkeypatch.setattr(
-        lc_mod,
+        res_mod,
         "build_member_session",
         _as_async(lambda **_k: SimpleNamespace(id="lead-sess-1")),
     )
-    monkeypatch.setattr(lc_mod, "_credential_gap", _as_async(lambda *_a, **_k: None))
-    monkeypatch.setattr(lc_mod, "_provider_resolver_deps", lambda _db: {})
+    monkeypatch.setattr(res_mod, "_credential_gap", _as_async(lambda *_a, **_k: None))
+    monkeypatch.setattr(res_mod, "_provider_resolver_deps", lambda _db: {})
     monkeypatch.setattr(lc_mod.kernel_client, "create_session", _capture_create_session)
     monkeypatch.setattr(
         lc_mod, "project_index", SimpleNamespace(record=_as_async(lambda *_a, **_k: None))

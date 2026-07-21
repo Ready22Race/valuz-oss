@@ -193,8 +193,25 @@ def check_kernel_boundary() -> list[str]:
     return problems
 
 
+# ── Tasks resolver seam ─────────────────────────────────────────────
+# Within ``modules/tasks/``, host-knowledge datastores (projects / agents)
+# may only be imported by the session resolver — the one file that turns
+# host definitions into kernel sessions, and the future host implementation
+# of ``MemberResolverPort`` (docs/design/task-kernel-migration.md §5.1/D4).
+# The other entries are grandfathered read paths; burn them down through
+# the resolver (or queries/service APIs) — never add.
+TASKS_HOST_DATASTORE_ALLOWLIST = {
+    "tasks/resolution.py",
+    "tasks/lifecycle.py",  # draft_task membership validation
+    "tasks/queries.py",  # member listing read path
+    "tasks/tools/handlers.py",  # create-task project gate
+}
+_TASKS_HOST_DATASTORE_OWNERS = {"projects", "agents"}
+
+
 def main() -> int:
     violations: list[tuple[Path, int, str, str]] = []
+    tasks_seam_violations: list[tuple[Path, int, str]] = []
     for py in sorted(MODULES_ROOT.rglob("*.py")):
         owner = _owning_module(py)
         if owner is None:
@@ -204,6 +221,28 @@ def main() -> int:
             target = _datastore_owner(dotted)
             if target and target != owner and (owner, target) not in ALLOWLIST:
                 violations.append((py, lineno, owner, target))
+            if (
+                owner == "tasks"
+                and target in _TASKS_HOST_DATASTORE_OWNERS
+                and py.relative_to(MODULES_ROOT).as_posix()
+                not in TASKS_HOST_DATASTORE_ALLOWLIST
+            ):
+                tasks_seam_violations.append((py, lineno, target))
+
+    if tasks_seam_violations:
+        print(
+            "Tasks resolver-seam violations — task code imported a host-knowledge\n"
+            "datastore outside tasks/resolution.py:"
+        )
+        for py, lineno, target in tasks_seam_violations:
+            rel = py.relative_to(MODULES_ROOT.parent.parent)
+            print(f"  {rel}:{lineno}  tasks → {target}.datastore")
+        print(
+            "\nResolve host knowledge (projects / membership / agent configs)\n"
+            "through tasks/resolution.py (TaskSessionResolver) instead — it is\n"
+            "the future MemberResolverPort host implementation (design §5.1/D4)."
+        )
+        return 1
 
     if violations:
         print("Module boundary violations — a module imported a sibling's datastore:")
