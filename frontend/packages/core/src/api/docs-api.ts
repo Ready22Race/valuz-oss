@@ -316,8 +316,34 @@ export const docsApi = {
     );
   },
 
-  health(): Promise<DocsHealth> {
-    return fetchJson("/v1/docs/health");
+  async health(): Promise<DocsHealth> {
+    // Fan out on multi-target editions so the KB-page health summary
+    // reflects BOTH backends' documents, matching kbApi.list(). Zero targets
+    // (OSS) keeps the single-backend path. Counts summed across backends;
+    // healthy if any backend is healthy.
+    if (getListFanOutTargets().length === 0) {
+      return fetchJson("/v1/docs/health");
+    }
+    const outcome = await fanOutTargets((target) =>
+      fetchJson<DocsHealth>("/v1/docs/health", { baseUrl: target.baseUrl }),
+    );
+    const sum: DocsHealth = {
+      status: "unavailable",
+      total_documents: 0,
+      ready_count: 0,
+      processing_count: 0,
+      failed_count: 0,
+      missing_count: 0,
+    };
+    for (const { value } of outcome.values) {
+      sum.total_documents += value.total_documents;
+      sum.ready_count += value.ready_count;
+      sum.processing_count += value.processing_count;
+      sum.failed_count += value.failed_count;
+      sum.missing_count += value.missing_count;
+      if (value.status === "healthy") sum.status = "healthy";
+    }
+    return sum;
   },
 
   getTask(taskId: string): Promise<ImportTask> {

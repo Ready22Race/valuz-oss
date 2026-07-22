@@ -1,6 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { ArrowLeft, ChevronRight, Clock3, FilePenLine, ListChecks, MessageSquare, Pause, Play, Power, Trash2 } from "lucide-react";
+import {
+  ArrowLeft,
+  ChevronRight,
+  Clock3,
+  FilePenLine,
+  ListChecks,
+  MessageSquare,
+  Pause,
+  Play,
+  Power,
+  Trash2,
+} from "lucide-react";
 import { toast } from "sonner";
 import {
   Button,
@@ -12,6 +23,7 @@ import {
 import {
   agentsApi,
   automationsApi,
+  useEntityOrigin,
   useTranslation,
   type ActionKind,
   type AutomationDetail,
@@ -57,7 +69,12 @@ const bucketOf = (ms: number, now: Date): TimeBucket => {
   return "earlier";
 };
 
-const BUCKET_ORDER: TimeBucket[] = ["today", "yesterday", "thisWeek", "earlier"];
+const BUCKET_ORDER: TimeBucket[] = [
+  "today",
+  "yesterday",
+  "thisWeek",
+  "earlier",
+];
 const BUCKET_KEY: Record<TimeBucket, string> = {
   today: "activity.today",
   yesterday: "activity.yesterday",
@@ -69,18 +86,23 @@ const BUCKET_KEY: Record<TimeBucket, string> = {
 
 export const AutomationDetailPage = () => {
   const { automationId = "" } = useParams<{ automationId: string }>();
+  // Cold deep-link recovery: on a cache miss this fires ensureOrigin, which
+  // probes both backends and resolves the origin; adding it to loadAll's deps
+  // re-fetches against the owning backend once it lands.
+  const automationOrigin = useEntityOrigin(automationId, "automation");
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const { t } = useTranslation();
-  const { setHideHeader, setContentInnerClassName } =
-    useProjectOutlet();
+  const { setHideHeader, setContentInnerClassName } = useProjectOutlet();
 
   const [loading, setLoading] = useState(true);
   const [detail, setDetail] = useState<AutomationDetail | null>(null);
   const [runs, setRuns] = useState<AutomationRunItem[]>([]);
   const [editOpen, setEditOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
-  const [editMembers, setEditMembers] = useState<MemberWithAgent[] | null>(null);
+  const [editMembers, setEditMembers] = useState<MemberWithAgent[] | null>(
+    null,
+  );
 
   const refreshRuns = useCallback(async () => {
     try {
@@ -109,7 +131,7 @@ export const AutomationDetailPage = () => {
     } finally {
       setLoading(false);
     }
-  }, [automationId]);
+  }, [automationId, automationOrigin]);
 
   useEffect(() => {
     void loadAll();
@@ -237,17 +259,25 @@ export const AutomationDetailPage = () => {
     const Icon = isTask ? ListChecks : MessageSquare;
     const eff = run.task_status ?? run.status;
     const pillStatus =
-      eff === "completed" || eff === "success" ? "completed"
-      : eff === "failed" ? "failed"
-      : eff === "active" || eff === "running" || eff === "queued" ? "running"
-      : eff === "paused" ? "paused"
-      : "skipped";
+      eff === "completed" || eff === "success"
+        ? "completed"
+        : eff === "failed"
+          ? "failed"
+          : eff === "active" || eff === "running" || eff === "queued"
+            ? "running"
+            : eff === "paused"
+              ? "paused"
+              : "skipped";
     const pillLabel =
-      pillStatus === "completed" ? t(k("automation.execStatusOk"))
-      : pillStatus === "failed" ? t(k("automation.execStatusErr"))
-      : pillStatus === "running" ? t(k("automation.execStatusPending"))
-      : pillStatus === "paused" ? t(k("cron.paused"))
-      : t(k("automation.execStatusSkip"));
+      pillStatus === "completed"
+        ? t(k("automation.execStatusOk"))
+        : pillStatus === "failed"
+          ? t(k("automation.execStatusErr"))
+          : pillStatus === "running"
+            ? t(k("automation.execStatusPending"))
+            : pillStatus === "paused"
+              ? t(k("cron.paused"))
+              : t(k("automation.execStatusSkip"));
     return (
       <button
         key={run.run_id}
@@ -289,84 +319,103 @@ export const AutomationDetailPage = () => {
       </div>
 
       <div className="flex min-h-0 w-full flex-1 flex-col overflow-hidden px-5">
-      {/* Title + actions section */}
-      <div className="flex items-start justify-between pt-4 pb-5 shrink-0">
-        <div>
-          <h1 className="text-2xl font-semibold text-ink-heading">{detail.name}</h1>
-          <p className="mt-1 flex items-center gap-2 text-sm text-ink-meta">
-            <span>{detail.trigger_human_readable}</span>
-            {detail.agent_name && (
-              <><span>·</span><span>{detail.agent_name}</span></>
-            )}
-          </p>
-        </div>
-        <div className="flex shrink-0 items-center gap-2 pt-1">
-          <Button variant="outline" size="sm" onClick={() => void handleToggle()}>
-            {detail.status === "enabled" ? (
-              <><Pause className="h-3.5 w-3.5" />{t(k("cron.pause"))}</>
-            ) : (
-              <><Power className="h-3.5 w-3.5" />{t(k("cron.enable"))}</>
-            )}
-          </Button>
-          <Button
-            variant="outline"
-            size="icon-sm"
-            onClick={() => setEditOpen(true)}
-          >
-            <FilePenLine className="h-4 w-4" />
-          </Button>
-          <Button
-            variant="outline"
-            size="icon-sm"
-            className="text-destructive hover:text-destructive"
-            onClick={() => setDeleteOpen(true)}
-          >
-            <Trash2 className="h-4 w-4" />
-          </Button>
-          <Button size="sm" onClick={() => void handleRunNow()}>
-            <Play className="h-3.5 w-3.5" />
-            {t(k("cron.runNow"))}
-          </Button>
-        </div>
-      </div>
-
-      {/* Two-column layout — each column scrolls independently */}
-      <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_360px] overflow-hidden border-t border-surface-border/70">
-        {/* Left: execution history */}
-        <div className="flex min-w-0 flex-col overflow-hidden pt-5">
-          <h2 className="mb-3 shrink-0 pr-8 text-sm font-medium text-ink-meta">
-            {t(k("cron.executionHistory"))}
-          </h2>
-          {visibleRuns.length > 0 ? (
-            <div className="min-h-0 flex-1 overflow-y-auto pr-8 pb-6">
-              {BUCKET_ORDER.filter((b) => groupedRuns.has(b)).map((b) => (
-                <div key={b} className="mb-4">
-                  <div className="mb-1.5 px-3 text-[11.5px] font-normal uppercase tracking-[0.06em] text-ink-body">
-                    {t(k(BUCKET_KEY[b]))}
-                  </div>
-                  {(groupedRuns.get(b) ?? []).map((run) => renderRunRow(run))}
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="flex flex-1 justify-center py-8">
-              <EmptyState variant="plain" title={t(k("automation.noExecutions"))} icon={<Clock3 className="h-5 w-5" />} />
-            </div>
-          )}
-        </div>
-
-        {/* Right: instructions */}
-        <div className="flex min-w-0 flex-col overflow-hidden border-l border-surface-border pl-6 pt-5 pb-6 text-sm">
-          <h2 className="mb-3 shrink-0 text-sm font-medium text-ink-meta">
-            {t(k("cron.instruction"))}
-          </h2>
-          <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-[#f7f8fa] bg-surface-soft/40 p-4">
-            <p className="whitespace-pre-wrap text-[13px] leading-6 text-ink-body">
-              {detail.prompt_template}
+        {/* Title + actions section */}
+        <div className="flex items-start justify-between pt-4 pb-5 shrink-0">
+          <div>
+            <h1 className="text-2xl font-semibold text-ink-heading">
+              {detail.name}
+            </h1>
+            <p className="mt-1 flex items-center gap-2 text-sm text-ink-meta">
+              <span>{detail.trigger_human_readable}</span>
+              {detail.agent_name && (
+                <>
+                  <span>·</span>
+                  <span>{detail.agent_name}</span>
+                </>
+              )}
             </p>
           </div>
+          <div className="flex shrink-0 items-center gap-2 pt-1">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void handleToggle()}
+            >
+              {detail.status === "enabled" ? (
+                <>
+                  <Pause className="h-3.5 w-3.5" />
+                  {t(k("cron.pause"))}
+                </>
+              ) : (
+                <>
+                  <Power className="h-3.5 w-3.5" />
+                  {t(k("cron.enable"))}
+                </>
+              )}
+            </Button>
+            <Button
+              variant="outline"
+              size="icon-sm"
+              onClick={() => setEditOpen(true)}
+            >
+              <FilePenLine className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="outline"
+              size="icon-sm"
+              className="text-destructive hover:text-destructive"
+              onClick={() => setDeleteOpen(true)}
+            >
+              <Trash2 className="h-4 w-4" />
+            </Button>
+            <Button size="sm" onClick={() => void handleRunNow()}>
+              <Play className="h-3.5 w-3.5" />
+              {t(k("cron.runNow"))}
+            </Button>
+          </div>
         </div>
-      </div>
+
+        {/* Two-column layout — each column scrolls independently */}
+        <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_360px] overflow-hidden border-t border-surface-border/70">
+          {/* Left: execution history */}
+          <div className="flex min-w-0 flex-col overflow-hidden pt-5">
+            <h2 className="mb-3 shrink-0 pr-8 text-sm font-medium text-ink-meta">
+              {t(k("cron.executionHistory"))}
+            </h2>
+            {visibleRuns.length > 0 ? (
+              <div className="min-h-0 flex-1 overflow-y-auto pr-8 pb-6">
+                {BUCKET_ORDER.filter((b) => groupedRuns.has(b)).map((b) => (
+                  <div key={b} className="mb-4">
+                    <div className="mb-1.5 px-3 text-[11.5px] font-normal uppercase tracking-[0.06em] text-ink-body">
+                      {t(k(BUCKET_KEY[b]))}
+                    </div>
+                    {(groupedRuns.get(b) ?? []).map((run) => renderRunRow(run))}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="flex flex-1 justify-center py-8">
+                <EmptyState
+                  variant="plain"
+                  title={t(k("automation.noExecutions"))}
+                  icon={<Clock3 className="h-5 w-5" />}
+                />
+              </div>
+            )}
+          </div>
+
+          {/* Right: instructions */}
+          <div className="flex min-w-0 flex-col overflow-hidden border-l border-surface-border pl-6 pt-5 pb-6 text-sm">
+            <h2 className="mb-3 shrink-0 text-sm font-medium text-ink-meta">
+              {t(k("cron.instruction"))}
+            </h2>
+            <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-[#f7f8fa] bg-surface-soft/40 p-4">
+              <p className="whitespace-pre-wrap text-[13px] leading-6 text-ink-body">
+                {detail.prompt_template}
+              </p>
+            </div>
+          </div>
+        </div>
       </div>
 
       <CreateAutomationDialog
