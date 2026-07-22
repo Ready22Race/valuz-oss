@@ -146,6 +146,25 @@ _MAX_BUFFER_SIZE: int = 32 * 1024 * 1024  # 32 MB
 # See ``docs/references/claude-workflows-spike/README.md``.
 _WORKFLOW_SETTINGS: dict[str, Any] = {"enableWorkflows": True}
 
+# WebFetch-preflight contributor to ``_build_settings``. Before every fetch
+# the Claude Code CLI sends the target hostname to
+# ``api.anthropic.com/api/web/domain_info`` and FAILS CLOSED when that check
+# is unreachable ("Unable to verify if domain … is safe to fetch") — which
+# kills every WebFetch in deployments that cannot reach Anthropic
+# (restrictive egress, and sessions on third-party Anthropic-compatible
+# channels whose base_url never touches Anthropic). The official escape
+# hatch is the ``skipWebFetchPreflight`` setting
+# (https://code.claude.com/docs/en/settings, "Set to true in environments
+# that block traffic to Anthropic"); the env var below opts a deployment
+# into injecting it. Opt-in by env — not a blanket default — because
+# skipping also drops Anthropic's malicious-domain blocklist, so the check
+# should stay on wherever Anthropic is reachable.
+SKIP_WEBFETCH_PREFLIGHT_ENV = "VALUZ_SKIP_WEBFETCH_PREFLIGHT"
+
+
+def _skip_webfetch_preflight_enabled() -> bool:
+    return os.getenv(SKIP_WEBFETCH_PREFLIGHT_ENV, "").strip().lower() in ("1", "true", "yes")
+
 
 # B2a: ``claude_agent + auto_review`` sessions fail at the first turn
 # when the underlying Claude tier doesn't grant access to Anthropic's
@@ -1671,14 +1690,18 @@ class ClaudeAgentRuntime:
         omitted.
 
         The workspace's own settings are read once up front so each harness
-        default can defer to an explicit project value. Today there is a
-        single default — dynamic workflows / ``/deep-research``
-        (``enableWorkflows``), which the ``setting_sources=["project"]``
-        scoping otherwise drops (it lives in the user surface; see
-        ``_WORKFLOW_SETTINGS``). Keep it a true *default*: inject it only when
-        the project hasn't set the key, so a project's explicit value (loaded
-        via ``setting_sources``) wins. When more harness defaults appear,
-        split this back into per-default helpers sharing ``project``.
+        default can defer to an explicit project value. Two defaults today:
+
+        - dynamic workflows / ``/deep-research`` (``enableWorkflows``), which
+          the ``setting_sources=["project"]`` scoping otherwise drops (it
+          lives in the user surface; see ``_WORKFLOW_SETTINGS``);
+        - ``skipWebFetchPreflight`` when the deployment opts in via
+          ``VALUZ_SKIP_WEBFETCH_PREFLIGHT`` (see
+          ``SKIP_WEBFETCH_PREFLIGHT_ENV``).
+
+        Keep each a true *default*: inject it only when the project hasn't
+        set the key, so a project's explicit value (loaded via
+        ``setting_sources``) wins.
         """
         # Read the workspace's own settings once. Tolerant of a missing /
         # unreadable / non-dict file (treated as empty).
@@ -1696,6 +1719,8 @@ class ClaudeAgentRuntime:
         settings: dict[str, Any] = {}
         if "enableWorkflows" not in project:
             settings.update(_WORKFLOW_SETTINGS)
+        if _skip_webfetch_preflight_enabled() and "skipWebFetchPreflight" not in project:
+            settings["skipWebFetchPreflight"] = True
         return json.dumps(settings) if settings else None
 
     def _build_model_provider_env(self) -> dict[str, str] | None:
