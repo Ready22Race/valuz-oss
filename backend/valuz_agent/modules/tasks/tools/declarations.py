@@ -251,15 +251,6 @@ _CREATE_TASK_PARAMETERS: dict[str, Any] = {
                 "agent of the current conversation."
             ),
         },
-        "dispatch_mode": {
-            "type": "string",
-            "enum": ["sync", "async"],
-            "description": (
-                "Dispatch architecture for the spawned lead. 'async' (default) "
-                "= persistent actor that dispatches members in parallel; 'sync' "
-                "= lead blocks on each dispatch in a single turn."
-            ),
-        },
         "refs": {
             "type": "array",
             "items": {"type": "string"},

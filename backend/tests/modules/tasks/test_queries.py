@@ -230,7 +230,10 @@ async def test_list_members_degrades_when_agent_not_loadable(db_factory, tmp_pat
     async def _no_agent(_member, _ds, **_kw):
         return None
 
-    monkeypatch.setattr(queries, "_member_agent_config", _no_agent)
+    from valuz_agent.modules.tasks import resolution as res_mod
+
+    # membership listing now lives behind the resolver seam
+    monkeypatch.setattr(res_mod, "_member_agent_config", _no_agent)
 
     out = await queries.list_members("w1", user_id=LOCAL_USER_ID)
 

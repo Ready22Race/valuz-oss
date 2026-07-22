@@ -6,7 +6,9 @@ import type { LLMModel } from "@valuz/shared";
 
 import type { LLMChannelDetail } from "../api/providers-api";
 import { clearRequestCacheForTests } from "../api/request";
+import { setComposerCatalogAdapter } from "../edition/composer-catalog";
 import {
+  useComposerProviderChannelState,
   useComposerProviderChannels,
   useComposerProviders,
   type RuntimeProvider,
@@ -50,46 +52,150 @@ const provider = (
 });
 
 afterEach(() => {
+  setComposerCatalogAdapter(null);
   clearRequestCacheForTests();
   vi.unstubAllGlobals();
 });
 
 describe("useComposerProviderChannels", () => {
+  it("distinguishes a pending request from a successful empty catalog", async () => {
+    let resolveRequest!: (value: Response) => void;
+    const request = new Promise<Response>((resolve) => {
+      resolveRequest = resolve;
+    });
+    vi.stubGlobal("fetch", vi.fn().mockReturnValue(request));
+
+    const { result } = renderHook(() =>
+      useComposerProviderChannelState("http://localhost:8000"),
+    );
+
+    expect(result.current).toEqual({ providers: [], status: "loading" });
+
+    await act(async () => {
+      resolveRequest(
+        new Response(JSON.stringify({ providers: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+      await request;
+    });
+
+    await waitFor(() =>
+      expect(result.current).toEqual({ providers: [], status: "ready" }),
+    );
+  });
+
+  it("reports a failed catalog request without treating it as ready", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValue(new Error("provider catalog unavailable")),
+    );
+
+    const { result } = renderHook(() =>
+      useComposerProviderChannelState("http://localhost:8000"),
+    );
+
+    await waitFor(() =>
+      expect(result.current).toEqual({ providers: [], status: "error" }),
+    );
+  });
+
+  it("returns loading immediately when the execution target changes", async () => {
+    const localProvider = provider({ id: "local", name: "Local" });
+    let resolveCloud!: (value: Response) => void;
+    let resolveLocalRefresh!: (value: Response) => void;
+    const cloudRequest = new Promise<Response>((resolve) => {
+      resolveCloud = resolve;
+    });
+    const localRefreshRequest = new Promise<Response>((resolve) => {
+      resolveLocalRefresh = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ providers: [localProvider] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        )
+        .mockReturnValueOnce(cloudRequest)
+        .mockReturnValueOnce(localRefreshRequest),
+    );
+
+    const { result, rerender } = renderHook(
+      ({ baseUrl }) => useComposerProviderChannelState(baseUrl),
+      { initialProps: { baseUrl: "http://localhost:8000" } },
+    );
+    await waitFor(() => expect(result.current.status).toBe("ready"));
+
+    rerender({ baseUrl: "https://cloud.example.test" });
+    expect(result.current).toEqual({ providers: [], status: "loading" });
+    rerender({ baseUrl: "http://localhost:8000" });
+    expect(result.current).toEqual({ providers: [], status: "loading" });
+
+    await act(async () => {
+      resolveCloud(
+        new Response(JSON.stringify({ providers: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+      await cloudRequest;
+    });
+    expect(result.current).toEqual({ providers: [], status: "loading" });
+
+    await act(async () => {
+      resolveLocalRefresh(
+        new Response(JSON.stringify({ providers: [localProvider] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+      await localRefreshRequest;
+    });
+    await waitFor(() =>
+      expect(result.current).toEqual({
+        providers: [localProvider],
+        status: "ready",
+      }),
+    );
+  });
+
   it("reloads the gated model list from each selected execution target", async () => {
     const localProvider = provider({ id: "local", name: "Local" });
     const cloudProvider = provider({ id: "cloud", name: "Cloud" });
-    const fetchSpy = vi.fn().mockImplementation((input: string) =>
-      Promise.resolve(
-        new Response(
-          JSON.stringify({
-            providers: input.includes("cloud.example.test")
-              ? [cloudProvider]
-              : [localProvider],
-          }),
-          {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          },
-        ),
-      ),
+    const listProviderChannels = vi.fn(
+      ({ targetId }: { targetId?: string | null }) =>
+        Promise.resolve({
+          providers: targetId === "cloud" ? [cloudProvider] : [localProvider],
+        }),
     );
-    vi.stubGlobal("fetch", fetchSpy);
+    setComposerCatalogAdapter({
+      getScopeKey: ({ targetId }) => `test:${targetId ?? "default"}`,
+      listAgents: vi.fn(),
+      listProviderChannels,
+    });
 
     const { result, rerender } = renderHook(
-      ({ baseUrl }) => useComposerProviderChannels(baseUrl),
-      { initialProps: { baseUrl: "http://localhost:8000" } },
+      ({ targetId }) => useComposerProviderChannels(targetId),
+      { initialProps: { targetId: "local" } },
     );
 
     await waitFor(() => expect(result.current).toEqual([localProvider]));
-    rerender({ baseUrl: "https://cloud.example.test" });
+    rerender({ targetId: "cloud" });
     await waitFor(() => expect(result.current).toEqual([cloudProvider]));
-    rerender({ baseUrl: "http://localhost:8000" });
+    rerender({ targetId: "local" });
     await waitFor(() => expect(result.current).toEqual([localProvider]));
 
-    expect(fetchSpy.mock.calls.map(([url]) => url)).toEqual([
-      "http://localhost:8000/v1/providers?gated=1",
-      "https://cloud.example.test/v1/providers?gated=1",
-      "http://localhost:8000/v1/providers?gated=1",
+    expect(
+      listProviderChannels.mock.calls.map(([context]) => context.targetId),
+    ).toEqual([
+      "local",
+      "cloud",
+      "local",
     ]);
   });
 
@@ -102,20 +208,22 @@ describe("useComposerProviderChannels", () => {
     const cloudRequest = new Promise<Response>((resolve) => {
       resolveCloud = resolve;
     });
-    vi.stubGlobal(
-      "fetch",
-      vi
-        .fn()
-        .mockReturnValueOnce(localRequest)
-        .mockReturnValueOnce(cloudRequest),
-    );
+    const listProviderChannels = vi
+      .fn()
+      .mockReturnValueOnce(localRequest.then((response) => response.json()))
+      .mockReturnValueOnce(cloudRequest.then((response) => response.json()));
+    setComposerCatalogAdapter({
+      getScopeKey: ({ targetId }) => `test:${targetId ?? "default"}`,
+      listAgents: vi.fn(),
+      listProviderChannels,
+    });
 
     const { result, rerender } = renderHook(
-      ({ baseUrl }) => useComposerProviderChannels(baseUrl),
-      { initialProps: { baseUrl: "http://localhost:8000" } },
+      ({ targetId }) => useComposerProviderChannels(targetId),
+      { initialProps: { targetId: "local" } },
     );
 
-    rerender({ baseUrl: "https://cloud.example.test" });
+    rerender({ targetId: "cloud" });
     expect(result.current).toEqual([]);
 
     await act(async () => {

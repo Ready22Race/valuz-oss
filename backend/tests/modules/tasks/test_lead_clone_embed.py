@@ -60,7 +60,6 @@ def _build_lead_request(monkeypatch: pytest.MonkeyPatch):
             task_id="t1",
             run_dir="/proj",
             brief="do the thing",
-            dispatch_mode="async",
             goal_mode=True,
         )
     )
@@ -72,7 +71,7 @@ def test_embed_lead_clone_into_create_request(monkeypatch: pytest.MonkeyPatch) -
     base_agent, request = _build_lead_request(monkeypatch)
 
     clone = asyncio.run(
-        TaskOrchestrator()._materialize_lead_agent(base_agent, dispatch_mode="async")
+        TaskOrchestrator()._materialize_lead_agent(base_agent)
     )
     assert clone.id == "agent:lead-base__lead__async"
 

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { Agent } from "../api/agents-api";
 import { clearRequestCacheForTests } from "../api/request";
+import { setComposerCatalogAdapter } from "../edition/composer-catalog";
 import { useComposerAgentLibrary } from "./use-agent";
 
 const agent = (slug: string): Agent => ({
@@ -26,34 +27,29 @@ const agent = (slug: string): Agent => ({
 });
 
 afterEach(() => {
+  setComposerCatalogAdapter(null);
   clearRequestCacheForTests();
   vi.unstubAllGlobals();
 });
 
 describe("useComposerAgentLibrary", () => {
   it("reloads agents from each selected execution target", async () => {
-    const fetchSpy = vi.fn().mockImplementation((input: string) =>
-      Promise.resolve(
-        new Response(
-          JSON.stringify({
-            agents: [
-              input.includes("cloud.example.test")
-                ? agent("cloud-agent")
-                : agent("local-agent"),
-            ],
-          }),
-          {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          },
-        ),
-      ),
+    const listAgents = vi.fn(({ targetId }: { targetId?: string | null }) =>
+      Promise.resolve({
+        agents: [
+          targetId === "cloud" ? agent("cloud-agent") : agent("local-agent"),
+        ],
+      }),
     );
-    vi.stubGlobal("fetch", fetchSpy);
+    setComposerCatalogAdapter({
+      getScopeKey: ({ targetId }) => `test:${targetId ?? "default"}`,
+      listAgents,
+      listProviderChannels: vi.fn(),
+    });
 
     const { result, rerender } = renderHook(
-      ({ baseUrl }) => useComposerAgentLibrary(baseUrl),
-      { initialProps: { baseUrl: "http://localhost:8000" } },
+      ({ targetId }) => useComposerAgentLibrary(targetId),
+      { initialProps: { targetId: "local" } },
     );
 
     await waitFor(() =>
@@ -63,7 +59,7 @@ describe("useComposerAgentLibrary", () => {
       }),
     );
 
-    rerender({ baseUrl: "https://cloud.example.test" });
+    rerender({ targetId: "cloud" });
     expect(result.current).toEqual({ agents: [], loaded: false });
     await waitFor(() =>
       expect(result.current).toEqual({
@@ -72,9 +68,10 @@ describe("useComposerAgentLibrary", () => {
       }),
     );
 
-    expect(fetchSpy.mock.calls.map(([url]) => url)).toEqual([
-      "http://localhost:8000/v1/agents",
-      "https://cloud.example.test/v1/agents",
+    expect(listAgents).toHaveBeenCalledTimes(2);
+    expect(listAgents.mock.calls.map(([context]) => context.targetId)).toEqual([
+      "local",
+      "cloud",
     ]);
   });
 
@@ -87,20 +84,22 @@ describe("useComposerAgentLibrary", () => {
     const cloudRequest = new Promise<Response>((resolve) => {
       resolveCloud = resolve;
     });
-    vi.stubGlobal(
-      "fetch",
-      vi
-        .fn()
-        .mockReturnValueOnce(localRequest)
-        .mockReturnValueOnce(cloudRequest),
-    );
+    const listAgents = vi
+      .fn()
+      .mockReturnValueOnce(localRequest.then((response) => response.json()))
+      .mockReturnValueOnce(cloudRequest.then((response) => response.json()));
+    setComposerCatalogAdapter({
+      getScopeKey: ({ targetId }) => `test:${targetId ?? "default"}`,
+      listAgents,
+      listProviderChannels: vi.fn(),
+    });
 
     const { result, rerender } = renderHook(
-      ({ baseUrl }) => useComposerAgentLibrary(baseUrl),
-      { initialProps: { baseUrl: "http://localhost:8000" } },
+      ({ targetId }) => useComposerAgentLibrary(targetId),
+      { initialProps: { targetId: "local" } },
     );
 
-    rerender({ baseUrl: "https://cloud.example.test" });
+    rerender({ targetId: "cloud" });
     expect(result.current).toEqual({ agents: [], loaded: false });
 
     await act(async () => {
@@ -130,17 +129,16 @@ describe("useComposerAgentLibrary", () => {
   });
 
   it("reloads the current target when its refresh key changes", async () => {
-    const fetchSpy = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ agents: [] }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }),
-    );
-    vi.stubGlobal("fetch", fetchSpy);
+    const listAgents = vi.fn().mockResolvedValue({ agents: [] });
+    setComposerCatalogAdapter({
+      getScopeKey: ({ targetId }) => `test:${targetId ?? "default"}`,
+      listAgents,
+      listProviderChannels: vi.fn(),
+    });
 
     const { result, rerender } = renderHook(
       ({ refreshKey }) =>
-        useComposerAgentLibrary("http://localhost:8000", refreshKey),
+        useComposerAgentLibrary("local", refreshKey),
       { initialProps: { refreshKey: "first" } },
     );
 
@@ -148,6 +146,6 @@ describe("useComposerAgentLibrary", () => {
     rerender({ refreshKey: "second" });
     expect(result.current).toEqual({ agents: [], loaded: false });
     await waitFor(() => expect(result.current.loaded).toBe(true));
-    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(listAgents).toHaveBeenCalledTimes(2);
   });
 });

@@ -5,10 +5,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from src.core.tools import ExecContext
 
 import valuz_agent.boot.kernel  # noqa: F401
 import valuz_agent.modules.genui.tools as t
-from src.core.tools import ExecContext
 from valuz_agent.modules.genui.tools import build_generative_ui_tool_defs
 
 

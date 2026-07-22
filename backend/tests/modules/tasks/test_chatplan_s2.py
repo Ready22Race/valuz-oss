@@ -386,6 +386,7 @@ def test_commit_task_returns_error_for_missing_task(db_factory, tmp_path):
             task_id="nope",
             project_id="w1",
             caller_session_id="chat-session-1",
+            user_id=OWNER,
         )
     )
     assert "error" in result

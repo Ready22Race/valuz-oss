@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 
-import { agentsApi, type Agent } from '../api/agents-api'
+import type { Agent } from '../api/agents-api'
+import { getComposerCatalogAdapter } from '../edition/composer-catalog'
 import { useAgentStore } from '../store/agent-store'
 
 export const useAgent = () => useAgentStore()
@@ -15,16 +16,19 @@ interface ComposerAgentLibraryState extends ComposerAgentLibrary {
 }
 
 /**
- * Load the temporary-conversation agent library from the execution target
- * selected in the composer. Target changes synchronously hide the previous
- * roster, and cleanup prevents a slower obsolete response from replacing the
- * active target's agents.
+ * Load the temporary-conversation agent library through the active edition's
+ * catalog adapter. OSS treats ``targetId`` as opaque; only an installed edition
+ * adapter may interpret it. Scope changes synchronously hide the previous
+ * roster, and cleanup prevents an obsolete response from replacing the active
+ * scope's agents.
  */
 export function useComposerAgentLibrary(
-  baseUrl?: string,
+  targetId?: string | null,
   refreshKey?: string | number | null,
 ): ComposerAgentLibrary {
-  const requestKey = `${baseUrl ?? ''}\u0000${refreshKey ?? ''}`
+  const adapter = getComposerCatalogAdapter()
+  const scopeKey = adapter.getScopeKey({ targetId })
+  const requestKey = `${scopeKey}\u0000${refreshKey ?? ''}`
   const [state, setState] = useState<ComposerAgentLibraryState>({
     requestKey,
     agents: [],
@@ -34,8 +38,8 @@ export function useComposerAgentLibrary(
   useEffect(() => {
     let active = true
 
-    void agentsApi
-      .listAgents(undefined, { baseUrl, fresh: true })
+    void adapter
+      .listAgents({ targetId })
       .then(({ agents }) => {
         if (active) setState({ requestKey, agents, loaded: true })
       })
@@ -46,7 +50,7 @@ export function useComposerAgentLibrary(
     return () => {
       active = false
     }
-  }, [baseUrl, requestKey])
+  }, [adapter, requestKey, targetId])
 
   if (state.requestKey !== requestKey) {
     return { agents: [], loaded: false }

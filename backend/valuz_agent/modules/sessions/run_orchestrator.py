@@ -24,7 +24,7 @@ import valuz_agent.boot.kernel  # noqa: F401
 from valuz_agent.adapters import kernel_client
 from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.infra.eventbus import EventBus
-from valuz_agent.modules.tasks.actor_runner import run_session_to_idle
+from valuz_agent.modules.sessions.turn_driver import run_session_to_idle
 
 logger = logging.getLogger(__name__)
 

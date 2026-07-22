@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from valuz_agent.infra.local_identity import resolve_local_user_id
+from valuz_agent.modules.sessions import turn_driver
 from valuz_agent.modules.tasks import actor_runner
 
 LOCAL_USER_ID = resolve_local_user_id()
@@ -42,7 +43,7 @@ def _run_to_idle_with_stop_reason(
     ``message`` carries ``stop_reason``; return (returned final_status, finalize
     call args). The turn outcome is classified off the message, not a re-read of
     the durable session (which is now only a secondary meter/error signal)."""
-    monkeypatch.setattr(actor_runner, "_restamp_always_on_mcp", _as_async(lambda *a, **k: None))
+    monkeypatch.setattr(turn_driver, "_restamp_always_on_mcp", _as_async(lambda *a, **k: None))
 
     after_run = SimpleNamespace(status="idle", stop_reason=stop_reason, metadata={})
 
@@ -50,7 +51,7 @@ def _run_to_idle_with_stop_reason(
         async def get_session(self, *a: Any, **k: Any) -> Any:
             return after_run
 
-    monkeypatch.setattr(actor_runner, "data_reader", lambda: _Reader())
+    monkeypatch.setattr(turn_driver, "data_reader", lambda: _Reader())
     monkeypatch.setattr(
         actor_runner.kernel_client,
         "run_turn",
@@ -66,7 +67,7 @@ def _run_to_idle_with_stop_reason(
     monkeypatch.setattr(run_orch, "_finalize_session", _fake_finalize)
 
     returned = asyncio.run(
-        actor_runner.run_session_to_idle("sess-1", "hi", _Bus(), user_id=LOCAL_USER_ID)
+        turn_driver.run_session_to_idle("sess-1", "hi", _Bus(), user_id=LOCAL_USER_ID)
     )
     return returned, finalize_calls
 

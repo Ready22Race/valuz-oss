@@ -19,8 +19,8 @@ from typing import Any
 
 import pytest
 
+from valuz_agent.modules.sessions import turn_driver
 from valuz_agent.modules.tasks import actor_runner
-
 
 LOCAL_USER_ID = "local-test-owner"
 
@@ -47,7 +47,7 @@ def test_restamp_calls_capabilities_helper(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(
         caps, "refresh_always_on_mcp_for_session", _as_async(lambda sid, *_: seen.append(sid))
     )
-    asyncio.run(actor_runner._restamp_always_on_mcp("sess-1", user_id=LOCAL_USER_ID))
+    asyncio.run(turn_driver._restamp_always_on_mcp("sess-1", user_id=LOCAL_USER_ID))
     assert seen == ["sess-1"]
 
 
@@ -59,7 +59,7 @@ def test_restamp_swallows_errors(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(caps, "refresh_always_on_mcp_for_session", _boom)
     # Must not raise — a re-stamp failure can never block the turn.
-    asyncio.run(actor_runner._restamp_always_on_mcp("sess-1", user_id=LOCAL_USER_ID))
+    asyncio.run(turn_driver._restamp_always_on_mcp("sess-1", user_id=LOCAL_USER_ID))
 
 
 # ── run_session_to_idle ─────────────────────────────────────────────────
@@ -68,7 +68,7 @@ def test_restamp_swallows_errors(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_run_session_to_idle_restamps_before_run_turn(monkeypatch: pytest.MonkeyPatch) -> None:
     order: list[str] = []
     monkeypatch.setattr(
-        actor_runner, "_restamp_always_on_mcp", _as_async(lambda _sid, *_: order.append("restamp"))
+        turn_driver, "_restamp_always_on_mcp", _as_async(lambda _sid, *_: order.append("restamp"))
     )
     sess = SimpleNamespace(status="idle", metadata={"valuz": {"run_kind": "lead"}})
     monkeypatch.setattr(actor_runner.kernel_client, "get_session", _as_async(lambda *_: sess))
@@ -83,7 +83,7 @@ def test_run_session_to_idle_restamps_before_run_turn(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(run_orch, "_finalize_session", _as_async(lambda *a, **k: None))
 
-    asyncio.run(actor_runner.run_session_to_idle("sess-1", "hi", _Bus(), user_id=LOCAL_USER_ID))
+    asyncio.run(turn_driver.run_session_to_idle("sess-1", "hi", _Bus(), user_id=LOCAL_USER_ID))
 
     assert "restamp" in order and "run_turn" in order
     assert order.index("restamp") < order.index("run_turn")
