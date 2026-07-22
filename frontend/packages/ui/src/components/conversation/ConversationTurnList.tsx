@@ -1163,7 +1163,19 @@ export function ConversationTurnList({
                 key={turn.id}
                 ref={rowVirtualizer.measureElement}
                 data-index={virtualRow.index}
-                className="absolute left-0 top-0 w-full"
+                // Opaque row background (matches the scroll container's
+                // ``bg-surface``, so invisible in the steady state). Rows are
+                // absolutely positioned from CACHED heights: when an earlier
+                // turn grows via late layout (markdown table / image load /
+                // code highlight / live streaming), the rows below keep their
+                // stale ``translateY`` for the frame(s) before the
+                // ResizeObserver re-measures — so they briefly land INSIDE the
+                // grown turn. In DOM order a later row paints on top, so the
+                // opaque background makes it cleanly cover the overflow instead
+                // of rendering text-on-text; the re-measure then separates them
+                // with no content lost. Does NOT touch the measurement path
+                // (calling ``measure()`` mid-stream regressed to "展示即消失").
+                className="absolute left-0 top-0 w-full bg-surface"
                 style={{
                   transform: `translateY(${virtualRow.start}px)`,
                 }}
