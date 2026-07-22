@@ -2619,11 +2619,30 @@ class ClaudeAgentRuntime:
                     case "error_max_budget_usd":
                         session.stop_reason = BudgetExhausted(reason="max_cost")
                     case "error_during_execution":
-                        session.stop_reason = Error(
-                            category="execution_error",
-                            retry_status="exhausted",
-                            message=_result_error_message(message),
-                        )
+                        ede_detail = _ede_interrupt_detail(message)
+                        if ede_detail is not None:
+                            # A marker-only result is the CLI misreporting an
+                            # interrupted turn (see ``_ede_interrupt_detail``):
+                            # stamp the quiet ``interrupted`` category — same
+                            # rendering as a runtime teardown — instead of a
+                            # scary execution_error card for a turn the user
+                            # (or the CLI's own steering) deliberately cut.
+                            logger.info(
+                                "claude: error_during_execution carried only an "
+                                "interrupt diagnostic, downgrading: %s",
+                                ede_detail,
+                            )
+                            session.stop_reason = Error(
+                                category="interrupted",
+                                retry_status="terminal",
+                                message=f"turn interrupted before completion ({ede_detail})",
+                            )
+                        else:
+                            session.stop_reason = Error(
+                                category="execution_error",
+                                retry_status="exhausted",
+                                message=_result_error_message(message),
+                            )
                     case _:
                         session.stop_reason = Error(
                             category=message.subtype,
@@ -2644,6 +2663,40 @@ class ClaudeAgentRuntime:
                     },
                 )
             )
+
+
+# The Claude Code CLI's turn engine ends every turn with a last-message
+# sanity check (last assistant message ends in text/thinking, OR last user
+# message is purely tool_result blocks, OR stop_reason == end_turn). An
+# *interrupted* turn always fails it: the CLI appends a synthetic plain-text
+# user message ("[Request interrupted by user…]") behind the in-flight
+# tool's rejection, so the loop ends on a non-tool_result user message with
+# stop_reason still ``tool_use`` — and the CLI reports THAT as
+# ``subtype="error_during_execution"`` whose ``errors`` carry only a
+# ``[ede_diagnostic] result_type=… last_content_type=… stop_reason=…``
+# marker (ede = error_during_execution). Observed triggers: a host Stop
+# racing the turn boundary, the CLI's own queued-input / task-notification
+# steering, and an upstream turn that produced no assistant message. The
+# CLI's own UI mapper filters ``[ede_diagnostic]`` strings out and renders
+# nothing for such results — the marker is a debug artifact, not a
+# user-facing error — so a marker-only errors array is an interruption
+# signature, not an execution failure.
+_EDE_DIAGNOSTIC_PREFIX = "[ede_diagnostic]"
+
+
+def _ede_interrupt_detail(message: Any) -> str | None:
+    """The joined diagnostic detail if a failing ``ResultMessage`` carries
+    ONLY ``[ede_diagnostic]`` marker lines (no API status, no result text,
+    no real error line), else ``None`` — anything more falls through to the
+    ``execution_error`` path."""
+    if getattr(message, "api_error_status", None) is not None:
+        return None
+    if getattr(message, "result", None):
+        return None
+    errors = [str(e) for e in (getattr(message, "errors", None) or [])]
+    if not errors or not all(e.startswith(_EDE_DIAGNOSTIC_PREFIX) for e in errors):
+        return None
+    return "; ".join(errors)
 
 
 def _result_error_message(message: Any) -> str:
