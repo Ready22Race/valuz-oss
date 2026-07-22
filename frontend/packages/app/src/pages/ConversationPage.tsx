@@ -3817,6 +3817,17 @@ export const ConversationPage = () => {
         // busy state from here). Replays (reconnect backfill) stay inert.
         if (evType === "message.user" && !isReplayOfSeen) {
           setSending(false);
+          // A turn starting is the authoritative "a queued head may have just
+          // been dispatched" signal — the drain marks the row ``dispatched``
+          // (a host-local write, no mirror lag) BEFORE emitting this event, so
+          // refetching now always reads post-dispatch state and drops the
+          // consumed item from the queue bar. This is timing-independent,
+          // unlike the ``isBusy`` edge refetch below (which misses when the
+          // idle→running transition is coalesced into one render and ``isBusy``
+          // never dips — the "dispatched item keeps showing as queued during
+          // its own turn" bug). Harmless for a direct (non-drain) send: the
+          // refetch returns the same list. The ticket guard dedups overlap.
+          void refreshQueueRef.current();
         }
         const status = event.event.payload.status;
         // Reconcile the authoritative status from the live frame so the derived
@@ -4326,6 +4337,14 @@ export const ConversationPage = () => {
       /* best-effort — a queue fetch failure must not break the conversation */
     }
   }, [selectedSessionId, applyQueueList]);
+
+  // Kept current so the SSE ``appendEvent`` closure (created once inside the
+  // deps-``[]`` ``subscribeToSession`` callback) always calls the latest
+  // ``refreshQueue`` without re-subscribing.
+  const refreshQueueRef = useRef(refreshQueue);
+  useEffect(() => {
+    refreshQueueRef.current = refreshQueue;
+  }, [refreshQueue]);
 
   const performEnqueue = async () => {
     const text = draft.trim();
