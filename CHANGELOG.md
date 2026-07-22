@@ -7,16 +7,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-07-23
+
 ### Added
 
-- **Composer catalog extension** — editions can register one generic adapter
-  for model and agent catalog loading while OSS keeps its single-backend
-  module-default behavior.
+- **Local data backup** — versioned snapshots of the client's local data with
+  scheduling, version browsing, and restore (#572 @Ready22Race).
+- **Per-entity execution location** — automations, knowledge bases, and library
+  resources each carry their own execution target (#597 @hanjixin).
 - **Automation runtime seam** — deployments can bind an
   `AutomationRuntimePort`, dispatch and execute persisted automation runs
   through stable facades, and initialize the canonical executor in a headless
   worker context. The default binding preserves the existing in-process runner
-  and failure monitor.
+  and failure monitor (#570 @homeant).
+- **Lifecycle unit of work** — exposed to overlays so edition code can join the
+  host transaction (#579 @homeant).
+- **Async sandbox credential verifier port** — managed editions can bind a
+  database/cache/identity-service verifier without changing the wire contract
+  (#581 @homeant).
+- **Task finalization events** — `task.finalized` published on terminal writes,
+  and the memory-review sandbox released with it (#564 @Ready22Race).
+- **Codex thread items** — `imageView` and `contextCompaction` surfaced in the
+  transcript (#571 @jiaoqsh).
+- **Claude runtime** — env-gated `skipWebFetchPreflight` CLI setting
+  (#600 @jiaoqsh).
+
+### Changed
+
+- **Storage** — uniform `RuntimeStore` dual-write across the kernel and the
+  host durable data plane (#578 @Ready22Race).
+- **Tasks** — host-resident task module finalized: de-duplication, explicit
+  seams, dead-code purge, and type tightening (#594 @Ready22Race).
+- **Frontend event stream** — session-lifetime stream plus a queue-drain busy
+  gate replaces the per-view wiring (#593 @Ready22Race).
+- **Composer catalog extension** — editions can register one generic adapter
+  for model and agent catalog loading while OSS keeps its single-backend
+  module-default behavior (#595 @homeant).
+- **Providers** — the composer's 1+N provider fan-out replaced with one gated
+  list request (#573 @jiaoqsh).
+- **Frontend design spec** — remaining spec violations corrected across the app
+  (#562 @yy83000812).
+
+### Fixed
+
+- **Conversations** — follow-up turns rendered nothing because a stale-cursor
+  replay closed the send-path stream; list fan-out now times out instead of
+  hanging (#589 @St0neWan9); waiting pill stuck on running turns and queued
+  messages invisible or flickering (#590 @Ready22Race); a resolved turn is
+  classified from the authoritative `run_turn` result rather than a lagging
+  mirror re-read (#587 @Ready22Race); conversation history stays stable while
+  models load (#596 @St0neWan9).
+- **List surfaces** — resilient to a degraded cloud target (#588 @St0neWan9)
+  with follow-ups for abort, re-probe, banner gating, and the list cache
+  (#591 @St0neWan9).
+- **Events** — subagent events attributed with `parent_tool_use_id` so they no
+  longer shred the lead's live stream (#565 @Ready22Race); streaming deltas
+  coalesced per flow instead of per type (#566 @Ready22Race).
+- **Execution location** — automation/KB probe gap closed and docs health
+  fanned out (#599 @hanjixin); the managed project's origin is recorded for
+  remote conversations (#601 @St0neWan9).
+- **Composer** — models (#586 @homeant) and agents (#592 @homeant) load from
+  the selected service.
+- **MCP** — FastMCP DNS-rebinding 421s stopped on the built-in servers
+  (#574 @Ready22Race); built-in FastMCP servers made stateless for
+  multi-replica deploys (#575 @Ready22Race).
+- **Notifications** — unread badge cleared when a conversation is opened
+  (#576 @Ready22Race); badge redesigned around a single unread signal with
+  corrected sizing/optical alignment and a focus-visible sheet close
+  (#602 @St0neWan9).
+- **Runtime** — bg-busy marker released on terminal `task_updated` pushes
+  (#568 @Ready22Race); marker-only `error_during_execution` classified as
+  interrupted (#598 @jiaoqsh).
+- **Memory** — review runs inside the source session's sandbox instead of a new
+  one (#577 @Ready22Race).
+- **Database** — `pool_pre_ping` + `pool_recycle` enabled on non-SQLite engines
+  (#569 @Ready22Race).
+- **Boot** — a source backend refuses to run on the packaged app's data dir
+  (#563 @St0neWan9).
+- **Agents** — runtime validated at the API boundary (#560 @St0neWan9).
+- **Skills** — skill-service request unit of work committed (#580 @homeant).
+- **Frontend** — public asset paths resolved via `BASE_URL` for the browser
+  router (#561 @hanjixin); the border around the HTML artifact preview iframe
+  dropped (#567 @St0neWan9).
+
+### Docs & Chore
+
+- Deps: `openai-codex` 0.1.0b3 → 0.144.4, the first stable release
+  (#583 @jiaoqsh); `claude-agent-sdk` 0.2.95 → 0.2.123 (CLI 2.1.215)
+  (#585 @jiaoqsh).
+- Tests: protocol-surface parity red on main fixed by excluding the host-side
+  composite (#584 @Ready22Race).
 
 ## [0.3.3] - 2026-07-15
 
