@@ -112,6 +112,57 @@ async def test_error_during_execution_keeps_category() -> None:
     assert "boom" in reason.message
 
 
+# -- interrupt misreported as error_during_execution -------------------------
+#
+# The CLI labels an interrupted turn (host Stop racing the turn boundary, the
+# CLI's own queued-input / task-notification steering) as
+# ``error_during_execution`` with a lone ``[ede_diagnostic] …`` marker in
+# ``errors`` — its own UI filters that marker out and shows nothing. A
+# marker-only result must land as the quiet ``interrupted`` category, never
+# as an execution_error card.
+
+_EDE_LINE = "[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=tool_use"
+
+
+async def test_ede_diagnostic_only_is_interrupted() -> None:
+    reason = await _classify(_result("error_during_execution", is_error=True, errors=[_EDE_LINE]))
+    assert isinstance(reason, Error)
+    assert reason.category == "interrupted"
+    assert reason.retry_status == "terminal"
+    assert _EDE_LINE in reason.message  # forensics preserved in the stored reason
+
+
+async def test_ede_diagnostic_turn_aborted_variant_is_interrupted() -> None:
+    # The engine's other marker shape, same prefix.
+    aborted = "[ede_diagnostic] turn aborted (user_interrupt) stop_reason=tool_use"
+    reason = await _classify(_result("error_during_execution", is_error=True, errors=[aborted]))
+    assert isinstance(reason, Error)
+    assert reason.category == "interrupted"
+
+
+async def test_ede_diagnostic_with_real_error_stays_execution_error() -> None:
+    reason = await _classify(
+        _result("error_during_execution", is_error=True, errors=[_EDE_LINE, "tool crashed: boom"])
+    )
+    assert isinstance(reason, Error)
+    assert reason.category == "execution_error"
+    assert "tool crashed: boom" in reason.message
+
+
+async def test_ede_diagnostic_with_result_text_stays_execution_error() -> None:
+    reason = await _classify(
+        _result("error_during_execution", is_error=True, errors=[_EDE_LINE], result="boom")
+    )
+    assert isinstance(reason, Error)
+    assert reason.category == "execution_error"
+
+
+async def test_error_during_execution_without_errors_stays_execution_error() -> None:
+    reason = await _classify(_result("error_during_execution", is_error=True))
+    assert isinstance(reason, Error)
+    assert reason.category == "execution_error"
+
+
 async def test_unknown_subtype_falls_through_to_error() -> None:
     reason = await _classify(_result("error_something_new", is_error=True, result="weird"))
     assert isinstance(reason, Error)
