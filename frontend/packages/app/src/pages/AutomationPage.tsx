@@ -44,6 +44,7 @@ import {
   CreateAutomationDialog,
   type AutomationAgentChoice,
 } from "@valuz/app/components";
+import { OriginIcon } from "../components/ExecutionLocationPicker";
 
 type I18nKey = Parameters<ReturnType<typeof useTranslation>["t"]>[0];
 const k = (key: string) => key as I18nKey;
@@ -94,6 +95,7 @@ function automationToTableRow(item: AutomationItem) {
         : undefined,
     last: relativeTime(item.last_run_at),
     status: (item.status === "enabled" ? "on" : "off") as "on" | "off",
+    exec_origin: item.exec_origin,
   };
 }
 
@@ -487,6 +489,7 @@ export const AutomationPage = () => {
                       onRowClick={(id) => navigate(`/automations/${id}`)}
                       onToggle={(id) => toggleAutomation(id)}
                       onRunNow={(id) => runNow(id)}
+                      renderOrigin={(o) => <OriginIcon origin={o} />}
                       onDelete={(id) => {
                         const automation = group.automations.find(
                           (item) => item.automation_id === id,

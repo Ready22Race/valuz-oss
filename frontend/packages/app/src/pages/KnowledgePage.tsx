@@ -70,6 +70,7 @@ import type { DirectoryFieldMode } from "@valuz/app/layout";
 import { usePlatform } from "@valuz/app/platform";
 import { useTranslation } from "@valuz/core";
 import { CreateKbDialog } from "../components";
+import { OriginIcon } from "../components/ExecutionLocationPicker";
 
 type UiStatus = "ready" | "indexing" | "failed" | "queued" | "missing";
 
@@ -859,8 +860,11 @@ export const KnowledgePage = ({
                         ) : null}
                       </div>
                       <div className="mt-4 min-w-0">
-                        <div className="truncate text-sm font-medium text-ink-heading">
-                          {kb.name}
+                        <div className="flex items-center gap-1">
+                          <span className="truncate text-sm font-medium text-ink-heading">
+                            {kb.name}
+                          </span>
+                          <OriginIcon origin={kb.exec_origin} />
                         </div>
                         <div className="mt-1 line-clamp-2 break-all text-xs leading-5 text-ink-meta">
                           {kb.root_path}
