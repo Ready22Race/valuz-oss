@@ -13,6 +13,7 @@ import {
 } from "@valuz/ui";
 import {
   agentsApi,
+  resolveApiBase,
   useTranslation,
   type Agent,
   type MemberWithAgent,
@@ -62,15 +63,19 @@ export const DeployAgentsDialog = ({
   }, [agents]);
 
   const refresh = async () => {
+    // Re-source from the project's owning backend (same reason as the parent
+    // page's library load) so post-deploy refresh stays on the right target.
+    const baseUrl = resolveApiBase({ projectId }, "") || undefined;
     const [agentsRes] = await Promise.all([
-      agentsApi.listAgents(),
+      agentsApi.listAgents(undefined, baseUrl ? { baseUrl } : undefined),
       onChanged(),
     ]);
     setLiveAgents(agentsRes.agents);
   };
 
   const deployedSourceSlugs = useMemo(
-    () => new Set(members.map((m) => m.member.source_agent_slug).filter(Boolean)),
+    () =>
+      new Set(members.map((m) => m.member.source_agent_slug).filter(Boolean)),
     [members],
   );
   const memberBySourceSlug = useMemo(

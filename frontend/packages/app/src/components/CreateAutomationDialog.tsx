@@ -18,12 +18,12 @@
 import { useEffect, useRef, useState } from "react";
 import { Maximize2 } from "lucide-react";
 import type { ActionKind, AutomationProjectTarget, Trigger } from "@valuz/core";
-import { automationsApi } from "@valuz/core";
 import {
-  browserTimezone,
-  timezoneLabel,
-  timezoneOptions,
-} from "@valuz/shared";
+  automationsApi,
+  getDefaultExecutionTarget,
+  useExecutionTargets,
+} from "@valuz/core";
+import { browserTimezone, timezoneLabel, timezoneOptions } from "@valuz/shared";
 import {
   Button,
   CronInput,
@@ -48,6 +48,10 @@ import {
   Textarea,
 } from "@valuz/ui";
 import { useI18n } from "@valuz/ui";
+import {
+  ExecutionLocationPicker,
+  OriginBadge,
+} from "./ExecutionLocationPicker";
 
 /** Minimum interval seconds — matches backend `MIN_INTERVAL_SECONDS` */
 const MIN_INTERVAL_SECONDS = 30;
@@ -109,6 +113,12 @@ export interface CreateAutomationDialogProps {
     trigger: Trigger;
     action_kind: ActionKind;
     worktree: boolean;
+    /** Execution-location target id (``"local"``/``"cloud"``) for a
+     * Chat-standalone automation on multi-target editions; ``undefined`` for
+     * project-bound targets (they inherit the project's origin), in edit
+     * mode, and on single-backend builds. The parent resolves it to a
+     * ``baseUrl`` for the create call. */
+    exec_location?: string;
   }) => Promise<void>;
   /**
    * Candidate agents the user can pick. Parent loads from either
@@ -141,6 +151,14 @@ export interface CreateAutomationDialogProps {
   selectedTargetId?: string | null;
   /** Notify the parent the user picked a different target. */
   onSelectTarget?: (id: string) => void;
+  /** Currently-selected execution location for a Chat-standalone target
+   *  (``"local"``/``"cloud"``), owned by the parent so it can re-source the
+   *  Chat agent list from the matching backend. ``undefined`` on
+   *  single-target builds and for project-bound targets (those inherit the
+   *  project's origin). */
+  selectedExecLocation?: string | null;
+  /** Notify the parent the user changed the Chat-standalone location. */
+  onSelectExecLocation?: (id: string) => void;
   /**
    * Display name of the locked project for flows where the target is fixed
    * and no selector is shown (the project detail page — the automation is
@@ -174,6 +192,8 @@ export const CreateAutomationDialog = ({
   targets,
   selectedTargetId,
   onSelectTarget,
+  selectedExecLocation,
+  onSelectExecLocation,
   fixedTargetName,
   initial,
   title: titleProp,
@@ -212,6 +232,17 @@ export const CreateAutomationDialog = ({
   const taskModeAllowed = showTargetSelector
     ? projectTargets.length > 0
     : allowTaskMode;
+
+  // Execution location (multi-target editions only). An automation fires a
+  // session in its target project's cwd on that project's backend, so a
+  // project-bound target INHERITS the project's origin (read-only badge);
+  // only a Chat-standalone target (no project_id — backend lazy-creates a
+  // chat project) needs a picker, and the chosen backend is where that chat
+  // project lands. Hidden on single-target builds (picker renders null) and
+  // in edit mode (``showTargetSelector`` is false).
+  const execTargets = useExecutionTargets();
+  const isChatStandaloneTarget =
+    showTargetSelector && selectedTarget?.kind !== "project";
 
   const [name, setName] = useState("");
   const [prompt, setPrompt] = useState("");
@@ -467,6 +498,13 @@ export const CreateAutomationDialog = ({
       // Worktree applies to both chat and task, gated on a real (git-repo)
       // project being bound — the same condition as ``taskModeAllowed``.
       worktree: taskModeAllowed ? worktree : false,
+      // Only a Chat-standalone target carries a location choice; project-bound
+      // targets inherit the project's origin and the parent routes via the
+      // project id.
+      exec_location:
+        isChatStandaloneTarget && execTargets.length >= 2
+          ? (selectedExecLocation ?? getDefaultExecutionTarget()?.id)
+          : undefined,
     });
     onOpenChange(false);
   };
@@ -523,107 +561,117 @@ export const CreateAutomationDialog = ({
               <DialogDescription>{description}</DialogDescription>
             </DialogHeader>
 
-        <div className="flex min-h-0 flex-1 flex-col gap-[14px] overflow-y-auto px-[18px] py-[14px]">
-          <FormField label={t("cron.taskName" as Parameters<typeof t>[0])}>
-            <Input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder={t(
-                "cron.taskNamePlaceholder" as Parameters<typeof t>[0],
-              )}
-            />
-          </FormField>
+            <div className="flex min-h-0 flex-1 flex-col gap-[14px] overflow-y-auto px-[18px] py-[14px]">
+              <FormField label={t("cron.taskName" as Parameters<typeof t>[0])}>
+                <Input
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder={t(
+                    "cron.taskNamePlaceholder" as Parameters<typeof t>[0],
+                  )}
+                />
+              </FormField>
 
-          {/* Execution mode — Chat (single agent run) vs Task (kick off
+              {/* Execution mode — Chat (single agent run) vs Task (kick off
               project task with this agent as Lead). Placed above the
               instruction so the user picks the mode before writing the
               prompt — the same prompt reads differently depending on
               whether it's a single turn or a task goal. Task mode is
               only valid on project projects; on chat we render the
               toggle but disable the Task pill with a hint. */}
-          <FormField
-            label={t("automation.actionKindLabel" as Parameters<typeof t>[0])}
-          >
-            <div className="flex items-stretch gap-2">
-              {(
-                [
-                  {
-                    value: "chat" as const,
-                    label: t(
-                      "automation.actionKindChat" as Parameters<typeof t>[0],
-                    ),
-                    hint: t(
-                      "automation.actionKindChatHint" as Parameters<
-                        typeof t
-                      >[0],
-                    ),
-                    disabled: false,
-                  },
-                  {
-                    value: "task" as const,
-                    label: t(
-                      "automation.actionKindTask" as Parameters<typeof t>[0],
-                    ),
-                    hint: taskModeAllowed
-                      ? t(
-                          "automation.actionKindTaskHint" as Parameters<
-                            typeof t
-                          >[0],
-                        )
-                      : t(
-                          "automation.actionKindTaskDisabledHint" as Parameters<
+              <FormField
+                label={t(
+                  "automation.actionKindLabel" as Parameters<typeof t>[0],
+                )}
+              >
+                <div className="flex items-stretch gap-2">
+                  {(
+                    [
+                      {
+                        value: "chat" as const,
+                        label: t(
+                          "automation.actionKindChat" as Parameters<
                             typeof t
                           >[0],
                         ),
-                    disabled: !taskModeAllowed,
-                  },
-                ] as const
-              ).map((opt) => {
-                const active = actionKind === opt.value;
-                return (
-                  <button
-                    key={opt.value}
-                    type="button"
-                    disabled={opt.disabled}
-                    onClick={() => !opt.disabled && handlePickMode(opt.value)}
-                    className={
-                      "flex-1 rounded-lg border px-3 py-2 text-left text-xs transition-colors " +
-                      (opt.disabled
-                        ? "cursor-not-allowed border-surface-border bg-surface-soft text-ink-meta opacity-60"
-                        : active
-                          ? "border-brand bg-brand/5 text-ink-heading"
-                          : "border-surface-border bg-card text-ink-body hover:border-brand/40")
-                    }
-                  >
-                    <div className="font-medium">{opt.label}</div>
-                    <div className="mt-0.5 text-[11px] leading-4 text-ink-meta">
-                      {opt.hint}
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          </FormField>
+                        hint: t(
+                          "automation.actionKindChatHint" as Parameters<
+                            typeof t
+                          >[0],
+                        ),
+                        disabled: false,
+                      },
+                      {
+                        value: "task" as const,
+                        label: t(
+                          "automation.actionKindTask" as Parameters<
+                            typeof t
+                          >[0],
+                        ),
+                        hint: taskModeAllowed
+                          ? t(
+                              "automation.actionKindTaskHint" as Parameters<
+                                typeof t
+                              >[0],
+                            )
+                          : t(
+                              "automation.actionKindTaskDisabledHint" as Parameters<
+                                typeof t
+                              >[0],
+                            ),
+                        disabled: !taskModeAllowed,
+                      },
+                    ] as const
+                  ).map((opt) => {
+                    const active = actionKind === opt.value;
+                    return (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        disabled={opt.disabled}
+                        onClick={() =>
+                          !opt.disabled && handlePickMode(opt.value)
+                        }
+                        className={
+                          "flex-1 rounded-lg border px-3 py-2 text-left text-xs transition-colors " +
+                          (opt.disabled
+                            ? "cursor-not-allowed border-surface-border bg-surface-soft text-ink-meta opacity-60"
+                            : active
+                              ? "border-brand bg-brand/5 text-ink-heading"
+                              : "border-surface-border bg-card text-ink-body hover:border-brand/40")
+                        }
+                      >
+                        <div className="font-medium">{opt.label}</div>
+                        <div className="mt-0.5 text-[11px] leading-4 text-ink-meta">
+                          {opt.hint}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </FormField>
 
-          {/* Worktree toggle — shown whenever a real (git-repo) project is
+              {/* Worktree toggle — shown whenever a real (git-repo) project is
               bound, for BOTH chat and task actions. Off = the fire works in the
               project directory; on = it runs in an isolated git worktree (a
               chat fire gets its own session worktree; a task shares one across
               lead + members) whose branch merges back / is discarded at end. */}
-          {taskModeAllowed && (
-            <FormField
-              label={t("automation.worktreeLabel" as Parameters<typeof t>[0])}
-            >
-              <div className="flex items-center justify-between gap-3 rounded-lg border border-surface-border bg-card px-3 py-2">
-                <p className="text-[11px] leading-4 text-ink-meta">
-                  {t("automation.worktreeHint" as Parameters<typeof t>[0])}
-                </p>
-                <Switch checked={worktree} onCheckedChange={setWorktree} />
-              </div>
-            </FormField>
-          )}
+              {taskModeAllowed && (
+                <FormField
+                  label={t(
+                    "automation.worktreeLabel" as Parameters<typeof t>[0],
+                  )}
+                >
+                  <div className="flex items-center justify-between gap-3 rounded-lg border border-surface-border bg-card px-3 py-2">
+                    <p className="text-[11px] leading-4 text-ink-meta">
+                      {t("automation.worktreeHint" as Parameters<typeof t>[0])}
+                    </p>
+                    <Switch checked={worktree} onCheckedChange={setWorktree} />
+                  </div>
+                </FormField>
+              )}
 
-          {/* "所属项目" — where this automation lives, picked before who runs
+              {/* "所属项目" — where this automation lives, picked before who runs
               it. Two presentations of the SAME control so the global and
               in-project dialogs read as one component:
               - Global automation page: an editable Select over the Chat
@@ -636,290 +684,340 @@ export const CreateAutomationDialog = ({
                 doubt) but unchangeable.
               The label is constant ("所属项目") across both modes — it never
               swaps mid-interaction. */}
-          {/* 所属项目 + 智能体 share one row. The project field is dropped when
+              {/* 所属项目 + 智能体 share one row. The project field is dropped when
               there's neither a selectable target nor a fixed project, so the
               agent field then spans the full width. */}
-          <div className="grid grid-cols-2 items-start gap-2">
-            {(showTargetSelector || fixedTargetName) && (
-              <div className="min-w-0">
-                {showTargetSelector ? (
+              <div className="grid grid-cols-2 items-start gap-2">
+                {(showTargetSelector || fixedTargetName) && (
+                  <div className="min-w-0">
+                    {showTargetSelector ? (
+                      <FormField
+                        label={t(
+                          "automation.targetLabelTask" as Parameters<
+                            typeof t
+                          >[0],
+                        )}
+                      >
+                        <Select
+                          value={selectedTargetId ?? ""}
+                          onValueChange={(v) => v && onSelectTarget?.(v)}
+                        >
+                          <SelectTrigger className="w-full">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {(actionKind === "task"
+                              ? projectTargets
+                              : targetList
+                            ).map((tg) => (
+                              <SelectItem key={tg.id} value={tg.id}>
+                                {tg.kind === "chat"
+                                  ? t(
+                                      "automation.targetChat" as Parameters<
+                                        typeof t
+                                      >[0],
+                                    )
+                                  : tg.name}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </FormField>
+                    ) : (
+                      <FormField
+                        label={t(
+                          "automation.targetLabelTask" as Parameters<
+                            typeof t
+                          >[0],
+                        )}
+                      >
+                        {/* Disabled Select = the same control, locked: the dimmed
+                        trigger + non-interactive chevron read as "fixed". */}
+                        <Select value="__fixed__" disabled>
+                          <SelectTrigger className="w-full">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="__fixed__">
+                              {fixedTargetName}
+                            </SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </FormField>
+                    )}
+                    {showTargetSelector && execTargets.length >= 2 ? (
+                      <div className="mt-2">
+                        <FormField
+                          label={t(
+                            "project.execLocation" as Parameters<typeof t>[0],
+                          )}
+                        >
+                          {isChatStandaloneTarget ? (
+                            <ExecutionLocationPicker
+                              value={selectedExecLocation ?? null}
+                              onChange={(id) => onSelectExecLocation?.(id)}
+                            />
+                          ) : (
+                            // Project-bound: the automation inherits the
+                            // target project's execution origin — read-only.
+                            <OriginBadge
+                              entityId={selectedTarget?.project_id ?? null}
+                              kind="project"
+                            />
+                          )}
+                        </FormField>
+                      </div>
+                    ) : null}
+                  </div>
+                )}
+
+                <div
+                  className={
+                    showTargetSelector || fixedTargetName
+                      ? "min-w-0"
+                      : "col-span-2 min-w-0"
+                  }
+                >
                   <FormField
                     label={t(
-                      "automation.targetLabelTask" as Parameters<typeof t>[0],
+                      "automation.agentLabel" as Parameters<typeof t>[0],
                     )}
                   >
                     <Select
-                      value={selectedTargetId ?? ""}
-                      onValueChange={(v) => v && onSelectTarget?.(v)}
+                      value={effectiveAgentSlug}
+                      onValueChange={setAgentSlug}
+                      disabled={agents.length === 0}
                     >
                       <SelectTrigger className="w-full">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {(actionKind === "task"
-                          ? projectTargets
-                          : targetList
-                        ).map((tg) => (
-                          <SelectItem key={tg.id} value={tg.id}>
-                            {tg.kind === "chat"
+                        <SelectValue
+                          placeholder={
+                            agents.length === 0
                               ? t(
-                                  "automation.targetChat" as Parameters<
+                                  "automation.agentPlaceholderEmpty" as Parameters<
                                     typeof t
                                   >[0],
                                 )
-                              : tg.name}
+                              : t(
+                                  "automation.agentPlaceholderPick" as Parameters<
+                                    typeof t
+                                  >[0],
+                                )
+                          }
+                        />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {agents.map((a) => (
+                          <SelectItem key={a.slug} value={a.slug}>
+                            {a.name}
                           </SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
                   </FormField>
-                ) : (
-                  <FormField
-                    label={t(
-                      "automation.targetLabelTask" as Parameters<typeof t>[0],
+                </div>
+              </div>
+
+              <FormField
+                label={t("cron.instruction" as Parameters<typeof t>[0])}
+                labelAction={
+                  <button
+                    type="button"
+                    onClick={() => {
+                      promptBeforeFullscreenRef.current = prompt;
+                      setPromptFullscreen(true);
+                    }}
+                    className="flex h-5 w-5 items-center justify-center rounded text-ink-meta transition-colors hover:bg-surface-muted hover:text-ink-body"
+                    title={t(
+                      "cron.instructionExpand" as Parameters<typeof t>[0],
+                    )}
+                    aria-label={t(
+                      "cron.instructionExpand" as Parameters<typeof t>[0],
                     )}
                   >
-                    {/* Disabled Select = the same control, locked: the dimmed
-                        trigger + non-interactive chevron read as "fixed". */}
-                    <Select value="__fixed__" disabled>
-                      <SelectTrigger className="w-full">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="__fixed__">
-                          {fixedTargetName}
-                        </SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </FormField>
-                )}
-              </div>
-            )}
-
-            <div
-              className={
-                showTargetSelector || fixedTargetName
-                  ? "min-w-0"
-                  : "col-span-2 min-w-0"
-              }
-            >
-              <FormField
-                label={t("automation.agentLabel" as Parameters<typeof t>[0])}
+                    <Maximize2 className="h-3.5 w-3.5" />
+                  </button>
+                }
               >
-                <Select
-                  value={effectiveAgentSlug}
-                  onValueChange={setAgentSlug}
-                  disabled={agents.length === 0}
-                >
-                  <SelectTrigger className="w-full">
-                    <SelectValue
-                      placeholder={
-                        agents.length === 0
-                          ? t(
-                              "automation.agentPlaceholderEmpty" as Parameters<
-                                typeof t
-                              >[0],
-                            )
-                          : t(
-                              "automation.agentPlaceholderPick" as Parameters<
-                                typeof t
-                              >[0],
-                            )
-                      }
-                    />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {agents.map((a) => (
-                      <SelectItem key={a.slug} value={a.slug}>
-                        {a.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <Textarea
+                  value={prompt}
+                  onChange={(e) => setPrompt(e.target.value)}
+                  placeholder={t(
+                    "cron.instructionPlaceholder" as Parameters<typeof t>[0],
+                  )}
+                  rows={4}
+                  // Fixed height with its own scroll — ``field-sizing-fixed``
+                  // overrides the Textarea's default content-sizing auto-grow so a
+                  // long instruction can't grow the dialog past the viewport.
+                  className="field-sizing-fixed h-32 resize-none"
+                />
               </FormField>
-            </div>
-          </div>
 
-          <FormField
-            label={t("cron.instruction" as Parameters<typeof t>[0])}
-            labelAction={
-              <button
-                type="button"
-                onClick={() => {
-                  promptBeforeFullscreenRef.current = prompt;
-                  setPromptFullscreen(true);
-                }}
-                className="flex h-5 w-5 items-center justify-center rounded text-ink-meta transition-colors hover:bg-surface-muted hover:text-ink-body"
-                title={t("cron.instructionExpand" as Parameters<typeof t>[0])}
-                aria-label={t("cron.instructionExpand" as Parameters<typeof t>[0])}
-              >
-                <Maximize2 className="h-3.5 w-3.5" />
-              </button>
-            }
-          >
-            <Textarea
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              placeholder={t(
-                "cron.instructionPlaceholder" as Parameters<typeof t>[0],
-              )}
-              rows={4}
-              // Fixed height with its own scroll — ``field-sizing-fixed``
-              // overrides the Textarea's default content-sizing auto-grow so a
-              // long instruction can't grow the dialog past the viewport.
-              className="field-sizing-fixed h-32 resize-none"
-            />
-          </FormField>
-
-          {/* Trigger — Cron / Interval tabs. */}
-          <FormField label={t("cron.period" as Parameters<typeof t>[0])}>
-            <Tabs
-              value={triggerKind}
-              onValueChange={(v) =>
-                setTriggerKind(v as "cron" | "interval" | "manual")
-              }
-            >
-              <TabsList>
-                <TabsTrigger value="cron">
-                  {t("automation.triggerCron" as Parameters<typeof t>[0])}
-                </TabsTrigger>
-                <TabsTrigger value="interval">
-                  {t("automation.triggerInterval" as Parameters<typeof t>[0])}
-                </TabsTrigger>
-                <TabsTrigger value="manual">
-                  {t("automation.triggerManual" as Parameters<typeof t>[0])}
-                </TabsTrigger>
-              </TabsList>
-              <TabsContent value="cron" className="pt-3 space-y-2">
-                {/* Timezone rides the same row as frequency/hour/minute via
+              {/* Trigger — Cron / Interval tabs. */}
+              <FormField label={t("cron.period" as Parameters<typeof t>[0])}>
+                <Tabs
+                  value={triggerKind}
+                  onValueChange={(v) =>
+                    setTriggerKind(v as "cron" | "interval" | "manual")
+                  }
+                >
+                  <TabsList>
+                    <TabsTrigger value="cron">
+                      {t("automation.triggerCron" as Parameters<typeof t>[0])}
+                    </TabsTrigger>
+                    <TabsTrigger value="interval">
+                      {t(
+                        "automation.triggerInterval" as Parameters<typeof t>[0],
+                      )}
+                    </TabsTrigger>
+                    <TabsTrigger value="manual">
+                      {t("automation.triggerManual" as Parameters<typeof t>[0])}
+                    </TabsTrigger>
+                  </TabsList>
+                  <TabsContent value="cron" className="pt-3 space-y-2">
+                    {/* Timezone rides the same row as frequency/hour/minute via
                     CronInput's slot (forced selection, browser-tz default,
                     "City (GMT±N)" label). */}
-                <CronInput
-                  value={cron}
-                  onChange={setCron}
-                  timezoneSlot={
-                    <div className="min-w-[150px] flex-1">
-                      <label className="mb-1 block text-xs font-medium text-ink-heading">
+                    <CronInput
+                      value={cron}
+                      onChange={setCron}
+                      timezoneSlot={
+                        <div className="min-w-[150px] flex-1">
+                          <label className="mb-1 block text-xs font-medium text-ink-heading">
+                            {t(
+                              "automation.timezoneLabel" as Parameters<
+                                typeof t
+                              >[0],
+                            )}
+                          </label>
+                          <Select
+                            value={timezone}
+                            onValueChange={(v) => v && setTimezone(v)}
+                          >
+                            <SelectTrigger className="w-full text-xs">
+                              <SelectValue>
+                                {timezoneLabel(timezone)}
+                              </SelectValue>
+                            </SelectTrigger>
+                            <SelectContent className="max-h-72">
+                              {timezoneOptions(timezone).map((tz) => (
+                                <SelectItem key={tz} value={tz}>
+                                  {timezoneLabel(tz)}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      }
+                    />
+                    {nextRunMs != null && (
+                      <p className="text-xs text-ink-meta">
                         {t(
-                          "automation.timezoneLabel" as Parameters<typeof t>[0],
+                          "automation.nextRunPreview" as Parameters<
+                            typeof t
+                          >[0],
                         )}
-                      </label>
-                      <Select
-                        value={timezone}
-                        onValueChange={(v) => v && setTimezone(v)}
-                      >
-                        <SelectTrigger className="w-full text-xs">
-                          <SelectValue>{timezoneLabel(timezone)}</SelectValue>
-                        </SelectTrigger>
-                        <SelectContent className="max-h-72">
-                          {timezoneOptions(timezone).map((tz) => (
-                            <SelectItem key={tz} value={tz}>
-                              {timezoneLabel(tz)}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  }
-                />
-                {nextRunMs != null && (
-                  <p className="text-xs text-ink-meta">
-                    {t(
-                      "automation.nextRunPreview" as Parameters<typeof t>[0],
+                        {" · "}
+                        {formatNextRun(nextRunMs, timezone)}
+                      </p>
                     )}
-                    {" · "}
-                    {formatNextRun(nextRunMs, timezone)}
-                  </p>
-                )}
-              </TabsContent>
-              <TabsContent value="interval" className="pt-3 space-y-2">
-                {/* Number input + unit Select on one row. Min on the input
+                  </TabsContent>
+                  <TabsContent value="interval" className="pt-3 space-y-2">
+                    {/* Number input + unit Select on one row. Min on the input
                     is unit-relative (1 for non-second units; 30 for
                     seconds) — server-side floor stays 30s; the unit
                     constraint just keeps the input from accepting 0 or
                     negatives. The hint line below restates the
                     resolved seconds + floor explicitly. */}
-                <div className="flex items-center gap-2">
-                  <Input
-                    type="number"
-                    min={intervalUnit === "seconds" ? MIN_INTERVAL_SECONDS : 1}
-                    value={intervalValue}
-                    onChange={(e) => {
-                      const v = Number.parseInt(e.target.value, 10);
-                      if (Number.isFinite(v)) setIntervalValue(v);
-                    }}
-                    className="flex-1"
-                  />
-                  <Select
-                    value={intervalUnit}
-                    onValueChange={(v) => setIntervalUnit(v as IntervalUnit)}
-                  >
-                    <SelectTrigger className="w-[110px]">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="seconds">
-                        {t(
-                          "automation.intervalUnitSeconds" as Parameters<
-                            typeof t
-                          >[0],
-                        )}
-                      </SelectItem>
-                      <SelectItem value="minutes">
-                        {t(
-                          "automation.intervalUnitMinutes" as Parameters<
-                            typeof t
-                          >[0],
-                        )}
-                      </SelectItem>
-                      <SelectItem value="hours">
-                        {t(
-                          "automation.intervalUnitHours" as Parameters<
-                            typeof t
-                          >[0],
-                        )}
-                      </SelectItem>
-                      <SelectItem value="days">
-                        {t(
-                          "automation.intervalUnitDays" as Parameters<
-                            typeof t
-                          >[0],
-                        )}
-                      </SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <p className="text-xs text-ink-meta">
-                  {intervalSeconds < MIN_INTERVAL_SECONDS
-                    ? t(
-                        "automation.intervalBelowFloor" as Parameters<
-                          typeof t
-                        >[0],
-                        { min: MIN_INTERVAL_SECONDS },
-                      )
-                    : t("automation.intervalEvery" as Parameters<typeof t>[0], {
-                        seconds: intervalSeconds,
-                        min: MIN_INTERVAL_SECONDS,
-                      })}
-                </p>
-              </TabsContent>
-              <TabsContent value="manual" className="pt-3">
-                <p className="text-xs leading-5 text-ink-meta">
-                  {t("automation.manualHint" as Parameters<typeof t>[0])}
-                </p>
-              </TabsContent>
-            </Tabs>
-          </FormField>
-        </div>
+                    <div className="flex items-center gap-2">
+                      <Input
+                        type="number"
+                        min={
+                          intervalUnit === "seconds" ? MIN_INTERVAL_SECONDS : 1
+                        }
+                        value={intervalValue}
+                        onChange={(e) => {
+                          const v = Number.parseInt(e.target.value, 10);
+                          if (Number.isFinite(v)) setIntervalValue(v);
+                        }}
+                        className="flex-1"
+                      />
+                      <Select
+                        value={intervalUnit}
+                        onValueChange={(v) =>
+                          setIntervalUnit(v as IntervalUnit)
+                        }
+                      >
+                        <SelectTrigger className="w-[110px]">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="seconds">
+                            {t(
+                              "automation.intervalUnitSeconds" as Parameters<
+                                typeof t
+                              >[0],
+                            )}
+                          </SelectItem>
+                          <SelectItem value="minutes">
+                            {t(
+                              "automation.intervalUnitMinutes" as Parameters<
+                                typeof t
+                              >[0],
+                            )}
+                          </SelectItem>
+                          <SelectItem value="hours">
+                            {t(
+                              "automation.intervalUnitHours" as Parameters<
+                                typeof t
+                              >[0],
+                            )}
+                          </SelectItem>
+                          <SelectItem value="days">
+                            {t(
+                              "automation.intervalUnitDays" as Parameters<
+                                typeof t
+                              >[0],
+                            )}
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <p className="text-xs text-ink-meta">
+                      {intervalSeconds < MIN_INTERVAL_SECONDS
+                        ? t(
+                            "automation.intervalBelowFloor" as Parameters<
+                              typeof t
+                            >[0],
+                            { min: MIN_INTERVAL_SECONDS },
+                          )
+                        : t(
+                            "automation.intervalEvery" as Parameters<
+                              typeof t
+                            >[0],
+                            {
+                              seconds: intervalSeconds,
+                              min: MIN_INTERVAL_SECONDS,
+                            },
+                          )}
+                    </p>
+                  </TabsContent>
+                  <TabsContent value="manual" className="pt-3">
+                    <p className="text-xs leading-5 text-ink-meta">
+                      {t("automation.manualHint" as Parameters<typeof t>[0])}
+                    </p>
+                  </TabsContent>
+                </Tabs>
+              </FormField>
+            </div>
 
-        <DialogFooter className="px-[18px] pt-1 pb-4">
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
-            {t("common.cancel" as Parameters<typeof t>[0])}
-          </Button>
-          <Button onClick={handleSubmit} disabled={submitDisabled}>
-            {t("common.save" as Parameters<typeof t>[0])}
-          </Button>
-        </DialogFooter>
+            <DialogFooter className="px-[18px] pt-1 pb-4">
+              <Button variant="outline" onClick={() => onOpenChange(false)}>
+                {t("common.cancel" as Parameters<typeof t>[0])}
+              </Button>
+              <Button onClick={handleSubmit} disabled={submitDisabled}>
+                {t("common.save" as Parameters<typeof t>[0])}
+              </Button>
+            </DialogFooter>
           </>
         )}
       </DialogContent>

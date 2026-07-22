@@ -63,12 +63,16 @@ export const ProjectsPage = ({
   const importInputRef = useRef<HTMLInputElement>(null);
   const [importFile, setImportFile] = useState<File | null>(null);
   const [importOpen, setImportOpen] = useState(false);
-  // Initial members for the create dialog (shared with the sidebar entry).
-  const memberPicker = useAgentDeployPicker();
   const managedDirectory = directoryFieldMode === "managed";
   // Execution location for the create dialog (multi-target editions; inert
   // no-target state on single-backend builds).
   const execLocation = useProjectExecutionLocation();
+  // Initial members for the create dialog (shared with the sidebar entry).
+  // Source candidates from the chosen target's backend so a cloud-bound
+  // project only lists cloud-deployable agents.
+  const memberPicker = useAgentDeployPicker(
+    execLocation.effectiveTarget?.baseUrl,
+  );
 
   const fetchProjects = useCallback(async () => {
     try {
@@ -88,10 +92,13 @@ export const ProjectsPage = ({
   useEffect(() => {
     if (searchParams.get("create") !== "1") return;
     void Promise.resolve().then(() => setCreateOpen(true));
-    setSearchParams((next) => {
-      next.delete("create");
-      return next;
-    }, { replace: true });
+    setSearchParams(
+      (next) => {
+        next.delete("create");
+        return next;
+      },
+      { replace: true },
+    );
   }, [searchParams, setSearchParams]);
 
   const pageHeader = useMemo(
@@ -172,10 +179,7 @@ export const ProjectsPage = ({
       toast.success(
         t("project.created" as Parameters<typeof t>[0], { name: trimmedName }),
       );
-      if (
-        execLocation.isRemoteTarget &&
-        execLocation.initialFiles.length > 0
-      ) {
+      if (execLocation.isRemoteTarget && execLocation.initialFiles.length > 0) {
         toast.info(
           t("project.initialFilesUploading" as Parameters<typeof t>[0]),
         );
@@ -336,9 +340,7 @@ export const ProjectsPage = ({
           >
             <DirectoryPicker
               value={newRootPath}
-              placeholder={t(
-                "knowledge.selectDir" as Parameters<typeof t>[0],
-              )}
+              placeholder={t("knowledge.selectDir" as Parameters<typeof t>[0])}
               onBrowse={() => void handleSelectDirectory()}
             />
             <p className="text-xs text-muted-foreground">
@@ -346,14 +348,10 @@ export const ProjectsPage = ({
             </p>
           </FormField>
         )}
-        <FormField
-          label={t("project.deployAgents" as Parameters<typeof t>[0])}
-        >
+        <FormField label={t("project.deployAgents" as Parameters<typeof t>[0])}>
           <AgentCheckboxList picker={memberPicker} />
         </FormField>
-        <FormField
-          label={t("common.description" as Parameters<typeof t>[0])}
-        >
+        <FormField label={t("common.description" as Parameters<typeof t>[0])}>
           <Textarea
             placeholder={t(
               "project.instructionPlaceholder" as Parameters<typeof t>[0],

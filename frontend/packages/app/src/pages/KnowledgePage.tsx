@@ -50,7 +50,13 @@ import {
   SearchInput,
   cn,
 } from "@valuz/ui";
-import { docsApi, kbApi, usePanelStore } from "@valuz/core";
+import {
+  docsApi,
+  getExecutionTargets,
+  kbApi,
+  recordEntityOrigin,
+  usePanelStore,
+} from "@valuz/core";
 import { ResourceActionSlot } from "../components/ResourceActionSlot";
 import type {
   DocDetail,
@@ -64,6 +70,7 @@ import type { DirectoryFieldMode } from "@valuz/app/layout";
 import { usePlatform } from "@valuz/app/platform";
 import { useTranslation } from "@valuz/core";
 import { CreateKbDialog } from "../components";
+import { OriginIcon } from "../components/ExecutionLocationPicker";
 
 type UiStatus = "ready" | "indexing" | "failed" | "queued" | "missing";
 
@@ -388,21 +395,24 @@ export const KnowledgePage = ({
     [expanded, childrenMap, activeKb],
   );
 
-  const selectDoc = useCallback(async (docId: string) => {
-    setSelectedDocId(docId);
-    try {
-      const [doc, prev] = await Promise.all([
-        docsApi.get(docId),
-        docsApi
-          .preview(docId)
-          .catch(() => ({ document_id: docId, markdown: "" })),
-      ]);
-      setSelectedDoc(doc);
-      setPreview(prev.markdown || null);
-    } catch {
-      toast.error(t("knowledge.cannotLoadDetail" as Parameters<typeof t>[0]));
-    }
-  }, []);
+  const selectDoc = useCallback(
+    async (docId: string) => {
+      setSelectedDocId(docId);
+      try {
+        const [doc, prev] = await Promise.all([
+          docsApi.get(docId, activeKb?.id),
+          docsApi
+            .preview(docId, activeKb?.id)
+            .catch(() => ({ document_id: docId, markdown: "" })),
+        ]);
+        setSelectedDoc(doc);
+        setPreview(prev.markdown || null);
+      } catch {
+        toast.error(t("knowledge.cannotLoadDetail" as Parameters<typeof t>[0]));
+      }
+    },
+    [activeKb],
+  );
 
   // ── Right panel ───────────────────────────────────────────────────
 
@@ -594,7 +604,7 @@ export const KnowledgePage = ({
   const handleDeleteDoc = async () => {
     if (!selectedDoc) return;
     try {
-      await docsApi.delete(selectedDoc.id);
+      await docsApi.delete(selectedDoc.id, selectedDoc.kb_id ?? undefined);
       toast.success(t("knowledge.docDeleted" as Parameters<typeof t>[0]));
       setDeleteDocOpen(false);
       setSelectedDocId(null);
@@ -850,8 +860,11 @@ export const KnowledgePage = ({
                         ) : null}
                       </div>
                       <div className="mt-4 min-w-0">
-                        <div className="truncate text-sm font-medium text-ink-heading">
-                          {kb.name}
+                        <div className="flex items-center gap-1">
+                          <span className="truncate text-sm font-medium text-ink-heading">
+                            {kb.name}
+                          </span>
+                          <OriginIcon origin={kb.exec_origin} />
                         </div>
                         <div className="mt-1 line-clamp-2 break-all text-xs leading-5 text-ink-meta">
                           {kb.root_path}
@@ -1089,7 +1102,21 @@ export const KnowledgePage = ({
         open={createOpen}
         onOpenChange={setCreateOpen}
         onSubmit={async (data) => {
-          const kb = await kbApi.create(data);
+          const baseUrl = data.target_id
+            ? getExecutionTargets().find((tt) => tt.id === data.target_id)
+                ?.baseUrl
+            : undefined;
+          const kb = await kbApi.create(
+            {
+              name: data.name,
+              root_path: data.root_path,
+              auto_discover: data.auto_discover,
+            },
+            baseUrl ? { baseUrl } : undefined,
+          );
+          // Record BEFORE loadKbs / enterKb so KB-scoped calls for this KB
+          // route to the owning backend on multi-target editions.
+          if (data.target_id) recordEntityOrigin(kb.id, data.target_id);
           toast.success(
             t("knowledge.created" as Parameters<typeof t>[0], {
               name: kb.name,

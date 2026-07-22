@@ -353,8 +353,12 @@ export const ProjectDetailPage = () => {
 
   useEffect(() => {
     let cancelled = false;
+    // Source library agents from the project's owning backend so a cloud
+    // project only offers cloud-deployable agents (a cloud backend can't
+    // instantiate a slug that only exists in the local library).
+    const baseUrl = resolveApiBase({ projectId: id }, "") || undefined;
     agentsApi
-      .listAgents()
+      .listAgents(undefined, baseUrl ? { baseUrl } : undefined)
       .then((res) => {
         if (!cancelled) setLibraryAgents(res.agents);
       })
@@ -364,7 +368,7 @@ export const ProjectDetailPage = () => {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [id]);
 
   const [fileTree, setFileTree] = useState<FileTreeNode[]>([]);
   const [instructions, setInstructions] = useState("");
@@ -956,7 +960,9 @@ export const ProjectDetailPage = () => {
     projectId: id || null,
     platform,
     locate: locateArtifactFile,
-    missingErrorMessage: t("task.artifactOpenInFinder" as Parameters<typeof t>[0]),
+    missingErrorMessage: t(
+      "task.artifactOpenInFinder" as Parameters<typeof t>[0],
+    ),
   });
   const {
     selectedPath: selectedArtifactPath,

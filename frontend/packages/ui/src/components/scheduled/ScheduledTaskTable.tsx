@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -32,6 +33,9 @@ export interface ScheduledTaskTableProps {
     triggerTimezone?: string;
     last: string;
     status: "on" | "off";
+    /** CLIENT-side execution-origin tag ("local"/"cloud") from list fan-out;
+     *  undefined on single-backend builds. */
+    exec_origin?: string;
   }>;
   onToggle?: (id: string) => void;
   onDelete?: (id: string) => void;
@@ -42,6 +46,10 @@ export interface ScheduledTaskTableProps {
   lastRunLabel?: string;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
+  /** Renders the origin indicator next to each row's name when the row carries
+   *  an ``exec_origin``. App supplies this so the icon component (which needs
+   *  the targets registry) stays in app; the table stays package-agnostic. */
+  renderOrigin?: (origin: string) => ReactNode;
 }
 
 const ScheduledTaskActionMenu = ({
@@ -116,6 +124,7 @@ export const ScheduledTaskTable = ({
   taskCountLabel,
   collapsed = false,
   onToggleCollapse,
+  renderOrigin,
 }: ScheduledTaskTableProps) => {
   const { t } = useI18n();
   const Chevron = collapsed ? ChevronRight : ChevronDown;
@@ -185,11 +194,14 @@ export const ScheduledTaskTable = ({
                         type="button"
                         onClick={() => onRowClick?.(task.id)}
                         className={cn(
-                          "block truncate text-left text-sm font-medium text-ink-heading transition-colors hover:text-brand",
+                          "flex items-center gap-1 truncate text-left text-sm font-medium text-ink-heading transition-colors hover:text-brand",
                           task.status === "off" && "opacity-50",
                         )}
                       >
-                        {task.name}
+                        <span className="truncate">{task.name}</span>
+                        {task.exec_origin && renderOrigin
+                          ? renderOrigin(task.exec_origin)
+                          : null}
                       </button>
                       <div
                         className={cn(
@@ -238,11 +250,14 @@ export const ScheduledTaskTable = ({
                         type="button"
                         onClick={() => onRowClick?.(task.id)}
                         className={cn(
-                          "block truncate text-left text-sm font-medium text-ink-heading transition-colors hover:text-brand",
+                          "flex items-center gap-1 truncate text-left text-sm font-medium text-ink-heading transition-colors hover:text-brand",
                           task.status === "off" && "opacity-50",
                         )}
                       >
-                        {task.name}
+                        <span className="truncate">{task.name}</span>
+                        {task.exec_origin && renderOrigin
+                          ? renderOrigin(task.exec_origin)
+                          : null}
                       </button>
                     </div>
                     {statusBadge(task.status)}

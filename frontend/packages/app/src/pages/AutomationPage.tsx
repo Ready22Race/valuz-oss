@@ -25,6 +25,11 @@ import {
 import {
   agentsApi,
   automationsApi,
+  getEntityOrigin,
+  getDefaultExecutionTarget,
+  getExecutionTargets,
+  recordEntityOrigin,
+  resolveApiBase,
   useTranslation,
   type Agent,
   type AutomationGroup,
@@ -39,6 +44,7 @@ import {
   CreateAutomationDialog,
   type AutomationAgentChoice,
 } from "@valuz/app/components";
+import { OriginIcon } from "../components/ExecutionLocationPicker";
 
 type I18nKey = Parameters<ReturnType<typeof useTranslation>["t"]>[0];
 const k = (key: string) => key as I18nKey;
@@ -89,6 +95,7 @@ function automationToTableRow(item: AutomationItem) {
         : undefined,
     last: relativeTime(item.last_run_at),
     status: (item.status === "enabled" ? "on" : "off") as "on" | "off",
+    exec_origin: item.exec_origin,
   };
 }
 
@@ -123,6 +130,15 @@ export const AutomationPage = () => {
   const [projectMembers, setProjectMembers] = useState<
     Record<string, MemberWithAgent[]>
   >({});
+  // Chat-standalone location choice (multi-target editions) — drives which
+  // backend the library-agent list is sourced from.
+  const [selectedExecLocation, setSelectedExecLocation] = useState<
+    string | null
+  >(null);
+  // Library agents for the Chat-standalone target's chosen location. The
+  // default location reuses ``libraryAgents``; a cloud location is fetched so
+  // a cloud backend is never handed an agent slug that only exists locally.
+  const [chatAgents, setChatAgents] = useState<Agent[]>([]);
 
   const [createOpen, setCreateOpen] = useState(false);
   const [selectedTargetId, setSelectedTargetId] = useState<string | null>(null);
@@ -201,6 +217,7 @@ export const AutomationPage = () => {
 
   const openCreate = useCallback(() => {
     setSelectedTargetId(targets[0]?.id ?? null);
+    setSelectedExecLocation(null);
     setCreateOpen(true);
   }, [targets]);
 
@@ -313,9 +330,38 @@ export const AutomationPage = () => {
     (target) => target.id === selectedTargetId,
   );
 
+  // Re-source the Chat-standalone agent list whenever the chosen location
+  // changes. A cloud backend can't instantiate an agent that only exists in
+  // the local library, so cloud must list the cloud library. Project-bound
+  // targets are unaffected — their members come from ``listMembers`` which is
+  // already routed per-project.
+  useEffect(() => {
+    if (!selectedTarget || selectedTarget.kind !== "chat") return;
+    const loc = selectedExecLocation;
+    const defaultLoc = getDefaultExecutionTarget()?.id;
+    if (!loc || loc === defaultLoc) {
+      // Module-default (local) — already loaded by ``loadAll``.
+      setChatAgents(libraryAgents);
+      return;
+    }
+    const target = getExecutionTargets().find((t) => t.id === loc);
+    let cancelled = false;
+    agentsApi
+      .listAgents(undefined, target ? { baseUrl: target.baseUrl } : undefined)
+      .then((res) => {
+        if (!cancelled) setChatAgents(res.agents);
+      })
+      .catch(() => {
+        if (!cancelled) setChatAgents([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedTarget, selectedExecLocation, libraryAgents]);
+
   const agentChoices: AutomationAgentChoice[] = useMemo(() => {
     if (!selectedTarget || selectedTarget.kind === "chat") {
-      return libraryAgents.map((agent) => ({
+      return chatAgents.map((agent) => ({
         slug: agent.slug,
         name: agent.name,
       }));
@@ -325,7 +371,7 @@ export const AutomationPage = () => {
       slug: entry.member.agent_slug,
       name: entry.agent?.name ?? entry.member.agent_slug,
     }));
-  }, [selectedTarget, libraryAgents, projectMembers]);
+  }, [selectedTarget, chatAgents, projectMembers]);
 
   const handleDialogSubmit = async (data: {
     name: string;
@@ -334,24 +380,51 @@ export const AutomationPage = () => {
     trigger: Trigger;
     action_kind: ActionKind;
     worktree: boolean;
+    /** Chat-standalone target only: chosen execution-location target id. */
+    exec_location?: string;
   }) => {
     if (!selectedTarget) {
       toast.error(t(k("automation.pickProjectFirst")));
       return;
     }
+    // Route the create call to the backend that should own the row:
+    //  - project-bound → the project's backend (origin inherited);
+    //  - Chat-standalone → the picker's chosen backend (the lazy-created
+    //    chat project lands there).
+    const isChatTarget = selectedTarget.kind === "chat";
+    const baseUrl = isChatTarget
+      ? data.exec_location
+        ? getExecutionTargets().find((tt) => tt.id === data.exec_location)
+            ?.baseUrl
+        : undefined
+      : resolveApiBase({ projectId: selectedTarget.project_id ?? "" }, "") ||
+        undefined;
     try {
-      await automationsApi.create({
-        name: data.name,
-        project_kind: selectedTarget.kind,
-        project_id: selectedTarget.project_id,
-        agent_kind:
-          selectedTarget.kind === "chat" ? "library_agent" : "project_member",
-        agent_slug: data.agent_slug,
-        prompt_template: data.prompt_template,
-        trigger: data.trigger,
-        action_kind: data.action_kind,
-        worktree: data.worktree,
-      });
+      const created = await automationsApi.create(
+        {
+          name: data.name,
+          project_kind: selectedTarget.kind,
+          project_id: selectedTarget.project_id,
+          agent_kind:
+            selectedTarget.kind === "chat" ? "library_agent" : "project_member",
+          agent_slug: data.agent_slug,
+          prompt_template: data.prompt_template,
+          trigger: data.trigger,
+          action_kind: data.action_kind,
+          worktree: data.worktree,
+        },
+        baseUrl ? { baseUrl } : undefined,
+      );
+      // Record the automation's (and, for chat-standalone, the lazy-created
+      // chat project's) origin BEFORE loadAll so detail / edit / run-now
+      // route to the owning backend on multi-target editions.
+      const origin = isChatTarget
+        ? data.exec_location
+        : getEntityOrigin(selectedTarget.project_id ?? "");
+      if (origin) {
+        recordEntityOrigin(created.automation_id, origin);
+        if (created.project_id) recordEntityOrigin(created.project_id, origin);
+      }
       toast.success(t(k("automation.createSuccess"), { name: data.name }));
       await loadAll();
     } catch (error) {
@@ -375,11 +448,7 @@ export const AutomationPage = () => {
               description={t(k("automation.emptyDesc"))}
               icon={<Clock3 className="h-5 w-5" />}
               action={
-                <Button
-                  variant="default"
-                  size="sm"
-                  onClick={openCreate}
-                >
+                <Button variant="default" size="sm" onClick={openCreate}>
                   <Plus className="h-3 w-3" />
                   {t(k("automation.emptyAction"))}
                 </Button>
@@ -420,6 +489,7 @@ export const AutomationPage = () => {
                       onRowClick={(id) => navigate(`/automations/${id}`)}
                       onToggle={(id) => toggleAutomation(id)}
                       onRunNow={(id) => runNow(id)}
+                      renderOrigin={(o) => <OriginIcon origin={o} />}
                       onDelete={(id) => {
                         const automation = group.automations.find(
                           (item) => item.automation_id === id,
@@ -442,6 +512,8 @@ export const AutomationPage = () => {
         targets={targets}
         selectedTargetId={selectedTargetId}
         onSelectTarget={setSelectedTargetId}
+        selectedExecLocation={selectedExecLocation}
+        onSelectExecLocation={setSelectedExecLocation}
         title={t(k("automation.dialogTitleNew"))}
       />
 
