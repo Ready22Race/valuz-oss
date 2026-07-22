@@ -7,33 +7,34 @@ import {
 } from "./conversation-loading";
 
 describe("deriveTurnActive", () => {
-  it("is not loading when nothing was sent", () => {
-    expect(deriveTurnActive(false, "running")).toBe(false);
+  it("is not loading on a quiet session, whatever its terminal status", () => {
     expect(deriveTurnActive(false, "idle")).toBe(false);
+    expect(deriveTurnActive(false, "failed")).toBe(false);
     expect(deriveTurnActive(false, null)).toBe(false);
+    expect(deriveTurnActive(false, "created")).toBe(false);
+  });
+
+  it("is loading while a turn runs, WHOEVER started it (queue drain, schedule, another client)", () => {
+    // No local send pending — the reconciled running status alone carries busy.
+    // This is what the old ``sending && …`` formula could not express.
+    expect(deriveTurnActive(false, "running")).toBe(true);
+    expect(deriveTurnActive(true, "running")).toBe(true);
   });
 
   it("shows loading optimistically at send time before the status is known", () => {
-    // Brand-new draft / pre-first-read: status unknown → the optimistic
-    // ``sending`` must show through (no flicker).
     expect(deriveTurnActive(true, null)).toBe(true);
     expect(deriveTurnActive(true, undefined)).toBe(true);
     expect(deriveTurnActive(true, "")).toBe(true);
     expect(deriveTurnActive(true, "created")).toBe(true);
   });
 
-  it("stays loading while the turn is running", () => {
-    expect(deriveTurnActive(true, "running")).toBe(true);
-  });
-
-  it("un-sticks when the session reaches a terminal status, even if sending was never cleared", () => {
-    // This is the bug: sending stuck true (missed terminal SSE frame), but the
-    // reconciled status is terminal → the UI must show NOT loading.
-    expect(deriveTurnActive(true, "idle")).toBe(false);
-    expect(deriveTurnActive(true, "failed")).toBe(false);
-    expect(deriveTurnActive(true, "cancelled")).toBe(false);
-    expect(deriveTurnActive(true, "archived")).toBe(false);
-    expect(deriveTurnActive(true, "terminated")).toBe(false);
+  it("keeps loading through a stale pre-turn terminal status while a send is pending", () => {
+    // Slow-start hazard (attachment parse threading): the session legitimately
+    // still reads the PRE-turN ``idle`` for seconds after Send — collapsing
+    // here froze the elapsed timer / reverted the Stop button (image upload).
+    // ``sendPending`` is released by the turn's start/terminal events or a
+    // send error, never left to hang on its own.
+    expect(deriveTurnActive(true, "idle")).toBe(true);
   });
 });
 
