@@ -283,7 +283,15 @@ export const ConversationsHomePage = () => {
       payload,
       target ? { baseUrl: target.baseUrl } : undefined,
     );
-    if (target) recordEntityOrigin(session.id, target.id);
+    if (target) {
+      recordEntityOrigin(session.id, target.id);
+      // Remote quick-chats mint a managed project that no list ever surfaces
+      // (temp projects are list-hidden) — record its origin here or its
+      // project-context fetches route to the module default and 404.
+      if (session.project_id && session.project_id !== "chat-default") {
+        recordEntityOrigin(session.project_id, target.id);
+      }
+    }
     return session;
   };
 

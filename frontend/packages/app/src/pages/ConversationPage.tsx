@@ -3176,6 +3176,20 @@ export const ConversationPage = () => {
           setSessionTriggerMode(sessionDetail.trigger_meta?.mode ?? null);
           setSessionAgentSlug(sessionDetail.agent_slug ?? null);
           setSelectedProjectId(sessionDetail.project_id);
+          // Origin inheritance: a session's project lives on the same backend
+          // as the session (managed remote projects are list-hidden, so this
+          // is often the ONLY chance to learn their origin). Also self-heals
+          // entries lost before project recording existed at creation time.
+          {
+            const sessionOrigin = getEntityOrigin(sessionDetail.id, "session");
+            if (
+              sessionOrigin &&
+              sessionDetail.project_id &&
+              !getEntityOrigin(sessionDetail.project_id)
+            ) {
+              recordEntityOrigin(sessionDetail.project_id, sessionOrigin);
+            }
+          }
           setSessions([sessionDetailToListItem(sessionDetail)]);
           selectedSessionIdRef.current = sessionDetail.id;
           setSelectedSessionId(sessionDetail.id);
@@ -3449,7 +3463,17 @@ export const ConversationPage = () => {
           createBaseUrl ? { baseUrl: createBaseUrl } : undefined,
         );
         const originTag = isChat ? chatTarget?.id : projectOrigin;
-        if (originTag) recordEntityOrigin(created.id, originTag);
+        if (originTag) {
+          recordEntityOrigin(created.id, originTag);
+          // A remote quick-chat mints a MANAGED project server-side. That
+          // project appears in no local list (temp projects are list-hidden),
+          // so no fan-out observation ever records its origin — without this
+          // line every project-context fetch (detail / files / skills) routes
+          // to the module-default backend and 404s, blanking the 云端对话 page.
+          if (created.project_id && created.project_id !== "chat-default") {
+            recordEntityOrigin(created.project_id, originTag);
+          }
+        }
       }
       // 10-new-conversation-guidance slice 3: remember which agent this 临时对话
       // used so the next new conversation pre-selects it.
