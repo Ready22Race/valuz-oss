@@ -170,13 +170,16 @@ class DispatcherService:
 
             # Fail fast on a credential-less member before starting its actor.
             if resolved.credential_gap is not None:
+                # No session_id on this event: the kernel session was never
+                # created (create_session below is unreached), so an id here
+                # would render in the task timeline as a clickable link to a
+                # session that 404s ("Session not found.").
                 await event_ds.append_event(
                     user_id,
                     project_id=project_id,
                     task_id=task_id,
                     type="subtask_failed",
                     actor=agent,
-                    session_id=member_session.id,
                     payload={
                         "agent": agent,
                         "agent_name": agent_name,

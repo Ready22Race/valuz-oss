@@ -264,8 +264,7 @@ class LifecycleService:
 
             # Fail fast: don't spawn a lead that has no usable credentials —
             # it would only fail mid-turn with a cryptic "Not logged in".
-            gap = resolved.credential_gap
-            if gap is not None:
+            async def _block_kickoff(reason: str) -> None:
                 # ``failed`` is NOT in the task status enum (task_state.py) —
                 # task-level failure folds into ``blocked`` (recoverable: the
                 # user adds the missing credential, then resume_task rebuilds
@@ -280,7 +279,7 @@ class LifecycleService:
                     status="blocked",
                     event_type="kickoff_failed",
                     actor=created_by,
-                    payload={"error": gap},
+                    payload={"error": reason},
                 )
                 from valuz_agent.modules.notifications.projectors import (
                     record_task_failure_notification,
@@ -291,10 +290,27 @@ class LifecycleService:
                     project_id=project_id,
                     event_id=kickoff_ev.id,
                     event_type="kickoff_failed",
-                    reason=gap,
+                    reason=reason,
                     user_id=user_id,
                 )
-                raise ValueError(gap)
+                raise ValueError(reason)
+
+            gap = resolved.credential_gap
+            if gap is not None:
+                await _block_kickoff(gap)
+
+            # Pre-run model-config check over the full roster: the lead can
+            # dispatch to ANY member, so an unconfigured member surfaces here
+            # as an immediate, actionable kickoff error instead of minutes
+            # into the run as a dispatch-time subtask failure.
+            member_gaps = await task_session_resolver.preflight_member_providers(
+                db, user_id=user_id, project_id=project_id
+            )
+            if member_gaps:
+                await _block_kickoff(
+                    "model configuration check failed for project members:\n"
+                    + "\n".join(f"- {g}" for g in member_gaps)
+                )
 
             await kernel_client.create_session(
                 user_id, lead_session, scope=SandboxScope(kind="task", id=task_id)
@@ -546,6 +562,17 @@ class LifecycleService:
 
             if resolved.credential_gap is not None:
                 return {"error": f"commit_task: {resolved.credential_gap}"}
+
+            # Same roster pre-flight as kickoff (see there): catch an
+            # unconfigured member before the committed plan starts running.
+            member_gaps = await task_session_resolver.preflight_member_providers(
+                db, user_id=user_id, project_id=project_id
+            )
+            if member_gaps:
+                return {
+                    "error": "commit_task: model configuration check failed "
+                    "for project members:\n" + "\n".join(f"- {g}" for g in member_gaps)
+                }
 
             await kernel_client.create_session(
                 user_id, lead_session, scope=SandboxScope(kind="task", id=task_id)

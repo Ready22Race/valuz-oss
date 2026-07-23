@@ -28,6 +28,7 @@ from typing import Any, Literal, cast
 
 from valuz_agent.adapters.agent_resolver import (
     _member_agent_config,
+    _resolve_agent_provider,
     build_member_session,
     embed_agent_config,
     resolve_agent_display_name,
@@ -70,51 +71,81 @@ async def _credential_gap(
     source of truth (see backend/CLAUDE.md — the host does not read LLM keys
     from process env). When ``model_provider`` is None the run would only fail
     mid-turn with a cryptic SDK "Not logged in · Please run /login", so we
-    detect it up front and surface *why* (no model provider configured).
+    detect it up front and surface *why* (no usable model provider).
 
-    Exception: OAuth subscription providers (``claude /login`` /
-    ``codex /login``) deliberately resolve to ``model_provider=None`` —
-    their credentials live in the CLI's keychain and the runtime SDK
-    reads them out-of-band. The pinned provider's ``auth_type`` tells us
-    which case we're in, so we don't false-positive on a perfectly valid
-    subscription setup. When ``db`` is omitted (legacy callers) we fall
-    back to the strict check.
-
-    Returns ``None`` when a provider resolved (or is an OAuth
-    subscription), else a human-readable reason.
+    Returns ``None`` when a provider resolved (or is an OAuth subscription —
+    see ``_provider_gap``), else a human-readable reason.
     """
     if getattr(session, "model_provider", None) is not None:
         return None
+    agent = getattr(session, "agent_config", None)
+    pinned_provider_id = (
+        (getattr(agent, "metadata", None) or {}).get("provider_id") if agent is not None else None
+    )
+    return await _provider_gap(
+        db,
+        agent_slug=agent_slug,
+        pinned_provider_id=pinned_provider_id,
+        runtime=getattr(session, "runtime_provider", "") or "",
+        model=getattr(session, "model", "") or "",
+        user_id=user_id,
+    )
 
-    # session.model_provider is None — could be (a) no provider pinned,
-    # or (b) pinned an OAuth subscription provider. Distinguish by
-    # loading the agent and checking the pinned provider's auth_type.
+
+async def _provider_gap(
+    db: Any | None,
+    *,
+    agent_slug: str,
+    pinned_provider_id: str | None,
+    runtime: str,
+    model: str,
+    user_id: str,
+) -> str | None:
+    """The no-usable-provider check shared by ``_credential_gap`` and the
+    kickoff roster pre-flight (``preflight_member_providers``).
+
+    A ``model_provider=None`` session is healthy in exactly one case: the
+    effective provider is an OAuth subscription (``claude /login`` /
+    ``codex /login``) — its credentials live in the CLI's keychain and the
+    runtime SDK reads them out-of-band. That provider is either the agent's
+    pin or, chat-parity, the model-hosted fallback the resolver would land
+    on (``agent_resolver._model_hosted_provider_id``); check both before
+    declaring a gap. When ``db`` is omitted (legacy callers) fall back to
+    the strict check.
+    """
     if db is not None:
         try:
             from valuz_agent.modules.providers.datastore import ProviderDatastore
 
-            agent = getattr(session, "agent_config", None)
-            if agent is not None:
-                provider_id = (getattr(agent, "metadata", None) or {}).get("provider_id")
-                if provider_id:
-                    provider = await ProviderDatastore(db).get_by_id(user_id, provider_id)
-                    if provider is not None and provider.auth_type == "oauth":
-                        # CLI-managed credentials — model_provider=None is
-                        # the expected resolver output, not a gap.
-                        return None
+            providers = ProviderDatastore(db)
+            if pinned_provider_id:
+                provider = await providers.get_by_id(user_id, pinned_provider_id)
+                if provider is not None and provider.auth_type == "oauth":
+                    # CLI-managed credentials — model_provider=None is
+                    # the expected resolver output, not a gap.
+                    return None
+            if model:
+                from valuz_agent.infra.eventbus import event_bus
+                from valuz_agent.modules.providers.service import ProviderService
+
+                match = await ProviderService(
+                    datastore=providers, event_bus=event_bus
+                ).resolve_provider_for_model(user_id, model)
+                if match is not None and match.auth_type == "oauth":
+                    return None
         except Exception:
             logger.warning(
-                "credential_gap: OAuth-provider lookup failed for agent %s — "
+                "credential_gap: provider lookup failed for agent %s — "
                 "falling back to strict check.",
                 agent_slug,
                 exc_info=True,
             )
 
-    runtime = getattr(session, "runtime_provider", "") or ""
+    model_part = f" for model '{model}'" if model else ""
     return (
-        f"agent '{agent_slug}' has no model provider configured "
-        f"(runtime '{runtime}'). Pin a model provider on the agent before "
-        f"dispatching."
+        f"agent '{agent_slug}' has no usable model provider{model_part} "
+        f"(runtime '{runtime}'). Pin a model channel on the agent, or enable "
+        f"a provider that hosts this model."
     )
 
 
@@ -213,6 +244,46 @@ class TaskSessionResolver:
     ) -> bool:
         """True when *agent_slug* is deployed into *project_id* (membership)."""
         return await ProjectMemberDatastore(db).get(user_id, project_id, agent_slug) is not None
+
+    async def preflight_member_providers(
+        self, db: Any, *, user_id: str, project_id: str
+    ) -> list[str]:
+        """Pre-run model-config check over the project's full roster.
+
+        The lead can dispatch to ANY member, so kickoff/commit verify every
+        member resolves a usable provider (chat-parity fallback included)
+        up front — an unconfigured member surfaces as an immediate,
+        actionable kickoff error instead of minutes into the run as a
+        dispatch-time ``subtask_failed``. Returns one human-readable line
+        per member with a gap (empty = all clear). Members whose library
+        agent can't be resolved are skipped — dispatch has its own error
+        for orphaned slugs. Pure DB reads (provider model options resolve
+        from stored rows / static descriptors — no network).
+        """
+        member_ds = ProjectMemberDatastore(db)
+        rows = await member_ds.list_by_project(user_id, project_id)
+        providers = _provider_resolver_deps(db).get("providers")
+        gaps: list[str] = []
+        for row in rows:
+            agent = await _member_agent_config(row, member_ds, user_id=user_id)
+            if agent is None:
+                continue
+            resolved = await _resolve_agent_provider(
+                agent=agent, model=agent.model, providers=providers, user_id=user_id
+            )
+            if resolved is not None:
+                continue
+            gap = await _provider_gap(
+                db,
+                agent_slug=row.agent_slug,
+                pinned_provider_id=(agent.metadata or {}).get("provider_id"),
+                runtime=agent.runtime_provider or "",
+                model=agent.model or "",
+                user_id=user_id,
+            )
+            if gap is not None:
+                gaps.append(gap)
+        return gaps
 
     async def list_member_descriptors(
         self, db: Any, *, user_id: str, project_id: str
@@ -375,6 +446,7 @@ __all__ = [
     "TaskProjectEnv",
     "TaskSessionResolver",
     "_credential_gap",
+    "_provider_gap",
     "_provider_resolver_deps",
     "materialize_lead_clone",
     "task_session_resolver",
