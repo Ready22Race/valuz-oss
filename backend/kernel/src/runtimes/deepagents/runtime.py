@@ -87,10 +87,17 @@ CHECKPOINT_DB_ENV = "DEEPAGENTS_CHECKPOINT_DB"
 # sqlite CANNOT live on COS — sqlite-on-COS-FUSE corrupts (WAL -shm mmap, no
 # fcntl locking, whole-object PUT → SIGBUS / "database disk image is malformed").
 # So IN-SANDBOX we use FileCheckpointSaver (write-once JSON files, corruption-free
-# on COS). The LOCAL resident process keeps the sqlite store above (durable local
-# disk, single host — no reason to change it). Gate: _in_sandbox().
+# on COS). The LOCAL resident process defaults to the sqlite store above (durable
+# local disk, single host). Gate: _in_sandbox(), overridable per deployment via
+# ``DEEPAGENTS_CHECKPOINT_BACKEND`` (see _checkpoint_backend).
 DEFAULT_CHECKPOINT_ROOT = "./deepagents_checkpoints"
 CHECKPOINT_ROOT_ENV = "DEEPAGENTS_CHECKPOINT_ROOT"
+
+# Explicit backend override. Unset (default) keeps the historical behaviour:
+# sandbox → file, local → sqlite. A deployment that wants the SAME on-disk
+# checkpoint shape in both places (e.g. so one collector/backup path can read
+# local and sandbox runs alike) sets ``file`` locally.
+CHECKPOINT_BACKEND_ENV = "DEEPAGENTS_CHECKPOINT_BACKEND"
 
 
 def _in_sandbox() -> bool:
@@ -100,6 +107,20 @@ def _in_sandbox() -> bool:
     return os.getenv("IS_SANDBOX", "").strip().lower() in ("1", "true", "yes") or (
         os.getenv("KERNEL_STORE", "local").strip().lower() == "remote"
     )
+
+
+def _checkpoint_backend() -> str:
+    """``"file"`` or ``"sqlite"`` — which checkpoint store this process uses.
+
+    ``DEEPAGENTS_CHECKPOINT_BACKEND`` wins when set to a recognised value;
+    otherwise fall back to the deployment gate (:func:`_in_sandbox`), so the
+    default behaviour is unchanged. An unrecognised value is ignored rather
+    than raising: a typo in an env var must not take the runtime down.
+    """
+    raw = os.getenv(CHECKPOINT_BACKEND_ENV, "").strip().lower()
+    if raw in ("file", "sqlite"):
+        return raw
+    return "file" if _in_sandbox() else "sqlite"
 
 # langchain TodoListMiddleware tool name (auto-included by deepagents). Treated
 # as a planning channel: emit `todo_update` and suppress the generic tool_use /
@@ -1098,17 +1119,21 @@ class DeepAgentsRuntime:
         """Open the checkpointer once per runtime instance (cached until close()).
 
         Thread-id (= session.id) lets langgraph rehydrate conversation state on
-        the next turn. Two backends by deployment (see ``_in_sandbox``):
+        the next turn. Two backends, selected by :func:`_checkpoint_backend`
+        (deployment gate by default, ``DEEPAGENTS_CHECKPOINT_BACKEND`` to pin):
 
-        - **Sandbox (ephemeral cloud):** ``FileCheckpointSaver`` over a per-owner
+        - **file** (sandbox default): ``FileCheckpointSaver`` over a per-owner
           COS mount — write-once JSON files survive sandbox recreation and, unlike
           sqlite, never corrupt on COS FUSE. No CM / no ``setup()``.
-        - **Local resident process:** the SQLite store on durable local disk. The
+        - **sqlite** (local default): the SQLite store on durable local disk. The
           CM is held until ``close()`` so the cached graph keeps a live connection.
+
+        The two stores are independent: switching backends starts from an empty
+        checkpoint history, so in-flight sessions cannot rehydrate across a flip.
         """
         if self._checkpointer is not None:
             return self._checkpointer
-        if _in_sandbox():
+        if _checkpoint_backend() == "file":
             from src.adapters.file_checkpoint_saver import FileCheckpointSaver
 
             os.makedirs(self.checkpoint_root, exist_ok=True)
