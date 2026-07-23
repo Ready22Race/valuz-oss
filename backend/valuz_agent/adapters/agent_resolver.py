@@ -758,6 +758,40 @@ async def resolve_agent_display_name(
     return names.get(agent_slug, agent_slug)
 
 
+async def _model_hosted_provider_id(
+    *,
+    model: str,
+    providers: object,
+    user_id: str,
+) -> str | None:
+    """Chat-parity fallback: the first enabled, credential-bearing provider
+    hosting *model*, or ``None`` when no configured provider hosts it.
+
+    Mirrors the session-service provider resolution (``sessions/service.py``):
+    agents routinely carry no pin — provider ids are install-local, so
+    pack-imported / source-instantiated agents arrive unpinned — and the chat
+    path quietly binds them to any enabled provider hosting their model. Task
+    dispatch used to skip this step, so the same agent worked in chat but
+    failed the dispatch pre-flight ("no model provider configured").
+    """
+    if not model:
+        return None
+    try:
+        from valuz_agent.infra.eventbus import event_bus
+        from valuz_agent.modules.providers.service import ProviderService
+
+        svc = ProviderService(datastore=providers, event_bus=event_bus)  # type: ignore[arg-type]
+        match = await svc.resolve_provider_for_model(user_id, model)
+        return match.id if match is not None else None
+    except Exception:
+        logger.warning(
+            "agent_resolver: model-hosted provider lookup failed for model %s",
+            model,
+            exc_info=True,
+        )
+        return None
+
+
 async def _resolve_agent_provider(
     *,
     agent: AgentConfig,
@@ -765,41 +799,59 @@ async def _resolve_agent_provider(
     providers: object | None,
     user_id: str,
 ) -> object | None:
-    """Resolve a concrete ModelProvider for an agent's pinned provider_id.
+    """Resolve a concrete ModelProvider for an agent, chat-parity fallbacks included.
 
-    Returns None (env fallback) when no provider is pinned or the resolver
-    deps weren't wired by the caller. Resolution failures are logged and
-    downgraded to None so a misconfigured pin never hard-fails a dispatch.
+    Resolution order matches the session-service path: the agent's pinned
+    ``metadata.provider_id`` when present, else any enabled provider hosting
+    the model (``_model_hosted_provider_id``); a pin that fails to resolve
+    also falls back to a model-hosted provider once. Returns None (env
+    fallback) when the resolver deps weren't wired by the caller, when the
+    effective provider is an OAuth subscription (healthy — the CLI supplies
+    the credential out-of-band), or when nothing resolved.
     """
     meta = agent.metadata or {}
     provider_id = meta.get("provider_id")
-    # Diagnostic: most "no model provider configured" reports trace to one
-    # of these three gaps (metadata-empty / pre-fix legacy agent / caller
-    # forgot to wire deps). Log once per resolve so the failure is debuggable
-    # in production without attaching a debugger.
+    if providers is None:
+        # Nothing to resolve against. With a pin present this is a caller
+        # bug — kickoff/dispatch should pass _provider_resolver_deps.
+        if provider_id:
+            logger.warning(
+                "agent_resolver: agent %s has provider_id=%s but resolver deps "
+                "are not wired. This is a caller bug — kickoff/dispatch should "
+                "pass _provider_resolver_deps.",
+                agent.id,
+                provider_id,
+            )
+        return None
+
+    from valuz_agent.adapters.provider_resolver import resolve_model_provider
+
+    pinned = bool(provider_id)
     if not provider_id:
-        logger.warning(
-            "agent_resolver: agent %s (%s) has no provider_id in metadata — "
-            "metadata keys=%s. Re-add the agent via the project "
-            "dialog so the provider pin is written.",
+        provider_id = await _model_hosted_provider_id(
+            model=model, providers=providers, user_id=user_id
+        )
+        if not provider_id:
+            logger.warning(
+                "agent_resolver: agent %s (%s) has no provider_id in metadata "
+                "and no enabled provider hosts model %s — metadata keys=%s. "
+                "Pin a model channel on the agent or enable a provider for "
+                "the model.",
+                agent.id,
+                agent.name,
+                model,
+                sorted(meta.keys()) if isinstance(meta, dict) else type(meta).__name__,
+            )
+            return None
+        logger.info(
+            "agent_resolver: agent %s (%s) has no provider pin — using "
+            "provider %s (hosts model %s), same fallback as the chat path.",
             agent.id,
             agent.name,
-            sorted(meta.keys()) if isinstance(meta, dict) else type(meta).__name__,
-        )
-        return None
-    if providers is None:
-        logger.warning(
-            "agent_resolver: agent %s has provider_id=%s but resolver deps "
-            "are not wired (providers=%s). This is a "
-            "caller bug — kickoff/dispatch should pass _provider_resolver_deps.",
-            agent.id,
             provider_id,
-            providers is not None,
+            model,
         )
-        return None
     try:
-        from valuz_agent.adapters.provider_resolver import resolve_model_provider
-
         resolved = await resolve_model_provider(
             provider_id=provider_id,
             model_id=model,
@@ -825,10 +877,42 @@ async def _resolve_agent_provider(
         return resolved
     except Exception:
         logger.warning(
-            "build_member_session: provider %s not resolvable for agent %s — falling back to env",
+            "build_member_session: provider %s not resolvable for agent %s — "
+            "trying a model-hosted fallback",
             provider_id,
             agent.id,
         )
+        # A broken pin (row deleted / disabled / credential gone) gets one
+        # shot at the same fallback an unpinned agent uses. Skip when the
+        # failing id already CAME from the fallback lookup.
+        if pinned:
+            fallback_id = await _model_hosted_provider_id(
+                model=model, providers=providers, user_id=user_id
+            )
+            if fallback_id and fallback_id != provider_id:
+                try:
+                    resolved = await resolve_model_provider(
+                        provider_id=fallback_id,
+                        model_id=model,
+                        providers=providers,  # type: ignore[arg-type]
+                        runtime_provider=agent.runtime_provider,
+                        user_id=user_id,
+                    )
+                    logger.info(
+                        "agent_resolver: pinned provider %s failed; resolved "
+                        "fallback provider %s for agent %s.",
+                        provider_id,
+                        fallback_id,
+                        agent.id,
+                    )
+                    return resolved
+                except Exception:
+                    logger.warning(
+                        "agent_resolver: fallback provider %s not resolvable "
+                        "for agent %s either — falling back to env.",
+                        fallback_id,
+                        agent.id,
+                    )
         return None
 
 

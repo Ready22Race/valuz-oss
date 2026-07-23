@@ -1971,6 +1971,9 @@ def test_commit_task_creates_lead_session_with_task_scope(
         async def get(self, _uid, _wid, _slug):
             return SimpleNamespace(agent_slug="lead")
 
+        async def list_by_project(self, _uid, _wid):
+            return []  # empty roster → the commit/kickoff provider pre-flight passes
+
     created: dict = {}
 
     async def _capture_create_session(_uid, session, scope=None):
@@ -2047,6 +2050,9 @@ def test_task_lifecycle_event_trace_golden(db_factory, tmp_path, monkeypatch) ->
 
         async def get(self, _uid, _wid, _slug):
             return SimpleNamespace(agent_slug="lead")
+
+        async def list_by_project(self, _uid, _wid):
+            return []  # empty roster → the commit/kickoff provider pre-flight passes
 
     _next_sid = iter(["lead-sess-1", "member-sess-1"])
 
@@ -2227,3 +2233,166 @@ def test_task_finalized_wiring_triggers_memory_on_completed(monkeypatch) -> None
     event_bus.publish(TASK_FINALIZED, task_id="t-y", owner_user_id=OWNER, status="stopped")
     event_bus.publish(TASK_FINALIZED, task_id="t-z", owner_user_id=OWNER, status="blocked")
     assert notified == [("t-x", OWNER)]
+
+
+# ---------------------------------------------------------------------------
+# Credential-gap dispatch: no ghost session_id + commit roster pre-flight
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_credential_gap_event_carries_no_session_id(
+    db_factory, tmp_path, monkeypatch
+) -> None:
+    """A dispatch failing the credential pre-flight appends ``subtask_failed``
+    WITHOUT a session_id: the kernel session is never created on this path, so
+    an id here becomes a clickable timeline link to a session that 404s
+    ("Session not found.")."""
+    from types import SimpleNamespace
+
+    from valuz_agent.modules.tasks import resolution as res_mod
+
+    _make_task(db_factory, tmp_path)
+    asyncio.run(
+        planning.plan_task(
+            task_id="t1",
+            project_id="w1",
+            user_id=OWNER,
+            lead_session_id="lead-sess",
+            subtasks=[{"key": "a", "title": "A", "agent": "worker"}],
+        )
+    )
+
+    class _FakeWsDs:
+        def __init__(self, _db):
+            pass
+
+        async def get_by_id(self, _uid, _wid):
+            return SimpleNamespace(id="w1", kind="project", root_path=str(tmp_path), name="W1")
+
+        async def get_context(self, _uid, _wid):
+            return None
+
+    gap = "agent 'worker' has no usable model provider for model 'm1' (runtime 'claude_agent')."
+
+    async def _gap(_session, agent_slug, **_k):
+        return gap if agent_slug == "worker" else None
+
+    monkeypatch.setattr(res_mod, "ProjectDatastore", _FakeWsDs)
+    monkeypatch.setattr(
+        res_mod, "fs_registry", SimpleNamespace(project_cwd=lambda *a, **k: tmp_path)
+    )
+    monkeypatch.setattr(
+        res_mod,
+        "build_member_session",
+        _as_async(lambda **_k: SimpleNamespace(id="member-sess-1")),
+    )
+    monkeypatch.setattr(res_mod, "_credential_gap", _gap)
+    monkeypatch.setattr(res_mod, "_provider_resolver_deps", lambda _db: {})
+    monkeypatch.setattr(
+        res_mod, "resolve_agent_display_name", _as_async(lambda _w, slug, _u: f"Agent {slug}")
+    )
+
+    orch = TaskOrchestrator()
+    res = asyncio.run(
+        orch.dispatch_async(
+            task_id="t1",
+            project_id="w1",
+            lead_session_id="lead-sess",
+            subtask_key="a",
+            user_id=OWNER,
+        )
+    )
+    assert res.get("status") == "failed", res
+    assert res.get("error") == gap
+
+    db = db_factory()
+    try:
+        rows = db.execute(select(TaskEventRow).filter_by(type="subtask_failed")).scalars().all()
+    finally:
+        db.close()
+    assert len(rows) == 1, [r.type for r in rows]
+    assert rows[0].session_id is None  # never-created session must not be linkable
+    assert (rows[0].payload or {}).get("error") == gap
+
+
+def test_commit_task_blocks_on_member_provider_preflight(db_factory, tmp_path, monkeypatch) -> None:
+    """``commit_task`` runs the roster provider pre-flight after the lead's own
+    credential check: an unconfigured member fails the commit with an
+    actionable aggregated error instead of surfacing minutes later as a
+    dispatch-time ``subtask_failed``."""
+    from types import SimpleNamespace
+
+    from valuz_agent.modules.tasks import resolution as res_mod
+
+    _make_task(db_factory, tmp_path)
+    asyncio.run(
+        planning.plan_task(
+            task_id="t1",
+            project_id="w1",
+            user_id=OWNER,
+            lead_session_id="chat",
+            subtasks=[{"key": "a", "title": "A", "agent": "worker"}],
+        )
+    )
+    db = db_factory()
+    try:
+        row = db.execute(select(TaskRow).filter_by(id="t1")).scalars().one()
+        row.status = "draft"
+        db.commit()
+    finally:
+        db.close()
+
+    class _FakeWsDs:
+        def __init__(self, _db):
+            pass
+
+        async def get_by_id(self, _uid, _wid):
+            return SimpleNamespace(id="w1", kind="project", root_path=str(tmp_path), name="W1")
+
+        async def get_context(self, _uid, _wid):
+            return None
+
+    class _FakeMemberDs:
+        def __init__(self, _db):
+            pass
+
+        async def get(self, _uid, _wid, _slug):
+            return SimpleNamespace(agent_slug="lead")
+
+    member_gap = "agent 'worker' has no usable model provider for model 'm1' (runtime 'codex')."
+
+    monkeypatch.setattr(res_mod, "ProjectDatastore", _FakeWsDs)
+    monkeypatch.setattr(res_mod, "ProjectMemberDatastore", _FakeMemberDs)
+    monkeypatch.setattr(
+        res_mod, "fs_registry", SimpleNamespace(project_cwd=lambda *a, **k: tmp_path)
+    )
+    monkeypatch.setattr(res_mod, "_member_agent_config", _as_async(lambda *_a, **_k: None))
+    monkeypatch.setattr(
+        res_mod,
+        "build_member_session",
+        _as_async(lambda **_k: SimpleNamespace(id="lead-sess-1")),
+    )
+    monkeypatch.setattr(res_mod, "_credential_gap", _as_async(lambda *_a, **_k: None))
+    monkeypatch.setattr(res_mod, "_provider_resolver_deps", lambda _db: {})
+    # The sweep is the unit under test's collaborator — stub the singleton the
+    # lifecycle calls (instance attr shadows the bound method).
+    monkeypatch.setattr(
+        res_mod.task_session_resolver,
+        "preflight_member_providers",
+        _as_async(lambda _db, **_k: [member_gap]),
+    )
+
+    orch = TaskOrchestrator()
+    res = asyncio.run(
+        orch.commit_task(
+            task_id="t1",
+            project_id="w1",
+            caller_session_id="chat",
+            user_id=OWNER,
+        )
+    )
+    assert "error" in res, res
+    assert "model configuration check failed" in res["error"]
+    assert member_gap in res["error"]
+    # The draft must remain committable after the user fixes the provider.
+    assert _task_row(db_factory).status == "draft"
