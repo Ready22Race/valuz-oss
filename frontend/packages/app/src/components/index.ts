@@ -19,7 +19,10 @@ export { AgentDetailView } from "./AgentDetailView";
 export type { AgentDetailViewProps } from "./AgentDetailView";
 export { AgentEditForm } from "./AgentEditForm";
 export type { AgentEditFormProps, AgentEditValue } from "./AgentEditForm";
-export { ResourceActionSlot } from "./ResourceActionSlot";
+export {
+  ResourceActionSlot,
+  ResourceDetailActionSlot,
+} from "./ResourceActionSlot";
 export { useCliLoginFlow } from "./CliLoginFlow";
 export type { CliTool, CliLoginState, CliLoginStatus } from "./CliLoginFlow";
 export { PlanCard } from "./PlanCard";

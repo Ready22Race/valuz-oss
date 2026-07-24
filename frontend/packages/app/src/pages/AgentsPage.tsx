@@ -47,6 +47,7 @@ import { AgentDetailView } from "../components/AgentDetailView";
 import { CreateAgentDialog } from "../components/CreateAgentDialog";
 import { ImportPackDialog } from "../components/ImportPackDialog";
 import { ExportPackDialog } from "../components/ExportPackDialog";
+import { isCloudOnlyAgent } from "./agent-list-state";
 
 /** Group agents into 自定义 (user-created, ``source !== "official"``) then
  * 官方 (built-in, ``source === "official"``). Mirrors the Skills /
@@ -238,6 +239,10 @@ export const AgentsPage = () => {
   /* -- Derived state -- */
 
   const visibleAgents = agents;
+  const localAgents = useMemo(
+    () => agents.filter((agent) => !isCloudOnlyAgent(agent)),
+    [agents],
+  );
 
   const categories = useResourceCategories<Agent>(
     "agent",
@@ -280,9 +285,8 @@ export const AgentsPage = () => {
   // selection if it still exists, otherwise fall back to the first agent in
   // the active tab (then any agent at all).
   const currentAgent =
-    agents.find((a) => a.slug === activeSlug) ??
-    visibleAgents[0] ??
-    agents[0] ??
+    localAgents.find((a) => a.slug === activeSlug) ??
+    localAgents[0] ??
     null;
   const effectiveActiveSlug = currentAgent?.slug ?? null;
   const effectiveProjectMemberKey =
@@ -341,6 +345,7 @@ export const AgentsPage = () => {
       opts?: { deploymentCount?: number },
     ) => {
       const AgentIcon = agentIcons.get(agent.slug) ?? Bot;
+      const cloudOnly = isCloudOnlyAgent(agent);
       const isChecked = checked.has(agent.slug);
       const deploymentCount =
         opts?.deploymentCount ?? deploymentCountBySlug.get(agent.slug) ?? 0;
@@ -352,7 +357,7 @@ export const AgentsPage = () => {
               : "hover:bg-surface-soft/60"
           }`}
         >
-          {selecting && (
+          {selecting && !cloudOnly && (
             <span
               className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors ${
                 isChecked
@@ -387,33 +392,35 @@ export const AgentsPage = () => {
           </div>
           {!selecting && (
             <>
-              <Popover>
-                <PopoverTrigger asChild>
-                  <button
-                    type="button"
-                    aria-label={t(
-                      "agent.copyAgent" as Parameters<typeof t>[0],
-                    )}
-                    onClick={(e) => e.stopPropagation()}
-                    className="flex h-7 w-7 shrink-0 cursor-default items-center justify-center rounded-md text-ink-meta opacity-0 transition-opacity hover:bg-card hover:text-ink-body group-hover:opacity-100 data-[state=open]:opacity-100"
-                  >
-                    <MoreHorizontal className="h-3.5 w-3.5" />
-                  </button>
-                </PopoverTrigger>
-                <PopoverContent align="end" className="w-32 p-1">
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      openCopy(agent);
-                    }}
-                    className="flex w-full cursor-default items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-ink-body transition-colors hover:bg-surface-soft"
-                  >
-                    <Copy className="h-3.5 w-3.5" />
-                    {t("agent.copyAgent" as Parameters<typeof t>[0])}
-                  </button>
-                </PopoverContent>
-              </Popover>
+              {!cloudOnly && (
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <button
+                      type="button"
+                      aria-label={t(
+                        "agent.copyAgent" as Parameters<typeof t>[0],
+                      )}
+                      onClick={(e) => e.stopPropagation()}
+                      className="flex h-7 w-7 shrink-0 cursor-default items-center justify-center rounded-md text-ink-meta opacity-0 transition-opacity hover:bg-card hover:text-ink-body group-hover:opacity-100 data-[state=open]:opacity-100"
+                    >
+                      <MoreHorizontal className="h-3.5 w-3.5" />
+                    </button>
+                  </PopoverTrigger>
+                  <PopoverContent align="end" className="w-32 p-1">
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openCopy(agent);
+                      }}
+                      className="flex w-full cursor-default items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-ink-body transition-colors hover:bg-surface-soft"
+                    >
+                      <Copy className="h-3.5 w-3.5" />
+                      {t("agent.copyAgent" as Parameters<typeof t>[0])}
+                    </button>
+                  </PopoverContent>
+                </Popover>
+              )}
               <ResourceActionSlot
                 resourceType="agent"
                 resource={agent as unknown as Record<string, unknown>}
@@ -629,17 +636,22 @@ export const AgentsPage = () => {
                       {!collapsedProjectGroups.has("_unassigned") && (
                         <div className="flex flex-col gap-3">
                           {unassignedAgents.map((agent) => (
-                            <div
-                              key={agent.slug}
-                              onClick={() => {
-                                if (selecting) {
+                              <div
+                                key={agent.slug}
+                                onClick={() => {
+                                  if (isCloudOnlyAgent(agent)) return;
+                                  if (selecting) {
                                   toggleChecked(agent.slug);
                                   return;
                                 }
                                 setActiveSlug(agent.slug);
                                 setActiveProjectMemberKey(null);
                               }}
-                              className="cursor-pointer"
+                                className={
+                                  isCloudOnlyAgent(agent)
+                                    ? "cursor-default"
+                                    : "cursor-pointer"
+                                }
                             >
                               {renderAgentRow(
                                 agent,
@@ -662,6 +674,7 @@ export const AgentsPage = () => {
                 selectedId={effectiveActiveSlug}
                 getId={(a: Agent) => a.slug}
                 onSelect={(a: Agent) => {
+                  if (isCloudOnlyAgent(a)) return;
                   if (selecting) {
                     toggleChecked(a.slug);
                     return;
