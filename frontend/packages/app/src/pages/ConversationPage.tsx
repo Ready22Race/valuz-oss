@@ -142,7 +142,7 @@ import {
 } from "./conversation-plan-anchors";
 import {
   deriveTurnActive,
-  isTerminalSessionStatus,
+  shouldApplySessionStatus,
   shouldRefreshConversationHistory,
   shouldShowNoModelEmptyState,
 } from "./conversation-loading";
@@ -3888,19 +3888,14 @@ export const ConversationPage = () => {
         const status = event.event.payload.status;
         // Reconcile the authoritative status from the live frame so the derived
         // loading flag + header pill track the turn without waiting for a poll.
-        // Non-terminal statuses always apply (the turn-start
-        // ``session.update{running}`` is what flips the pill to 运行中);
-        // a terminal status applies only when it is NOT a replay — a
-        // redelivered old terminal must not clobber a newer running turn.
+        // Replays are FULLY inert — non-terminal and terminal alike; the
+        // rationale (an asymmetric gate deadlocked the pill at 运行中 on
+        // cloud reconnect backfills) lives on ``shouldApplySessionStatus``.
         // The send path's stale-pre-turn-``idle`` hazard (image-upload slow
         // start) is handled by the busy derivation instead: ``sendPending``
         // overrides a terminal status until the turn's start event or a send
         // error (see ``deriveTurnActive``).
-        if (
-          evType === "session.update" &&
-          status &&
-          (!isTerminalSessionStatus(status) || !isReplayOfSeen)
-        ) {
+        if (evType === "session.update" && shouldApplySessionStatus(status, isReplayOfSeen)) {
           setSessions((prev) =>
             prev.map((s) =>
               s.id === sessionId

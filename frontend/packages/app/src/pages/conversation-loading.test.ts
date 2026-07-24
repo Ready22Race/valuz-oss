@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   deriveTurnActive,
   isTerminalSessionStatus,
+  shouldApplySessionStatus,
   shouldRefreshConversationHistory,
   shouldShowNoModelEmptyState,
 } from "./conversation-loading";
@@ -118,5 +119,30 @@ describe("shouldRefreshConversationHistory", () => {
         promotedWithLiveStream: true,
       }),
     ).toBe(false);
+  });
+});
+
+describe("shouldApplySessionStatus", () => {
+  it("applies live frames, non-terminal and terminal alike", () => {
+    expect(shouldApplySessionStatus("running", false)).toBe(true);
+    expect(shouldApplySessionStatus("idle", false)).toBe(true);
+    expect(shouldApplySessionStatus("failed", false)).toBe(true);
+  });
+
+  it("keeps replays FULLY inert — a replayed running must not revive a finished turn", () => {
+    // Regression: the old gate applied replayed ``running`` while suppressing
+    // the replayed terminal that follows it. On cloud sessions (live kernel
+    // frames carry no event_uid, so the first reconnect backfill seeds the
+    // seen-set and every later one is a replay) that re-flipped a finished
+    // conversation to "running" until a manual refresh.
+    expect(shouldApplySessionStatus("running", true)).toBe(false);
+    expect(shouldApplySessionStatus("idle", true)).toBe(false);
+    expect(shouldApplySessionStatus("failed", true)).toBe(false);
+  });
+
+  it("drops frames with no status at all", () => {
+    expect(shouldApplySessionStatus(undefined, false)).toBe(false);
+    expect(shouldApplySessionStatus(null, false)).toBe(false);
+    expect(shouldApplySessionStatus("", false)).toBe(false);
   });
 });
