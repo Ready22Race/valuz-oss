@@ -25,7 +25,10 @@ import {
   SkillDetailPanel,
   Switch,
 } from "@valuz/ui";
-import { ResourceActionSlot } from "../components/ResourceActionSlot";
+import {
+  ResourceActionSlot,
+  ResourceDetailActionSlot,
+} from "../components/ResourceActionSlot";
 import {
   skillsApi,
   usePanelStore,
@@ -42,6 +45,7 @@ import type { ResourceCategory } from "@valuz/shared";
 import { useProjectOutlet } from "@valuz/app/layout";
 import { SkillAddDialog, SkillEditDialog } from "@valuz/app/components";
 import { useTranslation } from "@valuz/core";
+import { isCloudOnlyResource } from "./agent-list-state";
 
 type AddSkillDialogMode = "link" | "upload";
 type ResourceRefreshEvent = CustomEvent<{ resourceType?: string }>;
@@ -419,17 +423,24 @@ export const SkillsPage = () => {
     const assigned = new Set<string>();
     for (const cat of categories) {
       const matching = filteredSkills
-        .filter((s) => !assigned.has(s.id) && cat.filter(s))
+        .filter(
+          (s) =>
+            !isCloudOnlyResource(s) &&
+            !assigned.has(s.id) &&
+            cat.filter(s),
+        )
         .sort(cat.sort);
       if (matching.length > 0) return matching[0];
       for (const s of filteredSkills) {
         if (cat.filter(s)) assigned.add(s.id);
       }
     }
-    return filteredSkills[0] ?? null;
+    return filteredSkills.find((skill) => !isCloudOnlyResource(skill)) ?? null;
   }, [filteredSkills, categories]);
   const currentSkill =
-    skills.find((s) => s.id === activeSkillId) ?? firstVisibleSkill;
+    skills.find(
+      (s) => s.id === activeSkillId && !isCloudOnlyResource(s),
+    ) ?? firstVisibleSkill;
   const effectiveActiveId = currentSkill?.id ?? null;
 
   const { canDelete: canDeleteSkill } = useResourceGuard({
@@ -577,6 +588,14 @@ export const SkillsPage = () => {
         }
         onDelete={canDeleteSkill ? handleDeleteOpen : undefined}
         onCopy={handleCopy}
+        headerActions={
+          <ResourceDetailActionSlot
+            resourceType="skill"
+            resource={
+              currentSkill as unknown as Record<string, unknown>
+            }
+          />
+        }
       />,
     );
     return () => {
@@ -690,8 +709,11 @@ export const SkillsPage = () => {
               categories={categories}
               selectedId={effectiveActiveId}
               getId={(s: SkillView) => s.id}
-              onSelect={(s: SkillView) => setActiveSkillId(s.id)}
+              onSelect={(s: SkillView) => {
+                if (!isCloudOnlyResource(s)) setActiveSkillId(s.id);
+              }}
               renderItem={(skill: SkillView, isSelected: boolean) => {
+                const cloudOnly = isCloudOnlyResource(skill);
                 // Determine which category this item belongs to so we
                 // can pass the right origin badge. CategorizedList
                 // partitions by filter predicates — we match the same
@@ -705,8 +727,10 @@ export const SkillsPage = () => {
                   <SkillCard
                     skill={toCardSkill(skill)}
                     originBadge={badgeForCategory(categoryId, skill, t)}
-                    active={isSelected}
-                    onClick={() => setActiveSkillId(skill.id)}
+                    active={!cloudOnly && isSelected}
+                    onClick={() => {
+                      if (!cloudOnly) setActiveSkillId(skill.id);
+                    }}
                     actions={
                       <div
                         className="flex items-center gap-2"
@@ -714,20 +738,22 @@ export const SkillsPage = () => {
                         // propagation so toggling never opens the detail panel.
                         onClick={(e) => e.stopPropagation()}
                       >
-                        <Switch
-                          size="sm"
-                          checked={skill.library_enabled !== false}
-                          onCheckedChange={(v) =>
-                            void handleToggleLibrary(skill, v)
-                          }
-                          aria-label={t(
-                            (skill.library_enabled !== false
-                              ? "skill.libraryEnabledTip"
-                              : "skill.libraryDisabledTip") as Parameters<
-                              typeof t
-                            >[0],
-                          )}
-                        />
+                        {!cloudOnly ? (
+                          <Switch
+                            size="sm"
+                            checked={skill.library_enabled !== false}
+                            onCheckedChange={(v) =>
+                              void handleToggleLibrary(skill, v)
+                            }
+                            aria-label={t(
+                              (skill.library_enabled !== false
+                                ? "skill.libraryEnabledTip"
+                                : "skill.libraryDisabledTip") as Parameters<
+                                typeof t
+                              >[0],
+                            )}
+                          />
+                        ) : null}
                         <ResourceActionSlot
                           resourceType="skill"
                           resource={

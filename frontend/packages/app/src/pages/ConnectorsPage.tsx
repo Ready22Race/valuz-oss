@@ -15,7 +15,10 @@ import {
   EmptyState,
   PageLoader,
 } from "@valuz/ui";
-import { ResourceActionSlot } from "../components/ResourceActionSlot";
+import {
+  ResourceActionSlot,
+  ResourceDetailActionSlot,
+} from "../components/ResourceActionSlot";
 import {
   acknowledgeConnectorAlert,
   connectorsApi,
@@ -38,6 +41,7 @@ import {
 } from "@valuz/app/components";
 import type { ConnectorAddMode } from "@valuz/app/components";
 import { reauthorizePayload, shouldReauthorize } from "./connector-reconnect";
+import { isCloudOnlyResource } from "./agent-list-state";
 
 /* ── Status labels ──────────────────────────────────────────────── */
 
@@ -308,18 +312,24 @@ export const ConnectorsPage = () => {
     const assigned = new Set<string>();
     for (const cat of categories) {
       const matching = unifiedList.filter(
-        (e) => !assigned.has(entryKey(e)) && cat.filter(e),
+        (e) =>
+          !isCloudOnlyResource(e) &&
+          !assigned.has(entryKey(e)) &&
+          cat.filter(e),
       );
       if (matching.length > 0) return matching[0];
       for (const e of unifiedList) {
         if (cat.filter(e)) assigned.add(entryKey(e));
       }
     }
-    return unifiedList[0] ?? null;
+    return unifiedList.find((entry) => !isCloudOnlyResource(entry)) ?? null;
   }, [unifiedList, categories]);
 
   const effectiveKey =
-    activeKey && unifiedList.some((e) => entryKey(e) === activeKey)
+    activeKey &&
+    unifiedList.some(
+      (e) => entryKey(e) === activeKey && !isCloudOnlyResource(e),
+    )
       ? activeKey
       : firstEntry
         ? entryKey(firstEntry)
@@ -543,6 +553,12 @@ export const ConnectorsPage = () => {
           busy={busyKey === `installed:${c.id}`}
           onConnect={() => handleReconnectInstalled(c)}
           onDisconnect={() => canDeleteConnector(c) && setDeleteTarget(c)}
+          headerActions={
+            <ResourceDetailActionSlot
+              resourceType="connector"
+              resource={c as unknown as Record<string, unknown>}
+            />
+          }
         />,
       );
     } else if (selectedCatalog) {
@@ -651,10 +667,13 @@ export const ConnectorsPage = () => {
               categories={categories}
               selectedId={effectiveKey}
               getId={entryKey}
-              onSelect={(e: ConnectorListEntry) => setActiveKey(entryKey(e))}
+              onSelect={(e: ConnectorListEntry) => {
+                if (!isCloudOnlyResource(e)) setActiveKey(entryKey(e));
+              }}
               renderItem={(entry: ConnectorListEntry, isSelected: boolean) => {
                 if (entry.kind === "installed") {
                   const c = entry.item;
+                  const cloudOnly = isCloudOnlyResource(entry);
                   return (
                     <ConnectorListItem
                       name={c.display_name}
@@ -665,11 +684,14 @@ export const ConnectorsPage = () => {
                           ? t(STATUS_LABEL_KEY[c.status])
                           : null
                       }
-                      active={isSelected}
-                      onClick={() => setActiveKey(`installed:${c.id}`)}
+                      active={!cloudOnly && isSelected}
+                      onClick={() => {
+                        if (!cloudOnly) setActiveKey(`installed:${c.id}`);
+                      }}
                       actions={
                         <>
-                          {c.connector_type !== "builtin" &&
+                          {!cloudOnly &&
+                            c.connector_type !== "builtin" &&
                             c.status !== "connected" && (
                               <button
                                 type="button"

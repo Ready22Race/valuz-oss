@@ -1,4 +1,5 @@
 import { Loader2, Plug, Wrench } from "lucide-react";
+import type { ReactNode } from "react";
 import type { ToolInfo } from "@valuz/shared";
 import { useI18n } from "../../hooks/use-i18n";
 import { Button } from "../ui/button";
@@ -23,6 +24,8 @@ export interface ConnectorDetailPanelProps {
   busy?: boolean;
   onConnect?: () => void;
   onDisconnect?: () => void;
+  /** Edition/overlay-provided actions rendered in the detail header. */
+  headerActions?: ReactNode;
 }
 
 export const ConnectorDetailPanel = ({
@@ -36,13 +39,17 @@ export const ConnectorDetailPanel = ({
   busy,
   onConnect,
   onDisconnect,
+  headerActions,
 }: ConnectorDetailPanelProps) => {
   const { t } = useI18n();
 
   // ── Not connected ──────────────────────────────────────────────────
   if (!connected) {
     return (
-      <aside className="flex h-full flex-col items-center justify-center px-6 text-center">
+      <aside className="relative flex h-full flex-col items-center justify-center px-6 text-center">
+        {headerActions ? (
+          <div className="absolute right-4 top-4">{headerActions}</div>
+        ) : null}
         <div className="w-[300px] -translate-y-[100px] rounded-xl px-5 py-8 text-center">
           <ConnectorIcon
             name={name}
@@ -81,6 +88,7 @@ export const ConnectorDetailPanel = ({
               {name}
             </div>
           </div>
+          {headerActions}
           <Button
             variant="outline"
             size="sm"

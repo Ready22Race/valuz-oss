@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { Agent } from "@valuz/core";
-import { isCloudOnlyAgent } from "./agent-list-state";
+import {
+  isCloudOnlyAgent,
+  isCloudOnlyResource,
+} from "./agent-list-state";
 
 const agent = {
   id: "agent-1",
@@ -26,5 +29,25 @@ describe("isCloudOnlyAgent", () => {
         _sync: { status: "synced", cloud_id: "org-agent-1" },
       } as unknown as Agent),
     ).toBe(false);
+  });
+});
+
+describe("isCloudOnlyResource", () => {
+  it("supports raw Skill rows and installed Connector entries", () => {
+    expect(
+      isCloudOnlyResource({
+        id: "org-skill",
+        _sync: { status: "cloud_only" },
+      }),
+    ).toBe(true);
+    expect(
+      isCloudOnlyResource({
+        kind: "installed",
+        item: {
+          id: "org-connector",
+          _sync: { status: "cloud_only" },
+        },
+      }),
+    ).toBe(true);
   });
 });

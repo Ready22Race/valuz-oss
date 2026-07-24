@@ -46,6 +46,18 @@ describe("SkillDetailPanel", () => {
     }
   });
 
+  it("renders edition-provided header actions", () => {
+    render(
+      <SkillDetailPanel
+        skill={skill("Shared")}
+        files={[]}
+        headerActions={<button type="button">Publish</button>}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Publish" })).toBeTruthy();
+  });
+
   it("clears previous SKILL.md content while the next skill loads", async () => {
     const loadFirst = vi.fn().mockResolvedValue(`---
 name: first-skill

@@ -7,7 +7,13 @@ import {
   Loader2,
   Trash2,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { cn } from "../../lib/cn";
 import { useI18n } from "../../hooks/use-i18n";
 import { Badge } from "../ui/badge";
@@ -76,6 +82,8 @@ export interface SkillDetailPanelProps {
   onLoadFile?: (path: string) => Promise<string>;
   onDelete?: () => void;
   onCopy?: () => void;
+  /** Edition/overlay-provided actions rendered before the native controls. */
+  headerActions?: ReactNode;
   /** Reveal the skill directory in the OS file manager (Finder on macOS,
    * Explorer on Windows). When provided, a folder icon button is
    * rendered to the left of the delete icon. */
@@ -297,6 +305,7 @@ export const SkillDetailPanel = ({
   onLoadFile,
   onDelete,
   onCopy,
+  headerActions,
   onOpenInFinder,
 }: SkillDetailPanelProps) => {
   const { t } = useI18n();
@@ -519,6 +528,7 @@ export const SkillDetailPanel = ({
               it on every panel was noise. */}
           <TooltipProvider delayDuration={150}>
             <div className="flex shrink-0 items-center gap-0.5">
+              {headerActions}
               {onCopy ? (
                 <Tooltip>
                   <TooltipTrigger asChild>
