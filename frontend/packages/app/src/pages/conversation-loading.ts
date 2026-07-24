@@ -50,6 +50,36 @@ export const deriveTurnActive = (
   status: string | null | undefined,
 ): boolean => sendPending || status === "running";
 
+/**
+ * Whether a ``session.update`` frame's status may be applied to the session
+ * list (and thereby the header pill / composer busy state).
+ *
+ * The rule is deliberately SYMMETRIC: replayed frames are fully inert,
+ * non-terminal and terminal alike. An earlier gate special-cased them
+ * (replayed ``running`` always applied, replayed terminal suppressed "so a
+ * redelivered old terminal cannot clobber a newer running turn") and that
+ * asymmetry deadlocked the pill at "running" on cloud sessions:
+ *
+ * - a turn's LIVE frames arrive from the sandbox kernel WITHOUT ``event_uid``
+ *   (the kernel store never mints uids), so the page's replay detection has
+ *   nothing to remember while the turn actually runs;
+ * - the durable-store backfill on SSE reconnect then redelivers the finished
+ *   turn WITH uids — the first backfill seeds the seen-set, and every later
+ *   backfill (cloud streams churn: CLB idle timeouts, instance clamps) counts
+ *   as a replay;
+ * - under the asymmetric gate each such replay applied ``running``@turn-start
+ *   while suppressing the terminal that follows it, re-flipping a finished
+ *   conversation to 运行中 until a manual refresh re-read REST state.
+ *
+ * Symmetry also covers the clobber the old gate feared: a genuinely new
+ * turn's ``running`` arrives as a live or first-delivery frame — never as a
+ * seen-uid replay — so dropping replayed ``running`` loses nothing.
+ */
+export const shouldApplySessionStatus = (
+  status: string | null | undefined,
+  isReplayOfSeen: boolean,
+): boolean => Boolean(status) && !isReplayOfSeen;
+
 export type ProviderCatalogStatus = "loading" | "ready" | "error";
 
 export const shouldShowNoModelEmptyState = ({
