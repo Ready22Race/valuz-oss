@@ -2913,7 +2913,16 @@ export const ConversationPage = () => {
           }
         }
       }
-      setTodos(lastTodos);
+      // Carry-forward, matching the other two setTodos sites (detail hydrate
+      // + live SSE): the persisted ``detail.todos`` snapshot is the
+      // authoritative source and history/live frames only ever refine it.
+      // The window covers the last TURN_PAGE_SIZE turns — on a long session
+      // it may contain no parseable ``session.todos.update`` frame at all,
+      // and an unconditional write here clobbered the detail hydrate with
+      // null on every cold re-open ("No todos yet" while sessions.todos is
+      // intact). An agent that *clears* its todos emits ``[]`` (truthy),
+      // which still lands.
+      if (lastTodos) setTodos(lastTodos);
       currentClarifyingPendingRef.current = unresolvedClarifyingPending;
       setPendingApprovals(rebuiltApprovals);
       historyHydratedSessionIdRef.current = sessionId;

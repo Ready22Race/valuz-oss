@@ -116,15 +116,32 @@ def _session_to_detail(session: KernelSession) -> SessionDetail:
     # across messages is a UI concern; surface 0 here and let callers that
     # care fetch the messages list directly.
     raw_todos = getattr(session, "todos", None)
-    todos = (
-        [
-            TodoItem(**{k: v for k, v in t.items() if k in ("content", "status", "activeForm")})
-            for t in raw_todos
-            if isinstance(t, dict) and "content" in t and "status" in t
-        ]
-        if isinstance(raw_todos, list)
-        else None
-    )
+    todos: list[TodoItem] | None
+    if isinstance(raw_todos, list):
+        # The kernel-client seam is wire-schema typed: ``session.todos`` items
+        # arrive as kernel ``TodoItem`` pydantic models, not the domain dicts
+        # this mapper was written against. The old ``isinstance(t, dict)``
+        # filter silently dropped every model item, so the detail endpoint
+        # returned ``todos: []`` for sessions whose DB row had todos — the
+        # panel's "detail hydrate" then wiped a good window/live snapshot with
+        # an empty list on warm re-opens. Accept both shapes.
+        todos = []
+        for t in raw_todos:
+            item = (
+                t if isinstance(t, dict) else (t.model_dump() if hasattr(t, "model_dump") else None)
+            )
+            if isinstance(item, dict) and "content" in item and "status" in item:
+                todos.append(
+                    TodoItem(
+                        **{
+                            k: v
+                            for k, v in item.items()
+                            if k in ("content", "status", "activeForm")
+                        }
+                    )
+                )
+    else:
+        todos = None
     settings = getattr(session, "model_settings", None)
     effort = settings.effort if settings is not None else None
     return SessionDetail(
