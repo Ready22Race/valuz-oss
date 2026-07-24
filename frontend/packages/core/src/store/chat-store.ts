@@ -634,8 +634,12 @@ export const reduce = (
     }
 
     case "session.todos.update": {
+      // Carry-forward on a malformed frame (parser returns null) — same
+      // semantics as the conversation page's SSE handler: a frame that
+      // can't be parsed must not wipe the snapshot the panel already has.
+      // A cleared todo list arrives as ``[]`` (truthy) and still lands.
       const todos = parseTodosUpdate(envelope);
-      return { todos, lastSeq: nextLastSeq };
+      return { todos: todos ?? state.todos, lastSeq: nextLastSeq };
     }
 
     case "session.idle": {
