@@ -256,7 +256,14 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 exe = EXE(
     pyz,
     a.scripts,
-    [],
+    # Force Python UTF-8 mode (PEP 540) in the frozen interpreter: every
+    # open()/read_text() without an explicit encoding= otherwise decodes with
+    # the OS locale codepage (GBK on zh-CN Windows, CP932 on ja-JP, ...), so
+    # any UTF-8 config/resource read on such a machine dies with
+    # UnicodeDecodeError. mac/linux already run UTF-8 locales; this makes
+    # Windows behave the same. Python defaults to UTF-8 mode from 3.15
+    # (PEP 686) — this just enables it early.
+    [("X utf8_mode=1", None, "OPTION")],
     exclude_binaries=True,
     name=exe_name,
     debug=False,
