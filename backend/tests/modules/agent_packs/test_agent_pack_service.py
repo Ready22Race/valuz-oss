@@ -231,6 +231,49 @@ async def test_import_pack_materializes_skills(svc: AgentPackService, tmp_path) 
     assert (skills_dir / "xhs-note-writing").is_dir()
 
 
+async def test_import_pack_notifies_bundled_skill_lifecycle(
+    svc: AgentPackService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from valuz_agent.ports.extensions import ext
+
+    notified: list[tuple[str, tuple[str, ...]]] = []
+
+    class Hook:
+        async def after_bundled_skills_materialized(
+            self,
+            *,
+            user_id: str,
+            slugs: tuple[str, ...],
+        ) -> None:
+            notified.append((user_id, slugs))
+
+    monkeypatch.setattr(ext, "skill_lifecycle", Hook())
+
+    await svc.import_pack(USER, "investment", **DEPLOY)
+
+    assert notified == [
+        (
+            USER,
+            (
+                "sector-overview",
+                "competitive-analysis",
+                "comps",
+                "idea-generation",
+                "dcf",
+                "3-statement-model",
+                "audit-xls",
+                "earnings-analysis",
+                "earnings-preview",
+                "model-update",
+                "initiating-coverage",
+                "morning-note",
+                "pptx-author",
+            ),
+        )
+    ]
+
+
 async def test_import_pack_indexes_embedded_skills(
     svc: AgentPackService, tmp_path, monkeypatch
 ) -> None:

@@ -22,6 +22,16 @@ class SkillLifecycleHook(ABC):
     """Callbacks around user-visible skill writes and deletes."""
 
     @abstractmethod
+    async def after_bundled_skills_materialized(
+        self,
+        *,
+        user_id: str,
+        slugs: tuple[str, ...],
+    ) -> None:
+        """Called after bundled Agent Pack skills are materialized and indexed."""
+        ...
+
+    @abstractmethod
     async def after_skill_saved(
         self,
         *,
@@ -46,6 +56,14 @@ class SkillLifecycleHook(ABC):
 
 
 class NoopSkillLifecycleHook(SkillLifecycleHook):
+    async def after_bundled_skills_materialized(
+        self,
+        *,
+        user_id: str,
+        slugs: tuple[str, ...],
+    ) -> None:
+        return None
+
     async def after_skill_saved(
         self,
         *,
