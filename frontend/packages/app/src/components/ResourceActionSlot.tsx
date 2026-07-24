@@ -24,3 +24,21 @@ export function ResourceActionSlot({
     />
   );
 }
+
+/**
+ * Resource detail-header action slot.
+ *
+ * Kept separate from the list-row slot so overlays can expose an explicit,
+ * labelled action on a detail page without adding an icon to every list row.
+ */
+export function ResourceDetailActionSlot({
+  resourceType,
+  resource,
+}: ResourceActionSlotProps) {
+  return (
+    <SlotRenderer
+      name={`resource.${resourceType}.detail.actions`}
+      context={{ resourceType, resource }}
+    />
+  );
+}

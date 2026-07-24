@@ -55,6 +55,7 @@ import { modelLabel } from "@valuz/shared";
 import { AgentModelPicker, type AgentModelSelection } from "./AgentModelPicker";
 import { CatalogPickerDialog } from "./CatalogPickerDialog";
 import { ExportPackDialog } from "./ExportPackDialog";
+import { ResourceDetailActionSlot } from "./ResourceActionSlot";
 import { useOptionalProjectOutlet } from "../layout";
 import {
   AVATAR_PRESETS,
@@ -685,6 +686,10 @@ export const AgentDetailView = ({
                 <Trash2 className="h-3.5 w-3.5" />
               </button>
             )}
+            <ResourceDetailActionSlot
+              resourceType="agent"
+              resource={agent as unknown as Record<string, unknown>}
+            />
             <Button
               size="sm"
               onClick={openInstantiate}
