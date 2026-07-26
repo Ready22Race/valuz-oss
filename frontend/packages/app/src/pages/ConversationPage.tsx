@@ -65,6 +65,7 @@ import {
   SESSION_ACTION_RESOLVED_EVENT,
   SESSION_WORKFLOW_PROGRESS_EVENT,
   type WorkflowState,
+  useCapabilities,
   useComposerProviderChannelState,
   useComposerAgentLibrary,
   useComposerProviders,
@@ -676,7 +677,16 @@ export const ConversationPage = () => {
   const [agentLibraryRevision, setAgentLibraryRevision] = useState(0);
   // 10-new-conversation-guidance (slice 2): is there any usable model channel?
   // Drives the setup banner's "no channel" state.
-  const { hasChannel, loaded: channelLoaded } = useHasUsableChannel();
+  const {
+    hasChannel,
+    loaded: channelLoaded,
+    refresh: refreshChannels,
+  } = useHasUsableChannel();
+  const { managedRuntimeSetup } = useCapabilities();
+  // A managed install receives its channels and its built-in assistant, so
+  // "none yet" is a delivery that has not landed — not a step the user skipped.
+  // Both cases offer a retry instead of a setup screen they cannot act on.
+  const channelsPending = managedRuntimeSetup && channelLoaded && !hasChannel;
   const [selectedAgentSlug, setSelectedAgentSlug] = useState<string | null>(
     null,
   );
@@ -2524,7 +2534,13 @@ export const ConversationPage = () => {
   const providerChannelState =
     useComposerProviderChannelState(providerTargetId);
   const providers = providerChannelState.providers;
-  const { agents: myAgents, loaded: myAgentsLoaded } = useComposerAgentLibrary(
+  const {
+    agents: myAgents,
+    loaded: myAgentsLoaded,
+    failed: myAgentsFailed,
+    settling: myAgentsSettling,
+    refresh: refreshAgents,
+  } = useComposerAgentLibrary(
     providerTargetId,
     `${agentParam ?? ""}:${agentLibraryRevision}`,
   );
@@ -2556,6 +2572,17 @@ export const ConversationPage = () => {
   // sentinel for 临时, so derive temp-ness from the resolved project kind
   // rather than a literal null.
   const isTempConversation = activeProject?.kind !== "project";
+
+  // Settled, trusted and still empty — see useComposerAgentLibrary for why the
+  // first empty answer is not enough to say this.
+  const rosterEmpty =
+    isTempConversation &&
+    myAgentsLoaded &&
+    !myAgentsFailed &&
+    !myAgentsSettling &&
+    myAgents.length === 0;
+  const agentPending = managedRuntimeSetup && rosterEmpty;
+  const setupPending = channelsPending || agentPending;
 
   // The attached strip under the composer owns the 📁 project choice for a
   // NEW conversation (replacing the composer's old toolbar chip) and keeps
@@ -6068,27 +6095,34 @@ export const ConversationPage = () => {
             </button>
           )}
 
-          {!selectedSession &&
-            ((channelLoaded && !hasChannel) ||
-              (isTempConversation &&
-                myAgentsLoaded &&
-                myAgents.length === 0)) && (
+          {!selectedSession && (rosterEmpty || (channelLoaded && !hasChannel)) && (
               <div className="mx-auto mb-2 flex w-full max-w-[760px] items-center justify-between gap-3 rounded-lg border border-info-border bg-info-light px-3 py-2 text-xs text-info-text">
                 <span>
-                  {channelLoaded && !hasChannel
-                    ? isTempConversation &&
-                      myAgentsLoaded &&
-                      myAgents.length === 0
-                      ? t("conversation.noChannelAndAgentBanner" as I18nKey)
-                      : t("conversation.noChannelBanner" as I18nKey)
-                    : t("conversation.noAgentBanner" as I18nKey)}
+                  {channelsPending
+                    ? t("conversation.channelsPendingBanner" as I18nKey)
+                    : agentPending
+                      ? t("conversation.agentPendingBanner" as I18nKey)
+                      : channelLoaded && !hasChannel
+                        ? rosterEmpty
+                          ? t("conversation.noChannelAndAgentBanner" as I18nKey)
+                          : t("conversation.noChannelBanner" as I18nKey)
+                        : t("conversation.noAgentBanner" as I18nKey)}
                 </span>
                 <button
                   type="button"
-                  onClick={() => navigate("/welcome")}
+                  onClick={() => {
+                    if (!setupPending) {
+                      navigate("/welcome");
+                      return;
+                    }
+                    if (channelsPending) refreshChannels();
+                    if (rosterEmpty) refreshAgents();
+                  }}
                   className="shrink-0 rounded-md bg-brand px-2.5 py-1 font-medium text-white transition-colors hover:bg-brand-hover"
                 >
-                  {t("conversation.noAgentBannerCta" as I18nKey)}
+                  {setupPending
+                    ? t("conversation.pendingBannerCta" as I18nKey)
+                    : t("conversation.noAgentBannerCta" as I18nKey)}
                 </button>
               </div>
             )}
