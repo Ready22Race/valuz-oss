@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-07-27
+
+### Added
+
+- **Streaming resilience** — the in-flight turn is recovered on reconnect from
+  a live-partial state snapshot instead of event replay, and live-partial drops
+  are reported explicitly rather than degrading silently (#617 @Ready22Race).
+- **Document reader** — DocumentReaderView for reading fetched documents
+  (#615 @St0neWan9).
+- **Connector catalog** — editions can contribute their own catalog entries
+  (#613 @St0neWan9).
+- **Resources** — organization import plus skill and connector detail action
+  slots; cloud-only catalog rows stay importable (#610 @homeant).
+- **Providers** — Claude Opus 5 added to the subscription model list
+  (#614 @jiaoqsh).
+- **DeepAgents runtime** — the checkpoint backend can be pinned per deployment
+  (#605 @Ready22Race).
+
+### Changed
+
+- **Memory** — injection frozen into `Session.instructions` once per session,
+  instead of once per user message (#618 @jiaoqsh).
+
+### Fixed
+
+- **Conversations** — the header no longer goes quiet while background work is
+  still running (#619 @Ready22Race); a first empty roster no longer claims
+  nothing is configured (#616 @St0neWan9); replayed `session.update` frames can
+  no longer revive a finished turn (#609 @Ready22Race).
+- **Sessions** — todos panel no longer blank on re-open: the detail endpoint
+  kept its todos and unconditional panel writes were removed (#612 @jiaoqsh).
+- **Tasks** — dispatch gets the chat-parity provider fallback and a roster
+  pre-flight (#606 @jiaoqsh).
+- **Skills** — bundled pack materialization now emits a sync notification
+  (#607 @homeant).
+- **Packaging** — the frozen backend runs in forced UTF-8 mode, with utf-8
+  markers on migrations (#608 @St0neWan9).
+- **i18n** — missing connector empty-state strings added (#604 @St0neWan9).
+
 ## [0.3.4] - 2026-07-23
 
 ### Added
