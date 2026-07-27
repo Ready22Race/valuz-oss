@@ -77,6 +77,19 @@ export interface SessionListItem {
   worktree?: WorktreeRef | null;
   /** Unix epoch milliseconds (UTC). Format via `new Date(ms)`. */
   updated_at: number;
+  /**
+   * A `run_in_background` task is still executing in this session. Same fact
+   * and same source as `RunSummary.background` — both read the orchestrator's
+   * live registry via `bg_busy_session_ids()` — so the conversation header,
+   * the sidebar pulse and the Activity page can never disagree about one
+   * session.
+   *
+   * Deliberately separate from `status`: the launching turn genuinely ends,
+   * and `status` drives the Stop button and queue routing, so a `running`
+   * value here would offer a Stop that stops nothing and route new messages
+   * into the queue (409 "Session is already running").
+   */
+  background?: boolean;
 }
 
 /**

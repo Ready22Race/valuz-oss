@@ -5200,6 +5200,23 @@ components:
             creation time, not liveness — the worktree may have been
             removed since; ``GET /v1/projects/{id}/worktrees`` is the
             source of truth for what still exists.
+        background:
+          type: boolean
+          default: false
+          description: |
+            True when the session carries a live background task
+            (``run_in_background`` shell command). Same fact and same
+            source as ``RunSummary.background`` — both read
+            ``bg_busy_session_ids()`` — so the conversation header, the
+            sidebar pulse and the Activity page can never disagree about
+            one session.
+
+            Deliberately a SEPARATE field rather than folding into
+            ``status``: the launching turn genuinely ends, and ``status``
+            drives the Stop button and queue routing, so reporting
+            ``running`` here would offer a Stop that stops nothing and
+            route new messages into the queue (409 "Session is already
+            running").
 
     WorktreeRef:
       type: object
