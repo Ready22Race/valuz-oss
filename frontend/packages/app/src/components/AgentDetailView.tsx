@@ -4,8 +4,10 @@ import { toast } from "sonner";
 import {
   ArrowLeft,
   BookOpen,
+  Bot,
   ChevronRight,
   Copy,
+  KeyRound,
   Plug,
   Plus,
   Trash2,
@@ -29,6 +31,7 @@ import {
   SelectTrigger,
   SelectValue,
   StatusPill,
+  Switch,
   Tabs,
   TabsContent,
   TabsList,
@@ -37,6 +40,7 @@ import {
 } from "@valuz/ui";
 import {
   agentsApi,
+  channelsApi,
   connectorsApi,
   skillsApi,
   useResourceGuard,
@@ -50,6 +54,7 @@ import {
   type SkillView,
   type UpdateAgentPayload,
   type ProjectListItem,
+  type WeComAIBotBinding,
 } from "@valuz/core";
 import { modelLabel } from "@valuz/shared";
 import { AgentModelPicker, type AgentModelSelection } from "./AgentModelPicker";
@@ -188,6 +193,13 @@ export const AgentDetailView = ({
   const [connectorDir, setConnectorDir] = useState<Map<string, ConnectorMeta>>(
     new Map(),
   );
+  const [aibotBinding, setAibotBinding] = useState<WeComAIBotBinding | null>(
+    null,
+  );
+  const [aibotEnabled, setAibotEnabled] = useState(true);
+  const [aibotBotId, setAibotBotId] = useState("");
+  const [aibotSecret, setAibotSecret] = useState("");
+  const [savingChannel, setSavingChannel] = useState(false);
 
   const { canDelete } = useResourceGuard(agent ?? {});
 
@@ -233,14 +245,23 @@ export const AgentDetailView = ({
 
   const loadData = useCallback(async () => {
     try {
-      const [tpl, wsRes, depRes] = await Promise.all([
+      const [tpl, wsRes, depRes, channelRes] = await Promise.all([
         agentsApi.getAgent(slug),
         projectsApi.list(),
         agentsApi.listDeployments(slug),
+        channelsApi.getWeComAIBotBinding(slug).catch(() => null),
       ]);
       setAgent(tpl);
       setProjects(wsRes.projects.filter((w) => w.kind === "project"));
       setDeployments(depRes.deployments);
+      setAibotBinding(channelRes);
+      if (channelRes) {
+        setAibotEnabled(
+          channelRes.agent_slug === slug ? channelRes.enabled : true,
+        );
+        setAibotBotId(channelRes.bot_id);
+        setAibotSecret("");
+      }
     } catch {
       toast.error(t("common.error"));
     } finally {
@@ -254,7 +275,6 @@ export const AgentDetailView = ({
 
   // Re-seed the per-tab drafts whenever the loaded agent changes — a deliberate
   // data → draft-state sync, not derived-during-render state.
-  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (!agent) return;
     setInstrDraft(agent.instructions);
@@ -268,7 +288,6 @@ export const AgentDetailView = ({
     });
     setEffortDraft(agent.effort ?? "high");
   }, [agent]);
-  /* eslint-enable react-hooks/set-state-in-effect */
 
   const doSave = async (tab: string, fields: UpdateAgentPayload) => {
     if (!agent) return;
@@ -456,6 +475,39 @@ export const AgentDetailView = ({
     void saveFields("connectors", { connector_types: next });
   };
 
+  const saveAibotBinding = async () => {
+    if (!agent) return;
+    const botId = aibotBotId.trim();
+    const secret = aibotSecret.trim();
+    if (!botId) {
+      toast.error(t("agent.wecomAibotBotIdRequired" as Parameters<typeof t>[0]));
+      return;
+    }
+    if (!aibotBinding?.has_secret && !secret) {
+      toast.error(t("agent.wecomAibotSecretRequired" as Parameters<typeof t>[0]));
+      return;
+    }
+    setSavingChannel(true);
+    try {
+      const next = await channelsApi.updateWeComAIBotBinding({
+        enabled: aibotEnabled,
+        agent_slug: agent.slug,
+        bot_id: botId,
+        secret,
+      });
+      setAibotBinding(next);
+      setAibotSecret("");
+      toast.success(t("agent.wecomAibotSaved" as Parameters<typeof t>[0]));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(
+        `${t("agent.saveFailed" as Parameters<typeof t>[0])}: ${msg}`,
+      );
+    } finally {
+      setSavingChannel(false);
+    }
+  };
+
   // Click-to-edit handlers for the identity card.
   const cancelIdentityEdit = () => {
     if (!agent) return;
@@ -513,6 +565,22 @@ export const AgentDetailView = ({
   const hasUnconnectedConnector =
     connectorsLoaded &&
     agent.connector_types.some((slug) => !connectedSlugs.has(slug));
+  const aibotBoundToThisAgent =
+    aibotBinding?.enabled === true && aibotBinding.agent_slug === agent.slug;
+  const aibotRuntimeStatus = aibotBinding?.connected
+    ? {
+        status: "connected",
+        label: t("agent.wecomAibotConnected" as Parameters<typeof t>[0]),
+      }
+    : aibotBinding?.connection_status === "connecting"
+      ? {
+          status: "running",
+          label: t("agent.wecomAibotConnecting" as Parameters<typeof t>[0]),
+        }
+      : {
+          status: "disconnected",
+          label: t("agent.wecomAibotDisconnected" as Parameters<typeof t>[0]),
+        };
 
   const fullPage = !!onBack;
 
@@ -819,6 +887,9 @@ export const AgentDetailView = ({
                   ) : null}
                 </span>
               </TabsTrigger>
+              <TabsTrigger value="channels">
+                {t("agent.tabChannels" as Parameters<typeof t>[0])}
+              </TabsTrigger>
             </TabsList>
           </div>
 
@@ -1026,6 +1097,96 @@ export const AgentDetailView = ({
                   );
                 })
               )}
+            </div>
+          </TabsContent>
+
+          <TabsContent value="channels" className="mt-4">
+            <div className="rounded-[14px] bg-card p-4 shadow-[var(--shadow-1)]">
+              <div className="flex items-start gap-3">
+                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-surface-soft text-ink-meta">
+                  <Bot className="h-4 w-4" />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="text-sm font-medium text-ink-heading">
+                      {t("agent.wecomAibotTitle" as Parameters<typeof t>[0])}
+                    </h3>
+                    {aibotBoundToThisAgent ? (
+                      <StatusPill
+                        status="ok"
+                        label={t(
+                          "agent.wecomAibotBound" as Parameters<typeof t>[0],
+                        )}
+                        className="px-1.5 py-0 text-[10px] leading-4"
+                      />
+                    ) : null}
+                    {aibotBoundToThisAgent ? (
+                      <StatusPill
+                        status={aibotRuntimeStatus.status}
+                        label={aibotRuntimeStatus.label}
+                        className="px-1.5 py-0 text-[10px] leading-4"
+                      />
+                    ) : null}
+                  </div>
+                </div>
+                <Switch
+                  checked={aibotEnabled}
+                  onCheckedChange={setAibotEnabled}
+                  aria-label={t(
+                    "agent.wecomAibotEnabled" as Parameters<typeof t>[0],
+                  )}
+                />
+              </div>
+
+              <div className="mt-4 flex flex-col gap-3">
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs font-medium text-ink-heading">
+                    {t("agent.wecomAibotBotId" as Parameters<typeof t>[0])}
+                  </span>
+                  <Input
+                    value={aibotBotId}
+                    onChange={(e) => setAibotBotId(e.target.value)}
+                    placeholder="aib..."
+                    className="font-mono text-xs"
+                  />
+                </label>
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs font-medium text-ink-heading">
+                    {t("agent.wecomAibotSecret" as Parameters<typeof t>[0])}
+                  </span>
+                  <div className="relative">
+                    <KeyRound className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-muted" />
+                    <Input
+                      type="password"
+                      value={aibotSecret}
+                      onChange={(e) => setAibotSecret(e.target.value)}
+                      placeholder={
+                        aibotBinding?.has_secret
+                          ? t(
+                              "agent.wecomAibotSecretSaved" as Parameters<
+                                typeof t
+                              >[0],
+                            )
+                          : ""
+                      }
+                      className="pl-8 font-mono text-xs"
+                    />
+                  </div>
+                </label>
+                <div className="flex justify-end">
+                  <Button
+                    size="sm"
+                    disabled={
+                      savingChannel ||
+                      !aibotBotId.trim() ||
+                      (!aibotBinding?.has_secret && !aibotSecret.trim())
+                    }
+                    onClick={() => void saveAibotBinding()}
+                  >
+                    {t("agent.wecomAibotBind" as Parameters<typeof t>[0])}
+                  </Button>
+                </div>
+              </div>
             </div>
           </TabsContent>
 
