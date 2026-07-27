@@ -49,6 +49,7 @@ from valuz_agent.adapters.system_prompt_builder import (
     build_project_system_prompt,
 )
 from valuz_agent.modules.agents.datastore import ProjectMemberDatastore
+from valuz_agent.modules.memory.injection import memory_instructions_block
 from valuz_agent.ports.instructions import global_instructions_preamble
 
 logger = logging.getLogger(__name__)
@@ -1070,6 +1071,11 @@ async def build_member_session(
             "\nIgnore any other skills present in the working directory not listed above."
         )
     skills_block = "\n".join(block_lines)
+    # Frozen memory snapshot (memory-system-design §8): lead and members share
+    # the same project memory (design §2), each frozen into its own session's
+    # instructions at create time — one copy per session, never per turn.
+    mem_block = await memory_instructions_block(user_id=user_id, project_id=project_id)
+
     # Wrap each block in an XML tag (shared chokepoint with the chat/project
     # path) so the agent / task guidance / project instructions / roster /
     # skills / brief are delineated instead of one undelimited blob.
@@ -1078,6 +1084,7 @@ async def build_member_session(
             ("global-instructions", await global_instructions_preamble()),
             ("agent-instructions", agent.instructions or ""),
             ("project-instructions", project_prompt),
+            ("memory", mem_block),
             ("member-roster", roster_block),
             ("available-skills", skills_block),
             ("task-playbook", playbook_block),

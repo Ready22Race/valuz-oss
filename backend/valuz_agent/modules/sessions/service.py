@@ -763,13 +763,20 @@ class SessionService:
             OUTPUT_FORMAT_INSTRUCTIONS,
             assemble_session_instructions,
         )
+        from valuz_agent.modules.memory.injection import memory_instructions_block
         from valuz_agent.ports.instructions import global_instructions_preamble
+
+        # Frozen memory snapshot (memory-system-design §8): rendered once here
+        # and frozen into ``Session.instructions`` — one copy per session
+        # instead of one per user message (the old additional-context path).
+        mem_block = await memory_instructions_block(user_id=user_id, project_id=project_id)
 
         instructions = assemble_session_instructions(
             [
                 ("global-instructions", await global_instructions_preamble()),
                 ("agent-instructions", agent.instructions or ""),
                 ("project-instructions", project_prompt),
+                ("memory", mem_block),
                 ("task-playbook", CHAT_TASK_PLAYBOOK),
                 (
                     "worktree-context",
@@ -1148,10 +1155,24 @@ class SessionService:
         # same as the agent-bound and task paths. OSS binds no override →
         # no-op, prompt unchanged.
         from valuz_agent.adapters.system_prompt_builder import (
+            assemble_session_instructions,
             prepend_global_instructions,
         )
+        from valuz_agent.modules.memory.injection import memory_instructions_block
 
         session_instructions = await prepend_global_instructions(session_instructions)
+
+        # Frozen memory snapshot (memory-system-design §8), same section the
+        # agent-bound and task paths get. Quick-chat ephemeral projects have
+        # no project MEMORY file, so passing project_id is a no-op for them
+        # (only user + global render); agent-less scheduled runs in a real
+        # project pick up that project's memory.
+        mem_block = await memory_instructions_block(user_id=user_id, project_id=project_id)
+        if mem_block:
+            mem_section = assemble_session_instructions([("memory", mem_block)])
+            session_instructions = (
+                f"{session_instructions}\n\n{mem_section}" if session_instructions else mem_section
+            )
 
         # Build the valuz metadata blob.
         valuz_meta: dict[str, object] = {

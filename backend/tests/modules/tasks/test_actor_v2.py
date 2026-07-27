@@ -385,6 +385,58 @@ def test_build_member_session_injects_skill_scoping(
     assert "Ignore any other skills" in session.instructions
 
 
+def test_build_member_session_freezes_memory_section(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The frozen memory snapshot lands in the session instructions at create
+    time as a ``<memory>`` section (memory-system-design §8) — lead and members
+    share the project memory, one copy per session, never per turn."""
+    from types import SimpleNamespace
+
+    from valuz_agent.adapters import agent_resolver
+
+    fake_agent = _fake_agent_config(
+        id="kernel-agent-1",
+        name="writer",
+        instructions="be a writer",
+        model="mimo-v2.5-pro",
+        runtime_provider="claude_agent",
+        skills=(),
+        mcp_servers=(),
+        permission_mode="full_access",
+        metadata={},
+    )
+    fake_members = SimpleNamespace(get=_async_member_get())
+    monkeypatch.setattr(
+        agent_resolver, "_member_agent_config", _as_async(lambda _member, _ds, **_kw: fake_agent)
+    )
+    seen: list[dict[str, object]] = []
+
+    async def fake_memory_block(**kwargs: object) -> str:
+        seen.append(kwargs)
+        return "This is recalled memory — remembered context.\n\ntracks ACME earnings"
+
+    monkeypatch.setattr(agent_resolver, "memory_instructions_block", fake_memory_block)
+
+    session = asyncio.run(
+        agent_resolver.build_member_session(
+            project_id="w1",
+            agent_slug="writer",
+            members=fake_members,  # type: ignore[arg-type]
+            is_lead=False,
+            task_id="t1",
+            run_dir="/proj",
+            brief="## Goal\n\nwrite a file",
+        )
+    )
+    assert session is not None
+    assert "<memory>" in session.instructions
+    assert "tracks ACME earnings" in session.instructions
+    # Exactly one copy, and the render was asked for THIS project's memory.
+    assert session.instructions.count("tracks ACME earnings") == 1
+    assert seen and seen[0].get("project_id") == "w1"
+
+
 def test_build_member_session_carries_agent_effort(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

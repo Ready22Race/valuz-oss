@@ -1,10 +1,15 @@
 """Per-turn ``<additional-context>`` assembly.
 
-Composes the cache-friendly per-turn context block (pending attachments +
-bound KB scope + memory injection) that rides ``UserMessage.additional_context``.
+Composes the cache-friendly per-turn context block (current time + pending
+attachments + bound KB scope) that rides ``UserMessage.additional_context``.
 Kept out of the system prompt on purpose: attachments and KB bindings churn,
 but the system prompt / skills / MCP list must stay stable for prompt-cache
 hits. Shared by the session run path and the task orchestrator.
+
+Memory is NOT part of this block: injecting it here put a full copy of the
+frozen snapshot inside every user message of the transcript (N copies for an
+N-turn session). It now freezes once into ``Session.instructions`` at create
+time — see ``modules/memory/injection.py`` (memory-system-design §8).
 """
 
 from __future__ import annotations
@@ -115,28 +120,6 @@ async def _build_additional_context(
             kb_section = await _format_kb_scope(ds, bindings)
             if kb_section:
                 sections.append(kb_section)
-
-        # 3) Memory (memory-system-design §8): a frozen snapshot — USER +
-        #    cross-project MEMORY + (in a project) that project's MEMORY,
-        #    captured once per session and reused byte-for-byte (prefix-cache
-        #    friendly). Rides additional-context, not the frozen system prompt,
-        #    so it never pollutes the user-visible instructions_md. Guarded so a
-        #    memory lookup never blocks a turn.
-        try:
-            from valuz_agent.modules.settings.preferences import get_memory_enabled
-
-            if await get_memory_enabled(db, user_id=user_id):
-                from valuz_agent.modules.memory.injection import injection_assembler
-
-                mem_block = injection_assembler.snapshot_for_session(
-                    user_id=user_id,
-                    session_id=session_id,
-                    project_id=project_id or None,
-                )
-                if mem_block.strip():
-                    sections.append(mem_block.strip())
-        except Exception:  # noqa: BLE001 — never block a turn on memory
-            logger.debug("memory injection skipped", exc_info=True)
 
     return "\n\n".join(sections)
 
