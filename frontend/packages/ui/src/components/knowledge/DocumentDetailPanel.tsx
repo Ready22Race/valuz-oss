@@ -313,7 +313,7 @@ export const DocumentDetailPanel = ({
             <Button
               variant="outline"
               size="sm"
-              className="w-full justify-start"
+              className="min-w-0 flex-1 justify-center"
               onClick={onRegenerate}
             >
               <RotateCw className="h-3.5 w-3.5" />
@@ -324,7 +324,7 @@ export const DocumentDetailPanel = ({
             <Button
               variant="ghost"
               size="sm"
-              className="w-full justify-start text-error-text hover:text-error-text"
+              className="min-w-0 flex-1 justify-center text-error-text hover:text-error-text"
               onClick={onDelete}
             >
               <Trash2 className="h-3.5 w-3.5" />
