@@ -308,7 +308,7 @@ export const DocumentDetailPanel = ({
       </div>
 
       {onRegenerate || onDelete ? (
-        <div className="shrink-0 space-y-2 border-t border-surface-border bg-surface px-5 py-4">
+        <div className="flex shrink-0 gap-2 border-t border-surface-border bg-surface px-5 py-4">
           {onRegenerate ? (
             <Button
               variant="outline"
