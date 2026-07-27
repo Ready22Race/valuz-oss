@@ -369,7 +369,13 @@ class SessionOrchestrator:
         return bus
 
     async def attach_session_tap(
-        self, user_id: str, session_id: str, sink: EventSink, *, replay: bool = False
+        self,
+        user_id: str,
+        session_id: str,
+        sink: EventSink,
+        *,
+        replay: bool = False,
+        live_partial: bool = False,
     ) -> None:
         """Register a passive multi-subscriber tap on a session's live stream.
 
@@ -378,10 +384,16 @@ class SessionOrchestrator:
         streams, host aggregators — can tap one session without displacing
         the client or each other. ``replay=True`` first delivers the events
         of the in-progress message so a mid-turn tap sees a coherent view.
+
+        ``live_partial=True`` additionally delivers the *unsealed* streaming
+        state — partial assistant text, partial tool input, the latest
+        workflow progress — which no replay path can reach because those
+        types are never persisted. The two flags are independent: a caller
+        that runs its own durable backfill wants ``live_partial`` alone.
         """
         bus = self._get_or_create_bus(session_id)
         replay_events = await self._build_replay(user_id, session_id) if replay else []
-        await bus.add_tap(sink, replay=replay_events)
+        await bus.add_tap(sink, replay=replay_events, live_partial=live_partial)
 
     async def detach_session_tap(self, session_id: str, sink: EventSink) -> None:
         """Unregister a tap added via :meth:`attach_session_tap`."""

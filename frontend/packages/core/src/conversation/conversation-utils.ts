@@ -50,6 +50,20 @@ export const resolveToolKind = (name: string): PrototypeToolCall["kind"] => {
   return "fetch";
 };
 
+/**
+ * Wire marker for a frame that carries a stream's absolute state instead
+ * of the next increment. The kernel emits one per open stream when a
+ * client joins mid-turn — the deltas sent before it connected are never
+ * persisted, so history can't reach them. Backend counterpart:
+ * ``kernel/src/core/live_partial.py::SNAPSHOT_FLAG``.
+ *
+ * Carried as a string because the SSE payload is a flat string map.
+ */
+export const LIVE_SNAPSHOT_FLAG = "live_snapshot";
+
+export const isLiveSnapshot = (payload: Record<string, string>): boolean =>
+  payload[LIVE_SNAPSHOT_FLAG] === "true";
+
 const payloadToBlock = (payload: Record<string, string>) =>
   Object.entries(payload)
     .filter(([, value]) => value)
@@ -338,17 +352,34 @@ const createTurnsBuilder = () => {
     return null;
   };
 
+  /**
+   * Fold one streamed text chunk into the turn.
+   *
+   * ``snapshot`` marks a frame that carries the stream's ABSOLUTE state
+   * rather than the next increment — the kernel sends one per open stream
+   * when a client joins mid-turn, because the deltas emitted before it
+   * connected are never persisted and so can never arrive any other way.
+   * The only behavioral difference is replace-vs-append; every staleness
+   * rule below applies unchanged, and deliberately so. A snapshot can
+   * arrive AFTER the canonical event that superseded it (it is taken when
+   * the tap attaches, which precedes the server's history read), and the
+   * sealed-redelivery guard is exactly the test that catches it.
+   */
   const appendDelta = (
     turn: ConversationTurn,
     kind: "assistant" | "thinking",
     text: string,
     messageId: string | undefined,
     parentToolUseId: string | undefined,
+    snapshot = false,
   ) => {
     if (!text) return;
     const open = matchesLastUnsealed(turn, kind, messageId, parentToolUseId);
     if (open) {
-      open.text += text;
+      // Absolute state replaces; an increment extends. Neither seals —
+      // the turn is still streaming, and sealing here would send the next
+      // live chunk into a fresh block and split the message in two.
+      open.text = snapshot ? text : open.text + text;
       return;
     }
     const last = lastFlowBlock(turn, parentToolUseId);
@@ -542,6 +573,7 @@ const createTurnsBuilder = () => {
           payload.text ?? "",
           payload.message_id,
           payload.parent_tool_use_id || undefined,
+          isLiveSnapshot(payload),
         );
         continue;
       }
@@ -553,6 +585,7 @@ const createTurnsBuilder = () => {
           payload.text ?? "",
           payload.message_id,
           payload.parent_tool_use_id || undefined,
+          isLiveSnapshot(payload),
         );
         continue;
       }

@@ -493,13 +493,19 @@ class InProcessKernelClient:
         """Live tap on one session's event stream (no replay, no backfill —
         pair with ``get_events(after_seq=...)`` for catch-up reads).
 
+        The one thing it does deliver up front is the *unsealed* streaming
+        state (``live_partial``): the bytes emitted since the last
+        canonical event are never persisted, so no catch-up read can ever
+        reach them. Without this a mid-turn reconnect renders an empty
+        assistant block until the turn ends.
+
         Remote analog: SSE {KERNEL_API_PREFIX}/v1/sessions/{id}/events/stream (ADR-013)."""
         from app.event_stream import QueueEventSink
         from app.serializers import live_event_to_data
 
         sink = QueueEventSink()
         orch = _orchestrator()
-        await orch.attach_session_tap(user_id, session_id, sink)
+        await orch.attach_session_tap(user_id, session_id, sink, live_partial=True)
         try:
             while True:
                 event = await sink.queue.get()
