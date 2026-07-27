@@ -45,9 +45,12 @@ fourth ordering case there earns its own change and its own QA pass.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from src.core.events import Event
+
+logger = logging.getLogger(__name__)
 
 # Marks a frame as absolute state rather than an increment. Consumers
 # REPLACE the open block's content instead of appending, and must not
@@ -71,12 +74,21 @@ _SEALED_BY: dict[str, str] = {
 # complete, so nothing is left that lives only in memory.
 _TURN_BOUNDARY_TYPES = frozenset({"user_message", "session_idle", "session_error"})
 
-# A stream past this many characters stops being tracked. Model text is
-# already bounded by the provider's output limit, so this is a backstop
-# against a pathological runtime, not a routine ceiling. On overflow the
-# stream is dropped rather than truncated: a partial tail would render as
-# if it were the whole message, and being visibly behind beats being
-# confidently wrong — the canonical event repairs it either way.
+# A stream past this many characters stops being tracked.
+#
+# This is an ABSURDITY THRESHOLD, not a quota. What accumulates here is
+# one unsealed segment — the text between two canonical events — which is
+# bounded by the provider's own single-message output limit. At ~64K
+# output tokens that is ~64K characters of CJK, ~256K of English, so the
+# cap sits at roughly 2x the worst legitimate case. Lowering it toward
+# "typical" usage would silently disable recovery for exactly the long
+# answers this feature exists to recover.
+#
+# On overflow the stream is dropped rather than truncated: a partial tail
+# would render as if it were the whole message, and being visibly behind
+# beats being confidently wrong — the canonical event repairs it either
+# way. The drop is per-stream, never global: one runaway subagent must
+# not cost the lead its recovery.
 MAX_CHARS_PER_STREAM = 512 * 1024
 
 # Ceiling on concurrently tracked streams. A lead plus its subagents sit
@@ -121,8 +133,10 @@ class LivePartialState:
     "snapshot, then live tail" atomic for a joining subscriber.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, session_id: str | None = None) -> None:
         self._streams: dict[_StreamKey, _Stream] = {}
+        self._session_id = session_id
+        self._warned_stream_cap = False
 
     def observe(self, event: Event) -> None:
         """Fold one outbound event into the accumulated state."""
@@ -152,6 +166,17 @@ class LivePartialState:
         stream = self._streams.get(key)
         if stream is None:
             if len(self._streams) >= MAX_STREAMS:
+                # Once per session rather than once per delta — this fires
+                # on the hot streaming path.
+                if not self._warned_stream_cap:
+                    self._warned_stream_cap = True
+                    logger.warning(
+                        "live-partial: session %s reached %d concurrent streams — "
+                        "further streams are untracked; mid-turn reconnect will fall "
+                        "back to durable history for them",
+                        self._session_id or "?",
+                        MAX_STREAMS,
+                    )
                 return
             stream = _Stream(
                 {k: v for k, v in event.data.items() if k not in ("text", "delta")},
@@ -161,6 +186,20 @@ class LivePartialState:
         if stream.overflowed:
             return
         if len(stream.text) + len(chunk) > MAX_CHARS_PER_STREAM:
+            # Reaching this means one unsealed segment outgrew a
+            # provider's whole output budget, which a well-behaved
+            # runtime cannot do — it means canonical events stopped
+            # arriving. Recovery for this stream is off until the next
+            # seal; say so rather than degrading in silence.
+            logger.warning(
+                "live-partial: %s stream (flow=%s) on session %s exceeded %d chars "
+                "without a canonical event — dropping it; mid-turn reconnect will "
+                "fall back to durable history for this stream",
+                event_type,
+                key[1] or "lead",
+                self._session_id or "?",
+                MAX_CHARS_PER_STREAM,
+            )
             stream.overflowed = True
             stream.text = ""
             return

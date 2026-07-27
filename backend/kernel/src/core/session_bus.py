@@ -52,11 +52,15 @@ class SessionEventBus:
     raises is dropped (same policy as the subscriber).
     """
 
-    def __init__(self, taps: Iterable[EventSink] = ()) -> None:
+    def __init__(
+        self, taps: Iterable[EventSink] = (), *, session_id: str | None = None
+    ) -> None:
         self._subscriber: EventSink | None = None
         self._taps: list[EventSink] = list(taps)
         self._lock = asyncio.Lock()
-        self._partial = LivePartialState()
+        # ``session_id`` is carried for log context only — the bus itself
+        # is session-agnostic and the orchestrator owns the routing.
+        self._partial = LivePartialState(session_id)
 
     @property
     def has_subscriber(self) -> bool:

@@ -14,6 +14,10 @@ idempotent (so redelivery is harmless).
 # ruff: noqa: I001 — kernel bootstrap side-effect import must precede `from src.*`
 from __future__ import annotations
 
+import logging
+
+import pytest
+
 import kernel  # noqa: F401
 
 from src.core.events import Event
@@ -164,12 +168,49 @@ def test_an_oversized_stream_is_dropped_not_truncated() -> None:
     assert state.snapshot() == []
 
 
+def test_overflow_is_reported(caplog: pytest.LogCaptureFixture) -> None:
+    """Hitting the cap means canonical events stopped arriving.
+
+    A well-behaved runtime cannot produce one unsealed segment larger
+    than a provider's whole output budget, so this is a bug signal and
+    must not degrade in silence.
+    """
+    state = LivePartialState("ses-42")
+    with caplog.at_level(logging.WARNING):
+        state.observe(_delta("x" * (MAX_CHARS_PER_STREAM + 1)))
+
+    assert "ses-42" in caplog.text
+    assert "text_delta" in caplog.text
+
+
+def test_overflow_of_one_stream_spares_the_others() -> None:
+    """One runaway subagent must not cost the lead its recovery."""
+    state = LivePartialState()
+    state.observe(_delta("x" * (MAX_CHARS_PER_STREAM + 1), parent="tool-9"))
+    state.observe(_delta("lead is fine"))
+
+    assert _texts(state.snapshot()) == ["lead is fine"]
+
+
 def test_stream_count_is_capped() -> None:
     state = LivePartialState()
     for i in range(MAX_STREAMS + 10):
         state.observe(_delta("x", parent=f"tool-{i}"))
 
     assert len(state.snapshot()) == MAX_STREAMS
+
+
+def test_stream_cap_warns_once_not_per_delta(caplog: pytest.LogCaptureFixture) -> None:
+    """The cap check sits on the hot streaming path."""
+    state = LivePartialState("ses-42")
+    for i in range(MAX_STREAMS):
+        state.observe(_delta("x", parent=f"tool-{i}"))
+
+    with caplog.at_level(logging.WARNING):
+        for i in range(20):
+            state.observe(_delta("x", parent=f"overflow-{i}"))
+
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
 
 
 def test_empty_chunks_never_create_a_stream() -> None:

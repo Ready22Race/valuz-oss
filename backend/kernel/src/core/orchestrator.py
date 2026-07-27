@@ -364,7 +364,10 @@ class SessionOrchestrator:
     def _get_or_create_bus(self, session_id: str) -> SessionEventBus:
         bus = self._buses.get(session_id)
         if bus is None:
-            bus = SessionEventBus(taps=[_GlobalForwardTap(session_id, self._global_taps)])
+            bus = SessionEventBus(
+                taps=[_GlobalForwardTap(session_id, self._global_taps)],
+                session_id=session_id,
+            )
             self._buses[session_id] = bus
         return bus
 
