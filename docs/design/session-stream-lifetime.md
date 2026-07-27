@@ -167,3 +167,8 @@ status 写 + POST;错误路径回滚 pending/`sendPending` 并 `refreshActiveSes
    (`session-stream.ts` 已具雏形;其"clean close = 终局"注释相对 forever
    服务端已过时,收编时一并修)。
 3. 排空是否等待 bg 任务的**产品级开关**(当前默认等待)。
+
+**已了结**:§2.2b 可见性护栏(以及任何断线)留下的 live-only delta 缺口,
+由内核侧的"进行中状态快照"补齐 —— 重连时按流下发累积**状态**而非 delta
+序列,不引入游标/代际/gap,详见
+[live-partial-snapshot.md](live-partial-snapshot.md)。护栏本身保持不变。

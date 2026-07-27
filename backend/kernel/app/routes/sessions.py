@@ -535,7 +535,17 @@ async def stream_session_events(
         # ``PersistThenBroadcastSink``), so anything at or below the
         # backfill cursor is skipped. Live-only delta frames have no
         # ``seq`` and always flow.
-        await orchestrator.attach_session_tap(owner, session_id, sink)
+        #
+        # ``live_partial`` covers what neither path can: the bytes streamed
+        # since the last canonical event, which are never persisted and so
+        # can never appear in the backfill. Those frames enter the queue
+        # here and therefore land AFTER the backfill below — the right
+        # order, since they continue it rather than repeat it (the
+        # accumulator drops a stream the moment a canonical event seals
+        # it). A snapshot that goes stale in the window between this tap
+        # and the backfill read is marked, and the consumer drops it
+        # against the sealed text it already holds.
+        await orchestrator.attach_session_tap(owner, session_id, sink, live_partial=True)
         try:
             cursor = after_seq
             if cursor is not None:

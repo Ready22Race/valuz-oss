@@ -11,6 +11,7 @@ import {
   type SessionStreamSnapshot,
   type SessionStreamState,
 } from "../agent/session-stream";
+import { isLiveSnapshot } from "../conversation/conversation-utils";
 
 export type ChatRole = "user" | "assistant";
 
@@ -472,12 +473,18 @@ export const reduce = (
       };
     }
 
+    // A ``live_snapshot`` frame carries the stream's absolute state rather
+    // than the next increment — the kernel sends one per open stream when
+    // a client joins mid-turn, because deltas emitted before it connected
+    // are never persisted. Replace instead of append, or a reconnect
+    // renders the recovered prefix twice. See
+    // ``kernel/src/core/live_partial.py``.
     case "message.assistant.text_delta": {
       const text = payload.text ?? "";
       return {
         streaming: {
           messageId: messageId ?? state.streaming.messageId,
-          text: state.streaming.text + text,
+          text: isLiveSnapshot(payload) ? text : state.streaming.text + text,
           thinking: state.streaming.thinking,
         },
         isStreaming: true,
@@ -491,7 +498,9 @@ export const reduce = (
         streaming: {
           messageId: messageId ?? state.streaming.messageId,
           text: state.streaming.text,
-          thinking: state.streaming.thinking + text,
+          thinking: isLiveSnapshot(payload)
+            ? text
+            : state.streaming.thinking + text,
         },
         isStreaming: true,
         lastSeq: nextLastSeq,

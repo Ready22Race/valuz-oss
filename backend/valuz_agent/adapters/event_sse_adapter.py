@@ -36,6 +36,13 @@ from valuz_agent.infra.sse import shielded
 
 logger = logging.getLogger(__name__)
 
+# Wire marker for a frame carrying absolute state instead of an increment.
+# Duplicated rather than imported: the module boundary forbids the host
+# from reaching into ``src.core``, and a wire constant is exactly what an
+# adapter is supposed to own. Kernel side: ``live_partial.SNAPSHOT_FLAG``
+# (``test_live_snapshot_flag_matches_kernel`` pins the two together).
+LIVE_SNAPSHOT_FLAG = "live_snapshot"
+
 POLL_INTERVAL_SECONDS = 0.3
 # The DB backfill on queue-timeout exists to cover the subscribe/backfill race
 # and missed events — not as the primary delivery path (the live subscription
@@ -167,6 +174,20 @@ def _with_parent_tool_use_id(payload: dict[str, str], data: dict[str, Any]) -> d
     parent_id = data.get("parent_tool_use_id")
     if parent_id is not None and "parent_tool_use_id" not in payload:
         payload["parent_tool_use_id"] = _stringify(parent_id)
+    return payload
+
+
+def _with_live_snapshot(payload: dict[str, str], data: dict[str, Any]) -> dict[str, str]:
+    """Mark a frame that carries absolute state rather than an increment.
+
+    Set by the kernel's live-partial accumulator when a subscriber joins
+    mid-turn (see ``kernel/src/core/live_partial.py``). The frame reuses
+    the ordinary delta type — same routing, same payload shape — so the
+    only thing consumers need is the rule that a marked frame REPLACES the
+    open block's text instead of appending to it.
+    """
+    if data.get(LIVE_SNAPSHOT_FLAG):
+        payload[LIVE_SNAPSHOT_FLAG] = "true"
     return payload
 
 
@@ -391,22 +412,28 @@ def _translate_kernel_event(
         )
 
     if kernel_type == "text_delta":
-        return "message.assistant.text_delta", _with_parent_tool_use_id(
-            _with_message_id(
-                {
-                    "text": _stringify(data.get("text") or data.get("delta") or ""),
-                },
+        return "message.assistant.text_delta", _with_live_snapshot(
+            _with_parent_tool_use_id(
+                _with_message_id(
+                    {
+                        "text": _stringify(data.get("text") or data.get("delta") or ""),
+                    },
+                    data,
+                ),
                 data,
             ),
             data,
         )
 
     if kernel_type == "thinking_delta":
-        return "message.assistant.thinking_delta", _with_parent_tool_use_id(
-            _with_message_id(
-                {
-                    "text": _stringify(data.get("text") or data.get("delta") or ""),
-                },
+        return "message.assistant.thinking_delta", _with_live_snapshot(
+            _with_parent_tool_use_id(
+                _with_message_id(
+                    {
+                        "text": _stringify(data.get("text") or data.get("delta") or ""),
+                    },
+                    data,
+                ),
                 data,
             ),
             data,
