@@ -35,7 +35,7 @@ Agent loop 和你的全部数据都留在**你自己的机器上**；唯一的�
 ```bash
 # 工具链前置：uv、pnpm、asdf（.tool-versions 锁定 Go 1.26）
 cd backend && uv sync && uv run alembic -c alembic/host/alembic.ini upgrade head
-cd frontend && pnpm install && pnpm run generate-types
+cd frontend && pnpm install
 make dev          # 启动后端 + 前端开发外壳
 make test-all     # 验证一切正常
 ```

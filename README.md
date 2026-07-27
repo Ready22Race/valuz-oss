@@ -43,7 +43,7 @@ For the full feature map, see the **[Product Overview](docs/product-overview.md)
 ```bash
 # Toolchain prerequisites: uv, pnpm, asdf (Go 1.26 pinned in .tool-versions)
 cd backend && uv sync && uv run alembic -c alembic/host/alembic.ini upgrade head
-cd frontend && pnpm install && pnpm run generate-types
+cd frontend && pnpm install
 make dev          # Start backend + frontend dev shell
 make test-all     # Verify everything works
 ```

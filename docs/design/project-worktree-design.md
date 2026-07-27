@@ -259,7 +259,7 @@ POST   /v1/projects/{id}/worktrees/{name}/merge   # P2 一键 merge
 - **会话/任务头部**：worktree badge（分支名，点击进面板）。
 - **项目 Context Panel → Worktrees 区块**：列表（分支、ahead/dirty 现算、来源、关联
   会话）+ 三动作（继续 / 丢弃 / 汇合提示文案，P2 变一键 merge）。
-- 类型全部由 openapi 生成（`make generate-types`）。
+- 类型对着 `api/openapi.yaml` 手写在 `frontend/packages/shared/src/types/`（无生成器）。
 
 ---
 

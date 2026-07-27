@@ -284,7 +284,8 @@ VALUZ_USER_TEMP_DIR=/data/valuz-tmp/{user_id}
 3. Implement logic in `modules/<x>/service.py` (+ `datastore.py`, `errors.py`,
    `schemas.py` as needed). Respect both boundary contracts.
 4. If kernel data is involved, go through an `adapters/*` resolver.
-5. Add tests under `tests/`; run `make generate-types` for the frontend.
+5. Add tests under `tests/`; hand-update the matching frontend type in
+   `frontend/packages/shared/src/types/` (no generator — see root CLAUDE.md).
 
 ## Commands
 

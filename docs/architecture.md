@@ -263,9 +263,18 @@ Zustand; styling is Tailwind CSS + shadcn/ui.
 ## 7. API Contract
 
 `api/openapi.yaml` is the single source of truth for every HTTP boundary. The flow is contract-first: edit the contract, then the backend,
-then the frontend. Frontend API types are generated from the contract
-(`make generate-types`) and never hand-written. Backend request/response
-schemas are Pydantic models validated against the same contract.
+then the frontend. Backend request/response schemas are Pydantic models
+validated against the same contract.
+
+Frontend API types are **hand-maintained** in
+`frontend/packages/shared/src/types/` — there is no OpenAPI generator, and a
+`make generate-types` target that pretended otherwise was removed (it had
+never run: no generator was ever installed). The hand-written types carry
+per-field documentation that generation would erase, so the trade is
+deliberate — but it means a contract change and its TypeScript counterpart
+must land in the same PR, or the two drift silently. Only
+`packages/shared/src/types/i18n.ts` is generated (from the locale files, via
+`i18n/scripts/gen_types.py`).
 
 Real-time updates (events, decision inbox, live TODOs) are delivered over SSE,
 projected from the kernel events table by `event_sse_adapter`.

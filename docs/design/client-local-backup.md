@@ -286,4 +286,4 @@ Registry 驱动接入（`settings-sections.ts` 加 `backup` section +
 | 前端 | `frontend/packages/app/src/pages/settings/BackupSection.tsx` | 新增 |
 | 前端 | `packages/core/src/edition/registries/settings-sections.ts`、`SettingsPage.tsx` | 注册 section |
 | i18n | `i18n/locales/{zh-CN,en-US}.json` | `settings.backup.*` 键 + 重新生成类型 |
-| 类型 | `make generate-types` | 契约变更后 |
+| 类型 | `frontend/packages/shared/src/types/` 手改 | 契约变更后（无生成器） |

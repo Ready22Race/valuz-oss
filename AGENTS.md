@@ -43,7 +43,9 @@ Do not consider work complete until all three pass.
 
 - Single source of truth: `api/openapi.yaml`
 - Change order: update openapi.yaml first → backend → frontend
-- Frontend types are auto-generated: `make generate-types`
+- Frontend API types are hand-maintained against the contract
+  (`frontend/packages/shared/src/types/`) — no OpenAPI generator exists; edit
+  them in the same PR as the contract change
 
 ## Rules
 

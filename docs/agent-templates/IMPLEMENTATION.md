@@ -12,7 +12,7 @@
 | Skill 落地 | 做成 **bundled official skill**：提交进 `resources/official_skills/`，boot 时 `sync_bundled_official_skills()` 自动同步到 `~/.valuz-oss/official-skills/`，带 `.bundled-version` 标记 → 免费、开箱、**不被 entitlement gate** | `integrations/skills_official_bootstrap.py`、`capability_resolver.py:172` |
 | MCP 落地 | 进 `resources/connector_catalog.json`；stdio 类型由 `mcp_resolver._build_stdio_config()` 拉起 | `adapters/mcp_resolver.py` |
 | 模板定义 | 新建 `modules/agent_templates/` 模块；文案走 i18n（`agentTemplates.*`），结构字段（slug/avatar/skills/connectors/effort/runtime）在模块内 | 参照 `onboarding.py` |
-| 契约优先 | 先改 `api/openapi.yaml` → 后端 → `make generate-types` → 前端 | 项目铁律 |
+| 契约优先 | 先改 `api/openapi.yaml` → 后端 → 手改前端类型（无生成器） | 项目铁律 |
 
 ### 源素材
 - 投研 13 个 skill：源自 [claude-for-financial-services-cn](https://github.com/jwangkun/claude-for-financial-services-cn)，移植后**去掉 `china-` 前缀、改写为全球股票市场口径（美股/港股/A 股为主）**，落在 `resources/template_skills/`（每个就是一个 `SKILL.md`）。
@@ -45,7 +45,7 @@
 12. `cd backend && uv run python ../i18n/scripts/gen_types.py` 重新生成 key 类型。
 
 ### Phase 5 · 前端模板面板
-13. `make generate-types` 后，`packages/core/src/api/agents-api.ts` 增 `AgentTemplate` 类型 + `listTemplates`/`addTemplate`。
+13. 手改前端类型后，`packages/core/src/api/agents-api.ts` 增 `AgentTemplate` 类型 + `listTemplates`/`addTemplate`。
 14. `packages/app/src/components/agent-icons.ts` 补 6 个 icon（gem/trophy/calculator/activity/presentation/image）。
 15. `packages/app/src/components/AgentTemplatesPanel.tsx`（Dialog，按场景分组，team 卡 + 「添加到我的库」批量创建 + 已添加禁用）。
 16. `packages/app/src/pages/AgentsPage.tsx` 顶部加「浏览模板」入口 + 添加后刷新列表。

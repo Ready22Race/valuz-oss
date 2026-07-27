@@ -211,8 +211,14 @@ frontend/
 ## 7. API 契约
 
 `api/openapi.yaml` 是每个 HTTP 边界的唯一事实来源。流程为契约优先：
-先改契约，再改后端，最后改前端。前端 API 类型从契约生成（`make generate-types`），
-绝不手写。后端请求/响应 schema 是 Pydantic 模型，对同一契约做校验。
+先改契约，再改后端，最后改前端。后端请求/响应 schema 是 Pydantic 模型，对同一契约做校验。
+
+前端 API 类型是**手工维护**的，位于 `frontend/packages/shared/src/types/` —— 并不存在
+OpenAPI 生成器；曾经假装存在的 `make generate-types` 目标已删除（它从未运行成功过：
+生成器从来没装过）。手写类型带着逐字段的文档，生成会把这些抹掉，所以这个取舍是刻意的 ——
+但代价是契约改动和对应的 TypeScript 类型必须在同一个 PR 里落地，否则两边会悄悄漂移。
+只有 `packages/shared/src/types/i18n.ts` 是生成的（由 locale 文件经
+`i18n/scripts/gen_types.py` 产出）。
 
 实时更新（事件、决策收件箱、实时 TODO）通过 SSE 推送，由 `event_sse_adapter` 从内核 events 表投影。
 

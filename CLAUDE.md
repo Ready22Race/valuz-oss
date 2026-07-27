@@ -155,7 +155,9 @@ Do not consider work complete until all three pass.
 
 - Defined in `api/openapi.yaml` — single source of truth
 - When changing an API: use the `api-change` skill (contract first → backend → frontend)
-- Frontend types auto-generated: `make generate-types`
+- Frontend API types are **hand-maintained** against the contract
+  (`frontend/packages/shared/src/types/`) — there is no OpenAPI generator.
+  Changing the contract means editing those types in the same PR.
 
 ## i18n
 

@@ -416,7 +416,7 @@ egress sidecar；microVM → 网关。CMA 的「cloud sandbox 网络默认关闭
 
 - [ ] `ports/sandbox_provider.py`：`SandboxProvider` / `SandboxSpec` /
       `SandboxEndpoint` / `NetworkPolicySpec` / `MountSpec`
-- [ ] `api/openapi.yaml`：`Environment` 资源 + CRUD 端点 → `make generate-types`
+- [ ] `api/openapi.yaml`：`Environment` 资源 + CRUD 端点 → 同 PR 手改前端类型
 - [ ] `valuz_environment` 表（可逆迁移）+ `modules/environments/`
       （models/datastore/service/errors）+ `api/routes/environments.py`
 - [ ] kernel 自迁移：standalone 启动时 `KERNEL_SELF_MIGRATE=1` 触发 alembic

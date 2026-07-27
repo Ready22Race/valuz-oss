@@ -6,9 +6,9 @@
  * authorization flow); PR-3 wires up the routing + per-plugin config
  * endpoints when the settings page is rewritten.
  *
- * Types are hand-written here to match the OpenAPI schema 1:1 — once
- * the `pnpm generate-types` pass runs in CI, the generated types
- * supersede these. Keep the shapes aligned in the meantime.
+ * Types are hand-written here to match the OpenAPI schema 1:1. That is the
+ * project-wide convention, not a stopgap: there is no OpenAPI generator (see
+ * docs/architecture.md §7), so keep these aligned with the contract by hand.
  */
 
 import { createFetchJson } from "./fetch-json";

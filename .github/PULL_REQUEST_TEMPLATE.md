@@ -32,7 +32,8 @@ Closes #
 - [ ] Commits follow Conventional Commits (`type(scope): summary`)
 - [ ] Updated docs if needed
 - [ ] Updated **both** i18n locales (`i18n/locales/{zh-CN,en-US}.json`) if I touched user-facing strings
-- [ ] Updated `api/openapi.yaml` + ran `make generate-types` if I changed the API
+- [ ] Updated `api/openapi.yaml` **and** the matching hand-written type in
+      `frontend/packages/shared/src/types/` if I changed the API (no generator)
 - [ ] Database migrations are reversible (if any)
 - [ ] Browser-verified any UI change (screenshots below if applicable)
 

@@ -8,7 +8,6 @@ sync path is wired correctly.
 from __future__ import annotations
 
 import contextlib
-import sys
 from pathlib import Path
 
 import pytest
@@ -78,18 +77,14 @@ def isolated_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):  # type: igno
     db_url_async = f"sqlite+aiosqlite:///{db_file}"
     monkeypatch.setattr(live_settings, "database_url", db_url)
     monkeypatch.setattr(live_settings, "kernel_database_url", None)
-    for mod in {
-        db_urls_mod,
-        sys.modules.get("valuz_agent.infra.db_urls"),
-    }:
-        if mod is None:
-            continue
-        monkeypatch.setattr(mod, "db_url", lambda db_url=db_url: db_url)
-        monkeypatch.setattr(
-            mod,
-            "db_url_async",
-            lambda db_url_async=db_url_async: db_url_async,
-        )
+    # Single object by construction: ``reimported_modules`` (conftest) restores
+    # both ``sys.modules`` and the parent-package attribute, so the module seen
+    # here and the one product code imports can no longer diverge. This used to
+    # patch a set of both spellings to survive that split.
+    monkeypatch.setattr(db_urls_mod, "db_url", lambda db_url=db_url: db_url)
+    monkeypatch.setattr(
+        db_urls_mod, "db_url_async", lambda db_url_async=db_url_async: db_url_async
+    )
 
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 

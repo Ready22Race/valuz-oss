@@ -93,11 +93,6 @@ migrate-new: ## Create new host migration (usage: make migrate-new MSG="add user
 migrate-down: ## Rollback last host migration
 	cd backend && uv run alembic -c alembic/host/alembic.ini downgrade -1
 
-# ─── API ────────────────────────────────────────────────────────────
-
-generate-types: ## Regenerate frontend types from OpenAPI spec
-	$(PNPM_FRONTEND) run generate-types
-
 # ─── i18n ───────────────────────────────────────────────────────────
 
 i18n-check: ## Validate locale files and check key consistency
