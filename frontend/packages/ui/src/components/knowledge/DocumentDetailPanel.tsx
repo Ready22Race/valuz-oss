@@ -7,10 +7,12 @@ import {
   Trash2,
   XCircle,
 } from "lucide-react";
+import { getLocale } from "@valuz/shared/i18n";
 import { cn } from "../../lib/cn";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { useI18n } from "../../hooks/use-i18n";
+import { MarkdownContent } from "../conversation/MarkdownContent";
 
 /** Mirror of the backend ``ParserAttempt`` row (one entry per plugin
  *  run for this doc — succeeded or failed). UI doesn't import the
@@ -67,7 +69,12 @@ function _formatAttemptTime(iso: string): string {
   try {
     const d = new Date(iso);
     if (Number.isNaN(d.getTime())) return iso;
-    return d.toLocaleTimeString();
+    return d.toLocaleTimeString(getLocale(), {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    });
   } catch {
     return iso;
   }
@@ -102,9 +109,11 @@ export const DocumentDetailPanel = ({
         </span>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-4 pb-4 pt-1">
+      <div className="flex-1 overflow-y-auto px-5 pb-5 pt-1">
         <div className="mb-4">
-          <div className="text-sm font-medium text-ink-heading">{doc.name}</div>
+          <div className="wrap-anywhere text-sm font-medium text-ink-heading">
+            {doc.name}
+          </div>
           <div className="mt-2 flex items-center gap-2">
             <Badge variant="outline">{doc.format}</Badge>
             <Badge
@@ -134,23 +143,22 @@ export const DocumentDetailPanel = ({
         </div>
 
         {doc.preview ? (
-          <div className="mb-4 rounded-lg border border-surface-border bg-surface-soft py-3 pl-3 pr-0">
-            <div className="pr-3 text-[10px] uppercase tracking-[0.7px] text-ink-section">
+          <section className="mb-5 border-b border-surface-border pb-5">
+            <div className="text-[11px] font-medium text-ink-section">
               {t("knowledge.preview")}
             </div>
-            <div className="mt-1.5 max-h-[320px] overflow-y-auto pr-3 text-xs leading-5 text-ink-body whitespace-pre-wrap break-words">
-              {doc.preview.length > 2000
-                ? `${doc.preview.slice(0, 2000)}…`
-                : doc.preview}
-            </div>
-          </div>
+            <MarkdownContent
+              content={doc.preview}
+              className="mt-2 text-xs leading-5 text-ink-body"
+            />
+          </section>
         ) : null}
 
         {meta ? (
           <div className="mb-4 space-y-3">
             {meta.kbName ? (
               <div>
-                <div className="text-[10px] uppercase tracking-[0.7px] text-ink-section">
+                <div className="text-[11px] font-medium text-ink-section">
                   {t("knowledge.parentKb")}
                 </div>
                 <div className="mt-1 flex items-center gap-1.5 text-xs text-ink-heading">
@@ -161,21 +169,21 @@ export const DocumentDetailPanel = ({
             ) : null}
             {meta.relativePath ? (
               <div>
-                <div className="text-[10px] uppercase tracking-[0.7px] text-ink-section">
+                <div className="text-[11px] font-medium text-ink-section">
                   {t("knowledge.kbPath")}
                 </div>
-                <div className="mt-1 text-xs text-ink-heading font-mono">
+                <div className="mt-1 wrap-anywhere font-mono text-xs text-ink-heading">
                   {meta.relativePath}
                 </div>
               </div>
             ) : null}
             {meta.sourcePath ? (
               <div>
-                <div className="text-[10px] uppercase tracking-[0.7px] text-ink-section">
+                <div className="text-[11px] font-medium text-ink-section">
                   {t("knowledge.sourcePath")}
                 </div>
                 <div
-                  className="mt-1 truncate text-xs text-ink-body font-mono"
+                  className="mt-1 wrap-anywhere font-mono text-xs leading-5 text-ink-body"
                   title={meta.sourcePath}
                 >
                   {meta.sourcePath}
@@ -184,7 +192,7 @@ export const DocumentDetailPanel = ({
             ) : null}
             {meta.fileSize != null ? (
               <div>
-                <div className="text-[10px] uppercase tracking-[0.7px] text-ink-section">
+                <div className="text-[11px] font-medium text-ink-section">
                   {t("knowledge.fileSize")}
                 </div>
                 <div className="mt-1 text-xs text-ink-heading">
@@ -198,16 +206,17 @@ export const DocumentDetailPanel = ({
             ) : null}
             {meta.importedAt ? (
               <div>
-                <div className="text-[10px] uppercase tracking-[0.7px] text-ink-section">
+                <div className="text-[11px] font-medium text-ink-section">
                   {t("knowledge.importTime")}
                 </div>
                 <div className="mt-1 text-xs text-ink-heading">
-                  {new Date(meta.importedAt).toLocaleString("zh-CN", {
+                  {new Date(meta.importedAt).toLocaleString(getLocale(), {
                     year: "numeric",
                     month: "2-digit",
                     day: "2-digit",
                     hour: "2-digit",
                     minute: "2-digit",
+                    hour12: false,
                   })}
                 </div>
               </div>
@@ -217,11 +226,11 @@ export const DocumentDetailPanel = ({
 
         {hasParseInfo ? (
           <div className="mb-4 space-y-2">
-            <div className="text-[10px] uppercase tracking-[0.7px] text-ink-section">
+            <div className="text-[11px] font-medium text-ink-section">
               {t("knowledge.parseHistory")}
             </div>
             {parse?.parserMode || isProcessing ? (
-              <div className="flex items-center gap-2 text-xs text-ink-heading">
+              <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-heading">
                 {isProcessing ? (
                   <Loader2 className="h-3 w-3 shrink-0 animate-spin text-brand" />
                 ) : null}
@@ -296,8 +305,10 @@ export const DocumentDetailPanel = ({
             ) : null}
           </div>
         ) : null}
+      </div>
 
-        <div className="mt-6 space-y-2">
+      {onRegenerate || onDelete ? (
+        <div className="shrink-0 space-y-2 border-t border-surface-border bg-surface px-5 py-4">
           {onRegenerate ? (
             <Button
               variant="outline"
@@ -321,7 +332,7 @@ export const DocumentDetailPanel = ({
             </Button>
           ) : null}
         </div>
-      </div>
+      ) : null}
     </div>
   );
 };
