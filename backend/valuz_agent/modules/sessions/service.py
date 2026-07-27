@@ -373,6 +373,18 @@ class SessionService:
         order = {sid: i for i, sid in enumerate(ids)}
         sessions.sort(key=lambda s: order.get(s.id, len(order)))
         items = [_session_to_list_item(s) for s in sessions]
+        # One probe for the whole page, membership per row — the same shape
+        # ``list_runs`` uses. Carrying it on the list item (not just the
+        # detail) is what lets a surface reading the session list stay live as
+        # background work starts and ends. Best-effort: a seam hiccup must
+        # degrade the badge, never blank the list.
+        try:
+            bg_busy = set(await kernel_client.bg_busy_session_ids())
+        except Exception:  # noqa: BLE001
+            logger.debug("session list: bg-busy probe failed", exc_info=True)
+        else:
+            for item in items:
+                item.background = item.id in bg_busy
         if query:
             q = query.lower()
             items = [i for i in items if i.name and q in i.name.lower()]
@@ -393,6 +405,17 @@ class SessionService:
             detail.worktree.exists = await asyncio.to_thread(
                 (_Path(detail.worktree.path) / ".git").exists
             )
+        # Background work outlives the turn that launched it, so ``status``
+        # reads ``idle`` while a task is still executing. The runs overview
+        # already compensates from the orchestrator's live registry; read the
+        # SAME seam here so the conversation header and the sidebar answer
+        # this question identically instead of each deriving its own.
+        # Best-effort, exactly as ``list_runs`` treats it: a seam hiccup must
+        # degrade the badge, never fail the session read.
+        try:
+            detail.background = session_id in set(await kernel_client.bg_busy_session_ids())
+        except Exception:  # noqa: BLE001
+            logger.debug("session detail: bg-busy probe failed", exc_info=True)
         return detail
 
     async def list_events(

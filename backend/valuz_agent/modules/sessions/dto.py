@@ -62,6 +62,17 @@ class SessionListItem:
     # Surfaced on the list so the composer can render the EffortSelector's
     # current value without a second fetch.
     effort: str | None = None
+    # A ``run_in_background`` task is still executing in this session. Same
+    # fact and same source as ``RunSummary.background`` (both read
+    # ``kernel_client.bg_busy_session_ids()``), so the conversation header,
+    # the sidebar pulse and the Activity page can never disagree about one
+    # session.
+    #
+    # Deliberately NOT folded into ``status``: the launching turn genuinely
+    # ends, and ``status`` drives the Stop button and queue routing — a
+    # ``running`` lie there offers a Stop that stops nothing and routes new
+    # messages into the queue (409 "Session is already running").
+    background: bool = False
     # Owning task id if this session belongs to a task (lead session or a
     # dispatched sub-Run). Read from ``session.metadata["valuz"]["task_id"]``.
     # ``None`` = a user-initiated standalone conversation. Surfaces here so
