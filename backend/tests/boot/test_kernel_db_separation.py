@@ -14,11 +14,12 @@ from __future__ import annotations
 
 import os
 import sqlite3
-import sys
 import uuid
 from pathlib import Path
 
 import pytest
+
+from conftest import reimported_modules
 
 
 _REIMPORT_PREFIXES = (
@@ -38,9 +39,9 @@ async def split_db(tmp_path, monkeypatch):
 
     The settings-bearing modules are re-imported so they pick up the
     probe's env vars, and the ORIGINAL module objects are restored on
-    teardown — later tests monkeypatch module attributes (e.g.
-    ``infra.db.AsyncSessionLocal``) and must target the same objects the
-    already-imported call sites hold, not fresh re-imports.
+    teardown by ``reimported_modules`` — later tests monkeypatch module
+    attributes (e.g. ``infra.db.AsyncSessionLocal``) and must target the same
+    objects the already-imported call sites hold, not fresh re-imports.
     """
     monkeypatch.setenv("VALUZ_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("VALUZ_DB_FILENAME", "host-probe.db")
@@ -52,41 +53,34 @@ async def split_db(tmp_path, monkeypatch):
     # the co-locate path has its own coverage.
     monkeypatch.setenv("VALUZ_DURABLE_DATABASE_URL", "")
 
-    saved_modules = {
-        name: mod for name, mod in sys.modules.items() if name.startswith(_REIMPORT_PREFIXES)
-    }
     saved_db_url = os.environ.get("DATABASE_URL")
-    for name in saved_modules:
-        sys.modules.pop(name, None)
 
     try:
-        import valuz_agent.boot.kernel as kb  # noqa: F401 — sys.path side-effect
+        with reimported_modules(*_REIMPORT_PREFIXES):
+            import valuz_agent.boot.kernel as kb  # noqa: F401 — sys.path side-effect
 
-        kb.run_kernel_migrations()
+            kb.run_kernel_migrations()
 
-        import valuz_agent.boot.schema as sb
-        from valuz_agent.infra.db_urls import db_url, sqlite_path_from_url
+            import valuz_agent.boot.schema as sb
+            from valuz_agent.infra.db_urls import db_url, sqlite_path_from_url
 
-        host_db = sqlite_path_from_url(db_url())
-        assert host_db is not None
+            host_db = sqlite_path_from_url(db_url())
+            assert host_db is not None
 
-        sb.run_host_migrations()
+            sb.run_host_migrations()
 
-        from app.config import AppConfig  # type: ignore[import-not-found]
-        from app.dependencies import (  # type: ignore[import-not-found]
-            init_dependencies,
-            shutdown_dependencies,
-        )
+            from app.config import AppConfig  # type: ignore[import-not-found]
+            from app.dependencies import (  # type: ignore[import-not-found]
+                init_dependencies,
+                shutdown_dependencies,
+            )
 
-        await init_dependencies(AppConfig())
-        try:
-            yield host_db, kernel_db
-        finally:
-            await shutdown_dependencies()
+            await init_dependencies(AppConfig())
+            try:
+                yield host_db, kernel_db
+            finally:
+                await shutdown_dependencies()
     finally:
-        for name in [n for n in sys.modules if n.startswith(_REIMPORT_PREFIXES)]:
-            sys.modules.pop(name, None)
-        sys.modules.update(saved_modules)
         if saved_db_url is None:
             os.environ.pop("DATABASE_URL", None)
         else:
