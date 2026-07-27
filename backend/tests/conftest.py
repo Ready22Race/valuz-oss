@@ -93,6 +93,121 @@ for _escape_key in [
 # ---------------------------------------------------------------------------
 import pytest  # noqa: E402
 import inspect
+import sys  # noqa: E402
+from contextlib import contextmanager  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Module re-import sandbox — the ONE supported way to reload settings-bearing
+# modules inside a test.
+#
+# A handful of fixtures (kernel DB separation, kernel-over-HTTP, the stream
+# dedup probe, session approval e2e) must make ``VALUZ_*`` env vars take effect
+# on modules that bind ``settings`` / ``fs_registry`` at import time. The only
+# way to do that is to drop them from ``sys.modules`` and let the next import
+# rebuild them.
+#
+# Putting the saved module objects back into ``sys.modules`` afterwards is only
+# HALF a restore, and the missing half caused ~40 order-dependent failures
+# across the skills / official-bootstrap / agent-pack suites:
+#
+#   ``import valuz_agent.infra.fs_registry`` also rebinds ``fs_registry`` as an
+#   ATTRIBUTE of the ``valuz_agent.infra`` package. Restoring ``sys.modules``
+#   leaves that attribute pointing at the throwaway module built inside the
+#   window. From then on the process has TWO live ``FsRegistry``/``Settings``
+#   objects and which one you get depends on the import spelling:
+#
+#     from valuz_agent.infra import fs_registry as fsr        # attribute → throwaway
+#     from valuz_agent.infra.fs_registry import fs_registry   # sys.modules → real
+#
+#   Tests patch ``fsr.settings.user_skills_dir``; product modules read the other
+#   object — so the patch silently does nothing and skill roots resolve to the
+#   session home sandbox instead of ``tmp_path``.
+#
+# ``reimported_modules`` restores BOTH halves: ``sys.modules`` and the parent
+# package attribute. Use it instead of hand-rolled ``sys.modules`` surgery.
+# ---------------------------------------------------------------------------
+
+
+def _rebind_on_parent(name: str, module) -> None:
+    """Point ``parent.leaf`` back at ``module`` (or drop it when it vanished)."""
+    parent_name, _, leaf = name.rpartition(".")
+    if not parent_name:
+        return
+    parent = sys.modules.get(parent_name)
+    if parent is None:
+        return
+    if module is None:
+        # Imported only inside the window: the package attribute now refers to a
+        # module that is no longer in ``sys.modules``. Drop it so the next
+        # ``from package import leaf`` re-imports instead of resurrecting it.
+        if hasattr(parent, leaf):
+            try:
+                delattr(parent, leaf)
+            except AttributeError:  # pragma: no cover - defensive
+                pass
+        return
+    setattr(parent, leaf, module)
+
+
+@contextmanager
+def reimported_modules(*prefixes: str):
+    """Drop ``prefixes``-matching modules for the duration of the block.
+
+    Inside the block the next import rebuilds them from the current environment;
+    on exit the ORIGINAL module objects are restored — in ``sys.modules`` *and*
+    on their parent packages — so later tests monkeypatch the very objects that
+    already-imported call sites hold.
+    """
+    matcher = tuple(prefixes)
+    saved = {name: mod for name, mod in sys.modules.items() if name.startswith(matcher)}
+    for name in saved:
+        sys.modules.pop(name, None)
+    try:
+        yield
+    finally:
+        window_names = [n for n in sys.modules if n.startswith(matcher)]
+        for name in window_names:
+            sys.modules.pop(name, None)
+        sys.modules.update(saved)
+        for name in set(window_names) | set(saved):
+            _rebind_on_parent(name, saved.get(name))
+
+
+# Modules whose import-time singletons (``settings`` / ``fs_registry``) the rest
+# of the suite monkeypatches. If any of them ends a test reachable under TWO
+# identities, every later ``monkeypatch.setattr(fsr.settings, ...)`` becomes a
+# silent no-op — see the ``reimported_modules`` note above.
+_SINGLETON_MODULES = (
+    "valuz_agent.infra.config",
+    "valuz_agent.infra.fs_registry",
+)
+
+
+@pytest.fixture(autouse=True)
+def _split_module_identity_tripwire():
+    """Fail the test that leaves a settings-bearing module double-bound.
+
+    Cheap identity check, in the spirit of the real-home leak tripwire below:
+    it pins the blame on the test that broke ``sys.modules`` rather than on the
+    unrelated test that trips over it 200 cases later."""
+    yield
+    split = []
+    for name in _SINGLETON_MODULES:
+        module = sys.modules.get(name)
+        if module is None:
+            continue  # never imported, or legitimately inside a reload window
+        parent_name, _, leaf = name.rpartition(".")
+        parent = sys.modules.get(parent_name)
+        if parent is not None and getattr(parent, leaf, module) is not module:
+            split.append(name)
+    assert not split, (
+        "module identity split after this test — sys.modules and the parent "
+        "package disagree for: "
+        f"{split}. Reload settings-bearing modules with the "
+        "``reimported_modules`` context manager (tests/conftest.py), which "
+        "restores both halves."
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -241,6 +356,41 @@ def _reset_host_data_plane():
     from valuz_agent.adapters import kernel_client
 
     kernel_client.bind_host_data_store(None)
+
+
+@pytest.fixture(autouse=True)
+def _restore_boot_globals():
+    """Restore the process-wide globals the BOOT path mutates.
+
+    Production runs one app per process, so ``lifespan`` is free to flip these
+    once and never look back. A test that drives the real lifespan (e.g. the
+    skill-staging API fixture) leaves them flipped for every test that follows,
+    which is invisible until the run order changes:
+
+    * ``i18n`` effective locale — ``boot.steps`` pushes the user's configured
+      locale (``set_locale``) so ``t()`` never touches the DB. Left pinned to
+      the seeded ``zh-CN``, the agent-pack manifests resolve their
+      ``{locale: text}`` maps to Chinese and ``test_agent_pack_service``'s
+      English assertions fail.
+    * ``infra.lifecycle`` draining flag — shutdown sets it and only ad-hoc
+      per-test calls ever clear it (``reset_draining`` is documented
+      test-only). Left set, the task actor loop takes its shutdown branch and
+      skips ``_finalize_actor`` entirely, failing ``test_user_interrupt``.
+
+    Snapshot + restore keeps each of them a per-test concern."""
+    from valuz_agent import i18n
+    from valuz_agent.infra import lifecycle
+
+    saved_locale = i18n._pushed_locale
+    saved_provider = i18n._default_locale_provider
+    saved_draining = lifecycle.is_draining()
+    yield
+    i18n.set_locale(saved_locale)
+    i18n.set_default_locale_provider(saved_provider)
+    if saved_draining:
+        lifecycle.set_draining()
+    else:
+        lifecycle.reset_draining()
 
 
 @pytest.fixture(autouse=True)

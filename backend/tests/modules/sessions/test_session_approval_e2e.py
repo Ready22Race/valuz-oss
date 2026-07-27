@@ -29,6 +29,7 @@ from datetime import datetime
 from typing import Literal
 
 import pytest
+from conftest import reimported_modules
 
 
 class _FakeRuntime:
@@ -101,31 +102,31 @@ async def _store_and_orchestrator(tmp_path, monkeypatch):
     # settings``) and ``_set_kernel_env`` writes ``DATABASE_URL`` from
     # that binding. A stale binding points the kernel store at the real
     # dev DB — the test's fixture rows then leak into ~/.valuz-oss/valuz.db.
-    import sys
+    #
+    # The window MUST be scoped: this fixture used to pop the modules and never
+    # put them back, which left every later test running against a throwaway
+    # ``Settings`` / ``FsRegistry`` reachable through the ``valuz_agent.infra``
+    # package attributes.
+    with reimported_modules("valuz_agent.infra.config", "valuz_agent.boot.kernel"):
+        # Side-effect: puts ``src.core`` on sys.path.
+        import valuz_agent.boot.kernel as kb  # noqa: F401
 
-    for name in list(sys.modules):
-        if name.startswith(("valuz_agent.infra.config", "valuz_agent.boot.kernel")):
-            sys.modules.pop(name, None)
+        # Drive the kernel's alembic chain via the host helper.
+        kb.run_kernel_migrations()
 
-    # Side-effect: puts ``src.core`` on sys.path.
-    import valuz_agent.boot.kernel as kb  # noqa: F401
+        from app.config import AppConfig  # type: ignore[import-not-found]
+        from app.dependencies import (  # type: ignore[import-not-found]
+            get_orchestrator,
+            get_store,
+            init_dependencies,
+            shutdown_dependencies,
+        )
 
-    # Drive the kernel's alembic chain via the host helper.
-    kb.run_kernel_migrations()
-
-    from app.config import AppConfig  # type: ignore[import-not-found]
-    from app.dependencies import (  # type: ignore[import-not-found]
-        get_orchestrator,
-        get_store,
-        init_dependencies,
-        shutdown_dependencies,
-    )
-
-    await init_dependencies(AppConfig())
-    try:
-        yield get_store(), get_orchestrator(), db_path
-    finally:
-        await shutdown_dependencies()
+        await init_dependencies(AppConfig())
+        try:
+            yield get_store(), get_orchestrator(), db_path
+        finally:
+            await shutdown_dependencies()
 
 
 @pytest.mark.asyncio
