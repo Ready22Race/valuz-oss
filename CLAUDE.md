@@ -57,7 +57,7 @@ version — CI strips the `v`, sets `VALUZ_VERSION`, and `build-desktop.sh` over
 
 - **Tencent COS + CDN** (`files.valuz.cn`) — the **auto-updater feed**. CI uploads
   every artifact here, and the packaged client's `app-update.yml` points at
-  `https://files.valuz.cn/valuz-<edition>/`. `electron-updater` reads
+  `https://files.valuz.cn/<edition>/` (e.g. `oss/`). `electron-updater` reads
   `latest-*.yml` from there.
 - **GitHub Releases** — the **manual-download + backup** surface. CI mirrors every
   artifact here too (`gh release upload`). If COS ever has an issue, the GitHub
