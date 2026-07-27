@@ -324,7 +324,7 @@ export const DocumentDetailPanel = ({
             <Button
               variant="outline"
               size="sm"
-              className="min-w-0 flex-1 justify-center border-error-text/30 text-error-text hover:border-error-text/50 hover:text-error-text"
+              className="min-w-0 flex-1 justify-center text-error-text hover:text-error-text"
               onClick={onDelete}
             >
               <Trash2 className="h-3.5 w-3.5" />
