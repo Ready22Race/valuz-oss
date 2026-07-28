@@ -366,6 +366,75 @@ async def list_feishu_chats(
     ]
 
 
+class CreateChatRequestBody(BaseModel):
+    name: str = Field(min_length=1)
+    project_id: str = Field(min_length=1)
+    channel_instance_id: str = Field(default="feishu-main", min_length=1)
+
+
+class CreatedChatResponse(BaseModel):
+    external_chat_id: str
+    name: str
+    project_id: str
+    # How the human joins: the bot is the creator, so nobody else is in the
+    # group yet. ``None`` when the link call failed — the group still exists.
+    share_link: str | None = None
+
+
+@router.post("/feishu/chats", response_model=CreatedChatResponse, status_code=201)
+async def create_feishu_chat_for_project(
+    body: CreateChatRequestBody,
+    user_id: Annotated[str, Depends(get_current_user_id)],
+) -> CreatedChatResponse:
+    """Create a Feishu group with the bot in it and bind it to a project.
+
+    Adding a bot to an existing group depends on a client menu that is absent
+    or disabled in many setups; creating the group here avoids that path
+    entirely.
+    """
+    from valuz_agent.integrations.feishu_long_connection import (
+        create_feishu_chat as create_chat,
+    )
+
+    async with async_unit_of_work() as db:
+        binding = next(
+            iter(
+                await AgentChannelBindingDatastore(db).list_enabled(
+                    platform=FEISHU_PLATFORM, user_id=user_id
+                )
+            ),
+            None,
+        )
+        if binding is None:
+            raise HTTPException(status_code=404, detail="feishu binding not found")
+        secret = _read_feishu_secret(user_id=user_id, secret_ref=binding.secret_ref)
+    if not secret.app_secret:
+        raise HTTPException(status_code=422, detail="App Secret is required")
+
+    name = body.name.strip()
+    try:
+        chat_id, share_link = await create_chat(
+            app_id=binding.bot_id, app_secret=secret.app_secret, name=name
+        )
+    except ChannelConfigError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    async with async_unit_of_work() as db:
+        await ChannelChatBindingDatastore(db).upsert(
+            user_id=user_id,
+            channel_instance_id=body.channel_instance_id.strip(),
+            external_chat_id=chat_id,
+            project_id=body.project_id.strip(),
+            external_chat_name=name,
+        )
+    return CreatedChatResponse(
+        external_chat_id=chat_id,
+        name=name,
+        project_id=body.project_id.strip(),
+        share_link=share_link,
+    )
+
+
 @router.get(
     "/chat-bindings",
     response_model=list[ChatProjectBindingResponse],

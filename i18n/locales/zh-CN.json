@@ -1115,7 +1115,13 @@
     "bindChatEmpty": "没有可关联的群。请先在飞书中建群并把机器人拉进去。",
     "bindChatBoundElsewhere": "已关联其它项目",
     "chatBindingSaved": "已关联",
-    "chatBindingRemoved": "已解除关联"
+    "chatBindingRemoved": "已解除关联",
+    "createChat": "新建群并关联",
+    "createChatName": "群名称",
+    "createChatHint": "机器人会创建群并自动关联到本项目；创建后用下面的链接加入。",
+    "createChatJoin": "加入群",
+    "createChatDone": "群已创建并关联",
+    "createChatLinkMissing": "群已创建，请在飞书中按群名搜索加入。"
   },
   "schedule": {
     "create": "创建定时任务",

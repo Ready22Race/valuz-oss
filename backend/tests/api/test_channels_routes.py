@@ -41,6 +41,14 @@ class _FakeAgentChannelBindingDatastore:
             return self.binding
         return None
 
+    async def list_enabled(self, *, platform: str, user_id: str | None = None) -> list:
+        binding = self.binding
+        if binding is None or binding.platform != platform or not binding.enabled:
+            return []
+        if user_id is not None and binding.owner_user_id != user_id:
+            return []
+        return [binding]
+
     async def get_enabled_by_channel_instance(
         self,
         *,
@@ -301,3 +309,67 @@ def test_test_feishu_binding_404_without_binding(monkeypatch) -> None:
     response = TestClient(app).post("/v1/channels/feishu/bindings/developer/test")
 
     assert response.status_code == 404
+
+
+def test_create_feishu_chat_creates_binds_and_returns_the_join_link(monkeypatch) -> None:
+    """Creating the group here sidesteps adding a bot to an existing group —
+    a client menu that is absent or disabled in plenty of setups. The bot is
+    the creator, so the share link is how the person joins."""
+    _FakeAgentChannelBindingDatastore.binding = SimpleNamespace(
+        id="binding-1",
+        owner_user_id="u1",
+        platform="feishu",
+        channel_instance_id="feishu-main",
+        agent_slug="developer",
+        bot_id="cli_app_1",
+        secret_ref="channel/feishu/developer",
+        enabled=True,
+        bot_name=None,
+        ws_url=None,
+    )
+    saved = {
+        ("u1", "channel/feishu/developer"): json.dumps({"app_secret": "app-secret"})
+    }
+    bound: list[dict] = []
+
+    class _FakeChatBindings:
+        def __init__(self, _db: object) -> None:
+            pass
+
+        async def upsert(self, **kwargs):
+            bound.append(kwargs)
+            return None
+
+    async def fake_create(*, app_id: str, app_secret: str, name: str):
+        assert (app_id, app_secret) == ("cli_app_1", "app-secret")
+        return "oc-new", f"https://applink.feishu.cn/client/chat/chatter/add_by_link?{name}"
+
+    monkeypatch.setattr(channels_routes, "async_unit_of_work", lambda: _Uow())
+    monkeypatch.setattr(
+        channels_routes,
+        "AgentChannelBindingDatastore",
+        _FakeAgentChannelBindingDatastore,
+    )
+    monkeypatch.setattr(channels_routes, "ChannelChatBindingDatastore", _FakeChatBindings)
+    monkeypatch.setattr(
+        channels_routes.secret_store, "get", lambda user_id, ref: saved.get((user_id, ref))
+    )
+    import valuz_agent.integrations.feishu_long_connection as feishu_mod
+
+    monkeypatch.setattr(feishu_mod, "create_feishu_chat", fake_create)
+
+    app = FastAPI()
+    app.include_router(channels_routes.router)
+    app.dependency_overrides[channels_routes.get_current_user_id] = lambda: "u1"
+
+    response = TestClient(app).post(
+        "/v1/channels/feishu/chats",
+        json={"name": "研究群", "project_id": "proj-a"},
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["external_chat_id"] == "oc-new"
+    assert body["share_link"].endswith("研究群")
+    assert bound[0]["project_id"] == "proj-a"
+    assert bound[0]["external_chat_name"] == "研究群"

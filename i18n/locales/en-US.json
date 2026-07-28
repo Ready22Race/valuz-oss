@@ -1115,7 +1115,13 @@
     "bindChatEmpty": "No groups available. Create one in Feishu and add the bot first.",
     "bindChatBoundElsewhere": "Linked to another project",
     "chatBindingSaved": "Linked",
-    "chatBindingRemoved": "Unlinked"
+    "chatBindingRemoved": "Unlinked",
+    "createChat": "Create and link a group",
+    "createChatName": "Group name",
+    "createChatHint": "The bot creates the group and links it to this project; use the link below to join.",
+    "createChatJoin": "Join the group",
+    "createChatDone": "Group created and linked",
+    "createChatLinkMissing": "Group created — search for it by name in Feishu to join."
   },
   "schedule": {
     "create": "Create Schedule",

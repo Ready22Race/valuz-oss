@@ -998,6 +998,65 @@ async def _send_feishu_card_to_chat(
         )
 
 
+async def create_feishu_chat(
+    *, app_id: str, app_secret: str, name: str
+) -> tuple[str, str | None]:
+    """Create a group with the bot already in it; returns ``(chat_id, link)``.
+
+    Adding a bot to an existing group needs a client menu that is missing or
+    disabled in plenty of setups (not a group, not the owner, disabled by the
+    tenant admin). Creating the group from here sidesteps all of that: the app
+    is the creator, so the bot is a member by construction.
+
+    The creator is the bot, not the human — so a share link comes back with it,
+    which is how the person joins. Asking for their open_id instead would mean
+    they had to message the bot first, which is exactly the kind of setup step
+    this is meant to remove.
+    """
+    from lark_oapi.api.im.v1 import (
+        CreateChatRequest,
+        CreateChatRequestBody,
+        LinkChatRequest,
+        LinkChatRequestBody,
+    )
+
+    config = FeishuLongConnectionConfig(
+        channel_instance_id="",
+        owner_user_id="",
+        agent_slug="",
+        app_id=app_id,
+        app_secret=app_secret,
+    )
+    client = _new_openapi_client(config)
+    created = await client.im.v1.chat.acreate(
+        CreateChatRequest.builder()
+        .request_body(CreateChatRequestBody.builder().name(name).build())
+        .build()
+    )
+    if not created.success() or created.data is None or not created.data.chat_id:
+        raise ChannelConfigError(
+            f"Feishu chat create failed: {created.code} {created.msg or ''}".strip()
+        )
+    chat_id = created.data.chat_id
+
+    # Best-effort: without the link the group still exists and is bound, and the
+    # person can still find it by name — failing the whole call would be worse.
+    try:
+        link = await client.im.v1.chat.alink(
+            LinkChatRequest.builder()
+            .chat_id(chat_id)
+            .request_body(
+                LinkChatRequestBody.builder().validity_period("permanently").build()
+            )
+            .build()
+        )
+        share_link = link.data.share_link if link.success() and link.data else None
+    except Exception as exc:  # noqa: BLE001 - the group is already created
+        logger.warning("Feishu chat link failed for %s: %s", chat_id, exc)
+        share_link = None
+    return chat_id, share_link
+
+
 async def list_feishu_chats(*, app_id: str, app_secret: str) -> list[tuple[str, str]]:
     """``(chat_id, name)`` for every group the bot is a member of.
 

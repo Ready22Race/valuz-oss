@@ -64,6 +64,14 @@ export interface ChatProjectBinding {
   default_agent_slug?: string | null;
 }
 
+export interface CreatedChat {
+  external_chat_id: string;
+  name: string;
+  project_id: string;
+  /** How the person joins: the bot is the creator, so nobody else is in yet. */
+  share_link?: string | null;
+}
+
 export interface FeishuBindingTestResult {
   credential_ok: boolean;
   error?: string | null;
@@ -145,6 +153,23 @@ export const channelsApi = {
     if (agentSlug) qs.set("agent_slug", agentSlug);
     const suffix = qs.toString() ? `?${qs}` : "";
     return fetchJson(`/v1/channels/feishu/chats${suffix}`);
+  },
+
+  /** Create a Feishu group with the bot already in it, bound to a project. */
+  createFeishuChat(payload: {
+    name: string;
+    project_id: string;
+    channel_instance_id?: string;
+  }): Promise<CreatedChat> {
+    return fetchJson("/v1/channels/feishu/chats", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: payload.name,
+        project_id: payload.project_id,
+        channel_instance_id: payload.channel_instance_id ?? "feishu-main",
+      }),
+    });
   },
 
   listChatBindings(projectId?: string): Promise<ChatProjectBinding[]> {
