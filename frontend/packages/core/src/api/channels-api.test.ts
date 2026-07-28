@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   channelsApi,
   setChannelsApiBase,
+  type FeishuBinding,
   type WeComAIBotBinding,
 } from "./channels-api";
 
@@ -22,6 +23,16 @@ const binding: WeComAIBotBinding = {
   connected: false,
   connection_status: "stopped",
   connection_error: null,
+};
+
+const feishuBinding: FeishuBinding = {
+  enabled: true,
+  channel_instance_id: "feishu-main",
+  owner_user_id: "u1",
+  agent_slug: "developer",
+  app_id: "cli_app_1",
+  has_verification_token: true,
+  has_encrypt_key: true,
 };
 
 describe("channelsApi", () => {
@@ -67,6 +78,45 @@ describe("channelsApi", () => {
       enabled: true,
       agent_slug: "developer",
       bot_id: "bot-1",
+    });
+  });
+
+  it("loads the Feishu binding", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(jsonResponse(feishuBinding));
+
+    await expect(channelsApi.getFeishuBinding("developer")).resolves.toEqual(
+      feishuBinding,
+    );
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      "http://api.test/v1/channels/feishu/bindings/developer",
+    );
+  });
+
+  it("does not send empty Feishu secrets when saving a binding", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(jsonResponse(feishuBinding));
+
+    await channelsApi.updateFeishuBinding({
+      enabled: true,
+      agent_slug: "developer",
+      app_id: "cli_app_1",
+      verification_token: "",
+      encrypt_key: "",
+    });
+
+    const [, init] = fetchMock.mock.calls[0] ?? [];
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      "http://api.test/v1/channels/feishu/bindings/developer",
+    );
+    const body = JSON.parse(String(init?.body));
+    expect(body).toEqual({
+      enabled: true,
+      agent_slug: "developer",
+      app_id: "cli_app_1",
     });
   });
 });

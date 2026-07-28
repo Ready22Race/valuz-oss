@@ -85,6 +85,7 @@ class AgentChannelBinding:
     """One agent's binding to one external channel identity."""
 
     id: str
+    owner_user_id: str
     platform: str
     channel_instance_id: str
     agent_slug: str

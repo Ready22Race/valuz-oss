@@ -51,6 +51,7 @@ import {
   type CatalogEntry,
   type ConnectorItem,
   type EffortLevel,
+  type FeishuBinding,
   type SkillView,
   type UpdateAgentPayload,
   type ProjectListItem,
@@ -200,6 +201,14 @@ export const AgentDetailView = ({
   const [aibotBotId, setAibotBotId] = useState("");
   const [aibotSecret, setAibotSecret] = useState("");
   const [savingChannel, setSavingChannel] = useState(false);
+  const [feishuBinding, setFeishuBinding] = useState<FeishuBinding | null>(
+    null,
+  );
+  const [feishuEnabled, setFeishuEnabled] = useState(true);
+  const [feishuAppId, setFeishuAppId] = useState("");
+  const [feishuVerificationToken, setFeishuVerificationToken] = useState("");
+  const [feishuEncryptKey, setFeishuEncryptKey] = useState("");
+  const [savingFeishuChannel, setSavingFeishuChannel] = useState(false);
 
   const { canDelete } = useResourceGuard(agent ?? {});
 
@@ -245,11 +254,12 @@ export const AgentDetailView = ({
 
   const loadData = useCallback(async () => {
     try {
-      const [tpl, wsRes, depRes, channelRes] = await Promise.all([
+      const [tpl, wsRes, depRes, channelRes, feishuChannelRes] = await Promise.all([
         agentsApi.getAgent(slug),
         projectsApi.list(),
         agentsApi.listDeployments(slug),
         channelsApi.getWeComAIBotBinding(slug).catch(() => null),
+        channelsApi.getFeishuBinding(slug).catch(() => null),
       ]);
       setAgent(tpl);
       setProjects(wsRes.projects.filter((w) => w.kind === "project"));
@@ -261,6 +271,15 @@ export const AgentDetailView = ({
         );
         setAibotBotId(channelRes.bot_id);
         setAibotSecret("");
+      }
+      setFeishuBinding(feishuChannelRes);
+      if (feishuChannelRes) {
+        setFeishuEnabled(
+          feishuChannelRes.agent_slug === slug ? feishuChannelRes.enabled : true,
+        );
+        setFeishuAppId(feishuChannelRes.app_id);
+        setFeishuVerificationToken("");
+        setFeishuEncryptKey("");
       }
     } catch {
       toast.error(t("common.error"));
@@ -508,6 +527,44 @@ export const AgentDetailView = ({
     }
   };
 
+  const saveFeishuBinding = async () => {
+    if (!agent) return;
+    const appId = feishuAppId.trim();
+    const verificationToken = feishuVerificationToken.trim();
+    const encryptKey = feishuEncryptKey.trim();
+    if (!appId) {
+      toast.error(t("agent.feishuAppIdRequired" as Parameters<typeof t>[0]));
+      return;
+    }
+    if (!feishuBinding?.has_verification_token && !verificationToken) {
+      toast.error(
+        t("agent.feishuVerificationTokenRequired" as Parameters<typeof t>[0]),
+      );
+      return;
+    }
+    setSavingFeishuChannel(true);
+    try {
+      const next = await channelsApi.updateFeishuBinding({
+        enabled: feishuEnabled,
+        agent_slug: agent.slug,
+        app_id: appId,
+        verification_token: verificationToken,
+        encrypt_key: encryptKey,
+      });
+      setFeishuBinding(next);
+      setFeishuVerificationToken("");
+      setFeishuEncryptKey("");
+      toast.success(t("agent.feishuSaved" as Parameters<typeof t>[0]));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(
+        `${t("agent.saveFailed" as Parameters<typeof t>[0])}: ${msg}`,
+      );
+    } finally {
+      setSavingFeishuChannel(false);
+    }
+  };
+
   // Click-to-edit handlers for the identity card.
   const cancelIdentityEdit = () => {
     if (!agent) return;
@@ -567,6 +624,8 @@ export const AgentDetailView = ({
     agent.connector_types.some((slug) => !connectedSlugs.has(slug));
   const aibotBoundToThisAgent =
     aibotBinding?.enabled === true && aibotBinding.agent_slug === agent.slug;
+  const feishuBoundToThisAgent =
+    feishuBinding?.enabled === true && feishuBinding.agent_slug === agent.slug;
   const aibotRuntimeStatus = aibotBinding?.connected
     ? {
         status: "connected",
@@ -1101,7 +1160,8 @@ export const AgentDetailView = ({
           </TabsContent>
 
           <TabsContent value="channels" className="mt-4">
-            <div className="rounded-[14px] bg-card p-4 shadow-[var(--shadow-1)]">
+            <div className="flex flex-col gap-3">
+              <div className="rounded-[14px] bg-card p-4 shadow-[var(--shadow-1)]">
               <div className="flex items-start gap-3">
                 <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-surface-soft text-ink-meta">
                   <Bot className="h-4 w-4" />
@@ -1185,6 +1245,117 @@ export const AgentDetailView = ({
                   >
                     {t("agent.wecomAibotBind" as Parameters<typeof t>[0])}
                   </Button>
+                </div>
+              </div>
+            </div>
+              <div className="rounded-[14px] bg-card p-4 shadow-[var(--shadow-1)]">
+                <div className="flex items-start gap-3">
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-surface-soft text-ink-meta">
+                    <BookOpen className="h-4 w-4" />
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h3 className="text-sm font-medium text-ink-heading">
+                        {t("agent.feishuTitle" as Parameters<typeof t>[0])}
+                      </h3>
+                      {feishuBoundToThisAgent ? (
+                        <StatusPill
+                          status="ok"
+                          label={t(
+                            "agent.feishuBound" as Parameters<typeof t>[0],
+                          )}
+                          className="px-1.5 py-0 text-[10px] leading-4"
+                        />
+                      ) : null}
+                    </div>
+                  </div>
+                  <Switch
+                    checked={feishuEnabled}
+                    onCheckedChange={setFeishuEnabled}
+                    aria-label={t(
+                      "agent.feishuEnabled" as Parameters<typeof t>[0],
+                    )}
+                  />
+                </div>
+
+                <div className="mt-4 flex flex-col gap-3">
+                  <label className="flex flex-col gap-1.5">
+                    <span className="text-xs font-medium text-ink-heading">
+                      {t("agent.feishuAppId" as Parameters<typeof t>[0])}
+                    </span>
+                    <Input
+                      value={feishuAppId}
+                      onChange={(e) => setFeishuAppId(e.target.value)}
+                      placeholder="cli_..."
+                      className="font-mono text-xs"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1.5">
+                    <span className="text-xs font-medium text-ink-heading">
+                      {t(
+                        "agent.feishuVerificationToken" as Parameters<
+                          typeof t
+                        >[0],
+                      )}
+                    </span>
+                    <div className="relative">
+                      <KeyRound className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-muted" />
+                      <Input
+                        type="password"
+                        value={feishuVerificationToken}
+                        onChange={(e) =>
+                          setFeishuVerificationToken(e.target.value)
+                        }
+                        placeholder={
+                          feishuBinding?.has_verification_token
+                            ? t(
+                                "agent.feishuSecretSaved" as Parameters<
+                                  typeof t
+                                >[0],
+                              )
+                            : ""
+                        }
+                        className="pl-8 font-mono text-xs"
+                      />
+                    </div>
+                  </label>
+                  <label className="flex flex-col gap-1.5">
+                    <span className="text-xs font-medium text-ink-heading">
+                      {t("agent.feishuEncryptKey" as Parameters<typeof t>[0])}
+                    </span>
+                    <div className="relative">
+                      <KeyRound className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-muted" />
+                      <Input
+                        type="password"
+                        value={feishuEncryptKey}
+                        onChange={(e) => setFeishuEncryptKey(e.target.value)}
+                        placeholder={
+                          feishuBinding?.has_encrypt_key
+                            ? t(
+                                "agent.feishuSecretSaved" as Parameters<
+                                  typeof t
+                                >[0],
+                              )
+                            : ""
+                        }
+                        className="pl-8 font-mono text-xs"
+                      />
+                    </div>
+                  </label>
+                  <div className="flex justify-end">
+                    <Button
+                      size="sm"
+                      disabled={
+                        savingFeishuChannel ||
+                        !feishuAppId.trim() ||
+                        (!feishuBinding?.has_verification_token &&
+                          !feishuVerificationToken.trim())
+                      }
+                      onClick={() => void saveFeishuBinding()}
+                    >
+                      {t("agent.feishuBind" as Parameters<typeof t>[0])}
+                    </Button>
+                  </div>
                 </div>
               </div>
             </div>

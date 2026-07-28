@@ -62,6 +62,29 @@ class AgentChannelBindingDatastore:
         )
         return [_agent_binding_to_schema(row) for row in rows]
 
+    async def get_enabled_by_channel_instance(
+        self,
+        *,
+        platform: str,
+        channel_instance_id: str,
+    ) -> AgentChannelBinding | None:
+        row = (
+            (
+                await self._db.execute(
+                    select(AgentChannelBindingRow)
+                    .where(
+                        AgentChannelBindingRow.platform == platform,
+                        AgentChannelBindingRow.channel_instance_id == channel_instance_id,
+                        AgentChannelBindingRow.enabled.is_(True),
+                    )
+                    .order_by(AgentChannelBindingRow.updated_at.desc())
+                )
+            )
+            .scalars()
+            .first()
+        )
+        return _agent_binding_to_schema(row) if row is not None else None
+
     async def upsert(
         self,
         *,
@@ -192,6 +215,7 @@ def _row_to_binding(row: ChannelThreadBindingRow) -> ChannelThreadBinding:
 def _agent_binding_to_schema(row: AgentChannelBindingRow) -> AgentChannelBinding:
     return AgentChannelBinding(
         id=row.id,
+        owner_user_id=row.user_id,
         platform=row.platform,
         channel_instance_id=row.channel_instance_id,
         agent_slug=row.agent_slug,
