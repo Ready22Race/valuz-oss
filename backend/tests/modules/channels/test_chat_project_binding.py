@@ -214,3 +214,129 @@ def test_binding_to_a_project_the_agent_is_not_on_degrades() -> None:
     assert decision.kind == ChannelRouteDecisionKind.NEW_SESSION
     assert decision.project_id == "proj-a"
     assert decision.reason == "single_deployment"
+
+
+# ------------------------------------------------------------------ #
+# chat commands through the ingress service (flow B)
+# ------------------------------------------------------------------ #
+
+
+class _FakeChatBindings:
+    def __init__(self, project_id: str | None = None) -> None:
+        self.project_id = project_id
+        self.upserts: list[dict] = []
+        self.deleted = False
+
+    async def get(self, **_keys):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(project_id=self.project_id) if self.project_id else None
+
+    async def upsert(self, **kwargs):
+        self.upserts.append(kwargs)
+        self.project_id = kwargs["project_id"]
+        return None
+
+    async def delete(self, **_keys) -> bool:
+        removed = self.project_id is not None
+        self.project_id = None
+        self.deleted = removed
+        return removed
+
+
+class _FakePlacements:
+    def __init__(self, placements: list[AgentPlacement]) -> None:
+        self.placements = placements
+
+    async def list_placements(self, _user_id: str, _slug: str) -> list[AgentPlacement]:
+        return self.placements
+
+
+class _NoopBindings:
+    async def get_for_thread(self, **_kwargs):
+        return None
+
+    async def upsert(self, **_kwargs) -> None:
+        return None
+
+
+class _NoopSessions:
+    async def create_session(self, **_kwargs):  # pragma: no cover - never reached
+        raise AssertionError("a command must not start a session")
+
+    async def send_message(self, **_kwargs) -> None:  # pragma: no cover
+        raise AssertionError("a command must not send a message")
+
+    async def get_session_status(self, **_kwargs) -> str | None:
+        return None
+
+    async def enqueue_message(self, **_kwargs) -> None:  # pragma: no cover
+        raise AssertionError("a command must not enqueue")
+
+
+def _inbound(text: str):
+    from valuz_agent.modules.channels.adapters import InboundChannelMessage
+
+    return InboundChannelMessage(
+        text=text,
+        context=_context(user_id="u1"),
+        params={},
+        channel_context={},
+    )
+
+
+def _service(chat_bindings, placements: list[AgentPlacement] | None = None):
+    from valuz_agent.modules.channels.service import ChannelIngressService
+
+    return ChannelIngressService(
+        placements=_FakePlacements(placements or []),
+        bindings=_NoopBindings(),
+        sessions=_NoopSessions(),
+        chat_bindings=chat_bindings,
+    )
+
+
+async def test_bind_command_binds_and_answers_directly() -> None:
+    """A command is configuration: answered directly, never routed to an agent
+    (a model answering would make the outcome non-deterministic)."""
+    store = _FakeChatBindings()
+    service = _service(store, [_placement("proj-a")])
+    placement_named = AgentPlacement(
+        project_id="proj-a", project_name="研究", agent_slug="helper"
+    )
+    service._placements = _FakePlacements([placement_named])
+
+    result = await service.handle_inbound_message(
+        user_id="u1", inbound=_inbound("绑定项目 研究")
+    )
+
+    assert result.direct_reply and "研究" in result.direct_reply
+    assert result.session_id is None
+    assert store.upserts[0]["project_id"] == "proj-a"
+
+
+async def test_unknown_project_lists_the_candidates() -> None:
+    store = _FakeChatBindings()
+    service = _service(
+        store,
+        [AgentPlacement(project_id="proj-a", project_name="研究", agent_slug="helper")],
+    )
+
+    result = await service.handle_inbound_message(
+        user_id="u1", inbound=_inbound("绑定项目 不存在")
+    )
+
+    assert result.direct_reply and "研究" in result.direct_reply
+    assert store.upserts == []
+
+
+async def test_unbind_command_clears_the_binding() -> None:
+    store = _FakeChatBindings(project_id="proj-a")
+    service = _service(store)
+
+    result = await service.handle_inbound_message(
+        user_id="u1", inbound=_inbound("解绑")
+    )
+
+    assert result.direct_reply is not None
+    assert store.project_id is None

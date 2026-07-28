@@ -7,6 +7,10 @@ from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 from valuz_agent.modules.channels.adapters import InboundChannelMessage
+from valuz_agent.modules.channels.commands import (
+    ChannelCommandKind,
+    parse_channel_command,
+)
 from valuz_agent.modules.channels.resolver import (
     CHAT_PROJECT_SENTINEL,
     AgentChannelResolver,
@@ -20,6 +24,13 @@ from valuz_agent.modules.channels.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+CHANNEL_BOUND_MESSAGE = "已绑定到项目「{project}」，之后这个群里的对话都会进入该项目。"
+CHANNEL_UNBOUND_MESSAGE = "已解除项目绑定。"
+CHANNEL_NO_PROJECT_BOUND_MESSAGE = "这个会话还没有绑定项目。"
+CHANNEL_CURRENT_PROJECT_MESSAGE = "当前绑定的项目是「{project}」。"
+CHANNEL_PROJECT_NOT_FOUND_MESSAGE = "没有找到项目「{name}」。可选项目：{candidates}"
+
 _DIRECT_TURN_SESSION_STATUSES = {"created", "idle"}
 
 
@@ -31,7 +42,7 @@ class AgentPlacementReader(Protocol):
     ) -> list[AgentPlacement]: ...
 
 
-class ChannelChatBindingReader(Protocol):
+class ChannelChatBindingStore(Protocol):
     async def get(
         self,
         *,
@@ -39,6 +50,22 @@ class ChannelChatBindingReader(Protocol):
         channel_instance_id: str,
         external_chat_id: str,
     ) -> Any: ...
+
+    async def upsert(
+        self,
+        *,
+        user_id: str,
+        channel_instance_id: str,
+        external_chat_id: str,
+        project_id: str,
+        default_agent_slug: str | None = None,
+        external_chat_name: str | None = None,
+        bound_by_external_user: str | None = None,
+    ) -> Any: ...
+
+    async def delete(
+        self, *, user_id: str, channel_instance_id: str, external_chat_id: str
+    ) -> bool: ...
 
 
 class ChannelThreadBindingStore(Protocol):
@@ -84,6 +111,9 @@ class ChannelSessionRunner(Protocol):
 class ChannelIngressResult:
     decision: AgentChannelRouteDecision
     session_id: str | None = None
+    # Set when the turn was a binding command rather than work for an agent:
+    # the runner posts this verbatim and starts no session.
+    direct_reply: str | None = None
 
 
 class ChannelIngressService:
@@ -94,7 +124,7 @@ class ChannelIngressService:
         bindings: ChannelThreadBindingStore,
         sessions: ChannelSessionRunner,
         resolver: AgentChannelResolver | None = None,
-        chat_bindings: ChannelChatBindingReader | None = None,
+        chat_bindings: ChannelChatBindingStore | None = None,
     ) -> None:
         self._placements = placements
         self._bindings = bindings
@@ -109,6 +139,9 @@ class ChannelIngressService:
         inbound: InboundChannelMessage,
     ) -> ChannelIngressResult:
         context = inbound.context
+        command_result = await self._handle_command(user_id=user_id, inbound=inbound)
+        if command_result is not None:
+            return command_result
         placements = await self._placements.list_placements(
             user_id,
             context.mentioned_agent_slug,
@@ -184,6 +217,88 @@ class ChannelIngressService:
         await self._bindings.upsert(user_id=user_id, key=key, session_id=session_id)
         return ChannelIngressResult(decision=decision, session_id=session_id)
 
+    async def _handle_command(
+        self,
+        *,
+        user_id: str,
+        inbound: InboundChannelMessage,
+    ) -> ChannelIngressResult | None:
+        """Bind / show / unbind the chat's project, in the chat itself.
+
+        Returns ``None`` for ordinary messages so they route to an agent as
+        usual. Commands never reach the agent — they are configuration, and
+        answering them with a model would make the outcome non-deterministic.
+        """
+        command = parse_channel_command(inbound.text)
+        if command is None or self._chat_bindings is None:
+            return None
+        context = inbound.context
+        keys = {
+            "user_id": user_id,
+            "channel_instance_id": context.channel_instance_id,
+            "external_chat_id": context.external_chat_id,
+        }
+
+        if command.kind is ChannelCommandKind.SHOW_PROJECT:
+            binding = await self._chat_bindings.get(**keys)
+            project_id = getattr(binding, "project_id", None)
+            name = await self._project_display_name(user_id, project_id)
+            return self._command_result(
+                CHANNEL_CURRENT_PROJECT_MESSAGE.format(project=name)
+                if name
+                else CHANNEL_NO_PROJECT_BOUND_MESSAGE
+            )
+
+        if command.kind is ChannelCommandKind.UNBIND_PROJECT:
+            removed = await self._chat_bindings.delete(**keys)
+            return self._command_result(
+                CHANNEL_UNBOUND_MESSAGE if removed else CHANNEL_NO_PROJECT_BOUND_MESSAGE
+            )
+
+        placements = await self._placements.list_placements(
+            user_id, context.mentioned_agent_slug
+        )
+        target = _match_project_by_name(placements, command.argument or "")
+        if target is None:
+            names = "、".join(p.project_name or p.project_id for p in placements)
+            return self._command_result(
+                CHANNEL_PROJECT_NOT_FOUND_MESSAGE.format(
+                    name=command.argument or "", candidates=names or "（无）"
+                )
+            )
+        await self._chat_bindings.upsert(
+            project_id=target.project_id,
+            bound_by_external_user=context.external_user_id,
+            **keys,
+        )
+        return self._command_result(
+            CHANNEL_BOUND_MESSAGE.format(project=target.project_name or target.project_id)
+        )
+
+    @staticmethod
+    def _command_result(message: str) -> ChannelIngressResult:
+        return ChannelIngressResult(
+            decision=AgentChannelRouteDecision(
+                kind=ChannelRouteDecisionKind.NEW_SESSION,
+                agent_slug="",
+                project_id=None,
+                session_id=None,
+                reason="channel_command",
+            ),
+            direct_reply=message,
+        )
+
+    async def _project_display_name(self, user_id: str, project_id: str | None) -> str | None:
+        if not project_id:
+            return None
+        from valuz_agent.modules.projects.service import project_name_map
+
+        try:
+            return (await project_name_map(user_id)).get(project_id, project_id)
+        except Exception:  # noqa: BLE001 - a name lookup must not break the reply
+            logger.warning("Failed to resolve project name for %s", project_id, exc_info=True)
+            return project_id
+
     async def _chat_project_id(
         self,
         *,
@@ -244,6 +359,18 @@ class ChannelIngressService:
         )
 
 
+def _match_project_by_name(placements: list[AgentPlacement], name: str) -> AgentPlacement | None:
+    """Match a project by name, normalized like the resolver's own hint match."""
+    wanted = " ".join(name.strip().casefold().split())
+    if not wanted:
+        return None
+    for placement in placements:
+        candidate = " ".join((placement.project_name or "").strip().casefold().split())
+        if candidate and candidate == wanted:
+            return placement
+    return None
+
+
 def _placement_for_project(placements: list[AgentPlacement], project_id: str) -> AgentPlacement:
     for placement in placements:
         if placement.project_id == project_id:
@@ -253,7 +380,7 @@ def _placement_for_project(placements: list[AgentPlacement], project_id: str) ->
 
 __all__ = [
     "AgentPlacementReader",
-    "ChannelChatBindingReader",
+    "ChannelChatBindingStore",
     "ChannelIngressResult",
     "ChannelIngressService",
     "ChannelSessionRef",
