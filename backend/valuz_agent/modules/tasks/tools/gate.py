@@ -23,19 +23,21 @@ def _valuz_meta(sess: Any) -> dict[str, Any]:
     return v if isinstance(v, dict) else {}
 
 
-def check_lead_gate(sess: Any) -> tuple[str, str] | Failure:
+def check_lead_gate(sess: Any, *, tool: str = "dispatch") -> tuple[str, str] | Failure:
     """Lead-only tools (dispatch / await_members / send / review / finish).
 
     Returns ``(task_id, project_id)`` when *sess* is a lead session with its
     task binding intact, else a :class:`Failure` carrying the rejection reason.
+    ``tool`` labels the rejection — the same gate guards seven tools, and a
+    finish_task rejection reading "dispatch: …" misdirects the model.
     """
     v = _valuz_meta(sess)
     if v.get("run_kind") != "lead":
-        return Failure("only the lead session may call dispatch tools")
+        return Failure(f"{tool}: only the lead session may call this tool")
     task_id = v.get("task_id", "")
     project_id = v.get("project_id", "")
     if not task_id or not project_id:
-        return Failure("dispatch: lead session is missing task_id or project_id in metadata")
+        return Failure(f"{tool}: lead session is missing task_id or project_id in metadata")
     return task_id, project_id
 
 

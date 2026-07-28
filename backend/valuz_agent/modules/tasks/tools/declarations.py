@@ -213,7 +213,7 @@ _LIST_TASKS_PARAMETERS: dict[str, Any] = {
     "properties": {
         "status": {
             "type": "string",
-            "enum": ["active", "completed", "failed"],
+            "enum": ["draft", "active", "paused", "stopped", "completed", "blocked"],
             "description": "Optional filter by task status.",
         },
         "mine_only": {
