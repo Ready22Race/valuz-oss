@@ -15,6 +15,7 @@ import {
   Loader2,
   Paperclip,
   Trash2,
+  Crown,
   X,
   Plus,
   MoreHorizontal,
@@ -240,6 +241,10 @@ export interface ProjectContextPanelProps {
   onOpenMember?: (slug: string) => void;
   /** Remove a member from the project (undeploy). The host is expected to confirm. */
   onRemoveMember?: (slug: string) => void;
+  /** Member slug that leads tasks when none is named; null/undefined = unset. */
+  defaultLeadSlug?: string | null;
+  /** Set (or clear, with null) the project's default task lead. */
+  onSetDefaultLead?: (slug: string | null) => void;
   skills?: ProjectSkill[];
   onAddSkill?: () => void;
   onCreateProjectSkill?: () => void;
@@ -953,6 +958,8 @@ export const ProjectDetailContextPanel = ({
   onAddMember,
   onOpenMember,
   onRemoveMember,
+  defaultLeadSlug,
+  onSetDefaultLead,
   skills,
   onAddSkill,
   onRemoveSkill,
@@ -1439,6 +1446,8 @@ export const ProjectDetailContextPanel = ({
               <div>
                 {members.map((member, index) => {
                   const isOrphan = member.orphan === true;
+                  const isDefaultLead =
+                    !!defaultLeadSlug && member.slug === defaultLeadSlug;
                   return (
                     <div key={member.id}>
                       {index > 0 ? (
@@ -1500,6 +1509,53 @@ export const ProjectDetailContextPanel = ({
                               </div>
                             </div>
                           </button>
+                          {onSetDefaultLead && !isOrphan && (
+                            // The current lead stays visible without hovering —
+                            // "who leads this project" should be readable at a
+                            // glance, not discovered by pointing at rows.
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.currentTarget.blur();
+                                onSetDefaultLead(
+                                  isDefaultLead ? null : member.slug,
+                                );
+                              }}
+                              className={`flex h-6 w-6 shrink-0 items-center justify-center rounded transition-opacity ${
+                                isDefaultLead
+                                  ? "text-brand opacity-100"
+                                  : "text-ink-muted opacity-0 hover:text-ink-body group-hover:opacity-100"
+                              }`}
+                              title={
+                                isDefaultLead
+                                  ? t(
+                                      "agent.clearDefaultLead" as Parameters<
+                                        typeof t
+                                      >[0],
+                                    )
+                                  : t(
+                                      "agent.setDefaultLead" as Parameters<
+                                        typeof t
+                                      >[0],
+                                    )
+                              }
+                              aria-label={
+                                isDefaultLead
+                                  ? t(
+                                      "agent.clearDefaultLead" as Parameters<
+                                        typeof t
+                                      >[0],
+                                    )
+                                  : t(
+                                      "agent.setDefaultLead" as Parameters<
+                                        typeof t
+                                      >[0],
+                                    )
+                              }
+                            >
+                              <Crown className="h-3.5 w-3.5" />
+                            </button>
+                          )}
                           {onRemoveMember && (
                             <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
                               <button

@@ -31,6 +31,8 @@ export interface ProjectListItem {
 
 export interface ProjectDetail extends ProjectListItem {
   instructions_md: string | null;
+  /** Member slug that leads a task when the caller names none; null = unset. */
+  default_lead_agent_slug?: string | null;
 }
 
 export interface ProjectDeletePreview {
@@ -325,6 +327,25 @@ export const projectsApi = {
       `/v1/projects/${encodeURIComponent(projectId)}?${qs}`,
       {
         method: "PATCH",
+        baseUrl: projectBase(projectId),
+      },
+    );
+    invalidateProjects();
+    return result;
+  },
+
+  /** Set the project's default task lead; pass null to clear it. */
+  async setDefaultLead(
+    projectId: string,
+    agentSlug: string | null,
+  ): Promise<ProjectDetail> {
+    const qs = new URLSearchParams();
+    if (agentSlug) qs.set("agent_slug", agentSlug);
+    const suffix = qs.toString() ? `?${qs}` : "";
+    const result = await fetchJson<ProjectDetail>(
+      `/v1/projects/${encodeURIComponent(projectId)}/default-lead${suffix}`,
+      {
+        method: "PUT",
         baseUrl: projectBase(projectId),
       },
     );

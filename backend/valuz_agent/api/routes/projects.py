@@ -126,6 +126,22 @@ async def rename_project(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+@router.put("/{project_id}/default-lead")
+async def set_default_lead(
+    project_id: str,
+    agent_slug: str | None = None,
+    user_id: str = Depends(get_current_user_id),
+    svc: ProjectService = Depends(get_project_service),
+) -> ProjectDetail:
+    """Set (or clear, by omitting ``agent_slug``) the project's default task lead."""
+    try:
+        return await svc.set_default_lead(user_id, project_id, agent_slug)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.put("/{project_id}/instructions")
 async def update_instructions(
     project_id: str,

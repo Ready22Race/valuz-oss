@@ -2285,7 +2285,9 @@
       "cancelSelect": "取消",
       "groupDesc": "描述（选填）",
       "groupDescPlaceholder": "这组 agent 是做什么的"
-    }
+    },
+    "setDefaultLead": "设为默认 lead",
+    "clearDefaultLead": "取消默认 lead"
   },
   "task": {
     "triggeredByChat": "由对话触发",

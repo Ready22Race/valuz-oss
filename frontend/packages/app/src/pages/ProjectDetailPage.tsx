@@ -1053,6 +1053,22 @@ export const ProjectDetailPage = () => {
     void revealInFinder(locateArtifactFile(selectedArtifactPath).absolutePath);
   }, [locateArtifactFile, selectedArtifactPath, revealInFinder]);
 
+  const handleSetDefaultLead = async (slug: string | null) => {
+    const previous = project;
+    // Optimistic: the crown should move the moment it is clicked; a failed
+    // write puts it back rather than leaving the UI ahead of the server.
+    setProject((current) =>
+      current ? { ...current, default_lead_agent_slug: slug } : current,
+    );
+    try {
+      const updated = await projectsApi.setDefaultLead(id, slug);
+      setProject(updated);
+    } catch {
+      setProject(previous);
+      toast.error(t("project.saveFailed" as Parameters<typeof t>[0]));
+    }
+  };
+
   const handleInstructionsChange = async (md: string) => {
     setInstructions(md);
     try {
@@ -1233,6 +1249,8 @@ export const ProjectDetailPage = () => {
         instructions={instructions}
         onInstructionsChange={handleInstructionsChange}
         members={members}
+        defaultLeadSlug={project?.default_lead_agent_slug ?? null}
+        onSetDefaultLead={(slug) => void handleSetDefaultLead(slug)}
         onAddMember={() => setAddAgentOpen(true)}
         onOpenMember={openMember}
         onRemoveMember={(slug) => setMemberDeleteTarget(slug)}
