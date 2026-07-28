@@ -161,7 +161,7 @@ export const channelsApi = {
     const qs = new URLSearchParams();
     if (agentSlug) qs.set("agent_slug", agentSlug);
     const suffix = qs.toString() ? `?${qs}` : "";
-    return fetchJson(`/v1/channels/feishu/chats${suffix}`);
+    return fetchJson(`/v1/channels/feishu/chats${suffix}`, { cache: "no-store" });
   },
 
   /** Create a Feishu group with the bot already in it, bound to a project. */
@@ -185,6 +185,7 @@ export const channelsApi = {
   async feishuChatLink(externalChatId: string): Promise<string | null> {
     const result = await fetchJson<{ share_link: string | null }>(
       `/v1/channels/feishu/chats/${encodeURIComponent(externalChatId)}/link`,
+      { cache: "no-store" },
     );
     return result.share_link ?? null;
   },
@@ -201,7 +202,10 @@ export const channelsApi = {
     const qs = new URLSearchParams();
     if (projectId) qs.set("project_id", projectId);
     const suffix = qs.toString() ? `?${qs}` : "";
-    return fetchJson(`/v1/channels/chat-bindings${suffix}`);
+    // ``no-store``: this is read right after linking, unlinking or dissolving
+    // a group, and a browser-cached copy would show the state before the
+    // change — indistinguishable from "the panel never refreshed".
+    return fetchJson(`/v1/channels/chat-bindings${suffix}`, { cache: "no-store" });
   },
 
   bindChatToProject(payload: {
