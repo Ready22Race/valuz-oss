@@ -3,12 +3,12 @@
 await_member_results (in-turn mailbox drain, heartbeat-sliced) · the
 role callbacks the ActorRunner binds as its ``ActorCoordinator``
 (notify_lead_member_idle / lead_idle_with_no_pending / session_still_working)
-· _broadcast_shutdown, the atomic halt primitive.
+· broadcast_shutdown, the atomic halt primitive.
 
 Text DELIVERY (send_to_member / inject_into_task / goal revision) lives in
 ``messaging`` — callers import it directly; there is no wrapper here.
 
-CRITICAL invariant: ``_broadcast_shutdown`` must stay a plain ``def`` — the
+CRITICAL invariant: ``broadcast_shutdown`` must stay a plain ``def`` — the
 single ``drain_members`` pop and the per-member puts may not be separated by
 an ``await``, or a concurrently spawned member is dropped. ``await`` inside a
 sync function is a SyntaxError, so the compiler enforces it (as it does for
@@ -677,8 +677,16 @@ class CoordinationService:
     # shutdown broadcast — the atomic shutdown primitive
     # ------------------------------------------------------------------
 
-    def _broadcast_shutdown(self, task_id: str) -> None:
-        """Tell every still-running member of a task to finalize after its turn."""
+    def broadcast_shutdown(self, task_id: str) -> None:
+        """Tell every still-running member of a task to finalize after its turn.
+
+        Public on purpose — finalization and recovery are its callers, and a
+        load-bearing cross-service contract must not hide behind a private
+        name. MUST stay a plain ``def``: the single ``drain_members`` pop and
+        the per-member puts may not be separated by an ``await``, or a
+        concurrently spawned member is dropped (compiler-enforced; pinned by
+        test_spawn_atomicity).
+        """
 
         for member_sid in self._members.drain_members(task_id):
             mailbox_registry.put(member_sid, InboxMsg(kind="shutdown"))

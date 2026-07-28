@@ -60,7 +60,7 @@ from valuz_agent.modules.tasks.tools.declarations import (
 if TYPE_CHECKING:
     from valuz_agent.modules.tasks.orchestrator import TaskOrchestrator
 
-from valuz_agent.modules.tasks.tools import gate
+from valuz_agent.modules.tasks import gate
 
 logger = logging.getLogger(__name__)
 
@@ -691,7 +691,7 @@ async def _finish_task_handler(
     status: str = args.get("status") or "completed"
     force: bool = bool(args.get("force") or False)
 
-    result = await orch.lifecycle.finish_task(
+    result = await orch.finalization.finish_task(
         task_id=task_id,
         project_id=project_id,
         lead_session_id=ctx.session_id,
@@ -891,7 +891,7 @@ async def _update_deliverable_handler(
     summary: str = args.get("summary", "")
     artifacts: list[str] = args.get("artifacts") or []
 
-    result = await orch.lifecycle.update_deliverable(
+    result = await orch.finalization.update_deliverable(
         task_id=task_id,
         project_id=project_id,
         lead_session_id=ctx.session_id,

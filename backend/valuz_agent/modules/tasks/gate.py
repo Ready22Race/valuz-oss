@@ -5,7 +5,10 @@ plain functions over already-loaded session/task objects, returning an error
 *string* (or the granted value) — makes the rules unit-testable without DB or
 transport fixtures, and keeps them portable (task-kernel-migration.md D5 would
 move them with the tool surface; that migration is currently deferred).
-``handlers.py`` owns the reads and wraps error strings for the wire.
+Domain-level on purpose: it used to live under ``tools/`` (transport), which
+made ``plan_commands`` (a service) import upward into the transport package —
+the module's only inverted edge. ``tools/handlers.py`` owns the reads and
+wraps error strings for the wire.
 
 Rules mirror VALUZ-CHATPLAN D4/D6 and M10 附录 E — see each function.
 """

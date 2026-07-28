@@ -407,7 +407,7 @@ class RecoveryService:
             await self._interrupt_kernel_session(sid, user_id=user_id)
         if lead_session_id is not None:
             await self._interrupt_kernel_session(lead_session_id, user_id=user_id)
-        self._coordination._broadcast_shutdown(task_id)
+        self._coordination.broadcast_shutdown(task_id)
         if lead_session_id is not None:
 
             mailbox_registry.put(lead_session_id, InboxMsg(kind="shutdown"))

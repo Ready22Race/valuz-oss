@@ -131,7 +131,7 @@ async def test_lead_loop_runs_turns_until_shutdown() -> None:
         finalized.append((str(kwargs["session_id"]), str(kwargs["final_status"])))
 
     orch.actor.run_turn = fake_turn  # type: ignore[method-assign]
-    orch.lifecycle.finalize_actor = fake_finalize  # type: ignore[method-assign]
+    orch.finalization.finalize_actor = fake_finalize  # type: ignore[method-assign]
 
     # Pre-load the inbox: a follow-up, then a shutdown. register() in the loop
     # is idempotent so these survive.
@@ -175,7 +175,7 @@ async def test_member_loop_notifies_lead_and_self_reaps_on_ttl() -> None:
 
     orch.actor.run_turn = fake_turn  # type: ignore[method-assign]
     orch.coordination.notify_lead_member_idle = fake_notify  # type: ignore[method-assign]
-    orch.lifecycle.finalize_actor = fake_finalize  # type: ignore[method-assign]
+    orch.finalization.finalize_actor = fake_finalize  # type: ignore[method-assign]
 
     # No messages arrive → the member reaps via the (tiny) idle TTL.
     await asyncio.wait_for(
@@ -208,7 +208,7 @@ async def test_terminal_turn_status_breaks_loop_immediately() -> None:
         return None
 
     orch.actor.run_turn = fake_turn  # type: ignore[method-assign]
-    orch.lifecycle.finalize_actor = fake_finalize  # type: ignore[method-assign]
+    orch.finalization.finalize_actor = fake_finalize  # type: ignore[method-assign]
 
     await asyncio.wait_for(
         orch.actor.run_actor_loop(
@@ -621,13 +621,13 @@ async def test_collect_manifest_attributes_by_mtime(tmp_path: object) -> None:
     assert str(old) in paths_all and str(new) in paths_all
 
 
-def test_broadcast_shutdown_signals_live_members() -> None:
+def testbroadcast_shutdown_signals_live_members() -> None:
     orch = TaskOrchestrator()
     orch._members.set_members("t1", {"m1", "m2"})
     mailbox_registry.register("m1")
     mailbox_registry.register("m2")
 
-    orch.coordination._broadcast_shutdown("t1")
+    orch.coordination.broadcast_shutdown("t1")
 
     assert mailbox_registry._boxes["m1"].get_nowait().kind == "shutdown"
     assert mailbox_registry._boxes["m2"].get_nowait().kind == "shutdown"

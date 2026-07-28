@@ -406,7 +406,7 @@ def test_finish_task_stopped_emits_task_stopped(db_factory, tmp_path) -> None:
     _make_task(db_factory, tmp_path)
     orch = TaskOrchestrator()
     asyncio.run(
-        orch.lifecycle.finish_task(
+        orch.finalization.finish_task(
             task_id="t1",
             project_id="w1",
             user_id=OWNER,
@@ -430,7 +430,7 @@ def test_finish_task_rejects_legacy_failed_status(db_factory, tmp_path) -> None:
     _make_task(db_factory, tmp_path)
     orch = TaskOrchestrator()
     result = asyncio.run(
-        orch.lifecycle.finish_task(
+        orch.finalization.finish_task(
             task_id="t1",
             project_id="w1",
             user_id=OWNER,
@@ -509,7 +509,7 @@ def test_finish_task_rejected_when_plan_has_unresolved_nodes(db_factory, tmp_pat
         )
     )
     res = asyncio.run(
-        orch.lifecycle.finish_task(
+        orch.finalization.finish_task(
             task_id="t1",
             project_id="w1",
             lead_session_id="lead",
@@ -554,7 +554,7 @@ def test_finish_task_allows_completion_when_all_done(db_factory, tmp_path) -> No
     finally:
         db.close()
     res = asyncio.run(
-        orch.lifecycle.finish_task(
+        orch.finalization.finish_task(
             task_id="t1",
             project_id="w1",
             lead_session_id="lead",
@@ -620,7 +620,7 @@ def test_auto_finalize_completes_when_no_pending_subtasks(db_factory, tmp_path) 
     _make_lead_run(db_factory)
     orch = TaskOrchestrator()
     asyncio.run(
-        orch.lifecycle._auto_finalize_lead_task(
+        orch.finalization._auto_finalize_lead_task(
             lead_session_id="lead-sess",
             task_id="t1",
             project_id="w1",
@@ -643,7 +643,7 @@ def test_finalize_actor_threads_user_id_to_auto_finalize(db_factory, tmp_path) -
     _make_lead_run(db_factory)
     orch = TaskOrchestrator()
     asyncio.run(
-        orch.lifecycle.finalize_actor(
+        orch.finalization.finalize_actor(
             session_id="lead-sess",
             last_content="done inline",
             final_status="idle",
@@ -670,7 +670,7 @@ def test_auto_finalize_blocks_when_plan_has_unresolved_nodes(db_factory, tmp_pat
         )
     )
     asyncio.run(
-        orch.lifecycle._auto_finalize_lead_task(
+        orch.finalization._auto_finalize_lead_task(
             lead_session_id="lead-sess",
             task_id="t1",
             project_id="w1",
@@ -691,7 +691,7 @@ def test_auto_finalize_blocks_on_terminated_with_empty_plan(db_factory, tmp_path
     _make_task(db_factory, tmp_path)
     orch = TaskOrchestrator()
     asyncio.run(
-        orch.lifecycle._auto_finalize_lead_task(
+        orch.finalization._auto_finalize_lead_task(
             lead_session_id="lead-sess",
             task_id="t1",
             project_id="w1",
@@ -733,7 +733,7 @@ def test_auto_finalize_blocks_on_stop_reason_error_with_empty_plan(
     )
     orch = TaskOrchestrator()
     asyncio.run(
-        orch.lifecycle._auto_finalize_lead_task(
+        orch.finalization._auto_finalize_lead_task(
             lead_session_id="lead-sess",
             task_id="t1",
             project_id="w1",
@@ -769,7 +769,7 @@ def test_auto_finalize_cancel_with_empty_plan_stays_active(
     )
     orch = TaskOrchestrator()
     asyncio.run(
-        orch.lifecycle._auto_finalize_lead_task(
+        orch.finalization._auto_finalize_lead_task(
             lead_session_id="lead-sess",
             task_id="t1",
             project_id="w1",
@@ -833,15 +833,15 @@ def test_finalize_actor_member_error_sets_rework_not_failed(
     async def _fake_manifest(*_a: object, **_k: object) -> dict[str, str]:
         return {"session_id": "mem-1", "status": "terminated", "summary": "API Error: ECONNRESET"}
 
-    from valuz_agent.modules.tasks import lifecycle as lc_mod
+    from valuz_agent.modules.tasks import finalization as fin_mod
 
     monkeypatch.setattr(run_orch, "_finalize_session", _noop)
-    # _finalize_actor resolves collect_manifest from the lifecycle namespace.
-    monkeypatch.setattr(lc_mod, "collect_manifest", _fake_manifest)
+    # finalize_actor resolves collect_manifest from the finalization namespace.
+    monkeypatch.setattr(fin_mod, "collect_manifest", _fake_manifest)
 
     orch = TaskOrchestrator()
     asyncio.run(
-        orch.lifecycle.finalize_actor(
+        orch.finalization.finalize_actor(
             session_id="mem-1",
             last_content="",
             final_status="terminated",
@@ -883,7 +883,7 @@ def test_auto_finalize_blocks_on_error_when_plan_has_unresolved_nodes(db_factory
         )
     )
     asyncio.run(
-        orch.lifecycle._auto_finalize_lead_task(
+        orch.finalization._auto_finalize_lead_task(
             lead_session_id="lead-sess",
             task_id="t1",
             project_id="w1",
@@ -906,7 +906,7 @@ def test_auto_finalize_noop_when_already_finalized(db_factory, tmp_path) -> None
         db.close()
     orch = TaskOrchestrator()
     asyncio.run(
-        orch.lifecycle._auto_finalize_lead_task(
+        orch.finalization._auto_finalize_lead_task(
             lead_session_id="lead-sess",
             task_id="t1",
             project_id="w1",
@@ -922,7 +922,7 @@ def test_auto_finalize_noop_when_members_in_flight(db_factory, tmp_path) -> None
     orch = TaskOrchestrator()
     orch._members.set_members("t1", {"m1"})  # a member is still running
     asyncio.run(
-        orch.lifecycle._auto_finalize_lead_task(
+        orch.finalization._auto_finalize_lead_task(
             lead_session_id="lead-sess",
             task_id="t1",
             project_id="w1",
@@ -1784,7 +1784,7 @@ def test_lead_shutdown_exit_skips_auto_finalize(monkeypatch) -> None:
 
     # _finalize_actor delegates to LifecycleService (ADR-023 Step 3c), whose
     # implementation calls its own _auto_finalize_lead_task — patch it there.
-    monkeypatch.setattr(orch._lifecycle, "_auto_finalize_lead_task", _fake_auto)
+    monkeypatch.setattr(orch._finalization, "_auto_finalize_lead_task", _fake_auto)
 
     common = dict(
         session_id="L",
@@ -1796,10 +1796,10 @@ def test_lead_shutdown_exit_skips_auto_finalize(monkeypatch) -> None:
         user_id=OWNER,
     )
     # shutdown exit → auto-finalize SKIPPED (no spurious block on resume)
-    asyncio.run(orch.lifecycle.finalize_actor(via_shutdown=True, **common))  # type: ignore[arg-type]
+    asyncio.run(orch.finalization.finalize_actor(via_shutdown=True, **common))  # type: ignore[arg-type]
     assert called == []
     # natural exit (idle-TTL / end_turn) → auto-finalize RUNS
-    asyncio.run(orch.lifecycle.finalize_actor(via_shutdown=False, **common))  # type: ignore[arg-type]
+    asyncio.run(orch.finalization.finalize_actor(via_shutdown=False, **common))  # type: ignore[arg-type]
     assert called == ["t1"]
 
 
@@ -1854,7 +1854,7 @@ def test_finish_task_completed_publishes_finalized_and_notifies_memory(
 
     orch = TaskOrchestrator()
     res = asyncio.run(
-        orch.lifecycle.finish_task(
+        orch.finalization.finish_task(
             task_id="t1",
             project_id="w1",
             lead_session_id="lead",
@@ -1884,7 +1884,7 @@ def test_finish_task_stopped_publishes_finalized_without_memory(
 
     orch = TaskOrchestrator()
     res = asyncio.run(
-        orch.lifecycle.finish_task(
+        orch.finalization.finish_task(
             task_id="t1",
             project_id="w1",
             lead_session_id="lead",
@@ -1905,6 +1905,7 @@ def test_commit_task_creates_lead_session_with_task_scope(
     dispatched member — c81ab288 originally landed this on the dead copy."""
     from types import SimpleNamespace
 
+    from valuz_agent.modules.tasks import launcher as launcher_mod
     from valuz_agent.modules.tasks import lifecycle as lc_mod
     from valuz_agent.modules.tasks import resolution as res_mod
 
@@ -1966,7 +1967,7 @@ def test_commit_task_creates_lead_session_with_task_scope(
     )
     monkeypatch.setattr(res_mod, "_credential_gap", _as_async(lambda *_a, **_k: None))
     monkeypatch.setattr(res_mod, "_provider_resolver_deps", lambda _db: {})
-    monkeypatch.setattr(lc_mod.kernel_client, "create_session", _capture_create_session)
+    monkeypatch.setattr(launcher_mod.kernel_client, "create_session", _capture_create_session)
     monkeypatch.setattr(
         launcher_mod,
         "project_index",
@@ -2006,6 +2007,7 @@ def test_commit_task_creates_lead_session_with_task_scope(
 def test_task_lifecycle_event_trace_golden(db_factory, tmp_path, monkeypatch) -> None:
     from types import SimpleNamespace
 
+    from valuz_agent.modules.tasks import launcher as launcher_mod
     from valuz_agent.modules.tasks import lifecycle as lc_mod
     from valuz_agent.modules.tasks import resolution as res_mod
 
@@ -2057,7 +2059,7 @@ def test_task_lifecycle_event_trace_golden(db_factory, tmp_path, monkeypatch) ->
         _as_async(lambda _w, slugs, _u: {s: f"Agent {s}" for s in slugs}),
     )
     monkeypatch.setattr(
-        lc_mod.kernel_client, "create_session", _as_async(lambda *_a, **_k: None)
+        launcher_mod.kernel_client, "create_session", _as_async(lambda *_a, **_k: None)
     )
     monkeypatch.setattr(kernel_client_mod, "get_session", _as_async(lambda *_a, **_k: None))
     monkeypatch.setattr(kernel_client_mod, "set_mode", _as_async(lambda *_a, **_k: None))
@@ -2145,7 +2147,7 @@ def test_task_lifecycle_event_trace_golden(db_factory, tmp_path, monkeypatch) ->
         assert res.get("decision") == "approve", res
 
         # 7) finish
-        res = await orch.lifecycle.finish_task(
+        res = await orch.finalization.finish_task(
             task_id=task_id,
             project_id="w1",
             lead_session_id="lead-sess-1",
@@ -2689,7 +2691,7 @@ def test_finalize_actor_skips_parked_member_run(db_factory, tmp_path, monkeypatc
     on resume and the node is re-dispatched as a brand-new session — session
     continuity and record truth both lost."""
     from valuz_agent.modules.sessions import run_orchestrator as run_orch
-    from valuz_agent.modules.tasks import lifecycle as lc_mod
+    from valuz_agent.modules.tasks import finalization as fin_mod
 
     _make_task(db_factory, tmp_path)
     _make_member_run(db_factory)
@@ -2706,11 +2708,11 @@ def test_finalize_actor_skips_parked_member_run(db_factory, tmp_path, monkeypatc
         return {"session_id": "mem-1", "status": "idle", "summary": ""}
 
     monkeypatch.setattr(run_orch, "_finalize_session", _noop)
-    monkeypatch.setattr(lc_mod, "collect_manifest", _manifest)
+    monkeypatch.setattr(fin_mod, "collect_manifest", _manifest)
 
     orch = TaskOrchestrator()
     asyncio.run(
-        orch.lifecycle.finalize_actor(
+        orch.finalization.finalize_actor(
             session_id="mem-1",
             last_content="",
             final_status="idle",

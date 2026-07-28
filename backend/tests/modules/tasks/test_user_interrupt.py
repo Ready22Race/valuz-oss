@@ -94,7 +94,7 @@ async def test_interrupted_member_breaks_without_per_turn_notify() -> None:
 
     orch.actor.run_turn = fake_turn  # type: ignore[method-assign]
     orch.coordination.notify_lead_member_idle = fake_notify  # type: ignore[method-assign]
-    orch.lifecycle.finalize_actor = fake_finalize  # type: ignore[method-assign]
+    orch.finalization.finalize_actor = fake_finalize  # type: ignore[method-assign]
 
     await asyncio.wait_for(
         orch.actor.run_actor_loop(
@@ -134,7 +134,7 @@ async def test_lead_loop_member_done_cancelled_skips_mark_in_review(
         marked.append(str(kwargs["member_session_id"]))
 
     orch.actor.run_turn = fake_turn  # type: ignore[method-assign]
-    orch.lifecycle.finalize_actor = fake_finalize  # type: ignore[method-assign]
+    orch.finalization.finalize_actor = fake_finalize  # type: ignore[method-assign]
     monkeypatch.setattr(planning, "mark_in_review", fake_mark)
 
     mailbox_registry.register("lead-int-1")
@@ -260,7 +260,7 @@ def _read_state(db_factory) -> tuple[str, dict[str, Any], list[str]]:
 async def test_finalize_interrupted_member_records_user_stop(
     db_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from valuz_agent.modules.tasks import lifecycle as lc_mod
+    from valuz_agent.modules.tasks import finalization as lc_mod
 
     async def _fake_name(*_a: Any, **_k: Any) -> str:
         return "Coder"
@@ -271,7 +271,7 @@ async def test_finalize_interrupted_member_records_user_stop(
     orch = TaskOrchestrator()
     mailbox_registry.register("lead-1")
     try:
-        await orch.lifecycle._finalize_interrupted_member(
+        await orch.finalization._finalize_interrupted_member(
             session_id="mem-1", task_id="t1", project_id="w1", user_id=LOCAL_USER_ID
         )
         run_status, node, events = _read_state(db_factory)
@@ -302,7 +302,7 @@ async def test_finalize_interrupted_member_skips_already_recorded_runs(
     orch = TaskOrchestrator()
     mailbox_registry.register("lead-1")
     try:
-        await orch.lifecycle._finalize_interrupted_member(
+        await orch.finalization._finalize_interrupted_member(
             session_id="mem-1", task_id="t1", project_id="w1", user_id=LOCAL_USER_ID
         )
         run_status, node, events = _read_state(db_factory)
@@ -468,7 +468,7 @@ async def test_await_breaks_early_when_all_pending_awaiting_user(
 async def test_finish_task_stopped_rejected_while_members_live(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from valuz_agent.modules.tasks import lifecycle as lc_mod
+    from valuz_agent.modules.tasks import finalization as lc_mod
 
     class _FakeRunDs:
         def __init__(self, _db):
@@ -489,7 +489,7 @@ async def test_finish_task_stopped_rejected_while_members_live(
     orch = TaskOrchestrator()
     orch._members.add_member("t-guard", "mem-live-1")
     try:
-        res = await orch.lifecycle.finish_task(
+        res = await orch.finalization.finish_task(
             task_id="t-guard",
             project_id="w1",
             lead_session_id="lead-g",
@@ -509,7 +509,7 @@ async def test_finish_task_stopped_force_bypasses_guard(
 ) -> None:
     """force=True must get PAST the live-member guard (proven by reaching the
     terminal-write path, stubbed here)."""
-    from valuz_agent.modules.tasks import lifecycle as lc_mod
+    from valuz_agent.modules.tasks import finalization as lc_mod
 
     writes: list[str] = []
 
@@ -567,7 +567,7 @@ async def test_finish_task_stopped_force_bypasses_guard(
     orch = TaskOrchestrator()
     orch._members.add_member("t-force", "mem-live-2")
     try:
-        res = await orch.lifecycle.finish_task(
+        res = await orch.finalization.finish_task(
             task_id="t-force",
             project_id="w1",
             lead_session_id="lead-f",
