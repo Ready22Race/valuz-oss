@@ -69,6 +69,8 @@ export interface ChatProjectBinding {
   /** Which IM the group lives in — "feishu" | "wecom_aibot". */
   platform?: string;
   created_by_valuz?: boolean;
+  /** Nobody has joined yet, so a join link is the only way in. */
+  needs_join?: boolean;
 }
 
 export interface CreatedChat {

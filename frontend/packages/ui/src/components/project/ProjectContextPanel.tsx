@@ -15,6 +15,7 @@ import {
   Loader2,
   Paperclip,
   Trash2,
+  Unlink,
   Crown,
   X,
   Plus,
@@ -30,6 +31,7 @@ import {
   AlertTriangle,
   GitBranch,
   Link2,
+  LogIn,
   MessageSquare,
   MessageSquarePlus,
   Sparkles,
@@ -247,10 +249,20 @@ export interface ProjectContextPanelProps {
   /** Set (or clear, with null) the project's default task lead. */
   onSetDefaultLead?: (slug: string | null) => void;
   /** IM groups bound to this project ("this group is that project"). */
-  chatBindings?: { id: string; name: string; platformLabel?: string }[];
+  chatBindings?: {
+    id: string;
+    name: string;
+    platformLabel?: string;
+    /** Valuz created it, so the bot owns it and may dissolve it. */
+    createdByValuz?: boolean;
+    /** …and nobody has joined yet, so a join link is the only way in. */
+    needsJoin?: boolean;
+  }[];
   /** Open the group picker; undefined hides the section entirely. */
   onBindChat?: () => void;
   onUnbindChat?: (externalChatId: string) => void;
+  onJoinChat?: (externalChatId: string) => void;
+  onDeleteChat?: (externalChatId: string) => void;
   skills?: ProjectSkill[];
   onAddSkill?: () => void;
   onCreateProjectSkill?: () => void;
@@ -969,6 +981,8 @@ export const ProjectDetailContextPanel = ({
   chatBindings,
   onBindChat,
   onUnbindChat,
+  onJoinChat,
+  onDeleteChat,
   skills,
   onAddSkill,
   onRemoveSkill,
@@ -1619,8 +1633,10 @@ export const ProjectDetailContextPanel = ({
         >
           <div className="-mr-3 max-h-[25vh] overflow-y-auto overflow-x-hidden pr-3">
             {worktrees.map((wt, index) => {
-              const verified = wt.dirtyFiles !== null && wt.aheadCommits !== null;
-              const clean = verified && wt.dirtyFiles === 0 && wt.aheadCommits === 0;
+              const verified =
+                wt.dirtyFiles !== null && wt.aheadCommits !== null;
+              const clean =
+                verified && wt.dirtyFiles === 0 && wt.aheadCommits === 0;
               const statusText = !verified
                 ? t("project.worktreeUnknown" as Parameters<typeof t>[0])
                 : clean
@@ -2318,24 +2334,90 @@ export const ProjectDetailContextPanel = ({
                   </div>
                   <div className="min-w-0 flex-1 truncate text-xs text-ink-heading">
                     {chat.platformLabel ? (
-                      <span className="text-ink-meta">{chat.platformLabel} · </span>
+                      <span className="text-ink-meta">
+                        {chat.platformLabel} ·{" "}
+                      </span>
                     ) : null}
                     {chat.name}
                   </div>
-                  {onUnbindChat && (
-                    <button
-                      type="button"
-                      onClick={(event) => {
-                        event.currentTarget.blur();
-                        onUnbindChat(chat.id);
-                      }}
-                      className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-ink-body opacity-0 transition-opacity hover:bg-red-50 hover:text-red-600 group-hover:opacity-100"
-                      title={t("project.unbindChat" as Parameters<typeof t>[0])}
-                      aria-label={t("project.unbindChat" as Parameters<typeof t>[0])}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
-                  )}
+                  {/* Same actions the picker offers, in the same order —
+                      whichever surface you reach a group from behaves alike. */}
+                  <TooltipProvider delayDuration={0}>
+                    <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                      {onJoinChat && chat.needsJoin && (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.currentTarget.blur();
+                                onJoinChat(chat.id);
+                              }}
+                              className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-muted"
+                              aria-label={t(
+                                "project.createChatJoin" as Parameters<
+                                  typeof t
+                                >[0],
+                              )}
+                            >
+                              <LogIn className="h-3.5 w-3.5" />
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            {t(
+                              "project.createChatJoin" as Parameters<
+                                typeof t
+                              >[0],
+                            )}
+                          </TooltipContent>
+                        </Tooltip>
+                      )}
+                      {onUnbindChat && (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.currentTarget.blur();
+                                onUnbindChat(chat.id);
+                              }}
+                              className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-muted"
+                              aria-label={t(
+                                "project.unbindChat" as Parameters<typeof t>[0],
+                              )}
+                            >
+                              <Unlink className="h-3.5 w-3.5" />
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            {t("project.unbindChat" as Parameters<typeof t>[0])}
+                          </TooltipContent>
+                        </Tooltip>
+                      )}
+                      {onDeleteChat && chat.createdByValuz && (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.currentTarget.blur();
+                                onDeleteChat(chat.id);
+                              }}
+                              className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-red-50 hover:text-red-600"
+                              aria-label={t(
+                                "project.deleteChat" as Parameters<typeof t>[0],
+                              )}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            {t("project.deleteChat" as Parameters<typeof t>[0])}
+                          </TooltipContent>
+                        </Tooltip>
+                      )}
+                    </div>
+                  </TooltipProvider>
                 </div>
               ))}
             </div>

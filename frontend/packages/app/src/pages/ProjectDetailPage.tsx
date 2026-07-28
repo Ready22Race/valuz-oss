@@ -254,6 +254,7 @@ export const ProjectDetailPage = () => {
   const [libraryAgents, setLibraryAgents] = useState<Agent[]>([]);
   const [addAgentOpen, setAddAgentOpen] = useState(false);
   const [bindChatOpen, setBindChatOpen] = useState(false);
+  const [chatDeleteTarget, setChatDeleteTarget] = useState<string | null>(null);
   const [chatBindings, setChatBindings] = useState<
     { id: string; name: string }[]
   >([]);
@@ -1073,6 +1074,8 @@ export const ProjectDetailPage = () => {
             row.platform === "wecom_aibot"
               ? _t("project.platformWecom" as Parameters<typeof _t>[0])
               : _t("project.platformFeishu" as Parameters<typeof _t>[0]),
+          createdByValuz: row.created_by_valuz ?? false,
+          needsJoin: row.needs_join ?? false,
         })),
       );
     } catch {
@@ -1088,6 +1091,31 @@ export const ProjectDetailPage = () => {
   useEffect(() => {
     if (!bindChatOpen) void loadChatBindings();
   }, [bindChatOpen, loadChatBindings]);
+
+  const handleJoinChat = async (externalChatId: string) => {
+    try {
+      const link = await channelsApi.feishuChatLink(externalChatId);
+      if (link) {
+        window.open(link, "_blank", "noreferrer");
+        return;
+      }
+      toast.error(
+        t("project.createChatLinkMissing" as Parameters<typeof t>[0]),
+      );
+    } catch {
+      toast.error(t("project.createChatJoin" as Parameters<typeof t>[0]));
+    }
+  };
+
+  const handleDeleteChat = async (externalChatId: string) => {
+    try {
+      await channelsApi.deleteFeishuChat(externalChatId);
+      toast.success(t("project.deleteChatDone" as Parameters<typeof t>[0]));
+      await loadChatBindings();
+    } catch {
+      toast.error(t("project.deleteChat" as Parameters<typeof t>[0]));
+    }
+  };
 
   const handleUnbindChat = async (externalChatId: string) => {
     try {
@@ -1299,6 +1327,8 @@ export const ProjectDetailPage = () => {
         chatBindings={chatBindings}
         onBindChat={() => setBindChatOpen(true)}
         onUnbindChat={(chatId) => void handleUnbindChat(chatId)}
+        onJoinChat={(chatId) => void handleJoinChat(chatId)}
+        onDeleteChat={(chatId) => setChatDeleteTarget(chatId)}
         onSetDefaultLead={(slug) => void handleSetDefaultLead(slug)}
         onAddMember={() => setAddAgentOpen(true)}
         onOpenMember={openMember}
@@ -1729,6 +1759,22 @@ export const ProjectDetailPage = () => {
               }
             : undefined
         }
+      />
+
+      <DeleteConfirmDialog
+        open={chatDeleteTarget !== null}
+        onOpenChange={(next) => {
+          if (!next) setChatDeleteTarget(null);
+        }}
+        itemName={
+          chatBindings.find((c) => c.id === chatDeleteTarget)?.name ?? undefined
+        }
+        description={t("project.deleteChatDesc" as Parameters<typeof t>[0])}
+        onConfirm={() => {
+          const target = chatDeleteTarget;
+          setChatDeleteTarget(null);
+          if (target) void handleDeleteChat(target);
+        }}
       />
 
       <BindChatDialog
