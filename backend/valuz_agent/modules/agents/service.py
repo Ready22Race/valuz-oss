@@ -40,30 +40,21 @@ logger = logging.getLogger(__name__)
 
 
 def _prepare_conversation_tools(agent: AgentConfig) -> AgentConfig:
-    """Make an agent's tool set conversation-ready (M10 附录 E).
+    """Clear an agent's inline tool declarations — agents carry none.
 
-    Surfaces the launcher/observability tools (``create_task`` / ``list_tasks``
-    / ``get_task``) and strips any lead-only dispatch tools — the latter belong
-    on the per-task lead clone, never the base agent. Applied at agent
-    create/edit time so the conversation-session path never has to mutate or
-    re-save the agent (which previously triggered an agent save on every
-    "send" — see the conversation bug fix).
+    Every tool surface (task orchestration, memory, submit_skill, browser, …)
+    rides the session's ``harness`` MCP entry, served by the host toolkit MCP
+    server and scoped per session to its base/lead toolset. So the correct
+    ``AgentConfig.tools`` is always empty; this strips whatever a legacy
+    snapshot still holds, so stale declarations can never reach a runtime
+    alongside the MCP-served set.
 
-    Also declares the always-on **in-process** baseline tools — the
-    ``memory`` tool and ``submit_skill`` — so every
-    member/lead agent surfaces them, exactly like conversation sessions. These
-    bind via the persisted ``AgentConfig.tools`` (the kernel reads tools off the
-    agent, not the session), so they can only live here; the handlers are
-    attached from the kernel tool registry at runtime — we add ``handler=None``
-    declarations. The skill/MCP half of the baseline (valuz-project-docs,
-    skill-creator skill, schedules/docs MCP) is injected per-session by the
-    session-build paths instead.
+    (This function used to ADD the launcher tools and strip only the lead-only
+    ones — from ``declarations.ensure_orchestration_tools_on_agent`` /
+    ``strip_dispatch_tools``, both since deleted. Applied at agent create/edit
+    time so the conversation-session path never mutates or re-saves the agent,
+    which once triggered an agent save on every "send".)
     """
-    # Tool surfaces ride the session's ``harness`` MCP entry now (the host
-    # toolkit MCP server serves orchestration + memory + submit_skill to
-    # every session) — agents carry no tool declarations. Strip whatever a
-    # legacy snapshot might still hold so old declarations never reach a
-    # runtime alongside the MCP-served set.
     return replace(agent, tools=())
 
 

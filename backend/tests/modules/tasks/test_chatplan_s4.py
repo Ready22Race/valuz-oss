@@ -166,7 +166,7 @@ def test_inject_queues_wrapped_message_in_lead_mailbox(db_factory, tmp_path):
     box = mailbox_registry._boxes["lead-sess-1"]
     assert box.qsize() == 1
     msg = box.get_nowait()
-    assert msg.kind == "message"
+    assert msg.kind == "text"
     assert msg.from_session == "chat-session-1"
     assert '<user-instruction source="chat">' in msg.text
     assert "please pivot to Q4" in msg.text

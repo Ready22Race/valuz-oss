@@ -205,15 +205,10 @@ def test_update_deliverable_rejected_when_task_not_found(db_factory) -> None:
 
 
 def test_update_deliverable_tool_is_declared() -> None:
-    """update_deliverable appears in DISPATCH_TOOL_NAMES and DISPATCH_TOOL_DECLARATIONS."""
+    """update_deliverable ships in the lead toolset."""
     from valuz_agent.modules.tasks.tools.declarations import (
         DISPATCH_TOOL_DECLARATIONS,
-        DISPATCH_TOOL_NAMES,
         UPDATE_DELIVERABLE_TOOL_NAME,
-    )
-
-    assert UPDATE_DELIVERABLE_TOOL_NAME in DISPATCH_TOOL_NAMES, (
-        "update_deliverable must be in DISPATCH_TOOL_NAMES"
     )
 
     decl_names = {d.name for d in DISPATCH_TOOL_DECLARATIONS}
@@ -237,12 +232,17 @@ def test_update_deliverable_declaration_has_required_summary() -> None:
 
 
 def test_update_deliverable_is_lead_only() -> None:
-    """update_deliverable is in LEAD_ONLY_TOOL_NAMES so it is stripped from chat agents."""
+    """update_deliverable must never reach a chat session's toolset.
+
+    It rewrites a finished task's deliverable card, so only that task's lead
+    may call it. Audience is decided by tuple membership (``boot/steps.py``
+    partitions the toolkit MCP server by these two lists).
+    """
     from valuz_agent.modules.tasks.tools.declarations import (
-        LEAD_ONLY_TOOL_NAMES,
+        ORCHESTRATION_TOOL_DECLARATIONS,
         UPDATE_DELIVERABLE_TOOL_NAME,
     )
 
-    assert UPDATE_DELIVERABLE_TOOL_NAME in LEAD_ONLY_TOOL_NAMES, (
-        "update_deliverable must be in LEAD_ONLY_TOOL_NAMES to be stripped from chat agents"
-    )
+    assert UPDATE_DELIVERABLE_TOOL_NAME not in {
+        d.name for d in ORCHESTRATION_TOOL_DECLARATIONS
+    }, "update_deliverable must not be advertised to chat sessions"

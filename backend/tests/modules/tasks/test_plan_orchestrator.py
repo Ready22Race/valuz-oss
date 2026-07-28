@@ -650,7 +650,7 @@ def test_auto_finalize_completes_when_no_pending_subtasks(db_factory, tmp_path) 
     _make_lead_run(db_factory)
     orch = TaskOrchestrator()
     asyncio.run(
-        orch._auto_finalize_lead_task(
+        orch.lifecycle._auto_finalize_lead_task(
             lead_session_id="lead-sess",
             task_id="t1",
             project_id="w1",
@@ -673,7 +673,7 @@ def test_finalize_actor_threads_user_id_to_auto_finalize(db_factory, tmp_path) -
     _make_lead_run(db_factory)
     orch = TaskOrchestrator()
     asyncio.run(
-        orch._finalize_actor(
+        orch.lifecycle.finalize_actor(
             session_id="lead-sess",
             last_content="done inline",
             final_status="idle",
@@ -700,7 +700,7 @@ def test_auto_finalize_blocks_when_plan_has_unresolved_nodes(db_factory, tmp_pat
         )
     )
     asyncio.run(
-        orch._auto_finalize_lead_task(
+        orch.lifecycle._auto_finalize_lead_task(
             lead_session_id="lead-sess",
             task_id="t1",
             project_id="w1",
@@ -721,7 +721,7 @@ def test_auto_finalize_blocks_on_terminated_with_empty_plan(db_factory, tmp_path
     _make_task(db_factory, tmp_path)
     orch = TaskOrchestrator()
     asyncio.run(
-        orch._auto_finalize_lead_task(
+        orch.lifecycle._auto_finalize_lead_task(
             lead_session_id="lead-sess",
             task_id="t1",
             project_id="w1",
@@ -763,7 +763,7 @@ def test_auto_finalize_blocks_on_stop_reason_error_with_empty_plan(
     )
     orch = TaskOrchestrator()
     asyncio.run(
-        orch._auto_finalize_lead_task(
+        orch.lifecycle._auto_finalize_lead_task(
             lead_session_id="lead-sess",
             task_id="t1",
             project_id="w1",
@@ -799,7 +799,7 @@ def test_auto_finalize_cancel_with_empty_plan_stays_active(
     )
     orch = TaskOrchestrator()
     asyncio.run(
-        orch._auto_finalize_lead_task(
+        orch.lifecycle._auto_finalize_lead_task(
             lead_session_id="lead-sess",
             task_id="t1",
             project_id="w1",
@@ -871,7 +871,7 @@ def test_finalize_actor_member_error_sets_rework_not_failed(
 
     orch = TaskOrchestrator()
     asyncio.run(
-        orch._finalize_actor(
+        orch.lifecycle.finalize_actor(
             session_id="mem-1",
             last_content="",
             final_status="terminated",
@@ -913,7 +913,7 @@ def test_auto_finalize_blocks_on_error_when_plan_has_unresolved_nodes(db_factory
         )
     )
     asyncio.run(
-        orch._auto_finalize_lead_task(
+        orch.lifecycle._auto_finalize_lead_task(
             lead_session_id="lead-sess",
             task_id="t1",
             project_id="w1",
@@ -936,7 +936,7 @@ def test_auto_finalize_noop_when_already_finalized(db_factory, tmp_path) -> None
         db.close()
     orch = TaskOrchestrator()
     asyncio.run(
-        orch._auto_finalize_lead_task(
+        orch.lifecycle._auto_finalize_lead_task(
             lead_session_id="lead-sess",
             task_id="t1",
             project_id="w1",
@@ -952,7 +952,7 @@ def test_auto_finalize_noop_when_members_in_flight(db_factory, tmp_path) -> None
     orch = TaskOrchestrator()
     orch._members.set_members("t1", {"m1"})  # a member is still running
     asyncio.run(
-        orch._auto_finalize_lead_task(
+        orch.lifecycle._auto_finalize_lead_task(
             lead_session_id="lead-sess",
             task_id="t1",
             project_id="w1",
@@ -967,14 +967,16 @@ def test_lead_idle_with_no_pending_true_when_clean(db_factory, tmp_path) -> None
     _make_task(db_factory, tmp_path)
     orch = TaskOrchestrator()
     # No members, no plan → nothing to wait for → break the loop immediately.
-    assert asyncio.run(orch._lead_idle_with_no_pending("t1", "w1", user_id=OWNER)) is True
+    idle = orch.coordination.lead_idle_with_no_pending("t1", "w1", user_id=OWNER)
+    assert asyncio.run(idle) is True
 
 
 def test_lead_idle_with_no_pending_false_when_member_in_flight(db_factory, tmp_path) -> None:
     _make_task(db_factory, tmp_path)
     orch = TaskOrchestrator()
     orch._members.set_members("t1", {"m1"})
-    assert asyncio.run(orch._lead_idle_with_no_pending("t1", "w1", user_id=OWNER)) is False
+    idle = orch.coordination.lead_idle_with_no_pending("t1", "w1", user_id=OWNER)
+    assert asyncio.run(idle) is False
 
 
 def test_lead_idle_with_no_pending_false_when_plan_unresolved(db_factory, tmp_path) -> None:
@@ -989,7 +991,8 @@ def test_lead_idle_with_no_pending_false_when_plan_unresolved(db_factory, tmp_pa
             subtasks=[{"key": "a", "title": "A", "agent": "x"}],
         )
     )
-    assert asyncio.run(orch._lead_idle_with_no_pending("t1", "w1", user_id=OWNER)) is False
+    idle = orch.coordination.lead_idle_with_no_pending("t1", "w1", user_id=OWNER)
+    assert asyncio.run(idle) is False
 
 
 # ---------------------------------------------------------------------------
@@ -1099,7 +1102,7 @@ def test_recover_one_task_reconciles_members_and_redrives_lead(
     orch._actor.run_actor_loop = _fake_loop  # type: ignore[method-assign]
 
     async def _run() -> None:
-        await orch._recover_one_task("t1", "w1", user_id=OWNER)
+        await orch.recovery._recover_one_task("t1", "w1", user_id=OWNER)
         await asyncio.sleep(0.05)  # let create_task'd loops run
 
     try:
@@ -1532,7 +1535,7 @@ def test_heartbeat_pending_synthesizes_terminal_completed(
     orch = TaskOrchestrator()
 
     out = asyncio.run(
-        orch._heartbeat_pending(
+        orch.coordination._heartbeat_pending(
             task_id="t1", project_id="w1", pending_keys={"B", "C"}, user_id=OWNER
         )
     )
@@ -1823,10 +1826,10 @@ def test_lead_shutdown_exit_skips_auto_finalize(monkeypatch) -> None:
         user_id=OWNER,
     )
     # shutdown exit → auto-finalize SKIPPED (no spurious block on resume)
-    asyncio.run(orch._finalize_actor(via_shutdown=True, **common))  # type: ignore[arg-type]
+    asyncio.run(orch.lifecycle.finalize_actor(via_shutdown=True, **common))  # type: ignore[arg-type]
     assert called == []
     # natural exit (idle-TTL / end_turn) → auto-finalize RUNS
-    asyncio.run(orch._finalize_actor(via_shutdown=False, **common))  # type: ignore[arg-type]
+    asyncio.run(orch.lifecycle.finalize_actor(via_shutdown=False, **common))  # type: ignore[arg-type]
     assert called == ["t1"]
 
 
@@ -1859,7 +1862,6 @@ def test_finish_task_completed_publishes_finalized_and_notifies_memory(
     (tasks/events.py): the commercial allocator's TTL clamp listens on it.
     A completed finish must also graduate lessons into project memory."""
     from valuz_agent.modules.tasks import events as events_mod
-    from valuz_agent.modules.tasks import lifecycle as lc_mod
 
     _make_task(db_factory, tmp_path)
     asyncio.run(
@@ -1900,7 +1902,6 @@ def test_finish_task_stopped_publishes_finalized_without_memory(
     """A 'stopped' finish still announces task.finalized (sandbox reclaim)
     but must NOT graduate memory — that's reserved for real completions."""
     from valuz_agent.modules.tasks import events as events_mod
-    from valuz_agent.modules.tasks import lifecycle as lc_mod
 
     _make_task(db_factory, tmp_path)
 

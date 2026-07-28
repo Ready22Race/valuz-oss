@@ -85,15 +85,15 @@ def _as_async(fn):
 async def test_put_get_roundtrip_delivers_message() -> None:
     reg = MailboxRegistry()
     reg.register("s1")
-    assert reg.put("s1", InboxMsg(kind="message", text="hello")) is True
+    assert reg.put("s1", InboxMsg(kind="text", text="hello")) is True
     msg = await reg.get("s1", timeout=1.0)
-    assert msg.kind == "message"
+    assert msg.kind == "text"
     assert msg.text == "hello"
 
 
 async def test_put_to_unregistered_session_is_noop() -> None:
     reg = MailboxRegistry()
-    assert reg.put("ghost", InboxMsg(kind="message", text="x")) is False
+    assert reg.put("ghost", InboxMsg(kind="text", text="x")) is False
 
 
 async def test_get_times_out_when_no_message() -> None:
@@ -130,17 +130,17 @@ async def test_lead_loop_runs_turns_until_shutdown() -> None:
     async def fake_finalize(**kwargs: object) -> None:
         finalized.append((str(kwargs["session_id"]), str(kwargs["final_status"])))
 
-    orch._run_turn_with_sink = fake_turn  # type: ignore[method-assign]
-    orch._finalize_actor = fake_finalize  # type: ignore[method-assign]
+    orch.actor.run_turn = fake_turn  # type: ignore[method-assign]
+    orch.lifecycle.finalize_actor = fake_finalize  # type: ignore[method-assign]
 
     # Pre-load the inbox: a follow-up, then a shutdown. register() in the loop
     # is idempotent so these survive.
     mailbox_registry.register("lead-1")
-    mailbox_registry.put("lead-1", InboxMsg(kind="message", text="follow-up"))
+    mailbox_registry.put("lead-1", InboxMsg(kind="text", text="follow-up"))
     mailbox_registry.put("lead-1", InboxMsg(kind="shutdown"))
 
     await asyncio.wait_for(
-        orch.run_actor_loop(
+        orch.actor.run_actor_loop(
             session_id="lead-1",
             initial_prompt="initial brief",
             role="lead",
@@ -173,13 +173,13 @@ async def test_member_loop_notifies_lead_and_self_reaps_on_ttl() -> None:
     async def fake_finalize(**kwargs: object) -> None:
         finalized.append(str(kwargs["session_id"]))
 
-    orch._run_turn_with_sink = fake_turn  # type: ignore[method-assign]
-    orch._notify_lead_member_idle = fake_notify  # type: ignore[method-assign]
-    orch._finalize_actor = fake_finalize  # type: ignore[method-assign]
+    orch.actor.run_turn = fake_turn  # type: ignore[method-assign]
+    orch.coordination.notify_lead_member_idle = fake_notify  # type: ignore[method-assign]
+    orch.lifecycle.finalize_actor = fake_finalize  # type: ignore[method-assign]
 
     # No messages arrive → the member reaps via the (tiny) idle TTL.
     await asyncio.wait_for(
-        orch.run_actor_loop(
+        orch.actor.run_actor_loop(
             session_id="mem-1",
             initial_prompt="do the thing",
             role="subtask",
@@ -207,11 +207,11 @@ async def test_terminal_turn_status_breaks_loop_immediately() -> None:
     async def fake_finalize(**kwargs: object) -> None:
         return None
 
-    orch._run_turn_with_sink = fake_turn  # type: ignore[method-assign]
-    orch._finalize_actor = fake_finalize  # type: ignore[method-assign]
+    orch.actor.run_turn = fake_turn  # type: ignore[method-assign]
+    orch.lifecycle.finalize_actor = fake_finalize  # type: ignore[method-assign]
 
     await asyncio.wait_for(
-        orch.run_actor_loop(
+        orch.actor.run_actor_loop(
             session_id="lead-x",
             initial_prompt="brief",
             role="lead",
@@ -635,7 +635,7 @@ def test_broadcast_shutdown_signals_live_members() -> None:
     mailbox_registry.register("m1")
     mailbox_registry.register("m2")
 
-    orch._broadcast_shutdown("t1")
+    orch.coordination._broadcast_shutdown("t1")
 
     assert mailbox_registry._boxes["m1"].get_nowait().kind == "shutdown"
     assert mailbox_registry._boxes["m2"].get_nowait().kind == "shutdown"
@@ -651,23 +651,21 @@ def test_broadcast_shutdown_signals_live_members() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_ensure_orchestration_tools_adds_create_task() -> None:
-    """A bare agent gains the create_task ToolDef; re-applying is a no-op."""
-    from src.core import AgentConfig  # type: ignore[import-not-found]
+def test_create_task_is_on_the_chat_toolset() -> None:
+    """A project conversation must be able to launch a task.
 
+    (Was ``test_ensure_orchestration_tools_adds_create_task``, which exercised
+    the retired "declare tools on the AgentConfig" mechanism. Tool audience is
+    now decided once by the two declaration tuples, which ``boot/steps.py``
+    turns into the toolkit MCP server's base/lead toolsets — so asserting
+    membership IS asserting what reaches a chat session.)
+    """
     from valuz_agent.modules.tasks.tools.declarations import (
         CREATE_TASK_TOOL_NAME,
-        ensure_orchestration_tools_on_agent,
+        ORCHESTRATION_TOOL_DECLARATIONS,
     )
 
-    bare = AgentConfig(id="a1", name="a1", tools=())
-    patched = ensure_orchestration_tools_on_agent(bare)
-    assert patched is not bare
-    assert CREATE_TASK_TOOL_NAME in {t.name for t in patched.tools}
-
-    # Idempotent: already-present → same object back.
-    again = ensure_orchestration_tools_on_agent(patched)
-    assert again is patched
+    assert CREATE_TASK_TOOL_NAME in {d.name for d in ORCHESTRATION_TOOL_DECLARATIONS}
 
 
 def test_create_task_gate_rejects_task_sessions(
@@ -712,34 +710,45 @@ def test_create_task_gate_rejects_task_sessions(
     assert isinstance(res, ToolResult) and res.is_error
 
 
-def test_strip_dispatch_tools_removes_lead_only() -> None:
-    """strip_dispatch_tools drops dispatch/finish_task but keeps create_task."""
-    from src.core import AgentConfig  # type: ignore[import-not-found]
+def test_lead_only_tools_never_reach_the_chat_toolset() -> None:
+    """The lead/chat audience partition — the invariant that matters.
 
+    (Was ``test_strip_dispatch_tools_removes_lead_only``, which tested the
+    retired AgentConfig-mutating strip helper. The same guarantee now comes
+    from the declaration tuples: ``boot/steps.py`` serves
+    ORCHESTRATION_TOOL_DECLARATIONS as the toolkit MCP ``base`` toolset and
+    DISPATCH_TOOL_DECLARATIONS as ``lead``, so a lead-only tool leaking into
+    the chat tuple is exactly the old bug in its current form.)
+
+    Execution-authority tools must be lead-only: a plain conversation that
+    could ``dispatch`` or ``finish_task`` would act on a task it does not own.
+    The deliberate overlap (list_members + the plan tools, which chat needs for
+    draft tasks) is asserted explicitly so widening it stays a conscious act.
+    """
     from valuz_agent.modules.tasks.tools.declarations import (
-        CREATE_TASK_TOOL_DECLARATION,
-        DISPATCH_TOOL_DECLARATION,
-        FINISH_TASK_TOOL_DECLARATION,
-        strip_dispatch_tools,
+        DISPATCH_TOOL_DECLARATIONS,
+        ORCHESTRATION_TOOL_DECLARATIONS,
     )
 
-    agent = AgentConfig(
-        id="a1",
-        name="a1",
-        tools=(
-            DISPATCH_TOOL_DECLARATION,
-            FINISH_TASK_TOOL_DECLARATION,
-            CREATE_TASK_TOOL_DECLARATION,
-        ),
-    )
-    stripped = strip_dispatch_tools(agent)
-    names = {t.name for t in stripped.tools}
-    assert "dispatch" not in names
-    assert "finish_task" not in names
-    assert "create_task" in names
+    lead = {d.name for d in DISPATCH_TOOL_DECLARATIONS}
+    chat = {d.name for d in ORCHESTRATION_TOOL_DECLARATIONS}
 
-    again = strip_dispatch_tools(stripped)
-    assert again is stripped
+    assert {
+        "dispatch",
+        "await_members",
+        "send",
+        "finish_task",
+        "review_subtask",
+        "stop_subtask",
+        "update_deliverable",
+    } <= lead - chat
+
+    # Chat-only: launching / observing / talking to a task from the outside.
+    assert {"create_task", "draft_task", "commit_task", "abandon_task"} <= chat - lead
+
+    # The intentional overlap — per-call authority is enforced by tools/gate.py
+    # (an active task's plan is lead-only; chat must inject_into_task instead).
+    assert lead & chat == {"list_members", "plan_task", "modify_plan", "get_plan"}
 
 
 async def test_materialize_lead_agent_builds_clone_without_tool_decls() -> None:
@@ -748,11 +757,9 @@ async def test_materialize_lead_agent_builds_clone_without_tool_decls() -> None:
     ``harness`` MCP entry (lead toolset of the host toolkit server)."""
     from src.core import AgentConfig  # type: ignore[import-not-found]
 
-    from valuz_agent.modules.tasks.orchestrator import TaskOrchestrator
+    from valuz_agent.modules.tasks.resolution import materialize_lead_clone
 
-    base = AgentConfig(id="base1", name="lead", tools=())
-    orch = TaskOrchestrator()
-    clone = await orch._materialize_lead_agent(base)
+    clone = materialize_lead_clone(AgentConfig(id="base1", name="lead", tools=()))
     assert clone.id == "base1__lead__async"
     assert tuple(clone.tools or ()) == ()
 
@@ -804,7 +811,7 @@ async def test_toolset_partition_matches_declaration_sets() -> None:
     declarations — its surface rides the session's ``harness`` MCP entry."""
     from src.core import AgentConfig  # type: ignore[import-not-found]
 
-    from valuz_agent.modules.tasks.orchestrator import TaskOrchestrator
+    from valuz_agent.modules.tasks.resolution import materialize_lead_clone
     from valuz_agent.modules.tasks.tools.declarations import (
         DISPATCH_TOOL_DECLARATIONS,
         ORCHESTRATION_TOOL_DECLARATIONS,
@@ -851,9 +858,7 @@ async def test_toolset_partition_matches_declaration_sets() -> None:
         assert stripped not in lead_names, f"{stripped} should not be in lead toolset"
 
     # The clone is a pure identity stamp.
-    clone = await TaskOrchestrator()._materialize_lead_agent(
-        AgentConfig(id="a", name="a", tools=())
-    )
+    clone = materialize_lead_clone(AgentConfig(id="a", name="a", tools=()))
     assert tuple(clone.tools or ()) == ()
 
 
@@ -987,6 +992,44 @@ async def test_await_members_all_returns_when_all_keys_done(monkeypatch) -> None
         assert res["collected"] == 2
         assert res["pending"] == []
         assert {r["subtask_key"] for r in res["results"]} == {"A", "B"}
+    finally:
+        mailbox_registry.unregister(lead)
+
+
+@pytest.mark.asyncio
+async def test_await_members_puts_shutdown_back_for_the_actor_loop(monkeypatch) -> None:
+    """Regression: a ``shutdown`` must survive being seen by await_members.
+
+    ``await_member_results`` runs INSIDE the lead's turn and drains the very
+    inbox the actor loop reads BETWEEN turns. It used to consume the shutdown
+    and just break, so ``finish_task``/``stop_task``'s broadcast never reached
+    the loop and the lead kept looping on a halted task. It must re-queue it.
+    """
+    _patch_await_deps(monkeypatch, {"sA": "A"})
+    orch = TaskOrchestrator()
+
+    async def _noop_mark(**_kw):
+        return None
+
+    monkeypatch.setattr(planning, "mark_in_review", _noop_mark)
+    lead = "lead-await-shutdown"
+    mailbox_registry.register(lead)
+    try:
+        mailbox_registry.put(lead, InboxMsg(kind="shutdown"))
+        res = await orch.await_member_results(
+            lead_session_id=lead,
+            project_id="w1",
+            task_id="t1",
+            keys=["A"],
+            mode="all",
+            timeout_s=2,
+            user_id=LOCAL_USER_ID,
+        )
+        # The wait ended immediately with nothing collected...
+        assert res["collected"] == 0
+        # ...and the shutdown is still queued for the actor loop to act on.
+        assert mailbox_registry.has_pending(lead)
+        assert (await mailbox_registry.get(lead, timeout=0.1)).kind == "shutdown"
     finally:
         mailbox_registry.unregister(lead)
 

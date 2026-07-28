@@ -57,24 +57,47 @@ def test_draining_flag_roundtrip() -> None:
 # ── ActorRunner.run_actor_loop ───────────────────────────────────────────
 
 
+class _RecordingCollaborators:
+    """Fake ``ActorFinalizer`` + ``ActorCoordinator`` in one object.
+
+    The loop only ever needs one instance of each and these tests care about
+    *whether* a seam fired, not which object owns it — so one fake satisfies
+    both protocols and appends to a shared call log.
+    """
+
+    def __init__(self, calls: list[str]) -> None:
+        self._calls = calls
+
+    async def finalize_actor(self, **kwargs: Any) -> None:
+        self._calls.append("finalize")
+
+    async def notify_lead_member_idle(
+        self, session_id: str, status: str, user_id: str
+    ) -> None:
+        return None
+
+    async def lead_idle_with_no_pending(
+        self, task_id: str, project_id: str, user_id: str
+    ) -> bool:
+        return True
+
+
+def _runner_recording(calls: list[str], turn_status: str) -> ActorRunner:
+    """An ActorRunner whose turn primitive records a call and returns *turn_status*."""
+    fake = _RecordingCollaborators(calls)
+    runner = ActorRunner(finalizer=fake, coordinator=fake)
+
+    async def _turn(session_id: str, content: str, user_id: str | None = None) -> str:
+        calls.append("turn")
+        return turn_status
+
+    runner.run_turn = _turn  # type: ignore[method-assign]
+    return runner
+
+
 def test_actor_loop_draining_skips_turn_and_finalize() -> None:
     calls: list[str] = []
-
-    class _Host:
-        async def _run_turn_with_sink(self, sid: str, content: str, user_id: str | None = None) -> str:
-            calls.append("turn")
-            return "idle"
-
-        async def _finalize_actor(self, **k: Any) -> None:
-            calls.append("finalize")
-
-        async def _notify_lead_member_idle(self, sid: str, status: str, user_id: str | None = None) -> None:
-            pass
-
-        async def _lead_idle_with_no_pending(self, t: str, p: str, user_id: str | None = None) -> bool:
-            return True
-
-    runner = ActorRunner(_Host())
+    runner = _runner_recording(calls, "idle")
     lifecycle.set_draining()
     asyncio.run(
         runner.run_actor_loop(
@@ -95,22 +118,8 @@ def test_actor_loop_draining_skips_turn_and_finalize() -> None:
 
 def test_actor_loop_runs_normally_when_not_draining() -> None:
     calls: list[str] = []
-
-    class _Host:
-        async def _run_turn_with_sink(self, sid: str, content: str, user_id: str | None = None) -> str:
-            calls.append("turn")
-            return "terminated"  # terminal → loop exits after one turn
-
-        async def _finalize_actor(self, **k: Any) -> None:
-            calls.append("finalize")
-
-        async def _notify_lead_member_idle(self, sid: str, status: str, user_id: str | None = None) -> None:
-            pass
-
-        async def _lead_idle_with_no_pending(self, t: str, p: str, user_id: str | None = None) -> bool:
-            return True
-
-    runner = ActorRunner(_Host())
+    # terminal status → the loop exits after a single turn
+    runner = _runner_recording(calls, "terminated")
     asyncio.run(
         runner.run_actor_loop(
             session_id="s2",

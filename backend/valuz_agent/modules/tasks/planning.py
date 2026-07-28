@@ -369,7 +369,7 @@ async def review_subtask(
         delivered = mailbox_registry.put(
             target_session,
             InboxMsg(
-                kind="message",
+                kind="text",
                 from_session=lead_session_id,
                 text=f"Your previous attempt was sent back for rework.\n\n{feedback or ''}",
             ),

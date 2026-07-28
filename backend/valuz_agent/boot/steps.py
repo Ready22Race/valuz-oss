@@ -910,8 +910,10 @@ async def start_decision_aggregator(app: FastAPI) -> None:
     then subscribes to the kernel broadcast bus for live updates.
     Lives for the whole app lifetime.
     """
-    from valuz_agent.api.deps import set_decision_aggregator
-    from valuz_agent.modules.decisions.aggregator import DecisionAggregator
+    from valuz_agent.modules.decisions.aggregator import (
+        DecisionAggregator,
+        set_decision_aggregator,
+    )
 
     agg = DecisionAggregator()
     await agg.start()

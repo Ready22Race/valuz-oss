@@ -22,7 +22,7 @@ import pytest
 
 from valuz_agent.adapters import agent_resolver
 from valuz_agent.adapters.agent_resolver import embed_agent_config
-from valuz_agent.modules.tasks.orchestrator import TaskOrchestrator
+from valuz_agent.modules.tasks.resolution import materialize_lead_clone
 
 from .test_actor_v2 import _as_async, _async_member_get, _fake_agent_config
 
@@ -70,9 +70,7 @@ def _build_lead_request(monkeypatch: pytest.MonkeyPatch):
 def test_embed_lead_clone_into_create_request(monkeypatch: pytest.MonkeyPatch) -> None:
     base_agent, request = _build_lead_request(monkeypatch)
 
-    clone = asyncio.run(
-        TaskOrchestrator()._materialize_lead_agent(base_agent)
-    )
+    clone = materialize_lead_clone(base_agent)
     assert clone.id == "agent:lead-base__lead__async"
 
     embedded = embed_agent_config(request, clone)

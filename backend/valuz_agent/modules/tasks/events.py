@@ -1,8 +1,20 @@
-"""Host-side event-bus topics for the tasks module.
+"""The tasks module's EVENT WRITE surface — timeline rows + bus topics.
 
-ADR-001 additive contract: the event NAME and payload FIELD NAMES are the
+Two things live here, both "something happened to this task, record it":
+
+  * :func:`finalize_task` — the composed terminal write (status flip + bus
+    announce + terminal timeline event). Runs on the caller's unit of work.
+  * :func:`record_awaiting_user` / :func:`record_user_answered` — timeline
+    rows projected from the cross-cutting Decision Inbox. These open their own
+    unit of work (their caller, ``modules/decisions/aggregator.py``, has no
+    task transaction to join).
+
+ADR-001 additive contract: the bus event NAME and payload FIELD NAMES are the
 frozen surface commercial overlays subscribe to (an overlay mirrors the string
 rather than importing this module — keep both in sync).
+
+Not here: mailbox DELIVERY (lead↔member text, chat→task inject) — that is
+``tasks/messaging.py``. The split is "does it put something in a mailbox?".
 """
 
 from __future__ import annotations
@@ -10,6 +22,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.tasks.datastore import TaskDatastore, TaskEventDatastore
 
 logger = logging.getLogger(__name__)
@@ -84,3 +97,78 @@ async def finalize_task(
         session_id=session_id,
         payload=payload or {},
     )
+
+
+# ---------------------------------------------------------------------------
+# Decision-Inbox projections
+#
+# The Decision Inbox is a cross-cutting overlay keyed by ``task_id``: a pending
+# question blocks the agent's turn but leaves NO trace on the task's own
+# timeline. These two writes are that trace. Their only caller is
+# ``modules/decisions/aggregator.py``; they open their own unit of work because
+# it has no task transaction for them to join.
+#
+# They lived in ``tasks/messaging.py`` until 2026-07 — misfiled, since neither
+# delivers anything to a mailbox.
+# ---------------------------------------------------------------------------
+
+
+async def record_awaiting_user(
+    *,
+    task_id: str,
+    project_id: str,
+    session_id: str,
+    subtask_key: str | None,
+    agent_slug: str,
+    agent_name: str | None,
+    question: str,
+    pending_id: str,
+    user_id: str,
+) -> None:
+    """Append an ``awaiting_user`` task event when an agent (lead or member)
+    raises a question through the Decision Inbox.
+
+    Without this the task page shows "Running" while the task is actually
+    blocked on the user. We do NOT add an ``awaiting_user`` task *status* (the
+    task genuinely is still active, and a status would need racy atomic
+    clearing on answer) — this event is the timeline record + the SSE frame the
+    attention surfaces drive from. Deduped by ``pending_id`` at the caller (the
+    aggregator tracks emitted ids per process).
+    """
+    async with async_unit_of_work() as db:
+        await TaskEventDatastore(db).append_event(
+            user_id,
+            project_id=project_id,
+            task_id=task_id,
+            type="awaiting_user",
+            actor=agent_slug,
+            session_id=session_id,
+            payload={
+                "agent_name": agent_name,
+                "question": question,
+                "pending_id": pending_id,
+                **({"subtask_key": subtask_key} if subtask_key else {}),
+            },
+        )
+
+
+async def record_user_answered(
+    *,
+    task_id: str,
+    project_id: str,
+    pending_id: str,
+    session_id: str | None = None,
+    user_id: str,
+) -> None:
+    """Append a ``user_answered`` task event when a pending question resolves
+    (the counterpart to :func:`record_awaiting_user`)."""
+    async with async_unit_of_work() as db:
+        await TaskEventDatastore(db).append_event(
+            user_id,
+            project_id=project_id,
+            task_id=task_id,
+            type="user_answered",
+            actor="user",
+            session_id=session_id,
+            payload={"pending_id": pending_id},
+        )

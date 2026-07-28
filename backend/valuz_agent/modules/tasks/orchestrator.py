@@ -1,20 +1,29 @@
-"""TaskOrchestrator — the task subsystem's single composed facade.
+"""TaskOrchestrator — the task subsystem's composition root + public facade.
 
-Holds NO implementation of its own: the composition root wires the shared
-collaborators (LiveMemberRegistry, ActorRunner, event bus) into the four
-services and every public method is a thin delegator. Routes and tool
-handlers depend on this one name (``task_orchestrator``) — the module's
-public contract. (Were the deferred kernel migration ever revived, this
-method surface drafts the ``KernelClient.task_*`` wire surface.)
+Two jobs, and nothing else:
 
-  Lifecycle  (``tasks/lifecycle.py``)     kickoff · draft/commit/abandon ·
-                                          finish · update_deliverable ·
-                                          auto-finalize + actor finalize
-  Dispatch   (``tasks/dispatcher.py``)    dispatch_async (member spawn)
-  Coordination (``tasks/coordination.py``) await_members · heartbeat ·
-                                          shutdown broadcast
-  Recovery   (``tasks/recovery.py``)      startup recovery · stop/resume ·
-                                          stop_member
+1. **Compose.** Build the shared collaborators (``LiveMemberRegistry``,
+   ``ActorRunner``) once and wire them into the four services, so every service
+   sees the *same* registry and the *same* runner. The ordering is load-bearing
+   — see :meth:`__init__`.
+2. **Expose the public surface.** Routes, the task MCP tool handlers, the
+   automation runner and boot all depend on the single name
+   ``task_orchestrator``; the twelve methods below are that contract.
+
+  Lifecycle    (``tasks/lifecycle.py``)    kickoff · draft/commit/abandon ·
+                                           finish_task · update_deliverable
+  Dispatch     (``tasks/dispatcher.py``)   dispatch_async (member spawn)
+  Coordination (``tasks/coordination.py``) await_member_results
+  Recovery     (``tasks/recovery.py``)     recover_active_tasks · stop_task ·
+                                           resume_task · stop_member
+
+Anything NOT in that list is service-internal. The facade used to carry a
+further dozen delegators (``_finalize_actor`` / ``_run_turn_with_sink`` /
+``_heartbeat_pending`` / ``_recover_one_task`` / …) that no production caller
+ever used — they existed so tests could reach through the facade, and they are
+exactly what kept the actor seam untyped. Tests now drive the owning service,
+reachable via the read-only properties below (:attr:`lifecycle`,
+:attr:`coordination`, :attr:`recovery`, :attr:`dispatcher`, :attr:`actor`).
 
 Related seams, deliberately NOT here:
   - host-knowledge session resolution → ``tasks/resolution.py``
@@ -23,18 +32,17 @@ Related seams, deliberately NOT here:
   - tool gate policy → ``tasks/tools/gate.py`` (pure; moves with the D5
     kernel-served tool surface); wire enforcement in ``tools/handlers.py``
   - read-side queries → ``tasks/queries.py`` · plan authoring/review →
-    ``tasks/planning.py`` · messaging/inject → ``tasks/messaging.py``
+    ``tasks/planning.py`` · mailbox delivery → ``tasks/messaging.py``
 """
 
 # ruff: noqa: I001
 from __future__ import annotations
 
 import logging
-from typing import Any, Literal
+from typing import Any
 
 import valuz_agent.boot.kernel  # noqa: F401
 
-from valuz_agent.infra.eventbus import EventBus, event_bus as _global_bus
 from valuz_agent.modules.tasks.actor_runner import ActorRunner
 from valuz_agent.modules.tasks.coordination import CoordinationService
 from valuz_agent.modules.tasks.dispatcher import DispatcherService
@@ -55,72 +63,90 @@ logger = logging.getLogger(__name__)
 class TaskOrchestrator:
     """Drives the full task lifecycle — kickoff, dispatch, finish.
 
-    Instantiated once at startup (like schedule_runner); registered in
-    app.py and passed to register_dispatch_tools().
+    Instantiated once at startup (like schedule_runner); the boot steps pass it
+    to ``tools.handlers.build_task_tool_defs``, whose closures capture it.
     """
 
     def __init__(
         self,
-        bus: EventBus | None = None,
         registry: LiveMemberRegistry | None = None,
         actor_runner: ActorRunner | None = None,
     ) -> None:
-        self._bus = bus or _global_bus
-        # Live member tracking: task_id → live member session ids (so
+        # Shared live-member tracking: task_id → live member session ids (so
         # finish_task can broadcast shutdown to every still-running member) and
         # session_id → dispatch-start epoch (manifest attribution under the
-        # shared project cwd). See LiveMemberRegistry for the sync invariant.
+        # shared project cwd). Every service below gets THIS instance — see
+        # LiveMemberRegistry for the no-await-between-spawn-and-register
+        # invariant that makes sharing load-bearing.
         self._members = registry or LiveMemberRegistry()
-        # The shared runtime turn/actor engine (ADR-023). Bind ``self`` as the
-        # host so the loop's seams (_run_turn_with_sink / _finalize_actor /
-        # _notify_lead_member_idle / _lead_idle_with_no_pending) resolve back to
-        # this orchestrator at call time — preserving the existing behaviour
-        # where the loop drives those methods (and lets tests stub them).
+
+        # Wiring order is forced by a cycle: the services need the runner as a
+        # constructor argument, and the runner needs two of them back. So build
+        # the runner first, then the services, then bind (below).
         self._actor = actor_runner or ActorRunner()
-        self._actor.bind(self)
-        # Subtask dispatch (async member spawn) lives in DispatcherService
-        # (ADR-023 Step 3a). It shares this orchestrator's registry + runtime
-        # ActorRunner (same instances); the orchestrator's public
-        # dispatch_async delegates straight onto it.
         self._dispatcher = DispatcherService(
             registry=self._members,
             actor_runner=self._actor,
         )
-        # Lead ↔ member coordination (await_members / heartbeat / shutdown
-        # broadcast / member-idle notify / text delivery) lives in
-        # CoordinationService (ADR-023 Step 3b). It shares this orchestrator's
-        # registry (same instance) for has_live_members / dispatch_started_at /
-        # drain_members; the orchestrator's coordination surface delegates
-        # straight onto it, and the ActorRunner resolves its role callbacks
-        # (_notify_lead_member_idle / _lead_idle_with_no_pending) through the
-        # bound host onto this service.
         self._coordination = CoordinationService(registry=self._members)
-        # Task lifecycle (kickoff / draft / commit / abandon / finish + the
-        # actor-loop finalize callbacks + the lead-clone builder) lives in
-        # LifecycleService (ADR-023 Step 3c). It shares this orchestrator's
-        # registry (same instance) + runtime ActorRunner + CoordinationService
-        # + event bus; the orchestrator's lifecycle surface delegates straight
-        # onto it, and the ActorRunner resolves its finalize callback
-        # (_finalize_actor) through the bound host onto this service.
         self._lifecycle = LifecycleService(
             registry=self._members,
             actor_runner=self._actor,
             coordination=self._coordination,
-            bus=self._bus,
         )
-        # Startup recovery + user-initiated stop/resume lives in RecoveryService
-        # (ADR-023 Step 3d). It shares this orchestrator's registry (same
-        # instance — re-populated WITHOUT a dispatch epoch on the recovery
-        # branch, the Step-1 invariant) + runtime ActorRunner + CoordinationService;
-        # the orchestrator's recovery surface delegates straight onto it.
         self._recovery = RecoveryService(
             registry=self._members,
             actor_runner=self._actor,
             coordination=self._coordination,
         )
 
+        # Close the cycle. The actor loop runs its own turns and delegates
+        # everything around a turn to these two — typed as ActorFinalizer /
+        # ActorCoordinator, so mypy checks that the services still satisfy the
+        # seam (an untyped handle here previously let delegators rot silently).
+        self._actor.bind(finalizer=self._lifecycle, coordinator=self._coordination)
+
     # ------------------------------------------------------------------
-    # kickoff
+    # Composed parts — read-only access for tests + diagnostics.
+    #
+    # This is the composition root, so handing out the wired services is
+    # legitimate and is what lets the public surface stay at twelve methods:
+    # a test that wants ``finalize_actor`` asks ``orch.lifecycle`` for it
+    # instead of forcing a pass-through onto the facade.
+    # ------------------------------------------------------------------
+
+    @property
+    def members(self) -> LiveMemberRegistry:
+        """The shared live-member registry every service writes through."""
+        return self._members
+
+    @property
+    def actor(self) -> ActorRunner:
+        """The shared turn/actor-loop engine."""
+        return self._actor
+
+    @property
+    def lifecycle(self) -> LifecycleService:
+        """kickoff / draft / commit / abandon / finish + actor finalize."""
+        return self._lifecycle
+
+    @property
+    def dispatcher(self) -> DispatcherService:
+        """Async subtask dispatch (member actor spawn)."""
+        return self._dispatcher
+
+    @property
+    def coordination(self) -> CoordinationService:
+        """Lead ↔ member coordination (await / heartbeat / shutdown broadcast)."""
+        return self._coordination
+
+    @property
+    def recovery(self) -> RecoveryService:
+        """Startup recovery + user-initiated stop / resume."""
+        return self._recovery
+
+    # ------------------------------------------------------------------
+    # Lifecycle
     # ------------------------------------------------------------------
 
     async def kickoff(
@@ -150,11 +176,6 @@ class TaskOrchestrator:
         ``user_id`` is the owning caller; it MUST be threaded through to the
         project / member lookups (owner-scoped queries return None for the wrong
         owner — a missing ``user_id`` reads as "project not found").
-
-        Thin delegator onto :class:`LifecycleService` (ADR-023 Step 3c).
-        Kept on the orchestrator so its existing callers (REST routes,
-        in-process automation runner, the ``create_task`` MCP handler) keep
-        invoking ``task_orchestrator.kickoff``.
         """
         return await self._lifecycle.kickoff(
             project_id=project_id,
@@ -170,10 +191,6 @@ class TaskOrchestrator:
             user_id=user_id,
         )
 
-    # ------------------------------------------------------------------
-    # Chat-plan-then-execute (VALUZ-CHATPLAN) — Slice 2
-    # ------------------------------------------------------------------
-
     async def draft_task(
         self,
         *,
@@ -185,10 +202,7 @@ class TaskOrchestrator:
         title: str | None = None,
         user_id: str,
     ) -> TaskRow:
-        """Create a ``draft`` task without a lead session (VALUZ-CHATPLAN).
-
-        Thin delegator onto :class:`LifecycleService` (ADR-023 Step 3c).
-        """
+        """Create a ``draft`` task without a lead session (VALUZ-CHATPLAN)."""
         return await self._lifecycle.draft_task(
             project_id=project_id,
             goal=goal,
@@ -208,10 +222,7 @@ class TaskOrchestrator:
         lead_agent_slug_override: str | None = None,
         user_id: str,
     ) -> dict[str, Any]:
-        """Flip a draft task to ``active`` by spawning its lead session.
-
-        Thin delegator onto :class:`LifecycleService` (ADR-023 Step 3c).
-        """
+        """Flip a draft task to ``active`` by spawning its lead session."""
         return await self._lifecycle.commit_task(
             task_id=task_id,
             project_id=project_id,
@@ -229,10 +240,7 @@ class TaskOrchestrator:
         reason: str = "",
         user_id: str,
     ) -> dict[str, Any]:
-        """Discard a draft task (status: draft → abandoned).
-
-        Thin delegator onto :class:`LifecycleService` (ADR-023 Step 3c).
-        """
+        """Discard a draft task (status: draft → abandoned)."""
         return await self._lifecycle.abandon_task(
             task_id=task_id,
             project_id=project_id,
@@ -240,276 +248,6 @@ class TaskOrchestrator:
             reason=reason,
             user_id=user_id,
         )
-
-    # ==================================================================
-    # v2 actor dispatch (M10 附录 B) — persistent lead + member actors
-    # ==================================================================
-
-    async def _run_turn_with_sink(
-        self, session_id: str, content: str, user_id: str
-    ) -> str:
-        """Run ONE turn on a persistent session and return its final status.
-
-        Thin delegator onto the shared :class:`ActorRunner` runtime engine
-        (ADR-023). Kept as a method so the actor loop drives it via ``self``
-        (and tests can stub ``orch._run_turn_with_sink``).
-        """
-        return await self._actor._run_turn_with_sink(session_id, content, user_id=user_id)
-
-    async def run_actor_loop(
-        self,
-        *,
-        session_id: str,
-        initial_prompt: str,
-        role: Literal["lead", "subtask"],
-        task_id: str,
-        project_id: str,
-        idle_ttl: float | None = None,
-        user_id: str,
-    ) -> None:
-        """Persistent actor loop: run turn → idle → await mailbox → repeat.
-
-        Delegates to the shared :class:`ActorRunner`; the runner resolves the
-        loop's seams (_run_turn_with_sink / _finalize_actor /
-        _notify_lead_member_idle / _lead_idle_with_no_pending) back through this
-        orchestrator (bound as its host), preserving the prior behaviour.
-        """
-        await self._actor.run_actor_loop(
-            session_id=session_id,
-            initial_prompt=initial_prompt,
-            role=role,
-            task_id=task_id,
-            project_id=project_id,
-            idle_ttl=idle_ttl,
-            user_id=user_id,
-        )
-
-    @staticmethod
-    def _format_member_done(msg: Any) -> str:
-        """Render a member_done mailbox message as the lead's next turn prompt."""
-        return ActorRunner._format_member_done(msg)
-
-    async def _notify_lead_member_idle(
-        self, session_id: str, status: str, user_id: str
-    ) -> None:
-        """After a member turn, push a member_done message to its lead's inbox.
-
-        Thin delegator onto :class:`CoordinationService` (ADR-023 Step 3b).
-        Kept as a method so the actor loop drives it via the bound host (and
-        tests can stub ``orch._notify_lead_member_idle``).
-        """
-        await self._coordination._notify_lead_member_idle(session_id, status, user_id=user_id)
-
-    async def _lead_idle_with_no_pending(
-        self, task_id: str, project_id: str, user_id: str
-    ) -> bool:
-        """True when a lead has nothing left to wait for after a turn.
-
-        Thin delegator onto :class:`CoordinationService` (ADR-023 Step 3b).
-        Kept as a method so the actor loop drives it via the bound host (and
-        tests can stub ``orch._lead_idle_with_no_pending``).
-        """
-        return await self._coordination._lead_idle_with_no_pending(
-            task_id, project_id, user_id=user_id
-        )
-
-    async def _auto_finalize_lead_task(
-        self,
-        *,
-        lead_session_id: str,
-        task_id: str,
-        project_id: str,
-        final_status: str,
-        user_id: str,
-    ) -> None:
-        """Host-side terminal fallback when a lead loop ends without finish_task
-        (ADR-023 Step 3c). Thin delegator onto :class:`LifecycleService` (kept as
-        a method so the loop seam + tests can drive ``orch._auto_finalize_lead_task``)."""
-        await self._lifecycle._auto_finalize_lead_task(
-            lead_session_id=lead_session_id,
-            task_id=task_id,
-            project_id=project_id,
-            final_status=final_status,
-            user_id=user_id,
-        )
-
-    # ------------------------------------------------------------------
-    # Stop / resume (VALUZ-RESUME)
-    # ------------------------------------------------------------------
-
-    async def recover_active_tasks(self) -> int:
-        """Startup Layer-1 recovery sweep — delegates to :class:`RecoveryService`."""
-        return await self._recovery.recover_active_tasks()
-
-    async def _recover_one_task(
-        self, task_id: str, project_id: str, user_id: str
-    ) -> bool:
-        return await self._recovery._recover_one_task(task_id, project_id, user_id=user_id)
-
-    async def _interrupt_kernel_session(self, session_id: str, user_id: str) -> None:
-        await self._recovery._interrupt_kernel_session(session_id, user_id=user_id)
-
-    async def stop_task(
-        self,
-        task_id: str,
-        project_id: str,
-        *,
-        target_status: str = "paused",
-        user_id: str,
-    ) -> bool:
-        return await self._recovery.stop_task(
-            task_id, project_id, target_status=target_status, user_id=user_id
-        )
-
-    async def resume_task(
-        self,
-        task_id: str,
-        project_id: str,
-        *,
-        actor: str = "user",
-        user_id: str,
-        instruction: str | None = None,
-    ) -> dict[str, Any]:
-        return await self._recovery.resume_task(
-            task_id, project_id, actor=actor, user_id=user_id, instruction=instruction
-        )
-
-    async def stop_member(self, session_id: str, user_id: str) -> bool:
-        return await self._recovery.stop_member(session_id, user_id=user_id)
-
-    async def _finalize_actor(
-        self,
-        *,
-        session_id: str,
-        last_content: str,
-        final_status: str,
-        role: Literal["lead", "subtask"],
-        task_id: str,
-        project_id: str,
-        via_shutdown: bool = False,
-        user_id: str,
-    ) -> None:
-        """Finalize a session once its actor loop ends (ADR-023 Step 3c).
-
-        Thin delegator onto :class:`LifecycleService`, which owns the single
-        implementation. Kept as a method so the ActorRunner can drive it via the
-        bound host (``run_actor_loop``'s ``finally`` resolves ``_finalize_actor``
-        onto this orchestrator).
-        """
-        await self._lifecycle._finalize_actor(
-            session_id=session_id,
-            last_content=last_content,
-            final_status=final_status,
-            role=role,
-            task_id=task_id,
-            project_id=project_id,
-            via_shutdown=via_shutdown,
-            user_id=user_id,
-        )
-
-    async def dispatch_async(
-        self,
-        *,
-        task_id: str,
-        project_id: str,
-        lead_session_id: str,
-        subtask_key: str,
-        agent: str | None = None,
-        goal: str | None = None,
-        refs: list[str] | None = None,
-        project_mode: str | None = None,
-        user_id: str,
-    ) -> dict[str, Any]:
-        """Start a planned subtask's member actor (non-blocking); return its handle.
-
-        Plan-first (VALUZ-TASK): the subtask must be dispatchable in the plan;
-        agent/goal default to the plan node. Unlike :meth:`dispatch`, this
-        records the run, starts the member's actor loop as a sibling task, and
-        returns ``{session_id, agent, status:"dispatched"}`` immediately. The
-        lead is re-woken via ``member_done``; the node goes ``in_review`` then
-        and is completed only by ``review_subtask``.
-        """
-        return await self._dispatcher.dispatch_async(
-            task_id=task_id,
-            project_id=project_id,
-            lead_session_id=lead_session_id,
-            subtask_key=subtask_key,
-            agent=agent,
-            goal=goal,
-            refs=refs,
-            project_mode=project_mode,
-            user_id=user_id,
-        )
-
-    # send_to_member / inject_into_task implementations live in
-    # tasks/messaging.py (T1.1 split) — callers invoke messaging.* directly.
-
-    # ------------------------------------------------------------------
-    # await_members (v0.14) — turn-内阻塞收集并行 member 结果
-    # ------------------------------------------------------------------
-
-    async def await_member_results(
-        self,
-        *,
-        lead_session_id: str,
-        project_id: str,
-        task_id: str,
-        keys: list[str] | None = None,
-        mode: str = "all",
-        timeout_s: float | None = None,
-        user_id: str,
-    ) -> dict[str, Any]:
-        """Block (inside the lead's turn) until dispatched members finish.
-
-        Thin delegator onto :class:`CoordinationService` (ADR-023 Step 3b).
-        Kept as a method so the dispatch-MCP ``await_members`` handler keeps
-        calling it on the orchestrator (and tests can drive
-        ``orch.await_member_results``).
-        """
-        return await self._coordination.await_member_results(
-            lead_session_id=lead_session_id,
-            project_id=project_id,
-            task_id=task_id,
-            keys=keys,
-            mode=mode,
-            timeout_s=timeout_s,
-            user_id=user_id,
-        )
-
-    async def _heartbeat_pending(
-        self,
-        *,
-        task_id: str,
-        project_id: str,
-        pending_keys: set[str],
-        user_id: str,
-    ) -> dict[str, dict[str, Any]]:
-        """Backstop for bad-case #3 (VALUZ-RESUME §5.4): a member whose kernel
-        session went terminal but whose ``member_done`` never reached the lead's
-        mailbox (delivery window / crash before finalize).
-
-        Thin delegator onto :class:`CoordinationService` (ADR-023 Step 3b).
-        Kept as a method so existing tests can drive ``orch._heartbeat_pending``.
-        """
-        return await self._coordination._heartbeat_pending(
-            task_id=task_id,
-            project_id=project_id,
-            pending_keys=pending_keys,
-            user_id=user_id,
-        )
-
-    def _broadcast_shutdown(self, task_id: str) -> None:
-        """Tell every still-running member of a task to finalize after its turn.
-
-        Thin delegator onto :class:`CoordinationService` (ADR-023 Step 3b).
-        Kept as a method so ``finish_task`` / ``stop_task`` drive it on the
-        orchestrator (and tests can call ``orch._broadcast_shutdown``).
-        """
-        self._coordination._broadcast_shutdown(task_id)
-
-    # ------------------------------------------------------------------
-    # finish_task
-    # ------------------------------------------------------------------
 
     async def finish_task(
         self,
@@ -523,10 +261,7 @@ class TaskOrchestrator:
         force: bool = False,
         user_id: str,
     ) -> dict[str, Any]:
-        """Close the task — append the terminal event and set the task status.
-
-        Thin delegator onto :class:`LifecycleService` (ADR-023 Step 3c).
-        """
+        """Close the task — append the terminal event and set the task status."""
         return await self._lifecycle.finish_task(
             task_id=task_id,
             project_id=project_id,
@@ -548,10 +283,7 @@ class TaskOrchestrator:
         artifacts: list[str] | None = None,
         user_id: str,
     ) -> dict[str, Any]:
-        """Refresh the deliverable card on a completed task (follow-up chat).
-
-        Thin delegator onto :class:`LifecycleService` (ADR-023 Step 3c).
-        """
+        """Refresh the deliverable card on a completed task (follow-up chat)."""
         return await self._lifecycle.update_deliverable(
             task_id=task_id,
             project_id=project_id,
@@ -562,25 +294,107 @@ class TaskOrchestrator:
         )
 
     # ------------------------------------------------------------------
-    # Plan / review — lead orchestration (VALUZ-TASK)
+    # Dispatch
     # ------------------------------------------------------------------
 
-    # Plan authoring / review / node mutation live in tasks/planning.py
-    # (T1.1 split). Callers (dispatch-MCP tools, task routes) invoke
-    # planning.* directly; the orchestrator's own dispatch/actor/recovery
-    # methods do the same.
+    async def dispatch_async(
+        self,
+        *,
+        task_id: str,
+        project_id: str,
+        lead_session_id: str,
+        subtask_key: str,
+        agent: str | None = None,
+        goal: str | None = None,
+        refs: list[str] | None = None,
+        project_mode: str | None = None,
+        user_id: str,
+    ) -> dict[str, Any]:
+        """Start a planned subtask's member actor (non-blocking); return its handle.
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    async def _materialize_lead_agent(self, base_agent: Any) -> Any:
-        """Materialize a per-task lead clone of *base_agent*.
-
-        Thin delegator onto :class:`LifecycleService` (ADR-023 Step 3c) —
-        kept as a method so tests keep driving ``orch._materialize_lead_agent``.
+        Plan-first (VALUZ-TASK): the subtask must be dispatchable in the plan;
+        agent/goal default to the plan node. Records the run, starts the
+        member's actor loop as a sibling task, and returns
+        ``{session_id, agent, status:"dispatched"}`` immediately. The lead is
+        re-woken via ``member_done``; the node goes ``in_review`` then and is
+        completed only by ``review_subtask``.
         """
-        return await self._lifecycle._materialize_lead_agent(base_agent)
+        return await self._dispatcher.dispatch_async(
+            task_id=task_id,
+            project_id=project_id,
+            lead_session_id=lead_session_id,
+            subtask_key=subtask_key,
+            agent=agent,
+            goal=goal,
+            refs=refs,
+            project_mode=project_mode,
+            user_id=user_id,
+        )
+
+    # ------------------------------------------------------------------
+    # Coordination
+    # ------------------------------------------------------------------
+
+    async def await_member_results(
+        self,
+        *,
+        lead_session_id: str,
+        project_id: str,
+        task_id: str,
+        keys: list[str] | None = None,
+        mode: str = "all",
+        timeout_s: float | None = None,
+        user_id: str,
+    ) -> dict[str, Any]:
+        """Block (inside the lead's turn) until dispatched members finish."""
+        return await self._coordination.await_member_results(
+            lead_session_id=lead_session_id,
+            project_id=project_id,
+            task_id=task_id,
+            keys=keys,
+            mode=mode,
+            timeout_s=timeout_s,
+            user_id=user_id,
+        )
+
+    # ------------------------------------------------------------------
+    # Recovery / stop / resume
+    # ------------------------------------------------------------------
+
+    async def recover_active_tasks(self) -> int:
+        """Startup Layer-1 recovery sweep over every owner's ``active`` tasks."""
+        return await self._recovery.recover_active_tasks()
+
+    async def stop_task(
+        self,
+        task_id: str,
+        project_id: str,
+        *,
+        target_status: str = "paused",
+        user_id: str,
+    ) -> bool:
+        """User-initiated cascade halt → ``paused`` (pause) or ``stopped`` (stop)."""
+        return await self._recovery.stop_task(
+            task_id, project_id, target_status=target_status, user_id=user_id
+        )
+
+    async def resume_task(
+        self,
+        task_id: str,
+        project_id: str,
+        *,
+        actor: str = "user",
+        user_id: str,
+        instruction: str | None = None,
+    ) -> dict[str, Any]:
+        """Resume a ``paused`` / ``blocked`` / ``stopped`` / ``completed`` task."""
+        return await self._recovery.resume_task(
+            task_id, project_id, actor=actor, user_id=user_id, instruction=instruction
+        )
+
+    async def stop_member(self, session_id: str, user_id: str) -> bool:
+        """User-initiated single-member stop (the task stays ``active``)."""
+        return await self._recovery.stop_member(session_id, user_id=user_id)
 
 
 # ---------------------------------------------------------------------------

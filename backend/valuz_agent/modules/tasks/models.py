@@ -158,7 +158,12 @@ class TaskSessionRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     # lead run; for subtask runs = the plan node ``key`` (one node → 1..N runs
     # across rework re-dispatches). The plan itself lives on TaskRow.plan.
     subtask_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    # active | completed | rejected | archived
+    # active | paused | completed | rejected | archived
+    #   active    — run in flight
+    #   paused    — parked by stop_task (task pause/stop); resumable
+    #   completed — finished normally, or approved by review_subtask
+    #   rejected  — user-cancelled (stop_member / an interrupted member turn)
+    #   archived  — the run errored terminally
     status: Mapped[str] = mapped_column(String(16), default="active")
     # Human label, e.g. "Kickoff" or None
     label: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -166,7 +171,12 @@ class TaskSessionRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     goal: Mapped[str | None] = mapped_column(Text, nullable=True)
     # session_id of the lead run that dispatched this subtask
     dispatched_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    # isolated | repo-worktree
+    # Display-only record of how the run's cwd was chosen. In practice always
+    # ``shared`` since v2.1: every member runs in the SHARED project cwd (a
+    # task-level worktree relocates that cwd wholesale rather than isolating
+    # per member — see task_worktree.py). The legacy ``isolated`` /
+    # ``repo-worktree`` per-member modes are retired and ``_member_run_dir``
+    # ignores this field; the column default is kept only for old rows.
     project_mode: Mapped[str] = mapped_column(String(16), default="isolated")
     # Absolute path to this run's working directory
     run_dir: Mapped[str | None] = mapped_column(Text, nullable=True)

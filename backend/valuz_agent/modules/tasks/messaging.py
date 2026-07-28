@@ -1,9 +1,16 @@
-"""Lead ↔ member / chat → task text delivery (mailbox-backed).
+"""Lead ↔ member / chat → task text DELIVERY (mailbox-backed).
 
-Extracted from ``TaskOrchestrator`` (T1.1 split). Both functions are stateless
-— they validate against the DB and post to the global ``mailbox_registry`` —
-so they live as module functions. The orchestrator keeps thin delegators as the
-coordinator surface the dispatch-MCP tools + task routes drive.
+Extracted from ``TaskOrchestrator`` (T1.1 split). Every function here is
+stateless — it validates against the DB and posts an :class:`InboxMsg` to the
+global ``mailbox_registry`` — so they live as module functions. Callers
+(dispatch-MCP handlers in ``tools/handlers.py``, task routes) import this
+module directly; there is deliberately no wrapper class in front of it.
+
+Scope rule: **if it does not put something in a mailbox, it does not belong
+here.** ``record_awaiting_user`` / ``record_user_answered`` used to live in
+this file despite being pure task-event appends with no delivery at all (their
+only caller is the decision-inbox aggregator); they now sit with the other
+task-event writes in ``tasks/events.py``.
 """
 
 from __future__ import annotations
@@ -50,7 +57,7 @@ async def send_to_member(
 
     delivered = mailbox_registry.put(
         to_session_id,
-        InboxMsg(kind="message", text=text, from_session=from_session_id),
+        InboxMsg(kind="text", text=text, from_session=from_session_id),
     )
     if not delivered:
         return {
@@ -170,7 +177,7 @@ async def inject_into_task(
     wrapped = f'<user-instruction source="chat">\n{text}\n</user-instruction>'
     delivered = mailbox_registry.put(
         lead_session_id,
-        InboxMsg(kind="message", text=wrapped, from_session=from_session_id),
+        InboxMsg(kind="text", text=wrapped, from_session=from_session_id),
     )
 
     async with async_unit_of_work() as db:
@@ -201,69 +208,6 @@ async def inject_into_task(
         "lead_session_id": lead_session_id,
         "reason": None if delivered else "LEAD_OFFLINE",
     }
-
-
-async def record_awaiting_user(
-    *,
-    task_id: str,
-    project_id: str,
-    session_id: str,
-    subtask_key: str | None,
-    agent_slug: str,
-    agent_name: str | None,
-    question: str,
-    pending_id: str,
-    user_id: str,
-) -> None:
-    """Append an ``awaiting_user`` task event when an agent (lead or member)
-    raises a question through the Decision Inbox.
-
-    A pending question blocks the turn but leaves NO trace on the task's own
-    timeline or status (the inbox is a cross-cutting overlay keyed by
-    ``task_id``). Without this the task page shows "Running" while the task is
-    actually blocked on the user. We do NOT add an ``awaiting_user`` task
-    *status* (the task genuinely is still active and a status would need racy
-    atomic clearing on answer) — this event is the timeline record + an SSE
-    frame the attention surfaces drive from. Deduped by ``pending_id`` at the
-    caller (the aggregator tracks emitted ids per process).
-    """
-    async with async_unit_of_work() as db:
-        await TaskEventDatastore(db).append_event(
-            user_id,
-            project_id=project_id,
-            task_id=task_id,
-            type="awaiting_user",
-            actor=agent_slug,
-            session_id=session_id,
-            payload={
-                "agent_name": agent_name,
-                "question": question,
-                "pending_id": pending_id,
-                **({"subtask_key": subtask_key} if subtask_key else {}),
-            },
-        )
-
-
-async def record_user_answered(
-    *,
-    task_id: str,
-    project_id: str,
-    pending_id: str,
-    session_id: str | None = None,
-    user_id: str,
-) -> None:
-    """Append a ``user_answered`` task event when a pending question resolves
-    (the counterpart to :func:`record_awaiting_user`)."""
-    async with async_unit_of_work() as db:
-        await TaskEventDatastore(db).append_event(
-            user_id,
-            project_id=project_id,
-            task_id=task_id,
-            type="user_answered",
-            actor="user",
-            session_id=session_id,
-            payload={"pending_id": pending_id},
-        )
 
 
 async def notify_lead_goal_revised(

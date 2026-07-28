@@ -1,39 +1,46 @@
 """LifecycleService — task lifecycle (ADR-023, Step 3c).
 
-The single owner of the task lifecycle surface (the orchestrator keeps thin
-delegators only — the earlier split left stale duplicate bodies on both
-sides, and fixes kept landing on whichever copy the author found first):
+The single owner of the task lifecycle surface. The orchestrator holds thin
+delegators for the six *public* entry points only — an earlier split left stale
+duplicate bodies on both sides and fixes kept landing on whichever copy the
+author found first, so there is exactly one implementation and it is here:
 
-  * :meth:`kickoff` — create TaskRow + lead session; async-mode spawns the lead
-    actor loop, sync-mode runs the lead one turn to idle then auto-finalizes.
+  * :meth:`kickoff` — create TaskRow + lead session, then spawn the lead actor
+    loop. (There is no sync mode: the one-shot "run the lead to idle then
+    auto-finalize" path was removed and ``metadata.dispatch_mode`` is a
+    constant ``"async"``.)
   * :meth:`draft_task` — create a ``draft`` task without a lead session.
   * :meth:`commit_task` — flip a draft to ``active`` by spawning its lead.
   * :meth:`abandon_task` — discard a draft task.
   * :meth:`finish_task` — the authoritative terminal: append the terminal
     event, set task status, reset the lead session mode, then broadcast
     shutdown to members + the lead.
-  * :meth:`_finalize_actor` — the ``run_actor_loop`` ``finally`` callback;
+  * :meth:`finalize_actor` — the ``run_actor_loop`` ``finally`` callback;
     lead → auto-finalize, subtask → discard + terminal run write.
   * :meth:`_auto_finalize_lead_task` — host-side terminal fallback for a lead
     that ends without an explicit ``finish_task``.
   * :meth:`update_deliverable` — refresh a completed task's deliverable card.
   * :meth:`_last_assistant_summary` — best-effort summary helper for the above.
-  * :meth:`_materialize_lead_agent` — per-task lead-clone builder.
+
+The per-task lead-clone builder is NOT here: it is the pure
+:func:`tasks.resolution.materialize_lead_clone`, called on the lead-resolution
+path. (An async ``_materialize_lead_agent`` method used to wrap it purely so
+tests could await it off the orchestrator; both are gone.)
 
 Collaborators are injected at the composition root:
 
   * ``registry``     — shared :class:`LiveMemberRegistry`
     (``has_live_members`` / ``discard_member`` / ``pop_dispatch_started``).
   * ``actor_runner`` — shared :class:`ActorRunner` (``kickoff`` / ``commit_task``
-    spawn ``run_actor_loop``; ``kickoff`` sync-mode runs ``run_session_to_idle``).
+    spawn ``run_actor_loop``).
   * ``coordination`` — :class:`CoordinationService` (``finish_task`` calls
     ``_broadcast_shutdown``).
 
-``_finalize_actor`` is the ``ActorRunner.run_actor_loop`` ``finally`` callback,
-so the runner is bound to a host that resolves ``_finalize_actor`` back onto
-this service (via the orchestrator's thin delegator). The orchestrator keeps
-delegators for the whole public lifecycle surface so its callers + the
-actor-loop seams keep resolving on it.
+:meth:`finalize_actor` makes this class the concrete
+:class:`~valuz_agent.modules.tasks.actor_runner.ActorFinalizer`: the
+composition root binds it into the runner, whose ``run_actor_loop`` ``finally``
+calls it directly. Typed via that protocol — so changing its signature without
+changing the protocol is a mypy error, not a silent runtime break.
 """
 
 # ruff: noqa: I001
@@ -53,7 +60,6 @@ from valuz_agent.adapters.agent_resolver import (
     resolve_agent_display_name,
 )
 from valuz_agent.infra.db import async_unit_of_work
-from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.tasks import planning
@@ -63,7 +69,6 @@ from valuz_agent.modules.tasks.task_worktree import (
     task_worktree_snapshot,
 )
 from valuz_agent.modules.tasks.resolution import (
-    materialize_lead_clone,
     task_session_resolver,
 )
 from valuz_agent.modules.tasks.actor_runner import (
@@ -86,14 +91,19 @@ logger = logging.getLogger(__name__)
 
 
 class LifecycleService:
-    """Task lifecycle — kickoff / draft / commit / abandon / finish + the
-    actor-loop finalize callbacks and the lead-clone builder.
+    """Task lifecycle — kickoff / draft / commit / abandon / finish, plus the
+    actor-loop finalize callback.
 
     Constructed once at the composition root with the shared registry +
-    runtime ActorRunner + CoordinationService (+ the event bus the sync-kickoff
-    lead drives its turn on); the orchestrator's lifecycle surface delegates
-    straight onto it, and the ActorRunner resolves its finalize callback
-    (``_finalize_actor``) through the bound host onto this service.
+    runtime ActorRunner + CoordinationService. The orchestrator's lifecycle
+    surface delegates straight onto it, and it is bound into the ActorRunner as
+    its :class:`ActorFinalizer`.
+
+    (It used to also take the host ``EventBus`` — the bus the sync-kickoff lead
+    drove its turn on. Sync kickoff is gone and the field had no readers left,
+    so the parameter was dropped. Terminal announces go through
+    ``events.finalize_task`` → ``publish_task_finalized``, which reaches the
+    global bus directly.)
     """
 
     def __init__(
@@ -102,12 +112,10 @@ class LifecycleService:
         registry: LiveMemberRegistry,
         actor_runner: ActorRunner,
         coordination: CoordinationService,
-        bus: EventBus,
     ) -> None:
         self._members = registry
         self._actor = actor_runner
         self._coordination = coordination
-        self._bus = bus
 
     # ------------------------------------------------------------------
     # kickoff
@@ -756,12 +764,10 @@ class LifecycleService:
                 return  # members still running — not the lead's terminal moment
 
             try:
-                plan = TaskPlan.from_dict(task.plan)
-                unresolved = [
-                    n.key
-                    for n in plan.nodes
-                    if n.status in ("planned", "in_progress", "in_review", "rework")
-                ]
+                # Shared predicate (TaskPlan.unresolved_keys) — ``paused`` counts
+                # as outstanding, so a task halted mid-flight whose parked node
+                # was never re-dispatched can no longer be closed ``completed``.
+                unresolved = TaskPlan.from_dict(task.plan).unresolved_keys()
             except PlanError:
                 unresolved = []
 
@@ -924,10 +930,10 @@ class LifecycleService:
             )
 
     # ------------------------------------------------------------------
-    # _finalize_actor — the run_actor_loop finally callback
+    # finalize_actor — the run_actor_loop finally callback
     # ------------------------------------------------------------------
 
-    async def _finalize_actor(
+    async def finalize_actor(
         self,
         *,
         session_id: str,
@@ -967,12 +973,12 @@ class LifecycleService:
             # quietly instead of spamming a "Dependencies not initialized"
             # traceback for every in-flight session at shutdown.
             logger.debug(
-                "_finalize_actor: kernel unavailable (shutdown) — deferring "
+                "finalize_actor: kernel unavailable (shutdown) — deferring "
                 "finalize of %s to boot recovery",
                 session_id,
             )
         except Exception:  # noqa: BLE001
-            logger.exception("_finalize_actor: finalize failed for %s", session_id)
+            logger.exception("finalize_actor: finalize failed for %s", session_id)
 
         if role == "lead":
             # A ``shutdown``-triggered exit (pause / stop / finish_task
@@ -1023,7 +1029,7 @@ class LifecycleService:
                 )
             except Exception:  # noqa: BLE001
                 logger.exception(
-                    "_finalize_actor: interrupted-member finalize failed for %s", session_id
+                    "finalize_actor: interrupted-member finalize failed for %s", session_id
                 )
             return
 
@@ -1041,7 +1047,7 @@ class LifecycleService:
                         session_id, run_dir, final_status, since_epoch=since, user_id=user_id
                     )
                 except Exception:  # noqa: BLE001
-                    logger.exception("_finalize_actor: manifest failed for %s", session_id)
+                    logger.exception("finalize_actor: manifest failed for %s", session_id)
                     manifest = {"session_id": session_id, "status": final_status, "summary": ""}
                 manifest["agent"] = agent_slug
 
@@ -1111,7 +1117,7 @@ class LifecycleService:
                         },
                     )
         except Exception:  # noqa: BLE001
-            logger.exception("_finalize_actor: failed to record terminal run for %s", session_id)
+            logger.exception("finalize_actor: failed to record terminal run for %s", session_id)
 
     async def _finalize_interrupted_member(
         self,
@@ -1228,9 +1234,10 @@ class LifecycleService:
         rather than silently aliased — fail fast keeps stale prompts visible.
 
         Plan-completeness guard (v0.14): a ``completed`` finish is REJECTED
-        while the plan still has unresolved nodes (planned / in_progress /
-        in_review / rework) — otherwise the lead can silently skip a planned
-        subtask (e.g. a final aggregation node) and still mark the task done.
+        while the plan still has unresolved nodes (``TaskPlan.unresolved_keys``:
+        planned / in_progress / in_review / rework / paused) — otherwise the
+        lead can silently skip a planned subtask (e.g. a final aggregation node,
+        or one parked by an earlier pause) and still mark the task done.
         The lead must dispatch+review those nodes first (or drop them via
         modify_plan, or finish with status='stopped' to terminate the task).
 
@@ -1296,12 +1303,10 @@ class LifecycleService:
             if final_status == "completed":
                 task_row = finished_task_row
                 if task_row is not None:
-                    plan = TaskPlan.from_dict(task_row.plan)
-                    unresolved = [
-                        n.key
-                        for n in plan.nodes
-                        if n.status in ("planned", "in_progress", "in_review", "rework")
-                    ]
+                    # Shared predicate (TaskPlan.unresolved_keys) — includes
+                    # ``paused``, so a node parked by a pause/stop that was never
+                    # re-dispatched still blocks a ``completed`` close.
+                    unresolved = TaskPlan.from_dict(task_row.plan).unresolved_keys()
                     if unresolved:
                         rejected = {
                             "error": (
@@ -1438,20 +1443,5 @@ class LifecycleService:
             )
 
         return {"ok": True, "status": "updated"}
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    async def _materialize_lead_agent(self, base_agent: Any) -> Any:
-        """Materialize a per-task lead clone of *base_agent*.
-
-        Thin wrapper over :func:`tasks.resolution.materialize_lead_clone`
-        (kept as an async method so tests keep awaiting
-        ``orch._materialize_lead_agent``); the resolver calls the function
-        directly on the lead-resolution path.
-        """
-        return materialize_lead_clone(base_agent)
-
 
 __all__ = ["LifecycleService"]

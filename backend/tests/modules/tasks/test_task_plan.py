@@ -137,6 +137,45 @@ def test_all_done_true_only_when_every_node_done() -> None:
     assert not plan.all_done()
 
 
+def test_unresolved_keys_covers_every_non_settled_status() -> None:
+    plan = TaskPlan.from_dict(
+        {
+            "subtasks": [
+                _node("planned", status="planned"),
+                _node("running", status="in_progress"),
+                _node("reviewing", status="in_review"),
+                _node("redo", status="rework"),
+                _node("parked", status="paused"),
+                _node("finished", status="done"),
+                _node("dead", status="failed"),
+            ]
+        }
+    )
+    assert plan.unresolved_keys() == ["planned", "running", "reviewing", "redo", "parked"]
+
+
+def test_unresolved_keys_counts_paused_as_outstanding() -> None:
+    """Regression: a node parked by a user pause/stop is NOT settled work.
+
+    ``ready_keys`` has always treated ``paused`` as dispatchable. The three
+    inline copies of this predicate (lead idle check / auto-finalize /
+    finish_task guard) omitted it, so a task whose parked node was never
+    re-dispatched closed as ``completed`` with a subtask that never ran.
+    """
+    plan = TaskPlan.from_dict({"subtasks": [_node("a", status="paused")]})
+    assert plan.unresolved_keys() == ["a"]
+    assert plan.ready_keys() == ["a"]  # the two views must agree
+    assert not plan.all_done()
+
+
+def test_unresolved_keys_empty_for_empty_plan() -> None:
+    # A lead that satisfied a simple goal inline never planned anything and
+    # must still be allowed to finish — unlike ``all_done()``, which is False.
+    plan = TaskPlan.from_dict(None)
+    assert plan.unresolved_keys() == []
+    assert not plan.all_done()
+
+
 def test_to_panel_maps_internal_status_to_four_panel_states() -> None:
     plan = TaskPlan.from_dict(
         {

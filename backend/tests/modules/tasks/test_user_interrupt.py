@@ -91,12 +91,12 @@ async def test_interrupted_member_breaks_without_per_turn_notify() -> None:
     async def fake_finalize(**kwargs: object) -> None:
         finalized.append(str(kwargs["final_status"]))
 
-    orch._run_turn_with_sink = fake_turn  # type: ignore[method-assign]
-    orch._notify_lead_member_idle = fake_notify  # type: ignore[method-assign]
-    orch._finalize_actor = fake_finalize  # type: ignore[method-assign]
+    orch.actor.run_turn = fake_turn  # type: ignore[method-assign]
+    orch.coordination.notify_lead_member_idle = fake_notify  # type: ignore[method-assign]
+    orch.lifecycle.finalize_actor = fake_finalize  # type: ignore[method-assign]
 
     await asyncio.wait_for(
-        orch.run_actor_loop(
+        orch.actor.run_actor_loop(
             session_id="mem-int-1",
             initial_prompt="do it",
             role="subtask",
@@ -132,8 +132,8 @@ async def test_lead_loop_member_done_cancelled_skips_mark_in_review(
     async def fake_mark(**kwargs: object) -> None:
         marked.append(str(kwargs["member_session_id"]))
 
-    orch._run_turn_with_sink = fake_turn  # type: ignore[method-assign]
-    orch._finalize_actor = fake_finalize  # type: ignore[method-assign]
+    orch.actor.run_turn = fake_turn  # type: ignore[method-assign]
+    orch.lifecycle.finalize_actor = fake_finalize  # type: ignore[method-assign]
     monkeypatch.setattr(planning, "mark_in_review", fake_mark)
 
     mailbox_registry.register("lead-int-1")
@@ -152,7 +152,7 @@ async def test_lead_loop_member_done_cancelled_skips_mark_in_review(
     mailbox_registry.put("lead-int-1", InboxMsg(kind="shutdown"))
 
     await asyncio.wait_for(
-        orch.run_actor_loop(
+        orch.actor.run_actor_loop(
             session_id="lead-int-1",
             initial_prompt="brief",
             role="lead",

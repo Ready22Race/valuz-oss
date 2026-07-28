@@ -1,7 +1,8 @@
 """Dispatch MCP tool HANDLERS — the thin args → service-call → ToolResult shims.
 
-Holds ``register_dispatch_tools`` (the public registration entry point), the
-lead / plan-writer / orchestration gate helpers, and the async closure handlers.
+Holds ``build_task_tool_defs`` (the public entry point — it returns the full
+``ToolDef`` tuple the host's toolkit MCP server serves), the lead /
+plan-writer / orchestration gate helpers, and the async closure handlers.
 
 Each handler is a thin translate-args → composition-root method call →
 ``ToolResult`` shim — the business logic lives on the peeled services behind

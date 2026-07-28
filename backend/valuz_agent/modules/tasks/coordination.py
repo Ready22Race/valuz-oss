@@ -7,9 +7,9 @@ coordination surface:
     user_inject preemption).
   * :meth:`_heartbeat_pending` — bad-case#3 backstop (reconcile a member whose
     kernel session went terminal but whose member_done never reached the lead).
-  * :meth:`_notify_lead_member_idle` — the role=="subtask" run-actor-loop
+  * :meth:`notify_lead_member_idle` — the role=="subtask" run-actor-loop
     callback: post a ``member_done`` to the lead's inbox after a member turn.
-  * :meth:`_lead_idle_with_no_pending` — the role=="lead" run-actor-loop check:
+  * :meth:`lead_idle_with_no_pending` — the role=="lead" run-actor-loop check:
     True when the lead has nothing left to wait for.
   * :meth:`_broadcast_shutdown` — the atomic shutdown primitive (single
     ``drain_members`` pop → per-member shutdown put).
@@ -19,11 +19,12 @@ constructor injection (the same instance the composition root wires into every
 other task service) for ``has_live_members`` / ``dispatch_started_at`` /
 ``drain_members``.
 
-ADR folds ``messaging.py`` into coordination: the lead↔member / chat→task text
-delivery methods (:meth:`send_to_member` / :meth:`inject_into_task` /
-:meth:`notify_lead_goal_revised`) are surfaced here by delegating into the
-stateless ``messaging`` module, which stays importable for the dispatch-MCP
-handlers + task routes that call it directly.
+Text delivery (lead↔member ``send_to_member``, chat→task ``inject_into_task``,
+``notify_lead_goal_revised``) is NOT surfaced here. An earlier ADR proposed
+folding ``messaging.py`` into this class; the resulting delegators never had a
+caller — every real call site (dispatch-MCP handlers, task routes) imports
+``tasks.messaging`` directly — and they silently rotted out of signature sync
+until mypy flagged them. They were deleted 2026-07; call ``messaging.*``.
 
 CRITICAL invariant (``_broadcast_shutdown``): the drain + per-member shutdown
 ``put`` loop must stay SYNCHRONOUS and contiguous — no ``await`` may separate the
@@ -41,7 +42,7 @@ from typing import Any, cast
 
 from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.infra.db import async_unit_of_work
-from valuz_agent.modules.tasks import messaging, planning
+from valuz_agent.modules.tasks import planning
 from valuz_agent.modules.tasks.actor_runner import _NON_REVIEWABLE_DONE, collect_manifest
 from valuz_agent.modules.tasks.datastore import (
     TaskDatastore,
@@ -69,12 +70,15 @@ _MAX_AWAIT_WINDOW_S = 600.0
 
 
 class CoordinationService:
-    """Lead ↔ member coordination + chat→task / lead→member text delivery.
+    """Lead ↔ member coordination.
 
-    Constructed once at the composition root with the shared registry; the
-    orchestrator's coordination surface delegates straight onto it, and the
-    ActorRunner resolves its role callbacks (``_notify_lead_member_idle`` /
-    ``_lead_idle_with_no_pending``) through the bound host onto this service.
+    Constructed once at the composition root with the shared registry. The
+    orchestrator exposes ``await_member_results`` from here, and the class is
+    bound into the ActorRunner as its
+    :class:`~valuz_agent.modules.tasks.actor_runner.ActorCoordinator` — the two
+    role callbacks (:meth:`notify_lead_member_idle` /
+    :meth:`lead_idle_with_no_pending`) are that protocol, typed, so a signature
+    drift is a mypy error rather than a runtime surprise.
     """
 
     def __init__(self, *, registry: LiveMemberRegistry) -> None:
@@ -241,8 +245,18 @@ class CoordinationService:
             except KeyError:
                 break
             if msg.kind == "shutdown":
+                # Put it BACK before leaving. ``await_member_results`` runs
+                # inside the lead's turn and drains the same inbox the actor
+                # loop reads between turns, so consuming a shutdown here would
+                # swallow the only signal that tells the loop to stop — the
+                # lead would finish this turn and keep looping on a task that
+                # ``stop_task`` / ``finish_task`` already halted. (It survived
+                # this long only because ``stop_task`` ALSO interrupts the
+                # kernel turn, which happens to end the loop by another route;
+                # ``finish_task``'s own broadcast had no such backstop.)
+                mailbox_registry.put(lead_session_id, msg)
                 break
-            if msg.kind in ("message", "revise_goal"):
+            if msg.kind in ("text", "revise_goal"):
                 # VALUZ-CHATPLAN S5: user inject via chat, OR a goal revision
                 # (both are authoritative user intent). Capture + break so the
                 # lead can react in this turn instead of waiting for a member_done
@@ -541,9 +555,12 @@ class CoordinationService:
         decision inbox. Best-effort: an unwired aggregator (tests, early boot)
         just means no ask detection, never a failed await."""
         try:
-            # Lazy import — the aggregator singleton lives on the API layer
-            # (same pattern as modules/docs/scheduler.py). Never a hard dep.
-            from valuz_agent.api.deps import get_decision_aggregator
+            # Lazy import — decisions is a sibling MODULE (its service API, not
+            # its datastore), so this is a sanctioned cross-module call; the
+            # import stays lazy only to keep the boot import graph flat.
+            # Best-effort by design: an unwired aggregator raises, and this
+            # method must degrade to "no ask detected", never fail the await.
+            from valuz_agent.modules.decisions.aggregator import get_decision_aggregator
 
             entries = await get_decision_aggregator().snapshot(user_id or "")
         except Exception:  # noqa: BLE001
@@ -562,7 +579,7 @@ class CoordinationService:
     # actor-loop role callbacks (driven by ActorRunner via the bound host)
     # ------------------------------------------------------------------
 
-    async def _notify_lead_member_idle(
+    async def notify_lead_member_idle(
         self, session_id: str, status: str, user_id: str
     ) -> None:
         """After a member turn, push a member_done message to its lead's inbox.
@@ -611,7 +628,7 @@ class CoordinationService:
                 ),
             )
 
-    async def _lead_idle_with_no_pending(
+    async def lead_idle_with_no_pending(
         self, task_id: str, project_id: str, user_id: str
     ) -> bool:
         """True when a lead has nothing left to wait for after a turn.
@@ -619,7 +636,8 @@ class CoordinationService:
         The actor loop normally parks on the mailbox for LEAD_IDLE_TTL_S between
         turns to catch ``member_done`` / follow-ups. But a lead only has a reason
         to wait if it has a member in flight OR an unresolved plan node still to
-        drive. When neither holds, the lead is done — break now so
+        drive (``TaskPlan.unresolved_keys`` — the shared predicate, ``paused``
+        included). When neither holds, the lead is done — break now so
         ``_finalize_actor`` closes the task immediately instead of after 30min.
         """
         if self._members.has_live_members(task_id):
@@ -634,10 +652,7 @@ class CoordinationService:
                 plan = TaskPlan.from_dict(task.plan)
             except PlanError:
                 return True
-            unresolved = any(
-                n.status in ("planned", "in_progress", "in_review", "rework") for n in plan.nodes
-            )
-            return not unresolved
+            return not plan.unresolved_keys()
 
     # ------------------------------------------------------------------
     # shutdown broadcast — the atomic shutdown primitive
@@ -649,70 +664,6 @@ class CoordinationService:
 
         for member_sid in self._members.drain_members(task_id):
             mailbox_registry.put(member_sid, InboxMsg(kind="shutdown"))
-
-    # ------------------------------------------------------------------
-    # text delivery (folds messaging.py — delegates to the stateless module)
-    # ------------------------------------------------------------------
-
-    async def send_to_member(
-        self,
-        *,
-        from_session_id: str,
-        to_session_id: str,
-        text: str,
-        project_id: str,
-        task_id: str,
-    ) -> dict[str, Any]:
-        """Deliver a free-text follow-up from the lead to a running member.
-
-        Delegates to the stateless ``messaging`` module (kept importable for the
-        dispatch-MCP handlers + task routes that call it directly).
-        """
-        return await messaging.send_to_member(
-            from_session_id=from_session_id,
-            to_session_id=to_session_id,
-            text=text,
-            project_id=project_id,
-            task_id=task_id,
-        )
-
-    async def inject_into_task(
-        self,
-        *,
-        task_id: str,
-        project_id: str,
-        text: str,
-        from_session_id: str,
-    ) -> dict[str, Any]:
-        """Inject a free-text instruction from a chat session into a running task's lead.
-
-        Delegates to the stateless ``messaging`` module (kept importable for the
-        dispatch-MCP handlers + task routes that call it directly).
-        """
-        return await messaging.inject_into_task(
-            task_id=task_id,
-            project_id=project_id,
-            text=text,
-            from_session_id=from_session_id,
-        )
-
-    async def notify_lead_goal_revised(
-        self,
-        *,
-        task_id: str,
-        project_id: str,
-        new_goal: str,
-    ) -> dict[str, Any]:
-        """Wake a running task's lead after the user revised ``task.goal``.
-
-        Delegates to the stateless ``messaging`` module (kept importable for the
-        dispatch-MCP handlers + task routes that call it directly).
-        """
-        return await messaging.notify_lead_goal_revised(
-            task_id=task_id,
-            project_id=project_id,
-            new_goal=new_goal,
-        )
 
 
 __all__ = ["CoordinationService"]
