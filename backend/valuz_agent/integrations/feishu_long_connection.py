@@ -30,6 +30,9 @@ CHANNEL_NO_ROUTE_MESSAGE = "消息已收到，但没有找到可执行的项目�
 # (``ACK_REACTION_EMOJI``) instead of a placeholder reply.
 CHANNEL_QUEUED_MESSAGE = "已加入队列，当前任务结束后会继续处理。"
 CHANNEL_EMPTY_RESULT_MESSAGE = "执行完成，但没有返回文本结果。"
+CHANNEL_BIND_PROMPT_MESSAGE = "这个群要绑定到哪个项目？绑定后，群里的对话都会进入该项目。"
+CHANNEL_BIND_TRUNCATED_MESSAGE = "（只列出了部分项目，其余请在 Valuz 项目页里绑定。）"
+CHANNEL_BIND_HOWTO_MESSAGE = "回复「绑定项目 项目名」即可完成绑定，例如：绑定项目 研究。"
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,7 +135,11 @@ class FeishuLongConnectionRunner:
 
     async def run_once(self, stop_event: asyncio.Event) -> None:
         self._loop = asyncio.get_running_loop()
-        event_handler = _build_event_handler(self._config, self._handle_event)
+        event_handler = _build_event_handler(
+            self._config,
+            self._handle_event,
+            bot_added=self._handle_bot_added,
+        )
         client = self._client_factory(self._config, event_handler)
         client.on_reconnecting = self._handle_reconnecting
         client.on_reconnected = self._handle_reconnected
@@ -264,6 +271,14 @@ class FeishuLongConnectionRunner:
         result: ChannelIngressResult | None,
         reply_message_id: str | None,
     ) -> None:
+        if result is not None and result.direct_reply:
+            # A binding command: configuration, answered directly. No session,
+            # no streaming card — just the outcome.
+            await self._patch_or_send_channel_reply(
+                inbound, reply_message_id, result.direct_reply
+            )
+            return
+
         if result is not None and result.decision.kind == ChannelRouteDecisionKind.QUEUE_SESSION:
             await self._patch_or_send_channel_reply(
                 inbound,
@@ -332,6 +347,38 @@ class FeishuLongConnectionRunner:
             return
 
         await sink.finish()
+
+    def _handle_bot_added(self, event: Any) -> None:
+        """Flow C: the bot was pulled into a group — offer the project picker.
+
+        Binding right here is the whole point: the person who just added the
+        bot is present and knows what the group is for, and never has to switch
+        to the desktop app to say so.
+        """
+        chat_id = _bot_added_chat_id(event)
+        if not chat_id:
+            return
+        loop = self._loop
+        if loop is None:
+            return
+        task = loop.create_task(
+            self._offer_project_picker(chat_id), name="feishu-bind-offer"
+        )
+        self._dispatch_tasks.add(task)
+        task.add_done_callback(self._dispatch_tasks.discard)
+
+    async def _offer_project_picker(self, chat_id: str) -> None:
+        try:
+            projects = await _list_bindable_projects(self._config.owner_user_id)
+            if not projects:
+                return
+            await _send_feishu_card_to_chat(
+                self._config,
+                chat_id,
+                _project_picker_card(chat_id, projects),
+            )
+        except Exception as exc:  # noqa: BLE001 - a failed offer must not crash the runner
+            logger.warning("Feishu project picker offer failed: %s", exc, exc_info=True)
 
     def _handle_reconnecting(self) -> None:
         self._on_reconnecting and self._on_reconnecting()
@@ -670,20 +717,23 @@ def _optional_str(value: Any) -> str | None:
 def _build_event_handler(
     config: FeishuLongConnectionConfig,
     callback: Callable[[Any], None],
+    bot_added: Callable[[Any], None] | None = None,
 ) -> Any:
     from lark_oapi.event.dispatcher_handler import (  # type: ignore[import-untyped]
         EventDispatcherHandler,
     )
 
-    return (
+    builder = (
         EventDispatcherHandler.builder(
             config.encrypt_key or "",
             config.verification_token or "",
         )
         .register_p2_im_chat_access_event_bot_p2p_chat_entered_v1(_ignore_feishu_event)
         .register_p2_im_message_receive_v1(callback)
-        .build()
     )
+    if bot_added is not None:
+        builder = builder.register_p2_im_chat_member_bot_added_v1(bot_added)
+    return builder.build()
 
 
 async def _send_feishu_text_reply(
@@ -872,6 +922,283 @@ async def _open_feishu_card_stream(
         )
         return None
     return _FeishuCardStream(config, card_id)
+
+
+def _bot_added_chat_id(event: Any) -> str | None:
+    event_body = getattr(event, "event", None)
+    return getattr(event_body, "chat_id", None) if event_body is not None else None
+
+
+async def _list_bindable_projects(user_id: str) -> list[tuple[str, str]]:
+    """``(project_id, name)`` for the picker — real projects only.
+
+    Chat projects are per-session and ephemeral; offering one as a group's
+    home would bind the group to something that disappears.
+    """
+    from valuz_agent.modules.projects.service import project_name_map, project_root_paths
+
+    names = await project_name_map(user_id)
+    return [
+        (project_id, names.get(project_id, project_id))
+        for project_id, kind, _root in await project_root_paths(user_id)
+        if kind == "project"
+    ]
+
+
+def _project_picker_card(chat_id: str, projects: list[tuple[str, str]]) -> str:
+    """Card listing the projects, asking the reader to reply with a command.
+
+    Buttons would be the obvious design, but a card button click arrives as a
+    **callback** (``card.action.trigger``), not an event, and the SDK's
+    long-connection client drops callback frames outright
+    (``MessageType.CARD`` → ``return``). Callbacks need a public HTTPS endpoint,
+    which a local-first desktop install does not have. The reply command path
+    (``绑定项目 X``) rides the ordinary message event, so it works everywhere the
+    bot works.
+    """
+    # A card is not a browser: past this the Valuz project page is the right
+    # surface for picking among many projects.
+    shown = projects[:20]
+    lines = [CHANNEL_BIND_PROMPT_MESSAGE, ""]
+    lines += [f"- **{name}**" for _project_id, name in shown]
+    if len(projects) > len(shown):
+        lines.append(CHANNEL_BIND_TRUNCATED_MESSAGE)
+    lines += ["", CHANNEL_BIND_HOWTO_MESSAGE]
+    return json.dumps(
+        {
+            "schema": "2.0",
+            "body": {"elements": [{"tag": "markdown", "content": "\n".join(lines)}]},
+        },
+        ensure_ascii=False,
+    )
+
+
+async def _send_feishu_card_to_chat(
+    config: FeishuLongConnectionConfig, chat_id: str, card_json: str
+) -> None:
+    from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
+
+    client = _new_openapi_client(config)
+    request = (
+        CreateMessageRequest.builder()
+        .receive_id_type("chat_id")
+        .request_body(
+            CreateMessageRequestBody.builder()
+            .receive_id(chat_id)
+            .msg_type("interactive")
+            .content(card_json)
+            .build()
+        )
+        .build()
+    )
+    response = await client.im.v1.message.acreate(request)
+    if not response.success():
+        raise ChannelConfigError(
+            f"Feishu card send failed: {response.code} {response.msg or ''}".strip()
+        )
+
+
+async def create_feishu_chat(
+    *, app_id: str, app_secret: str, name: str
+) -> tuple[str, str | None]:
+    """Create a group with the bot already in it; returns ``(chat_id, link)``.
+
+    Adding a bot to an existing group needs a client menu that is missing or
+    disabled in plenty of setups (not a group, not the owner, disabled by the
+    tenant admin). Creating the group from here sidesteps all of that: the app
+    is the creator, so the bot is a member by construction.
+
+    The creator is the bot, not the human — so a share link comes back with it,
+    which is how the person joins. Asking for their open_id instead would mean
+    they had to message the bot first, which is exactly the kind of setup step
+    this is meant to remove.
+    """
+    from lark_oapi.api.im.v1 import (
+        CreateChatRequest,
+        CreateChatRequestBody,
+        LinkChatRequest,
+        LinkChatRequestBody,
+    )
+
+    config = FeishuLongConnectionConfig(
+        channel_instance_id="",
+        owner_user_id="",
+        agent_slug="",
+        app_id=app_id,
+        app_secret=app_secret,
+    )
+    client = _new_openapi_client(config)
+    created = await client.im.v1.chat.acreate(
+        CreateChatRequest.builder()
+        .request_body(CreateChatRequestBody.builder().name(name).build())
+        .build()
+    )
+    if not created.success() or created.data is None or not created.data.chat_id:
+        raise ChannelConfigError(
+            f"Feishu chat create failed: {created.code} {created.msg or ''}".strip()
+        )
+    chat_id = created.data.chat_id
+
+    # Best-effort: without the link the group still exists and is bound, and the
+    # person can still find it by name — failing the whole call would be worse.
+    try:
+        link = await client.im.v1.chat.alink(
+            LinkChatRequest.builder()
+            .chat_id(chat_id)
+            .request_body(
+                LinkChatRequestBody.builder().validity_period("permanently").build()
+            )
+            .build()
+        )
+        share_link = link.data.share_link if link.success() and link.data else None
+    except Exception as exc:  # noqa: BLE001 - the group is already created
+        logger.warning("Feishu chat link failed for %s: %s", chat_id, exc)
+        share_link = None
+    return chat_id, share_link
+
+
+async def feishu_chat_link(*, app_id: str, app_secret: str, chat_id: str) -> str | None:
+    """A share link for a group the bot is in.
+
+    Generated on demand rather than stored: the link at creation time is easy
+    to miss, and without a way to ask again a Valuz-created group becomes
+    unreachable — nobody but the bot is in it yet.
+    """
+    from lark_oapi.api.im.v1 import LinkChatRequest, LinkChatRequestBody
+
+    config = FeishuLongConnectionConfig(
+        channel_instance_id="",
+        owner_user_id="",
+        agent_slug="",
+        app_id=app_id,
+        app_secret=app_secret,
+    )
+    client = _new_openapi_client(config)
+    response = await client.im.v1.chat.alink(
+        LinkChatRequest.builder()
+        .chat_id(chat_id)
+        .request_body(
+            LinkChatRequestBody.builder().validity_period("permanently").build()
+        )
+        .build()
+    )
+    if not response.success():
+        raise ChannelConfigError(
+            f"Feishu chat link failed: {response.code} {response.msg or ''}".strip()
+        )
+    return response.data.share_link if response.data is not None else None
+
+
+async def delete_feishu_chat(*, app_id: str, app_secret: str, chat_id: str) -> None:
+    """Dissolve a group. Only valid for groups the app created — it owns those."""
+    from lark_oapi.api.im.v1 import DeleteChatRequest
+
+    config = FeishuLongConnectionConfig(
+        channel_instance_id="",
+        owner_user_id="",
+        agent_slug="",
+        app_id=app_id,
+        app_secret=app_secret,
+    )
+    client = _new_openapi_client(config)
+    response = await client.im.v1.chat.adelete(
+        DeleteChatRequest.builder().chat_id(chat_id).build()
+    )
+    if not response.success():
+        raise ChannelConfigError(
+            f"Feishu chat delete failed: {response.code} {response.msg or ''}".strip()
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class FeishuChat:
+    chat_id: str
+    name: str
+    # The app owns this group — i.e. it created it, and is the only identity
+    # Feishu lets dissolve it. Bot-owned groups come back with no ``owner_id``.
+    bot_owned: bool
+    # A person is in the group. A Valuz-created group nobody joined has only
+    # the bot, and is the only case where "join" is a real answer.
+    has_people: bool = True
+
+
+async def list_feishu_chats(*, app_id: str, app_secret: str) -> list[FeishuChat]:
+    """Every group the bot is a member of.
+
+    Powers the project page's group picker: the bot must already be in the
+    group (that half of the flow only an IM client can do), and Valuz then owns
+    which project it stands for.
+    """
+    from lark_oapi.api.im.v1 import ListChatRequest
+
+    config = FeishuLongConnectionConfig(
+        channel_instance_id="",
+        owner_user_id="",
+        agent_slug="",
+        app_id=app_id,
+        app_secret=app_secret,
+    )
+    client = _new_openapi_client(config)
+    chats: list[FeishuChat] = []
+    page_token: str | None = None
+    # Bounded: a bot in more than a few hundred groups is not a picker problem.
+    for _ in range(10):
+        builder = ListChatRequest.builder().page_size(100)
+        if page_token:
+            builder = builder.page_token(page_token)
+        response = await client.im.v1.chat.alist(builder.build())
+        if not response.success():
+            raise ChannelConfigError(
+                f"Feishu chat list failed: {response.code} {response.msg or ''}".strip()
+            )
+        data = response.data
+        for item in getattr(data, "items", None) or []:
+            chat_id = getattr(item, "chat_id", None)
+            if chat_id:
+                chats.append(
+                    FeishuChat(
+                        chat_id=chat_id,
+                        name=getattr(item, "name", None) or chat_id,
+                        bot_owned=not getattr(item, "owner_id", None),
+                    )
+                )
+        page_token = getattr(data, "page_token", None) if data is not None else None
+        if not page_token or not getattr(data, "has_more", False):
+            break
+    return await _with_membership(client, chats)
+
+
+async def _with_membership(client: Any, chats: list[FeishuChat]) -> list[FeishuChat]:
+    """Fill in ``has_people`` for bot-owned groups.
+
+    The list endpoint carries no member count, so this costs one detail call
+    per bot-owned group — a handful at picker scale, and only for the groups
+    where the answer changes anything (a group someone made themselves always
+    has them in it).
+    """
+    from lark_oapi.api.im.v1 import GetChatRequest
+
+    async def resolve(chat: FeishuChat) -> FeishuChat:
+        if not chat.bot_owned:
+            return chat
+        try:
+            response = await client.im.v1.chat.aget(
+                GetChatRequest.builder().chat_id(chat.chat_id).build()
+            )
+        except Exception:  # noqa: BLE001 - a picker row must not fail the list
+            return chat
+        if not response.success() or response.data is None:
+            return chat
+        # Feishu returns the count as a string, and ``bool("0")`` is True —
+        # which read every empty group as occupied.
+        raw = getattr(response.data, "user_count", None)
+        try:
+            count = int(str(raw).strip() or 0)
+        except ValueError:
+            return chat
+        return replace(chat, has_people=count > 0)
+
+    return list(await asyncio.gather(*(resolve(chat) for chat in chats)))
 
 
 async def _add_feishu_reaction(

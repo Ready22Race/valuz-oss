@@ -82,6 +82,7 @@ class FeishuChannelAdapter:
         message = _as_dict(event.get("message"))
         message_id = str(message.get("message_id") or "")
         chat_id = str(message.get("chat_id") or "")
+        chat_type = str(message.get("chat_type") or "")
         root_id = str(message.get("root_id") or "")
         parent_id = str(message.get("parent_id") or "")
         # Only a real Feishu topic counts as a thread. Falling back to the
@@ -102,6 +103,7 @@ class FeishuChannelAdapter:
             mentioned_agent_slug=self.config.agent_slug,
             explicit_project_name=project_name,
             is_top_level_mention=is_top_level,
+            is_direct_chat=chat_type == "p2p",
             continuation_hint=(not is_top_level) or has_reference,
             explicit_continue_hint=explicit_continue_hint,
             explicit_new_hint=explicit_new_hint,

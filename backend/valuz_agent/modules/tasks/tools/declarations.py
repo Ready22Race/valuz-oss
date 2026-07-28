@@ -189,8 +189,9 @@ _CREATE_TASK_PARAMETERS: dict[str, Any] = {
         "lead_agent": {
             "type": "string",
             "description": (
-                "Project-local agent slug to lead the task. Defaults to the "
-                "agent of the current conversation."
+                "Project-local agent slug to lead the task. Omit to use the "
+                "project's default lead, falling back to the agent of the "
+                "current conversation."
             ),
         },
         "refs": {
@@ -395,7 +396,7 @@ _MODIFY_PLAN_PARAMETERS: dict[str, Any] = {
 
 _DRAFT_TASK_PARAMETERS: dict[str, Any] = {
     "type": "object",
-    "required": ["goal", "lead_agent_slug"],
+    "required": ["goal"],
     "properties": {
         "goal": {
             "type": "string",
@@ -403,7 +404,11 @@ _DRAFT_TASK_PARAMETERS: dict[str, Any] = {
         },
         "lead_agent_slug": {
             "type": "string",
-            "description": "Which project agent will become the lead at commit time.",
+            "description": (
+                "Which project agent becomes the lead at commit time. Omit to "
+                "use the project's default lead, falling back to the agent of "
+                "the current conversation."
+            ),
         },
         "title": {
             "type": "string",

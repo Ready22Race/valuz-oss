@@ -535,3 +535,21 @@ class AgentService:
             raise MemberNotFoundError(agent_slug)
 
         await self._members.delete(user_id, project_id, agent_slug)
+
+        # Undeploying the project's default lead leaves the pointer dangling.
+        # Readers fall through it, so this is hygiene rather than correctness —
+        # but leaving it set makes the project page advertise a lead that is no
+        # longer on the team. Best-effort on purpose: the membership row is
+        # already gone, so failing here would report a failed undeploy for an
+        # operation that actually succeeded.
+        from valuz_agent.modules.projects.service import clear_default_lead_if
+
+        try:
+            await clear_default_lead_if(user_id, project_id, agent_slug)
+        except Exception:  # noqa: BLE001 — cleanup must not fail the undeploy
+            logger.warning(
+                "failed to clear default lead after undeploying %s from %s",
+                agent_slug,
+                project_id,
+                exc_info=True,
+            )

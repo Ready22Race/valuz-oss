@@ -249,6 +249,16 @@ class WeComAIBotLongConnectionRunner:
         inbound: InboundChannelMessage,
         result: ChannelIngressResult | None,
     ) -> None:
+        if result is not None and result.direct_reply:
+            # A binding command: configuration, answered directly (no session).
+            await self._try_send_channel_reply(
+                websocket,
+                inbound,
+                result.direct_reply,
+                True,
+            )
+            return
+
         if result is not None and result.decision.kind == ChannelRouteDecisionKind.QUEUE_SESSION:
             await self._try_send_channel_reply(
                 websocket,

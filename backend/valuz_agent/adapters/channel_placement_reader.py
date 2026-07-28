@@ -34,4 +34,15 @@ class DatastoreAgentPlacementReader:
         return placements
 
 
-__all__ = ["DatastoreAgentPlacementReader"]
+class DatastoreProjectMemberReader:
+    """Members of one project, for resolving an agent named in a chat message."""
+
+    def __init__(self, *, members: ProjectMemberDatastore) -> None:
+        self._members = members
+
+    async def list_member_slugs(self, user_id: str, project_id: str) -> list[str]:
+        rows = await self._members.list_by_project(user_id, project_id)
+        return [row.agent_slug for row in rows]
+
+
+__all__ = ["DatastoreAgentPlacementReader", "DatastoreProjectMemberReader"]
