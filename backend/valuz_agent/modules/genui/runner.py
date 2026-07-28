@@ -35,6 +35,19 @@ _DIRECT_LLM_FINAL_OUTPUT_INSTRUCTIONS = (
     "or reasoning blocks, and do not include prose or markdown fences."
 )
 
+# Ephemeral event type → live event type emitted on the CALLING session.
+# ``text_delta`` is the OpenUI code stream (frontend concatenates it into the
+# tool card's output for progressive <Renderer> paint). ``thinking_delta``
+# rides a SEPARATE type — ``tool.call.output_delta`` is concatenated into the
+# code stream unconditionally, so reasoning text through the same channel
+# would corrupt the render; ``tool.call.thinking_delta`` is ignored by
+# frontends that don't know it, and fills the otherwise-silent reasoning
+# window for ones that do.
+_FORWARD_TYPES = {
+    "text_delta": "tool_output_delta",
+    "thinking_delta": "tool_thinking_delta",
+}
+
 
 def _resolve_provider_id(source: Any) -> str | None:
     """Provider id for the ephemeral session: prefer the host-stamped
@@ -82,11 +95,13 @@ def _make_completer(
 
     When ``calling_session_id`` + ``tool_use_id`` are set, the ephemeral
     session's ``text_delta`` stream is forwarded to the CALLING session as
-    ``tool_output_delta`` (keyed by ``tool_use_id``) via the existing
+    ``tool_output_delta`` and its ``thinking_delta`` stream as
+    ``tool_thinking_delta`` (both keyed by ``tool_use_id``) via the existing
     ``kernel_client.emit_live_event`` live-injection channel, so the frontend
-    ``<Renderer isStreaming>`` paints progressively. ``run_turn`` still returns
-    the full text as the canonical ToolResult. When either is None, behaves as
-    the synchronous (non-streaming) version."""
+    ``<Renderer isStreaming>`` paints progressively and the reasoning phase is
+    observable instead of a silent wait. ``run_turn`` still returns the full
+    text as the canonical ToolResult. When either is None, behaves as the
+    synchronous (non-streaming) version."""
 
     if not _uses_official_cli_auth(runtime_provider=runtime_provider, mp=mp):
         return _make_direct_llm_completer(
@@ -101,7 +116,8 @@ def _make_completer(
         forwarded = 0
         try:
             async for ev in kernel_client.subscribe_session_events(user_id, ephem_id):
-                if getattr(ev, "type", None) != "text_delta":
+                live_type = _FORWARD_TYPES.get(getattr(ev, "type", None) or "")
+                if live_type is None:
                     continue
                 text = (getattr(ev, "data", None) or {}).get("text")
                 if not text:
@@ -109,12 +125,13 @@ def _make_completer(
                 await kernel_client.emit_live_event(
                     user_id,
                     calling_session_id or "",
-                    "tool_output_delta",
+                    live_type,
                     {"id": tool_use_id, "text": text},
                 )
                 forwarded += 1
                 logger.debug(
-                    "generate_ui: forwarded delta #%d (%d chars) tool_use_id=%s",
+                    "generate_ui: forwarded %s #%d (%d chars) tool_use_id=%s",
+                    live_type,
                     forwarded,
                     len(text),
                     tool_use_id,
@@ -154,7 +171,11 @@ def _make_completer(
         )
         ephem_id = uuid4().hex
         gen_cwd = fs_registry.generative_ui_cwd(user_id)
-        marker = {"valuz": {"ephemeral_generative_ui": True}}
+        # ``bare_completion`` is the kernel-recognized strip switch
+        # (``src.core.types.is_bare_completion``): every runtime drops its
+        # agentic scaffolding — built-in tools, preset/base system prompts,
+        # settings/skills discovery — for this one-shot no-tool session.
+        marker = {"bare_completion": True, "valuz": {"ephemeral_generative_ui": True}}
         req = CreateSessionRequest(
             id=ephem_id,
             agent_config=AgentConfigSchema(

@@ -91,6 +91,7 @@ from src.core.types import (
     ModelSettings,
     Session,
     UserMessage,
+    is_bare_completion,
 )
 
 # Approval bridge — pure helpers live in ``approval_bridge.py``; we
@@ -1645,6 +1646,24 @@ class ClaudeAgentRuntime:
         # ``""``, same bug codex would hit on a deployment named ``""``.
         if self.model:
             opts_kwargs["model"] = self.model
+        # Bare one-shot completion (``is_bare_completion``): strip every
+        # source of agentic scaffolding the SDK lets us drop. Combined with
+        # the plain-string system prompt from ``_build_system_prompt`` this
+        # reduces the request to instructions + user prompt:
+        #
+        # * ``tools=[]`` — disable ALL built-in tools (their schemas alone
+        #   are thousands of prefill tokens; a bare session calls none).
+        # * ``setting_sources=[]`` — skip the CLAUDE.md / settings / skills
+        #   discovery of the shared scratch cwd entirely.
+        # * ``settings=None`` — no harness settings layer (workflows etc.
+        #   are meaningless for a one-shot no-tool turn).
+        # * ``strict_mcp_config=True`` — don't let the CLI pick up ambient
+        #   ``.mcp.json`` from the cwd; the session declares no MCP servers.
+        if is_bare_completion(session):
+            opts_kwargs["tools"] = []
+            opts_kwargs["setting_sources"] = []
+            opts_kwargs["settings"] = None
+            opts_kwargs["strict_mcp_config"] = True
         # ``WebSearch`` is a Claude *subscription* tool — it works on
         # Claude Code CLI sessions backed by an Anthropic subscription
         # entitlement, but errors at use time on direct-API calls
@@ -1794,6 +1813,12 @@ class ClaudeAgentRuntime:
         ``instructions`` is a UI-side default; the session is the runtime's
         source of truth.)
         """
+        if is_bare_completion(session):
+            # Bare one-shot completion: the claude_code preset (the full
+            # Claude Code system prompt) is pure uncached prefill for a
+            # session that lives one turn and calls no tools — send ONLY
+            # the session's own instructions as a plain string.
+            return session.instructions or ""
         if session.instructions:
             return SystemPromptPreset(
                 type="preset",

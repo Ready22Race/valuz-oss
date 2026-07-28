@@ -109,9 +109,13 @@ def _make_completer(
         )
         ephem_id = uuid4().hex
         review_cwd = fs_registry.memory_review_cwd(user_id)
-        # Marker so the runner's recursion guard skips this session if it is ever
-        # finalized through the normal path (it isn't — run_turn bypasses it).
-        marker = {"valuz": {"ephemeral_memory_review": True}}
+        # ``ephemeral_memory_review``: recursion guard so the idle extractor
+        # skips this session if it is ever finalized through the normal path
+        # (it isn't — run_turn bypasses it). ``bare_completion``: the
+        # kernel-recognized strip switch (``src.core.types.is_bare_completion``)
+        # — every runtime drops its agentic scaffolding for this one-shot
+        # no-tool review session.
+        marker = {"bare_completion": True, "valuz": {"ephemeral_memory_review": True}}
         req = CreateSessionRequest(
             id=ephem_id,
             agent_config=AgentConfigSchema(
