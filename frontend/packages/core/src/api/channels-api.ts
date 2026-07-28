@@ -50,6 +50,14 @@ export interface UpdateFeishuBindingPayload {
   app_secret?: string;
 }
 
+export interface FeishuBindingTestResult {
+  credential_ok: boolean;
+  error?: string | null;
+  connected: boolean;
+  connection_status: string;
+  connection_error?: string | null;
+}
+
 const fetchJson = createFetchJson(() => _apiBase);
 
 export const channelsApi = {
@@ -92,7 +100,9 @@ export const channelsApi = {
     );
   },
 
-  updateFeishuBinding(payload: UpdateFeishuBindingPayload): Promise<FeishuBinding> {
+  updateFeishuBinding(
+    payload: UpdateFeishuBindingPayload,
+  ): Promise<FeishuBinding> {
     const appSecret = payload.app_secret?.trim();
     const body: UpdateFeishuBindingPayload = {
       enabled: payload.enabled,
@@ -112,6 +122,13 @@ export const channelsApi = {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       },
+    );
+  },
+
+  testFeishuBinding(agentSlug: string): Promise<FeishuBindingTestResult> {
+    return fetchJson(
+      `/v1/channels/feishu/bindings/${encodeURIComponent(agentSlug)}/test`,
+      { method: "POST" },
     );
   },
 };

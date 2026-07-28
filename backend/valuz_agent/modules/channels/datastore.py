@@ -42,18 +42,27 @@ class AgentChannelBindingDatastore:
     async def list_enabled(
         self,
         *,
-        user_id: str,
         platform: str,
+        user_id: str | None = None,
     ) -> list[AgentChannelBinding]:
+        """Enabled bindings for a platform.
+
+        ``user_id=None`` lists across owners — the long-connection supervisors
+        use it because a background loader has no request identity to filter
+        by; each row carries its own owner (the supervisor must never guess one
+        from ambient process identity).
+        """
+        conditions = [
+            AgentChannelBindingRow.platform == platform,
+            AgentChannelBindingRow.enabled.is_(True),
+        ]
+        if user_id is not None:
+            conditions.append(AgentChannelBindingRow.user_id == user_id)
         rows = (
             (
                 await self._db.execute(
                     select(AgentChannelBindingRow)
-                    .where(
-                        AgentChannelBindingRow.user_id == user_id,
-                        AgentChannelBindingRow.platform == platform,
-                        AgentChannelBindingRow.enabled.is_(True),
-                    )
+                    .where(*conditions)
                     .order_by(AgentChannelBindingRow.updated_at.asc())
                 )
             )

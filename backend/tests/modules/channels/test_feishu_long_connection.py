@@ -8,7 +8,6 @@ from lark_oapi.api.im.v1.model.p2_im_message_receive_v1 import P2ImMessageReceiv
 
 from valuz_agent.integrations import feishu_long_connection as feishu_runtime
 from valuz_agent.integrations.feishu_long_connection import (
-    CHANNEL_RECEIVED_MESSAGE,
     FeishuLongConnectionConfig,
     FeishuLongConnectionRunner,
     inbound_from_sdk_event,
@@ -56,11 +55,51 @@ def test_inbound_from_sdk_event_normalizes_message_for_bound_agent() -> None:
     assert inbound.context.user_id == "u1"
     assert inbound.context.mentioned_agent_slug == "valuz-helper"
     assert inbound.context.external_chat_id == "oc-chat"
-    assert inbound.context.external_thread_id == "om-msg"
+    # A plain chat message is NOT a thread. Keying it by its own message id
+    # made the route key unique per message, so no session was ever continued.
+    assert inbound.context.external_thread_id is None
+
+
+def test_inbound_from_sdk_event_keeps_user_opened_topic_as_thread() -> None:
+    """A topic the user opens branches off: its root id becomes the thread id,
+    giving that branch its own route key (and therefore its own session)."""
+    event = P2ImMessageReceiveV1(
+        {
+            "schema": "2.0",
+            "header": {"event_id": "evt-2", "event_type": "im.message.receive_v1"},
+            "event": {
+                "sender": {"sender_id": {"open_id": "ou-user"}},
+                "message": {
+                    "message_id": "om-msg-2",
+                    "root_id": "om-root",
+                    "chat_id": "oc-chat",
+                    "message_type": "text",
+                    "content": json.dumps({"text": "继续说"}),
+                },
+            },
+        }
+    )
+
+    inbound = inbound_from_sdk_event(
+        event,
+        FeishuLongConnectionConfig(
+            channel_instance_id="feishu-main",
+            owner_user_id="u1",
+            agent_slug="valuz-helper",
+            app_id="cli_app_1",
+            app_secret="app-secret",
+        ),
+    )
+
+    assert inbound.context.external_thread_id == "om-root"
+    assert inbound.context.is_top_level_mention is False
 
 
 @pytest.mark.asyncio
-async def test_feishu_runner_replies_and_patches_session_output() -> None:
+async def test_feishu_runner_streams_the_answer_into_a_card() -> None:
+    """The turn is acknowledged with a reaction (no placeholder message), the
+    answer streams into a Feishu streaming card, and the reaction is cleared
+    once the card is closed."""
     config = FeishuLongConnectionConfig(
         channel_instance_id="feishu-main",
         owner_user_id="u1",
@@ -70,15 +109,14 @@ async def test_feishu_runner_replies_and_patches_session_output() -> None:
     )
     inbound = InboundChannelMessage(
         text="你好",
-        context=inbound_from_sdk_event(
-            _message_event(),
-            config,
-        ).context,
+        context=inbound_from_sdk_event(_message_event(), config).context,
         params={"query": "你好", "content": "你好"},
         channel_context={"platform": "feishu"},
     )
     replies: list[str] = []
-    patches: list[tuple[str, str]] = []
+    reactions: list[tuple[str, str]] = []
+    removed: list[tuple[str, str]] = []
+    pushes: list[tuple[str, bool]] = []
 
     async def dispatch(message: InboundChannelMessage) -> ChannelIngressResult:
         assert message.text == "你好"
@@ -98,16 +136,33 @@ async def test_feishu_runner_replies_and_patches_session_output() -> None:
         message: InboundChannelMessage,
         content: str,
     ) -> str | None:
-        assert message.context.external_message_id == "om-msg"
         replies.append(content)
         return "om-reply"
 
-    async def reply_updater(
+    async def reaction_adder(
         _config: FeishuLongConnectionConfig,
         message_id: str,
-        content: str,
+        emoji: str,
+    ) -> str | None:
+        reactions.append((message_id, emoji))
+        return "reaction-1"
+
+    async def reaction_remover(
+        _config: FeishuLongConnectionConfig,
+        message_id: str,
+        reaction_id: str,
     ) -> None:
-        patches.append((message_id, content))
+        removed.append((message_id, reaction_id))
+
+    class _FakeCard:
+        async def push(self, content: str, *, final: bool) -> None:
+            pushes.append((content, final))
+
+    async def card_opener(
+        _config: FeishuLongConnectionConfig,
+        _message: InboundChannelMessage,
+    ):
+        return _FakeCard()
 
     async def stream_session_events(user_id: str, session_id: str):
         assert user_id == "u1"
@@ -120,18 +175,95 @@ async def test_feishu_runner_replies_and_patches_session_output() -> None:
         config,
         dispatch=dispatch,
         reply_sender=reply_sender,
-        reply_updater=reply_updater,
+        reaction_adder=reaction_adder,
+        reaction_remover=reaction_remover,
+        card_stream_opener=card_opener,
         session_event_stream_factory=stream_session_events,
     )
 
     await runner._dispatch_event(inbound)
 
-    assert replies == [CHANNEL_RECEIVED_MESSAGE]
-    assert patches == [
-        ("om-reply", "Hel"),
-        ("om-reply", "Hello"),
-        ("om-reply", "Hello"),
-    ]
+    assert reactions == [("om-msg", feishu_runtime.ACK_REACTION_EMOJI)]
+    assert removed == [("om-msg", "reaction-1")]
+    assert replies == []  # no placeholder, no duplicate final message
+    assert pushes[-1] == ("Hello", True)  # closed on the complete answer
+
+
+@pytest.mark.asyncio
+async def test_feishu_runner_falls_back_to_text_when_card_unavailable() -> None:
+    """An app without the cardkit permission still answers — the sink degrades
+    to editing a plain text reply for the rest of the turn."""
+    config = FeishuLongConnectionConfig(
+        channel_instance_id="feishu-main",
+        owner_user_id="u1",
+        agent_slug="valuz-helper",
+        app_id="cli_app_1",
+        app_secret="app-secret",
+    )
+    inbound = InboundChannelMessage(
+        text="你好",
+        context=inbound_from_sdk_event(_message_event(), config).context,
+        params={"query": "你好", "content": "你好"},
+        channel_context={"platform": "feishu"},
+    )
+    replies: list[str] = []
+    patches: list[tuple[str, str]] = []
+
+    async def dispatch(_message: InboundChannelMessage) -> ChannelIngressResult:
+        return ChannelIngressResult(
+            decision=AgentChannelRouteDecision(
+                kind=ChannelRouteDecisionKind.REUSE_SESSION,
+                agent_slug="valuz-helper",
+                project_id="project-1",
+                session_id="session-1",
+                reason="existing thread binding",
+            ),
+            session_id="session-1",
+        )
+
+    async def reply_sender(
+        _config: FeishuLongConnectionConfig,
+        _message: InboundChannelMessage,
+        content: str,
+    ) -> str | None:
+        replies.append(content)
+        return "om-reply"
+
+    async def reply_updater(
+        _config: FeishuLongConnectionConfig,
+        message_id: str,
+        content: str,
+    ) -> None:
+        patches.append((message_id, content))
+
+    async def card_opener(
+        _config: FeishuLongConnectionConfig,
+        _message: InboundChannelMessage,
+    ):
+        return None  # e.g. missing cardkit permission
+
+    async def noop_reaction(*_args, **_kwargs):
+        return None
+
+    async def stream_session_events(_user_id: str, _session_id: str):
+        yield SimpleNamespace(type="assistant_message", data={"text": "Hello"})
+        yield SimpleNamespace(type="session_idle", data={"stop_reason": "end_turn"})
+
+    runner = FeishuLongConnectionRunner(
+        config,
+        dispatch=dispatch,
+        reply_sender=reply_sender,
+        reply_updater=reply_updater,
+        reaction_adder=noop_reaction,
+        reaction_remover=noop_reaction,
+        card_stream_opener=card_opener,
+        session_event_stream_factory=stream_session_events,
+    )
+
+    await runner._dispatch_event(inbound)
+
+    assert replies == ["Hello"]  # sent once, then edited in place
+    assert patches == [("om-reply", "Hello")]
 
 
 def test_feishu_event_handler_ignores_p2p_chat_entered_event() -> None:
@@ -185,3 +317,62 @@ def _message_event() -> P2ImMessageReceiveV1:
             },
         }
     )
+
+
+async def test_load_enabled_configs_uses_row_owner_not_local_identity(
+    tmp_path, monkeypatch
+) -> None:
+    """Bindings created under an edition user id (e.g. a logged-in commercial
+    user) must load with that owner — resolving the device-fingerprint local
+    id here would silently produce zero connections."""
+    from contextlib import asynccontextmanager
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from valuz_agent.infra.database import Base
+    from valuz_agent.modules.channels.datastore import AgentChannelBindingDatastore
+    from valuz_agent.modules.channels.models import AgentChannelBindingRow
+
+    db_file = tmp_path / "channels.db"
+    sync_engine = create_engine(
+        f"sqlite:///{db_file}", connect_args={"check_same_thread": False}
+    )
+    Base.metadata.create_all(sync_engine, tables=[AgentChannelBindingRow.__table__])
+    sessionmaker_ = async_sessionmaker(
+        bind=create_async_engine(f"sqlite+aiosqlite:///{db_file}"),
+        expire_on_commit=False,
+    )
+
+    async with sessionmaker_() as db:
+        await AgentChannelBindingDatastore(db).upsert(
+            user_id="commercial-user-1",
+            platform="feishu",
+            agent_slug="valuz-helper",
+            channel_instance_id="feishu-main",
+            bot_id="cli_app_1",
+            secret_ref="channel/feishu/valuz-helper",
+            enabled=True,
+        )
+        await db.commit()
+
+    @asynccontextmanager
+    async def fake_unit_of_work(**_kwargs):
+        async with sessionmaker_() as session:
+            yield session
+
+    secret_reads: list[tuple[str, str]] = []
+
+    def fake_secret_get(user_id: str, ref: str) -> str:
+        secret_reads.append((user_id, ref))
+        return json.dumps({"app_secret": "s3cret"})
+
+    monkeypatch.setattr(feishu_runtime, "async_unit_of_work", fake_unit_of_work)
+    monkeypatch.setattr(feishu_runtime.secret_store, "get", fake_secret_get)
+
+    configs = await feishu_runtime._load_enabled_feishu_configs()
+
+    assert [config.owner_user_id for config in configs] == ["commercial-user-1"]
+    assert configs[0].app_id == "cli_app_1"
+    assert configs[0].app_secret == "s3cret"
+    assert secret_reads == [("commercial-user-1", "channel/feishu/valuz-helper")]

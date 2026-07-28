@@ -230,3 +230,74 @@ def test_update_feishu_binding_requires_app_secret_for_new_binding(
 
     assert response.status_code == 422
     assert response.json()["detail"] == "App Secret is required"
+
+
+def test_test_feishu_binding_probes_credentials_and_reports_status(
+    monkeypatch,
+) -> None:
+    _FakeAgentChannelBindingDatastore.binding = SimpleNamespace(
+        id="binding-1",
+        owner_user_id="u1",
+        platform="feishu",
+        channel_instance_id="feishu-main",
+        agent_slug="developer",
+        bot_id="cli_app_1",
+        secret_ref="channel/feishu/developer",
+        enabled=True,
+        bot_name=None,
+        ws_url=None,
+    )
+    saved = {
+        ("u1", "channel/feishu/developer"): json.dumps({"app_secret": "app-secret"})
+    }
+    monkeypatch.setattr(channels_routes, "async_unit_of_work", lambda: _Uow())
+    monkeypatch.setattr(
+        channels_routes,
+        "AgentChannelBindingDatastore",
+        _FakeAgentChannelBindingDatastore,
+    )
+    monkeypatch.setattr(
+        channels_routes.secret_store,
+        "get",
+        lambda user_id, ref: saved.get((user_id, ref)),
+    )
+    monkeypatch.setattr(channels_routes, "feishu_supervisor", _FakeSupervisor())
+    probes: list[tuple[str, str]] = []
+
+    async def fake_check(app_id: str, app_secret: str) -> tuple[bool, str | None]:
+        probes.append((app_id, app_secret))
+        return True, None
+
+    monkeypatch.setattr(channels_routes, "_check_feishu_credentials", fake_check)
+    app = FastAPI()
+    app.include_router(channels_routes.router)
+    app.dependency_overrides[channels_routes.get_current_user_id] = lambda: "u1"
+
+    response = TestClient(app).post("/v1/channels/feishu/bindings/developer/test")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "credential_ok": True,
+        "error": None,
+        "connected": False,
+        "connection_status": "stopped",
+        "connection_error": None,
+    }
+    assert probes == [("cli_app_1", "app-secret")]
+
+
+def test_test_feishu_binding_404_without_binding(monkeypatch) -> None:
+    _FakeAgentChannelBindingDatastore.binding = None
+    monkeypatch.setattr(channels_routes, "async_unit_of_work", lambda: _Uow())
+    monkeypatch.setattr(
+        channels_routes,
+        "AgentChannelBindingDatastore",
+        _FakeAgentChannelBindingDatastore,
+    )
+    app = FastAPI()
+    app.include_router(channels_routes.router)
+    app.dependency_overrides[channels_routes.get_current_user_id] = lambda: "u1"
+
+    response = TestClient(app).post("/v1/channels/feishu/bindings/developer/test")
+
+    assert response.status_code == 404

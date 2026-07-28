@@ -84,7 +84,10 @@ class FeishuChannelAdapter:
         chat_id = str(message.get("chat_id") or "")
         root_id = str(message.get("root_id") or "")
         parent_id = str(message.get("parent_id") or "")
-        thread_id = root_id or parent_id or message_id
+        # Only a real Feishu topic counts as a thread. Falling back to the
+        # message id made every plain chat message its own "thread", so the
+        # route key changed on each turn and no session was ever continued.
+        thread_id = root_id or parent_id
         text = _normalize_feishu_text(message.get("content"))
         project_name = _extract_project_hint(text)
         explicit_continue_hint, explicit_new_hint = detect_session_intent_hints(text)

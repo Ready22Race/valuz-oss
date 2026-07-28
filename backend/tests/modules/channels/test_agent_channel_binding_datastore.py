@@ -86,6 +86,38 @@ async def test_list_enabled_wecom_aibot_bindings_is_owner_scoped(sessionmaker_) 
     assert rows[0].bot_id == "bot-1"
 
 
+async def test_list_enabled_without_owner_crosses_users(sessionmaker_) -> None:
+    """The long-connection supervisors load bindings ownerless — each row
+    carries its own owner, so bindings created under an edition-specific
+    user id (not the device-fingerprint local id) still connect."""
+    async with sessionmaker_() as db:
+        ds = AgentChannelBindingDatastore(db)
+        await ds.upsert(
+            user_id="commercial-user-1",
+            platform="feishu",
+            agent_slug="valuz-helper",
+            channel_instance_id="feishu-main",
+            bot_id="cli_app_1",
+            secret_ref="channel/feishu/valuz-helper",
+            enabled=True,
+        )
+        await ds.upsert(
+            user_id="local-fingerprint",
+            platform="feishu",
+            agent_slug="developer",
+            channel_instance_id="feishu-main",
+            bot_id="cli_app_2",
+            secret_ref="channel/feishu/developer",
+            enabled=False,
+        )
+
+        rows = await ds.list_enabled(platform="feishu")
+
+    assert [(row.owner_user_id, row.agent_slug) for row in rows] == [
+        ("commercial-user-1", "valuz-helper")
+    ]
+
+
 async def test_get_enabled_binding_by_channel_instance_returns_owner(sessionmaker_) -> None:
     async with sessionmaker_() as db:
         ds = AgentChannelBindingDatastore(db)
