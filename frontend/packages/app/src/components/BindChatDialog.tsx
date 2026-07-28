@@ -189,7 +189,13 @@ export function BindChatDialog({
   return (
     <FormDialog
       open={open}
-      onOpenChange={onOpenChange}
+      onOpenChange={(next) => {
+        // Closing is itself a refresh signal: whatever happened in here
+        // (linking, unlinking, dissolving) changed what the caller shows. Kept
+        // in the dialog so the contract holds however it gets closed.
+        if (!next) void onBound();
+        onOpenChange(next);
+      }}
       title={t("project.bindChatDialogTitle" as Parameters<typeof t>[0])}
       description={t("project.bindChatDialogDesc" as Parameters<typeof t>[0])}
       cancelLabel={t("common.cancel")}
