@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import Any, Protocol, cast
@@ -25,7 +26,8 @@ logger = logging.getLogger(__name__)
 
 CHANNEL_EXECUTION_ERROR_MESSAGE = "执行异常，任务没有成功提交，请稍后重试或联系管理员。"
 CHANNEL_NO_ROUTE_MESSAGE = "消息已收到，但没有找到可执行的项目绑定。"
-CHANNEL_RECEIVED_MESSAGE = "收到，正在处理。"
+# Retired: the turn is acknowledged with a reaction on the user's message
+# (``ACK_REACTION_EMOJI``) instead of a placeholder reply.
 CHANNEL_QUEUED_MESSAGE = "已加入队列，当前任务结束后会继续处理。"
 CHANNEL_EMPTY_RESULT_MESSAGE = "执行完成，但没有返回文本结果。"
 
@@ -66,9 +68,34 @@ ReplySender = Callable[
     Awaitable[str | None],
 ]
 ReplyUpdater = Callable[[FeishuLongConnectionConfig, str, str], Awaitable[None]]
+ReactionAdder = Callable[[FeishuLongConnectionConfig, str, str], Awaitable[str | None]]
+ReactionRemover = Callable[[FeishuLongConnectionConfig, str, str], Awaitable[None]]
 AuthenticatedCallback = Callable[[], None]
 ReconnectingCallback = Callable[[], None]
 SessionEventStreamFactory = Callable[[str, str], AsyncIterator[Any]]
+
+
+class CardStream(Protocol):
+    """A live Feishu streaming card the runner writes the answer into."""
+
+    async def push(self, content: str, *, final: bool) -> None: ...
+
+
+CardStreamOpener = Callable[
+    [FeishuLongConnectionConfig, InboundChannelMessage],
+    Awaitable["CardStream | None"],
+]
+
+# Feishu emoji key used as the "picked this up" acknowledgement. Reacting to the
+# user's own message keeps the chat free of throwaway placeholder messages.
+ACK_REACTION_EMOJI = "OnIt"
+
+# Minimum spacing between streaming updates. Model deltas arrive far faster than
+# any chat API accepts; without this the stream is a burst of rate-limit errors.
+STREAM_PATCH_MIN_INTERVAL_S = 0.7
+
+# Element the streaming card writes into (see ``_stream_card_json``).
+STREAM_CARD_ELEMENT_ID = "answer"
 
 
 class FeishuLongConnectionRunner:
@@ -80,6 +107,9 @@ class FeishuLongConnectionRunner:
         client_factory: ClientFactory | None = None,
         reply_sender: ReplySender | None = None,
         reply_updater: ReplyUpdater | None = None,
+        reaction_adder: ReactionAdder | None = None,
+        reaction_remover: ReactionRemover | None = None,
+        card_stream_opener: CardStreamOpener | None = None,
         on_authenticated: AuthenticatedCallback | None = None,
         on_reconnecting: ReconnectingCallback | None = None,
         session_event_stream_factory: SessionEventStreamFactory | None = None,
@@ -89,6 +119,9 @@ class FeishuLongConnectionRunner:
         self._client_factory = client_factory or _new_sdk_client
         self._reply_sender = reply_sender or _send_feishu_text_reply
         self._reply_updater = reply_updater or _patch_feishu_text_message
+        self._reaction_adder = reaction_adder or _add_feishu_reaction
+        self._reaction_remover = reaction_remover or _remove_feishu_reaction
+        self._card_stream_opener = card_stream_opener or _open_feishu_card_stream
         self._on_authenticated = on_authenticated
         self._on_reconnecting = on_reconnecting
         self._session_event_stream_factory = (
@@ -139,31 +172,57 @@ class FeishuLongConnectionRunner:
         task.add_done_callback(self._dispatch_tasks.discard)
 
     async def _dispatch_event(self, inbound: InboundChannelMessage) -> None:
-        reply_message_id = await self._try_send_channel_reply(
-            inbound,
-            CHANNEL_RECEIVED_MESSAGE,
-        )
+        # Acknowledge by reacting to the user's own message instead of posting a
+        # placeholder: the chat keeps only real content, and the reaction is
+        # cleared once the answer lands.
+        reaction_id = await self._try_add_ack_reaction(inbound)
         try:
-            result = await self._dispatch(inbound)
-        except Exception:
-            logger.exception(
-                "Feishu inbound dispatch failed: channel=%s agent=%s msg=%s",
-                self._config.channel_instance_id,
-                self._config.agent_slug,
-                inbound.context.external_message_id,
+            try:
+                result = await self._dispatch(inbound)
+            except Exception:
+                logger.exception(
+                    "Feishu inbound dispatch failed: channel=%s agent=%s msg=%s",
+                    self._config.channel_instance_id,
+                    self._config.agent_slug,
+                    inbound.context.external_message_id,
+                )
+                await self._patch_or_send_channel_reply(
+                    inbound,
+                    None,
+                    CHANNEL_EXECUTION_ERROR_MESSAGE,
+                )
+                return
+            logger.info(
+                "Feishu routed message: decision=%s session=%s",
+                result.decision.kind.value if result is not None else "none",
+                result.session_id if result is not None else None,
             )
-            await self._patch_or_send_channel_reply(
-                inbound,
-                reply_message_id,
-                CHANNEL_EXECUTION_ERROR_MESSAGE,
-            )
+            await self._stream_dispatch_result(inbound, result, None)
+        finally:
+            await self._try_remove_ack_reaction(inbound, reaction_id)
+
+    async def _try_add_ack_reaction(self, inbound: InboundChannelMessage) -> str | None:
+        message_id = inbound.context.external_message_id
+        if not message_id:
+            return None
+        try:
+            return await self._reaction_adder(self._config, message_id, ACK_REACTION_EMOJI)
+        except Exception as exc:  # noqa: BLE001 - acknowledgement is best-effort
+            logger.warning("Feishu ack reaction failed: %s", exc)
+            return None
+
+    async def _try_remove_ack_reaction(
+        self,
+        inbound: InboundChannelMessage,
+        reaction_id: str | None,
+    ) -> None:
+        message_id = inbound.context.external_message_id
+        if not message_id or not reaction_id:
             return
-        logger.info(
-            "Feishu routed message: decision=%s session=%s",
-            result.decision.kind.value if result is not None else "none",
-            result.session_id if result is not None else None,
-        )
-        await self._stream_dispatch_result(inbound, result, reply_message_id)
+        try:
+            await self._reaction_remover(self._config, message_id, reaction_id)
+        except Exception as exc:  # noqa: BLE001 - acknowledgement is best-effort
+            logger.warning("Feishu ack reaction removal failed: %s", exc)
 
     async def _try_send_channel_reply(
         self,
@@ -223,8 +282,7 @@ class FeishuLongConnectionRunner:
             return
 
         user_id = inbound.context.user_id
-        accumulated = ""
-        last_sent = ""
+        sink = _StreamingReplySink(self, inbound, reply_message_id)
         logger.info(
             "Feishu streaming session output: channel=%s agent=%s session=%s",
             self._config.channel_instance_id,
@@ -243,25 +301,13 @@ class FeishuLongConnectionRunner:
                 )
                 if event_type == "text_delta":
                     text = _event_text(data)
-                    if not text:
-                        continue
-                    accumulated += text
-                    if accumulated != last_sent and reply_message_id:
-                        if await self._try_patch_channel_reply(reply_message_id, accumulated):
-                            last_sent = accumulated
-                        else:
-                            reply_message_id = None
+                    if text:
+                        await sink.append(text)
                     continue
                 if event_type == "assistant_message":
                     text = _event_text(data)
-                    if not text:
-                        continue
-                    accumulated = text
-                    if accumulated != last_sent and reply_message_id:
-                        if await self._try_patch_channel_reply(reply_message_id, accumulated):
-                            last_sent = accumulated
-                        else:
-                            reply_message_id = None
+                    if text:
+                        await sink.replace(text)
                     continue
                 if event_type == "session_error":
                     logger.warning(
@@ -270,18 +316,10 @@ class FeishuLongConnectionRunner:
                         self._config.agent_slug,
                         session_id,
                     )
-                    await self._patch_or_send_channel_reply(
-                        inbound,
-                        reply_message_id,
-                        CHANNEL_EXECUTION_ERROR_MESSAGE,
-                    )
+                    await sink.fail(CHANNEL_EXECUTION_ERROR_MESSAGE)
                     return
                 if _is_terminal_session_event(event_type, data):
-                    await self._patch_or_send_channel_reply(
-                        inbound,
-                        reply_message_id,
-                        accumulated.strip() or CHANNEL_EMPTY_RESULT_MESSAGE,
-                    )
+                    await sink.finish()
                     return
         except Exception:
             logger.exception(
@@ -290,21 +328,126 @@ class FeishuLongConnectionRunner:
                 self._config.agent_slug,
                 session_id,
             )
-            await self._patch_or_send_channel_reply(
-                inbound,
-                reply_message_id,
-                CHANNEL_EXECUTION_ERROR_MESSAGE,
-            )
+            await sink.fail(CHANNEL_EXECUTION_ERROR_MESSAGE)
             return
 
-        if accumulated:
-            await self._patch_or_send_channel_reply(inbound, reply_message_id, accumulated)
+        await sink.finish()
 
     def _handle_reconnecting(self) -> None:
         self._on_reconnecting and self._on_reconnecting()
 
     def _handle_reconnected(self) -> None:
         self._on_authenticated and self._on_authenticated()
+
+
+class _StreamingReplySink:
+    """Accumulates the answer and pushes it out as it grows.
+
+    Preferred transport is a Feishu streaming card (``cardkit``): it is the only
+    one built for incremental output — editing a text message is capped at ~20
+    edits and marks the message as edited every time. The card is opened lazily
+    on the first content so a turn that produces nothing never posts an empty
+    bubble, and any failure downgrades to the text path for the rest of the turn.
+    """
+
+    def __init__(
+        self,
+        runner: FeishuLongConnectionRunner,
+        inbound: InboundChannelMessage,
+        reply_message_id: str | None,
+    ) -> None:
+        self._runner = runner
+        self._inbound = inbound
+        self._reply_message_id = reply_message_id
+        self._card: CardStream | None = None
+        self._card_unavailable = False
+        self._accumulated = ""
+        self._flushed = ""
+        self._last_push_at = 0.0
+
+    async def append(self, text: str) -> None:
+        self._accumulated += text
+        await self._maybe_flush()
+
+    async def replace(self, text: str) -> None:
+        self._accumulated = text
+        await self._maybe_flush()
+
+    async def finish(self) -> None:
+        content = self._accumulated.strip()
+        if not content:
+            # Nothing streamed: a card was never opened, so this is the only
+            # message the turn produces.
+            await self._runner._patch_or_send_channel_reply(
+                self._inbound,
+                self._reply_message_id,
+                CHANNEL_EMPTY_RESULT_MESSAGE,
+            )
+            return
+        await self._push(content, final=True)
+
+    async def fail(self, message: str) -> None:
+        if self._card is not None:
+            # Close the card on whatever it managed to stream, then report the
+            # failure separately — a half-written card must not keep spinning.
+            await self._push(self._accumulated.strip() or message, final=True)
+            await self._runner._try_send_channel_reply(self._inbound, message)
+            return
+        await self._runner._patch_or_send_channel_reply(
+            self._inbound,
+            self._reply_message_id,
+            message,
+        )
+
+    async def _maybe_flush(self) -> None:
+        if self._accumulated == self._flushed:
+            return
+        now = time.monotonic()
+        if now - self._last_push_at < STREAM_PATCH_MIN_INTERVAL_S:
+            return
+        await self._push(self._accumulated, final=False)
+
+    async def _push(self, content: str, *, final: bool) -> None:
+        if not content:
+            return
+        if await self._ensure_card():
+            assert self._card is not None
+            try:
+                await self._card.push(content, final=final)
+            except Exception as exc:  # noqa: BLE001 - degrade, never drop the answer
+                logger.warning("Feishu card stream push failed: %s", exc)
+                self._card = None
+                self._card_unavailable = True
+            else:
+                self._flushed = content
+                self._last_push_at = time.monotonic()
+                return
+        # Text fallback: only worth an update when the content actually moved.
+        message_id = await self._runner._patch_or_send_channel_reply(
+            self._inbound,
+            self._reply_message_id,
+            content,
+        )
+        self._reply_message_id = message_id
+        self._flushed = content
+        self._last_push_at = time.monotonic()
+
+    async def _ensure_card(self) -> bool:
+        if self._card is not None:
+            return True
+        if self._card_unavailable:
+            return False
+        try:
+            self._card = await self._runner._card_stream_opener(
+                self._runner._config, self._inbound
+            )
+        except Exception as exc:  # noqa: BLE001 - degrade to the text path
+            logger.warning("Feishu card stream open failed: %s", exc)
+            self._card = None
+        if self._card is None:
+            self._card_unavailable = True
+            return False
+        return True
 
 
 class FeishuSupervisor:
@@ -577,6 +720,209 @@ async def _send_feishu_text_reply(
             f"Feishu reply failed: {response.code} {response.msg or ''}".strip()
         )
     return response.data.message_id if response.data is not None else None
+
+
+def _stream_card_json() -> str:
+    """Card schema 2.0 in streaming mode with one markdown element to fill.
+
+    ``streaming_mode`` is what makes Feishu render the typewriter effect and
+    accept incremental content updates; a plain card would need a full re-render
+    per token.
+    """
+    return json.dumps(
+        {
+            "schema": "2.0",
+            "config": {
+                "streaming_mode": True,
+                "streaming_config": {
+                    "print_frequency_ms": {"default": 30},
+                    "print_step": {"default": 2},
+                    "print_strategy": "fast",
+                },
+            },
+            "body": {
+                "elements": [
+                    {
+                        "tag": "markdown",
+                        "content": "",
+                        "element_id": STREAM_CARD_ELEMENT_ID,
+                    }
+                ]
+            },
+        },
+        ensure_ascii=False,
+    )
+
+
+class _FeishuCardStream:
+    """Writes an answer into a Feishu streaming card.
+
+    Sequence numbers order the updates server-side (they may overtake each other
+    in flight), so every push takes the next one.
+    """
+
+    def __init__(self, config: FeishuLongConnectionConfig, card_id: str) -> None:
+        self._config = config
+        self._card_id = card_id
+        self._sequence = 1
+
+    async def push(self, content: str, *, final: bool) -> None:
+        from lark_oapi.api.cardkit.v1 import (  # type: ignore[import-untyped]
+            ContentCardElementRequest,
+            ContentCardElementRequestBody,
+        )
+
+        client = _new_openapi_client(self._config)
+        self._sequence += 1
+        request = (
+            ContentCardElementRequest.builder()
+            .card_id(self._card_id)
+            .element_id(STREAM_CARD_ELEMENT_ID)
+            .request_body(
+                ContentCardElementRequestBody.builder()
+                .content(content)
+                .sequence(self._sequence)
+                .build()
+            )
+            .build()
+        )
+        response = await client.cardkit.v1.card_element.acontent(request)
+        if not response.success():
+            raise ChannelConfigError(
+                f"Feishu card stream update failed: {response.code} "
+                f"{response.msg or ''}".strip()
+            )
+        if final:
+            await self._close(client)
+
+    async def _close(self, client: Any) -> None:
+        """Leave streaming mode so the card stops showing the typing cursor."""
+        from lark_oapi.api.cardkit.v1 import SettingsCardRequest, SettingsCardRequestBody
+
+        self._sequence += 1
+        request = (
+            SettingsCardRequest.builder()
+            .card_id(self._card_id)
+            .request_body(
+                SettingsCardRequestBody.builder()
+                .settings(json.dumps({"config": {"streaming_mode": False}}))
+                .sequence(self._sequence)
+                .build()
+            )
+            .build()
+        )
+        response = await client.cardkit.v1.card.asettings(request)
+        if not response.success():
+            logger.warning(
+                "Feishu card stream close failed: %s %s",
+                response.code,
+                response.msg or "",
+            )
+
+
+async def _open_feishu_card_stream(
+    config: FeishuLongConnectionConfig,
+    inbound: InboundChannelMessage,
+) -> CardStream | None:
+    """Create a streaming card and post it as the reply to the user's message.
+
+    Returns ``None`` when the card path is unavailable (most often the app is
+    missing the cardkit permission) so the caller can fall back to plain text.
+    """
+    from lark_oapi.api.cardkit.v1 import CreateCardRequest, CreateCardRequestBody
+    from lark_oapi.api.im.v1 import ReplyMessageRequest, ReplyMessageRequestBody
+
+    source_message_id = inbound.context.external_message_id
+    if not source_message_id:
+        return None
+    client = _new_openapi_client(config)
+    create = (
+        CreateCardRequest.builder()
+        .request_body(
+            CreateCardRequestBody.builder().type("card_json").data(_stream_card_json()).build()
+        )
+        .build()
+    )
+    created = await client.cardkit.v1.card.acreate(create)
+    if not created.success() or created.data is None or not created.data.card_id:
+        logger.info(
+            "Feishu streaming card unavailable (%s %s); falling back to text",
+            created.code,
+            created.msg or "",
+        )
+        return None
+    card_id = created.data.card_id
+    reply = (
+        ReplyMessageRequest.builder()
+        .message_id(source_message_id)
+        .request_body(
+            ReplyMessageRequestBody.builder()
+            .msg_type("interactive")
+            .content(json.dumps({"type": "card", "data": {"card_id": card_id}}))
+            .build()
+        )
+        .build()
+    )
+    response = await client.im.v1.message.areply(reply)
+    if not response.success():
+        logger.info(
+            "Feishu streaming card reply rejected (%s %s); falling back to text",
+            response.code,
+            response.msg or "",
+        )
+        return None
+    return _FeishuCardStream(config, card_id)
+
+
+async def _add_feishu_reaction(
+    config: FeishuLongConnectionConfig,
+    message_id: str,
+    emoji_type: str,
+) -> str | None:
+    from lark_oapi.api.im.v1 import (
+        CreateMessageReactionRequest,
+        CreateMessageReactionRequestBody,
+        Emoji,
+    )
+
+    client = _new_openapi_client(config)
+    request = (
+        CreateMessageReactionRequest.builder()
+        .message_id(message_id)
+        .request_body(
+            CreateMessageReactionRequestBody.builder()
+            .reaction_type(Emoji.builder().emoji_type(emoji_type).build())
+            .build()
+        )
+        .build()
+    )
+    response = await client.im.v1.message_reaction.acreate(request)
+    if not response.success():
+        raise ChannelConfigError(
+            f"Feishu reaction failed: {response.code} {response.msg or ''}".strip()
+        )
+    return response.data.reaction_id if response.data is not None else None
+
+
+async def _remove_feishu_reaction(
+    config: FeishuLongConnectionConfig,
+    message_id: str,
+    reaction_id: str,
+) -> None:
+    from lark_oapi.api.im.v1 import DeleteMessageReactionRequest
+
+    client = _new_openapi_client(config)
+    request = (
+        DeleteMessageReactionRequest.builder()
+        .message_id(message_id)
+        .reaction_id(reaction_id)
+        .build()
+    )
+    response = await client.im.v1.message_reaction.adelete(request)
+    if not response.success():
+        raise ChannelConfigError(
+            f"Feishu reaction removal failed: {response.code} {response.msg or ''}".strip()
+        )
 
 
 async def _patch_feishu_text_message(
