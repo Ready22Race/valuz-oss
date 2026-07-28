@@ -20,10 +20,7 @@ from valuz_agent.modules.channels.adapters import (
 from valuz_agent.modules.channels.config import ChannelConfigError
 from valuz_agent.modules.channels.datastore import AgentChannelBindingDatastore
 from valuz_agent.modules.channels.schemas import ChannelRouteDecisionKind
-from valuz_agent.modules.channels.service import (
-    CHANNEL_BOUND_MESSAGE,
-    ChannelIngressResult,
-)
+from valuz_agent.modules.channels.service import ChannelIngressResult
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +31,8 @@ CHANNEL_NO_ROUTE_MESSAGE = "消息已收到，但没有找到可执行的项目�
 CHANNEL_QUEUED_MESSAGE = "已加入队列，当前任务结束后会继续处理。"
 CHANNEL_EMPTY_RESULT_MESSAGE = "执行完成，但没有返回文本结果。"
 CHANNEL_BIND_PROMPT_MESSAGE = "这个群要绑定到哪个项目？绑定后，群里的对话都会进入该项目。"
-CHANNEL_BIND_TRUNCATED_MESSAGE = "只列出了部分项目，其余请在 Valuz 项目页里绑定。"
+CHANNEL_BIND_TRUNCATED_MESSAGE = "（只列出了部分项目，其余请在 Valuz 项目页里绑定。）"
+CHANNEL_BIND_HOWTO_MESSAGE = "回复「绑定项目 项目名」即可完成绑定，例如：绑定项目 研究。"
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,7 +139,6 @@ class FeishuLongConnectionRunner:
             self._config,
             self._handle_event,
             bot_added=self._handle_bot_added,
-            card_action=self._handle_card_action,
         )
         client = self._client_factory(self._config, event_handler)
         client.on_reconnecting = self._handle_reconnecting
@@ -382,42 +379,6 @@ class FeishuLongConnectionRunner:
             )
         except Exception as exc:  # noqa: BLE001 - a failed offer must not crash the runner
             logger.warning("Feishu project picker offer failed: %s", exc, exc_info=True)
-
-    def _handle_card_action(self, event: Any) -> Any:
-        """Card button callback — the click that establishes the binding."""
-        loop = self._loop
-        if loop is None:
-            return None
-        action = _card_action_value(event)
-        if not action:
-            return None
-        task = loop.create_task(
-            self._apply_card_action(action), name="feishu-card-action"
-        )
-        self._dispatch_tasks.add(task)
-        task.add_done_callback(self._dispatch_tasks.discard)
-        return None
-
-    async def _apply_card_action(self, action: dict[str, Any]) -> None:
-        chat_id = str(action.get("chat_id") or "")
-        project_id = str(action.get("project_id") or "")
-        project_name = str(action.get("project_name") or project_id)
-        if action.get("action") != "bind_project" or not chat_id or not project_id:
-            return
-        try:
-            await _bind_chat_project(
-                user_id=self._config.owner_user_id,
-                channel_instance_id=self._config.channel_instance_id,
-                external_chat_id=chat_id,
-                project_id=project_id,
-            )
-            await _send_feishu_text_to_chat(
-                self._config,
-                chat_id,
-                CHANNEL_BOUND_MESSAGE.format(project=project_name),
-            )
-        except Exception as exc:  # noqa: BLE001 - report, never crash the runner
-            logger.warning("Feishu card binding failed: %s", exc, exc_info=True)
 
     def _handle_reconnecting(self) -> None:
         self._on_reconnecting and self._on_reconnecting()
@@ -757,7 +718,6 @@ def _build_event_handler(
     config: FeishuLongConnectionConfig,
     callback: Callable[[Any], None],
     bot_added: Callable[[Any], None] | None = None,
-    card_action: Callable[[Any], Any] | None = None,
 ) -> Any:
     from lark_oapi.event.dispatcher_handler import (  # type: ignore[import-untyped]
         EventDispatcherHandler,
@@ -773,8 +733,6 @@ def _build_event_handler(
     )
     if bot_added is not None:
         builder = builder.register_p2_im_chat_member_bot_added_v1(bot_added)
-    if card_action is not None:
-        builder = builder.register_p2_card_action_trigger(card_action)
     return builder.build()
 
 
@@ -971,19 +929,6 @@ def _bot_added_chat_id(event: Any) -> str | None:
     return getattr(event_body, "chat_id", None) if event_body is not None else None
 
 
-def _card_action_value(event: Any) -> dict[str, Any] | None:
-    """The ``value`` payload carried by the clicked card button."""
-    event_body = getattr(event, "event", None)
-    action = getattr(event_body, "action", None) if event_body is not None else None
-    value = getattr(action, "value", None) if action is not None else None
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except ValueError:
-            return None
-    return value if isinstance(value, dict) else None
-
-
 async def _list_bindable_projects(user_id: str) -> list[tuple[str, str]]:
     """``(project_id, name)`` for the picker — real projects only.
 
@@ -1001,34 +946,30 @@ async def _list_bindable_projects(user_id: str) -> list[tuple[str, str]]:
 
 
 def _project_picker_card(chat_id: str, projects: list[tuple[str, str]]) -> str:
-    """Card JSON offering one button per project (bounded, see below)."""
-    # Feishu cards degrade badly past a few dozen elements, and a picker is not
-    # a browser: beyond this the project page (flow A) is the right surface.
+    """Card listing the projects, asking the reader to reply with a command.
+
+    Buttons would be the obvious design, but a card button click arrives as a
+    **callback** (``card.action.trigger``), not an event, and the SDK's
+    long-connection client drops callback frames outright
+    (``MessageType.CARD`` → ``return``). Callbacks need a public HTTPS endpoint,
+    which a local-first desktop install does not have. The reply command path
+    (``绑定项目 X``) rides the ordinary message event, so it works everywhere the
+    bot works.
+    """
+    # A card is not a browser: past this the Valuz project page is the right
+    # surface for picking among many projects.
     shown = projects[:20]
-    actions = [
-        {
-            "tag": "button",
-            "text": {"tag": "plain_text", "content": name},
-            "type": "default",
-            "value": {
-                "action": "bind_project",
-                "chat_id": chat_id,
-                "project_id": project_id,
-                "project_name": name,
-            },
-        }
-        for project_id, name in shown
-    ]
-    elements: list[dict[str, Any]] = [
-        {"tag": "markdown", "content": CHANNEL_BIND_PROMPT_MESSAGE},
-        {"tag": "action", "actions": actions},
-    ]
+    lines = [CHANNEL_BIND_PROMPT_MESSAGE, ""]
+    lines += [f"- **{name}**" for _project_id, name in shown]
     if len(projects) > len(shown):
-        elements.append(
-            {"tag": "markdown", "content": CHANNEL_BIND_TRUNCATED_MESSAGE}
-        )
+        lines.append(CHANNEL_BIND_TRUNCATED_MESSAGE)
+    lines += ["", CHANNEL_BIND_HOWTO_MESSAGE]
     return json.dumps(
-        {"schema": "2.0", "body": {"elements": elements}}, ensure_ascii=False
+        {
+            "schema": "2.0",
+            "body": {"elements": [{"tag": "markdown", "content": "\n".join(lines)}]},
+        },
+        ensure_ascii=False,
     )
 
 
@@ -1054,45 +995,6 @@ async def _send_feishu_card_to_chat(
     if not response.success():
         raise ChannelConfigError(
             f"Feishu card send failed: {response.code} {response.msg or ''}".strip()
-        )
-
-
-async def _send_feishu_text_to_chat(
-    config: FeishuLongConnectionConfig, chat_id: str, text: str
-) -> None:
-    from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
-
-    client = _new_openapi_client(config)
-    request = (
-        CreateMessageRequest.builder()
-        .receive_id_type("chat_id")
-        .request_body(
-            CreateMessageRequestBody.builder()
-            .receive_id(chat_id)
-            .msg_type("text")
-            .content(_feishu_text_content(text))
-            .build()
-        )
-        .build()
-    )
-    response = await client.im.v1.message.acreate(request)
-    if not response.success():
-        raise ChannelConfigError(
-            f"Feishu text send failed: {response.code} {response.msg or ''}".strip()
-        )
-
-
-async def _bind_chat_project(
-    *, user_id: str, channel_instance_id: str, external_chat_id: str, project_id: str
-) -> None:
-    from valuz_agent.modules.channels.datastore import ChannelChatBindingDatastore
-
-    async with async_unit_of_work(commit=True) as db:
-        await ChannelChatBindingDatastore(db).upsert(
-            user_id=user_id,
-            channel_instance_id=channel_instance_id,
-            external_chat_id=external_chat_id,
-            project_id=project_id,
         )
 
 

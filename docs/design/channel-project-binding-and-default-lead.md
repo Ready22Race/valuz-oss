@@ -62,9 +62,9 @@ quick-chat 回落）。
   `AgentChannelResolver` 会把它与派驻项目名做归一化匹配。
 - 派驻了多个项目又没给提示时，resolver 返回 `ASK_PROJECT`，runner 会回复候选项目名。
 - `create_task` 已经接受 `lead_agent` 参数 —— 任务的 lead 本来就不必是当前对话 agent。
-- 飞书 SDK 已提供绑定流程所需的全部接口：`im.v1.chat.alist`（bot 所在的群）、
-  `im.v1.chat.aget`（群名）、`im.chat.member.bot.added_v1`（bot 被拉进群）、
-  `card.action.trigger`（卡片按钮回调）。
+- 飞书 SDK 已提供绑定流程所需的接口：`im.v1.chat.alist`（bot 所在的群）、
+  `im.v1.chat.aget`（群名）、`im.chat.member.bot.added_v1`（bot 被拉进群）。
+  卡片按钮回调 `card.action.trigger` **不可用**，原因见 §5 路径 C。
 
 ### 2.2 缺失的部分
 
@@ -141,8 +141,9 @@ valuz_channel_chat_binding
 ```
 
 点名 agent 即切换会话线，因此群里每个 agent 各自保有一条对话脉络，切回去能恢复。解析方式对齐
-`_extract_project_hint`：新增一个 `_extract_agent_hint`，按同样的归一化规则匹配当前项目的成员
-slug 与显示名。列出成员按钮的卡片是它的"免打字"等价物，走同一条解析路径。
+`_extract_project_hint`：新增一个 `extract_agent_hint`，只认显式写法（`@名字`、`让X看看`、
+`找X处理`、`agent：X`），再按归一化规则匹配当前项目的成员 slug。**匹配不中就忽略、不猜** ——
+把活派给错的成员，比按默认 agent 回答更糟。
 
 ### 4.3 任务 lead
 
@@ -177,8 +178,14 @@ slug 与显示名。列出成员按钮的卡片是它的"免打字"等价物，�
 ### C. bot 入群时引导绑定（首次体验最佳）
 
 订阅 `im.chat.member.bot.added_v1`。bot 一被拉进群就发一张卡片 —— "这个群要绑定到哪个项目？"
-—— 每个项目一个按钮。点击以 `card.action.trigger` 回调到达，写入绑定，卡片原地更新为"已绑定到
-XX"。全程不打字，也不用切回桌面端。
+—— 列出可选项目，并提示回复 `绑定项目 X` 完成绑定（走路径 B 的指令）。不用切回桌面端。
+
+> **为什么不是按钮**（2026-07-28 实现时查明）：按钮点击到达的是**回调**
+> `card.action.trigger`，而不是事件 —— 它在飞书开放平台位于「回调」配置项下，不在事件订阅列表
+> 里；更关键的是 **lark-oapi 的长连接客户端直接丢弃回调帧**（`MessageType.CARD` → `return`），
+> 所以按钮在长连接模式下永远不会触发。回调需要公网 HTTPS 端点，而本地优先的桌面端没有。
+> 回复指令走的是普通消息事件，bot 能工作的地方它就能工作。
+> 若将来要做按钮：要么等 SDK 支持长连接回调，要么为云端部署单独接一条 HTTP 回调路由。
 
 ### B. 群内文本指令（低成本补充）
 
@@ -239,8 +246,8 @@ bot。把一个应用改造成承载多 agent，涉及绑定模型与消息路�
 |---|---|---|
 | 1 | 项目默认 lead：加列 + 迁移、抽出共用的 lead 解析器并接入 `create_task` 与 `draft_task`、项目页选择器、移除成员时清空 | 与通道无关；桌面端建任务的 UI 立刻受益 |
 | 2 | `valuz_channel_chat_binding` + §4.1 的项目解析顺序 + 路径 A（项目页 ↔ `chat.alist`） | 让"群 = 项目"真正成立且可查看可修改 |
-| 3 | 路径 C：订阅 `im.chat.member.bot.added_v1`、项目选择卡片、`card.action.trigger` 处理；以及路径 B 的指令 | 需要新增事件订阅与飞书应用权限 |
-| 4 | agent 选择（§4.2）：`_extract_agent_hint`、成员选择卡片、`default_agent_slug` | 复用既有的按 agent 会话线机制 |
+| 3 | 路径 C：订阅 `im.chat.member.bot.added_v1` + 项目列表卡片；以及路径 B 的指令 | 需要新增事件订阅与飞书应用权限；按钮回调不可用，见路径 C 的说明 |
+| 4 | agent 选择（§4.2）：`extract_agent_hint`、`default_agent_slug` | 复用既有的按 agent 会话线机制 |
 
 第 1 期最小，且收益外溢到通道之外，所以先做。
 
