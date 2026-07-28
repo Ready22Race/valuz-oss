@@ -1732,7 +1732,7 @@ export const ProjectDetailPage = () => {
         open={bindChatOpen}
         onOpenChange={setBindChatOpen}
         projectId={id}
-        onBound={() => void loadChatBindings()}
+        onBound={loadChatBindings}
       />
 
       <DeployAgentsDialog

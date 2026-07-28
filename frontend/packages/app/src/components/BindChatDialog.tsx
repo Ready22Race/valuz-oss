@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { ExternalLink } from "lucide-react";
+import { t as _t } from "@valuz/shared/i18n";
 import { Button, FormDialog, Input, StatusPill } from "@valuz/ui";
 import {
   channelsApi,
@@ -13,7 +14,8 @@ interface BindChatDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   projectId: string;
-  onBound: () => void;
+  /** Refresh the caller's view; awaited so the panel is current on close. */
+  onBound: () => void | Promise<void>;
 }
 
 /**
@@ -37,31 +39,30 @@ export function BindChatDialog({
   const [creating, setCreating] = useState(false);
   const [created, setCreated] = useState<CreatedChat | null>(null);
 
+  const refreshChats = useCallback(async (): Promise<void> => {
+    try {
+      setChats(await channelsApi.listFeishuChats());
+    } catch (err) {
+      setChats([]);
+      toast.error(
+        `${_t("project.bindChat" as Parameters<typeof _t>[0])}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }, []);
+
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
     setLoading(true);
-    channelsApi
-      .listFeishuChats()
-      .then((rows) => {
-        if (!cancelled) setChats(rows);
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return;
-        setChats([]);
-        toast.error(
-          `${t("project.bindChat" as Parameters<typeof t>[0])}: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+    void refreshChats().finally(() => {
+      if (!cancelled) setLoading(false);
+    });
     return () => {
       cancelled = true;
     };
-  }, [open, t]);
+  }, [open, refreshChats]);
 
   useEffect(() => {
     if (!open) {
@@ -82,7 +83,9 @@ export function BindChatDialog({
       setCreated(result);
       setNewName("");
       toast.success(t("project.createChatDone" as Parameters<typeof t>[0]));
-      onBound();
+      // Both surfaces: the panel behind, and this dialog's own list — the new
+      // group belongs under "existing groups" the moment it exists.
+      await Promise.all([refreshChats(), onBound()]);
     } catch (err) {
       toast.error(
         `${t("project.createChat" as Parameters<typeof t>[0])}: ${
@@ -103,7 +106,7 @@ export function BindChatDialog({
         external_chat_name: chat.name,
       });
       toast.success(t("project.chatBindingSaved" as Parameters<typeof t>[0]));
-      onBound();
+      await onBound();
       onOpenChange(false);
     } catch (err) {
       toast.error(
@@ -234,6 +237,9 @@ export function BindChatDialog({
                       variant="outline"
                       disabled={saving !== null}
                       onClick={() => void bind(chat)}
+                      // Sized to the 已关联 pill it alternates with, so the
+                      // rows keep one rhythm whichever state they are in.
+                      className="h-5 min-w-12 shrink-0 justify-center rounded-sm px-2 text-2xs font-medium"
                     >
                       {t("project.bindChatShort" as Parameters<typeof t>[0])}
                     </Button>
