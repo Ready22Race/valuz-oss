@@ -427,7 +427,7 @@ class CoordinationService:
                                 "status": "rework",
                                 "review_feedback": "member session errored (heartbeat)",
                             },
-                            None,
+                            ("in_progress", "in_review", "rework", "paused"),
                         )
                     )
                     # Same emitter as every other failure path — without it a

@@ -1017,7 +1017,10 @@ class LifecycleService:
                             feedback = manifest.get("summary") or "上次运行因错误中断,请重试。"
 
                             def _park(p: TaskPlan, *, _key: str = key or "") -> bool:
-                                if p.get(_key) is None:
+                                n = p.get(_key)
+                                if n is None or n.status not in (
+                                    "in_progress", "in_review", "rework", "paused"
+                                ):
                                     return False
                                 p.update_node(_key, status="rework", review_feedback=feedback)
                                 return True
@@ -1088,7 +1091,10 @@ class LifecycleService:
                 if task_row is not None:
 
                     def _park(p: TaskPlan, *, _key: str = key or "") -> bool:
-                        if p.get(_key) is None:
+                        n = p.get(_key)
+                        if n is None or n.status not in (
+                            "in_progress", "in_review", "rework", "paused"
+                        ):
                             return False
                         p.update_node(_key, status="rework", review_feedback="用户中断了该子任务")
                         return True

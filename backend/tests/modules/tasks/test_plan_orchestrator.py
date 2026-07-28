@@ -306,19 +306,12 @@ def test_rework_redispatch_folds_feedback_into_brief(db_factory, tmp_path) -> No
             project_id="w1",
             user_id=OWNER,
             lead_session_id="lead",
-            subtasks=[{"key": "a", "title": "A", "agent": "x", "goal": "build X"}],
+            subtasks=[
+                {"key": "a", "title": "A", "agent": "x", "goal": "build X", "status": "in_review"}
+            ],
         )
     )
     # node in_review → reject (no live member) → rework
-    asyncio.run(
-        planning.modify_plan(
-            task_id="t1",
-            project_id="w1",
-            user_id=OWNER,
-            lead_session_id="lead",
-            update=[{"key": "a", "status": "in_review"}],
-        )
-    )
     asyncio.run(
         planning.review_subtask(
             task_id="t1",
@@ -350,7 +343,7 @@ def test_review_approve_marks_done_and_unlocks(db_factory, tmp_path) -> None:
             user_id=OWNER,
             lead_session_id="lead",
             subtasks=[
-                {"key": "a", "title": "A", "agent": "x"},
+                {"key": "a", "title": "A", "agent": "x", "status": "in_review"},
                 {"key": "b", "title": "B", "agent": "y", "depends_on": ["a"]},
             ],
         )
@@ -554,7 +547,8 @@ def test_finish_task_allows_completion_when_all_done(db_factory, tmp_path) -> No
     try:
         row = db.execute(select(TaskRow).filter_by(id="t1")).scalars().one()
         plan = TaskPlan.from_dict(row.plan)
-        plan.update_node("a", status="done")
+        for st in ("in_progress", "in_review", "done"):  # legal chain
+            plan.update_node("a", status=st)
         row.plan = plan.to_dict()
         db.commit()
     finally:
@@ -829,7 +823,7 @@ def test_finalize_actor_member_error_sets_rework_not_failed(
             project_id="w1",
             user_id=OWNER,
             lead_session_id="lead-sess",
-            subtasks=[{"key": "a", "title": "A", "agent": "researcher"}],
+            subtasks=[{"key": "a", "title": "A", "agent": "researcher", "status": "in_progress"}],
         )
     )
     _make_member_run(db_factory)
@@ -1824,7 +1818,9 @@ def _mark_all_done(db_factory, task_id="t1") -> None:
         row = db.execute(select(TaskRow).filter_by(id=task_id)).scalars().one()
         plan = TaskPlan.from_dict(row.plan)
         for n in plan.nodes:
-            plan.update_node(n.key, status="done")
+            # Walk the legal chain — NODE_TRANSITIONS forbids planned → done.
+            for st in ("in_progress", "in_review", "done"):
+                plan.update_node(n.key, status=st)
         row.plan = plan.to_dict()
         db.commit()
     finally:
@@ -2759,3 +2755,96 @@ def test_stop_member_wakes_idle_member_with_shutdown(db_factory, tmp_path) -> No
     finally:
         mailbox_registry.unregister("lead-s")
         mailbox_registry.unregister("sB")
+
+
+def test_review_refuses_never_dispatched_node(db_factory, tmp_path) -> None:
+    """Approving a ``planned`` node would skip its work entirely — the
+    transition table refuses planned → done and the lead gets an actionable
+    error instead of a silently 'done' node."""
+    _make_task(db_factory, tmp_path)
+    asyncio.run(
+        planning.plan_task(
+            task_id="t1",
+            project_id="w1",
+            user_id=OWNER,
+            lead_session_id="lead",
+            subtasks=[{"key": "a", "title": "A", "agent": "x"}],
+        )
+    )
+    res = asyncio.run(
+        planning.review_subtask(
+            task_id="t1",
+            project_id="w1",
+            user_id=OWNER,
+            lead_session_id="lead",
+            decision="approve",
+            subtask_key="a",
+        )
+    )
+    assert "error" in res and "illegal subtask transition" in res["error"]
+    from valuz_agent.modules.tasks.plan import TaskPlan
+
+    db = db_factory()
+    try:
+        node = TaskPlan.from_dict(db.query(TaskRow).filter_by(id="t1").one().plan).get("a")
+        assert node is not None and node.status == "planned"
+    finally:
+        db.close()
+
+
+def test_review_refuses_halted_task(db_factory, tmp_path) -> None:
+    """A paused/stopped task's plan must not move under review — same
+    writable-status rationale as plan_commands."""
+    _make_task(db_factory, tmp_path)
+    asyncio.run(
+        planning.plan_task(
+            task_id="t1",
+            project_id="w1",
+            user_id=OWNER,
+            lead_session_id="lead",
+            subtasks=[{"key": "a", "title": "A", "agent": "x", "status": "in_review"}],
+        )
+    )
+    db = db_factory()
+    try:
+        db.query(TaskRow).filter_by(id="t1").update({"status": "paused"})
+        db.commit()
+    finally:
+        db.close()
+    res = asyncio.run(
+        planning.review_subtask(
+            task_id="t1",
+            project_id="w1",
+            user_id=OWNER,
+            lead_session_id="lead",
+            decision="approve",
+            subtask_key="a",
+        )
+    )
+    assert "error" in res and "review applies to an active task" in res["error"]
+
+
+def test_modify_plan_cannot_stamp_failed(db_factory, tmp_path) -> None:
+    """``failed`` is not in the unresolved set, so a failed-stamped node passes
+    the finish_task(completed) guard — planned work skipped by relabeling.
+    The table makes it unwritable through every door, modify_plan included."""
+    _make_task(db_factory, tmp_path)
+    asyncio.run(
+        planning.plan_task(
+            task_id="t1",
+            project_id="w1",
+            user_id=OWNER,
+            lead_session_id="lead",
+            subtasks=[{"key": "a", "title": "A", "agent": "x"}],
+        )
+    )
+    res = asyncio.run(
+        planning.modify_plan(
+            task_id="t1",
+            project_id="w1",
+            user_id=OWNER,
+            lead_session_id="lead",
+            update=[{"key": "a", "status": "failed"}],
+        )
+    )
+    assert "error" in res and "illegal subtask transition" in res["error"]

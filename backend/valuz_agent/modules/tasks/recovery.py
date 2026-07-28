@@ -39,7 +39,7 @@ from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 from valuz_agent.modules.tasks.member_state import (
     reconcile,
 )
-from valuz_agent.modules.tasks.plan import TaskPlan
+from valuz_agent.modules.tasks.plan import PlanError, TaskPlan
 
 logger = logging.getLogger(__name__)
 
@@ -205,7 +205,13 @@ class RecoveryService:
                             continue
                         if bump_attempts:
                             fields = {**fields, "attempts": n.attempts + 1}
-                        p.update_node(key, **fields)
+                        try:
+                            p.update_node(key, **fields)
+                        except PlanError:
+                            logger.warning(
+                                "reconcile: skipping illegal node write %s %s", key, fields
+                            )
+                            continue
                         changed = True
                     return changed
 
@@ -539,7 +545,10 @@ class RecoveryService:
                 if task is not None:
 
                     def _park(p: TaskPlan, *, _key: str = subtask_key or "") -> bool:
-                        if p.get(_key) is None:
+                        n = p.get(_key)
+                        if n is None or n.status not in (
+                            "in_progress", "in_review", "rework", "paused"
+                        ):
                             return False
                         p.update_node(
                             _key, status="rework", review_feedback="用户手动停止了该子任务"

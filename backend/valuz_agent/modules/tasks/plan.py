@@ -37,6 +37,27 @@ from typing import Any, Literal, get_args
 SubtaskStatus = Literal["planned", "in_progress", "in_review", "rework", "done", "failed", "paused"]
 SUBTASK_STATUSES: tuple[str, ...] = get_args(SubtaskStatus)
 
+# Legal node transitions, enforced inside :meth:`TaskPlan.update_node` (the one
+# choke point every status write already goes through). Same-status writes are
+# no-ops. The edges mirror the real writers:
+#   dispatch (planned/rework/paused → in_progress) · member done (→ in_review,
+#   also from paused via recovery reconcile) · failure/stop parks (→ rework) ·
+#   task pause (in_progress → paused) · review (→ done / rework / in_progress).
+# ``done`` is terminal (un-approving is a plan revision, not a status flip) and
+# ``failed`` has exactly one edge — ``→ planned`` — so a legacy stranded node
+# can be revived via modify_plan, while nothing can ever write ``failed``:
+# a failed-stamped node would silently pass the finish_task(completed) guard
+# (it is not "unresolved"), letting planned work be skipped by relabeling it.
+NODE_TRANSITIONS: dict[str, frozenset[str]] = {
+    "planned": frozenset({"in_progress"}),
+    "in_progress": frozenset({"in_review", "rework", "paused", "done"}),
+    "in_review": frozenset({"done", "rework", "in_progress"}),
+    "rework": frozenset({"in_progress", "in_review", "done"}),
+    "paused": frozenset({"in_progress", "in_review", "rework"}),
+    "done": frozenset(),
+    "failed": frozenset({"planned"}),
+}
+
 # The ONE definition of "is there work left?" — every caller goes through
 # :meth:`TaskPlan.unresolved_keys`. ``paused`` is load-bearing: omit it and a
 # task halted mid-flight closes ``completed`` with a subtask that never ran
@@ -225,8 +246,17 @@ class TaskPlan:
         node = self.get(key)
         if node is None:
             raise PlanError(f"no subtask with key {key!r}")
-        if "status" in fields and fields["status"] not in SUBTASK_STATUSES:
-            raise PlanError(f"invalid status {fields['status']!r}")
+        if "status" in fields:
+            new_status = fields["status"]
+            if new_status not in SUBTASK_STATUSES:
+                raise PlanError(f"invalid status {new_status!r}")
+            if new_status != node.status and new_status not in NODE_TRANSITIONS.get(
+                node.status, frozenset()
+            ):
+                raise PlanError(
+                    f"illegal subtask transition {node.status!r} → {new_status!r} "
+                    f"for {key!r}"
+                )
         for name, value in fields.items():
             if not hasattr(node, name):
                 raise PlanError(f"unknown subtask field {name!r}")

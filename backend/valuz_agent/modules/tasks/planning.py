@@ -369,6 +369,10 @@ async def review_subtask(
         task_row = await task_ds.get_task_by_project(user_id, project_id, task_id)
         if task_row is None:
             return {"error": f"task {task_id!r} not found"}
+        if task_row.status != "active":
+            # Same rationale as plan_commands' writable-status guard: a halted
+            # (paused/stopped/completed) task's plan must not move under review.
+            return {"error": f"task is {task_row.status!r} — review applies to an active task"}
         plan = TaskPlan.from_dict(task_row.plan)
         key = subtask_key
         if not key and session_id:
@@ -397,6 +401,10 @@ async def review_subtask(
             # returns a 500 instead of the same actionable error phase 1 gives.
             if task_row is None:
                 return {"error": f"task {task_id!r} not found"}
+            if task_row.status != "active":
+                return {
+                    "error": f"task is {task_row.status!r} — review applies to an active task"
+                }
             node = TaskPlan.from_dict(task_row.plan).get(key)
             if node is None:
                 return {"error": f"no subtask with key {key!r}"}
@@ -407,15 +415,20 @@ async def review_subtask(
                 p.update_node(key, status="done", review_feedback=None)
                 return True
 
-            persisted = await persist_plan(
-                task_ds,
-                event_ds,
-                task_row,
-                mutate=_approve,
-                actor=lead_session_id,
-                session_id=lead_session_id,
-                user_id=user_id,
-            )
+            try:
+                persisted = await persist_plan(
+                    task_ds,
+                    event_ds,
+                    task_row,
+                    mutate=_approve,
+                    actor=lead_session_id,
+                    session_id=lead_session_id,
+                    user_id=user_id,
+                )
+            except PlanError as exc:
+                # e.g. approving a never-dispatched node — the transition table
+                # (plan.NODE_TRANSITIONS) refuses planned → done.
+                return {"error": f"invalid review: {exc}"}
             if persisted is None:
                 return {"error": f"no subtask with key {key!r}"}
             if target_session:
@@ -486,6 +499,8 @@ async def review_subtask(
         # guaranteed to still exist.
         if task_row is None:
             return {"error": f"task {task_id!r} not found"}
+        if task_row.status != "active":
+            return {"error": f"task is {task_row.status!r} — review applies to an active task"}
         if TaskPlan.from_dict(task_row.plan).get(key) is None:
             return {"error": f"no subtask with key {key!r}"}
 
@@ -499,15 +514,18 @@ async def review_subtask(
             )
             return True
 
-        persisted = await persist_plan(
-            task_ds,
-            event_ds,
-            task_row,
-            mutate=_rework,
-            actor=lead_session_id,
-            session_id=lead_session_id,
-            user_id=user_id,
-        )
+        try:
+            persisted = await persist_plan(
+                task_ds,
+                event_ds,
+                task_row,
+                mutate=_rework,
+                actor=lead_session_id,
+                session_id=lead_session_id,
+                user_id=user_id,
+            )
+        except PlanError as exc:
+            return {"error": f"invalid review: {exc}"}
         if persisted is None:
             return {"error": f"no subtask with key {key!r}"}
         await event_ds.append_event(
@@ -597,8 +615,8 @@ async def mark_node_dispatched(
 
         def _dispatch(p: TaskPlan) -> bool:
             node = p.get(subtask_key)
-            if node is None:
-                return False
+            if node is None or node.status not in ("planned", "rework", "paused"):
+                return False  # mirrors the resolve_dispatch_node gate
             p.update_node(
                 subtask_key,
                 status="in_progress",
