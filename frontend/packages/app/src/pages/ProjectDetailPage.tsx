@@ -1730,7 +1730,13 @@ export const ProjectDetailPage = () => {
 
       <BindChatDialog
         open={bindChatOpen}
-        onOpenChange={setBindChatOpen}
+        onOpenChange={(next) => {
+          setBindChatOpen(next);
+          // Refresh on close as well: unlinking or dissolving a group inside
+          // the dialog changes the panel too, and a stale panel after closing
+          // reads as the action not having happened.
+          if (!next) void loadChatBindings();
+        }}
         projectId={id}
         onBound={loadChatBindings}
       />

@@ -556,24 +556,25 @@ async def delete_feishu_chat(
     user_id: Annotated[str, Depends(get_current_user_id)],
     channel_instance_id: str = "feishu-main",
 ) -> None:
-    """Delete a group Valuz created, and drop its binding.
+    """Dissolve a group Valuz created, and drop its binding if it has one.
 
-    Refused for a group somebody else made: the bot is not its owner, and
-    unbinding is the most this side may do to something it does not own.
+    Deliberately not conditioned on a binding existing: a group Valuz created
+    can be unbound (or never have been bound, if the binding write failed after
+    the group was made), and those orphans are exactly what needs cleaning up.
+    Ownership is the gate — for a group somebody else made the request is
+    refused, since the bot is not its owner and dissolving it is not
+    recoverable.
     """
     from valuz_agent.integrations.feishu_long_connection import (
         delete_feishu_chat as delete_chat,
     )
 
     async with async_unit_of_work() as db:
-        chat_ds = ChannelChatBindingDatastore(db)
-        binding = await chat_ds.get(
+        binding = await ChannelChatBindingDatastore(db).get(
             user_id=user_id,
             channel_instance_id=channel_instance_id,
             external_chat_id=external_chat_id,
         )
-        if binding is None:
-            raise HTTPException(status_code=404, detail="chat binding not found")
         app_binding = next(
             iter(
                 await AgentChannelBindingDatastore(db).list_enabled(
@@ -590,13 +591,12 @@ async def delete_feishu_chat(
     if app_binding is None or not secret.app_secret:
         raise HTTPException(status_code=404, detail="feishu binding not found")
 
-    if not binding.created_by_valuz and not await _bot_owns_chat(
+    owns = bool(binding is not None and binding.created_by_valuz) or await _bot_owns_chat(
         app_id=app_binding.bot_id,
         app_secret=secret.app_secret,
         chat_id=external_chat_id,
-    ):
-        # Unbinding is the most this side may do to a group it does not own —
-        # dissolving somebody's group by mistake is not recoverable.
+    )
+    if not owns:
         raise HTTPException(
             status_code=409,
             detail="this group was not created by Valuz; unlink it instead",
@@ -611,12 +611,13 @@ async def delete_feishu_chat(
     except ChannelConfigError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    async with async_unit_of_work() as db:
-        await ChannelChatBindingDatastore(db).delete(
-            user_id=user_id,
-            channel_instance_id=channel_instance_id,
-            external_chat_id=external_chat_id,
-        )
+    if binding is not None:
+        async with async_unit_of_work() as db:
+            await ChannelChatBindingDatastore(db).delete(
+                user_id=user_id,
+                channel_instance_id=channel_instance_id,
+                external_chat_id=external_chat_id,
+            )
 
 
 @router.delete("/chat-bindings", status_code=204)

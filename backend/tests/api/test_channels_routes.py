@@ -522,3 +522,66 @@ def test_delete_feishu_chat_refuses_a_group_valuz_did_not_create(monkeypatch) ->
 
     assert response.status_code == 409
     assert deleted == []
+
+
+def test_delete_feishu_chat_works_without_a_binding(monkeypatch) -> None:
+    """A Valuz-created group can be unbound — or never bound, if the binding
+    write failed after the group was made. Those orphans are exactly what needs
+    cleaning up, so deleting must not require a binding row."""
+    _FakeAgentChannelBindingDatastore.binding = SimpleNamespace(
+        id="binding-1",
+        owner_user_id="u1",
+        platform="feishu",
+        channel_instance_id="feishu-main",
+        agent_slug="developer",
+        bot_id="cli_app_1",
+        secret_ref="channel/feishu/developer",
+        enabled=True,
+        bot_name=None,
+        ws_url=None,
+    )
+    deleted: list[str] = []
+
+    class _NoChatBindings:
+        def __init__(self, _db: object) -> None:
+            pass
+
+        async def get(self, **_keys):
+            return None
+
+        async def delete(self, **_keys) -> bool:  # pragma: no cover
+            raise AssertionError("nothing to unbind")
+
+    async def fake_delete(**kwargs):
+        deleted.append(kwargs["chat_id"])
+
+    async def fake_list(*, app_id: str, app_secret: str):
+        from valuz_agent.integrations.feishu_long_connection import FeishuChat
+
+        return [FeishuChat(chat_id="oc-orphan", name="孤儿群", bot_owned=True)]
+
+    monkeypatch.setattr(channels_routes, "async_unit_of_work", lambda: _Uow())
+    monkeypatch.setattr(
+        channels_routes,
+        "AgentChannelBindingDatastore",
+        _FakeAgentChannelBindingDatastore,
+    )
+    monkeypatch.setattr(channels_routes, "ChannelChatBindingDatastore", _NoChatBindings)
+    monkeypatch.setattr(
+        channels_routes.secret_store,
+        "get",
+        lambda user_id, ref: json.dumps({"app_secret": "app-secret"}),
+    )
+    import valuz_agent.integrations.feishu_long_connection as feishu_mod
+
+    monkeypatch.setattr(feishu_mod, "delete_feishu_chat", fake_delete)
+    monkeypatch.setattr(feishu_mod, "list_feishu_chats", fake_list)
+
+    app = FastAPI()
+    app.include_router(channels_routes.router)
+    app.dependency_overrides[channels_routes.get_current_user_id] = lambda: "u1"
+
+    response = TestClient(app).delete("/v1/channels/feishu/chats/oc-orphan")
+
+    assert response.status_code == 204
+    assert deleted == ["oc-orphan"]
