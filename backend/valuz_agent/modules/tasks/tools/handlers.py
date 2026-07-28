@@ -31,7 +31,7 @@ from src.core.tools import ExecContext, ToolHandler
 from valuz_agent.adapters.agent_resolver import summarize_role
 from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.infra.db import async_unit_of_work
-from valuz_agent.modules.tasks import messaging, planning, queries
+from valuz_agent.modules.tasks import messaging, plan_commands, planning, queries
 from valuz_agent.modules.tasks.datastore import TaskDatastore
 from valuz_agent.modules.tasks.mailbox import mailbox_registry
 from valuz_agent.modules.tasks.outcome import Failure
@@ -149,7 +149,9 @@ async def _resolve_plan_writer_task(
     Returns ``(task_row, project_id, task_id)`` on success or
     ``ToolResult(is_error=True)`` on any failure.
 
-    Read-only callers (get_plan) should use ``_resolve_plan_reader_task`` instead.
+    Plan reads/writes do NOT use this any more — they go through
+    ``plan_commands``, the single authorized door both transports share.
+    What is left here is the state-transition pair (commit / abandon).
     """
     user_id = ctx.user_id
     sess = await data_reader().get_session(user_id, ctx.session_id)
@@ -177,37 +179,6 @@ async def _resolve_plan_writer_task(
     gate_err = _check_plan_writer_gate(sess, task)
     if gate_err is not None:
         return gate_err
-    return task, task.project_id, task_id
-
-
-async def _resolve_plan_reader_task(
-    ctx: ExecContext, args: dict[str, Any]
-) -> tuple[Any, str, str] | ToolResult:
-    """Loose variant of ``_resolve_plan_writer_task`` for read-only plan calls.
-
-    Permits any caller in the task's project (chat or lead). Useful for
-    get_plan: knowing your own draft / a project mate's plan is fine.
-    """
-    user_id = ctx.user_id
-    sess = await data_reader().get_session(user_id, ctx.session_id)
-    if sess is None:
-        return ToolResult(content="plan tool: caller session not found", is_error=True)
-
-    v: dict[str, Any] = (sess.metadata or {}).get("valuz", {})
-    task_id = args.get("task_id") or v.get("task_id") or ""
-    if not task_id:
-        return ToolResult(content="plan tool: task_id is required", is_error=True)
-
-
-    async with async_unit_of_work(commit=False) as db:
-        task_ds = TaskDatastore(db)
-        task = await task_ds.get_task(user_id, task_id)
-    if task is None:
-        return ToolResult(content=f"plan tool: task {task_id!r} not found", is_error=True)
-
-    failure = gate.check_plan_reader_gate(sess, task)
-    if failure is not None:
-        return ToolResult(content=failure.reason, is_error=True)
     return task, task.project_id, task_id
 
 
@@ -811,79 +782,71 @@ async def _finish_task_handler(
     return ToolResult(content="Task closed. Events appended. Do not continue working.")
 
 
+async def _resolve_plan_task_id(ctx: ExecContext, args: dict[str, Any]) -> str | None:
+    """The task a plan tool is aimed at: explicit for chat callers, from the
+    session's own metadata for a lead. Authorization is NOT decided here — that
+    belongs to ``plan_commands``, which is the single door both transports use."""
+    if task_id := (args.get("task_id") or ""):
+        return str(task_id)
+    sess = await data_reader().get_session(ctx.user_id, ctx.session_id)
+    if sess is None:
+        return None
+    return (sess.metadata or {}).get("valuz", {}).get("task_id") or None
+
+
+def _plan_result(result: dict[str, Any]) -> ToolResult:
+    return ToolResult(content=json.dumps(result, ensure_ascii=False), is_error="error" in result)
+
+
 async def _plan_task_handler(
     orch: TaskOrchestrator, args: dict[str, Any], ctx: ExecContext
 ) -> ToolResult:
-    resolved = await _resolve_plan_writer_task(ctx, args)
-    if isinstance(resolved, ToolResult):
-        return resolved
-    task, project_id, task_id = resolved
-
-    # D10 belt-and-suspenders: once a task is committed (committed_at set
-    # OR plan_pre_committed implicit by status=active), reject plan_task.
-    # The committed brief tells the lead not to call this anyway.
-    if task.committed_at is not None or task.status == "active":
-
-        if not TaskPlan.from_dict(task.plan).is_empty:
-            return ToolResult(
-                content=(
-                    "plan_task: this task already has a committed plan — "
-                    "use modify_plan to change it (handler rejects re-planning "
-                    "a non-empty committed plan)"
-                ),
-                is_error=True,
-            )
-
-    subtasks = args.get("subtasks") or []
-    result = await planning.plan_task(
-        task_id=task_id,
-        project_id=project_id,
-        lead_session_id=ctx.session_id,
-        subtasks=subtasks,
-        user_id=ctx.user_id,
-    )
-    return ToolResult(
-        content=json.dumps(result, ensure_ascii=False), is_error="error" in result
+    task_id = await _resolve_plan_task_id(ctx, args)
+    if not task_id:
+        return ToolResult(
+            content=(
+                "plan tool: task_id is required (chat callers must pass it "
+                "explicitly; lead callers must have it in session metadata)"
+            ),
+            is_error=True,
+        )
+    return _plan_result(
+        await plan_commands.plan_task(
+            plan_commands.AgentCaller(ctx.session_id, ctx.user_id),
+            task_id=task_id,
+            subtasks=args.get("subtasks") or [],
+        )
     )
 
 
 async def _get_plan_handler(
     orch: TaskOrchestrator, args: dict[str, Any], ctx: ExecContext
 ) -> ToolResult:
-    # get_plan is read-only: any project member can read.
-    resolved = await _resolve_plan_reader_task(ctx, args)
-    if isinstance(resolved, ToolResult):
-        return resolved
-    _task, project_id, task_id = resolved
-    result = await planning.get_plan(
-        task_id=task_id, project_id=project_id, user_id=ctx.user_id
-    )
-    return ToolResult(
-        content=json.dumps(result, ensure_ascii=False), is_error="error" in result
+    task_id = await _resolve_plan_task_id(ctx, args)
+    if not task_id:
+        return ToolResult(content="plan tool: task_id is required", is_error=True)
+    return _plan_result(
+        await plan_commands.get_plan(
+            plan_commands.AgentCaller(ctx.session_id, ctx.user_id), task_id=task_id
+        )
     )
 
 
 async def _modify_plan_handler(
     orch: TaskOrchestrator, args: dict[str, Any], ctx: ExecContext
 ) -> ToolResult:
-    resolved = await _resolve_plan_writer_task(ctx, args)
-    if isinstance(resolved, ToolResult):
-        return resolved
-    _task, project_id, task_id = resolved
-    expected_version_arg = args.get("expected_version")
-    result = await planning.modify_plan(
-        task_id=task_id,
-        project_id=project_id,
-        lead_session_id=ctx.session_id,
-        add=args.get("add"),
-        update=args.get("update"),
-        expected_version=(
-            int(expected_version_arg) if expected_version_arg is not None else None
-        ),
-        user_id=ctx.user_id,
-    )
-    return ToolResult(
-        content=json.dumps(result, ensure_ascii=False), is_error="error" in result
+    task_id = await _resolve_plan_task_id(ctx, args)
+    if not task_id:
+        return ToolResult(content="plan tool: task_id is required", is_error=True)
+    expected = args.get("expected_version")
+    return _plan_result(
+        await plan_commands.modify_plan(
+            plan_commands.AgentCaller(ctx.session_id, ctx.user_id),
+            task_id=task_id,
+            add=args.get("add"),
+            update=args.get("update"),
+            expected_version=int(expected) if expected is not None else None,
+        )
     )
 
 

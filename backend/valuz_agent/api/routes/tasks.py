@@ -33,7 +33,7 @@ from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.infra.db import async_unit_of_work, get_async_session
 from valuz_agent.infra.sse import shielded
 from valuz_agent.modules.automations.datastore import AutomationDatastore
-from valuz_agent.modules.tasks import messaging, planning
+from valuz_agent.modules.tasks import messaging, plan_commands
 from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow
 from valuz_agent.modules.tasks.orchestrator import task_orchestrator
 from valuz_agent.modules.tasks.service import TaskService
@@ -275,6 +275,18 @@ async def kickoff_task(
     resp = TaskResponse.model_validate(row)
     resp.trigger = TaskTrigger(type=row.trigger_type or "user")
     return resp
+
+
+
+def _plan_error_status(result: dict[str, Any]) -> int:
+    """Map a plan-command error onto a status code.
+
+    The command service returns one error shape; only the route knows about
+    HTTP. "not found" covers both a missing task and one owned by somebody
+    else — deliberately indistinguishable — so it is a 404; every other
+    rejection is the caller asking for something the rules forbid.
+    """
+    return 404 if "not found" in str(result.get("error", "")) else 400
 
 
 @router.get("/v1/projects/{project_id}/tasks", response_model=dict[str, list[TaskResponse]])
@@ -696,21 +708,18 @@ async def plan_task_route(
     user_id: str = Depends(get_current_user_id),
 ) -> PlanResponse:
     """Lay down the initial plan (errors if a plan with progress already exists)."""
-    async with async_unit_of_work(commit=False) as db:
-        task = await TaskService(db).get_owned_task(user_id, task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
     if not payload.subtasks:
         raise HTTPException(status_code=422, detail="subtasks is required and must be non-empty")
-    result = await planning.plan_task(
-        task_id=task_id,
-        project_id=task.project_id,
-        lead_session_id=payload.lead_session_id,
-        subtasks=payload.subtasks,
-        user_id=user_id,
+    # Through the command service, NOT ``planning`` directly: it is the one
+    # place that decides who may change a plan and when. ``payload
+    # .lead_session_id`` is deliberately NOT used as an identity — it arrives
+    # in the request body, so gating on it would be authorization theatre. A
+    # human client is authorized by owning the task (OwnerCaller).
+    result = await plan_commands.plan_task(
+        plan_commands.OwnerCaller(user_id), task_id=task_id, subtasks=payload.subtasks
     )
     if "error" in result:
-        raise HTTPException(status_code=400, detail=result["error"])
+        raise HTTPException(status_code=_plan_error_status(result), detail=result["error"])
     return PlanResponse(
         subtasks=result["subtasks"],
         ready=result["ready"],
@@ -726,18 +735,12 @@ async def modify_plan_route(
 ) -> PlanResponse:
     """Patch the plan: add nodes / update existing nodes. CAS via
     ``expected_version`` — returns 409 on conflict."""
-    async with async_unit_of_work(commit=False) as db:
-        task = await TaskService(db).get_owned_task(user_id, task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
-    result = await planning.modify_plan(
+    result = await plan_commands.modify_plan(
+        plan_commands.OwnerCaller(user_id),
         task_id=task_id,
-        project_id=task.project_id,
-        lead_session_id=payload.lead_session_id,
         add=payload.add,
         update=payload.update,
         expected_version=payload.expected_version,
-        user_id=user_id,
     )
     if result.get("error") == "PLAN_VERSION_CONFLICT":
         raise HTTPException(status_code=409, detail=result)
@@ -756,17 +759,11 @@ async def get_plan_route(
     user_id: str = Depends(get_current_user_id),
 ) -> PlanResponse:
     """Read the plan snapshot + ready keys + counts + current_version."""
-    async with async_unit_of_work(commit=False) as db:
-        task = await TaskService(db).get_owned_task(user_id, task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
-    result = await planning.get_plan(
-        task_id=task_id,
-        project_id=task.project_id,
-        user_id=user_id,
+    result = await plan_commands.get_plan(
+        plan_commands.OwnerCaller(user_id), task_id=task_id
     )
     if "error" in result:
-        raise HTTPException(status_code=400, detail=result["error"])
+        raise HTTPException(status_code=_plan_error_status(result), detail=result["error"])
     return PlanResponse(
         subtasks=result["subtasks"],
         ready=result["ready"],
