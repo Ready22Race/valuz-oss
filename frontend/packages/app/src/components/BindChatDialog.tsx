@@ -282,6 +282,54 @@ export function BindChatDialog({
                       </div>
                     )}
                   </div>
+                  {/* Actions sit ahead of the state tag and surface on
+                      hover, so a row reads as name → what you can do → what it
+                      is, and stays quiet until pointed at. */}
+                  <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                    {/* Joining matters most for a Valuz-created group, whose
+                        only member is the bot. */}
+                    <button
+                      type="button"
+                      onClick={() => void join(chat)}
+                      className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-2"
+                      title={t(
+                        "project.createChatJoin" as Parameters<typeof t>[0],
+                      )}
+                      aria-label={t(
+                        "project.createChatJoin" as Parameters<typeof t>[0],
+                      )}
+                    >
+                      <LogIn className="h-3.5 w-3.5" />
+                    </button>
+                    {boundHere && (
+                      <button
+                        type="button"
+                        disabled={saving !== null}
+                        onClick={() => void unbind(chat)}
+                        className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-2"
+                        title={t("project.unbindChat" as Parameters<typeof t>[0])}
+                        aria-label={t(
+                          "project.unbindChat" as Parameters<typeof t>[0],
+                        )}
+                      >
+                        <Unlink className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                    {chat.created_by_valuz && (
+                      <button
+                        type="button"
+                        disabled={saving !== null}
+                        onClick={() => setDeleteTarget(chat)}
+                        className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-red-50 hover:text-red-600"
+                        title={t("project.deleteChat" as Parameters<typeof t>[0])}
+                        aria-label={t(
+                          "project.deleteChat" as Parameters<typeof t>[0],
+                        )}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
                   {boundHere ? (
                     // State, not an action — the tag taxonomy carries it; a
                     // disabled button only looked like one you may not press.
@@ -305,56 +353,6 @@ export function BindChatDialog({
                       {t("project.bindChatShort" as Parameters<typeof t>[0])}
                     </Button>
                   )}
-                  {/* Secondary actions stay out of the way until pointed at —
-                      joining matters most for a Valuz-created group, whose
-                      only member is the bot. */}
-                  <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
-                    <button
-                      type="button"
-                      onClick={() => void join(chat)}
-                      className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-muted"
-                      title={t(
-                        "project.createChatJoin" as Parameters<typeof t>[0],
-                      )}
-                      aria-label={t(
-                        "project.createChatJoin" as Parameters<typeof t>[0],
-                      )}
-                    >
-                      <LogIn className="h-3.5 w-3.5" />
-                    </button>
-                    {boundHere && (
-                      <button
-                        type="button"
-                        disabled={saving !== null}
-                        onClick={() => void unbind(chat)}
-                        className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-muted"
-                        title={t(
-                          "project.unbindChat" as Parameters<typeof t>[0],
-                        )}
-                        aria-label={t(
-                          "project.unbindChat" as Parameters<typeof t>[0],
-                        )}
-                      >
-                        <Unlink className="h-3.5 w-3.5" />
-                      </button>
-                    )}
-                    {chat.created_by_valuz && (
-                      <button
-                        type="button"
-                        disabled={saving !== null}
-                        onClick={() => setDeleteTarget(chat)}
-                        className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-red-50 hover:text-red-600"
-                        title={t(
-                          "project.deleteChat" as Parameters<typeof t>[0],
-                        )}
-                        aria-label={t(
-                          "project.deleteChat" as Parameters<typeof t>[0],
-                        )}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    )}
-                  </div>
                 </div>
               );
             })}
