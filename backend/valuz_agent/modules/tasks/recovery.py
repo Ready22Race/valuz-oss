@@ -141,7 +141,9 @@ class RecoveryService:
             lead_session_id = lead_run.session_id
 
             plan = TaskPlan.from_dict(task.plan)
-            plan_dirty = False
+            # (key, fields, bump_attempts) — applied inside persist_plan's CAS
+            # closure; ``plan`` above only feeds the reconcile classification.
+            mutations: list[tuple[str, dict[str, Any], bool]] = []
             for run in runs:
                 if run.kind != "subtask" or run.status not in ("active", "paused"):
                     continue
@@ -174,14 +176,11 @@ class RecoveryService:
                     )
                 if node is not None and rec.node_status:
                     fields: dict[str, Any] = {"status": rec.node_status}
-                    if rec.resume:
-                        fields["attempts"] = node.attempts + 1
                     if rec.reason and rec.node_status == "rework":
                         fields["review_feedback"] = rec.reason
                     # ``node`` was looked up BY ``run.subtask_key``, so a
                     # non-None node means the key is a real str.
-                    plan.update_node(node.key, **fields)
-                    plan_dirty = True
+                    mutations.append((node.key, fields, rec.resume))
                 if rec.deliver_member_done and manifest is not None:
                     member_done.append((run.session_id, manifest))
                 if rec.resume:
@@ -196,12 +195,25 @@ class RecoveryService:
                     )
                 summary.append(f"- {run.subtask_key}({run.agent_slug}): {rec.disposition}")
 
-            if plan_dirty:
+            if mutations:
+
+                def _apply(p: TaskPlan) -> bool:
+                    changed = False
+                    for key, fields, bump_attempts in mutations:
+                        n = p.get(key)
+                        if n is None:
+                            continue
+                        if bump_attempts:
+                            fields = {**fields, "attempts": n.attempts + 1}
+                        p.update_node(key, **fields)
+                        changed = True
+                    return changed
+
                 await planning.persist_plan(
                     task_ds,
                     event_ds,
                     task,
-                    plan,
+                    mutate=_apply,
                     actor="system",
                     session_id=lead_session_id,
                     user_id=user_id,
@@ -339,22 +351,23 @@ class RecoveryService:
             # a parked node back to ``in_progress`` if its run survived;
             # otherwise it stays ``paused`` and is re-dispatchable (ready_keys +
             # resolve_dispatch_node both accept ``paused``).
-            plan = TaskPlan.from_dict(task.plan)
-            parked = 0
-            for node in plan.nodes:
-                if node.status == "in_progress":
-                    plan.update_node(node.key, status="paused")
-                    parked += 1
-            if parked:
-                await planning.persist_plan(
-                    task_ds,
-                    event_ds,
-                    task,
-                    plan,
-                    actor="user",
-                    session_id=lead_session_id,
-                    user_id=user_id,
-                )
+            def _park_running(p: TaskPlan) -> bool:
+                parked = 0
+                for node in p.nodes:
+                    if node.status == "in_progress":
+                        p.update_node(node.key, status="paused")
+                        parked += 1
+                return parked > 0
+
+            await planning.persist_plan(
+                task_ds,
+                event_ds,
+                task,
+                mutate=_park_running,
+                actor="user",
+                session_id=lead_session_id,
+                user_id=user_id,
+            )
             if target_status == "stopped":
                 # Terminal write — goes through finalize_task so the status
                 # flip rides the task_state guard AND ``task.finalized`` is
@@ -524,22 +537,24 @@ class RecoveryService:
             if subtask_key:
                 task = await task_ds.get_task_by_project(user_id, project_id, task_id)
                 if task is not None:
-                    plan = TaskPlan.from_dict(task.plan)
-                    if plan.get(subtask_key) is not None:
-                        plan.update_node(
-                            subtask_key,
-                            status="rework",
-                            review_feedback="用户手动停止了该子任务",
+
+                    def _park(p: TaskPlan, *, _key: str = subtask_key or "") -> bool:
+                        if p.get(_key) is None:
+                            return False
+                        p.update_node(
+                            _key, status="rework", review_feedback="用户手动停止了该子任务"
                         )
-                        await planning.persist_plan(
-                            task_ds,
-                            event_ds,
-                            task,
-                            plan,
-                            actor="user",
-                            session_id=lead_session_id or None,
-                            user_id=user_id,
-                        )
+                        return True
+
+                    await planning.persist_plan(
+                        task_ds,
+                        event_ds,
+                        task,
+                        mutate=_park,
+                        actor="user",
+                        session_id=lead_session_id or None,
+                        user_id=user_id,
+                    )
             await record_subtask_stopped(
                 event_ds,
                 user_id=user_id,

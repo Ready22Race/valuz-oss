@@ -377,8 +377,9 @@ class CoordinationService:
             if not any(k in runs_by_key for k in pending_keys):
                 return {}  # nothing in-flight for these keys — don't touch the plan
             task = await task_ds.get_task_by_project(user_id, project_id, task_id)
-            plan = TaskPlan.from_dict(task.plan) if task is not None else None
-            plan_dirty = False
+            # Node mutations are recorded as (key, fields, only_from) and
+            # applied inside persist_plan's CAS closure against the fresh plan.
+            mutations: list[tuple[str, dict[str, Any], tuple[str, ...] | None]] = []
             for key in pending_keys:
                 run = runs_by_key.get(key)
                 if run is None:
@@ -390,7 +391,6 @@ class CoordinationService:
                     getattr(ks, "status", None) if ks is not None else None,
                     getattr(ks, "stop_reason", None) if ks is not None else None,
                 )
-                node = plan.get(key) if plan is not None else None
                 if disp == "completed":
                     try:
                         manifest = await collect_manifest(
@@ -409,9 +409,7 @@ class CoordinationService:
                     await run_ds.update_run_by_session(
                         session_id=run.session_id, status="completed", result_manifest=manifest
                     )
-                    if node is not None and node.status in ("in_progress", "rework"):
-                        plan.update_node(key, status="in_review")  # type: ignore[union-attr]
-                        plan_dirty = True
+                    mutations.append((key, {"status": "in_review"}, ("in_progress", "rework")))
                     out[key] = {
                         "subtask_key": key,
                         "session_id": run.session_id,
@@ -422,13 +420,16 @@ class CoordinationService:
                     }
                 elif disp == "failed":
                     await run_ds.update_run_by_session(session_id=run.session_id, status="archived")
-                    if node is not None:
-                        plan.update_node(  # type: ignore[union-attr]
+                    mutations.append(
+                        (
                             key,
-                            status="rework",
-                            review_feedback="member session errored (heartbeat)",
+                            {
+                                "status": "rework",
+                                "review_feedback": "member session errored (heartbeat)",
+                            },
+                            None,
                         )
-                        plan_dirty = True
+                    )
                     # Same emitter as every other failure path — without it a
                     # heartbeat-detected failure reworked the node invisibly.
                     agent_name = await resolve_agent_display_name(
@@ -454,12 +455,23 @@ class CoordinationService:
                         "summary": "member session errored",
                         "artifacts": [],
                     }
-            if plan_dirty and plan is not None and task is not None:
+            if mutations and task is not None:
+
+                def _apply(p: TaskPlan) -> bool:
+                    changed = False
+                    for key, fields, only_from in mutations:
+                        n = p.get(key)
+                        if n is None or (only_from and n.status not in only_from):
+                            continue
+                        p.update_node(key, **fields)
+                        changed = True
+                    return changed
+
                 await planning.persist_plan(
                     task_ds,
                     event_ds,
                     task,
-                    plan,
+                    mutate=_apply,
                     actor="system",
                     session_id=None,
                     user_id=user_id,

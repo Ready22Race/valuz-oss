@@ -165,6 +165,42 @@ class TaskDatastore:
         await async_commit_with_retry(self._db, where="TaskDatastore.update_task")
         return row
 
+    async def cas_update_plan(
+        self, user_id: str, row: TaskRow, plan: dict[str, Any], *, expected_version: int
+    ) -> bool:
+        """Compare-and-swap plan write: succeeds only at ``expected_version``.
+
+        The plan column is a whole-document JSON write, so without the version
+        predicate two concurrent writers (lead loop vs heartbeat vs stop) each
+        read-modify-write and the loser's nodes are silently reverted. Every
+        plan write goes through here and bumps ``plan_version`` by 1 — the
+        version is the write counter, not just the structural-edit counter.
+
+        After the statement the ORM row is refreshed IN PLACE (sessions run
+        ``expire_on_commit=False``, so a plain re-select would return the same
+        stale identity-mapped object): on success the caller sees the new
+        values, on conflict the winner's — ready for a retry loop. Raises if
+        the row vanished (task deleted concurrently).
+
+        Returns True when the row was written.
+        """
+        res = cast(
+            "CursorResult[Any]",
+            await self._db.execute(
+                update(TaskRow)
+                .where(
+                    TaskRow.id == row.id,
+                    TaskRow.user_id == user_id,
+                    TaskRow.plan_version == expected_version,
+                )
+                .values(plan=plan, plan_version=expected_version + 1, updated_at=now_ms())
+                .execution_options(synchronize_session=False)
+            ),
+        )
+        await async_commit_with_retry(self._db, where="TaskDatastore.cas_update_plan")
+        await self._db.refresh(row)
+        return bool(res.rowcount)
+
     async def update_task_status(self, user_id: str, task_id: str, status: str) -> bool:
         """Update task status, enforcing the ``task_state`` state machine.
 

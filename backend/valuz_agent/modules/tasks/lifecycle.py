@@ -1000,24 +1000,23 @@ class LifecycleService:
                             user_id, project_id, task_id
                         )
                         if task_row is not None:
-                            plan = TaskPlan.from_dict(task_row.plan)
-                            if plan.get(key) is not None:
-                                plan.update_node(
-                                    key,
-                                    status="rework",
-                                    review_feedback=(
-                                        manifest.get("summary") or "上次运行因错误中断,请重试。"
-                                    ),
-                                )
-                                await planning.persist_plan(
-                                    task_ds,
-                                    event_ds,
-                                    task_row,
-                                    plan,
-                                    actor=agent_slug,
-                                    session_id=session_id,
-                                    user_id=user_id,
-                                )
+                            feedback = manifest.get("summary") or "上次运行因错误中断,请重试。"
+
+                            def _park(p: TaskPlan, *, _key: str = key or "") -> bool:
+                                if p.get(_key) is None:
+                                    return False
+                                p.update_node(_key, status="rework", review_feedback=feedback)
+                                return True
+
+                            await planning.persist_plan(
+                                task_ds,
+                                event_ds,
+                                task_row,
+                                mutate=_park,
+                                actor=agent_slug,
+                                session_id=session_id,
+                                user_id=user_id,
+                            )
                     agent_name = await resolve_agent_display_name(
                         project_id, agent_slug, user_id
                     )
@@ -1073,22 +1072,22 @@ class LifecycleService:
             if key:
                 task_row = await task_ds.get_task_by_project(user_id, project_id, task_id)
                 if task_row is not None:
-                    plan = TaskPlan.from_dict(task_row.plan)
-                    if plan.get(key) is not None:
-                        plan.update_node(
-                            key,
-                            status="rework",
-                            review_feedback="用户中断了该子任务",
-                        )
-                        await planning.persist_plan(
-                            task_ds,
-                            event_ds,
-                            task_row,
-                            plan,
-                            actor="user",
-                            session_id=session_id,
-                            user_id=user_id,
-                        )
+
+                    def _park(p: TaskPlan, *, _key: str = key or "") -> bool:
+                        if p.get(_key) is None:
+                            return False
+                        p.update_node(_key, status="rework", review_feedback="用户中断了该子任务")
+                        return True
+
+                    await planning.persist_plan(
+                        task_ds,
+                        event_ds,
+                        task_row,
+                        mutate=_park,
+                        actor="user",
+                        session_id=session_id,
+                        user_id=user_id,
+                    )
             agent_name = await resolve_agent_display_name(project_id, agent_slug, user_id)
             await record_subtask_stopped(
                 event_ds,

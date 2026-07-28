@@ -2177,9 +2177,12 @@ def test_task_lifecycle_event_trace_golden(db_factory, tmp_path, monkeypatch) ->
         "subtask_spawned",
         "task_plan_update",  # node → in_progress (mark_node_dispatched)
         "task_plan_update",  # node → in_review (member idle)
+        # approve persists the plan FIRST (CAS write + snapshot), then appends
+        # the review events — an approval that loses the CAS race must not have
+        # already announced itself.
+        "task_plan_update",  # node → done (approve unlocks dependents)
         "subtask_reviewed",
         "subtask_completed",
-        "task_plan_update",  # node → done (approve unlocks dependents)
         "task_completed",
     ], [e.type for e in rows]
 
