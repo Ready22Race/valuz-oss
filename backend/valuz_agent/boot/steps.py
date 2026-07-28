@@ -632,7 +632,7 @@ async def recover_active_tasks() -> None:
     kernel_client.bind_sandbox_scope_resolver(resolve_sandbox_scope)
 
     try:
-        await task_orchestrator.recover_active_tasks()
+        await task_orchestrator.recovery.recover_active_tasks()
     except Exception:  # noqa: BLE001 — startup must not block on bookkeeping
         logging.getLogger(__name__).exception("recover_active_tasks failed")
 

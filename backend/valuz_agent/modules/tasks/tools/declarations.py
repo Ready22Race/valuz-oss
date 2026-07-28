@@ -615,6 +615,7 @@ GET_PLAN_TOOL_DECLARATION = ToolDef(
     ),
     parameters=_GET_PLAN_PARAMETERS,
     handler=None,
+    read_only=True,
 )
 
 MODIFY_PLAN_TOOL_DECLARATION = ToolDef(

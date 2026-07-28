@@ -394,7 +394,7 @@ async def test_await_timeout_reports_running_member_liveness(
     lead = "lead-live-1"
     mailbox_registry.register(lead)
     try:
-        res = await orch.await_member_results(
+        res = await orch.coordination.await_member_results(
             lead_session_id=lead,
             project_id="w1",
             task_id="t1",
@@ -436,7 +436,7 @@ async def test_await_breaks_early_when_all_pending_awaiting_user(
     try:
         loop = asyncio.get_running_loop()
         start = loop.time()
-        res = await orch.await_member_results(
+        res = await orch.coordination.await_member_results(
             lead_session_id=lead,
             project_id="w1",
             task_id="t1",
@@ -489,7 +489,7 @@ async def test_finish_task_stopped_rejected_while_members_live(
     orch = TaskOrchestrator()
     orch._members.add_member("t-guard", "mem-live-1")
     try:
-        res = await orch.finish_task(
+        res = await orch.lifecycle.finish_task(
             task_id="t-guard",
             project_id="w1",
             lead_session_id="lead-g",
@@ -567,7 +567,7 @@ async def test_finish_task_stopped_force_bypasses_guard(
     orch = TaskOrchestrator()
     orch._members.add_member("t-force", "mem-live-2")
     try:
-        res = await orch.finish_task(
+        res = await orch.lifecycle.finish_task(
             task_id="t-force",
             project_id="w1",
             lead_session_id="lead-f",

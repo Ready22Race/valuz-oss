@@ -259,7 +259,7 @@ def test_abandon_task_flips_draft_to_abandoned(db_factory, tmp_path):
     _make_draft(db_factory, tmp_path)
     orch = TaskOrchestrator()
     result = asyncio.run(
-        orch.abandon_task(
+        orch.lifecycle.abandon_task(
             task_id="t1",
             project_id="w1",
             user_id=OWNER,
@@ -275,7 +275,7 @@ def test_abandon_task_appends_abandoned_event(db_factory, tmp_path):
     _make_draft(db_factory, tmp_path)
     orch = TaskOrchestrator()
     asyncio.run(
-        orch.abandon_task(
+        orch.lifecycle.abandon_task(
             task_id="t1",
             project_id="w1",
             user_id=OWNER,
@@ -296,7 +296,7 @@ def test_abandon_task_rejects_non_draft(db_factory, tmp_path):
 
     orch = TaskOrchestrator()
     result = asyncio.run(
-        orch.abandon_task(
+        orch.lifecycle.abandon_task(
             task_id="t1",
             project_id="w1",
             user_id=OWNER,
@@ -311,7 +311,7 @@ def test_abandon_task_rejects_non_draft(db_factory, tmp_path):
 def test_abandon_task_returns_error_for_missing_task(db_factory, tmp_path):
     orch = TaskOrchestrator()
     result = asyncio.run(
-        orch.abandon_task(
+        orch.lifecycle.abandon_task(
             task_id="nope",
             project_id="w1",
             user_id=OWNER,
@@ -329,7 +329,7 @@ def test_commit_task_rejects_empty_plan(db_factory, tmp_path):
     _make_draft(db_factory, tmp_path)  # no plan written
     orch = TaskOrchestrator()
     result = asyncio.run(
-        orch.commit_task(
+        orch.lifecycle.commit_task(
             task_id="t1",
             project_id="w1",
             user_id=OWNER,
@@ -349,7 +349,7 @@ def test_commit_task_rejects_non_draft(db_factory, tmp_path):
     db.close()
     orch = TaskOrchestrator()
     result = asyncio.run(
-        orch.commit_task(
+        orch.lifecycle.commit_task(
             task_id="t1",
             project_id="w1",
             user_id=OWNER,
@@ -363,7 +363,7 @@ def test_commit_task_rejects_non_draft(db_factory, tmp_path):
 def test_commit_task_returns_error_for_missing_task(db_factory, tmp_path):
     orch = TaskOrchestrator()
     result = asyncio.run(
-        orch.commit_task(
+        orch.lifecycle.commit_task(
             task_id="nope",
             project_id="w1",
             caller_session_id="chat-session-1",

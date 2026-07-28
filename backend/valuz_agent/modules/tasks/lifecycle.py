@@ -1,46 +1,14 @@
-"""LifecycleService — task lifecycle (ADR-023, Step 3c).
+"""LifecycleService — the single owner of the task lifecycle.
 
-The single owner of the task lifecycle surface. The orchestrator holds thin
-delegators for the six *public* entry points only — an earlier split left stale
-duplicate bodies on both sides and fixes kept landing on whichever copy the
-author found first, so there is exactly one implementation and it is here:
+kickoff · draft_task · commit_task · abandon_task · finish_task (the
+authoritative terminal: event + status + lead-mode reset + shutdown broadcast)
+· update_deliverable, plus the actor-loop callbacks: :meth:`finalize_actor`
+(the ``run_actor_loop`` ``finally``) and :meth:`_auto_finalize_lead_task`
+(terminal fallback for a lead that never called finish_task).
 
-  * :meth:`kickoff` — create TaskRow + lead session, then spawn the lead actor
-    loop. (There is no sync mode: the one-shot "run the lead to idle then
-    auto-finalize" path was removed and ``metadata.dispatch_mode`` is a
-    constant ``"async"``.)
-  * :meth:`draft_task` — create a ``draft`` task without a lead session.
-  * :meth:`commit_task` — flip a draft to ``active`` by spawning its lead.
-  * :meth:`abandon_task` — discard a draft task.
-  * :meth:`finish_task` — the authoritative terminal: append the terminal
-    event, set task status, reset the lead session mode, then broadcast
-    shutdown to members + the lead.
-  * :meth:`finalize_actor` — the ``run_actor_loop`` ``finally`` callback;
-    lead → auto-finalize, subtask → discard + terminal run write.
-  * :meth:`_auto_finalize_lead_task` — host-side terminal fallback for a lead
-    that ends without an explicit ``finish_task``.
-  * :meth:`update_deliverable` — refresh a completed task's deliverable card.
-  * :meth:`_last_assistant_summary` — best-effort summary helper for the above.
-
-The per-task lead-clone builder is NOT here: it is the pure
-:func:`tasks.resolution.materialize_lead_clone`, called on the lead-resolution
-path. (An async ``_materialize_lead_agent`` method used to wrap it purely so
-tests could await it off the orchestrator; both are gone.)
-
-Collaborators are injected at the composition root:
-
-  * ``registry``     — shared :class:`LiveMemberRegistry`
-    (``has_live_members`` / ``discard_member`` / ``pop_dispatch_started``).
-  * ``actor_runner`` — shared :class:`ActorRunner` (``kickoff`` / ``commit_task``
-    spawn ``run_actor_loop``).
-  * ``coordination`` — :class:`CoordinationService` (``finish_task`` calls
-    ``_broadcast_shutdown``).
-
-:meth:`finalize_actor` makes this class the concrete
-:class:`~valuz_agent.modules.tasks.actor_runner.ActorFinalizer`: the
-composition root binds it into the runner, whose ``run_actor_loop`` ``finally``
-calls it directly. Typed via that protocol — so changing its signature without
-changing the protocol is a mypy error, not a silent runtime break.
+This class is the runner's concrete
+:class:`~valuz_agent.modules.tasks.actor_runner.ActorFinalizer`, bound at the
+composition root — the protocol keeps the seam typed.
 """
 
 # ruff: noqa: I001
@@ -101,16 +69,8 @@ class LifecycleService:
     """Task lifecycle — kickoff / draft / commit / abandon / finish, plus the
     actor-loop finalize callback.
 
-    Constructed once at the composition root with the shared registry +
-    runtime ActorRunner + CoordinationService. The orchestrator's lifecycle
-    surface delegates straight onto it, and it is bound into the ActorRunner as
-    its :class:`ActorFinalizer`.
-
-    (It used to also take the host ``EventBus`` — the bus the sync-kickoff lead
-    drove its turn on. Sync kickoff is gone and the field had no readers left,
-    so the parameter was dropped. Terminal announces go through
-    ``events.finalize_task`` → ``publish_task_finalized``, which reaches the
-    global bus directly.)
+    Built once at the composition root with the shared registry, ActorRunner
+    and CoordinationService; bound into the runner as its ``ActorFinalizer``.
     """
 
     def __init__(
@@ -485,22 +445,13 @@ class LifecycleService:
     ) -> dict[str, Any]:
         """Transition a draft task to active by spawning its lead session.
 
-        Atomicity — read this carefully, it is weaker than it looks. The three
-        DB writes (lead session row → task status flip → committed event) do
-        NOT commit together: every task datastore method commits on its own
-        (``async_commit_with_retry``), so ``async_unit_of_work`` here is a
-        SESSION SCOPE, not a transaction. A crash between two of them leaves a
-        real partial state — e.g. a lead run row for a task still marked
-        ``draft``, or an ``active`` task with no ``committed`` timeline event.
-        (This is a repo-wide property of the datastore layer, not something
-        this method opted into; making it genuinely transactional means
-        changing that convention everywhere, not just here.)
-
-        What IS guaranteed is the ordering and the recovery story: the actor
-        spawn happens after the writes, and if it fails we do NOT roll the task
-        back to draft (the state machine forbids ``active → draft``). The task
-        stays ``active`` with no running actor — the health monitor sees a lead
-        with no live mailbox and marks it ``blocked`` so the user can resume.
+        NOT atomic: the three DB writes (lead run row → status flip →
+        ``committed`` event) each commit on their own — repo-wide datastore
+        convention, so ``async_unit_of_work`` is a session scope, not a
+        transaction. What is guaranteed is ordering + recovery: the actor
+        spawns after the writes, and a failed spawn is NOT rolled back
+        (``active → draft`` is illegal) — the health monitor sees a lead with
+        no live mailbox and marks the task ``blocked`` for the user to resume.
 
         The new lead session gets the ``plan_pre_committed=True`` brief
         variant which tells it to skip ``plan_task`` and dispatch directly
@@ -735,21 +686,13 @@ class LifecycleService:
         final_status: str,
         user_id: str,
     ) -> None:
-        """Close a task when its lead actor-loop ends without an explicit
-        ``finish_task`` call.
-
-        ``finish_task`` is the authoritative terminal, but a goal-mode lead
-        often satisfies a simple goal inline (does the work itself), the goal
-        evaluator auto-exits to default, and the loop ends at idle-TTL — never
-        calling finish_task. Without this the task is orphaned ``active``
-        forever. Restores the original §7.3 intent ("lead session naturally
-        ends → task_completed"). Disposition:
-          - status != active   → no-op (finish_task / stop / intervene won);
-          - members in flight   → no-op (defensive; not the terminal moment);
-          - turn errored (final_status terminated/error OR session.stop_reason
-            is an error — an errored turn can still leave status "idle") →
-            ``failed`` (never "completed"!);
-          - plan has unresolved nodes (no error) → ``blocked``;
+        """Close a task whose lead loop ended without calling ``finish_task``
+        (common: a goal-mode lead satisfies a simple goal inline) — otherwise
+        the task is orphaned ``active`` forever. Disposition:
+          - status != active / members in flight → no-op;
+          - turn errored (status OR stop_reason — an errored turn can still
+            read "idle") → ``blocked``, never ``completed``;
+          - unresolved plan nodes → ``blocked``;
           - else → ``completed`` (summary = lead's last assistant message).
         """
         # Fail loud: a missing owner silently misses the owner-scoped task
@@ -811,17 +754,10 @@ class LifecycleService:
 
             if error_msg:
                 if error_category in ("user_interrupt", "interrupted") and not unresolved:
-                    # User/host-driven cancellation BEFORE any plan node exists —
-                    # there's no in-flight or half-done work to protect, so locking
-                    # the task forces an unnecessary ``resume_task`` ceremony for
-                    # what is effectively still a fresh kickoff. Real bug report
-                    # (2026-05-29): an automation-fired lead entered the Claude
-                    # Agent SDK's ``EnterPlanMode`` + a nested ``Agent`` that hung;
-                    # the SDK cancelled the turn ~3.5 min later
-                    # (``category='user_interrupt'``); plan still empty. Keep the
-                    # task ``active`` so the next driver (user message → fresh turn;
-                    # or the next automation fire) picks it up cleanly. Logged for
-                    # the audit trail; no ``task_blocked`` event (nothing pending).
+                    # Cancellation BEFORE any plan node exists: nothing half-done
+                    # to protect, so blocking would force a pointless resume
+                    # ceremony on what is still a fresh kickoff. Stay ``active``
+                    # for the next driver (user message / automation fire).
                     logger.warning(
                         "auto-finalize: task %s lead turn cancelled with empty plan "
                         "(%s) — staying active for next driver",
@@ -830,14 +766,9 @@ class LifecycleService:
                     )
                     return
 
-                # Genuine failure (API/network/exec error, or a raised exception),
-                # OR a cancellation that left pending work. Per task_state.py:
-                # task-level ``failed`` is intentionally not in the enum — this
-                # maps to ``blocked`` (recoverable; the plan is intact, the user
-                # resumes via the detail page's retry/继续 entry → resume_task
-                # rebuilds the lead). The ``reason`` payload tags this as a
-                # lead-turn-error to distinguish from the unresolved-subtasks
-                # blocked case below.
+                # Genuine failure, or a cancellation that left pending work.
+                # Task-level ``failed`` is not in the enum (task_state.py) —
+                # this maps to ``blocked``, recoverable via resume_task.
                 await block_task(
                     db,
                     user_id=user_id,
@@ -1036,20 +967,12 @@ class LifecycleService:
                     result_manifest=manifest,
                     ended_at=now_ms(),
                 )
-                # Review model (VALUZ-TASK §6.1): the actor loop ending is NOT
-                # subtask completion — the lead decides that via review_subtask. We
-                # only surface a terminal *failure* (terminated/error) here. The
-                # node goes to ``rework`` (NOT ``failed``): a member run dying —
-                # including an API/socket drop that Layer-1 stamps as an
-                # ``Error(api_error)`` and ``_resolve_turn_status`` elevates to
-                # ``terminated`` — is recoverable. ``rework`` is dispatchable by
-                # the gate (planned/rework) and is the bucket both a live lead and
-                # a resumed lead re-dispatch, matching ``reconcile()`` /
-                # ``stop_member``. ``failed`` would strand it (excluded from
-                # ready_keys + non-dispatchable), so a blocked→resume could never
-                # relaunch it. The error rides along as ``review_feedback`` so the
-                # retry brief explains why; the ``subtask_failed`` event below
-                # still records the failed attempt on the timeline.
+                # The loop ending is NOT subtask completion — the lead decides
+                # that via review_subtask; only terminal FAILURE is surfaced
+                # here. The node goes to ``rework``, never ``failed``: a dead
+                # member run is recoverable, and ``failed`` would strand it
+                # (non-dispatchable), so a blocked→resume could never relaunch
+                # it. The error rides along as ``review_feedback``.
                 if not ok:
                     key = run.subtask_key if run else None
                     if key:
@@ -1190,32 +1113,19 @@ class LifecycleService:
         force: bool = False,
         user_id: str,
     ) -> dict[str, Any]:
-        """Close the task — append a terminal event and set the task status.
+        """Close the task: terminal event + status + lead-mode reset + shutdown.
 
-        ``status`` is ``completed`` (goal achieved) or ``stopped`` (user-
-        requested terminate or lead-judged unreachable). Emits
-        ``task_completed`` / ``task_stopped`` accordingly.
+        ``status`` is ``completed`` or ``stopped``; ``failed`` is rejected
+        loudly (task-level failure is ``blocked``, written by recovery /
+        auto-finalize — see task_state.py).
 
-        Note: task-level ``failed`` is intentionally NOT a valid finish status
-        — see ``task_state.py``. Hard lead-turn crashes are surfaced as
-        ``blocked`` by ``recover_active_tasks`` / auto-finalize, not via this
-        path. Any caller still passing ``status='failed'`` is rejected loudly
-        rather than silently aliased — fail fast keeps stale prompts visible.
-
-        Plan-completeness guard (v0.14): a ``completed`` finish is REJECTED
-        while the plan still has unresolved nodes (``TaskPlan.unresolved_keys``:
-        planned / in_progress / in_review / rework / paused) — otherwise the
-        lead can silently skip a planned subtask (e.g. a final aggregation node,
-        or one parked by an earlier pause) and still mark the task done.
-        The lead must dispatch+review those nodes first (or drop them via
-        modify_plan, or finish with status='stopped' to terminate the task).
-
-        Live-member guard: a ``stopped`` finish is REJECTED while members are
-        still running (a member deep in a long build looks exactly like a hang
-        from the lead's side — killing the whole task is almost never right).
-        The lead must first check them (``await_members`` reports pending
-        members' live status), stop them individually (``stop_subtask``), or
-        pass ``force=True`` after a deliberate decision.
+        Two guards:
+        * completed → REJECTED while ``TaskPlan.unresolved_keys()`` is
+          non-empty (paused included), or the lead could skip planned work and
+          still mark the task done.
+        * stopped → REJECTED while members are live unless ``force=True`` — a
+          member deep in a long build looks exactly like a hang from the
+          lead's side, and killing the task is almost never right.
         """
         if status not in ("completed", "stopped"):
             return {

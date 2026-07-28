@@ -275,10 +275,13 @@ def test_inject_handler_revives_halted_task(db_factory, tmp_path, monkeypatch):
     _seed_task(db_factory, tmp_path, status="stopped")
     calls: list[dict] = []
 
-    class _Orch:
+    class _Recovery:
         async def resume_task(self, task_id, project_id, **kw):
             calls.append({"task_id": task_id, "project_id": project_id, **kw})
             return {"ok": True, "prior_status": "stopped", "resumed": True}
+
+    class _Orch:
+        recovery = _Recovery()
 
     class _Reader:
         async def get_session(self, _uid, _sid):

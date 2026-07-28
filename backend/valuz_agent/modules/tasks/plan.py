@@ -29,33 +29,18 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Literal, get_args
 
 # Internal subtask lifecycle (task-plan-review.md §5).
-# ``paused`` is a transient halt: when the user pauses/stops the parent task
-# the in-flight node is parked here so the panel stops showing it as actively
-# running (it projects to ``pending``, not ``active``). It is NOT ``planned``
-# on purpose — ``ready_nodes`` must not re-dispatch a parked node as fresh;
-# resume reconciliation (recovery.reconcile) flips it back to ``in_progress``.
-#
-# ``failed`` is currently UNREACHABLE from host code: every member-failure path
-# (``_finalize_actor`` / ``recovery.reconcile`` / ``stop_member`` /
-# ``_heartbeat_pending``) parks the node in ``rework`` instead, because a dead
-# member run is recoverable and ``failed`` would strand the node (excluded from
-# ``ready_keys`` and non-dispatchable). It is kept in the enum for legacy rows
-# and because the frontend panel contract still carries a ``failed`` state —
-# do not "revive" it as a write target without also making it dispatchable.
+# ``paused`` = parked by a task pause/stop; re-dispatchable on resume.
+# ``failed`` is UNREACHABLE as a write target — every failure path parks the
+# node in ``rework`` (recoverable; ``failed`` would strand it). Kept for
+# legacy rows + the frontend contract; do not revive as a write target
+# without also making it dispatchable.
 SubtaskStatus = Literal["planned", "in_progress", "in_review", "rework", "done", "failed", "paused"]
 SUBTASK_STATUSES: tuple[str, ...] = get_args(SubtaskStatus)
 
-# Statuses that still represent OUTSTANDING work on a node — the complement of
-# the two settled states (``done``, and the unreachable-but-terminal
-# ``failed``). This is the ONE definition of "is there work left?"; every
-# caller must go through :meth:`TaskPlan.unresolved_keys`.
-#
-# ``paused`` is load-bearing here. It used to be omitted from the (three,
-# copy-pasted) inline versions of this predicate, so a task paused mid-flight
-# whose parked node never got re-dispatched read as "nothing outstanding" and
-# was auto-finalized / finish_task'd as ``completed`` with a subtask that never
-# ran. ``ready_keys`` has always treated ``paused`` as dispatchable — the two
-# views must agree.
+# The ONE definition of "is there work left?" — every caller goes through
+# :meth:`TaskPlan.unresolved_keys`. ``paused`` is load-bearing: omit it and a
+# task halted mid-flight closes ``completed`` with a subtask that never ran
+# (``ready_keys`` treats paused as dispatchable — the two views must agree).
 _UNRESOLVED_STATUSES: frozenset[str] = frozenset(
     {"planned", "in_progress", "in_review", "rework", "paused"}
 )
@@ -213,18 +198,10 @@ class TaskPlan:
         ]
 
     def unresolved_keys(self) -> list[str]:
-        """Keys with work still outstanding — the "is this task done?" predicate.
-
-        A node is unresolved while its status is in :data:`_UNRESOLVED_STATUSES`
-        (planned / in_progress / in_review / rework / **paused**). Used by the
-        lead's idle check, the auto-finalize disposition, and ``finish_task``'s
-        completeness guard — all three must read the SAME set, otherwise a task
-        can be closed as ``completed`` with work that never ran.
-
-        Differs from ``not all_done()``: an empty plan has no unresolved keys
-        (a lead that satisfied a simple goal inline never planned anything and
-        must still be allowed to finish), whereas ``all_done()`` is False for
-        an empty plan.
+        """Keys with work outstanding — THE "is this task done?" predicate,
+        shared by the lead idle check, auto-finalize and finish_task's guard.
+        Unlike ``not all_done()``, an empty plan has no unresolved keys (an
+        inline-satisfied goal must still be allowed to finish).
         """
         return [n.key for n in self._nodes if n.status in _UNRESOLVED_STATUSES]
 

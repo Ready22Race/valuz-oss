@@ -1,37 +1,15 @@
-"""ActorRunner — the single session-turn-to-idle / actor-loop primitive.
+"""ActorRunner — the persistent actor loop and its per-turn primitive.
 
-Runtime layer (ADR-023). Owns the agent-turn engine that drives a kernel
-session through one or more turns:
+``run_turn`` drives one turn on a persistent session; ``run_actor_loop`` runs
+turn → idle → await mailbox → repeat until shutdown/terminal/TTL. Shared turn
+semantics (``_resolve_turn_status`` / ``_restamp_always_on_mcp``) are imported
+from ``sessions/turn_driver`` so both drivers read one implementation.
 
-  * :class:`ActorRunner` — the persistent v2 actor loop (``run_actor_loop``)
-    plus its per-turn primitive (``run_turn``) and the member_done prompt
-    renderer (``_format_member_done``).
-  * :func:`collect_manifest` — pure manifest builder used by dispatcher /
-    coordination / recovery.
-  * :func:`_member_run_dir` — resolve a member's working dir by isolation mode.
-
-The one-shot chat-path driver (``run_session_to_idle``) lives in
-``sessions/turn_driver.py``; the shared turn semantics
-(``_resolve_turn_status`` / ``_restamp_always_on_mcp``) are imported from
-there so both drivers read one implementation.
-
-Collaborators
--------------
-Running a turn is the runner's OWN job (:meth:`ActorRunner.run_turn`). What
-happens *around* a turn is not, so the loop delegates it through two narrow,
-typed protocols bound at the composition root:
-
-  * :class:`ActorFinalizer`   — what to do when the loop exits
-    (``LifecycleService``).
-  * :class:`ActorCoordinator` — the two role-specific between-turn questions
-    (``CoordinationService``).
-
-Both are bound late, via :meth:`ActorRunner.bind`, because the runner is
-constructed *before* the services that depend on it. Protocols rather than an
-untyped handle: the seam is the heart of the task system, and mypy verifying
-that the concrete services still satisfy it is worth more than the flexibility
-of duck typing — an earlier ``host: Any`` version let three delegators rot out
-of signature sync unnoticed.
+What happens *around* a turn is delegated through two typed protocols bound at
+the composition root: :class:`ActorFinalizer` (loop exit → LifecycleService)
+and :class:`ActorCoordinator` (between-turn questions → CoordinationService).
+Typed on purpose: the seam is the heart of the task system, and mypy verifying
+the concrete services beats duck typing that once let delegators rot unnoticed.
 """
 
 # ruff: noqa: I001
@@ -245,16 +223,9 @@ class ActorCoordinator(Protocol):
 
 
 class ActorRunner:
-    """The persistent v2 actor loop + its per-turn primitive.
-
-    Constructed once at the composition root and shared by the dispatcher,
-    coordination, lifecycle and recovery services. Holds NO task state: running
-    a turn is its own job (:meth:`run_turn`), and everything around a turn goes
-    through the two injected protocols.
-
-    Collaborators are bound after construction via :meth:`bind` — the root must
-    build the runner first (the services take it as a constructor argument),
-    then the services, then bind them back.
+    """The persistent actor loop. Holds NO task state; collaborators are bound
+    after construction via :meth:`bind` (the services need the runner first,
+    then the runner needs two of them back).
     """
 
     def __init__(
@@ -406,18 +377,11 @@ class ActorRunner:
                 try:
                     msg = await mailbox_registry.get(session_id, timeout=ttl)
                 except TimeoutError:
-                    # The TTL measures silence on OUR mailbox, which is not the
-                    # same as the session being idle. A ``run_in_background``
-                    # subagent keeps working after the turn that launched it,
-                    # and the CLI drives the follow-up turns itself — the loop
-                    # sees none of that and its clock never resets. A real task
-                    # was reaped exactly this way: the lead spawned two
-                    # subagents, the session ran two more turns while the loop
-                    # sat parked, and 1800s after the FIRST turn the task was
-                    # closed as ``blocked`` while the work was still running.
-                    #
-                    # So ask before concluding. Bounded by MAX_IDLE_EXTENSIONS
-                    # so a session wedged ``running`` cannot pin the loop.
+                    # The TTL measures silence on OUR mailbox — not session
+                    # idleness. A run_in_background subagent outlives the turn
+                    # and the CLI drives follow-up turns the loop never sees,
+                    # so ask before concluding (bounded by MAX_IDLE_EXTENSIONS
+                    # so a wedged session cannot pin the loop forever).
                     if extensions < MAX_IDLE_EXTENSIONS and await coordinator.session_still_working(
                         session_id
                     ):

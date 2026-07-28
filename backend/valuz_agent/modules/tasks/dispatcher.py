@@ -272,32 +272,15 @@ class DispatcherService:
     ) -> None:
         """Register the member and start its actor loop — ATOMICALLY.
 
-        **This is a plain ``def`` on purpose, and that is the enforcement.**
+        A plain ``def`` on purpose: a concurrent ``_broadcast_shutdown`` drains
+        the live set in ONE pop, so an ``await`` between "member exists" and
+        "member registered" lets the broadcast miss it — the member is never
+        told to stop and hangs until its idle TTL. Inside a sync function
+        ``await`` is a SyntaxError, so the compiler enforces the rule on every
+        edit; work that must await belongs before this call, not inside it.
 
-        Everything below has to happen without the event loop getting a turn in
-        between. A ``finish_task`` running concurrently calls
-        ``_broadcast_shutdown``, which drains the live-member set in a single
-        pop; if it lands after ``create_task`` but before ``add_member``, it
-        sees an empty set, the just-spawned member never gets its shutdown, and
-        it hangs until its idle TTL. Same for the mailboxes: a shutdown
-        delivered to an unregistered inbox is silently dropped.
-
-        A comment saying "no ``await`` here" is not enforcement — the next
-        person adding one gets no warning, and the resulting bug is a rare
-        interleaving in production. Inside a synchronous function ``await`` is a
-        SYNTAX ERROR, so the rule is checked by the compiler on every edit.
-        Keep it sync; if you find yourself needing to await, the awaited work
-        belongs before this call, not inside it.
-
-        (``_broadcast_shutdown`` — the other half of the race — is a plain
-        ``def`` for exactly the same reason.)
-
-        The LEAD's mailbox is registered here too (idempotent): the member
-        posts ``member_done`` to it when it idles. Registering at dispatch time
-        guarantees delivery even when the lead was not started via the
-        async-kickoff path (e.g. a goal-mode single-turn lead) — otherwise the
-        member's ``put`` lands on an unregistered inbox and is DROPPED, and
-        ``await_members`` returns empty so the lead thinks members are stuck.
+        The LEAD's mailbox registers here too (idempotent) so a member's
+        ``member_done`` can never land on an unregistered inbox and vanish.
         """
         mailbox_registry.register(lead_session_id)
         self._members.add_member(task_id, member_session_id, dispatch_epoch=time.time())

@@ -26,34 +26,17 @@ from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
 
-# Kind of an inbound message delivered to an actor at its next turn boundary.
-# Four kinds in three semantic classes — the class decides how the actor loop
+# Four kinds in three semantic classes — the class decides how the loop
 # consumes it:
-#
-#   FREE TEXT — becomes the next turn's prompt verbatim (``prompt = msg.text``):
-#     text         — free text from another actor or the user (lead→member
-#                    follow-up, chat→lead inject, a rework instruction).
-#     revise_goal  — the user revised task.goal on a running task; payload.goal
-#                    carries the new goal. A distinct kind (not plain ``text``)
-#                    because ``await_member_results`` must preempt on it and the
-#                    text is pre-wrapped in a ``<goal-revised>`` envelope. It
-#                    exists at all because the goal is the lead's initial brief
-#                    AND its goal-mode loop condition, both baked in at spawn —
-#                    so a bare task.goal DB write never reaches a running lead.
-#
-#   STRUCTURED REPORT — rendered before it becomes a prompt:
-#     member_done  — a member finished a turn; payload carries its manifest,
-#                    rendered by ``ActorRunner._format_member_done``.
-#
-#   CONTROL SIGNAL — no text, no prompt; steers the loop itself:
-#     shutdown     — graceful stop request; the loop finalises after the current
-#                    turn (pause / stop / finish_task broadcast).
-#
-# NB: ``text`` was called ``"message"`` until 2026-07, which made the envelope
-# (``InboxMsg``) and one of its four variants share a name — "a message of kind
-# message". The literal is process-local (see ``MailboxRegistry``: an in-memory
-# ``asyncio.Queue`` per session, never persisted and never on the wire), so the
-# rename carried no migration.
+#   FREE TEXT (becomes the next turn's prompt verbatim):
+#     text         — from another actor or the user (follow-up / inject / rework)
+#     revise_goal  — user revised task.goal; distinct so await_member_results
+#                    preempts on it (a bare DB write never reaches a running
+#                    lead — the goal is baked into the session at spawn)
+#   STRUCTURED REPORT (rendered first): member_done — manifest, via
+#     ActorRunner._format_member_done
+#   CONTROL SIGNAL (no prompt): shutdown — finalize after the current turn
+# Process-local only (in-memory asyncio.Queue per session; never persisted).
 InboxKind = Literal["text", "member_done", "shutdown", "revise_goal"]
 
 

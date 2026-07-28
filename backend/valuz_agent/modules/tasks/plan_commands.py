@@ -1,45 +1,17 @@
-"""PlanCommandService — the single authorized entry point for plan writes.
+"""PlanCommandService — the single authorized door for plan reads/writes.
 
-A task's plan has two transports: the MCP tools an agent calls, and the REST
-routes a human client calls. They had drifted into two different answers to
-"who may change this plan":
+Both transports (MCP tools, REST routes) call this and nothing else calls
+``planning`` directly. Fixed order: load task → authorize caller → check
+status → check CAS → mutate → emit. (The REST path used to skip straight to
+``planning``, which carries no status guard — so a completed/paused task's
+plan was rewritable and an active task's by a non-lead.)
 
-  * the tool path resolved the caller's session and ran
-    ``gate.check_plan_writer_gate`` (draft → originator or a project mate;
-    active → the lead session only; anything else → read-only);
-  * the REST path checked that the task belonged to the requesting user and
-    called ``planning`` directly.
-
-``planning.plan_task`` / ``modify_plan`` carry no status guard of their own —
-only "a plan with progress already exists" and the CAS token — so over REST the
-plan of a *completed* or *paused* task could still be rewritten, and an
-*active* task's plan could be rewritten by someone who is not its lead. The
-rules existed; one of the two doors just did not consult them.
-
-This module is that door. Every plan write goes through it, and the order is
-fixed: load the task, authorize the caller, check the status, check the CAS
-token, mutate, emit. ``planning`` keeps the mutation itself and is no longer
-called directly by either transport.
-
-Two kinds of caller, deliberately not one
------------------------------------------
-The obvious unification — "take a ``caller_session_id`` and run the gate" —
-is wrong, and it is worth saying why, because it is what the two transports had
-been half-doing.
-
-An AGENT's authority comes from its session's ROLE: this session is the lead of
-this task, or it is a chat session in the task's project. That is what
-``gate.py`` encodes. A HUMAN's authority comes from OWNING the task; a person
-is not a lead session and never will be, so running the agent gate against them
-would reject every human edit on an active task, and inventing a session id to
-get past it would be authorization theatre.
-
-Worse, over REST the session id arrives in the REQUEST BODY
-(``PlanTaskRequest.lead_session_id``) — self-declared. Gating on a value the
-caller supplies is not a check. :class:`AgentCaller` is therefore only ever
-constructed from a session the transport itself resolved.
-
-So the two are modelled separately and each is checked on its own terms.
+Two caller kinds, deliberately not one: an AGENT's authority comes from its
+session's ROLE (the ``gate.py`` rules), a HUMAN's from OWNING the task — a
+person is not a lead session, and the REST ``lead_session_id`` arrives in the
+request body (self-declared), so gating on it would be authorization theatre.
+:class:`AgentCaller` is only ever built from a session the transport itself
+resolved.
 """
 
 from __future__ import annotations
@@ -65,12 +37,8 @@ _WRITABLE_STATUSES = frozenset({"draft", "active"})
 
 @dataclass(frozen=True)
 class AgentCaller:
-    """An agent session calling through the MCP tool surface.
-
-    ``session_id`` MUST come from the tool-execution context, never from
-    caller-supplied arguments — its whole purpose is to establish a role the
-    caller cannot claim for itself.
-    """
+    """An agent session (MCP). ``session_id`` MUST come from the tool-execution
+    context, never from caller-supplied arguments."""
 
     session_id: str
     user_id: str

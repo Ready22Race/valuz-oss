@@ -1,22 +1,10 @@
 """Member-run state classification — pure domain, no IO.
 
 How to read a dispatched member's kernel session state and decide what the
-host should do about it. Sits beside ``plan.py`` and ``task_state.py`` as the
-module's third pure vocabulary: no DB, no kernel client, no service instance,
-so every rule here is unit-testable on plain values.
-
-It lived inside ``recovery.py`` until 2026-07. Two services need it —
-``RecoveryService`` (startup + resume sweeps) and
-``CoordinationService._heartbeat_pending`` (the online backstop for a member
-whose ``member_done`` never arrived) — and since recovery already imports
-coordination for the shutdown broadcast, coordination could only reach back for
-``classify_member`` through a function-local import. That is a real circular
-dependency, merely hidden. Pure rules do not belong to either service; giving
-them their own home removes the cycle instead of masking it.
-
-The side effects the classification implies (DB writes, respawning an actor
-loop, delivering ``member_done``) stay in ``RecoveryService`` — this module
-only says WHAT is true, never DOES anything.
+host should do. Sits beside ``plan`` / ``task_state`` / ``outcome`` as pure
+vocabulary; both ``RecoveryService`` and coordination's heartbeat consume it
+(its own home is what broke their import cycle). Side effects stay in the
+services — this module says WHAT is true, never DOES anything.
 """
 
 from __future__ import annotations
@@ -64,17 +52,10 @@ def classify_member(status: str | None, stop_reason: Any) -> Disposition:
     if typ == "end_turn":
         return "completed"  # normal terminal turn
     if typ == "error":
-        # Interrupted mid-flight → resumable. Three ways a turn loses its
-        # process without it being a task failure:
-        #   * host_restart — a hard kill left the row ``running``; boot
-        #     recovery flipped it (host liveness-aware reset, or the kernel's
-        #     own scan on the ``local`` tier).
-        #   * interrupted — a graceful host stop tore down the runtime
-        #     subprocess and the runtime stamped it resumable itself.
-        #   * user_interrupt — the user cancelled the in-flight turn (every
-        #     runtime stamps this category on an explicit interrupt). A user
-        #     pressing stop is intent, not a failure.
-        # Any other error = a real execution failure.
+        # Three categories mean "lost its process, not failed": host_restart
+        # (hard kill, boot recovery flipped it), interrupted (graceful host
+        # stop), user_interrupt (explicit cancel = intent). Everything else
+        # is a real execution failure.
         return (
             "resume"
             if sr.get("category") in ("host_restart", "interrupted", "user_interrupt")

@@ -1,21 +1,11 @@
 """Shared fixtures for the tasks-module tests.
 
-``db_factory`` had been copy-pasted into eight test modules — the same twenty
-lines of engine wiring, drifting apart in which tables each one bothered to
-create. It belongs here once.
-
-Why a REAL sqlite file rather than fake datastore classes: the tasks module's
-persistence is where its invariants live (the task-status state machine, the
-per-task event sequence, owner scoping). A hand-rolled ``_FakeTaskDs`` with
-just enough methods to get a test green does not enforce any of them, and it
-rots the moment a signature changes — during this refactor two such fakes broke
-on unrelated edits and a third had a bug encoded into it as expected behaviour
-(``get_task_by_project`` returning None with the comment "no plan guard").
-A tmp sqlite file costs milliseconds and can't drift from reality.
-
-Fakes are still right for things that are NOT this module: the kernel client,
-the projects/agents datastores, the provider catalogue. Those are seams, and
-stubbing a seam is not the same as stubbing yourself.
+``db_factory`` is a REAL tmp sqlite rather than fake datastore classes: the
+module's invariants live in its persistence (status machine, event sequence,
+owner scoping), and a hand-rolled fake models the API rather than the data —
+two broke on unrelated edits during the 2026-07 refactor and one had a bug
+encoded as expected behaviour. Fakes remain right for SEAMS (kernel client,
+sibling modules' stores); stubbing a seam is not stubbing yourself.
 """
 
 from __future__ import annotations

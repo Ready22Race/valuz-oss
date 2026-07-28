@@ -502,11 +502,6 @@ class TaskSessionDatastore:
         await async_commit_with_retry(self._db, where="TaskSessionDatastore.create_run")
         return row
 
-    async def update_run(self, row: TaskSessionRow) -> TaskSessionRow:
-        await self._db.merge(row)
-        await async_commit_with_retry(self._db, where="TaskSessionDatastore.update_run")
-        return row
-
     async def update_run_by_session(
         self,
         session_id: str,

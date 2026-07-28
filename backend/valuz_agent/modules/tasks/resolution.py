@@ -1,22 +1,12 @@
-"""TaskSessionResolver — host-side session resolution for task actors.
+"""TaskSessionResolver — host knowledge → ready-to-create kernel sessions.
 
-The ONE place task code turns host knowledge (project rows, membership, the
-agent library, providers, credentials) into ready-to-create kernel sessions.
-Kickoff, commit and dispatch used to each carry their own copy of this
-resolution block; they now consume this module, and no other task file may
-import ``ProjectDatastore`` / ``ProjectMemberDatastore`` for session building.
+The ONE place task code turns project rows, membership, the agent library,
+providers and credentials into lead/member sessions (enforced by
+check_module_boundaries.py). Shaped after MemberResolverPort
+(task-kernel-migration §5.1) in case that migration is revived.
 
-The seam stands on its own: callers receive a fully resolved session and
-never learn *how* it was resolved. The interface is shaped after
-``MemberResolverPort`` (docs/design/task-kernel-migration.md §5.1) so that if
-the — currently deferred — kernel migration is ever revived, this class
-graduates into the port's host implementation verbatim.
-
-Error convention (mirrors ``planning.resolve_dispatch_node``): resolve methods
-return the resolved value on success or a :class:`~tasks.outcome.Failure` on
-failure — callers decide whether that reason becomes a raise, an error dict, or
-a task event. It used to be a bare ``str``, told apart from success by
-``isinstance``; see ``outcome.py`` for why that was replaced.
+Resolve methods return the value or a ``Failure`` — callers decide whether the
+reason becomes a raise, an error dict, or a task event.
 """
 
 # ruff: noqa: I001
@@ -66,17 +56,11 @@ async def _credential_gap(
     db: Any | None = None,
     user_id: str,
 ) -> str | None:
-    """Return a clear reason when a built session has no usable credentials.
+    """A clear reason when a built session has no usable credentials, else None.
 
-    Credentials are funnelled through the provider system: a session's
-    resolved ``model_provider`` (base_url/api_key/protocol) is the single
-    source of truth (see backend/CLAUDE.md — the host does not read LLM keys
-    from process env). When ``model_provider`` is None the run would only fail
-    mid-turn with a cryptic SDK "Not logged in · Please run /login", so we
-    detect it up front and surface *why* (no usable model provider).
-
-    Returns ``None`` when a provider resolved (or is an OAuth subscription —
-    see ``_provider_gap``), else a human-readable reason.
+    Detected up front because a ``model_provider=None`` run only fails
+    mid-turn with a cryptic SDK "Not logged in". OAuth subscriptions are
+    healthy with provider=None — see ``_provider_gap``.
     """
     if getattr(session, "model_provider", None) is not None:
         return None
@@ -103,17 +87,12 @@ async def _provider_gap(
     model: str,
     user_id: str,
 ) -> str | None:
-    """The no-usable-provider check shared by ``_credential_gap`` and the
-    kickoff roster pre-flight (``preflight_member_providers``).
+    """No-usable-provider check shared with the kickoff roster pre-flight.
 
-    A ``model_provider=None`` session is healthy in exactly one case: the
-    effective provider is an OAuth subscription (``claude /login`` /
-    ``codex /login``) — its credentials live in the CLI's keychain and the
-    runtime SDK reads them out-of-band. That provider is either the agent's
-    pin or, chat-parity, the model-hosted fallback the resolver would land
-    on (``agent_resolver._model_hosted_provider_id``); check both before
-    declaring a gap. When ``db`` is omitted (legacy callers) fall back to
-    the strict check.
+    ``model_provider=None`` is healthy in exactly one case: an OAuth
+    subscription (CLI keychain, read out-of-band by the SDK) — either the
+    agent's pin or the model-hosted fallback; check both before declaring a
+    gap.
     """
     if db is not None:
         try:

@@ -258,7 +258,7 @@ async def kickoff_task(
 ) -> TaskResponse:
     """Create a task and start its lead session (lead self-dispatches sub-runs)."""
     try:
-        row = await task_orchestrator.kickoff(
+        row = await task_orchestrator.lifecycle.kickoff(
             project_id=project_id,
             goal=payload.goal,
             lead_agent_slug=payload.lead_agent_slug,
@@ -536,7 +536,7 @@ async def intervene(
         # ``paused``; ``stop`` → ``stopped``. Both are soft terminals the
         # detail page can resume (stopped→active is a legal transition).
         target = "paused" if payload.action == "pause" else "stopped"
-        applied = await task_orchestrator.stop_task(
+        applied = await task_orchestrator.recovery.stop_task(
             task_id, ws, target_status=target, user_id=user_id
         )
         # ``stop_task`` returns False on an illegal transition (e.g. the task is
@@ -549,7 +549,7 @@ async def intervene(
                 detail=f"cannot {payload.action} task in status {task.status!r}",
             )
     elif payload.action == "resume":
-        result = await task_orchestrator.resume_task(
+        result = await task_orchestrator.recovery.resume_task(
             task_id, ws, user_id=user_id, instruction=payload.text
         )
         # ``resume_task`` returns ``{ok: False, error}`` on an illegal source
@@ -593,7 +593,7 @@ async def draft_task(
     """Open a draft task (status=draft, plan_version=0). No lead session is
     started — the originating chat session is recorded as the plan writer."""
     try:
-        row = await task_orchestrator.draft_task(
+        row = await task_orchestrator.lifecycle.draft_task(
             project_id=project_id,
             goal=payload.goal,
             lead_agent_slug=payload.lead_agent_slug,
@@ -624,7 +624,7 @@ async def commit_task(
         task = await TaskService(db).get_owned_task(user_id, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
-    result = await task_orchestrator.commit_task(
+    result = await task_orchestrator.lifecycle.commit_task(
         task_id=task_id,
         project_id=task.project_id,
         caller_session_id=payload.caller_session_id,
@@ -647,7 +647,7 @@ async def abandon_task(
         task = await TaskService(db).get_owned_task(user_id, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
-    result = await task_orchestrator.abandon_task(
+    result = await task_orchestrator.lifecycle.abandon_task(
         task_id=task_id,
         project_id=task.project_id,
         caller_session_id=payload.caller_session_id,
@@ -685,7 +685,7 @@ async def inject_into_task(
     # it here: that decision is orchestration, which is why the delivery helper
     # reports the state instead of reaching for the orchestrator itself.
     if result.get("reason") == "TASK_HALTED":
-        revived = await task_orchestrator.resume_task(
+        revived = await task_orchestrator.recovery.resume_task(
             task_id, task.project_id, user_id=user_id, instruction=payload.text
         )
         ok = bool(revived.get("ok"))
@@ -780,7 +780,7 @@ async def stop_member(
 ) -> StopMemberResponse:
     """User-initiated single-member stop: interrupt one subtask, notify the lead
     (member_done cancelled), run→rejected, node→rework. Task stays active."""
-    stopped = await task_orchestrator.stop_member(session_id, user_id=user_id)
+    stopped = await task_orchestrator.recovery.stop_member(session_id, user_id=user_id)
     if not stopped:
         raise HTTPException(status_code=404, detail=f"Subtask run not found: {session_id}")
     return StopMemberResponse(stopped=True)

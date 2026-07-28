@@ -56,20 +56,12 @@ async def persist_plan(
     session_id: str | None,
     user_id: str,
 ) -> None:
-    """Write a mutated plan back to the task AND announce it. Both, always.
+    """Write a mutated plan back AND announce it — both, always (persisting
+    without the ``task_plan_update`` leaves the Todo panel silently stale).
 
-    The two halves are one operation. Persisting without announcing leaves the
-    frontend Todo panel showing a stale plan until something else happens to
-    emit — a silent staleness bug this module has shipped before. This idiom
-    was hand-written at 10 mutation sites (planning / recovery / lifecycle /
-    coordination); routing them all through here means no future site can do
-    half of it. Same reasoning as :func:`tasks.events.finalize_task`.
-
-    Two callers deliberately do NOT use this: ``plan_task`` and ``modify_plan``
-    append their own ``task_planned`` / ``plan_revised`` event BETWEEN the
-    write and the announce, and that event order is on the wire (the timeline
-    renders them in sequence). They also bump ``plan_version`` — the CAS token
-    this function never touches, since only the authoring paths may move it.
+    ``plan_task`` / ``modify_plan`` deliberately keep their own copy: they
+    append ``task_planned`` / ``plan_revised`` BETWEEN write and announce
+    (that order is on the wire) and they alone bump ``plan_version``.
     """
     task_row.plan = plan.to_dict()
     await task_ds.update_task(task_row)
@@ -92,19 +84,12 @@ async def emit_plan_update(
     session_id: str | None,
     user_id: str,
 ) -> None:
-    """Append a ``task_plan_update`` snapshot event.
+    """Append a ``task_plan_update`` SNAPSHOT — every field is load-bearing.
 
-    The payload is a SELF-CONTAINED SNAPSHOT, and every field below is load
-    bearing — this used to emit ``{"subtasks": ...}`` alone while the frontend
-    read four keys off it, which silently broke the live plan feed:
-    ``PlanCardFeed`` guards with ``if (payload.plan_version ?? 0) <=
-    card.planVersion) return``, so with the version absent every event
-    evaluated ``0 <= n`` and was DISCARDED. The feed only ever updated from its
-    initial fetch; nothing on screen moved as the plan progressed.
-
-    Keep it a snapshot. A consumer must be able to render the whole card from
-    one event without joining against anything, because these arrive over SSE
-    where "the event before this one" is not guaranteed to have been seen.
+    A consumer must render the whole card from one event (SSE gives no
+    guarantee the previous one was seen). ``plan_version`` in particular is
+    the feed's dedup key: without it every event was silently discarded.
+    Shape locked by test_plan_update_payload_is_a_self_contained_snapshot.
     """
     panel = plan.to_panel()
     # Stamp each node's member display name so the Todo panel renders it

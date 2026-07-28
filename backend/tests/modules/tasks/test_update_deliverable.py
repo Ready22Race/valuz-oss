@@ -110,7 +110,7 @@ def test_update_deliverable_appends_event_on_completed_task(
     """update_deliverable on a completed task appends a deliverable_updated event."""
     orch = TaskOrchestrator()
     result = asyncio.run(
-        orch.update_deliverable(
+        orch.lifecycle.update_deliverable(
             task_id=completed_task["task_id"],
             project_id=completed_task["project_id"],
             user_id=OWNER,
@@ -139,7 +139,7 @@ def test_update_deliverable_rejected_on_active_task(db_factory, active_task) -> 
     """update_deliverable is rejected when the task is not yet completed."""
     orch = TaskOrchestrator()
     result = asyncio.run(
-        orch.update_deliverable(
+        orch.lifecycle.update_deliverable(
             task_id=active_task["task_id"],
             project_id=active_task["project_id"],
             user_id=OWNER,
@@ -160,7 +160,7 @@ def test_update_deliverable_rejected_when_task_not_found(db_factory) -> None:
     """update_deliverable is rejected when no task matches the id."""
     orch = TaskOrchestrator()
     result = asyncio.run(
-        orch.update_deliverable(
+        orch.lifecycle.update_deliverable(
             task_id="does-not-exist",
             project_id="w1",
             user_id=OWNER,

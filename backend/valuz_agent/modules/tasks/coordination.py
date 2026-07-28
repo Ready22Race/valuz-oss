@@ -1,35 +1,18 @@
-"""CoordinationService — lead ↔ member coordination (ADR-023, Step 3b).
+"""CoordinationService — lead ↔ member coordination.
 
-Peeled verbatim out of ``TaskOrchestrator``. Owns the in-turn / between-turn
-coordination surface:
+await_member_results (in-turn mailbox drain, heartbeat-sliced) · the
+role callbacks the ActorRunner binds as its ``ActorCoordinator``
+(notify_lead_member_idle / lead_idle_with_no_pending / session_still_working)
+· _broadcast_shutdown, the atomic halt primitive.
 
-  * :meth:`await_member_results` — in-turn mailbox drain (8s heartbeat slices,
-    user_inject preemption).
-  * :meth:`_heartbeat_pending` — bad-case#3 backstop (reconcile a member whose
-    kernel session went terminal but whose member_done never reached the lead).
-  * :meth:`notify_lead_member_idle` — the role=="subtask" run-actor-loop
-    callback: post a ``member_done`` to the lead's inbox after a member turn.
-  * :meth:`lead_idle_with_no_pending` — the role=="lead" run-actor-loop check:
-    True when the lead has nothing left to wait for.
-  * :meth:`_broadcast_shutdown` — the atomic shutdown primitive (single
-    ``drain_members`` pop → per-member shutdown put).
+Text DELIVERY (send_to_member / inject_into_task / goal revision) lives in
+``messaging`` — callers import it directly; there is no wrapper here.
 
-Holds no task state — it receives the shared :class:`LiveMemberRegistry` by
-constructor injection (the same instance the composition root wires into every
-other task service) for ``has_live_members`` / ``dispatch_started_at`` /
-``drain_members``.
-
-Text delivery (lead↔member ``send_to_member``, chat→task ``inject_into_task``,
-``notify_lead_goal_revised``) is NOT surfaced here. An earlier ADR proposed
-folding ``messaging.py`` into this class; the resulting delegators never had a
-caller — every real call site (dispatch-MCP handlers, task routes) imports
-``tasks.messaging`` directly — and they silently rotted out of signature sync
-until mypy flagged them. They were deleted 2026-07; call ``messaging.*``.
-
-CRITICAL invariant (``_broadcast_shutdown``): the drain + per-member shutdown
-``put`` loop must stay SYNCHRONOUS and contiguous — no ``await`` may separate the
-single atomic ``registry.drain_members`` pop from the shutdown puts, or a member
-spawned concurrently by ``dispatch_async`` could be dropped.
+CRITICAL invariant: ``_broadcast_shutdown`` must stay a plain ``def`` — the
+single ``drain_members`` pop and the per-member puts may not be separated by
+an ``await``, or a concurrently spawned member is dropped. ``await`` inside a
+sync function is a SyntaxError, so the compiler enforces it (as it does for
+``DispatcherService._spawn_member``, the other half of the race).
 """
 
 # ruff: noqa: I001
@@ -85,16 +68,7 @@ _MAX_AWAIT_WINDOW_S = 600.0
 
 
 class CoordinationService:
-    """Lead ↔ member coordination.
-
-    Constructed once at the composition root with the shared registry. The
-    orchestrator exposes ``await_member_results`` from here, and the class is
-    bound into the ActorRunner as its
-    :class:`~valuz_agent.modules.tasks.actor_runner.ActorCoordinator` — the two
-    role callbacks (:meth:`notify_lead_member_idle` /
-    :meth:`lead_idle_with_no_pending`) are that protocol, typed, so a signature
-    drift is a mypy error rather than a runtime surprise.
-    """
+    """Lead ↔ member coordination; the ActorRunner's typed ``ActorCoordinator``."""
 
     def __init__(self, *, registry: LiveMemberRegistry) -> None:
         self._members = registry
@@ -455,13 +429,8 @@ class CoordinationService:
                             review_feedback="member session errored (heartbeat)",
                         )
                         plan_dirty = True
-                    # Emit ``subtask_failed`` like every other member-failure
-                    # path (_finalize_actor / dispatcher). Without this a
-                    # heartbeat-detected failure archived the run + reworked the
-                    # node INVISIBLY — no timeline row, no attention signal; the
-                    # user just saw the subtask silently blink active→pending.
-                    # Stamp ``agent_name`` (established rule) so the frontend
-                    # doesn't race an async member-list join.
+                    # Same emitter as every other failure path — without it a
+                    # heartbeat-detected failure reworked the node invisibly.
                     agent_name = await resolve_agent_display_name(
                         project_id, run.agent_slug or "", user_id
                     )
@@ -504,18 +473,10 @@ class CoordinationService:
         pending_keys: set[str],
         user_id: str,
     ) -> list[dict[str, Any]]:
-        """Best-effort live status of still-pending members — READ ONLY.
-
-        Unlike ``_heartbeat_pending`` this never touches the plan or the runs;
-        it answers the one question a waiting lead cannot otherwise answer:
-        *is this silent member alive?* Three observable states:
-
-          * ``awaiting_user`` — the member is parked mid-turn on an
-            AskUserQuestion (pending decision-inbox entry); nothing moves until
-            the user answers.
-          * ``running`` — genuinely working (possibly a long tool call).
-          * anything else / ``unknown`` — the kernel status as-is (terminal
-            states are normally reconciled by the heartbeat before this runs).
+        """READ-ONLY live status of still-pending members: ``awaiting_user``
+        (parked on an AskUserQuestion — nothing moves until the user answers),
+        ``running``, or the kernel status as-is. Never touches plan or runs —
+        that is ``_heartbeat_pending``'s job.
         """
         if not pending_keys:
             return []
@@ -590,18 +551,12 @@ class CoordinationService:
     async def notify_lead_member_idle(
         self, session_id: str, status: str, user_id: str
     ) -> None:
-        """After a member turn, push a member_done message to its lead's inbox.
+        """After a member turn: ``member_done`` to the lead's inbox + a
+        ``subtask_reported`` timeline event. Best-effort — a missing lead inbox
+        (lead already finished) drops the mailbox message.
 
-        Also appends a ``subtask_reported`` task event so the timeline shows
-        that the member reported back. Best-effort — a missing lead inbox (lead
-        already finished) just means the mailbox message is dropped.
-
-        The event type used to be ``subtask_message`` with a
-        ``payload.direction`` discriminator shared with the lead→member
-        direction, so the timeline could not tell "the lead said something" from
-        "a member finished a round of work" without reading the payload. They
-        are different events and now have different types; rows written before
-        2026-07 keep the old type (the log is append-only and is not rewritten).
+        (Pre-2026-07 rows carry this as ``subtask_message`` with a
+        ``payload.direction``; the append-only log is never rewritten.)
         """
 
         async with async_unit_of_work() as db:
@@ -694,16 +649,10 @@ class CoordinationService:
     async def _session_has_background_work(session_id: str) -> bool:
         """Is this session running a ``run_in_background`` task right now?
 
-        A background task OUTLIVES the turn that launched it: the turn ends,
-        the session goes ``idle``, and the work carries on. The actor loop
-        cannot see any of it — the CLI drives the follow-up turns itself — so
-        without this probe an actor is "idle" while its own subagents are
-        mid-flight.
-
-        ``bg_busy_session_ids`` is the same signal the conversation header and
-        the Activity list read, so every surface agrees on whether a session is
-        busy. Best-effort: if the kernel cannot answer we report False rather
-        than pinning an actor loop forever on a failed lookup.
+        A background task outlives the turn that launched it and the CLI
+        drives the follow-up turns — the loop sees none of it. Same signal as
+        the conversation header (``bg_busy_session_ids``), so surfaces agree.
+        Best-effort: a failed lookup reports False rather than pin the loop.
         """
         try:
             return session_id in set(await kernel_client.bg_busy_session_ids())

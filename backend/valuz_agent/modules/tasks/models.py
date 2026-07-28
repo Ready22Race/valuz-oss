@@ -22,22 +22,14 @@ Task (valuz_task):
     "drafting", ``NULL`` + ``status=active`` as "legacy committed".
 
 TaskEvent (valuz_task_event):
-  Append-only event log scoped to a task. Monotonic ``sequence`` per
-  (project_id, task_id). Types: kickoff | subtask_spawned |
-  subtask_completed | subtask_failed | subtask_stopped | subtask_reviewed |
-  subtask_message | subtask_reported | user_note | goal_revised |
-  paused | resumed | stopped | task_completed | task_blocked |
-  task_drafted | committed | abandoned | user_inject |
-  user_inject_dropped | awaiting_user | user_answered |
-  task_plan_update | plan_revised | task_planned | deliverable_updated |
-  kickoff_failed.
+  Append-only event log scoped to a task; monotonic ``sequence`` per
+  (project_id, task_id). The type vocabulary is open (plain string column);
+  the frontend's ``TaskEventType`` union lists the known ones.
 
   ``subtask_message`` is lead → member; ``subtask_reported`` is member →
-  lead. They were ONE type discriminated by ``payload.direction`` until
-  2026-07 — a timeline could not tell "the lead said something" from "a
-  member finished a round" without reading the payload. Rows written before
-  the split keep the old type for BOTH directions: this log is append-only
-  and is never rewritten, so readers must keep handling it.
+  lead. Pre-2026-07 rows carry ``subtask_message`` for BOTH directions
+  (split by ``payload.direction``) — the log is never rewritten, so readers
+  must keep handling that.
 
 TaskSession (valuz_task_session):
   Index of every kernel session that belongs to a task — the lead's
@@ -182,12 +174,9 @@ class TaskSessionRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     goal: Mapped[str | None] = mapped_column(Text, nullable=True)
     # session_id of the lead run that dispatched this subtask
     dispatched_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    # Display-only record of how the run's cwd was chosen. In practice always
-    # ``shared`` since v2.1: every member runs in the SHARED project cwd (a
-    # task-level worktree relocates that cwd wholesale rather than isolating
-    # per member — see task_worktree.py). The legacy ``isolated`` /
-    # ``repo-worktree`` per-member modes are retired and ``_member_run_dir``
-    # ignores this field; the column default is kept only for old rows.
+    # Display-only; always ``shared`` since v2.1 (members share the project
+    # cwd, a task worktree relocates it wholesale). Legacy per-member modes
+    # are retired; the default remains only for old rows.
     project_mode: Mapped[str] = mapped_column(String(16), default="isolated")
     # Absolute path to this run's working directory
     run_dir: Mapped[str | None] = mapped_column(Text, nullable=True)

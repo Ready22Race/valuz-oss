@@ -1,39 +1,13 @@
-"""TaskService — the task module's service tier for the HTTP layer.
+"""TaskService — the HTTP layer's service tier (routes never touch datastores).
 
-Every other business module exposes a ``service.py``; tasks did not, and the
-consequence showed up in ``api/routes/tasks.py``: eighteen direct
-``TaskDatastore(db)`` / ``TaskEventDatastore(db)`` / ``TaskSessionDatastore(db)``
-constructions, i.e. the route layer reaching straight past the service tier into
-persistence. That contradicts the documented flow (routes → service →
-datastore) and means the same "load a task the caller owns, 404 otherwise"
-decision was re-expressed at eight call sites.
+Owned reads (incl. the composite detail/timeline reads) + the two intervention
+writes (``add_note`` / ``revise_goal`` — the latter must reach a RUNNING lead,
+not just the row). Ownership is a parameter, never ambient; methods return
+``None`` instead of raising HTTP errors so non-HTTP callers can reuse them.
 
-Scope — the piece that was missing, not a wrapper around everything:
-
-* Owned reads, including the composite ones the detail page and the SSE tail
-  need.
-* The two small intervention writes that had no home either — ``add_note`` and
-  ``revise_goal``. They are task business logic (the goal revision has to reach
-  a RUNNING lead, not just the row), and they were inlined in the route.
-
-Deliberately NOT here:
-
-* Lifecycle orchestration — kickoff / commit / abandon / finish / stop /
-  resume / dispatch already have an owner, the composition root
-  (``TaskOrchestrator``). Routes call that directly and should keep doing so;
-  re-exporting it here would just create a second front door.
-* Plan authoring (``planning``) and mailbox delivery (``messaging``).
-
-Ownership is a parameter, never ambient: every method takes ``user_id`` and
-every underlying query filters on it, so a route cannot accidentally read
-across owners. Methods return ``None`` (or an empty result) rather than raising
-HTTP errors — mapping "missing" onto a status code is the route's job, and
-keeping it out of here is what lets non-HTTP callers reuse this.
-
-The agent-facing reads live in ``queries.py`` instead: they return the loose
-dict summaries the MCP tools want and open their own units of work (the tool
-context has no request-scoped session), whereas everything here runs on the
-caller's ``db`` and feeds Pydantic response models.
+NOT here: lifecycle orchestration (``task_orchestrator`` services), plan
+writes (``plan_commands``), agent-facing reads (``queries`` — loose dicts on
+their own UoW for the MCP context).
 """
 
 from __future__ import annotations

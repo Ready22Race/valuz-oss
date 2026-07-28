@@ -1,38 +1,13 @@
 """Failure — the module's typed "this did not work, here is why".
 
-Pure domain, no IO. Exists so a function that can fail without raising says so
-in its TYPE rather than by returning a value the caller has to sniff.
+Replaces the ``T | str`` idiom (success and failure told apart by RUNTIME
+type, a forgotten ``isinstance`` flowing the error onward as a result). Pure
+domain; ``Failure.reason`` carries exactly the string the old form returned.
 
-The idiom it replaces was ``T | str``::
-
-    def check_lead_gate(sess) -> tuple[str, str] | str: ...
-
-    verdict = check_lead_gate(sess)
-    if isinstance(verdict, str):        # ← failure, apparently
-        ...
-
-Three things are wrong with that. Success and failure are told apart by their
-RUNTIME TYPE, so it collapses the moment a function legitimately wants to
-return a string. A forgotten ``isinstance`` check is not a type error, so the
-error message flows onward as if it were the result. And three unrelated layers
-(``resolution`` / ``planning`` / ``tools.gate``) each reinvented it
-independently.
-
-``T | Failure`` fixes all three at no runtime cost: ``Failure.reason`` carries
-exactly the string the old form did, so nothing on the wire changes.
-
-Scope — this is NOT the module's single error convention, and deliberately so:
-
-* Service functions that back an MCP tool (``plan_task``, ``dispatch_async``,
-  ``await_member_results``, …) return ``{"error": ..., "hint": ...,
-  "ready_keys": ...}`` dicts. Those are not exception substitutes, they are the
-  tool's WIRE PAYLOAD — structured guidance the model reads and acts on. Their
-  shape is a contract with the agent, not an internal convention to tidy.
-* Genuinely exceptional conditions (an invalid plan mutation, an illegal task
-  status transition) still raise ``PlanError`` / ``TaskStateError``.
-
-So: raise for programmer errors, ``Failure`` for expected in-process failures,
-error dicts where the dict IS the answer being sent somewhere.
+Scope — deliberately NOT the module's only error form: service functions
+backing an MCP tool return ``{"error", "hint", ...}`` dicts because that dict
+IS the tool's wire payload (structured guidance the model acts on), and
+violated invariants still raise (``PlanError`` / ``TaskStateError``).
 """
 
 from __future__ import annotations

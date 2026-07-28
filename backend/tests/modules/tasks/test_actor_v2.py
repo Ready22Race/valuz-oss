@@ -980,7 +980,7 @@ async def test_await_members_all_returns_when_all_keys_done(monkeypatch) -> None
         mailbox_registry.put(
             lead, InboxMsg(kind="member_done", from_session="sB", payload={"summary": "b"})
         )
-        res = await orch.await_member_results(
+        res = await orch.coordination.await_member_results(
             lead_session_id=lead,
             project_id="w1",
             task_id="t1",
@@ -1016,7 +1016,7 @@ async def test_await_members_puts_shutdown_back_for_the_actor_loop(monkeypatch) 
     mailbox_registry.register(lead)
     try:
         mailbox_registry.put(lead, InboxMsg(kind="shutdown"))
-        res = await orch.await_member_results(
+        res = await orch.coordination.await_member_results(
             lead_session_id=lead,
             project_id="w1",
             task_id="t1",
@@ -1048,7 +1048,7 @@ async def test_await_members_any_returns_on_first(monkeypatch) -> None:
     mailbox_registry.register(lead)
     try:
         mailbox_registry.put(lead, InboxMsg(kind="member_done", from_session="sA", payload={}))
-        res = await orch.await_member_results(
+        res = await orch.coordination.await_member_results(
             lead_session_id=lead,
             project_id="w1",
             task_id="t1",
@@ -1077,7 +1077,7 @@ async def test_await_members_timeout_returns_partial_with_pending(monkeypatch) -
     mailbox_registry.register(lead)
     try:
         mailbox_registry.put(lead, InboxMsg(kind="member_done", from_session="sA", payload={}))
-        res = await orch.await_member_results(
+        res = await orch.coordination.await_member_results(
             lead_session_id=lead,
             project_id="w1",
             task_id="t1",
@@ -1110,7 +1110,7 @@ async def test_await_members_no_dispatched_returns_immediately(monkeypatch) -> N
     try:
         loop = asyncio.get_running_loop()
         start = loop.time()
-        res = await orch.await_member_results(
+        res = await orch.coordination.await_member_results(
             lead_session_id=lead,
             project_id="w1",
             task_id="t1",
@@ -1150,7 +1150,7 @@ async def test_await_members_any_running_pending_gets_keep_waiting_hint(monkeypa
     try:
         # No member_done queued → the member is still running when the short
         # window closes.
-        res = await orch.await_member_results(
+        res = await orch.coordination.await_member_results(
             lead_session_id=lead,
             project_id="w1",
             task_id="t1",
@@ -1191,7 +1191,7 @@ async def test_await_members_clamps_window_to_max(monkeypatch) -> None:
     try:
         loop = asyncio.get_running_loop()
         start = loop.time()
-        res = await orch.await_member_results(
+        res = await orch.coordination.await_member_results(
             lead_session_id=lead,
             project_id="w1",
             task_id="t1",

@@ -71,36 +71,15 @@ async def finalize_task(
     session_id: str | None = None,
     payload: dict[str, Any] | None = None,
 ) -> Any:  # returns the appended TaskEventRow
-    """THE terminal write — every site that ends a task goes through here.
+    """THE terminal write — every site that ends a task goes through here:
+    status flip (through the ``task_state`` guard) + ``task.finalized`` bus
+    announce + the terminal event row (returned, for notifications).
 
-    Composes the three legs no terminal site may split again (the 2026-07
-    fossil-edit bugs were exactly a missing leg: explicit ``finish_task``
-    shipped without the announce, ``stop_task`` without announce *or* the
-    state-machine guard, the lead-turn-error block without the announce):
-
-      1. the status flip through the ``task_state`` guard
-         (``TaskDatastore.update_task_status``),
-      2. the ``task.finalized`` announce (the commercial sandbox allocator's
-         TTL clamp listens on it — see :data:`TASK_FINALIZED`),
-      3. the terminal task event row (returned, so callers can hang
-         notifications off its id).
-
-    "Composes" means ONE CALL SITE, not one transaction. The three legs are
-    not atomic: ``update_task_status`` and ``append_event`` each commit on
-    their own (every task datastore method does), so the caller's
-    ``async_unit_of_work`` is a session scope, not a transaction, and the
-    announce in between is an in-process bus publish that cannot be rolled
-    back at all. A crash between legs 1 and 3 leaves a task whose status is
-    terminal with no terminal event on its timeline.
-
-    The value here is that no site can FORGET a leg — which is what actually
-    went wrong (see above) — not that the three land or fail together. Making
-    them truly atomic means changing the datastore-commits-itself convention
-    repo-wide; until then, readers must tolerate a terminal status without its
-    event (the task detail page already falls back to the status).
-
-    Runs on the caller's unit of work; the announce is best-effort and
-    synchronous (see :func:`publish_task_finalized`).
+    ONE CALL SITE, not one transaction: each datastore write commits on its
+    own (repo-wide convention) and the bus publish cannot roll back, so a
+    crash between legs leaves a terminal status without its event — readers
+    must tolerate that. The value is that no site can FORGET a leg, which is
+    the bug class this replaced.
     """
     await TaskDatastore(db).update_task_status(user_id, task_id, status)
     publish_task_finalized(task_id, user_id, status)
@@ -129,20 +108,10 @@ async def block_task(
 ) -> Any:  # returns the appended TaskEventRow
     """Put a task into ``blocked`` AND raise the user-facing notification.
 
-    ``blocked`` is the module's single "needs your attention" state — a task
-    reaches it only when something went wrong and a human has to decide what
-    happens next. That makes the notification part of the transition, not an
-    optional extra: a blocked task nobody is told about is a task that silently
-    stops.
-
-    Every ``blocked`` write went through :func:`finalize_task` and then
-    hand-wrote the same notification call (kickoff credential failure, lead
-    turn error, unresolved subtasks, health-monitor zombie sweep — four sites,
-    four copies, four chances to forget). This composes them.
-
-    ``reason`` is the human-readable line shown in the notification; it is also
-    folded into the event payload so the timeline and the notification cannot
-    disagree about why.
+    ``blocked`` is the single "needs your attention" state, so the
+    notification is part of the transition — a blocked task nobody is told
+    about is a task that silently stops. ``reason`` is the human line, folded
+    into both the notification and the event payload so they cannot disagree.
     """
     from valuz_agent.modules.notifications.projectors import (
         record_task_failure_notification,
@@ -171,19 +140,9 @@ async def block_task(
 
 
 # ---------------------------------------------------------------------------
-# Subtask outcome events
-#
-# Both of these were emitted from more than one place with a DIFFERENT payload
-# each time. ``subtask_failed`` had three shapes — the heartbeat backstop wrote
-# {agent_name, subtask_key, status, summary, reason}, dispatch wrote {agent,
-# agent_name, status, error} with no key and no summary, and the actor-loop
-# finalize spread a whole manifest. The timeline renderer falls back to a
-# ``text|summary|goal|error`` lookup for these types, so the detail line a user
-# saw depended on which internal path had failed, and no consumer could rely on
-# ANY field being present.
-#
-# One emitter each, every key always populated. Add a field here, not at a call
-# site.
+# Subtask outcome events — one emitter each, every key always populated (they
+# used to be emitted from 3/2 places with a different payload per path, so no
+# consumer could rely on any field). Add a field HERE, not at a call site.
 # ---------------------------------------------------------------------------
 
 
@@ -258,16 +217,10 @@ async def record_subtask_stopped(
 
 
 # ---------------------------------------------------------------------------
-# Decision-Inbox projections
-#
-# The Decision Inbox is a cross-cutting overlay keyed by ``task_id``: a pending
-# question blocks the agent's turn but leaves NO trace on the task's own
-# timeline. These two writes are that trace. Their only caller is
-# ``modules/decisions/aggregator.py``; they open their own unit of work because
-# it has no task transaction for them to join.
-#
-# They lived in ``tasks/messaging.py`` until 2026-07 — misfiled, since neither
-# delivers anything to a mailbox.
+# Decision-Inbox projections — the timeline trace of a pending user question
+# (which otherwise blocks the turn invisibly). Sole caller:
+# modules/decisions/aggregator.py; they open their own UoW because it has no
+# task transaction to join.
 # ---------------------------------------------------------------------------
 
 

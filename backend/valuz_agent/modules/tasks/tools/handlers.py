@@ -1,17 +1,10 @@
-"""Dispatch MCP tool HANDLERS — the thin args → service-call → ToolResult shims.
+"""Task MCP tool HANDLERS — thin args → service call → ToolResult shims.
 
-Holds ``build_task_tool_defs`` (the public entry point — it returns the full
-``ToolDef`` tuple the host's toolkit MCP server serves), the lead /
-plan-writer / orchestration gate helpers, and the async closure handlers.
-
-Each handler is a thin translate-args → composition-root method call →
-``ToolResult`` shim — the business logic lives on the peeled services behind
-the ``TaskOrchestrator`` composition root (split shape A: the root exposes the
-same method names the closures call, delegating to dispatcher / lifecycle /
-coordination / recovery).
-
-Static declarations (tool names, parameter schemas, ``ToolDef(handler=None)``)
-live in ``declarations.py``.
+Module-level functions taking the orchestrator first; ``build_task_tool_defs``
+zips them with the ``ToolDef`` declarations (identity lives THERE) and wraps
+each in ``_guarded`` (+ ``_with_inbox_notice`` for gap-callable lead tools).
+Business logic lives on the composed services (``orchestrator.lifecycle`` etc.)
+and in ``plan_commands`` for plan reads/writes.
 """
 
 # ruff: noqa: I001
@@ -20,8 +13,9 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from functools import partial
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any
 
 import valuz_agent.boot.kernel  # noqa: F401
 
@@ -39,63 +33,27 @@ from valuz_agent.modules.tasks.plan import TaskPlan
 from valuz_agent.modules.tasks.resolution import task_session_resolver
 
 from valuz_agent.modules.tasks.tools.declarations import (
-    ABANDON_TASK_TOOL_DECLARATION,
     ABANDON_TASK_TOOL_NAME,
-    AWAIT_MEMBERS_TOOL_DECLARATION,
     AWAIT_MEMBERS_TOOL_NAME,
-    COMMIT_TASK_TOOL_DECLARATION,
     COMMIT_TASK_TOOL_NAME,
-    CREATE_TASK_TOOL_DECLARATION,
     CREATE_TASK_TOOL_NAME,
-    DISPATCH_TOOL_DECLARATION,
+    DISPATCH_TOOL_DECLARATIONS,
     DISPATCH_TOOL_NAME,
-    DRAFT_TASK_TOOL_DECLARATION,
     DRAFT_TASK_TOOL_NAME,
-    FINISH_TASK_TOOL_DECLARATION,
     FINISH_TASK_TOOL_NAME,
-    GET_PLAN_TOOL_DECLARATION,
     GET_PLAN_TOOL_NAME,
-    GET_TASK_TOOL_DECLARATION,
     GET_TASK_TOOL_NAME,
-    INJECT_INTO_TASK_TOOL_DECLARATION,
     INJECT_INTO_TASK_TOOL_NAME,
-    LIST_MEMBERS_TOOL_DECLARATION,
     LIST_MEMBERS_TOOL_NAME,
-    LIST_TASKS_TOOL_DECLARATION,
     LIST_TASKS_TOOL_NAME,
-    MODIFY_PLAN_TOOL_DECLARATION,
     MODIFY_PLAN_TOOL_NAME,
-    PLAN_TASK_TOOL_DECLARATION,
+    ORCHESTRATION_TOOL_DECLARATIONS,
     PLAN_TASK_TOOL_NAME,
-    RESUME_TASK_TOOL_DECLARATION,
     RESUME_TASK_TOOL_NAME,
-    REVIEW_SUBTASK_TOOL_DECLARATION,
     REVIEW_SUBTASK_TOOL_NAME,
-    SEND_TOOL_DECLARATION,
     SEND_TOOL_NAME,
-    STOP_SUBTASK_TOOL_DECLARATION,
     STOP_SUBTASK_TOOL_NAME,
-    UPDATE_DELIVERABLE_TOOL_DECLARATION,
     UPDATE_DELIVERABLE_TOOL_NAME,
-    _ABANDON_TASK_PARAMETERS,
-    _AWAIT_MEMBERS_PARAMETERS,
-    _COMMIT_TASK_PARAMETERS,
-    _CREATE_TASK_PARAMETERS,
-    _DISPATCH_PARAMETERS,
-    _DRAFT_TASK_PARAMETERS,
-    _FINISH_TASK_PARAMETERS,
-    _GET_PLAN_PARAMETERS,
-    _GET_TASK_PARAMETERS,
-    _INJECT_INTO_TASK_PARAMETERS,
-    _LIST_MEMBERS_PARAMETERS,
-    _LIST_TASKS_PARAMETERS,
-    _MODIFY_PLAN_PARAMETERS,
-    _PLAN_TASK_PARAMETERS,
-    _RESUME_TASK_PARAMETERS,
-    _REVIEW_SUBTASK_PARAMETERS,
-    _SEND_PARAMETERS,
-    _STOP_SUBTASK_PARAMETERS,
-    _UPDATE_DELIVERABLE_PARAMETERS,
 )
 
 if TYPE_CHECKING:
@@ -132,26 +90,10 @@ async def _check_lead_gate(ctx: ExecContext) -> tuple[str, str] | ToolResult:
 async def _resolve_plan_writer_task(
     ctx: ExecContext, args: dict[str, Any]
 ) -> tuple[Any, str, str] | ToolResult:
-    """Resolve the target task for a plan-writing call + verify the caller may write it.
-
-    VALUZ-CHATPLAN D4 + D6: plan tools (plan_task / modify_plan / get_plan) and
-    state-transition tools (draft_task / commit_task / abandon_task) are
-    callable from BOTH chat and lead sessions. This helper:
-
-    1. Picks the task_id from explicit ``args["task_id"]`` (chat path) or
-       from the caller session's metadata (lead path).
-    2. Loads the TaskRow.
-    3. Runs the writer gate based on task.status:
-       - ``draft``  → caller must be originating session OR same project.
-       - ``active`` → caller must be the lead (strict D6).
-       - else      → reject (plan is read-only on terminal/paused tasks).
-
-    Returns ``(task_row, project_id, task_id)`` on success or
-    ``ToolResult(is_error=True)`` on any failure.
-
-    Plan reads/writes do NOT use this any more — they go through
-    ``plan_commands``, the single authorized door both transports share.
-    What is left here is the state-transition pair (commit / abandon).
+    """Resolve the target task + run the writer gate for the state-transition
+    tools (commit / abandon). task_id comes from args (chat) or the caller
+    session's metadata (lead). Plan reads/writes do NOT use this — they go
+    through ``plan_commands``, the single authorized door.
     """
     user_id = ctx.user_id
     sess = await data_reader().get_session(user_id, ctx.session_id)
@@ -263,21 +205,12 @@ async def _bound_agent_member(sess: Any) -> dict[str, Any] | None:
 
 
 def _with_inbox_notice(handler: ToolHandler) -> ToolHandler:
-    """Wrap a lead tool so a member_done that arrived in the gap is surfaced.
+    """Surface a member_done that arrived between two ``await_members`` calls.
 
-    Companion to ``await_member_results``' ``still_running`` hint. Between two
-    ``await_members`` calls the lead often touches other orchestration tools
-    (get_plan / dispatch / review_subtask …). If a member finished meanwhile,
-    its ``member_done`` sits in the lead's mailbox unread until the *next*
-    ``await_members`` — the exact pull-gap that stranded a completed result for
-    minutes. This wrapper PEEKS the mailbox (``has_pending`` — non-consuming: it
-    never pops, so it cannot disturb ``await_member_results``' live-key /
-    in_review invariants) and appends an ``inbox_pending`` notice to the JSON
-    envelope so the model collects it NOW rather than reasoning past it.
-
-    Self-gating: only fires for a caller whose session has queued mail (a lead in
-    an active task); a no-op for chat callers, empty inboxes, error results, and
-    non-JSON/plain-text envelopes.
+    PEEKS the caller's mailbox (non-consuming) after a gap-callable lead tool
+    and appends an ``inbox_pending`` notice to the JSON envelope, so a queued
+    result is collected now instead of sitting unread for minutes. Self-gating:
+    no-op for chat callers, empty inboxes, errors, non-JSON envelopes.
     """
     import json as _json
 
@@ -367,7 +300,7 @@ async def _dispatch_handler(
     subtask_key: str = (args.get("subtask_key") or "").strip()
     if not subtask_key:
         return ToolResult(content="dispatch: 'subtask_key' is required", is_error=True)
-    result = await orch.dispatch_async(
+    result = await orch.dispatcher.dispatch_async(
         task_id=task_id,
         project_id=project_id,
         lead_session_id=ctx.session_id,
@@ -390,7 +323,7 @@ async def _await_members_handler(
     if isinstance(gate, ToolResult):
         return gate
     task_id, project_id = gate
-    result = await orch.await_member_results(
+    result = await orch.coordination.await_member_results(
         lead_session_id=ctx.session_id,
         project_id=project_id,
         task_id=task_id,
@@ -454,7 +387,7 @@ async def _draft_task_handler(
         )
 
     try:
-        task_row = await orch.draft_task(
+        task_row = await orch.lifecycle.draft_task(
             project_id=project_id,
             goal=goal,
             lead_agent_slug=lead_agent,
@@ -491,7 +424,7 @@ async def _commit_task_handler(
     if isinstance(resolved, ToolResult):
         return resolved
     task, project_id, task_id = resolved
-    result = await orch.commit_task(
+    result = await orch.lifecycle.commit_task(
         task_id=task_id,
         project_id=project_id,
         caller_session_id=ctx.session_id,
@@ -512,7 +445,7 @@ async def _abandon_task_handler(
     if isinstance(resolved, ToolResult):
         return resolved
     task, project_id, task_id = resolved
-    result = await orch.abandon_task(
+    result = await orch.lifecycle.abandon_task(
         task_id=task_id,
         project_id=project_id,
         caller_session_id=ctx.session_id,
@@ -523,6 +456,34 @@ async def _abandon_task_handler(
         content=json.dumps(result, ensure_ascii=False),
         is_error="error" in result,
     )
+
+
+async def _authorize_task_conversation_caller(
+    ctx: ExecContext, task_id: str, tool: str
+) -> tuple[Any, Any] | ToolResult:
+    """Load caller session + task, allow the task's originator or a session in
+    its project. The auth model inject_into_task and resume_task share: looser
+    than the writer gate because the LEAD keeps full authority over what to do
+    with the request."""
+    sess = await data_reader().get_session(ctx.user_id, ctx.session_id)
+    if sess is None:
+        return ToolResult(content=f"{tool}: caller session not found", is_error=True)
+    async with async_unit_of_work(commit=False) as db:
+        task = await TaskDatastore(db).get_task(ctx.user_id, task_id)
+    if task is None:
+        return ToolResult(content=f"{tool}: task {task_id!r} not found", is_error=True)
+    v: dict[str, Any] = (sess.metadata or {}).get("valuz", {})
+    caller_ws = getattr(sess, "project_id", "") or v.get("project_id", "")
+    origin = (task.metadata_ or {}).get("originating_session_id")
+    if not ((origin and sess.id == origin) or (caller_ws and caller_ws == task.project_id)):
+        return ToolResult(
+            content=(
+                f"{tool}: FORBIDDEN — caller is neither the task's originator "
+                f"nor a session in the task's project (task project {task.project_id!r})"
+            ),
+            is_error=True,
+        )
+    return sess, task
 
 
 async def _inject_into_task_handler(
@@ -581,7 +542,7 @@ async def _inject_into_task_handler(
     # embeds the text in the respawned lead's recovery brief, appending its
     # own ``resumed`` + ``user_inject`` events.
     if result.get("reason") == "TASK_HALTED":
-        revived = await orch.resume_task(
+        revived = await orch.recovery.resume_task(
             task_id, task.project_id, user_id=ctx.user_id, instruction=text
         )
         result = {
@@ -598,46 +559,20 @@ async def _inject_into_task_handler(
 async def _resume_task_handler(
     orch: TaskOrchestrator, args: dict[str, Any], ctx: ExecContext
 ) -> ToolResult:
-    # Chat-side resume. Same auth model as inject_into_task: caller must
-    # be the task's originator OR a session in the same project —
-    # state-machine + orch.resume_task already validates that the
-    # task is paused/blocked (terminal/draft/active rejected with a
-    # human-readable reason in the dict it returns).
-    user_id = ctx.user_id
+    # orch.resume_task itself validates the task is in a resumable status.
     task_id = (args.get("task_id") or "").strip()
     if not task_id:
         return ToolResult(content="resume_task: task_id is required", is_error=True)
+    authorized = await _authorize_task_conversation_caller(ctx, task_id, "resume_task")
+    if isinstance(authorized, ToolResult):
+        return authorized
+    _sess, task = authorized
 
-    sess = await data_reader().get_session(user_id, ctx.session_id)
-    if sess is None:
-        return ToolResult(content="resume_task: caller session not found", is_error=True)
-
-
-    async with async_unit_of_work(commit=False) as db:
-        task = await TaskDatastore(db).get_task(user_id, task_id)
-    if task is None:
-        return ToolResult(content=f"resume_task: task {task_id!r} not found", is_error=True)
-
-    v: dict[str, Any] = (sess.metadata or {}).get("valuz", {})
-    caller_ws = getattr(sess, "project_id", "") or v.get("project_id", "")
-    origin = (task.metadata_ or {}).get("originating_session_id")
-    is_originator = bool(origin) and sess.id == origin
-    is_project_mate = bool(caller_ws) and caller_ws == task.project_id
-    if not (is_originator or is_project_mate):
-        return ToolResult(
-            content=(
-                "resume_task: FORBIDDEN — caller is neither the task's "
-                "originator nor a session in the task's project "
-                f"(task project {task.project_id!r})"
-            ),
-            is_error=True,
-        )
-
-    result = await orch.resume_task(
+    result = await orch.recovery.resume_task(
         task_id=task_id,
         project_id=task.project_id,
         actor=ctx.session_id,
-        user_id=user_id,
+        user_id=ctx.user_id,
     )
     return ToolResult(
         content=json.dumps(result, ensure_ascii=False),
@@ -662,7 +597,7 @@ async def _create_task_handler(
             content="create_task: no lead_agent given and conversation has no agent",
             is_error=True,
         )
-    task_row = await orch.kickoff(
+    task_row = await orch.lifecycle.kickoff(
         project_id=project_id,
         goal=goal,
         lead_agent_slug=lead_agent,
@@ -763,7 +698,7 @@ async def _finish_task_handler(
     status: str = args.get("status") or "completed"
     force: bool = bool(args.get("force") or False)
 
-    result = await orch.finish_task(
+    result = await orch.lifecycle.finish_task(
         task_id=task_id,
         project_id=project_id,
         lead_session_id=ctx.session_id,
@@ -931,7 +866,7 @@ async def _stop_subtask_handler(
             )
 
     reason = (args.get("reason") or "").strip()
-    ok = await orch.stop_member(target_session_id, user_id=user_id)
+    ok = await orch.recovery.stop_member(target_session_id, user_id=user_id)
     if not ok:
         return ToolResult(
             content=(
@@ -969,7 +904,7 @@ async def _update_deliverable_handler(
     summary: str = args.get("summary", "")
     artifacts: list[str] = args.get("artifacts") or []
 
-    result = await orch.update_deliverable(
+    result = await orch.lifecycle.update_deliverable(
         task_id=task_id,
         project_id=project_id,
         lead_session_id=ctx.session_id,
@@ -990,172 +925,51 @@ async def _update_deliverable_handler(
 # ---------------------------------------------------------------------------
 
 
-class _ToolSpec(NamedTuple):
-    """One tool: its wire identity plus the handler that serves it."""
-
-    name: str
-    description: str
-    parameters: dict[str, Any]
-    handler: Callable[..., Awaitable[ToolResult]]
-    read_only: bool = False
-
-
-# The full task tool set, in registration order. A table rather than 20
-# ``register_tool(...)`` statements: adding a tool is one row, and the mapping
-# from wire name to handler is readable at a glance instead of buried in an
-# 800-line factory body.
-_TOOL_SPECS: tuple[_ToolSpec, ...] = (
-    _ToolSpec(
-        DISPATCH_TOOL_NAME,
-        DISPATCH_TOOL_DECLARATION.description,
-        _DISPATCH_PARAMETERS,
-        _dispatch_handler,
-    ),
-    _ToolSpec(
-        AWAIT_MEMBERS_TOOL_NAME,
-        AWAIT_MEMBERS_TOOL_DECLARATION.description,
-        _AWAIT_MEMBERS_PARAMETERS,
-        _await_members_handler,
-    ),
-    _ToolSpec(
-        LIST_MEMBERS_TOOL_NAME,
-        LIST_MEMBERS_TOOL_DECLARATION.description,
-        _LIST_MEMBERS_PARAMETERS,
-        _list_members_handler,
-    ),
-    _ToolSpec(
-        FINISH_TASK_TOOL_NAME,
-        FINISH_TASK_TOOL_DECLARATION.description,
-        _FINISH_TASK_PARAMETERS,
-        _finish_task_handler,
-    ),
-    _ToolSpec(
-        SEND_TOOL_NAME,
-        SEND_TOOL_DECLARATION.description,
-        _SEND_PARAMETERS,
-        _send_handler,
-    ),
-    _ToolSpec(
-        CREATE_TASK_TOOL_NAME,
-        CREATE_TASK_TOOL_DECLARATION.description,
-        _CREATE_TASK_PARAMETERS,
-        _create_task_handler,
-    ),
-    _ToolSpec(
-        LIST_TASKS_TOOL_NAME,
-        LIST_TASKS_TOOL_DECLARATION.description,
-        _LIST_TASKS_PARAMETERS,
-        _list_tasks_handler,
-    ),
-    _ToolSpec(
-        GET_TASK_TOOL_NAME,
-        GET_TASK_TOOL_DECLARATION.description,
-        _GET_TASK_PARAMETERS,
-        _get_task_handler,
-    ),
-    _ToolSpec(
-        PLAN_TASK_TOOL_NAME,
-        PLAN_TASK_TOOL_DECLARATION.description,
-        _PLAN_TASK_PARAMETERS,
-        _plan_task_handler,
-    ),
-    _ToolSpec(
-        GET_PLAN_TOOL_NAME,
-        GET_PLAN_TOOL_DECLARATION.description,
-        _GET_PLAN_PARAMETERS,
-        _get_plan_handler,
-        read_only=True,
-    ),
-    _ToolSpec(
-        MODIFY_PLAN_TOOL_NAME,
-        MODIFY_PLAN_TOOL_DECLARATION.description,
-        _MODIFY_PLAN_PARAMETERS,
-        _modify_plan_handler,
-    ),
-    _ToolSpec(
-        REVIEW_SUBTASK_TOOL_NAME,
-        REVIEW_SUBTASK_TOOL_DECLARATION.description,
-        _REVIEW_SUBTASK_PARAMETERS,
-        _review_subtask_handler,
-    ),
-    _ToolSpec(
-        DRAFT_TASK_TOOL_NAME,
-        DRAFT_TASK_TOOL_DECLARATION.description,
-        _DRAFT_TASK_PARAMETERS,
-        _draft_task_handler,
-    ),
-    _ToolSpec(
-        COMMIT_TASK_TOOL_NAME,
-        COMMIT_TASK_TOOL_DECLARATION.description,
-        _COMMIT_TASK_PARAMETERS,
-        _commit_task_handler,
-    ),
-    _ToolSpec(
-        ABANDON_TASK_TOOL_NAME,
-        ABANDON_TASK_TOOL_DECLARATION.description,
-        _ABANDON_TASK_PARAMETERS,
-        _abandon_task_handler,
-    ),
-    _ToolSpec(
-        INJECT_INTO_TASK_TOOL_NAME,
-        INJECT_INTO_TASK_TOOL_DECLARATION.description,
-        _INJECT_INTO_TASK_PARAMETERS,
-        _inject_into_task_handler,
-    ),
-    _ToolSpec(
-        RESUME_TASK_TOOL_NAME,
-        RESUME_TASK_TOOL_DECLARATION.description,
-        _RESUME_TASK_PARAMETERS,
-        _resume_task_handler,
-    ),
-    _ToolSpec(
-        STOP_SUBTASK_TOOL_NAME,
-        STOP_SUBTASK_TOOL_DECLARATION.description,
-        _STOP_SUBTASK_PARAMETERS,
-        _stop_subtask_handler,
-    ),
-    _ToolSpec(
-        UPDATE_DELIVERABLE_TOOL_NAME,
-        UPDATE_DELIVERABLE_TOOL_DECLARATION.description,
-        _UPDATE_DELIVERABLE_PARAMETERS,
-        _update_deliverable_handler,
-    ),
-)
+# Wire identity (name / description / parameters) lives on the ToolDef
+# declarations; this maps each declared tool to the handler that serves it.
+# ``build_task_tool_defs`` zips the two — repeating the identity here would be
+# a second copy to keep in sync (and was, until 2026-07).
+_HANDLERS: dict[str, Callable[..., Awaitable[ToolResult]]] = {
+    DISPATCH_TOOL_NAME: _dispatch_handler,
+    AWAIT_MEMBERS_TOOL_NAME: _await_members_handler,
+    LIST_MEMBERS_TOOL_NAME: _list_members_handler,
+    FINISH_TASK_TOOL_NAME: _finish_task_handler,
+    SEND_TOOL_NAME: _send_handler,
+    CREATE_TASK_TOOL_NAME: _create_task_handler,
+    LIST_TASKS_TOOL_NAME: _list_tasks_handler,
+    GET_TASK_TOOL_NAME: _get_task_handler,
+    PLAN_TASK_TOOL_NAME: _plan_task_handler,
+    GET_PLAN_TOOL_NAME: _get_plan_handler,
+    MODIFY_PLAN_TOOL_NAME: _modify_plan_handler,
+    REVIEW_SUBTASK_TOOL_NAME: _review_subtask_handler,
+    DRAFT_TASK_TOOL_NAME: _draft_task_handler,
+    COMMIT_TASK_TOOL_NAME: _commit_task_handler,
+    ABANDON_TASK_TOOL_NAME: _abandon_task_handler,
+    INJECT_INTO_TASK_TOOL_NAME: _inject_into_task_handler,
+    RESUME_TASK_TOOL_NAME: _resume_task_handler,
+    STOP_SUBTASK_TOOL_NAME: _stop_subtask_handler,
+    UPDATE_DELIVERABLE_TOOL_NAME: _update_deliverable_handler,
+}
 
 
 def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
-    """Bind *orchestrator* into every task tool and return the full set.
+    """Bind *orchestrator* into every declared task tool and return the set.
 
-    The host's toolkit MCP server partitions the result into its ``base`` /
-    ``lead`` toolsets by declaration name (see ``boot/steps.py``).
-
-    Handlers are module-level functions taking the orchestrator as their first
-    argument; ``partial`` supplies it here. They used to be twenty closures
-    nested inside this function — 840 lines and 137 branches in a single
-    definition, four times the branch count of anything else in the module —
-    justified by "capture the orchestrator to avoid a startup circular import".
-    That never required a closure: this module only imports ``TaskOrchestrator``
-    under ``TYPE_CHECKING``, so a parameter does the same job and each handler
-    becomes independently readable and directly testable.
-
-    Must be called after ``init_kernel_dependencies()`` (i.e. from the async
-    startup steps), once the tasks orchestrator exists.
+    Identity comes from the declaration tuples (deduped by name — the lead and
+    chat toolsets deliberately overlap); behaviour comes from ``_HANDLERS``.
+    The toolkit MCP server partitions the result into base/lead toolsets by
+    name (boot/steps.py). Call after ``init_kernel_dependencies()``.
     """
     defs: list[ToolDef] = []
-    for spec in _TOOL_SPECS:
-        handler: ToolHandler = _guarded(spec.name, partial(spec.handler, orchestrator))
-        # Pull-gap: wrap gap-callable lead tools so a member_done queued between
-        # await_members calls is surfaced on the next tool result (self-gating).
-        if spec.name in _INBOX_NOTICE_TOOLS:
+    seen: set[str] = set()
+    for decl in DISPATCH_TOOL_DECLARATIONS + ORCHESTRATION_TOOL_DECLARATIONS:
+        if decl.name in seen:
+            continue
+        seen.add(decl.name)
+        handler: ToolHandler = _guarded(decl.name, partial(_HANDLERS[decl.name], orchestrator))
+        # Pull-gap: surface a queued member_done on gap-callable lead tools.
+        if decl.name in _INBOX_NOTICE_TOOLS:
             handler = _with_inbox_notice(handler)
-        defs.append(
-            ToolDef(
-                name=spec.name,
-                description=spec.description,
-                parameters=spec.parameters,
-                handler=handler,
-                **({"read_only": True} if spec.read_only else {}),
-            )
-        )
+        defs.append(replace(decl, handler=handler))
     logger.info("Built task tool defs: %s", ", ".join(sorted(t.name for t in defs)))
     return tuple(defs)

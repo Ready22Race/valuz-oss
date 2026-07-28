@@ -1,24 +1,11 @@
-"""Task stop/resume reconciliation core (VALUZ-RESUME, S1).
+"""RecoveryService — startup recovery + user-initiated stop / resume.
 
-The durable source of truth for a subtask's liveness/completion is the kernel
-session state (status + stop_reason) + the host run/plan rows — NOT the
-in-memory mailbox (which dies on app restart). These pure functions map a
-member's real kernel-session state to a host-side disposition; the
-:class:`RecoveryService` (S2/S4) applies the side effects (DB writes, respawn
-actor loop, mailbox).
-
-The :class:`RecoveryService` (ADR-023 Step 3d) was peeled verbatim out of
-``TaskOrchestrator``: startup Layer-1 sweep (``recover_active_tasks`` /
-``_recover_one_task``) plus the user-initiated Layer-2 stop/resume surface
-(``stop_task`` / ``resume_task`` / ``stop_member`` + ``_interrupt_kernel_session``).
-It re-populates the shared :class:`LiveMemberRegistry` (no dispatch epoch on the
-recovery branch — the Step-1 invariant) before respawning each resumable
-member's actor loop, mirroring ``dispatch_async``'s add-member-before-spawn
-ordering. The pure ``reconcile`` / ``classify_member`` functions below stay
-module-level domain code, imported by both the service and
-``CoordinationService._heartbeat_pending``.
-
-See docs/exec-plans/completed/task-stop-resume.md.
+The durable truth for a member's liveness is its kernel session state + the
+host run/plan rows, never the in-memory mailbox (which dies with the process).
+The pure state→disposition rules live in ``member_state``; this service
+applies their side effects: Layer-1 startup sweep (``recover_active_tasks``),
+Layer-2 ``stop_task`` / ``resume_task`` / ``stop_member``, and the shared
+``_recover_one_task`` reconcile-and-respawn machine.
 """
 
 # ruff: noqa: I001
@@ -57,28 +44,11 @@ logger = logging.getLogger(__name__)
 
 
 class RecoveryService:
-    """Startup recovery + user-initiated stop/resume — peeled verbatim out of
-    ``TaskOrchestrator``.
+    """Startup sweep + user stop/resume.
 
-    Owns:
-
-      * :meth:`recover_active_tasks` — Layer-1 startup sweep over
-        ``TaskDatastore.list_active``.
-      * :meth:`_recover_one_task` — reconcile one task's members + re-drive its
-        lead (shared by Layer-1 startup and Layer-2 ``resume_task``). The
-        registry re-population keystone: each resumable member is seeded via
-        ``registry.add_member`` (NO dispatch epoch — recovery branch) BEFORE
-        its actor loop respawns, mirroring ``dispatch_async``'s invariant.
-      * :meth:`stop_task` — Layer-2 cascade interrupt + shutdown broadcast →
-        ``paused``.
-      * :meth:`resume_task` — Layer-2 flip back to ``active`` then
-        ``_recover_one_task``.
-      * :meth:`stop_member` — Layer-2 single-member stop.
-      * :meth:`_interrupt_kernel_session` — best-effort kernel turn interrupt.
-
-    Constructed once at the composition root with the shared registry +
-    runtime ActorRunner + CoordinationService; the orchestrator's recovery
-    surface delegates straight onto it.
+    Registry keystone in ``_recover_one_task``: each resumable member is
+    re-seeded via ``registry.add_member`` (no dispatch epoch on the recovery
+    branch) BEFORE its actor loop respawns — mirroring ``dispatch_async``.
     """
 
     def __init__(
@@ -232,17 +202,11 @@ class RecoveryService:
                     user_id=user_id,
                 )
 
-        # Evict any stale kernel runtime BEFORE respawning so each resumed turn
-        # builds a FRESH one. Load-bearing for pause→resume: the pause
-        # ``interrupt`` cancels the in-flight turn and leaves the runtime's SDK
-        # client in a broken/cancelled state cached in the kernel orchestrator's
-        # ``_runtimes``; ``_ensure_runtime`` would reuse it and the resumed turn
-        # immediately cancels (9s, null output) → the lead loop ends with an
-        # errored ``stop_reason`` → ``_auto_finalize`` blocks the task. Doing it
-        # HERE — right before respawn, not in the old loop's async
-        # ``_finalize_actor`` — is race-free: the old loop has already exited and
-        # the new one hasn't built its runtime yet. On Layer-1 startup recovery
-        # the cache is empty so it's a harmless no-op.
+        # Evict any stale kernel runtime BEFORE respawning. Load-bearing for
+        # pause→resume: the pause interrupt leaves a cancelled SDK client in
+        # the kernel's runtime cache, and reusing it makes the resumed turn
+        # cancel instantly → auto-finalize blocks the task. Doing it here is
+        # race-free (old loop exited, new one not yet built).
         async def _evict_runtime(sid: str) -> None:
             try:
                 await kernel_client.cleanup_runtime(sid)
@@ -334,23 +298,13 @@ class RecoveryService:
         target_status: str = "paused",
         user_id: str,
     ) -> bool:
-        """User-initiated cascade halt → ``paused`` (pause) or ``stopped`` (stop).
+        """Cascade halt → ``paused`` (from active) or ``stopped`` (from
+        active/paused; soft-terminal but revivable via resume_task).
 
-        Interrupts the lead + every in-flight member, broadcasts ``shutdown`` to
-        their actor loops, parks in-flight member runs ``→paused`` AND their
-        running plan nodes (``in_progress`` → ``paused``) so the panel stops
-        rendering them as actively running, then flips the task to
-        ``target_status``:
-
-          * ``paused`` — recoverable pause. Layer-1 app-restart recovery skips it;
-            the user resumes explicitly via ``resume_task``. Only from ``active``.
-          * ``stopped`` — user-driven stop. Soft-terminal in the UI (no resume
-            button) but still revivable via chat/inject (``resume_task`` accepts
-            it). From ``active`` or an already-``paused`` task.
-
-        Members + plan nodes are parked identically for both (``stopped`` stays
-        revivable by design); only the task status + the emitted event differ.
-        Returns False if the task is gone or the transition is illegal.
+        Interrupts lead + members, broadcasts shutdown, parks in-flight runs
+        and their ``in_progress`` plan nodes ``→paused``, then flips the task.
+        Members are parked identically for both targets. Returns False when
+        the task is gone or the transition is illegal.
         """
         async with async_unit_of_work() as db:
             task_ds = TaskDatastore(db)
@@ -443,47 +397,17 @@ class RecoveryService:
         user_id: str,
         instruction: str | None = None,
     ) -> dict[str, Any]:
-        """User-initiated resume of a ``paused`` / ``blocked`` / ``stopped`` /
-        ``completed`` task.
+        """Resume a ``paused`` / ``blocked`` / ``stopped`` / ``completed`` task
+        (``completed`` = deliberate reopen to supplement its subtasks; only
+        ``abandoned`` is hard-terminal, and ``draft`` launches via commit_task).
 
-        ``instruction`` — optional free-text user guidance that rides along
-        with the resume (":intervene action=resume text=…" / chat inject on a
-        halted task). Recorded as a ``user_inject`` event and embedded in the
-        respawned lead's recovery brief (see ``_recover_one_task``).
+        Flips the task ``active``, reactivates the lead run row when a prior
+        finish marked it completed, then reconciles + respawns through the
+        shared ``_recover_one_task`` machine. ``instruction`` rides along into
+        the respawned lead's recovery brief and is recorded as ``user_inject``.
 
-        Flips the task back to ``active`` then reconciles + respawns members
-        and re-drives the lead via the shared ``_recover_one_task`` machine
-        (same path as Layer-1 startup recovery; only the trigger differs).
-
-        Allowed source states (per ``task_state.ALLOWED_TRANSITIONS``):
-
-        - ``paused`` — user-intervened pause (REST /intervene action=pause)
-        - ``blocked`` — auto-finalize couldn't close (unresolved nodes, OR a
-          mid-turn lead crash surfaced as ``task_blocked``). Recoverable.
-        - ``stopped`` — user-driven termination (typically via inject "停止此
-          任务" → lead calling finish_task(status="stopped")). The lead run
-          was marked "completed" by finish_task; we flip it back to "active"
-          here so ``_recover_one_task`` rebuilds a fresh lead actor.
-        - ``completed`` — a finished task REOPENED to supplement or adjust
-          subtasks from a second chat-plan (chat-plan "区分场景"). Like
-          ``stopped``, the lead run was marked "completed" by finish_task; we
-          reactivate it the same way. The caller is expected to immediately
-          modify_plan / inject the new subtasks. A genuinely new goal should
-          be a fresh follow-up task, not a reopen.
-
-        Only ``abandoned`` is hard-terminal (draft discarded, nothing to
-        revive). ``draft`` is also rejected — call ``commit_task`` to launch
-        the lead for the first time.
-
-        Returns a dict explaining what happened:
-
-        - ``{ok: True, prior_status, resumed: True}`` — flip + recovery kicked
-        - ``{ok: False, error, prior_status}`` — illegal source state or
-          task not found; caller surfaces ``error`` to the user.
-
-        Why a dict, not a bool: the chat-facing ``resume_task`` MCP tool needs
-        a human-readable reason to feed back when resume fails (legacy
-        ``True/False`` collapses "wrong status" with "task not found").
+        Returns ``{ok, prior_status, resumed|error}`` — a dict rather than a
+        bool because the MCP tool needs a human-readable rejection reason.
         """
         from valuz_agent.modules.tasks.task_state import assert_transition
 

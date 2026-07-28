@@ -40,7 +40,7 @@ from valuz_agent.ports.model_defaults import ModelDefaults
 logger = logging.getLogger(__name__)
 
 
-async def _factory_model_defaults(user_id: str | None) -> "ModelDefaults":
+async def _factory_model_defaults(user_id: str | None) -> ModelDefaults:
     """Factory runtime/model defaults for creates that omitted them
     (``ext.model_defaults``: Settings env / distribution / cloud-delivered)."""
     from valuz_agent.ports.extensions import ext
