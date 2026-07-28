@@ -492,12 +492,22 @@ class LifecycleService:
     ) -> dict[str, Any]:
         """Transition a draft task to active by spawning its lead session.
 
-        Atomicity (D2 — half-atomic): the DB writes (lead session row + task
-        status flip + committed event) commit together. If the actor loop fails
-        to spawn afterwards we do NOT roll the task back to draft (the state
-        machine forbids ``active → draft``); the task stays ``active`` with no
-        running actor — the sweeper picks it up and marks it ``blocked`` so the
-        user can resume.
+        Atomicity — read this carefully, it is weaker than it looks. The three
+        DB writes (lead session row → task status flip → committed event) do
+        NOT commit together: every task datastore method commits on its own
+        (``async_commit_with_retry``), so ``async_unit_of_work`` here is a
+        SESSION SCOPE, not a transaction. A crash between two of them leaves a
+        real partial state — e.g. a lead run row for a task still marked
+        ``draft``, or an ``active`` task with no ``committed`` timeline event.
+        (This is a repo-wide property of the datastore layer, not something
+        this method opted into; making it genuinely transactional means
+        changing that convention everywhere, not just here.)
+
+        What IS guaranteed is the ordering and the recovery story: the actor
+        spawn happens after the writes, and if it fails we do NOT roll the task
+        back to draft (the state machine forbids ``active → draft``). The task
+        stays ``active`` with no running actor — the health monitor sees a lead
+        with no live mailbox and marks it ``blocked`` so the user can resume.
 
         The new lead session gets the ``plan_pre_committed=True`` brief
         variant which tells it to skip ``plan_task`` and dispatch directly
@@ -636,9 +646,10 @@ class LifecycleService:
                 },
             )
 
-        # Half-atomic D2: actor spawn happens AFTER the DB txn. If spawn
-        # fails the DB is already in `active` — the sweeper will mark
-        # the task blocked so the user can resume.
+        # Actor spawn happens AFTER the writes above (which are individually
+        # committed — see the docstring; there is no enclosing transaction to
+        # roll back). If the spawn fails the task is already ``active``, and
+        # the health monitor marks it blocked so the user can resume.
         from valuz_agent.modules.tasks.mailbox import mailbox_registry
 
         mailbox_registry.register(lead_session.id)

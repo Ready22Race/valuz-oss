@@ -83,6 +83,20 @@ async def finalize_task(
       3. the terminal task event row (returned, so callers can hang
          notifications off its id).
 
+    "Composes" means ONE CALL SITE, not one transaction. The three legs are
+    not atomic: ``update_task_status`` and ``append_event`` each commit on
+    their own (every task datastore method does), so the caller's
+    ``async_unit_of_work`` is a session scope, not a transaction, and the
+    announce in between is an in-process bus publish that cannot be rolled
+    back at all. A crash between legs 1 and 3 leaves a task whose status is
+    terminal with no terminal event on its timeline.
+
+    The value here is that no site can FORGET a leg — which is what actually
+    went wrong (see above) — not that the three land or fail together. Making
+    them truly atomic means changing the datastore-commits-itself convention
+    repo-wide; until then, readers must tolerate a terminal status without its
+    event (the task detail page already falls back to the status).
+
     Runs on the caller's unit of work; the announce is best-effort and
     synchronous (see :func:`publish_task_finalized`).
     """
