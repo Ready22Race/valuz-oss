@@ -712,6 +712,12 @@ async def _enrich_bindings(user_id: str, rows: list[Any]) -> list[Any]:
     except Exception:  # noqa: BLE001 - a nameless row beats a failed panel
         return [(row, None) for row in rows]
 
+    # Follow the order the bot's chat list comes back in, which is what the
+    # picker shows — the same groups in a different sequence on two surfaces
+    # reads as two different lists.
+    order = {chat_id: index for index, chat_id in enumerate(live)}
+    rows = sorted(rows, key=lambda row: order.get(row.external_chat_id, len(order)))
+
     named: list[Any] = []
     async with async_unit_of_work() as db:
         ds = ChannelChatBindingDatastore(db)
