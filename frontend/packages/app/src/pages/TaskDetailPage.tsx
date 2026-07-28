@@ -1949,6 +1949,14 @@ function resolveActor(
   if (type === "task_drafted" || type === "committed") {
     return t("task.actorYou");
   }
+  // Historical chat-created kickoffs carry the raw chat session UUID as actor
+  // (the create_task tool used to pass its session id as ``created_by``; new
+  // rows carry "user"). The log is append-only, so those rows are permanent —
+  // collapse them to "你" instead of rendering bare hex. Gated on the id shape
+  // so an "automation" kickoff keeps its own label.
+  if (type === "kickoff" && /^[0-9a-f]{32}$/.test(actor)) {
+    return t("task.actorYou");
+  }
   // Lead-driven events carry the lead SESSION id as actor — collapse to the
   // lead agent name (VALUZ-TASK adds plan/review events on this path).
   if (

@@ -597,12 +597,18 @@ async def _create_task_handler(
             content="create_task: no lead_agent given and conversation has no agent",
             is_error=True,
         )
+    # ``created_by`` is a SOURCE KIND (user | automation | …), not an id — a
+    # chat-created task is user-initiated, and the "via chat" channel is
+    # already captured by trigger provenance (originating_session_id →
+    # trigger_type="chat"). This used to pass the raw chat session UUID, which
+    # leaked into TaskRow.created_by AND the kickoff event's actor, so the
+    # timeline's first row rendered a bare hex id.
     task_row = await orch.lifecycle.kickoff(
         project_id=project_id,
         goal=goal,
         lead_agent_slug=lead_agent,
         refs=args.get("refs") or [],
-        created_by=ctx.session_id,
+        created_by="user",
         title=args.get("title"),
         originating_session_id=ctx.session_id,
         user_id=ctx.user_id,

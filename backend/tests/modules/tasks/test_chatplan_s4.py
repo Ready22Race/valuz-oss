@@ -9,6 +9,7 @@ fixture (no kernel session bring-up needed). Pattern mirrors
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -344,3 +345,63 @@ def test_wrapped_envelope_uses_user_instruction_source_chat_tag(db_factory, tmp_
     # The raw text is preserved inside the envelope (no escaping shenanigans).
     expected = '<user-instruction source="chat">\nraw user text\n</user-instruction>'
     assert msg.text == expected
+
+
+def test_chat_created_task_is_attributed_to_the_user(monkeypatch):
+    """``created_by`` is a source KIND, not an id.
+
+    The create_task tool used to pass its own chat session UUID, which leaked
+    into ``TaskRow.created_by`` (documented enum: user | automation | …) AND
+    the kickoff event's actor — so the timeline's first row rendered a bare
+    32-hex id instead of "你". The channel attribution ("via chat") is
+    provenance's job, carried by ``originating_session_id``, which must keep
+    flowing unchanged.
+    """
+    from valuz_agent.adapters import data_reader as dr_mod
+    from valuz_agent.integrations.toolkit_mcp_server import HostExecContext
+    from valuz_agent.modules.tasks.resolution import TaskProjectEnv
+    from valuz_agent.modules.tasks.tools import handlers as h_mod
+
+    kickoffs: list[dict] = []
+
+    class _Lifecycle:
+        async def kickoff(self, **kw):
+            kickoffs.append(kw)
+            return SimpleNamespace(id="t-new", title="T", plan_version=0)
+
+    class _Orch:
+        lifecycle = _Lifecycle()
+
+    class _Reader:
+        async def get_session(self, _uid, sid):
+            return SimpleNamespace(
+                id=sid,
+                user_id=LOCAL_USER_ID,
+                project_id="w1",
+                metadata={"valuz": {"agent_slug": "helper"}},
+            )
+
+    monkeypatch.setattr(dr_mod, "data_reader", lambda: _Reader())
+    monkeypatch.setattr(h_mod, "data_reader", lambda: _Reader())
+
+    async def _fake_env(self, db, *, user_id, project_id):
+        return TaskProjectEnv(
+            project_row=SimpleNamespace(kind="project", name="P"),
+            project_cwd=Path("/tmp"),
+            instructions_md=None,
+        )
+
+    monkeypatch.setattr(
+        type(h_mod.task_session_resolver), "resolve_project_env", _fake_env
+    )
+
+    res = asyncio.run(
+        h_mod._create_task_handler(
+            _Orch(),
+            {"goal": "查询热门板块", "lead_agent": "lead"},
+            HostExecContext(session_id="chat-sess-1", user_id=LOCAL_USER_ID),
+        )
+    )
+    assert not res.is_error
+    assert kickoffs[0]["created_by"] == "user"
+    assert kickoffs[0]["originating_session_id"] == "chat-sess-1"
