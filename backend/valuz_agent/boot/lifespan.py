@@ -59,7 +59,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     steps.resolve_marketplace_index()
     await steps.start_skills(app)
     await steps.start_decision_aggregator(app)
-    steps.mark_boot_complete()  # LAST
+    steps.mark_boot_complete()  # LAST blocking startup step
+    await steps.start_post_boot_agent_channels(app)
 
     yield
 

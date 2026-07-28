@@ -3,6 +3,7 @@ export * from "./api/agents-api";
 export * from "./api/agent-templates-api";
 export * from "./api/analytics-api";
 export * from "./api/browser-api";
+export * from "./api/channels-api";
 export * from "./api/providers-api";
 export * from "./api/runtime-compat";
 export * from "./api/runtime-protocols";

@@ -9,6 +9,116 @@ servers:
     description: Local development
 
 paths:
+  /v1/channels/wecom-aibot/bindings/{agent_slug}:
+    get:
+      summary: Get an agent's local WeCom AIBot binding
+      operationId: getWeComAIBotBinding
+      tags: [channels]
+      parameters:
+        - name: agent_slug
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: Current local agent binding
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WeComAIBotBinding"
+    put:
+      summary: Update an agent's local WeCom AIBot binding
+      operationId: updateWeComAIBotBinding
+      tags: [channels]
+      parameters:
+        - name: agent_slug
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WeComAIBotBindingUpdate"
+      responses:
+        "200":
+          description: Updated local agent binding
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WeComAIBotBinding"
+
+  /v1/channels/wecom/{channel_instance_id}/callback:
+    get:
+      summary: WeCom channel URL verification
+      operationId: verifyWeComChannelCallback
+      tags: [channels]
+      parameters:
+        - name: channel_instance_id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: msg_signature
+          in: query
+          required: true
+          schema: {type: string}
+        - name: timestamp
+          in: query
+          required: true
+          schema: {type: string}
+        - name: nonce
+          in: query
+          required: true
+          schema: {type: string}
+        - name: echostr
+          in: query
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: Decrypted echostr
+          content:
+            text/plain:
+              schema: {type: string}
+        "401":
+          description: Signature rejected
+    post:
+      summary: WeCom channel message callback
+      operationId: weComChannelCallback
+      tags: [channels]
+      parameters:
+        - name: channel_instance_id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: msg_signature
+          in: query
+          required: true
+          schema: {type: string}
+        - name: timestamp
+          in: query
+          required: true
+          schema: {type: string}
+        - name: nonce
+          in: query
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/xml:
+            schema: {type: string}
+          text/xml:
+            schema: {type: string}
+      responses:
+        "200":
+          description: WeCom success acknowledgement
+          content:
+            text/plain:
+              schema: {type: string, enum: [success]}
+        "401":
+          description: Signature rejected
   /v1/runs:
     get:
       summary: List runs for the activity overview (running sessions / tasks)
@@ -3254,6 +3364,54 @@ paths:
 
 components:
   schemas:
+    WeComAIBotBinding:
+      type: object
+      required:
+        - enabled
+        - channel_instance_id
+        - owner_user_id
+        - agent_slug
+        - bot_id
+        - has_secret
+        - connected
+        - connection_status
+      properties:
+        enabled:
+          type: boolean
+        channel_instance_id:
+          type: string
+        owner_user_id:
+          type: string
+        agent_slug:
+          type: string
+        bot_id:
+          type: string
+        has_secret:
+          type: boolean
+        connected:
+          type: boolean
+        connection_status:
+          type: string
+        connection_error:
+          type: string
+          nullable: true
+    WeComAIBotBindingUpdate:
+      type: object
+      required:
+        - enabled
+        - agent_slug
+        - bot_id
+      properties:
+        enabled:
+          type: boolean
+        channel_instance_id:
+          type: string
+        agent_slug:
+          type: string
+        bot_id:
+          type: string
+        secret:
+          type: string
     FileCapabilities:
       type: object
       required: [canPreview, canDownload, canOpenExternal, canCopyContent]
