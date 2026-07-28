@@ -8,6 +8,10 @@ import {
   FormDialog,
   Input,
   StatusPill,
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
 } from "@valuz/ui";
 import {
   channelsApi,
@@ -113,7 +117,9 @@ export function BindChatDialog({
         window.open(link, "_blank", "noreferrer");
         return;
       }
-      toast.error(t("project.createChatLinkMissing" as Parameters<typeof t>[0]));
+      toast.error(
+        t("project.createChatLinkMissing" as Parameters<typeof t>[0]),
+      );
     } catch (err) {
       toast.error(
         `${t("project.createChatJoin" as Parameters<typeof t>[0])}: ${
@@ -282,58 +288,83 @@ export function BindChatDialog({
                       </div>
                     )}
                   </div>
-                  {/* Actions sit ahead of the state tag: a row reads as
-                      name → what you can do → what it is. Kept visible — they
-                      replace nothing, and hiding them made the row's only
-                      affordances discoverable by accident. */}
-                  <div className="flex shrink-0 items-center gap-0.5">
-                    {/* Only while nobody has joined: the bot is then the sole
+                  {/* Actions sit ahead of the state tag — a row reads as
+                      name → what you can do → what it is — and stay out of the
+                      way until the row is pointed at. Labels come from
+                      tooltips: the native ``title`` takes about a second to
+                      appear, long enough to click the wrong icon. */}
+                  <TooltipProvider delayDuration={0}>
+                    <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                      {/* Only while nobody has joined: the bot is then the sole
                         member and the link is the way in. Once someone is in —
                         or they made the group themselves — it is noise. */}
-                    {chat.needs_join && (
-                      <button
-                        type="button"
-                        onClick={() => void join(chat)}
-                        className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-2"
-                        title={t(
-                          "project.createChatJoin" as Parameters<typeof t>[0],
-                        )}
-                        aria-label={t(
-                          "project.createChatJoin" as Parameters<typeof t>[0],
-                        )}
-                      >
-                        <LogIn className="h-3.5 w-3.5" />
-                      </button>
-                    )}
-                    {boundHere && (
-                      <button
-                        type="button"
-                        disabled={saving !== null}
-                        onClick={() => void unbind(chat)}
-                        className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-2"
-                        title={t("project.unbindChat" as Parameters<typeof t>[0])}
-                        aria-label={t(
-                          "project.unbindChat" as Parameters<typeof t>[0],
-                        )}
-                      >
-                        <Unlink className="h-3.5 w-3.5" />
-                      </button>
-                    )}
-                    {chat.created_by_valuz && (
-                      <button
-                        type="button"
-                        disabled={saving !== null}
-                        onClick={() => setDeleteTarget(chat)}
-                        className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-red-50 hover:text-red-600"
-                        title={t("project.deleteChat" as Parameters<typeof t>[0])}
-                        aria-label={t(
-                          "project.deleteChat" as Parameters<typeof t>[0],
-                        )}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    )}
-                  </div>
+                      {chat.needs_join && (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              type="button"
+                              onClick={() => void join(chat)}
+                              className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-2"
+                              aria-label={t(
+                                "project.createChatJoin" as Parameters<
+                                  typeof t
+                                >[0],
+                              )}
+                            >
+                              <LogIn className="h-3.5 w-3.5" />
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            {t(
+                              "project.createChatJoin" as Parameters<
+                                typeof t
+                              >[0],
+                            )}
+                          </TooltipContent>
+                        </Tooltip>
+                      )}
+                      {boundHere && (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              type="button"
+                              disabled={saving !== null}
+                              onClick={() => void unbind(chat)}
+                              className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-2"
+                              aria-label={t(
+                                "project.unbindChat" as Parameters<typeof t>[0],
+                              )}
+                            >
+                              <Unlink className="h-3.5 w-3.5" />
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            {t("project.unbindChat" as Parameters<typeof t>[0])}
+                          </TooltipContent>
+                        </Tooltip>
+                      )}
+                      {chat.created_by_valuz && (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              type="button"
+                              disabled={saving !== null}
+                              onClick={() => setDeleteTarget(chat)}
+                              className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-red-50 hover:text-red-600"
+                              aria-label={t(
+                                "project.deleteChat" as Parameters<typeof t>[0],
+                              )}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            {t("project.deleteChat" as Parameters<typeof t>[0])}
+                          </TooltipContent>
+                        </Tooltip>
+                      )}
+                    </div>
+                  </TooltipProvider>
                   {boundHere ? (
                     // State, not an action — the tag taxonomy carries it; a
                     // disabled button only looked like one you may not press.
