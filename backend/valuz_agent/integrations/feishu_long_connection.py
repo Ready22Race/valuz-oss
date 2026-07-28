@@ -874,6 +874,46 @@ async def _open_feishu_card_stream(
     return _FeishuCardStream(config, card_id)
 
 
+async def list_feishu_chats(*, app_id: str, app_secret: str) -> list[tuple[str, str]]:
+    """``(chat_id, name)`` for every group the bot is a member of.
+
+    Powers the project page's group picker: the bot must already be in the
+    group (that half of the flow only an IM client can do), and Valuz then owns
+    which project it stands for.
+    """
+    from lark_oapi.api.im.v1 import ListChatRequest
+
+    config = FeishuLongConnectionConfig(
+        channel_instance_id="",
+        owner_user_id="",
+        agent_slug="",
+        app_id=app_id,
+        app_secret=app_secret,
+    )
+    client = _new_openapi_client(config)
+    chats: list[tuple[str, str]] = []
+    page_token: str | None = None
+    # Bounded: a bot in more than a few hundred groups is not a picker problem.
+    for _ in range(10):
+        builder = ListChatRequest.builder().page_size(100)
+        if page_token:
+            builder = builder.page_token(page_token)
+        response = await client.im.v1.chat.alist(builder.build())
+        if not response.success():
+            raise ChannelConfigError(
+                f"Feishu chat list failed: {response.code} {response.msg or ''}".strip()
+            )
+        data = response.data
+        for item in getattr(data, "items", None) or []:
+            chat_id = getattr(item, "chat_id", None)
+            if chat_id:
+                chats.append((chat_id, getattr(item, "name", None) or chat_id))
+        page_token = getattr(data, "page_token", None) if data is not None else None
+        if not page_token or not getattr(data, "has_more", False):
+            break
+    return chats
+
+
 async def _add_feishu_reaction(
     config: FeishuLongConnectionConfig,
     message_id: str,

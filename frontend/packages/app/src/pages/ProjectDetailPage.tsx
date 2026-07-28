@@ -17,6 +17,7 @@ import {
   TabsTrigger,
 } from "@valuz/ui";
 import {
+  BindChatDialog,
   CreateAutomationDialog,
   DeployAgentsDialog,
   ActivityFeedList,
@@ -24,6 +25,7 @@ import {
 } from "@valuz/app/components";
 import { toast } from "sonner";
 import {
+  channelsApi,
   projectsApi,
   ApiError,
   getEntityOrigin,
@@ -251,6 +253,10 @@ export const ProjectDetailPage = () => {
   // "Agents" [+] opens the same dialog the project tasks page uses.
   const [libraryAgents, setLibraryAgents] = useState<Agent[]>([]);
   const [addAgentOpen, setAddAgentOpen] = useState(false);
+  const [bindChatOpen, setBindChatOpen] = useState(false);
+  const [chatBindings, setChatBindings] = useState<
+    { id: string; name: string }[]
+  >([]);
 
   const loadMembers = useCallback(async () => {
     if (!id) return;
@@ -1053,6 +1059,36 @@ export const ProjectDetailPage = () => {
     void revealInFinder(locateArtifactFile(selectedArtifactPath).absolutePath);
   }, [locateArtifactFile, selectedArtifactPath, revealInFinder]);
 
+  const loadChatBindings = useCallback(async () => {
+    try {
+      const rows = await channelsApi.listChatBindings(id);
+      setChatBindings(
+        rows.map((row) => ({
+          id: row.external_chat_id,
+          name: row.external_chat_name || row.external_chat_id,
+        })),
+      );
+    } catch {
+      // A channel-less install (no bot configured) simply has no bindings —
+      // an error here must not disturb the project page.
+      setChatBindings([]);
+    }
+  }, [id]);
+
+  useEffect(() => {
+    void loadChatBindings();
+  }, [loadChatBindings]);
+
+  const handleUnbindChat = async (externalChatId: string) => {
+    try {
+      await channelsApi.unbindChat(externalChatId);
+      toast.success(t("project.chatBindingRemoved" as Parameters<typeof t>[0]));
+      await loadChatBindings();
+    } catch {
+      toast.error(t("project.saveFailed" as Parameters<typeof t>[0]));
+    }
+  };
+
   const handleSetDefaultLead = async (slug: string | null) => {
     const previous = project;
     // Optimistic: the crown should move the moment it is clicked; a failed
@@ -1250,6 +1286,9 @@ export const ProjectDetailPage = () => {
         onInstructionsChange={handleInstructionsChange}
         members={members}
         defaultLeadSlug={project?.default_lead_agent_slug ?? null}
+        chatBindings={chatBindings}
+        onBindChat={() => setBindChatOpen(true)}
+        onUnbindChat={(chatId) => void handleUnbindChat(chatId)}
         onSetDefaultLead={(slug) => void handleSetDefaultLead(slug)}
         onAddMember={() => setAddAgentOpen(true)}
         onOpenMember={openMember}
@@ -1680,6 +1719,13 @@ export const ProjectDetailPage = () => {
               }
             : undefined
         }
+      />
+
+      <BindChatDialog
+        open={bindChatOpen}
+        onOpenChange={setBindChatOpen}
+        projectId={id}
+        onBound={() => void loadChatBindings()}
       />
 
       <DeployAgentsDialog

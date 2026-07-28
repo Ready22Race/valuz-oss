@@ -36,6 +36,18 @@ class AgentPlacement:
 
 
 @dataclass(frozen=True, slots=True)
+class ChannelChatBinding:
+    """An external chat pinned to one project — "this group is that project"."""
+
+    channel_instance_id: str
+    external_chat_id: str
+    project_id: str
+    default_agent_slug: str | None = None
+    external_chat_name: str | None = None
+    bound_by_external_user: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ChannelMentionContext:
     """Normalized group/direct chat mention routed to one Valuz agent."""
 
@@ -110,6 +122,7 @@ __all__ = [
     "AgentChannelBinding",
     "AgentChannelRouteDecision",
     "AgentPlacement",
+    "ChannelChatBinding",
     "ChannelMentionContext",
     "ChannelPlatform",
     "ChannelRouteKey",

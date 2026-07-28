@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, replace
-from typing import Protocol
+from typing import Any, Protocol
 
 from valuz_agent.modules.channels.adapters import InboundChannelMessage
 from valuz_agent.modules.channels.resolver import (
@@ -29,6 +29,16 @@ class AgentPlacementReader(Protocol):
         user_id: str,
         source_agent_slug: str,
     ) -> list[AgentPlacement]: ...
+
+
+class ChannelChatBindingReader(Protocol):
+    async def get(
+        self,
+        *,
+        user_id: str,
+        channel_instance_id: str,
+        external_chat_id: str,
+    ) -> Any: ...
 
 
 class ChannelThreadBindingStore(Protocol):
@@ -84,11 +94,13 @@ class ChannelIngressService:
         bindings: ChannelThreadBindingStore,
         sessions: ChannelSessionRunner,
         resolver: AgentChannelResolver | None = None,
+        chat_bindings: ChannelChatBindingReader | None = None,
     ) -> None:
         self._placements = placements
         self._bindings = bindings
         self._sessions = sessions
         self._resolver = resolver or AgentChannelResolver()
+        self._chat_bindings = chat_bindings
 
     async def handle_inbound_message(
         self,
@@ -117,6 +129,7 @@ class ChannelIngressService:
             context,
             placements=placements,
             existing_binding=existing_binding,
+            chat_project_id=await self._chat_project_id(user_id=user_id, context=context),
         )
         if decision.kind == ChannelRouteDecisionKind.QUEUE_SESSION and decision.session_id:
             await self._sessions.enqueue_message(
@@ -171,6 +184,33 @@ class ChannelIngressService:
         await self._bindings.upsert(user_id=user_id, key=key, session_id=session_id)
         return ChannelIngressResult(decision=decision, session_id=session_id)
 
+    async def _chat_project_id(
+        self,
+        *,
+        user_id: str,
+        context: Any,
+    ) -> str | None:
+        """The project this chat is bound to, if any ("this group is that
+        project"). A read failure degrades to the placement heuristics rather
+        than dropping the turn."""
+        if self._chat_bindings is None:
+            return None
+        try:
+            binding = await self._chat_bindings.get(
+                user_id=user_id,
+                channel_instance_id=context.channel_instance_id,
+                external_chat_id=context.external_chat_id,
+            )
+        except Exception:  # noqa: BLE001 - routing must survive a binding read
+            logger.warning(
+                "Failed to read the chat project binding: channel=%s chat=%s",
+                context.channel_instance_id,
+                context.external_chat_id,
+                exc_info=True,
+            )
+            return None
+        return getattr(binding, "project_id", None) if binding is not None else None
+
     async def _binding_with_live_session_status(
         self,
         *,
@@ -213,6 +253,7 @@ def _placement_for_project(placements: list[AgentPlacement], project_id: str) ->
 
 __all__ = [
     "AgentPlacementReader",
+    "ChannelChatBindingReader",
     "ChannelIngressResult",
     "ChannelIngressService",
     "ChannelSessionRef",

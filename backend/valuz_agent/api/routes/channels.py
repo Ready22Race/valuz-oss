@@ -28,7 +28,10 @@ from valuz_agent.modules.channels.config import (
     load_wecom_config,
     read_wecom_aibot_binding,
 )
-from valuz_agent.modules.channels.datastore import AgentChannelBindingDatastore
+from valuz_agent.modules.channels.datastore import (
+    AgentChannelBindingDatastore,
+    ChannelChatBindingDatastore,
+)
 from valuz_agent.modules.channels.schemas import AgentChannelBinding
 from valuz_agent.modules.channels.service import ChannelIngressService
 
@@ -289,6 +292,143 @@ async def test_feishu_binding(
         connected=runtime.connected,
         connection_status=runtime.status,
         connection_error=runtime.last_error,
+    )
+
+
+class ChannelChatItem(BaseModel):
+    """A chat the bot can be bound to (i.e. it is already a member)."""
+
+    external_chat_id: str
+    name: str
+    bound_project_id: str | None = None
+
+
+class ChatProjectBindingResponse(BaseModel):
+    channel_instance_id: str
+    external_chat_id: str
+    project_id: str
+    external_chat_name: str | None = None
+    default_agent_slug: str | None = None
+
+
+class ChatProjectBindingUpdate(BaseModel):
+    channel_instance_id: str = Field(default="feishu-main", min_length=1)
+    external_chat_id: str = Field(min_length=1)
+    project_id: str = Field(min_length=1)
+    external_chat_name: str | None = None
+    default_agent_slug: str | None = None
+
+
+@router.get("/feishu/chats", response_model=list[ChannelChatItem])
+async def list_feishu_chats(
+    user_id: Annotated[str, Depends(get_current_user_id)],
+    agent_slug: str | None = None,
+) -> list[ChannelChatItem]:
+    """Groups this bot is already a member of, for the project-page picker.
+
+    The bot must be added to the group in Feishu first — that is the half of
+    the flow only an IM client can perform. ``agent_slug`` is optional: a
+    Feishu app binds exactly one agent, so with a single configured bot the
+    caller (a project page, which knows nothing about bots) need not name it.
+    """
+    from valuz_agent.integrations.feishu_long_connection import list_feishu_chats as fetch
+
+    async with async_unit_of_work() as db:
+        ds = AgentChannelBindingDatastore(db)
+        binding = (
+            await ds.get(user_id=user_id, platform=FEISHU_PLATFORM, agent_slug=agent_slug)
+            if agent_slug
+            else next(
+                iter(await ds.list_enabled(platform=FEISHU_PLATFORM, user_id=user_id)),
+                None,
+            )
+        )
+        if binding is None:
+            raise HTTPException(status_code=404, detail="feishu binding not found")
+        secret = _read_feishu_secret(user_id=user_id, secret_ref=binding.secret_ref)
+        bound = {
+            row.external_chat_id: row.project_id
+            for row in await ChannelChatBindingDatastore(db).list_all(user_id=user_id)
+        }
+    if not secret.app_secret:
+        raise HTTPException(status_code=422, detail="App Secret is required")
+    try:
+        chats = await fetch(app_id=binding.bot_id, app_secret=secret.app_secret)
+    except ChannelConfigError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return [
+        ChannelChatItem(
+            external_chat_id=chat_id,
+            name=name,
+            bound_project_id=bound.get(chat_id),
+        )
+        for chat_id, name in chats
+    ]
+
+
+@router.get(
+    "/chat-bindings",
+    response_model=list[ChatProjectBindingResponse],
+)
+async def list_chat_bindings(
+    user_id: Annotated[str, Depends(get_current_user_id)],
+    project_id: str | None = None,
+) -> list[ChatProjectBindingResponse]:
+    async with async_unit_of_work() as db:
+        ds = ChannelChatBindingDatastore(db)
+        rows = (
+            await ds.list_for_project(user_id=user_id, project_id=project_id)
+            if project_id
+            else await ds.list_all(user_id=user_id)
+        )
+    return [_chat_binding_response(row) for row in rows]
+
+
+@router.put("/chat-bindings", response_model=ChatProjectBindingResponse)
+async def bind_chat_to_project(
+    body: ChatProjectBindingUpdate,
+    user_id: Annotated[str, Depends(get_current_user_id)],
+) -> ChatProjectBindingResponse:
+    """Bind a chat to a project — "this group is that project".
+
+    Rebinding overwrites: a chat holds exactly one project, otherwise the whole
+    premise stops holding.
+    """
+    async with async_unit_of_work() as db:
+        binding = await ChannelChatBindingDatastore(db).upsert(
+            user_id=user_id,
+            channel_instance_id=body.channel_instance_id.strip(),
+            external_chat_id=body.external_chat_id.strip(),
+            project_id=body.project_id.strip(),
+            default_agent_slug=(body.default_agent_slug or "").strip() or None,
+            external_chat_name=body.external_chat_name,
+        )
+    return _chat_binding_response(binding)
+
+
+@router.delete("/chat-bindings", status_code=204)
+async def unbind_chat(
+    external_chat_id: str,
+    user_id: Annotated[str, Depends(get_current_user_id)],
+    channel_instance_id: str = "feishu-main",
+) -> None:
+    async with async_unit_of_work() as db:
+        removed = await ChannelChatBindingDatastore(db).delete(
+            user_id=user_id,
+            channel_instance_id=channel_instance_id,
+            external_chat_id=external_chat_id,
+        )
+    if not removed:
+        raise HTTPException(status_code=404, detail="chat binding not found")
+
+
+def _chat_binding_response(binding: Any) -> ChatProjectBindingResponse:
+    return ChatProjectBindingResponse(
+        channel_instance_id=binding.channel_instance_id,
+        external_chat_id=binding.external_chat_id,
+        project_id=binding.project_id,
+        external_chat_name=binding.external_chat_name,
+        default_agent_slug=binding.default_agent_slug,
     )
 
 

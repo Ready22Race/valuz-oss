@@ -1105,7 +1105,17 @@
     "initialFilesTooLarge": "文件夹过大（超过 {maxFiles} 个文件或 {maxMb}MB），请精简后重试",
     "initialFilesUploading": "正在上传初始文件…",
     "initialFilesUploaded": "初始文件上传完成（{count} 个）",
-    "initialFilesFailed": "初始文件上传失败，可稍后在项目里重新上传"
+    "initialFilesFailed": "初始文件上传失败，可稍后在项目里重新上传",
+    "chatBindingsTitle": "关联群聊",
+    "bindChat": "关联飞书群",
+    "unbindChat": "解除关联",
+    "chatBindingsEmpty": "尚未关联群聊。关联后，群里的对话会进入这个项目。",
+    "bindChatDialogTitle": "关联飞书群",
+    "bindChatDialogDesc": "选择一个机器人已加入的群；关联后群里的消息都会进入这个项目。",
+    "bindChatEmpty": "没有可关联的群。请先在飞书中建群并把机器人拉进去。",
+    "bindChatBoundElsewhere": "已关联其它项目",
+    "chatBindingSaved": "已关联",
+    "chatBindingRemoved": "已解除关联"
   },
   "schedule": {
     "create": "创建定时任务",

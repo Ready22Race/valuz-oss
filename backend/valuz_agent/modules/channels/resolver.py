@@ -51,7 +51,11 @@ class AgentChannelResolver:
         placements: Iterable[AgentPlacement],
         existing_binding: ChannelThreadBinding | None = None,
         recent_binding: ChannelThreadBinding | None = None,
+        chat_project_id: str | None = None,
     ) -> AgentChannelRouteDecision:
+        """``chat_project_id`` is the chat's bound project ("this group is that
+        project"). It outranks the placement heuristics: once a group is bound,
+        placement ambiguity stops being a question anyone is asked (§4.1)."""
         active_placements = tuple(
             placement
             for placement in placements
@@ -83,6 +87,12 @@ class AgentChannelResolver:
         if explicit is not None:
             return self._new_session(context, explicit, reason="explicit_project_match")
 
+        # The chat's bound project, when the mentioned agent is actually on that
+        # team. A binding pointing at a project the agent was never deployed to
+        # is a misconfiguration; falling through to the placement heuristics
+        # degrades gracefully instead of failing session creation later.
+        bound = by_project_id.get(chat_project_id) if chat_project_id else None
+
         if not context.explicit_new_hint:
             for binding, reason in (
                 (existing_binding, "thread_binding"),
@@ -95,6 +105,11 @@ class AgentChannelResolver:
                 if binding.project_id is None or binding.session_id is None:
                     continue
                 if binding.project_id not in by_project_id:
+                    continue
+                # A bound chat continues only its own project's lineage — a
+                # leftover lineage from before the binding must not answer for
+                # the project the group now stands for.
+                if bound is not None and binding.project_id != chat_project_id:
                     continue
                 if binding is recent_binding and not wants_continuation:
                     continue
@@ -115,6 +130,9 @@ class AgentChannelResolver:
                     session_id=binding.session_id,
                     reason=reason,
                 )
+
+        if bound is not None:
+            return self._new_session(context, bound, reason="chat_project_binding")
 
         if len(active_placements) == 1:
             return self._new_session(context, active_placements[0], reason="single_deployment")

@@ -1105,7 +1105,17 @@
     "initialFilesTooLarge": "Folder too large (over {maxFiles} files or {maxMb}MB) — trim it and retry",
     "initialFilesUploading": "Uploading initial files…",
     "initialFilesUploaded": "Initial files uploaded ({count})",
-    "initialFilesFailed": "Initial file upload failed — you can re-upload from the project later"
+    "initialFilesFailed": "Initial file upload failed — you can re-upload from the project later",
+    "chatBindingsTitle": "Linked groups",
+    "bindChat": "Link a Feishu group",
+    "unbindChat": "Unlink",
+    "chatBindingsEmpty": "No group linked yet. Once linked, conversations there run in this project.",
+    "bindChatDialogTitle": "Link a Feishu group",
+    "bindChatDialogDesc": "Pick a group the bot has already joined; messages there will run in this project.",
+    "bindChatEmpty": "No groups available. Create one in Feishu and add the bot first.",
+    "bindChatBoundElsewhere": "Linked to another project",
+    "chatBindingSaved": "Linked",
+    "chatBindingRemoved": "Unlinked"
   },
   "schedule": {
     "create": "Create Schedule",

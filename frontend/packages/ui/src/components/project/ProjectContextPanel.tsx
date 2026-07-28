@@ -30,6 +30,7 @@ import {
   AlertTriangle,
   GitBranch,
   Link2,
+  MessageSquare,
   MessageSquarePlus,
   Sparkles,
 } from "lucide-react";
@@ -245,6 +246,11 @@ export interface ProjectContextPanelProps {
   defaultLeadSlug?: string | null;
   /** Set (or clear, with null) the project's default task lead. */
   onSetDefaultLead?: (slug: string | null) => void;
+  /** IM groups bound to this project ("this group is that project"). */
+  chatBindings?: { id: string; name: string }[];
+  /** Open the group picker; undefined hides the section entirely. */
+  onBindChat?: () => void;
+  onUnbindChat?: (externalChatId: string) => void;
   skills?: ProjectSkill[];
   onAddSkill?: () => void;
   onCreateProjectSkill?: () => void;
@@ -960,6 +966,9 @@ export const ProjectDetailContextPanel = ({
   onRemoveMember,
   defaultLeadSlug,
   onSetDefaultLead,
+  chatBindings,
+  onBindChat,
+  onUnbindChat,
   skills,
   onAddSkill,
   onRemoveSkill,
@@ -1590,6 +1599,68 @@ export const ProjectDetailContextPanel = ({
           ) : (
             <p className="text-2xs leading-5 text-ink-meta">
               {t("agent.noMembers" as Parameters<typeof t>[0])}
+            </p>
+          )}
+        </AccordionSection>
+      )}
+
+      {/* IM groups bound to this project. A group standing for a project is
+          how channel conversations get a project without anyone typing its
+          name; see docs/design/channel-project-binding-and-default-lead.md. */}
+      {chatBindings !== undefined && onBindChat && (
+        <AccordionSection
+          {...sectionState("chatBindings")}
+          title={t("project.chatBindingsTitle" as Parameters<typeof t>[0])}
+          icon={MessageSquare}
+          iconClassName="text-context-icon"
+          count={chatBindings.length || undefined}
+          action={
+            <button
+              type="button"
+              onClick={(event) => {
+                event.currentTarget.blur();
+                onBindChat();
+              }}
+              className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-muted"
+              title={t("project.bindChat" as Parameters<typeof t>[0])}
+            >
+              <Plus className="h-3.5 w-3.5" />
+            </button>
+          }
+        >
+          {chatBindings.length > 0 ? (
+            <div className="flex flex-col">
+              {chatBindings.map((chat) => (
+                <div
+                  key={chat.id}
+                  className="group relative flex items-center gap-2.5 rounded-lg px-2 py-2 hover:bg-[#f7f8fa]"
+                >
+                  <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-brand/8 text-brand">
+                    <MessageSquare className="h-3 w-3" />
+                  </div>
+                  <div className="min-w-0 flex-1 truncate text-xs text-ink-heading">
+                    {chat.name}
+                  </div>
+                  {onUnbindChat && (
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.currentTarget.blur();
+                        onUnbindChat(chat.id);
+                      }}
+                      className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-ink-body opacity-0 transition-opacity hover:bg-red-50 hover:text-red-600 group-hover:opacity-100"
+                      title={t("project.unbindChat" as Parameters<typeof t>[0])}
+                      aria-label={t("project.unbindChat" as Parameters<typeof t>[0])}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="px-2 py-2 text-xs text-ink-meta">
+              {t("project.chatBindingsEmpty" as Parameters<typeof t>[0])}
             </p>
           )}
         </AccordionSection>

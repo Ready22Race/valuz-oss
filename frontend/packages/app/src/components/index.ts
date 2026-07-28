@@ -3,6 +3,7 @@ export { ParserSettingsSection } from "./ParserSettingsSection";
 export { SystemLogsSection } from "./SystemLogsSection";
 export { SkillEditDialog } from "./SkillEditDialog";
 export { SkillAddDialog } from "./SkillAddDialog";
+export { BindChatDialog } from "./BindChatDialog";
 export { MarketplaceImportDialog } from "./MarketplaceImportDialog";
 export { ConnectorAddDialog } from "./ConnectorAddDialog";
 export type { ConnectorAddMode } from "./ConnectorAddDialog";

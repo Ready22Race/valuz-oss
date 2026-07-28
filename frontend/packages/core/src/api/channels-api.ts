@@ -50,6 +50,20 @@ export interface UpdateFeishuBindingPayload {
   app_secret?: string;
 }
 
+export interface ChannelChatItem {
+  external_chat_id: string;
+  name: string;
+  bound_project_id?: string | null;
+}
+
+export interface ChatProjectBinding {
+  channel_instance_id: string;
+  external_chat_id: string;
+  project_id: string;
+  external_chat_name?: string | null;
+  default_agent_slug?: string | null;
+}
+
 export interface FeishuBindingTestResult {
   credential_ok: boolean;
   error?: string | null;
@@ -123,6 +137,52 @@ export const channelsApi = {
         body: JSON.stringify(body),
       },
     );
+  },
+
+  /** Groups the bot is already a member of — the project page's picker. */
+  listFeishuChats(agentSlug?: string): Promise<ChannelChatItem[]> {
+    const qs = new URLSearchParams();
+    if (agentSlug) qs.set("agent_slug", agentSlug);
+    const suffix = qs.toString() ? `?${qs}` : "";
+    return fetchJson(`/v1/channels/feishu/chats${suffix}`);
+  },
+
+  listChatBindings(projectId?: string): Promise<ChatProjectBinding[]> {
+    const qs = new URLSearchParams();
+    if (projectId) qs.set("project_id", projectId);
+    const suffix = qs.toString() ? `?${qs}` : "";
+    return fetchJson(`/v1/channels/chat-bindings${suffix}`);
+  },
+
+  bindChatToProject(payload: {
+    external_chat_id: string;
+    project_id: string;
+    channel_instance_id?: string;
+    external_chat_name?: string | null;
+    default_agent_slug?: string | null;
+  }): Promise<ChatProjectBinding> {
+    return fetchJson("/v1/channels/chat-bindings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        channel_instance_id: payload.channel_instance_id ?? "feishu-main",
+        external_chat_id: payload.external_chat_id,
+        project_id: payload.project_id,
+        external_chat_name: payload.external_chat_name ?? null,
+        default_agent_slug: payload.default_agent_slug ?? null,
+      }),
+    });
+  },
+
+  async unbindChat(
+    externalChatId: string,
+    channelInstanceId = "feishu-main",
+  ): Promise<void> {
+    const qs = new URLSearchParams({
+      external_chat_id: externalChatId,
+      channel_instance_id: channelInstanceId,
+    });
+    await fetchJson(`/v1/channels/chat-bindings?${qs}`, { method: "DELETE" });
   },
 
   testFeishuBinding(agentSlug: string): Promise<FeishuBindingTestResult> {
