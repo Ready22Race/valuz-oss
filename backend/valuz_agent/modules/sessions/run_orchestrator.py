@@ -373,8 +373,9 @@ async def _project_conversation_run_result(
 ) -> None:
     """Notify (or clear) a NON-task conversation run failure.
 
-    The task-failure projector (``tasks/messaging.record_task_failure_notification``)
-    covers lead/subtask runs; this is its conversation analog, keyed on the
+    The task-failure projector
+    (``notifications/projectors.record_task_failure_notification``) covers
+    lead/subtask runs; this is its conversation analog, keyed on the
     session and routed to ``/conversation/{id}``. ``error_event`` is the exact
     ``session_error`` payload finalize writes durably — passing it means we fire
     precisely when a real failure is recorded (raised exception OR terminal

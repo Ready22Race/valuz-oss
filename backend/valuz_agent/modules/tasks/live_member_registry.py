@@ -51,11 +51,19 @@ class LiveMemberRegistry:
     def discard_member(self, task_id: str, session_id: str) -> None:
         """Drop ``session_id`` from ``task_id``'s live set if present.
 
-        Never raises on a missing task_id and never creates the key.
+        Never raises on a missing task_id and never creates the key. Drops the
+        task's entry entirely once its last member goes: this registry lives
+        for the whole process, and leaving an empty set behind per finished
+        task grew the dict without bound. ``has_live_members`` already treats
+        an empty set and a missing key identically, so removal changes nothing
+        observable.
         """
-        s = self._members.get(task_id)
-        if s:
-            s.discard(session_id)
+        members = self._members.get(task_id)
+        if not members:
+            return
+        members.discard(session_id)
+        if not members:
+            del self._members[task_id]
 
     def pop_dispatch_started(self, session_id: str) -> float:
         """Remove and return ``session_id``'s dispatch epoch (0.0 if absent)."""

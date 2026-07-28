@@ -75,6 +75,7 @@ import {
 } from "../hooks";
 import { deriveDeliverable } from "./task-detail/deliverable";
 import { useArtifactFile } from "../hooks/use-artifact-file";
+import { eventDetail } from "../lib/task-event-detail";
 
 interface EventMeta {
   icon: ComponentType<{ className?: string }>;
@@ -133,10 +134,19 @@ const EVENT_META: Record<string, EventMeta> = {
     node: "bg-amber-500/10 text-amber-500",
     labelKey: "task.event.subtaskStopped",
   },
+  // Lead → member: the lead sent a running member a follow-up instruction.
+  // (Before 2026-07 this type also covered the member → lead direction, split
+  // apart only by `payload.direction`; historical rows still land here.)
   subtask_message: {
     icon: MessageSquare,
     node: "bg-indigo-500/10 text-indigo-500",
     labelKey: "task.event.subtaskMessage",
+  },
+  // Member → lead: the member finished a round of work and reported back.
+  subtask_reported: {
+    icon: MessageSquare,
+    node: "bg-indigo-500/10 text-indigo-500",
+    labelKey: "task.event.subtaskReported",
   },
   user_note: {
     icon: MessageSquare,
@@ -328,64 +338,6 @@ function formatDuration(ms: number, t: Translator): string {
   });
 }
 
-/** Resolve a one-line, type-specific detail string for the timeline.
- *  Reads the right payload field per event type so each row carries
- *  useful info instead of a generic label — e.g. ``task_planned``
- *  surfaces "拆解为 N 个子任务", ``subtask_reviewed`` surfaces the
- *  approve/rework decision + feedback. Falls back to the legacy
- *  ``text|summary|goal|error`` lookup for event types without a
- *  custom rule. */
-function eventDetail(evt: TaskEvent, t: Translator): string {
-  const p = (evt.payload ?? {}) as Record<string, unknown>;
-  switch (evt.type) {
-    case "task_planned": {
-      const subs = (p as { subtasks?: unknown[] }).subtasks;
-      const n = Array.isArray(subs) ? subs.length : 0;
-      if (n > 0) return t("task.event.planSummary", { count: n });
-      break;
-    }
-    case "plan_revised": {
-      const add = Array.isArray((p as { add?: unknown[] }).add)
-        ? (p as { add: unknown[] }).add.length
-        : 0;
-      const upd = Array.isArray((p as { update?: unknown[] }).update)
-        ? (p as { update: unknown[] }).update.length
-        : 0;
-      const rem = Array.isArray((p as { remove?: unknown[] }).remove)
-        ? (p as { remove: unknown[] }).remove.length
-        : 0;
-      const parts: string[] = [];
-      if (add) parts.push(t("task.event.planAdd", { count: add }));
-      if (upd) parts.push(t("task.event.planUpdate", { count: upd }));
-      if (rem) parts.push(t("task.event.planRemove", { count: rem }));
-      if (parts.length > 0) return parts.join(" · ");
-      break;
-    }
-    case "subtask_reviewed": {
-      const decision = String((p as { decision?: unknown }).decision || "");
-      const feedback =
-        typeof (p as { feedback?: unknown }).feedback === "string"
-          ? ((p as { feedback: string }).feedback || "").trim()
-          : "";
-      if (decision === "approve") {
-        return feedback
-          ? t("task.event.subtaskReviewApproveReason", { feedback })
-          : t("task.event.subtaskReviewApprove");
-      }
-      if (decision === "rework") {
-        return feedback
-          ? t("task.event.subtaskReviewRework", { feedback })
-          : t("task.event.subtaskReviewReworkNoFeedback");
-      }
-      break;
-    }
-  }
-  for (const key of ["text", "summary", "goal", "error"]) {
-    const v = p[key];
-    if (typeof v === "string" && v.trim()) return v;
-  }
-  return "";
-}
 
 export const TaskDetailPage = () => {
   const { taskId = "" } = useParams<{ taskId: string }>();
@@ -1995,6 +1947,14 @@ function resolveActor(
   // draft/commit came from the user's conversation) — show "你", never the
   // raw session UUID.
   if (type === "task_drafted" || type === "committed") {
+    return t("task.actorYou");
+  }
+  // Historical chat-created kickoffs carry the raw chat session UUID as actor
+  // (the create_task tool used to pass its session id as ``created_by``; new
+  // rows carry "user"). The log is append-only, so those rows are permanent —
+  // collapse them to "你" instead of rendering bare hex. Gated on the id shape
+  // so an "automation" kickoff keeps its own label.
+  if (type === "kickoff" && /^[0-9a-f]{32}$/.test(actor)) {
     return t("task.actorYou");
   }
   // Lead-driven events carry the lead SESSION id as actor — collapse to the

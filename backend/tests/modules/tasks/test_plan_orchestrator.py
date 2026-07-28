@@ -14,11 +14,9 @@ from pathlib import Path
 import pytest
 
 import valuz_agent.boot.kernel  # noqa: F401
-from sqlalchemy import create_engine, select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.orm import sessionmaker
-from valuz_agent.infra.database import Base
+from sqlalchemy import select
 from valuz_agent.adapters import kernel_client as kernel_client_mod
+from valuz_agent.modules.tasks import launcher as launcher_mod
 from valuz_agent.modules.tasks import planning
 from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionRow
 from valuz_agent.modules.tasks.orchestrator import TaskOrchestrator
@@ -36,28 +34,6 @@ def _as_async(fn):
     return _f
 
 
-@pytest.fixture
-def db_factory(tmp_path, monkeypatch):
-    """A tmp-SQLite async sessionmaker bound into ``infra.db.AsyncSessionLocal``.
-
-    The host is now fully async (``async_unit_of_work`` / aiosqlite); we patch
-    ``infra.db.AsyncSessionLocal`` so the orchestrator's units of work bind to
-    this tmp engine. A parallel SYNC sessionmaker is returned for the test
-    helpers to seed/read rows synchronously (simpler than awaiting in helpers).
-    """
-    import valuz_agent.infra.db as db_mod
-
-    db_file = tmp_path / "plan.db"
-    # Sync engine for the test helpers (seed/read).
-    sync_engine = create_engine(f"sqlite:///{db_file}", connect_args={"check_same_thread": False})
-    Base.metadata.create_all(
-        sync_engine, tables=[TaskRow.__table__, TaskEventRow.__table__, TaskSessionRow.__table__]
-    )
-    # Async engine for the code-under-test.
-    async_engine = create_async_engine(f"sqlite+aiosqlite:///{db_file}")
-    async_factory = async_sessionmaker(bind=async_engine, expire_on_commit=False)
-    monkeypatch.setattr(db_mod, "AsyncSessionLocal", async_factory)
-    return sessionmaker(bind=sync_engine, expire_on_commit=False)
 
 
 def _make_task(db_factory, tmp_path, *, project_id="w1", task_id="t1") -> str:
@@ -279,7 +255,7 @@ def test_dispatch_rejects_unknown_subtask_key(db_factory, tmp_path) -> None:
     _make_task(db_factory, tmp_path)
     orch = TaskOrchestrator()
     res = asyncio.run(
-        orch.dispatch_async(
+        orch.dispatcher.dispatch_async(
             task_id="t1",
             project_id="w1",
             lead_session_id="lead",
@@ -306,7 +282,7 @@ def test_dispatch_rejects_blocked_subtask(db_factory, tmp_path) -> None:
         )
     )
     res = asyncio.run(
-        orch.dispatch_async(
+        orch.dispatcher.dispatch_async(
             task_id="t1",
             project_id="w1",
             lead_session_id="lead",
@@ -437,7 +413,7 @@ def test_finish_task_stopped_emits_task_stopped(db_factory, tmp_path) -> None:
     _make_task(db_factory, tmp_path)
     orch = TaskOrchestrator()
     asyncio.run(
-        orch.finish_task(
+        orch.lifecycle.finish_task(
             task_id="t1",
             project_id="w1",
             user_id=OWNER,
@@ -461,7 +437,7 @@ def test_finish_task_rejects_legacy_failed_status(db_factory, tmp_path) -> None:
     _make_task(db_factory, tmp_path)
     orch = TaskOrchestrator()
     result = asyncio.run(
-        orch.finish_task(
+        orch.lifecycle.finish_task(
             task_id="t1",
             project_id="w1",
             user_id=OWNER,
@@ -540,7 +516,7 @@ def test_finish_task_rejected_when_plan_has_unresolved_nodes(db_factory, tmp_pat
         )
     )
     res = asyncio.run(
-        orch.finish_task(
+        orch.lifecycle.finish_task(
             task_id="t1",
             project_id="w1",
             lead_session_id="lead",
@@ -584,7 +560,7 @@ def test_finish_task_allows_completion_when_all_done(db_factory, tmp_path) -> No
     finally:
         db.close()
     res = asyncio.run(
-        orch.finish_task(
+        orch.lifecycle.finish_task(
             task_id="t1",
             project_id="w1",
             lead_session_id="lead",
@@ -650,7 +626,7 @@ def test_auto_finalize_completes_when_no_pending_subtasks(db_factory, tmp_path) 
     _make_lead_run(db_factory)
     orch = TaskOrchestrator()
     asyncio.run(
-        orch._auto_finalize_lead_task(
+        orch.lifecycle._auto_finalize_lead_task(
             lead_session_id="lead-sess",
             task_id="t1",
             project_id="w1",
@@ -673,7 +649,7 @@ def test_finalize_actor_threads_user_id_to_auto_finalize(db_factory, tmp_path) -
     _make_lead_run(db_factory)
     orch = TaskOrchestrator()
     asyncio.run(
-        orch._finalize_actor(
+        orch.lifecycle.finalize_actor(
             session_id="lead-sess",
             last_content="done inline",
             final_status="idle",
@@ -700,7 +676,7 @@ def test_auto_finalize_blocks_when_plan_has_unresolved_nodes(db_factory, tmp_pat
         )
     )
     asyncio.run(
-        orch._auto_finalize_lead_task(
+        orch.lifecycle._auto_finalize_lead_task(
             lead_session_id="lead-sess",
             task_id="t1",
             project_id="w1",
@@ -721,7 +697,7 @@ def test_auto_finalize_blocks_on_terminated_with_empty_plan(db_factory, tmp_path
     _make_task(db_factory, tmp_path)
     orch = TaskOrchestrator()
     asyncio.run(
-        orch._auto_finalize_lead_task(
+        orch.lifecycle._auto_finalize_lead_task(
             lead_session_id="lead-sess",
             task_id="t1",
             project_id="w1",
@@ -763,7 +739,7 @@ def test_auto_finalize_blocks_on_stop_reason_error_with_empty_plan(
     )
     orch = TaskOrchestrator()
     asyncio.run(
-        orch._auto_finalize_lead_task(
+        orch.lifecycle._auto_finalize_lead_task(
             lead_session_id="lead-sess",
             task_id="t1",
             project_id="w1",
@@ -799,7 +775,7 @@ def test_auto_finalize_cancel_with_empty_plan_stays_active(
     )
     orch = TaskOrchestrator()
     asyncio.run(
-        orch._auto_finalize_lead_task(
+        orch.lifecycle._auto_finalize_lead_task(
             lead_session_id="lead-sess",
             task_id="t1",
             project_id="w1",
@@ -871,7 +847,7 @@ def test_finalize_actor_member_error_sets_rework_not_failed(
 
     orch = TaskOrchestrator()
     asyncio.run(
-        orch._finalize_actor(
+        orch.lifecycle.finalize_actor(
             session_id="mem-1",
             last_content="",
             final_status="terminated",
@@ -913,7 +889,7 @@ def test_auto_finalize_blocks_on_error_when_plan_has_unresolved_nodes(db_factory
         )
     )
     asyncio.run(
-        orch._auto_finalize_lead_task(
+        orch.lifecycle._auto_finalize_lead_task(
             lead_session_id="lead-sess",
             task_id="t1",
             project_id="w1",
@@ -936,7 +912,7 @@ def test_auto_finalize_noop_when_already_finalized(db_factory, tmp_path) -> None
         db.close()
     orch = TaskOrchestrator()
     asyncio.run(
-        orch._auto_finalize_lead_task(
+        orch.lifecycle._auto_finalize_lead_task(
             lead_session_id="lead-sess",
             task_id="t1",
             project_id="w1",
@@ -952,7 +928,7 @@ def test_auto_finalize_noop_when_members_in_flight(db_factory, tmp_path) -> None
     orch = TaskOrchestrator()
     orch._members.set_members("t1", {"m1"})  # a member is still running
     asyncio.run(
-        orch._auto_finalize_lead_task(
+        orch.lifecycle._auto_finalize_lead_task(
             lead_session_id="lead-sess",
             task_id="t1",
             project_id="w1",
@@ -967,14 +943,16 @@ def test_lead_idle_with_no_pending_true_when_clean(db_factory, tmp_path) -> None
     _make_task(db_factory, tmp_path)
     orch = TaskOrchestrator()
     # No members, no plan → nothing to wait for → break the loop immediately.
-    assert asyncio.run(orch._lead_idle_with_no_pending("t1", "w1", user_id=OWNER)) is True
+    idle = orch.coordination.lead_idle_with_no_pending("t1", "w1", user_id=OWNER)
+    assert asyncio.run(idle) is True
 
 
 def test_lead_idle_with_no_pending_false_when_member_in_flight(db_factory, tmp_path) -> None:
     _make_task(db_factory, tmp_path)
     orch = TaskOrchestrator()
     orch._members.set_members("t1", {"m1"})
-    assert asyncio.run(orch._lead_idle_with_no_pending("t1", "w1", user_id=OWNER)) is False
+    idle = orch.coordination.lead_idle_with_no_pending("t1", "w1", user_id=OWNER)
+    assert asyncio.run(idle) is False
 
 
 def test_lead_idle_with_no_pending_false_when_plan_unresolved(db_factory, tmp_path) -> None:
@@ -989,7 +967,8 @@ def test_lead_idle_with_no_pending_false_when_plan_unresolved(db_factory, tmp_pa
             subtasks=[{"key": "a", "title": "A", "agent": "x"}],
         )
     )
-    assert asyncio.run(orch._lead_idle_with_no_pending("t1", "w1", user_id=OWNER)) is False
+    idle = orch.coordination.lead_idle_with_no_pending("t1", "w1", user_id=OWNER)
+    assert asyncio.run(idle) is False
 
 
 # ---------------------------------------------------------------------------
@@ -1099,7 +1078,7 @@ def test_recover_one_task_reconciles_members_and_redrives_lead(
     orch._actor.run_actor_loop = _fake_loop  # type: ignore[method-assign]
 
     async def _run() -> None:
-        await orch._recover_one_task("t1", "w1", user_id=OWNER)
+        await orch.recovery._recover_one_task("t1", "w1", user_id=OWNER)
         await asyncio.sleep(0.05)  # let create_task'd loops run
 
     try:
@@ -1213,7 +1192,7 @@ def test_stop_task_pauses_members_and_cascade_interrupts(db_factory, tmp_path, m
 
     orch._recovery._interrupt_kernel_session = _fake_interrupt  # type: ignore[method-assign]
 
-    assert asyncio.run(orch.stop_task("t1", "w1", user_id=OWNER)) is True
+    assert asyncio.run(orch.recovery.stop_task("t1", "w1", user_id=OWNER)) is True
 
     task = _task_row(db_factory)
     assert task.status == "paused"
@@ -1235,7 +1214,7 @@ def test_stop_task_noop_when_not_active(db_factory, tmp_path, monkeypatch) -> No
         raise AssertionError("should not interrupt a non-active task")
 
     orch._recovery._interrupt_kernel_session = _fake_interrupt  # type: ignore[method-assign]
-    assert asyncio.run(orch.stop_task("t1", "w1", user_id=OWNER)) is False
+    assert asyncio.run(orch.recovery.stop_task("t1", "w1", user_id=OWNER)) is False
 
 
 def test_resume_task_only_paused_flips_active_and_redrives(
@@ -1269,7 +1248,7 @@ def test_resume_task_only_paused_flips_active_and_redrives(
     orch._actor.run_actor_loop = _fake_loop  # type: ignore[method-assign]
 
     async def _run() -> dict:
-        result = await orch.resume_task("t1", "w1", user_id=OWNER)
+        result = await orch.recovery.resume_task("t1", "w1", user_id=OWNER)
         await asyncio.sleep(0.05)
         return result
 
@@ -1292,7 +1271,7 @@ def test_resume_task_noop_when_active(db_factory, tmp_path) -> None:
         db_factory, tmp_path, members=[("A", "backend", "sA", "in_progress")], task_status="active"
     )
     orch = TaskOrchestrator()
-    result = asyncio.run(orch.resume_task("t1", "w1", user_id=OWNER))
+    result = asyncio.run(orch.recovery.resume_task("t1", "w1", user_id=OWNER))
     assert result["ok"] is False
     assert result["prior_status"] == "active"
     assert "paused" in result["error"] or "blocked" in result["error"]
@@ -1320,7 +1299,7 @@ def test_resume_task_accepts_blocked(db_factory, tmp_path, monkeypatch) -> None:
         spawned.append((session_id, role))
 
     orch._actor.run_actor_loop = _fake_loop  # type: ignore[method-assign]
-    result = asyncio.run(orch.resume_task("t1", "w1", user_id=OWNER))
+    result = asyncio.run(orch.recovery.resume_task("t1", "w1", user_id=OWNER))
     assert result["ok"] is True
     assert result["prior_status"] == "blocked"
     assert _task_row(db_factory).status == "active"
@@ -1350,7 +1329,7 @@ def test_resume_task_accepts_stopped(db_factory, tmp_path, monkeypatch) -> None:
         spawned.append((session_id, role))
 
     orch._actor.run_actor_loop = _fake_loop  # type: ignore[method-assign]
-    result = asyncio.run(orch.resume_task("t1", "w1", user_id=OWNER))
+    result = asyncio.run(orch.recovery.resume_task("t1", "w1", user_id=OWNER))
     assert result["ok"] is True
     assert result["prior_status"] == "stopped"
     assert _task_row(db_factory).status == "active"
@@ -1380,7 +1359,7 @@ def test_resume_task_accepts_completed(db_factory, tmp_path, monkeypatch) -> Non
         spawned.append((session_id, role))
 
     orch._actor.run_actor_loop = _fake_loop  # type: ignore[method-assign]
-    result = asyncio.run(orch.resume_task("t1", "w1", user_id=OWNER))
+    result = asyncio.run(orch.recovery.resume_task("t1", "w1", user_id=OWNER))
     assert result["ok"] is True
     assert result["prior_status"] == "completed"
     assert _task_row(db_factory).status == "active"
@@ -1415,7 +1394,7 @@ def test_resume_task_with_instruction_embeds_brief_and_logs_event(
     orch._actor.run_actor_loop = _fake_loop  # type: ignore[method-assign]
     try:
         result = asyncio.run(
-            orch.resume_task("t1", "w1", user_id=OWNER, instruction="先核对数据再继续")
+            orch.recovery.resume_task("t1", "w1", user_id=OWNER, instruction="先核对数据再继续")
         )
         assert result["ok"] is True
         assert '<user-instruction source="resume">' in prompts["lead"]
@@ -1452,7 +1431,7 @@ def test_resume_task_accepts_legacy_failed(db_factory, tmp_path, monkeypatch) ->
 
     orch._actor.run_actor_loop = _fake_loop  # type: ignore[method-assign]
     try:
-        result = asyncio.run(orch.resume_task("t1", "w1", user_id=OWNER))
+        result = asyncio.run(orch.recovery.resume_task("t1", "w1", user_id=OWNER))
         assert result["ok"] is True
         assert result["prior_status"] == "failed"
         assert _task_row(db_factory).status == "active"
@@ -1466,7 +1445,7 @@ def test_resume_task_rejects_abandoned(db_factory, tmp_path) -> None:
     revive; the user must draft afresh."""
     _seed_lead_and_members(db_factory, tmp_path, members=[], task_status="abandoned")
     orch = TaskOrchestrator()
-    result = asyncio.run(orch.resume_task("t1", "w1", user_id=OWNER))
+    result = asyncio.run(orch.recovery.resume_task("t1", "w1", user_id=OWNER))
     assert result["ok"] is False
     assert result["prior_status"] == "abandoned"
     assert _task_row(db_factory).status == "abandoned"
@@ -1489,7 +1468,7 @@ def test_stop_member_rejects_run_reworks_node_and_notifies_lead(
     orch._recovery._interrupt_kernel_session = _fake_interrupt  # type: ignore[method-assign]
     mailbox_registry.register("lead-s")
     try:
-        assert asyncio.run(orch.stop_member("sB", user_id=OWNER)) is True
+        assert asyncio.run(orch.recovery.stop_member("sB", user_id=OWNER)) is True
         runs = _runs(db_factory)
         assert runs["sB"] == "rejected"
         plan = TaskPlan.from_dict(db_factory().query(TaskRow).filter_by(id="t1").one().plan)
@@ -1532,7 +1511,7 @@ def test_heartbeat_pending_synthesizes_terminal_completed(
     orch = TaskOrchestrator()
 
     out = asyncio.run(
-        orch._heartbeat_pending(
+        orch.coordination._heartbeat_pending(
             task_id="t1", project_id="w1", pending_keys={"B", "C"}, user_id=OWNER
         )
     )
@@ -1779,7 +1758,7 @@ def test_resume_evicts_kernel_runtime_before_respawn(db_factory, tmp_path, monke
     orch._actor.run_actor_loop = _fake_loop  # type: ignore[method-assign]
 
     async def _run() -> None:
-        await orch.resume_task("t1", "w1", user_id=OWNER)
+        await orch.recovery.resume_task("t1", "w1", user_id=OWNER)
         await asyncio.sleep(0.05)
 
     try:
@@ -1823,10 +1802,10 @@ def test_lead_shutdown_exit_skips_auto_finalize(monkeypatch) -> None:
         user_id=OWNER,
     )
     # shutdown exit → auto-finalize SKIPPED (no spurious block on resume)
-    asyncio.run(orch._finalize_actor(via_shutdown=True, **common))  # type: ignore[arg-type]
+    asyncio.run(orch.lifecycle.finalize_actor(via_shutdown=True, **common))  # type: ignore[arg-type]
     assert called == []
     # natural exit (idle-TTL / end_turn) → auto-finalize RUNS
-    asyncio.run(orch._finalize_actor(via_shutdown=False, **common))  # type: ignore[arg-type]
+    asyncio.run(orch.lifecycle.finalize_actor(via_shutdown=False, **common))  # type: ignore[arg-type]
     assert called == ["t1"]
 
 
@@ -1859,7 +1838,6 @@ def test_finish_task_completed_publishes_finalized_and_notifies_memory(
     (tasks/events.py): the commercial allocator's TTL clamp listens on it.
     A completed finish must also graduate lessons into project memory."""
     from valuz_agent.modules.tasks import events as events_mod
-    from valuz_agent.modules.tasks import lifecycle as lc_mod
 
     _make_task(db_factory, tmp_path)
     asyncio.run(
@@ -1880,7 +1858,7 @@ def test_finish_task_completed_publishes_finalized_and_notifies_memory(
 
     orch = TaskOrchestrator()
     res = asyncio.run(
-        orch.finish_task(
+        orch.lifecycle.finish_task(
             task_id="t1",
             project_id="w1",
             lead_session_id="lead",
@@ -1900,7 +1878,6 @@ def test_finish_task_stopped_publishes_finalized_without_memory(
     """A 'stopped' finish still announces task.finalized (sandbox reclaim)
     but must NOT graduate memory — that's reserved for real completions."""
     from valuz_agent.modules.tasks import events as events_mod
-    from valuz_agent.modules.tasks import lifecycle as lc_mod
 
     _make_task(db_factory, tmp_path)
 
@@ -1911,7 +1888,7 @@ def test_finish_task_stopped_publishes_finalized_without_memory(
 
     orch = TaskOrchestrator()
     res = asyncio.run(
-        orch.finish_task(
+        orch.lifecycle.finish_task(
             task_id="t1",
             project_id="w1",
             lead_session_id="lead",
@@ -1995,13 +1972,15 @@ def test_commit_task_creates_lead_session_with_task_scope(
     monkeypatch.setattr(res_mod, "_provider_resolver_deps", lambda _db: {})
     monkeypatch.setattr(lc_mod.kernel_client, "create_session", _capture_create_session)
     monkeypatch.setattr(
-        lc_mod, "project_index", SimpleNamespace(record=_as_async(lambda *_a, **_k: None))
+        launcher_mod,
+        "project_index",
+        SimpleNamespace(record=_as_async(lambda *_a, **_k: None)),
     )
 
     async def _run() -> dict:
         orch = TaskOrchestrator()
         monkeypatch.setattr(orch._actor, "run_actor_loop", _as_async(lambda **_k: None))
-        res = await orch.commit_task(
+        res = await orch.lifecycle.commit_task(
             task_id="t1",
             project_id="w1",
             caller_session_id="chat",
@@ -2087,7 +2066,9 @@ def test_task_lifecycle_event_trace_golden(db_factory, tmp_path, monkeypatch) ->
     monkeypatch.setattr(kernel_client_mod, "get_session", _as_async(lambda *_a, **_k: None))
     monkeypatch.setattr(kernel_client_mod, "set_mode", _as_async(lambda *_a, **_k: None))
     monkeypatch.setattr(
-        lc_mod, "project_index", SimpleNamespace(record=_as_async(lambda *_a, **_k: None))
+        launcher_mod,
+        "project_index",
+        SimpleNamespace(record=_as_async(lambda *_a, **_k: None)),
     )
     # draft_task needs a project row + task file path via lifecycle namespace too.
     import valuz_agent.modules.projects.datastore as ws_src
@@ -2109,14 +2090,18 @@ def test_task_lifecycle_event_trace_golden(db_factory, tmp_path, monkeypatch) ->
     async def _run() -> None:
         orch = TaskOrchestrator()
         monkeypatch.setattr(orch._actor, "run_actor_loop", _as_async(lambda **_k: None))
-        from valuz_agent.modules.tasks.dispatcher import (
-            kernel_client as disp_kernel,  # shared module object
+        # session creation goes through the launcher now — same shared
+        # kernel_client module object, patched once.
+        from valuz_agent.modules.tasks.launcher import (
+            kernel_client as launch_kernel,
         )
 
-        monkeypatch.setattr(disp_kernel, "create_session", _as_async(lambda *_a, **_k: None))
+        monkeypatch.setattr(
+            launch_kernel, "create_session", _as_async(lambda *_a, **_k: None)
+        )
 
         # 1) draft → 2) plan → 3) commit
-        row = await orch.draft_task(
+        row = await orch.lifecycle.draft_task(
             project_id="w1",
             goal="build the thing",
             lead_agent_slug="lead",
@@ -2131,13 +2116,13 @@ def test_task_lifecycle_event_trace_golden(db_factory, tmp_path, monkeypatch) ->
             lead_session_id="chat-1",
             subtasks=[{"key": "a", "title": "A", "agent": "worker"}],
         )
-        res = await orch.commit_task(
+        res = await orch.lifecycle.commit_task(
             task_id=task_id, project_id="w1", caller_session_id="chat-1", user_id=OWNER
         )
         assert res.get("status") == "active", res
 
         # 4) dispatch the planned node (async spawn, actor stubbed)
-        res = await orch.dispatch_async(
+        res = await orch.dispatcher.dispatch_async(
             task_id=task_id,
             project_id="w1",
             lead_session_id="lead-sess-1",
@@ -2164,7 +2149,7 @@ def test_task_lifecycle_event_trace_golden(db_factory, tmp_path, monkeypatch) ->
         assert res.get("decision") == "approve", res
 
         # 7) finish
-        res = await orch.finish_task(
+        res = await orch.lifecycle.finish_task(
             task_id=task_id,
             project_id="w1",
             lead_session_id="lead-sess-1",
@@ -2294,7 +2279,7 @@ def test_dispatch_credential_gap_event_carries_no_session_id(
 
     orch = TaskOrchestrator()
     res = asyncio.run(
-        orch.dispatch_async(
+        orch.dispatcher.dispatch_async(
             task_id="t1",
             project_id="w1",
             lead_session_id="lead-sess",
@@ -2312,7 +2297,13 @@ def test_dispatch_credential_gap_event_carries_no_session_id(
         db.close()
     assert len(rows) == 1, [r.type for r in rows]
     assert rows[0].session_id is None  # never-created session must not be linkable
-    assert (rows[0].payload or {}).get("error") == gap
+    # The human line lives in ``summary`` for EVERY subtask_failed now — this
+    # path used to be the odd one out, writing it as ``error`` while the other
+    # two wrote ``summary``, so the timeline detail differed by internal path.
+    payload = rows[0].payload or {}
+    assert payload["summary"] == gap
+    assert payload["reason"] == "dispatch_failed"
+    assert payload["subtask_key"] == "a"
 
 
 def test_commit_task_blocks_on_member_provider_preflight(db_factory, tmp_path, monkeypatch) -> None:
@@ -2384,7 +2375,7 @@ def test_commit_task_blocks_on_member_provider_preflight(db_factory, tmp_path, m
 
     orch = TaskOrchestrator()
     res = asyncio.run(
-        orch.commit_task(
+        orch.lifecycle.commit_task(
             task_id="t1",
             project_id="w1",
             caller_session_id="chat",
@@ -2396,3 +2387,297 @@ def test_commit_task_blocks_on_member_provider_preflight(db_factory, tmp_path, m
     assert member_gap in res["error"]
     # The draft must remain committable after the user fixes the provider.
     assert _task_row(db_factory).status == "draft"
+
+
+# ---------------------------------------------------------------------------
+# notify_lead_member_idle — the member -> lead timeline event
+# ---------------------------------------------------------------------------
+
+
+def test_member_report_emits_subtask_reported_with_agent_name(
+    db_factory, tmp_path, monkeypatch
+) -> None:
+    """A member finishing a round writes ``subtask_reported``, not ``subtask_message``.
+
+    The two directions shared one type (split only by ``payload.direction``)
+    until 2026-07, so the timeline could not tell "the lead said something"
+    from "a member finished a round" without reading the payload. This also
+    pins the ``agent_name`` stamp: the frontend renders it straight from the
+    payload rather than joining the slug against a racy async members list.
+    """
+    from valuz_agent.modules.tasks import coordination as coord_mod
+
+    _make_task(db_factory, tmp_path)
+    db = db_factory()
+    try:
+        db.add(
+            TaskSessionRow(
+                user_id=OWNER,
+                id="run-mem",
+                project_id="w1",
+                task_id="t1",
+                session_id="mem-sess",
+                agent_slug="researcher",
+                sequence=1,
+                kind="subtask",
+                status="active",
+                subtask_key="A",
+                dispatched_by="lead-sess",
+                run_dir=str(tmp_path),
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    async def _fake_manifest(*_a, **_k):
+        return {"session_id": "mem-sess", "status": "idle", "summary": "did the thing"}
+
+    async def _fake_name(_ws, slug, _uid):
+        return f"Name of {slug}"
+
+    monkeypatch.setattr(coord_mod, "collect_manifest", _fake_manifest)
+    monkeypatch.setattr(coord_mod, "resolve_agent_display_name", _fake_name)
+
+    orch = TaskOrchestrator()
+    asyncio.run(orch.coordination.notify_lead_member_idle("mem-sess", "idle", user_id=OWNER))
+
+    assert "subtask_reported" in _events(db_factory)
+    assert "subtask_message" not in _events(db_factory)
+    payload = _event_payload(db_factory, "subtask_reported")
+    assert payload["agent_name"] == "Name of researcher"
+    assert payload["summary"] == "did the thing"
+    assert payload["status"] == "idle"
+
+
+def test_review_subtask_rejects_when_task_vanishes_between_phases(
+    db_factory, tmp_path, monkeypatch
+) -> None:
+    """``review_subtask`` reads in TWO units of work — guard both.
+
+    Phase 1 resolves the node on a read-only UoW; phase 2 re-reads on a
+    writable one. Only phase 1 checked for a missing task, so a task deleted in
+    between crashed phase 2 with AttributeError on ``None.plan`` (a 500 out of
+    the tool) instead of returning the same actionable "not found".
+    """
+    _make_task(db_factory, tmp_path)
+    asyncio.run(
+        planning.plan_task(
+            task_id="t1",
+            project_id="w1",
+            user_id=OWNER,
+            lead_session_id="lead-sess",
+            subtasks=[{"key": "a", "title": "A", "agent": "x"}],
+        )
+    )
+
+    # Delete the task after phase 1 has resolved the node: patch the datastore
+    # read so the SECOND call (phase 2) reports the row gone.
+    calls = {"n": 0}
+    real = planning.TaskDatastore.get_task_by_project
+
+    async def _vanish_after_first(self, user_id, project_id, task_id):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        if calls["n"] > 1:
+            return None
+        return await real(self, user_id, project_id, task_id)
+
+    monkeypatch.setattr(
+        planning.TaskDatastore, "get_task_by_project", _vanish_after_first
+    )
+
+    res = asyncio.run(
+        planning.review_subtask(
+            task_id="t1",
+            project_id="w1",
+            lead_session_id="lead-sess",
+            decision="approve",
+            subtask_key="a",
+            user_id=OWNER,
+        )
+    )
+    assert "not found" in res["error"]
+
+
+def test_list_tasks_counts_every_settled_run_as_done(db_factory, tmp_path) -> None:
+    """``runs_done`` must count archived/rejected runs, not a status that
+    doesn't exist.
+
+    The run status enum is active | paused | completed | rejected | archived.
+    This counted ``("completed", "failed")`` — and ``failed`` is not one of
+    them — so an errored run (archived) or a user-stopped one (rejected) never
+    counted, and the progress reported to the agent read low forever.
+    """
+    from valuz_agent.modules.tasks import service as queries
+
+    _make_task(db_factory, tmp_path)
+    db = db_factory()
+    try:
+        for i, status in enumerate(
+            ["completed", "archived", "rejected", "active"], start=1
+        ):
+            db.add(
+                TaskSessionRow(
+                    user_id=OWNER,
+                    id=f"run-{i}",
+                    project_id="w1",
+                    task_id="t1",
+                    session_id=f"s-{i}",
+                    agent_slug="x",
+                    sequence=i,
+                    kind="subtask",
+                    status=status,
+                    subtask_key=f"k{i}",
+                )
+            )
+        db.commit()
+    finally:
+        db.close()
+
+    rows = asyncio.run(queries.list_tasks("w1", user_id=OWNER))
+    assert rows[0]["runs"] == 4
+    # completed + archived + rejected are settled; only the active one isn't.
+    assert rows[0]["runs_done"] == 3
+
+
+def test_plan_update_payload_is_a_self_contained_snapshot(db_factory, tmp_path) -> None:
+    """``task_plan_update`` must carry everything a consumer renders from it.
+
+    Regression for a silent contract drift: the backend emitted
+    ``{"subtasks": ...}`` alone while ``PlanCardFeed`` read four keys off the
+    payload and guarded with
+
+        if ((payload.plan_version ?? 0) <= card.planVersion) return
+
+    With the version missing, every event evaluated ``0 <= n`` and was
+    DISCARDED — the live plan feed only ever updated from its initial fetch,
+    and nothing moved on screen as the plan progressed. Nothing failed; it just
+    quietly stopped working.
+
+    These events go out over SSE, where a consumer cannot assume it saw the
+    previous one, so the payload has to stand alone. Lock the shape.
+    """
+    _make_task(db_factory, tmp_path)
+    asyncio.run(
+        planning.plan_task(
+            task_id="t1",
+            project_id="w1",
+            user_id=OWNER,
+            lead_session_id="lead-sess",
+            subtasks=[{"key": "a", "title": "A", "agent": "x"}],
+        )
+    )
+    payload = _event_payload(db_factory, "task_plan_update")
+
+    assert set(payload) == {"subtasks", "plan_version", "task_status", "title"}
+    assert payload["plan_version"] == 1, "the CAS token is the consumer's dedup key"
+    assert payload["task_status"] == "active"
+    assert payload["title"] == "T"
+    # Nodes carry the resolved display name so the panel never has to join the
+    # slug against an async members list.
+    assert payload["subtasks"][0]["key"] == "a"
+    assert "agent_name" in payload["subtasks"][0]
+
+
+def test_plan_update_version_advances_with_every_plan_write(db_factory, tmp_path) -> None:
+    """Consecutive snapshots must be distinguishable, or the consumer's
+    ``version <= seen`` guard drops the newer one."""
+    _make_task(db_factory, tmp_path)
+    asyncio.run(
+        planning.plan_task(
+            task_id="t1",
+            project_id="w1",
+            user_id=OWNER,
+            lead_session_id="lead-sess",
+            subtasks=[{"key": "a", "title": "A", "agent": "x"}],
+        )
+    )
+    asyncio.run(
+        planning.modify_plan(
+            task_id="t1",
+            project_id="w1",
+            user_id=OWNER,
+            lead_session_id="lead-sess",
+            add=[{"key": "b", "title": "B", "agent": "x"}],
+        )
+    )
+    db = db_factory()
+    try:
+        versions = [
+            (e.payload or {}).get("plan_version")
+            for e in db.query(TaskEventRow)
+            .filter_by(type="task_plan_update")
+            .order_by(TaskEventRow.sequence)
+            .all()
+        ]
+    finally:
+        db.close()
+    assert versions == [1, 2]
+
+
+def test_every_subtask_failure_path_writes_the_same_payload_shape(
+    db_factory, tmp_path
+) -> None:
+    """One event type, one shape — whichever internal path detected the failure.
+
+    ``subtask_failed`` used to be emitted from three places with three
+    different payloads: the heartbeat backstop wrote {agent_name, subtask_key,
+    status, summary, reason}, dispatch wrote {agent, agent_name, status, error}
+    with no key and no summary, and the actor-loop finalize spread a whole
+    manifest. The timeline renderer falls back to a ``text|summary|goal|error``
+    lookup for this type, so the detail a user saw depended on which code path
+    had failed — and no consumer could rely on any field being present.
+    """
+    from valuz_agent.infra.db import async_unit_of_work
+    from valuz_agent.modules.tasks.datastore import TaskEventDatastore
+    from valuz_agent.modules.tasks.events import record_subtask_failed
+
+    _make_task(db_factory, tmp_path)
+
+    async def _emit(reason: str) -> None:
+        async with async_unit_of_work() as db:
+            await record_subtask_failed(
+                TaskEventDatastore(db),
+                user_id=OWNER,
+                project_id="w1",
+                task_id="t1",
+                session_id="s-1",
+                agent_slug="coder",
+                agent_name="Coder",
+                subtask_key="a",
+                summary="it broke",
+                reason=reason,
+            )
+
+    for reason in ("dispatch_failed", "heartbeat_detected", "run_error"):
+        asyncio.run(_emit(reason))
+
+    db = db_factory()
+    try:
+        rows = (
+            db.execute(select(TaskEventRow).filter_by(type="subtask_failed"))
+            .scalars()
+            .all()
+        )
+    finally:
+        db.close()
+
+    assert len(rows) == 3
+    expected_keys = {
+        "agent",
+        "agent_name",
+        "subtask_key",
+        "status",
+        "summary",
+        "reason",
+        "artifacts",
+    }
+    for row in rows:
+        assert set(row.payload) == expected_keys, "every path must fill every key"
+        assert row.payload["status"] == "failed"
+    # Only the machine-readable cause differs between paths.
+    assert {r.payload["reason"] for r in rows} == {
+        "dispatch_failed",
+        "heartbeat_detected",
+        "run_error",
+    }

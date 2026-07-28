@@ -1,12 +1,23 @@
-"""Dispatch MCP tool DECLARATIONS — the static, import-safe surface.
+"""Task MCP tool DECLARATIONS — the static, import-safe surface.
 
-Holds the tool-name constants, JSON-schema parameter dicts,
-``ToolDef(handler=None)`` declarations, the declaration tuples, and the pure
-agent-config transforms (``strip_dispatch_tools`` /
-``ensure_orchestration_tools_on_agent``).
+Holds the tool-name constants, JSON-schema parameter dicts, and the
+``ToolDef(handler=None)`` declarations, grouped into the TWO audience tuples
+that are this module's real output:
 
-This module is handler-free and orchestrator-free on purpose: it is imported by
-``projects/service.py``, ``agents/service.py``, and ``lifecycle._materialize_lead_agent``
+  * :data:`DISPATCH_TOOL_DECLARATIONS`      — the **lead** toolset (a running
+    task lead: plan, dispatch, await, review, finish).
+  * :data:`ORCHESTRATION_TOOL_DECLARATIONS` — the **chat** toolset (a plain
+    project conversation acting as a control surface: create/draft/commit a
+    task, inspect it, inject into it, resume it).
+
+``boot/steps.py`` partitions the host toolkit MCP server by exactly these two
+name lists (``/_internal/mcp/toolkit/{lead,base}``), so an audience change here
+IS the wire change — nothing else needs updating. Both tuples deliberately
+share ``list_members`` and the plan tools; the per-call authorization that the
+overlap needs lives in ``tools/gate.py`` (e.g. "an active task's plan is
+lead-only, chat must inject").
+
+This module is handler-free and orchestrator-free on purpose: it is imported
 during AgentConfig construction, so it must never reach the orchestrator (which
 would re-introduce the startup circular-import the handler closures avoid).
 
@@ -62,75 +73,6 @@ STOP_SUBTASK_TOOL_NAME = "stop_subtask"
 # deliverable card (summary + artifacts) during follow-up chat. Appends a
 # ``deliverable_updated`` event; does not change task status.
 UPDATE_DELIVERABLE_TOOL_NAME = "update_deliverable"
-
-DISPATCH_TOOL_NAMES = (
-    DISPATCH_TOOL_NAME,
-    AWAIT_MEMBERS_TOOL_NAME,
-    LIST_MEMBERS_TOOL_NAME,
-    FINISH_TASK_TOOL_NAME,
-    SEND_TOOL_NAME,
-    CREATE_TASK_TOOL_NAME,
-    LIST_TASKS_TOOL_NAME,
-    GET_TASK_TOOL_NAME,
-    PLAN_TASK_TOOL_NAME,
-    GET_PLAN_TOOL_NAME,
-    MODIFY_PLAN_TOOL_NAME,
-    REVIEW_SUBTASK_TOOL_NAME,
-    DRAFT_TASK_TOOL_NAME,
-    COMMIT_TASK_TOOL_NAME,
-    ABANDON_TASK_TOOL_NAME,
-    INJECT_INTO_TASK_TOOL_NAME,
-    RESUME_TASK_TOOL_NAME,
-    STOP_SUBTASK_TOOL_NAME,
-    UPDATE_DELIVERABLE_TOOL_NAME,
-)
-
-# Strict-lead-only dispatch tools — must NOT be on a plain conversation agent
-# (stripped via ``strip_dispatch_tools``).
-#
-# VALUZ-CHATPLAN S2 (D4): plan_task / modify_plan / get_plan are NO LONGER
-# strict-lead-only — they are also advertised on chat agents (via
-# ORCHESTRATION_TOOL_DECLARATIONS) so the chat-as-control-surface flow can
-# write plans on draft tasks. Handler-level ``_check_plan_writer_gate``
-# enforces "active-task plan is lead-only" semantics.
-#
-# VALUZ-CHATPLAN bug fix: ``list_members`` was previously in this set with
-# a comment claiming ``ensure_orchestration_tools_on_agent`` would re-add it
-# via ORCHESTRATION_TOOL_DECLARATIONS. But ``_prepare_conversation_tools``
-# runs ``strip_dispatch_tools(ensure_orchestration_tools_on_agent(agent))``
-# (add THEN strip), so list_members was added and immediately stripped —
-# leaving chat agents without it. The chat-as-control-surface flow needs
-# list_members on chat agents (and the description explicitly tells the
-# LLM to call it before draft_task), so it's removed from the strip set.
-# Lead clones still get list_members via DISPATCH_TOOL_DECLARATIONS in
-# ``_materialize_lead_agent``, so removing it from the strip set is safe.
-LEAD_ONLY_TOOL_NAMES = frozenset(
-    {
-        DISPATCH_TOOL_NAME,
-        AWAIT_MEMBERS_TOOL_NAME,
-        SEND_TOOL_NAME,
-        FINISH_TASK_TOOL_NAME,
-        REVIEW_SUBTASK_TOOL_NAME,
-        STOP_SUBTASK_TOOL_NAME,
-        UPDATE_DELIVERABLE_TOOL_NAME,
-    }
-)
-
-
-def strip_dispatch_tools(agent_cfg: Any) -> Any:
-    """Return *agent_cfg* with all lead-only dispatch tools removed (idempotent).
-
-    A conversation/member agent must not advertise dispatch/finish_task — those
-    belong on the per-task lead clone. Pure — caller persists if changed.
-    """
-    from dataclasses import replace
-
-    tools = agent_cfg.tools or ()
-    kept = tuple(t for t in tools if getattr(t, "name", None) not in LEAD_ONLY_TOOL_NAMES)
-    if len(kept) == len(tools):
-        return agent_cfg
-    return replace(agent_cfg, tools=kept)
-
 
 # ---------------------------------------------------------------------------
 # JSON Schema parameters
@@ -678,6 +620,7 @@ GET_PLAN_TOOL_DECLARATION = ToolDef(
     ),
     parameters=_GET_PLAN_PARAMETERS,
     handler=None,
+    read_only=True,
 )
 
 MODIFY_PLAN_TOOL_DECLARATION = ToolDef(
@@ -957,39 +900,3 @@ ORCHESTRATION_TOOL_DECLARATIONS: tuple[ToolDef, ...] = (
 # Names of conversation-launcher tools — dropped from the per-task lead clone
 # (the lead dispatches; it doesn't launch new tasks). ``list_members`` is NOT
 # in this set: it stays on the lead too (it's part of the dispatch toolset),
-# so it must not be stripped from the lead clone.
-#
-# VALUZ-CHATPLAN S2: draft/commit/abandon are chat-only — a running lead has
-# no need (and no business) creating new drafts inside its own execution.
-# plan_task / modify_plan / get_plan are deliberately NOT here: the lead
-# clone re-adds them via DISPATCH_TOOL_DECLARATIONS. Dedup of duplicate
-# advertisements happens in ``_materialize_lead_agent``.
-ORCHESTRATION_TOOL_NAMES = frozenset(
-    {
-        CREATE_TASK_TOOL_NAME,
-        LIST_TASKS_TOOL_NAME,
-        GET_TASK_TOOL_NAME,
-        DRAFT_TASK_TOOL_NAME,
-        COMMIT_TASK_TOOL_NAME,
-        ABANDON_TASK_TOOL_NAME,
-        INJECT_INTO_TASK_TOOL_NAME,
-        RESUME_TASK_TOOL_NAME,
-    }
-)
-
-
-def ensure_orchestration_tools_on_agent(agent_cfg: Any) -> Any:
-    """Return *agent_cfg* with the ``create_task`` ToolDef declared (idempotent).
-
-    Project-conversation agents need ``create_task`` advertised to the model;
-    tools live on ``AgentConfig.tools`` (kernel Session has no tools field).
-    The launcher counterpart to ``TaskOrchestrator._materialize_lead_agent``
-    (which builds the per-task lead clone). Pure — caller persists.
-    """
-    from dataclasses import replace
-
-    existing = {getattr(t, "name", None) for t in (agent_cfg.tools or ())}
-    missing = [td for td in ORCHESTRATION_TOOL_DECLARATIONS if td.name not in existing]
-    if not missing:
-        return agent_cfg
-    return replace(agent_cfg, tools=tuple(agent_cfg.tools or ()) + tuple(missing))

@@ -26,15 +26,18 @@ from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
 
-# kind of an inbound message delivered to an actor at its next turn boundary.
-#   message      — free text from another actor (lead→member follow-up, etc.)
-#   member_done  — a member finished a turn; payload carries its manifest
-#   shutdown     — graceful stop request; the loop finalises after current turn
-#   revise_goal  — the user revised task.goal on a running task; payload.goal
-#                  carries the new goal. Delivered so the lead re-orients (the
-#                  goal is its initial brief + goal-mode condition baked at
-#                  spawn, so a bare task.goal write never reaches a running lead).
-InboxKind = Literal["message", "member_done", "shutdown", "revise_goal"]
+# Four kinds in three semantic classes — the class decides how the loop
+# consumes it:
+#   FREE TEXT (becomes the next turn's prompt verbatim):
+#     text         — from another actor or the user (follow-up / inject / rework)
+#     revise_goal  — user revised task.goal; distinct so await_member_results
+#                    preempts on it (a bare DB write never reaches a running
+#                    lead — the goal is baked into the session at spawn)
+#   STRUCTURED REPORT (rendered first): member_done — manifest, via
+#     ActorRunner._format_member_done
+#   CONTROL SIGNAL (no prompt): shutdown — finalize after the current turn
+# Process-local only (in-memory asyncio.Queue per session; never persisted).
+InboxKind = Literal["text", "member_done", "shutdown", "revise_goal"]
 
 
 @dataclass(slots=True)

@@ -641,7 +641,7 @@ class InProcessAutomationRunner:
         try:
             title = rendered_prompt[:60] if len(rendered_prompt) > 60 else rendered_prompt
             run.started_at = now_ms()
-            task = await task_orchestrator.kickoff(
+            task = await task_orchestrator.lifecycle.kickoff(
                 project_id=row.project_id,
                 goal=rendered_prompt,
                 lead_agent_slug=row.agent_slug,

@@ -234,6 +234,9 @@ def _translate_kernel_event(
       - ``tool_output_delta`` → ``tool.call.output_delta`` (live-only: streamed
         tool output between started and completed; ``stream`` discriminates
         codex patch vs stdout)
+      - ``tool_thinking_delta`` → ``tool.call.thinking_delta`` (live-only:
+        tool-scoped reasoning stream — the ephemeral ``generate_ui``
+        session's thinking, forwarded onto the calling session)
       - ``session_error``     → ``run.failed``
       - ``usage_update``      → ``runtime.engine.usage``  (V5+messages: replaces
         the dropped ``cost_update`` event; carries token counts +
@@ -466,6 +469,23 @@ def _translate_kernel_event(
             {
                 "tool_use_id": _stringify(data.get("id") or ""),
                 "stream": _stringify(data.get("stream") or ""),
+                "text": _stringify(data.get("text") or data.get("delta") or ""),
+            },
+            data,
+        )
+
+    if kernel_type == "tool_thinking_delta":
+        # Live, non-persisted: a tool-scoped reasoning stream — today the
+        # ephemeral ``generate_ui`` session's ``thinking_delta``, forwarded
+        # onto the calling session between started and completed. A SEPARATE
+        # type from ``tool.call.output_delta`` on purpose: the frontend
+        # concatenates output deltas into the tool card's output stream
+        # unconditionally (the OpenUI code the <Renderer> paints), so
+        # reasoning text through that channel would corrupt the render.
+        # Frontends that don't know this type ignore it.
+        return "tool.call.thinking_delta", _with_message_id(
+            {
+                "tool_use_id": _stringify(data.get("id") or ""),
                 "text": _stringify(data.get("text") or data.get("delta") or ""),
             },
             data,

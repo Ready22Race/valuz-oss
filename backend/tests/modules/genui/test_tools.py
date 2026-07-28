@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -129,7 +130,7 @@ async def test_handler_resolves_tool_use_id_and_streams(monkeypatch, patched):
     assert captured["resolve_args"]["session_id"] == "s1"
 
 
-async def test_handler_falls_back_to_sync_when_no_R(monkeypatch, patched):
+async def test_handler_falls_back_to_sync_when_no_r(monkeypatch, patched):
     async def _none(**kw):
         return None
 
@@ -149,3 +150,55 @@ async def test_handler_falls_back_to_sync_when_no_R(monkeypatch, patched):
     await handler({"request": "chart"}, _ctx())
     assert completer_calls["kw"]["tool_use_id"] is None
     assert completer_calls["kw"]["calling_session_id"] is None
+
+
+async def test_handler_retries_when_generation_returns_blank(monkeypatch, patched, caplog):
+    calls = 0
+
+    async def _no_sleep(seconds):
+        return None
+
+    async def _comp(prompt):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return "   "
+        return "Chart"
+
+    monkeypatch.setattr(t.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(t, "_make_completer", lambda **kw: _comp)
+    handler = build_generative_ui_tool_defs()[0].handler
+
+    with caplog.at_level(logging.INFO, logger=t.__name__):
+        res = await handler({"request": "chart"}, _ctx())
+
+    assert res.is_error is False
+    assert res.content == "Chart"
+    assert calls == 2
+    assert "generate_ui: generation returned blank output on attempt 1/2" in caplog.text
+
+
+async def test_handler_retries_when_generation_raises(monkeypatch, patched, caplog):
+    calls = 0
+
+    async def _no_sleep(seconds):
+        return None
+
+    async def _comp(prompt):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("stream broke")
+        return "Chart"
+
+    monkeypatch.setattr(t.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(t, "_make_completer", lambda **kw: _comp)
+    handler = build_generative_ui_tool_defs()[0].handler
+
+    with caplog.at_level(logging.INFO, logger=t.__name__):
+        res = await handler({"request": "chart"}, _ctx())
+
+    assert res.is_error is False
+    assert res.content == "Chart"
+    assert calls == 2
+    assert "generate_ui: generation attempt 1/2 failed" in caplog.text

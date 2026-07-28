@@ -1,10 +1,25 @@
-import type { ComponentProps } from "react";
+import { useEffect, useRef, useState, type ComponentProps } from "react";
 import { Renderer } from "@openuidev/react-lang";
 import { ThemeProvider } from "@openuidev/react-ui";
 import { openuiLibrary } from "@openuidev/react-ui/genui-lib";
+import { Maximize2 } from "lucide-react";
 
 import { useI18n } from "../../hooks/use-i18n";
+import { Button } from "../ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "../ui/dialog";
 import { Spinner } from "../ui/spinner";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "../ui/tooltip";
 
 type OpenUiTheme = NonNullable<
   ComponentProps<typeof ThemeProvider>["lightTheme"]
@@ -235,21 +250,67 @@ export interface GenerativeUICardProps {
   openui?: string;
   /** Tool status; "running" while the tool hasn't returned yet. */
   status?: "running" | "success" | "error";
+  /** Reasoning stream (``tool.call.thinking_delta``, live-only) from the
+   * ephemeral generation session. Shown dimmed while running so the model's
+   * thinking phase is visible progress instead of a silent wait; dropped
+   * from the DOM once the tool completes (it never persists to history). */
+  thinking?: string;
 }
 
+const OPENUI_SCOPE_SELECTOR = '[data-openui-scope="generative-ui"]';
+
 const GENERATIVE_UI_LAYOUT_CSS = `
-  [data-slot="generative-ui-card"]
+  ${OPENUI_SCOPE_SELECTOR} {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} * {
+    box-sizing: border-box;
+    min-width: 0;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} :where([class^="openui-"], [class*=" openui-"]) {
+    max-width: 100%;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} :where(p, span, div, td, th) {
+    overflow-wrap: anywhere;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR}
     .openui-horizontal-bar-chart-container-inner-wrapper {
     height: auto !important;
     overflow: visible;
   }
 
-  [data-slot="generative-ui-card"]
+  ${OPENUI_SCOPE_SELECTOR}
     .openui-horizontal-bar-chart-main-container {
     height: auto;
     overflow-y: visible;
   }
 `;
+
+function OpenUiBody({
+  body,
+  status,
+}: {
+  body: string;
+  status?: GenerativeUICardProps["status"];
+}) {
+  return (
+    <ThemeProvider
+      lightTheme={VALUZ_OPENUUI_THEME}
+      cssSelector={OPENUI_SCOPE_SELECTOR}
+    >
+      <Renderer
+        library={openuiLibrary}
+        response={body}
+        isStreaming={status === "running"}
+      />
+    </ThemeProvider>
+  );
+}
 
 /**
  * Renders the OpenUI Lang produced by the ``generate_ui`` MCP tool as live,
@@ -257,49 +318,113 @@ const GENERATIVE_UI_LAYOUT_CSS = `
  * ``renderToolCall`` override (the same lift-out seam AskUserQuestion and
  * submit_skill use).
  */
-export function GenerativeUICard({ openui, status }: GenerativeUICardProps) {
+export function GenerativeUICard({
+  openui,
+  status,
+  thinking,
+}: GenerativeUICardProps) {
   const { t } = useI18n();
+  const [fullscreenOpen, setFullscreenOpen] = useState(false);
   const body = extractContentText(openui);
+  const cardTitle = t("genui.cardTitle" as Parameters<typeof t>[0]);
+  const fullscreenLabel = t("genui.fullscreen" as Parameters<typeof t>[0]);
+  // Reasoning is transient live progress: visible only while the tool runs
+  // (after completion the rendered UI is the payload; the stream is
+  // live-only and gone on history replay anyway).
+  const showThinking = status === "running" && Boolean(thinking);
+  const thinkingRef = useRef<HTMLDivElement | null>(null);
+
+  // Follow the tail of the reasoning stream as it grows.
+  useEffect(() => {
+    const el = thinkingRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [thinking]);
 
   return (
     <div
       data-slot="generative-ui-card"
+      data-openui-scope="generative-ui"
       className="rounded-xl border border-surface-border bg-surface overflow-hidden"
     >
       <style>{GENERATIVE_UI_LAYOUT_CSS}</style>
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-surface-border">
-        <span className="text-sm font-medium text-ink-heading">
-          {t("genui.cardTitle" as Parameters<typeof t>[0])}
+      <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-surface-border">
+        <span className="min-w-0 truncate text-sm font-medium text-ink-heading">
+          {cardTitle}
         </span>
+        <TooltipProvider delayDuration={150}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label={fullscreenLabel}
+                title={fullscreenLabel}
+                disabled={!body}
+                onClick={() => setFullscreenOpen(true)}
+                className="shrink-0 text-ink-muted hover:text-ink-heading"
+              >
+                <Maximize2 className="size-3.5" aria-hidden="true" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="left">{fullscreenLabel}</TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
       </div>
-      <div className="min-w-0 overflow-x-auto p-3 [&>*]:min-w-0 [&>*]:max-w-full">
-        {body ? (
-          <ThemeProvider
-            lightTheme={VALUZ_OPENUUI_THEME}
-            cssSelector="[data-slot='generative-ui-card']"
-          >
-            <Renderer
-              library={openuiLibrary}
-              response={body}
-              isStreaming={status === "running"}
-            />
-          </ThemeProvider>
-        ) : (
-          <div
-            data-testid="genui-empty"
-            className="flex items-center gap-2 text-sm text-ink-meta"
-          >
-            {status === "running" ? (
-              <>
-                <Spinner className="size-3.5" />
-                {t("genui.generating" as Parameters<typeof t>[0])}
-              </>
-            ) : (
-              t("genui.empty" as Parameters<typeof t>[0])
-            )}
+      {showThinking ? (
+        <div className="px-3 py-2 border-b border-surface-border bg-surface-soft">
+          <div className="flex items-center gap-2 text-xs text-ink-meta">
+            <Spinner className="size-3" />
+            {t("conversation.thinking" as Parameters<typeof t>[0])}
           </div>
-        )}
-      </div>
+          <div
+            ref={thinkingRef}
+            data-testid="genui-thinking"
+            className="mt-1 max-h-24 overflow-y-auto whitespace-pre-wrap text-xs italic text-ink-meta"
+          >
+            {thinking}
+          </div>
+        </div>
+      ) : null}
+      {body || !showThinking ? (
+        <div className="min-w-0 overflow-x-auto p-3 [&>*]:min-w-0 [&>*]:max-w-full">
+          {body ? (
+            <OpenUiBody body={body} status={status} />
+          ) : (
+            <div
+              data-testid="genui-empty"
+              className="flex items-center gap-2 text-sm text-ink-meta"
+            >
+              {status === "running" ? (
+                <>
+                  <Spinner className="size-3.5" />
+                  {t("genui.generating" as Parameters<typeof t>[0])}
+                </>
+              ) : (
+                t("genui.empty" as Parameters<typeof t>[0])
+              )}
+            </div>
+          )}
+        </div>
+      ) : null}
+      <Dialog open={fullscreenOpen} onOpenChange={setFullscreenOpen}>
+        <DialogContent className="top-9 right-4 bottom-4 left-4 h-auto max-h-none w-auto max-w-none translate-x-0 translate-y-0 gap-0 overflow-hidden p-0 sm:max-w-none">
+          <DialogHeader className="border-b border-surface-border px-4 py-3 pr-12">
+            <DialogTitle className="text-sm leading-5">{cardTitle}</DialogTitle>
+            <DialogDescription className="sr-only">
+              {t("genui.fullscreenDescription" as Parameters<typeof t>[0])}
+            </DialogDescription>
+          </DialogHeader>
+          <div
+            data-testid="genui-fullscreen"
+            data-slot="generative-ui-fullscreen"
+            data-openui-scope="generative-ui"
+            className="min-h-0 flex-1 overflow-auto p-4 [&>*]:min-w-0 [&>*]:max-w-full"
+          >
+            {body ? <OpenUiBody body={body} status={status} /> : null}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

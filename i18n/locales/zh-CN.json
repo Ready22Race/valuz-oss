@@ -571,6 +571,8 @@
   "genui": {
     "cardTitle": "生成式 UI",
     "empty": "尚无内容",
+    "fullscreen": "全屏查看",
+    "fullscreenDescription": "在更大的工作区中预览生成的界面。",
     "generating": "正在生成界面…",
     "error": "生成失败"
   },
@@ -2454,6 +2456,7 @@
       "subtaskFailed": "子任务失败",
       "subtaskStopped": "子任务已被停止",
       "subtaskMessage": "成员消息",
+      "subtaskReported": "成员已回报",
       "userNote": "添加备注",
       "goalRevised": "修改目标",
       "paused": "已暂停",

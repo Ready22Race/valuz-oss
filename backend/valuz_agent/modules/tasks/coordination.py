@@ -1,34 +1,18 @@
-"""CoordinationService — lead ↔ member coordination (ADR-023, Step 3b).
+"""CoordinationService — lead ↔ member coordination.
 
-Peeled verbatim out of ``TaskOrchestrator``. Owns the in-turn / between-turn
-coordination surface:
+await_member_results (in-turn mailbox drain, heartbeat-sliced) · the
+role callbacks the ActorRunner binds as its ``ActorCoordinator``
+(notify_lead_member_idle / lead_idle_with_no_pending / session_still_working)
+· _broadcast_shutdown, the atomic halt primitive.
 
-  * :meth:`await_member_results` — in-turn mailbox drain (8s heartbeat slices,
-    user_inject preemption).
-  * :meth:`_heartbeat_pending` — bad-case#3 backstop (reconcile a member whose
-    kernel session went terminal but whose member_done never reached the lead).
-  * :meth:`_notify_lead_member_idle` — the role=="subtask" run-actor-loop
-    callback: post a ``member_done`` to the lead's inbox after a member turn.
-  * :meth:`_lead_idle_with_no_pending` — the role=="lead" run-actor-loop check:
-    True when the lead has nothing left to wait for.
-  * :meth:`_broadcast_shutdown` — the atomic shutdown primitive (single
-    ``drain_members`` pop → per-member shutdown put).
+Text DELIVERY (send_to_member / inject_into_task / goal revision) lives in
+``messaging`` — callers import it directly; there is no wrapper here.
 
-Holds no task state — it receives the shared :class:`LiveMemberRegistry` by
-constructor injection (the same instance the composition root wires into every
-other task service) for ``has_live_members`` / ``dispatch_started_at`` /
-``drain_members``.
-
-ADR folds ``messaging.py`` into coordination: the lead↔member / chat→task text
-delivery methods (:meth:`send_to_member` / :meth:`inject_into_task` /
-:meth:`notify_lead_goal_revised`) are surfaced here by delegating into the
-stateless ``messaging`` module, which stays importable for the dispatch-MCP
-handlers + task routes that call it directly.
-
-CRITICAL invariant (``_broadcast_shutdown``): the drain + per-member shutdown
-``put`` loop must stay SYNCHRONOUS and contiguous — no ``await`` may separate the
-single atomic ``registry.drain_members`` pop from the shutdown puts, or a member
-spawned concurrently by ``dispatch_async`` could be dropped.
+CRITICAL invariant: ``_broadcast_shutdown`` must stay a plain ``def`` — the
+single ``drain_members`` pop and the per-member puts may not be separated by
+an ``await``, or a concurrently spawned member is dropped. ``await`` inside a
+sync function is a SyntaxError, so the compiler enforces it (as it does for
+``DispatcherService._spawn_member``, the other half of the race).
 """
 
 # ruff: noqa: I001
@@ -37,18 +21,23 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
+from valuz_agent.adapters import kernel_client
+from valuz_agent.adapters.agent_resolver import resolve_agent_display_name
 from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.infra.db import async_unit_of_work
-from valuz_agent.modules.tasks import messaging, planning
+from valuz_agent.modules.tasks import planning
 from valuz_agent.modules.tasks.actor_runner import _NON_REVIEWABLE_DONE, collect_manifest
+from valuz_agent.modules.tasks.events import record_subtask_failed
 from valuz_agent.modules.tasks.datastore import (
     TaskDatastore,
     TaskEventDatastore,
     TaskSessionDatastore,
 )
 from valuz_agent.modules.tasks.live_member_registry import LiveMemberRegistry
+from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
+from valuz_agent.modules.tasks.member_state import classify_member
 from valuz_agent.modules.tasks.plan import PlanError, TaskPlan
 
 logger = logging.getLogger(__name__)
@@ -56,6 +45,16 @@ logger = logging.getLogger(__name__)
 # Heartbeat slice for await_member_results: how often the lead reconciles
 # in-flight members against their kernel session while waiting (VALUZ-RESUME §5.4).
 _HEARTBEAT_S = 8.0
+
+# Run the parked-member probe every Nth heartbeat slice rather than every one.
+# The probe asks the decision inbox "is EVERY pending member waiting on the
+# user?" — a state that can only change when a HUMAN acts, so 8-second
+# resolution buys nothing and costs a full run listing + one kernel-session
+# read per pending member + an inbox snapshot on every slice of a wait that can
+# run ten minutes. The heartbeat itself is NOT throttled: it is the backstop
+# for a member that died without delivering ``member_done``, and every slice it
+# skips is time the lead hangs on a result that will never arrive.
+_PROBE_EVERY_N_SLICES = 4
 
 # Max seconds a SINGLE await_members call parks. await is designed to be LOOPED
 # (the still_running hint + inbox-notice drive prompt re-await), so one call
@@ -69,13 +68,7 @@ _MAX_AWAIT_WINDOW_S = 600.0
 
 
 class CoordinationService:
-    """Lead ↔ member coordination + chat→task / lead→member text delivery.
-
-    Constructed once at the composition root with the shared registry; the
-    orchestrator's coordination surface delegates straight onto it, and the
-    ActorRunner resolves its role callbacks (``_notify_lead_member_idle`` /
-    ``_lead_idle_with_no_pending``) through the bound host onto this service.
-    """
+    """Lead ↔ member coordination; the ActorRunner's typed ``ActorCoordinator``."""
 
     def __init__(self, *, registry: LiveMemberRegistry) -> None:
         self._members = registry
@@ -109,7 +102,6 @@ class CoordinationService:
         ``timeout_s``: on expiry, return whatever was collected plus
         ``pending`` (so a stuck member can't hang the lead forever).
         """
-        from valuz_agent.modules.tasks.mailbox import mailbox_registry
 
         # Ensure the lead inbox exists so ``get`` blocks for member_done
         # instead of raising KeyError (which would return empty instantly and
@@ -174,8 +166,11 @@ class CoordinationService:
         # larger model-supplied timeout_s doesn't buy anything — await loops — and
         # would risk exceeding the codex tool-call ceiling, turning a healthy wait
         # into a "timed out awaiting tools/call" transport failure.
-        requested = timeout_s if timeout_s is not None else _MAX_AWAIT_WINDOW_S
-        effective_timeout = min(requested, _MAX_AWAIT_WINDOW_S)
+        # NB: distinct from the ``requested`` key list above — this one is the
+        # caller's wait window. They shared a name until 2026-07, which only
+        # worked because the key-list branch returns before reaching here.
+        requested_window = timeout_s if timeout_s is not None else _MAX_AWAIT_WINDOW_S
+        effective_timeout = min(requested_window, _MAX_AWAIT_WINDOW_S)
         deadline = loop.time() + effective_timeout
         collected: dict[str, dict[str, Any]] = {}
         # VALUZ-CHATPLAN S5: if a user-injected ``message`` arrives in the
@@ -190,6 +185,7 @@ class CoordinationService:
         # timeout is pure waste when nothing can move without the user.
         awaiting_user_break = False
         pending_probe: list[dict[str, Any]] = []
+        slices_waited = 0
 
         while True:
             if mode == "all" and target and target.issubset(collected.keys()):
@@ -207,6 +203,7 @@ class CoordinationService:
             try:
                 msg = await mailbox_registry.get(lead_session_id, timeout=slice_timeout)
             except TimeoutError:
+                slices_waited += 1
                 pending_now = (target - set(collected.keys())) if target else set()
                 collected.update(
                     await self._heartbeat_pending(
@@ -225,7 +222,7 @@ class CoordinationService:
                 # answers; the lead gets to react — do other work or end the
                 # turn and be woken by the eventual member_done).
                 still_pending = (target - set(collected.keys())) if target else set()
-                if still_pending:
+                if still_pending and slices_waited % _PROBE_EVERY_N_SLICES == 0:
                     probe = await self._probe_pending_members(
                         task_id=task_id, pending_keys=still_pending, user_id=user_id
                     )
@@ -241,8 +238,18 @@ class CoordinationService:
             except KeyError:
                 break
             if msg.kind == "shutdown":
+                # Put it BACK before leaving. ``await_member_results`` runs
+                # inside the lead's turn and drains the same inbox the actor
+                # loop reads between turns, so consuming a shutdown here would
+                # swallow the only signal that tells the loop to stop — the
+                # lead would finish this turn and keep looping on a task that
+                # ``stop_task`` / ``finish_task`` already halted. (It survived
+                # this long only because ``stop_task`` ALSO interrupts the
+                # kernel turn, which happens to end the loop by another route;
+                # ``finish_task``'s own broadcast had no such backstop.)
+                mailbox_registry.put(lead_session_id, msg)
                 break
-            if msg.kind in ("message", "revise_goal"):
+            if msg.kind in ("text", "revise_goal"):
                 # VALUZ-CHATPLAN S5: user inject via chat, OR a goal revision
                 # (both are authoritative user intent). Capture + break so the
                 # lead can react in this turn instead of waiting for a member_done
@@ -357,8 +364,6 @@ class CoordinationService:
         """
         if not pending_keys:
             return {}
-        from valuz_agent.modules.tasks.recovery import classify_member
-
         out: dict[str, dict[str, Any]] = {}
         async with async_unit_of_work() as db:
             run_ds = TaskSessionDatastore(db)
@@ -424,34 +429,22 @@ class CoordinationService:
                             review_feedback="member session errored (heartbeat)",
                         )
                         plan_dirty = True
-                    # Emit ``subtask_failed`` like every other member-failure
-                    # path (_finalize_actor / dispatcher). Without this a
-                    # heartbeat-detected failure archived the run + reworked the
-                    # node INVISIBLY — no timeline row, no attention signal; the
-                    # user just saw the subtask silently blink active→pending.
-                    # Stamp ``agent_name`` (established rule) so the frontend
-                    # doesn't race an async member-list join.
-                    from valuz_agent.adapters.agent_resolver import (
-                        resolve_agent_display_name,
-                    )
-
+                    # Same emitter as every other failure path — without it a
+                    # heartbeat-detected failure reworked the node invisibly.
                     agent_name = await resolve_agent_display_name(
                         project_id, run.agent_slug or "", user_id
                     )
-                    await event_ds.append_event(
-                        user_id,
+                    await record_subtask_failed(
+                        event_ds,
+                        user_id=user_id,
                         project_id=project_id,
                         task_id=task_id,
-                        type="subtask_failed",
-                        actor=run.agent_slug or "",
                         session_id=run.session_id,
-                        payload={
-                            "agent_name": agent_name,
-                            "subtask_key": key,
-                            "status": "failed",
-                            "summary": "member session errored",
-                            "reason": "heartbeat_detected",
-                        },
+                        agent_slug=run.agent_slug or "",
+                        agent_name=agent_name,
+                        subtask_key=key,
+                        summary="member session errored",
+                        reason="heartbeat_detected",
                     )
                     out[key] = {
                         "subtask_key": key,
@@ -462,13 +455,11 @@ class CoordinationService:
                         "artifacts": [],
                     }
             if plan_dirty and plan is not None and task is not None:
-                task.plan = plan.to_dict()
-                await task_ds.update_task(task)
-                await planning.emit_plan_update(
+                await planning.persist_plan(
+                    task_ds,
                     event_ds,
-                    project_id=project_id,
-                    task_id=task_id,
-                    plan=plan,
+                    task,
+                    plan,
                     actor="system",
                     session_id=None,
                     user_id=user_id,
@@ -482,18 +473,10 @@ class CoordinationService:
         pending_keys: set[str],
         user_id: str,
     ) -> list[dict[str, Any]]:
-        """Best-effort live status of still-pending members — READ ONLY.
-
-        Unlike ``_heartbeat_pending`` this never touches the plan or the runs;
-        it answers the one question a waiting lead cannot otherwise answer:
-        *is this silent member alive?* Three observable states:
-
-          * ``awaiting_user`` — the member is parked mid-turn on an
-            AskUserQuestion (pending decision-inbox entry); nothing moves until
-            the user answers.
-          * ``running`` — genuinely working (possibly a long tool call).
-          * anything else / ``unknown`` — the kernel status as-is (terminal
-            states are normally reconciled by the heartbeat before this runs).
+        """READ-ONLY live status of still-pending members: ``awaiting_user``
+        (parked on an AskUserQuestion — nothing moves until the user answers),
+        ``running``, or the kernel status as-is. Never touches plan or runs —
+        that is ``_heartbeat_pending``'s job.
         """
         if not pending_keys:
             return []
@@ -501,7 +484,7 @@ class CoordinationService:
             async with async_unit_of_work(commit=False) as db:
                 runs_by_key = {
                     r.subtask_key: r
-                    for r in await TaskSessionDatastore(db).list_runs(cast(str, user_id), task_id)
+                    for r in await TaskSessionDatastore(db).list_runs(user_id, task_id)
                     if r.kind == "subtask" and r.subtask_key and r.status == "active"
                 }
         except Exception:  # noqa: BLE001
@@ -515,7 +498,7 @@ class CoordinationService:
                 continue
             kernel_status: str | None = None
             try:
-                ks = await data_reader().get_session(cast(str, user_id), run.session_id)
+                ks = await data_reader().get_session(user_id, run.session_id)
                 kernel_status = getattr(ks, "status", None) if ks is not None else None
             except Exception:  # noqa: BLE001
                 logger.debug(
@@ -541,9 +524,12 @@ class CoordinationService:
         decision inbox. Best-effort: an unwired aggregator (tests, early boot)
         just means no ask detection, never a failed await."""
         try:
-            # Lazy import — the aggregator singleton lives on the API layer
-            # (same pattern as modules/docs/scheduler.py). Never a hard dep.
-            from valuz_agent.api.deps import get_decision_aggregator
+            # Lazy import — decisions is a sibling MODULE (its service API, not
+            # its datastore), so this is a sanctioned cross-module call; the
+            # import stays lazy only to keep the boot import graph flat.
+            # Best-effort by design: an unwired aggregator raises, and this
+            # method must degrade to "no ask detected", never fail the await.
+            from valuz_agent.modules.decisions.aggregator import get_decision_aggregator
 
             entries = await get_decision_aggregator().snapshot(user_id or "")
         except Exception:  # noqa: BLE001
@@ -562,16 +548,16 @@ class CoordinationService:
     # actor-loop role callbacks (driven by ActorRunner via the bound host)
     # ------------------------------------------------------------------
 
-    async def _notify_lead_member_idle(
+    async def notify_lead_member_idle(
         self, session_id: str, status: str, user_id: str
     ) -> None:
-        """After a member turn, push a member_done message to its lead's inbox.
+        """After a member turn: ``member_done`` to the lead's inbox + a
+        ``subtask_reported`` timeline event. Best-effort — a missing lead inbox
+        (lead already finished) drops the mailbox message.
 
-        Also appends a ``subtask_message`` task event so the timeline shows the
-        member→lead notification. Best-effort — a missing lead inbox (lead
-        already finished) just means the message is dropped.
+        (Pre-2026-07 rows carry this as ``subtask_message`` with a
+        ``payload.direction``; the append-only log is never rewritten.)
         """
-        from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 
         async with async_unit_of_work() as db:
             run_ds = TaskSessionDatastore(db)
@@ -586,15 +572,22 @@ class CoordinationService:
                 session_id, run_dir, status, since_epoch=since, user_id=user_id
             )
             manifest["agent"] = run.agent_slug
+            # Stamp the display name at emit time (established rule): the
+            # frontend renders ``payload.agent_name`` directly instead of
+            # joining the slug against an async members list, which races the
+            # load and misses agents removed since.
+            agent_name = await resolve_agent_display_name(
+                run.project_id, run.agent_slug or "", user_id
+            )
             await event_ds.append_event(
                 user_id,
                 project_id=run.project_id,
                 task_id=run.task_id or "",
-                type="subtask_message",
+                type="subtask_reported",
                 actor=run.agent_slug,
                 session_id=session_id,
                 payload={
-                    "direction": "member->lead",
+                    "agent_name": agent_name,
                     "summary": manifest.get("summary", ""),
                     "status": status,
                 },
@@ -611,19 +604,27 @@ class CoordinationService:
                 ),
             )
 
-    async def _lead_idle_with_no_pending(
-        self, task_id: str, project_id: str, user_id: str
+    async def lead_idle_with_no_pending(
+        self, task_id: str, project_id: str, user_id: str, lead_session_id: str = ""
     ) -> bool:
         """True when a lead has nothing left to wait for after a turn.
 
         The actor loop normally parks on the mailbox for LEAD_IDLE_TTL_S between
         turns to catch ``member_done`` / follow-ups. But a lead only has a reason
-        to wait if it has a member in flight OR an unresolved plan node still to
-        drive. When neither holds, the lead is done — break now so
-        ``_finalize_actor`` closes the task immediately instead of after 30min.
+        to wait if it has a member in flight, BACKGROUND WORK of its own still
+        running, or an unresolved plan node still to drive
+        (``TaskPlan.unresolved_keys`` — the shared predicate, ``paused``
+        included). When none holds, the lead is done — break now so
+        ``finalize_actor`` closes the task immediately instead of after 30min.
         """
         if self._members.has_live_members(task_id):
             return False  # a member is still running — keep waiting for its result
+        if lead_session_id and await self._session_has_background_work(lead_session_id):
+            # The lead spawned a ``run_in_background`` subagent. Its own turn
+            # genuinely ended, but the work has NOT — and when the task finishes
+            # the CLI wakes the session with the result. Finalising here would
+            # close the task out from under work that is still running.
+            return False
         async with async_unit_of_work(commit=False) as db:
             task = await TaskDatastore(db).get_task_by_project(
                 user_id, project_id, task_id
@@ -634,10 +635,30 @@ class CoordinationService:
                 plan = TaskPlan.from_dict(task.plan)
             except PlanError:
                 return True
-            unresolved = any(
-                n.status in ("planned", "in_progress", "in_review", "rework") for n in plan.nodes
-            )
-            return not unresolved
+            return not plan.unresolved_keys()
+
+    async def session_still_working(self, session_id: str) -> bool:
+        """ActorCoordinator: is this session doing work the loop cannot see?
+
+        Today that means a live ``run_in_background`` task. The actor loop asks
+        this before treating an idle-TTL expiry as "this actor is done".
+        """
+        return await self._session_has_background_work(session_id)
+
+    @staticmethod
+    async def _session_has_background_work(session_id: str) -> bool:
+        """Is this session running a ``run_in_background`` task right now?
+
+        A background task outlives the turn that launched it and the CLI
+        drives the follow-up turns — the loop sees none of it. Same signal as
+        the conversation header (``bg_busy_session_ids``), so surfaces agree.
+        Best-effort: a failed lookup reports False rather than pin the loop.
+        """
+        try:
+            return session_id in set(await kernel_client.bg_busy_session_ids())
+        except Exception:  # noqa: BLE001
+            logger.debug("bg-busy probe failed for %s", session_id, exc_info=True)
+            return False
 
     # ------------------------------------------------------------------
     # shutdown broadcast — the atomic shutdown primitive
@@ -645,74 +666,9 @@ class CoordinationService:
 
     def _broadcast_shutdown(self, task_id: str) -> None:
         """Tell every still-running member of a task to finalize after its turn."""
-        from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 
         for member_sid in self._members.drain_members(task_id):
             mailbox_registry.put(member_sid, InboxMsg(kind="shutdown"))
-
-    # ------------------------------------------------------------------
-    # text delivery (folds messaging.py — delegates to the stateless module)
-    # ------------------------------------------------------------------
-
-    async def send_to_member(
-        self,
-        *,
-        from_session_id: str,
-        to_session_id: str,
-        text: str,
-        project_id: str,
-        task_id: str,
-    ) -> dict[str, Any]:
-        """Deliver a free-text follow-up from the lead to a running member.
-
-        Delegates to the stateless ``messaging`` module (kept importable for the
-        dispatch-MCP handlers + task routes that call it directly).
-        """
-        return await messaging.send_to_member(
-            from_session_id=from_session_id,
-            to_session_id=to_session_id,
-            text=text,
-            project_id=project_id,
-            task_id=task_id,
-        )
-
-    async def inject_into_task(
-        self,
-        *,
-        task_id: str,
-        project_id: str,
-        text: str,
-        from_session_id: str,
-    ) -> dict[str, Any]:
-        """Inject a free-text instruction from a chat session into a running task's lead.
-
-        Delegates to the stateless ``messaging`` module (kept importable for the
-        dispatch-MCP handlers + task routes that call it directly).
-        """
-        return await messaging.inject_into_task(
-            task_id=task_id,
-            project_id=project_id,
-            text=text,
-            from_session_id=from_session_id,
-        )
-
-    async def notify_lead_goal_revised(
-        self,
-        *,
-        task_id: str,
-        project_id: str,
-        new_goal: str,
-    ) -> dict[str, Any]:
-        """Wake a running task's lead after the user revised ``task.goal``.
-
-        Delegates to the stateless ``messaging`` module (kept importable for the
-        dispatch-MCP handlers + task routes that call it directly).
-        """
-        return await messaging.notify_lead_goal_revised(
-            task_id=task_id,
-            project_id=project_id,
-            new_goal=new_goal,
-        )
 
 
 __all__ = ["CoordinationService"]

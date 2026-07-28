@@ -271,6 +271,26 @@ class Session:
     todos: list[dict[str, Any]] | None = None
 
 
+# Host-stamped ``Session.metadata`` marker for one-shot "bare completion"
+# sessions — ephemeral helper sessions (generative-UI, memory review) that
+# need exactly one LLM round-trip and none of the agentic scaffolding. Each
+# runtime that sees it strips to the minimum its SDK allows: no built-in
+# tools, no preset/base system prompt where the SDK permits, no settings or
+# skills discovery. Rationale: these sessions are created fresh per call, so
+# every kilobyte of scaffolding is an uncached prefill paid on every
+# invocation (a claude_agent ephemeral turn measured ~38s to first token vs
+# ~2.4s for a stripped in-process call on the same model).
+BARE_COMPLETION_METADATA_KEY = "bare_completion"
+
+
+def is_bare_completion(session: Session) -> bool:
+    """True when the host marked *session* as a bare one-shot completion."""
+    try:
+        return bool(session.metadata.get(BARE_COMPLETION_METADATA_KEY))
+    except Exception:  # noqa: BLE001 — malformed metadata never breaks dispatch
+        return False
+
+
 # -- Message --
 
 MessageStatus = Literal["running", "completed", "errored", "cancelled"]

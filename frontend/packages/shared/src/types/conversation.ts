@@ -13,6 +13,11 @@ export interface PrototypeToolCall {
   status: PrototypeToolCallStatus;
   input?: string;
   output?: string;
+  /** Tool-scoped reasoning stream (``tool.call.thinking_delta``, live-only —
+   * the ephemeral generate_ui session's thinking forwarded onto the calling
+   * session). Accumulated separately from ``output`` on purpose: output IS
+   * the tool's result stream (e.g. OpenUI code) and must not be polluted. */
+  thinking?: string;
 }
 
 /* ── Background tasks (run_in_background shell commands) ──── */

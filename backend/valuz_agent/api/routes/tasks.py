@@ -33,14 +33,10 @@ from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.infra.db import async_unit_of_work, get_async_session
 from valuz_agent.infra.sse import shielded
 from valuz_agent.modules.automations.datastore import AutomationDatastore
-from valuz_agent.modules.tasks import messaging, planning
-from valuz_agent.modules.tasks.datastore import (
-    TaskDatastore,
-    TaskEventDatastore,
-    TaskSessionDatastore,
-)
+from valuz_agent.modules.tasks import messaging, plan_commands
 from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow
 from valuz_agent.modules.tasks.orchestrator import task_orchestrator
+from valuz_agent.modules.tasks.service import TaskService
 from valuz_agent.modules.tasks.task_state import TERMINAL_STATUSES
 
 router = APIRouter(tags=["tasks"])
@@ -106,7 +102,9 @@ async def _resolve_triggers(
     ``TaskTrigger`` (parent-task titles + automation names fetched once)."""
     parent_ids = list({r.trigger_task_id for r in rows if r.trigger_task_id})
     automation_ids = list({r.trigger_automation_id for r in rows if r.trigger_automation_id})
-    titles = await TaskDatastore(db).get_titles_by_ids(user_id, parent_ids) if parent_ids else {}
+    titles = (
+        await TaskService(db).titles_by_ids(user_id, parent_ids) if parent_ids else {}
+    )
     automations = (
         await AutomationDatastore(db).get_names_by_ids(user_id, automation_ids)
         if automation_ids
@@ -260,7 +258,7 @@ async def kickoff_task(
 ) -> TaskResponse:
     """Create a task and start its lead session (lead self-dispatches sub-runs)."""
     try:
-        row = await task_orchestrator.kickoff(
+        row = await task_orchestrator.lifecycle.kickoff(
             project_id=project_id,
             goal=payload.goal,
             lead_agent_slug=payload.lead_agent_slug,
@@ -279,13 +277,25 @@ async def kickoff_task(
     return resp
 
 
+
+def _plan_error_status(result: dict[str, Any]) -> int:
+    """Map a plan-command error onto a status code.
+
+    The command service returns one error shape; only the route knows about
+    HTTP. "not found" covers both a missing task and one owned by somebody
+    else — deliberately indistinguishable — so it is a 404; every other
+    rejection is the caller asking for something the rules forbid.
+    """
+    return 404 if "not found" in str(result.get("error", "")) else 400
+
+
 @router.get("/v1/projects/{project_id}/tasks", response_model=dict[str, list[TaskResponse]])
 async def list_tasks(
     project_id: str,
     db: AsyncSession = Depends(get_async_session),
     user_id: str = Depends(get_current_user_id),
 ) -> dict[str, list[TaskResponse]]:
-    rows = await TaskDatastore(db).list_tasks(user_id, project_id)
+    rows = await TaskService(db).list_for_project(user_id, project_id)
     triggers = await _resolve_triggers(db, user_id, rows)
     return {"tasks": _to_task_responses(rows, triggers)}
 
@@ -299,7 +309,7 @@ async def list_all_tasks(
     """Global cross-project task list, newest activity first. Powers the
     sidebar TASKS section so users see what's running regardless of which
     project page they're on."""
-    rows = await TaskDatastore(db).list_all(user_id, limit=limit)
+    rows = await TaskService(db).list_all(user_id, limit=limit)
     triggers = await _resolve_triggers(db, user_id, rows)
     return {"tasks": _to_task_responses(rows, triggers)}
 
@@ -310,15 +320,13 @@ async def get_task(
     db: AsyncSession = Depends(get_async_session),
     user_id: str = Depends(get_current_user_id),
 ) -> TaskDetailResponse:
-    task = await TaskDatastore(db).get_task(user_id, task_id)
-    if task is None:
+    detail = await TaskService(db).get_detail(user_id, task_id)
+    if detail is None:
         raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
-    runs = await TaskSessionDatastore(db).list_runs(user_id, task_id)
-    events = await TaskEventDatastore(db).list_events(user_id, task.project_id, task_id)
     return TaskDetailResponse(
-        task=await _task_response_with_trigger(db, user_id, task),
-        runs=[RunResponse.model_validate(r) for r in runs],
-        events=[EventResponse.model_validate(e) for e in events],
+        task=await _task_response_with_trigger(db, user_id, detail.task),
+        runs=[RunResponse.model_validate(r) for r in detail.runs],
+        events=[EventResponse.model_validate(e) for e in detail.events],
     )
 
 
@@ -328,11 +336,10 @@ async def list_task_events(
     db: AsyncSession = Depends(get_async_session),
     user_id: str = Depends(get_current_user_id),
 ) -> dict[str, list[EventResponse]]:
-    task = await TaskDatastore(db).get_task(user_id, task_id)
-    if task is None:
+    found = await TaskService(db).get_events(user_id, task_id)
+    if found is None:
         raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
-    events = await TaskEventDatastore(db).list_events(user_id, task.project_id, task_id)
-    return {"events": [EventResponse.model_validate(e) for e in events]}
+    return {"events": [EventResponse.model_validate(e) for e in found.events]}
 
 
 # SSE polling cadence — tight enough that ``inject_into_task`` → plan
@@ -411,7 +418,7 @@ async def _iter_task_events_sse(
         # connection down mid-checkin (see ``infra.sse.shielded``).
         async def _tick_read(after: int) -> list[TaskEventRow]:
             async with async_unit_of_work(commit=False) as db:
-                return await TaskEventDatastore(db).list_events_after(
+                return await TaskService(db).events_after(
                     user_id, project_id, task_id, after
                 )
 
@@ -472,7 +479,7 @@ async def stream_task_events(
     optimization candidate) this endpoint can switch to push.
     """
     async with async_unit_of_work(commit=False) as db:
-        task = await TaskDatastore(db).get_task(user_id, task_id)
+        task = await TaskService(db).get_owned_task(user_id, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
     # ``request.is_disconnected`` is async; sse-starlette wraps the
@@ -512,48 +519,24 @@ async def intervene(
                     along as a user instruction embedded in the respawned
                     lead's recovery brief ("回复并恢复" in one step).
     """
-    task_ds = TaskDatastore(db)
-    event_ds = TaskEventDatastore(db)
-    task = await task_ds.get_task(user_id, task_id)
+    service = TaskService(db)
+    task = await service.get_owned_task(user_id, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
     ws = task.project_id
 
     if payload.action == "note":
-        await event_ds.append_event(
-            user_id,
-            ws,
-            task_id,
-            "user_note",
-            actor="user",
-            payload={"text": payload.text or ""},
-        )
+        await service.add_note(user_id, task, payload.text or "")
     elif payload.action == "revise_goal":
         if not payload.goal:
             raise HTTPException(status_code=422, detail="goal is required for revise_goal")
-        task.goal = payload.goal
-        await task_ds.update_task(task)
-        # Push the revision to the running lead so it actually re-orients —
-        # task.goal alone is pull-only (the lead never re-reads it mid-run).
-        # Best-effort: an offline/finished lead just isn't woken (DB goal still
-        # updated above). The lead decides autonomously how to fold it in.
-        notified = await messaging.notify_lead_goal_revised(
-            task_id=task_id, project_id=ws, new_goal=payload.goal
-        )
-        await event_ds.append_event(
-            user_id,
-            ws,
-            task_id,
-            "goal_revised",
-            actor="user",
-            payload={"goal": payload.goal, "delivered_to_lead": notified["delivered"]},
-        )
+        await service.revise_goal(user_id, task, payload.goal)
     elif payload.action in ("pause", "stop"):
         # Layer 2 cascade halt (orchestrator manages its own txn). ``pause`` →
         # ``paused``; ``stop`` → ``stopped``. Both are soft terminals the
         # detail page can resume (stopped→active is a legal transition).
         target = "paused" if payload.action == "pause" else "stopped"
-        applied = await task_orchestrator.stop_task(
+        applied = await task_orchestrator.recovery.stop_task(
             task_id, ws, target_status=target, user_id=user_id
         )
         # ``stop_task`` returns False on an illegal transition (e.g. the task is
@@ -566,7 +549,7 @@ async def intervene(
                 detail=f"cannot {payload.action} task in status {task.status!r}",
             )
     elif payload.action == "resume":
-        result = await task_orchestrator.resume_task(
+        result = await task_orchestrator.recovery.resume_task(
             task_id, ws, user_id=user_id, instruction=payload.text
         )
         # ``resume_task`` returns ``{ok: False, error}`` on an illegal source
@@ -578,7 +561,7 @@ async def intervene(
             )
 
     db.expire_all()  # drop cached rows so we see the orchestrator's committed write
-    refreshed = await task_ds.get_task(user_id, task_id)
+    refreshed = await service.get_owned_task(user_id, task_id)
     assert refreshed is not None
     return await _task_response_with_trigger(db, user_id, refreshed)
 
@@ -610,7 +593,7 @@ async def draft_task(
     """Open a draft task (status=draft, plan_version=0). No lead session is
     started — the originating chat session is recorded as the plan writer."""
     try:
-        row = await task_orchestrator.draft_task(
+        row = await task_orchestrator.lifecycle.draft_task(
             project_id=project_id,
             goal=payload.goal,
             lead_agent_slug=payload.lead_agent_slug,
@@ -638,10 +621,10 @@ async def commit_task(
 ) -> dict[str, Any]:
     """Promote a draft task to active by spawning its lead session."""
     async with async_unit_of_work(commit=False) as db:
-        task = await TaskDatastore(db).get_task(user_id, task_id)
+        task = await TaskService(db).get_owned_task(user_id, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
-    result = await task_orchestrator.commit_task(
+    result = await task_orchestrator.lifecycle.commit_task(
         task_id=task_id,
         project_id=task.project_id,
         caller_session_id=payload.caller_session_id,
@@ -661,10 +644,10 @@ async def abandon_task(
 ) -> dict[str, Any]:
     """Discard a draft task. Terminal (cannot be resurrected)."""
     async with async_unit_of_work(commit=False) as db:
-        task = await TaskDatastore(db).get_task(user_id, task_id)
+        task = await TaskService(db).get_owned_task(user_id, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
-    result = await task_orchestrator.abandon_task(
+    result = await task_orchestrator.lifecycle.abandon_task(
         task_id=task_id,
         project_id=task.project_id,
         caller_session_id=payload.caller_session_id,
@@ -685,7 +668,7 @@ async def inject_into_task(
     """Push a user instruction into the lead session's mailbox. Returns
     delivered=False with reason when the lead is offline / task not active."""
     async with async_unit_of_work(commit=False) as db:
-        task = await TaskDatastore(db).get_task(user_id, task_id)
+        task = await TaskService(db).get_owned_task(user_id, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
     if not payload.text or not payload.text.strip():
@@ -697,6 +680,20 @@ async def inject_into_task(
         from_session_id=payload.from_session_id,
         user_id=user_id,
     )
+    # A halted task can't be delivered to — its lead loop is gone. Talking to
+    # it IS the user's resume intent (see the :intervene contract), so revive
+    # it here: that decision is orchestration, which is why the delivery helper
+    # reports the state instead of reaching for the orchestrator itself.
+    if result.get("reason") == "TASK_HALTED":
+        revived = await task_orchestrator.recovery.resume_task(
+            task_id, task.project_id, user_id=user_id, instruction=payload.text
+        )
+        ok = bool(revived.get("ok"))
+        return InjectTaskResponse(
+            delivered=ok,
+            lead_session_id=None,
+            reason="TASK_RESUMED" if ok else "RESUME_FAILED",
+        )
     return InjectTaskResponse(
         delivered=bool(result.get("delivered")),
         lead_session_id=result.get("lead_session_id"),
@@ -711,21 +708,18 @@ async def plan_task_route(
     user_id: str = Depends(get_current_user_id),
 ) -> PlanResponse:
     """Lay down the initial plan (errors if a plan with progress already exists)."""
-    async with async_unit_of_work(commit=False) as db:
-        task = await TaskDatastore(db).get_task(user_id, task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
     if not payload.subtasks:
         raise HTTPException(status_code=422, detail="subtasks is required and must be non-empty")
-    result = await planning.plan_task(
-        task_id=task_id,
-        project_id=task.project_id,
-        lead_session_id=payload.lead_session_id,
-        subtasks=payload.subtasks,
-        user_id=user_id,
+    # Through the command service, NOT ``planning`` directly: it is the one
+    # place that decides who may change a plan and when. ``payload
+    # .lead_session_id`` is deliberately NOT used as an identity — it arrives
+    # in the request body, so gating on it would be authorization theatre. A
+    # human client is authorized by owning the task (OwnerCaller).
+    result = await plan_commands.plan_task(
+        plan_commands.OwnerCaller(user_id), task_id=task_id, subtasks=payload.subtasks
     )
     if "error" in result:
-        raise HTTPException(status_code=400, detail=result["error"])
+        raise HTTPException(status_code=_plan_error_status(result), detail=result["error"])
     return PlanResponse(
         subtasks=result["subtasks"],
         ready=result["ready"],
@@ -741,18 +735,12 @@ async def modify_plan_route(
 ) -> PlanResponse:
     """Patch the plan: add nodes / update existing nodes. CAS via
     ``expected_version`` — returns 409 on conflict."""
-    async with async_unit_of_work(commit=False) as db:
-        task = await TaskDatastore(db).get_task(user_id, task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
-    result = await planning.modify_plan(
+    result = await plan_commands.modify_plan(
+        plan_commands.OwnerCaller(user_id),
         task_id=task_id,
-        project_id=task.project_id,
-        lead_session_id=payload.lead_session_id,
         add=payload.add,
         update=payload.update,
         expected_version=payload.expected_version,
-        user_id=user_id,
     )
     if result.get("error") == "PLAN_VERSION_CONFLICT":
         raise HTTPException(status_code=409, detail=result)
@@ -771,17 +759,11 @@ async def get_plan_route(
     user_id: str = Depends(get_current_user_id),
 ) -> PlanResponse:
     """Read the plan snapshot + ready keys + counts + current_version."""
-    async with async_unit_of_work(commit=False) as db:
-        task = await TaskDatastore(db).get_task(user_id, task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
-    result = await planning.get_plan(
-        task_id=task_id,
-        project_id=task.project_id,
-        user_id=user_id,
+    result = await plan_commands.get_plan(
+        plan_commands.OwnerCaller(user_id), task_id=task_id
     )
     if "error" in result:
-        raise HTTPException(status_code=400, detail=result["error"])
+        raise HTTPException(status_code=_plan_error_status(result), detail=result["error"])
     return PlanResponse(
         subtasks=result["subtasks"],
         ready=result["ready"],
@@ -798,7 +780,7 @@ async def stop_member(
 ) -> StopMemberResponse:
     """User-initiated single-member stop: interrupt one subtask, notify the lead
     (member_done cancelled), run→rejected, node→rework. Task stays active."""
-    stopped = await task_orchestrator.stop_member(session_id, user_id=user_id)
+    stopped = await task_orchestrator.recovery.stop_member(session_id, user_id=user_id)
     if not stopped:
         raise HTTPException(status_code=404, detail=f"Subtask run not found: {session_id}")
     return StopMemberResponse(stopped=True)

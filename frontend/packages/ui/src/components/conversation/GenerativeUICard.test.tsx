@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 
 vi.mock("@openuidev/react-lang", () => ({
   Renderer: (props: { response: string; isStreaming?: boolean }) => (
@@ -27,6 +27,24 @@ describe("GenerativeUICard", () => {
   it("renders the OpenUI Renderer with the openui payload", () => {
     render(<GenerativeUICard openui={"Chart\n  data: 1"} />);
     expect(screen.getByTestId("renderer").textContent).toBe("Chart\n  data: 1");
+  });
+
+  it("adds a fullscreen action to the title row and opens a fullscreen preview", () => {
+    render(<GenerativeUICard openui={"Chart\n  data: 1"} />);
+
+    const action = screen.getByRole("button", { name: "genui.fullscreen" });
+    expect(action.closest('[data-slot="generative-ui-card"]')).toBeTruthy();
+
+    fireEvent.click(action);
+
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(screen.getByRole("dialog").className).toContain("top-9");
+    expect(screen.getByRole("dialog").className).toContain("bottom-4");
+    expect(screen.getByTestId("genui-fullscreen")).toBeTruthy();
+    expect(screen.getAllByTestId("renderer")).toHaveLength(2);
+    expect(screen.getAllByTestId("renderer")[1]?.textContent).toBe(
+      "Chart\n  data: 1",
+    );
   });
 
   it("lets horizontal charts expand to show every data row", () => {
@@ -64,6 +82,28 @@ describe("GenerativeUICard", () => {
   it("renders non-streaming on success", () => {
     render(<GenerativeUICard openui={"Chart"} status="success" />);
     expect(screen.getByTestId("renderer").getAttribute("data-streaming")).toBe("false");
+  });
+
+  it("streams the reasoning while running, replacing the bare generating placeholder", () => {
+    render(
+      <GenerativeUICard openui={undefined} status="running" thinking={"planning the layout"} />,
+    );
+    const el = screen.getByTestId("genui-thinking");
+    expect(el.textContent).toBe("planning the layout");
+    // The reasoning section IS the progress surface — no second spinner row.
+    expect(screen.queryByTestId("genui-empty")).toBeNull();
+  });
+
+  it("keeps the reasoning visible alongside the progressive render", () => {
+    render(<GenerativeUICard openui={"Chart"} status="running" thinking={"still going"} />);
+    expect(screen.getByTestId("genui-thinking").textContent).toBe("still going");
+    expect(screen.getByTestId("renderer").textContent).toBe("Chart");
+  });
+
+  it("drops the reasoning once the tool completes", () => {
+    render(<GenerativeUICard openui={"Chart"} status="success" thinking={"planning"} />);
+    expect(screen.queryByTestId("genui-thinking")).toBeNull();
+    expect(screen.getByTestId("renderer").textContent).toBe("Chart");
   });
 });
 

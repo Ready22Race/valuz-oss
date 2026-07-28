@@ -676,6 +676,21 @@ const createTurnsBuilder = () => {
         continue;
       }
 
+      if (eventType === "tool.call.thinking_delta") {
+        // Live, non-persisted: tool-scoped reasoning stream (the ephemeral
+        // generate_ui session's thinking forwarded onto this session).
+        // Accumulates onto ``thinking`` — NEVER ``output``, which is the
+        // tool's result stream (the OpenUI code the renderer paints).
+        const id = payload.tool_use_id || "";
+        if (!id) continue;
+        const streaming = activeToolCalls.get(id);
+        if (streaming) {
+          streaming.thinking =
+            (streaming.thinking ?? "") + (payload.text ?? "");
+        }
+        continue;
+      }
+
       if (eventType === "tool.call.started") {
         const title =
           payload.name || payload.tool_name || payload.tool || "tool";

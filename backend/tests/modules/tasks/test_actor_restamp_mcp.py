@@ -7,7 +7,7 @@ lead/member session re-driven after a backend restart carries a *stale*
 403s and the runtime parks the ``harness`` server in needsAuth, hiding dispatch
 / review_subtask / finish_task / await_members / send / get_plan. The chat path
 re-stamped in ``send_message``; the task/actor path didn't. Both
-``run_session_to_idle`` and ``ActorRunner._run_turn_with_sink`` must now
+``run_session_to_idle`` and ``ActorRunner.run_turn`` must now
 re-stamp first.
 """
 
@@ -89,7 +89,7 @@ def test_run_session_to_idle_restamps_before_run_turn(monkeypatch: pytest.Monkey
     assert order.index("restamp") < order.index("run_turn")
 
 
-# ── ActorRunner._run_turn_with_sink ─────────────────────────────────────
+# ── ActorRunner.run_turn ─────────────────────────────────────
 
 
 def test_actor_loop_turn_restamps_before_run_turn(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -109,7 +109,7 @@ def test_actor_loop_turn_restamps_before_run_turn(monkeypatch: pytest.MonkeyPatc
     )
 
     runner = actor_runner.ActorRunner()
-    status = asyncio.run(runner._run_turn_with_sink("sess-1", "hi", user_id=LOCAL_USER_ID))
+    status = asyncio.run(runner.run_turn("sess-1", "hi", user_id=LOCAL_USER_ID))
 
     assert status == "idle"
     assert order == ["restamp", "run_turn"]

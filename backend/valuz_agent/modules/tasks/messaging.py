@@ -1,9 +1,16 @@
-"""Lead ↔ member / chat → task text delivery (mailbox-backed).
+"""Lead ↔ member / chat → task text DELIVERY (mailbox-backed).
 
-Extracted from ``TaskOrchestrator`` (T1.1 split). Both functions are stateless
-— they validate against the DB and post to the global ``mailbox_registry`` —
-so they live as module functions. The orchestrator keeps thin delegators as the
-coordinator surface the dispatch-MCP tools + task routes drive.
+Extracted from ``TaskOrchestrator`` (T1.1 split). Every function here is
+stateless — it validates against the DB and posts an :class:`InboxMsg` to the
+global ``mailbox_registry`` — so they live as module functions. Callers
+(dispatch-MCP handlers in ``tools/handlers.py``, task routes) import this
+module directly; there is deliberately no wrapper class in front of it.
+
+Scope rule: **if it does not put something in a mailbox, it does not belong
+here.** ``record_awaiting_user`` / ``record_user_answered`` used to live in
+this file despite being pure task-event appends with no delivery at all (their
+only caller is the decision-inbox aggregator); they now sit with the other
+task-event writes in ``tasks/events.py``.
 """
 
 from __future__ import annotations
@@ -16,6 +23,7 @@ from valuz_agent.modules.tasks.datastore import (
     TaskEventDatastore,
     TaskSessionDatastore,
 )
+from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 
 
 async def send_to_member(
@@ -35,7 +43,6 @@ async def send_to_member(
     sibling task's session id) deliver across tasks. We refuse any target
     whose run doesn't belong to ``task_id``.
     """
-    from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 
     async with async_unit_of_work(commit=False) as db:
         target_run = await TaskSessionDatastore(db).get_run(to_session_id)
@@ -50,7 +57,7 @@ async def send_to_member(
 
     delivered = mailbox_registry.put(
         to_session_id,
-        InboxMsg(kind="message", text=text, from_session=from_session_id),
+        InboxMsg(kind="text", text=text, from_session=from_session_id),
     )
     if not delivered:
         return {
@@ -62,6 +69,11 @@ async def send_to_member(
         }
 
     async with async_unit_of_work() as db:
+        # ``subtask_message`` is the lead → member direction only. The member →
+        # lead counterpart is ``subtask_reported`` (coordination.py); the two
+        # shared this type — split apart by ``payload.direction`` — until
+        # 2026-07. ``direction`` is kept on the payload because pre-split rows
+        # carry it and it costs nothing; new readers key on the type.
         await TaskEventDatastore(db).append_event(
             user_id,
             project_id=project_id,
@@ -93,17 +105,16 @@ async def inject_into_task(
 
     Returns ``{delivered: bool, lead_session_id: str | None, reason: str | None}``:
       - active task + registered lead inbox → ``delivered=True``
-      - paused / blocked / stopped task → the task is REVIVED
-        (``resume_task`` with the text as the resume instruction) →
-        ``delivered=True, reason=TASK_RESUMED``; a failed revive returns
-        ``delivered=False, reason=RESUME_FAILED``
+      - paused / blocked / stopped task → ``delivered=False,
+        reason=TASK_HALTED`` plus ``task_status``. Reviving it is usually the
+        right move, but it is ORCHESTRATION and therefore the caller's
+        decision — this module only delivers.
       - no lead run found for the task → ``delivered=False, reason=NO_LEAD``
       - lead run exists but mailbox unregistered (already finished) →
         ``delivered=False, reason=LEAD_OFFLINE``
       - draft / completed / abandoned task →
         ``delivered=False, reason=TASK_NOT_ACTIVE``
     """
-    from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 
     async with async_unit_of_work(commit=False) as db:
         task_row = await TaskDatastore(db).get_task_by_project(
@@ -116,38 +127,23 @@ async def inject_into_task(
             "reason": "TASK_NOT_FOUND",
         }
     if task_row.status in ("paused", "blocked", "stopped"):
-        # Halted task: the lead loop is torn down and its mailbox is
-        # unregistered, so a plain put() can never deliver. "Talking to a
-        # halted task" IS the user's resume intent (the intervene docstring
-        # promised "chat/inject can also revive it") — route through
-        # resume_task with the text as the resume instruction: it flips the
-        # status, reconciles members, and embeds the text in the respawned
-        # lead's recovery brief. resume_task appends the ``resumed`` +
-        # ``user_inject`` events itself — don't double-append here.
-        # ``completed`` stays excluded: reopening a finished task is a
-        # deliberate act (detail-page reopen / explicit resume_task), not a
-        # side effect of a stray chat message.
-        from valuz_agent.modules.tasks.orchestrator import task_orchestrator
-
-        result = await task_orchestrator.resume_task(
-            task_id, project_id, user_id=user_id, instruction=text
-        )
-        lead_session_id = None
-        async with async_unit_of_work(commit=False) as db:
-            runs = await TaskSessionDatastore(db).list_runs(user_id, task_id)
-            lead = next((r for r in runs if r.kind == "lead"), None)
-            if lead is not None:
-                lead_session_id = lead.session_id
-        if result.get("ok"):
-            return {
-                "delivered": True,
-                "lead_session_id": lead_session_id,
-                "reason": "TASK_RESUMED",
-            }
+        # Halted: the lead loop is torn down and its mailbox unregistered, so a
+        # plain put() can never deliver. Reviving it IS usually what the user
+        # meant — but reviving is orchestration, and deciding to do it is the
+        # CALLER's call, not a delivery helper's. This module puts messages in
+        # mailboxes; reaching up to the composition root for ``resume_task``
+        # from here inverted the dependency (a leaf importing the root, through
+        # a function-local import to dodge the cycle it created).
+        #
+        # So: report the state and let the caller act. ``tools/handlers`` and
+        # ``routes/tasks`` both already hold the orchestrator.
+        # ``completed`` is deliberately NOT in this set — reopening a finished
+        # task is a deliberate act, not a side effect of a stray chat message.
         return {
             "delivered": False,
-            "lead_session_id": lead_session_id,
-            "reason": "RESUME_FAILED",
+            "lead_session_id": None,
+            "reason": "TASK_HALTED",
+            "task_status": task_row.status,
         }
     if task_row.status != "active":
         return {
@@ -170,7 +166,7 @@ async def inject_into_task(
     wrapped = f'<user-instruction source="chat">\n{text}\n</user-instruction>'
     delivered = mailbox_registry.put(
         lead_session_id,
-        InboxMsg(kind="message", text=wrapped, from_session=from_session_id),
+        InboxMsg(kind="text", text=wrapped, from_session=from_session_id),
     )
 
     async with async_unit_of_work() as db:
@@ -203,69 +199,6 @@ async def inject_into_task(
     }
 
 
-async def record_awaiting_user(
-    *,
-    task_id: str,
-    project_id: str,
-    session_id: str,
-    subtask_key: str | None,
-    agent_slug: str,
-    agent_name: str | None,
-    question: str,
-    pending_id: str,
-    user_id: str,
-) -> None:
-    """Append an ``awaiting_user`` task event when an agent (lead or member)
-    raises a question through the Decision Inbox.
-
-    A pending question blocks the turn but leaves NO trace on the task's own
-    timeline or status (the inbox is a cross-cutting overlay keyed by
-    ``task_id``). Without this the task page shows "Running" while the task is
-    actually blocked on the user. We do NOT add an ``awaiting_user`` task
-    *status* (the task genuinely is still active and a status would need racy
-    atomic clearing on answer) — this event is the timeline record + an SSE
-    frame the attention surfaces drive from. Deduped by ``pending_id`` at the
-    caller (the aggregator tracks emitted ids per process).
-    """
-    async with async_unit_of_work() as db:
-        await TaskEventDatastore(db).append_event(
-            user_id,
-            project_id=project_id,
-            task_id=task_id,
-            type="awaiting_user",
-            actor=agent_slug,
-            session_id=session_id,
-            payload={
-                "agent_name": agent_name,
-                "question": question,
-                "pending_id": pending_id,
-                **({"subtask_key": subtask_key} if subtask_key else {}),
-            },
-        )
-
-
-async def record_user_answered(
-    *,
-    task_id: str,
-    project_id: str,
-    pending_id: str,
-    session_id: str | None = None,
-    user_id: str,
-) -> None:
-    """Append a ``user_answered`` task event when a pending question resolves
-    (the counterpart to :func:`record_awaiting_user`)."""
-    async with async_unit_of_work() as db:
-        await TaskEventDatastore(db).append_event(
-            user_id,
-            project_id=project_id,
-            task_id=task_id,
-            type="user_answered",
-            actor="user",
-            session_id=session_id,
-            payload={"pending_id": pending_id},
-        )
-
-
 async def notify_lead_goal_revised(
     *,
     task_id: str,
@@ -287,7 +220,6 @@ async def notify_lead_goal_revised(
     auto-completion may still track the ORIGINAL goal, so this revision is
     declared authoritative.
     """
-    from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 
     async with async_unit_of_work(commit=False) as db:
         runs = await TaskSessionDatastore(db).list_runs(user_id, task_id)

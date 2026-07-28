@@ -2,14 +2,18 @@
 
 Registered in the host toolkit MCP ``base`` toolset (runtime-agnostic). The
 handler resolves the caller's runtime/provider/model from the calling session,
-builds the OpenUI prompt (vendored genui-lib + request + optional data), runs
-one ephemeral no-tools LLM call via the memory-pattern completer, and returns
-the OpenUI Lang as the tool result — which the frontend renders with OpenUI's
-``<Renderer>``. Best-effort: every failure becomes an ``is_error`` result.
+builds the OpenUI prompt (vendored genui-lib + request + optional data), and
+returns the OpenUI Lang as the tool result — which the frontend renders with
+OpenUI's ``<Renderer>``. Official Claude/Codex subscription channels still run
+through an ephemeral no-tools kernel session so their CLI keychain auth works;
+explicit-credential channels call the model directly and stream chunks back to
+the originating tool card. Best-effort: every failure becomes an ``is_error``
+result.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -28,6 +32,8 @@ from valuz_agent.modules.providers.service import (
 logger = logging.getLogger(__name__)
 
 GENERATIVE_UI_TOOL_NAME = "generate_ui"
+_GENERATION_MAX_ATTEMPTS = 2
+_GENERATION_RETRY_DELAY_SECONDS = 0.5
 
 _PARAMS = {
     "type": "object",
@@ -47,6 +53,47 @@ _PARAMS = {
     },
     "required": ["request"],
 }
+
+
+async def _complete_with_retries(
+    completer: Any,
+    prompt: str,
+    *,
+    max_attempts: int = _GENERATION_MAX_ATTEMPTS,
+) -> str:
+    max_attempts = max(1, max_attempts)
+    for attempt in range(1, max_attempts + 1):
+        try:
+            openui = await completer(prompt)
+        except Exception:  # noqa: BLE001
+            if attempt >= max_attempts:
+                raise
+            logger.info(
+                "generate_ui: generation attempt %d/%d failed; retrying",
+                attempt,
+                max_attempts,
+                exc_info=True,
+            )
+        else:
+            if (openui or "").strip():
+                if attempt > 1:
+                    logger.info(
+                        "generate_ui: generation succeeded on attempt %d/%d",
+                        attempt,
+                        max_attempts,
+                    )
+                return str(openui)
+            if attempt >= max_attempts:
+                return str(openui or "")
+            logger.info(
+                "generate_ui: generation returned blank output on attempt %d/%d; retrying",
+                attempt,
+                max_attempts,
+            )
+
+        await asyncio.sleep(_GENERATION_RETRY_DELAY_SECONDS * attempt)
+
+    return ""
 
 
 async def _generate_ui_handler(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
@@ -99,7 +146,10 @@ async def _generate_ui_handler(args: dict[str, Any], ctx: ExecContext) -> ToolRe
         tool_use_id=tool_use_id,
     )
     try:
-        openui = await completer(build_openui_prompt(str(request), data))
+        openui = await _complete_with_retries(
+            completer,
+            build_openui_prompt(str(request), data),
+        )
     except Exception as exc:  # noqa: BLE001
         logger.debug("generate_ui: generation failed", exc_info=True)
         return ToolResult(content=f"generate_ui: generation failed ({exc})", is_error=True)

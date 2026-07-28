@@ -23,14 +23,80 @@ export interface TaskTrigger {
   source_session_id?: string | null;
 }
 
+/**
+ * The task lifecycle states, mirroring the backend's `task_state.TASK_STATUSES`.
+ *
+ * Safe to state as a closed union because the backend ENFORCES it:
+ * `TaskDatastore.update_task_status` raises `TaskStateError` rather than
+ * persist a value outside the enum, and the legal transitions between them are
+ * a state machine there. So `status` is one of these or the write never
+ * happened.
+ */
+export type TaskStatus =
+  | "draft"
+  | "active"
+  | "paused"
+  | "stopped"
+  | "completed"
+  | "blocked"
+  | "abandoned"
+  /**
+   * LEGACY, read-only. Task-level failure was folded into `blocked` before
+   * this enum existed; `update_task_status` now refuses to write `failed`, but
+   * rows created earlier still carry it and the backend keeps handling them
+   * (`resume_task` accepts it as a resumable prior status). So it can arrive
+   * on a read even though nothing produces it any more — the union describes
+   * what the server can SEND.
+   */
+  | "failed";
+
+/**
+ * Task timeline event types.
+ *
+ * Deliberately NOT a closed union on the wire — see `TaskEvent.type`. The
+ * backend column is a plain string with no enum behind it, and the vocabulary
+ * grows (`subtask_reported`, `awaiting_user` and `user_answered` were all added
+ * recently). This union names the ones a client handles today so a `switch`
+ * gets autocomplete and a typo is caught; it is not a claim about what the
+ * server can send.
+ */
+export type TaskEventType =
+  | "kickoff"
+  | "kickoff_failed"
+  | "task_drafted"
+  | "task_planned"
+  | "plan_revised"
+  | "task_plan_update"
+  | "committed"
+  | "abandoned"
+  | "subtask_spawned"
+  | "subtask_completed"
+  | "subtask_failed"
+  | "subtask_stopped"
+  | "subtask_reviewed"
+  | "subtask_message"
+  | "subtask_reported"
+  | "user_note"
+  | "user_inject"
+  | "user_inject_dropped"
+  | "goal_revised"
+  | "awaiting_user"
+  | "user_answered"
+  | "paused"
+  | "resumed"
+  | "stopped"
+  | "task_completed"
+  | "task_stopped"
+  | "task_blocked"
+  | "deliverable_updated";
+
 /** Durable header for a lead-dispatch task. */
 export interface Task {
   id: string;
   project_id: string;
   title: string;
   goal: string;
-  /** active | paused | stopped | completed | blocked */
-  status: string;
+  status: TaskStatus;
   created_by: string;
   lead_agent_slug: string;
   current_holder: string;
@@ -66,10 +132,15 @@ export interface TaskRun {
 export interface TaskEvent {
   id: string;
   sequence: number;
-  /** kickoff | subtask_spawned | subtask_completed | subtask_failed |
-   *  subtask_message | user_note | goal_revised | paused | resumed |
-   *  stopped | task_completed */
-  type: string;
+  /**
+   * Known types get autocomplete; unknown ones still parse.
+   *
+   * `(string & {})` keeps the field assignable from any server string while
+   * preserving the union's suggestions — narrowing it outright would assert an
+   * enum the backend does not have, so a newly added event type would become a
+   * compile error on data that is perfectly valid.
+   */
+  type: TaskEventType | (string & {});
   /** user | <agent_slug> | system */
   actor: string;
   session_id: string | null;

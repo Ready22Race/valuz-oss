@@ -109,9 +109,13 @@ def _make_completer(
         )
         ephem_id = uuid4().hex
         review_cwd = fs_registry.memory_review_cwd(user_id)
-        # Marker so the runner's recursion guard skips this session if it is ever
-        # finalized through the normal path (it isn't — run_turn bypasses it).
-        marker = {"valuz": {"ephemeral_memory_review": True}}
+        # ``ephemeral_memory_review``: recursion guard so the idle extractor
+        # skips this session if it is ever finalized through the normal path
+        # (it isn't — run_turn bypasses it). ``bare_completion``: the
+        # kernel-recognized strip switch (``src.core.types.is_bare_completion``)
+        # — every runtime drops its agentic scaffolding for this one-shot
+        # no-tool review session.
+        marker = {"bare_completion": True, "valuz": {"ephemeral_memory_review": True}}
         req = CreateSessionRequest(
             id=ephem_id,
             agent_config=AgentConfigSchema(
@@ -329,9 +333,9 @@ async def run_task_finish_extraction(task_id: str, user_id: str | None) -> None:
         return
     token = set_current_user_id(user_id)
     try:
-        from valuz_agent.modules.tasks import queries
+        from valuz_agent.modules.tasks import service as task_queries
 
-        task, runs = await queries.get_task_with_runs(user_id, task_id)
+        task, runs = await task_queries.get_task_with_runs(user_id, task_id)
         # Only graduate lessons from a successfully completed task.
         if task is None or task.status != "completed":
             return

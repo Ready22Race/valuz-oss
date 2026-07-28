@@ -2151,14 +2151,17 @@ export const ConversationPage = () => {
       input?: string;
       output?: string;
       status?: string;
+      thinking?: string;
     }) => {
       const name = tool.title || "";
 
       // generate_ui — generative UI. The MCP tool returns OpenUI Lang as
       // ``tool.output`` (growing token-by-token while running, as the host
-      // forwards ephemeral text_deltas as tool_output_delta). Render it with
-      // OpenUI's <Renderer> via GenerativeUICard, including while running so the
-      // UI paints progressively; only error falls through (return null) to the
+      // forwards ephemeral text_deltas as tool_output_delta) plus a live
+      // reasoning stream on ``tool.thinking`` (tool.call.thinking_delta).
+      // Render with OpenUI's <Renderer> via GenerativeUICard, including while
+      // running so the UI paints progressively and the thinking phase shows
+      // as dimmed progress; only error falls through (return null) to the
       // generic ToolCallCard so the failure text stays visible.
       if (isToolNamed(name, "generate_ui")) {
         if (tool.status === "error") return null;
@@ -2166,6 +2169,7 @@ export const ConversationPage = () => {
           <GenerativeUICard
             openui={tool.output}
             status={tool.status === "running" ? "running" : "success"}
+            thinking={tool.thinking}
           />
         );
       }

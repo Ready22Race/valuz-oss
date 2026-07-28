@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from valuz_agent.modules.tasks.outcome import Failure
+
 
 def _valuz_meta(sess: Any) -> dict[str, Any]:
     meta = getattr(sess, "metadata", None) or {}
@@ -21,24 +23,24 @@ def _valuz_meta(sess: Any) -> dict[str, Any]:
     return v if isinstance(v, dict) else {}
 
 
-def check_lead_gate(sess: Any) -> tuple[str, str] | str:
+def check_lead_gate(sess: Any) -> tuple[str, str] | Failure:
     """Lead-only tools (dispatch / await_members / send / review / finish).
 
     Returns ``(task_id, project_id)`` when *sess* is a lead session with its
-    task binding intact, else the rejection reason.
+    task binding intact, else a :class:`Failure` carrying the rejection reason.
     """
     v = _valuz_meta(sess)
     if v.get("run_kind") != "lead":
-        return "only the lead session may call dispatch tools"
+        return Failure("only the lead session may call dispatch tools")
     task_id = v.get("task_id", "")
     project_id = v.get("project_id", "")
     if not task_id or not project_id:
-        return "dispatch: lead session is missing task_id or project_id in metadata"
+        return Failure("dispatch: lead session is missing task_id or project_id in metadata")
     return task_id, project_id
 
 
-def check_plan_writer_gate(sess: Any, task: Any) -> str | None:
-    """May *sess* write plan / state on *task*? ``None`` = allowed.
+def check_plan_writer_gate(sess: Any, task: Any) -> Failure | None:
+    """May *sess* write plan / state on *task*? ``None`` = allowed, else Failure.
 
     Policy (VALUZ-CHATPLAN D6 strict):
       - ``status == draft``: originating session OR any session in the task's
@@ -58,7 +60,7 @@ def check_plan_writer_gate(sess: Any, task: Any) -> str | None:
         caller_ws = getattr(sess, "project_id", "") or v.get("project_id", "")
         if caller_ws == task.project_id:
             return None
-        return (
+        return Failure(
             f"not authorized: draft task {task.id!r} is held by its originator and "
             f"project members; caller is in project {caller_ws!r}, task is in "
             f"{task.project_id!r}"
@@ -66,28 +68,28 @@ def check_plan_writer_gate(sess: Any, task: Any) -> str | None:
     if task.status == "active":
         if v.get("run_kind") == "lead" and v.get("task_id") == task.id:
             return None
-        return (
+        return Failure(
             "active task plan is lead-owned; chat sessions must use "
             "inject_into_task to ask the lead to revise it (D6 strict)"
         )
     if task.status == "paused":
-        return f"task {task.id!r} is paused; resume it before editing the plan"
-    return f"task {task.id!r} is {task.status!r}; plan is read-only"
+        return Failure(f"task {task.id!r} is paused; resume it before editing the plan")
+    return Failure(f"task {task.id!r} is {task.status!r}; plan is read-only")
 
 
-def check_plan_reader_gate(sess: Any, task: Any) -> str | None:
+def check_plan_reader_gate(sess: Any, task: Any) -> Failure | None:
     """Loose read-only variant: any caller in the task's project may read."""
     v = _valuz_meta(sess)
     caller_ws = getattr(sess, "project_id", "") or v.get("project_id", "")
     if caller_ws != task.project_id:
-        return (
+        return Failure(
             f"plan tool: caller project {caller_ws!r} does not match "
             f"task project {task.project_id!r}"
         )
     return None
 
 
-def check_orchestration_caller(sess: Any) -> tuple[str, str] | str:
+def check_orchestration_caller(sess: Any) -> tuple[str, str] | Failure:
     """Session-shape half of the ``create_task`` gate (M10 附录 E).
 
     Allowed only from a plain project conversation: the session must carry a
@@ -98,7 +100,7 @@ def check_orchestration_caller(sess: Any) -> tuple[str, str] | str:
     """
     v = _valuz_meta(sess)
     if v.get("run_kind") in ("lead", "subtask"):
-        return (
+        return Failure(
             "create_task is only available in a project conversation, not "
             "inside a running task (nested tasks are not supported)"
         )
@@ -107,7 +109,7 @@ def check_orchestration_caller(sess: Any) -> tuple[str, str] | str:
     # read project_id directly (valuz.project_id only exists on task runs).
     project_id = getattr(sess, "project_id", "") or v.get("project_id", "")
     if not project_id:
-        return "create_task: caller session has no project"
+        return Failure("create_task: caller session has no project")
     return project_id, v.get("agent_slug") or ""
 
 

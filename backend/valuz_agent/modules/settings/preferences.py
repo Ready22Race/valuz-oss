@@ -105,7 +105,7 @@ RUNTIME_VALUES = ("claude_agent", "codex", "deepagents")
 # value outside the known enums.
 
 
-async def _factory_defaults(user_id: str | None) -> "ModelDefaults":
+async def _factory_defaults(user_id: str | None) -> ModelDefaults:
     from valuz_agent.ports.extensions import ext
 
     return await ext.model_defaults.get(user_id)

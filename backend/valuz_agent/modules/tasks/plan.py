@@ -29,13 +29,21 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Literal, get_args
 
 # Internal subtask lifecycle (task-plan-review.md §5).
-# ``paused`` is a transient halt: when the user pauses/stops the parent task
-# the in-flight node is parked here so the panel stops showing it as actively
-# running (it projects to ``pending``, not ``active``). It is NOT ``planned``
-# on purpose — ``ready_nodes`` must not re-dispatch a parked node as fresh;
-# resume reconciliation (recovery.reconcile) flips it back to ``in_progress``.
+# ``paused`` = parked by a task pause/stop; re-dispatchable on resume.
+# ``failed`` is UNREACHABLE as a write target — every failure path parks the
+# node in ``rework`` (recoverable; ``failed`` would strand it). Kept for
+# legacy rows + the frontend contract; do not revive as a write target
+# without also making it dispatchable.
 SubtaskStatus = Literal["planned", "in_progress", "in_review", "rework", "done", "failed", "paused"]
 SUBTASK_STATUSES: tuple[str, ...] = get_args(SubtaskStatus)
+
+# The ONE definition of "is there work left?" — every caller goes through
+# :meth:`TaskPlan.unresolved_keys`. ``paused`` is load-bearing: omit it and a
+# task halted mid-flight closes ``completed`` with a subtask that never ran
+# (``ready_keys`` treats paused as dispatchable — the two views must agree).
+_UNRESOLVED_STATUSES: frozenset[str] = frozenset(
+    {"planned", "in_progress", "in_review", "rework", "paused"}
+)
 
 # Frontend panel statuses (TaskContextPanel ``task_plan_update`` contract).
 # ``paused`` is a first-class display state (NOT collapsed to ``pending``) so
@@ -188,6 +196,14 @@ class TaskPlan:
             for n in self._nodes
             if n.status in ("planned", "paused") and all(d in done for d in n.depends_on)
         ]
+
+    def unresolved_keys(self) -> list[str]:
+        """Keys with work outstanding — THE "is this task done?" predicate,
+        shared by the lead idle check, auto-finalize and finish_task's guard.
+        Unlike ``not all_done()``, an empty plan has no unresolved keys (an
+        inline-satisfied goal must still be allowed to finish).
+        """
+        return [n.key for n in self._nodes if n.status in _UNRESOLVED_STATUSES]
 
     def all_done(self) -> bool:
         return bool(self._nodes) and all(n.status == "done" for n in self._nodes)
