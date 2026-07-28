@@ -591,8 +591,24 @@ class LifecycleService:
             )
             await run_ds.create_run(user_id, lead_run)
 
+            # The draft→active flip IS the commit mutex: the door's UPDATE
+            # carries ``status='draft'``, so of two concurrent commits (double
+            # click, chat tool + REST) exactly one wins the rowcount. The
+            # top-of-function draft guard only covers the sequential case —
+            # this closes the window the awaits above (resolve_lead, session
+            # creation) opened.
             committed_at = now_ms()
-            task_row.status = "active"
+            if not await task_ds.update_task_status(
+                user_id, task_id, "active", expect="draft"
+            ):
+                await run_ds.update_run_by_session(
+                    session_id=lead_session.id, status="rejected", ended_at=now_ms()
+                )
+                return {
+                    "error": "commit_task: task was committed or changed concurrently "
+                    "— refresh and retry"
+                }
+            task_row.status = "active"  # mirror the door's write for the merge below
             task_row.committed_at = committed_at
             task_row.current_holder = lead_session.id
             # Stamp the lead session id back into metadata so subsequent
@@ -669,8 +685,14 @@ class LifecycleService:
                     )
                 }
 
-            task_row.status = "abandoned"
-            await task_ds.update_task(task_row)
+            # Through the door with expect='draft' — a commit racing this
+            # abandon can't interleave into active→abandoned (illegal).
+            if not await task_ds.update_task_status(
+                user_id, task_id, "abandoned", expect="draft"
+            ):
+                return {
+                    "error": "abandon_task: task changed concurrently — refresh and retry"
+                }
             await event_ds.append_event(
                 user_id,
                 project_id=project_id,

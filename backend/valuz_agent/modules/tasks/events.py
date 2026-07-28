@@ -80,8 +80,19 @@ async def finalize_task(
     crash between legs leaves a terminal status without its event — readers
     must tolerate that. The value is that no site can FORGET a leg, which is
     the bug class this replaced.
+
+    Returns None when the status flip lost a concurrent race (the winner
+    already announced its own terminal) — announce and event are skipped so
+    two finalizers can't publish contradictory terminals for one task.
     """
-    await TaskDatastore(db).update_task_status(user_id, task_id, status)
+    if not await TaskDatastore(db).update_task_status(user_id, task_id, status):
+        logger.error(
+            "finalize_task: task %s → %r lost a concurrent status race — "
+            "skipping announce/event (the winner recorded its own terminal)",
+            task_id,
+            status,
+        )
+        return None
     publish_task_finalized(task_id, user_id, status)
     return await TaskEventDatastore(db).append_event(
         user_id,
@@ -128,6 +139,8 @@ async def block_task(
         session_id=session_id,
         payload={**(payload or {}), "error": reason},
     )
+    if event is None:  # lost the terminal race — winner owns the notification
+        return None
     await record_task_failure_notification(
         task_id=task_id,
         project_id=project_id,

@@ -201,36 +201,59 @@ class TaskDatastore:
         await self._db.refresh(row)
         return bool(res.rowcount)
 
-    async def update_task_status(self, user_id: str, task_id: str, status: str) -> bool:
-        """Update task status, enforcing the ``task_state`` state machine.
+    async def _current_status(self, user_id: str, task_id: str) -> str | None:
+        """The row's persisted status (seam for the CAS door; tests fake it
+        to drive the read→write race deterministically)."""
+        return cast(
+            "str | None",
+            await self._db.scalar(
+                select(TaskRow.status).where(TaskRow.id == task_id, TaskRow.user_id == user_id)
+            ),
+        )
 
-        Refuses to persist an out-of-enum target (e.g. the legacy ``"failed"``)
-        and rejects illegal transitions from a known source — so the state
-        machine in ``task_state.py`` is a real guard, not just documentation.
+    async def update_task_status(
+        self, user_id: str, task_id: str, status: str, *, expect: str | None = None
+    ) -> bool:
+        """Status door: ``task_state`` machine + a compare-and-swap write.
+
+        Refuses an out-of-enum target (e.g. the legacy ``"failed"``) and an
+        illegal transition from a known source. The UPDATE itself carries a
+        ``status = <source>`` predicate, so two concurrent writers who both
+        read the same source can't both land — without it, a stop_task racing
+        an auto-finalize could persist the forbidden net transition
+        stopped → blocked and publish ``task.finalized`` twice with
+        contradictory statuses. Losing the race returns False (True when the
+        winner performed the SAME transition — idempotent), and the caller
+        must not proceed with the side effects that ride the flip.
+
+        ``expect``: assert the source status too (``commit_task`` passes
+        ``"draft"`` — the flip then doubles as the commit mutex: exactly one
+        of two concurrent commits wins the rowcount).
 
         Tolerances (logged, not raised): a same-status write is a no-op, and a
         legacy/unknown *source* status (a row written before this enforcement)
         is allowed through so it can still be recovered (e.g. → ``active`` on
         resume) instead of being bricked.
-
-        Returns True when the row was updated.
         """
         if not is_valid_status(status):
             raise TaskStateError(f"refusing to write invalid task status {status!r}")
-        current = await self._db.scalar(
-            select(TaskRow.status).where(TaskRow.id == task_id, TaskRow.user_id == user_id)
-        )
-        if current is not None and current != status:
-            if is_valid_status(current):
-                assert_transition(current, status)  # raises TaskStateError if illegal
-            else:
-                logger.warning(
-                    "update_task_status: legacy/unknown source status %r for task %s "
-                    "→ %r (allowed without transition check)",
-                    current,
-                    task_id,
-                    status,
-                )
+        current = await self._current_status(user_id, task_id)
+        if current is None:
+            return False
+        if expect is not None and current != expect:
+            return False
+        if current == status:
+            return True  # no-op
+        if is_valid_status(current):
+            assert_transition(current, status)  # raises TaskStateError if illegal
+        else:
+            logger.warning(
+                "update_task_status: legacy/unknown source status %r for task %s "
+                "→ %r (allowed without transition check)",
+                current,
+                task_id,
+                status,
+            )
         # ``AsyncSession.execute`` is typed as returning ``Result``, but a DML
         # statement always yields a ``CursorResult`` — the only shape carrying
         # ``rowcount``. Narrow once here instead of ignoring the error.
@@ -238,12 +261,30 @@ class TaskDatastore:
             "CursorResult[Any]",
             await self._db.execute(
                 update(TaskRow)
-                .where(TaskRow.id == task_id, TaskRow.user_id == user_id)
+                .where(
+                    TaskRow.id == task_id,
+                    TaskRow.user_id == user_id,
+                    TaskRow.status == current,
+                )
                 .values(status=status, updated_at=now_ms())
+                .execution_options(synchronize_session=False)
             ),
         )
         await async_commit_with_retry(self._db, where="TaskDatastore.update_task_status")
-        return bool(res.rowcount)
+        if res.rowcount:
+            return True
+        landed = await self._current_status(user_id, task_id)
+        if landed == status and expect is None:
+            return True  # someone else performed the same transition
+        logger.error(
+            "update_task_status: lost status race for task %s — read %r, "
+            "row now %r, refused writing %r",
+            task_id,
+            current,
+            landed,
+            status,
+        )
+        return False
 
 
 class TaskEventDatastore:
