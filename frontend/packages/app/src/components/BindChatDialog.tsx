@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { ExternalLink } from "lucide-react";
 import { Button, FormDialog, Input, StatusPill } from "@valuz/ui";
 import {
   channelsApi,
@@ -123,104 +124,123 @@ export function BindChatDialog({
       description={t("project.bindChatDialogDesc" as Parameters<typeof t>[0])}
       cancelLabel={t("common.cancel")}
     >
-      <div className="mb-3 flex flex-col gap-2 rounded-lg border border-surface-border p-3">
-        <div className="text-xs text-ink-body">
-          {t("project.createChatHint" as Parameters<typeof t>[0])}
+      {/* Create — the path that avoids adding a bot to an existing group. */}
+      <div className="flex flex-col gap-2">
+        <div className="text-2xs font-medium tracking-wide text-ink-meta uppercase">
+          {t("project.createChat" as Parameters<typeof t>[0])}
         </div>
         <div className="flex items-center gap-2">
           <Input
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
             placeholder={t("project.createChatName" as Parameters<typeof t>[0])}
-            className="h-8 flex-1 text-xs"
+            className="h-9 flex-1"
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && newName.trim() && !creating) {
+                e.preventDefault();
+                void create();
+              }
+            }}
           />
           <Button
             size="sm"
+            variant="outline"
             disabled={creating || !newName.trim()}
             onClick={() => void create()}
           >
-            {t("project.createChat" as Parameters<typeof t>[0])}
+            {t("common.create")}
           </Button>
         </div>
+        <p className="text-2xs text-ink-meta">
+          {t("project.createChatHint" as Parameters<typeof t>[0])}
+        </p>
         {created && (
-          <div className="text-xs text-ink-body">
+          // The bot created the group, so nobody else is in it yet — the join
+          // link is the next action, not a footnote.
+          <div className="flex items-center justify-between gap-2 rounded-md bg-surface-muted px-2.5 py-2">
+            <span className="min-w-0 truncate text-xs text-ink-body">
+              {created.name}
+            </span>
             {created.share_link ? (
-              <a
-                href={created.share_link}
-                target="_blank"
-                rel="noreferrer"
-                className="text-brand underline"
-              >
-                {t("project.createChatJoin" as Parameters<typeof t>[0])} ·{" "}
-                {created.name}
-              </a>
+              <Button size="sm" variant="outline" asChild>
+                <a href={created.share_link} target="_blank" rel="noreferrer">
+                  {t("project.createChatJoin" as Parameters<typeof t>[0])}
+                  <ExternalLink />
+                </a>
+              </Button>
             ) : (
-              t("project.createChatLinkMissing" as Parameters<typeof t>[0])
+              <span className="text-2xs text-ink-meta">
+                {t("project.createChatLinkMissing" as Parameters<typeof t>[0])}
+              </span>
             )}
           </div>
         )}
       </div>
 
-      {loading ? (
-        <p className="py-4 text-center text-xs text-ink-meta">
-          {t("common.loading")}
-        </p>
-      ) : chats.length === 0 ? (
-        <p className="py-4 text-center text-xs text-ink-meta">
-          {t("project.bindChatEmpty" as Parameters<typeof t>[0])}
-        </p>
-      ) : (
-        <div className="flex max-h-[50vh] flex-col gap-1 overflow-y-auto">
-          {chats.map((chat) => {
-            const boundElsewhere =
-              !!chat.bound_project_id && chat.bound_project_id !== projectId;
-            const boundHere = chat.bound_project_id === projectId;
-            return (
-              <div
-                key={chat.external_chat_id}
-                className="flex items-center gap-2 rounded-lg px-2 py-2 hover:bg-surface-muted"
-              >
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm text-ink-heading">
-                    {chat.name}
-                  </div>
-                  {boundElsewhere && (
-                    <div className="truncate text-2xs text-ink-meta">
-                      {t(
-                        "project.bindChatBoundElsewhere" as Parameters<
-                          typeof t
-                        >[0],
-                      )}
+      {/* Existing groups the bot has already joined. */}
+      <div className="mt-4 flex flex-col gap-2">
+        <div className="text-2xs font-medium tracking-wide text-ink-meta uppercase">
+          {t("project.bindChatExistingTitle" as Parameters<typeof t>[0])}
+        </div>
+        {loading ? (
+          <p className="py-6 text-center text-xs text-ink-meta">
+            {t("common.loading")}
+          </p>
+        ) : chats.length === 0 ? (
+          <p className="py-6 text-center text-xs text-ink-meta">
+            {t("project.bindChatEmpty" as Parameters<typeof t>[0])}
+          </p>
+        ) : (
+          <div className="max-h-[40vh] divide-y divide-surface-border overflow-y-auto rounded-md border border-surface-border">
+            {chats.map((chat) => {
+              const boundElsewhere =
+                !!chat.bound_project_id && chat.bound_project_id !== projectId;
+              const boundHere = chat.bound_project_id === projectId;
+              return (
+                <div
+                  key={chat.external_chat_id}
+                  className="flex items-center gap-2 px-2.5 py-2 transition-colors hover:bg-surface-muted"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-xs text-ink-heading">
+                      {chat.name}
                     </div>
+                    {boundElsewhere && (
+                      <div className="truncate text-2xs text-ink-meta">
+                        {t(
+                          "project.bindChatBoundElsewhere" as Parameters<
+                            typeof t
+                          >[0],
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  {boundHere ? (
+                    // State, not an action — the tag taxonomy carries it; a
+                    // disabled button only looked like one you may not press.
+                    <StatusPill
+                      status="connected"
+                      label={t(
+                        "project.chatBindingSaved" as Parameters<typeof t>[0],
+                      )}
+                      className="shrink-0"
+                    />
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={saving !== null}
+                      onClick={() => void bind(chat)}
+                    >
+                      {t("project.bindChatShort" as Parameters<typeof t>[0])}
+                    </Button>
                   )}
                 </div>
-                {boundHere ? (
-                  // State, not an action — the tag taxonomy carries it, a
-                  // disabled button only looked like one you may not press.
-                  <StatusPill
-                    // ``connected`` (not ``ok``, which is absent from the tone
-                    // map and falls back to grey) — the group IS connected to
-                    // this project, and the tone map paints that green.
-                    status="connected"
-                    label={t(
-                      "project.chatBindingSaved" as Parameters<typeof t>[0],
-                    )}
-                    className="shrink-0"
-                  />
-                ) : (
-                  <Button
-                    size="sm"
-                    disabled={saving !== null}
-                    onClick={() => void bind(chat)}
-                  >
-                    {t("project.bindChat" as Parameters<typeof t>[0])}
-                  </Button>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
+              );
+            })}
+          </div>
+        )}
+      </div>
     </FormDialog>
   );
 }

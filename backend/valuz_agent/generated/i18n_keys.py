@@ -1300,6 +1300,8 @@ I18nKey = Literal[
     "project.bindChatDialogDesc",
     "project.bindChatDialogTitle",
     "project.bindChatEmpty",
+    "project.bindChatExistingTitle",
+    "project.bindChatShort",
     "project.browse",
     "project.cancel",
     "project.chatBindingRemoved",
