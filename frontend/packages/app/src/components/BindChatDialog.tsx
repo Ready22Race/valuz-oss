@@ -102,9 +102,20 @@ export function BindChatDialog({
       setCreated(result);
       setNewName("");
       toast.success(t("project.createChatDone" as Parameters<typeof t>[0]));
-      // Both surfaces: the panel behind, and this dialog's own list — the new
-      // group belongs under "existing groups" the moment it exists.
-      await Promise.all([refreshChats(), onBound()]);
+      // Append locally — a just-created group can be missing from Feishu's
+      // eventually-consistent list for a moment, and refetching would then
+      // ERASE it from the dialog right after the user made it.
+      setChats((prev) => [
+        ...prev.filter((c) => c.external_chat_id !== result.external_chat_id),
+        {
+          external_chat_id: result.external_chat_id,
+          name,
+          bound_project_id: projectId,
+          created_by_valuz: true,
+          needs_join: true,
+        },
+      ]);
+      await onBound();
     } catch (err) {
       toast.error(
         `${t("project.createChat" as Parameters<typeof t>[0])}: ${
@@ -140,7 +151,14 @@ export function BindChatDialog({
     try {
       await channelsApi.unbindChat(chat.external_chat_id);
       toast.success(t("project.chatBindingRemoved" as Parameters<typeof t>[0]));
-      await Promise.all([refreshChats(), onBound()]);
+      setChats((prev) =>
+        prev.map((c) =>
+          c.external_chat_id === chat.external_chat_id
+            ? { ...c, bound_project_id: null }
+            : c,
+        ),
+      );
+      await onBound();
     } catch (err) {
       toast.error(
         `${t("project.unbindChat" as Parameters<typeof t>[0])}: ${
@@ -157,7 +175,14 @@ export function BindChatDialog({
     try {
       await channelsApi.deleteFeishuChat(chat.external_chat_id);
       toast.success(t("project.deleteChatDone" as Parameters<typeof t>[0]));
-      await Promise.all([refreshChats(), onBound()]);
+      // Drop the row here, from what we know — Feishu's chat list is
+      // eventually consistent, so refetching right now can still CONTAIN the
+      // group we just dissolved and the list looks like nothing happened.
+      // The next dialog open refetches and reconciles.
+      setChats((prev) =>
+        prev.filter((c) => c.external_chat_id !== chat.external_chat_id),
+      );
+      await onBound();
     } catch (err) {
       toast.error(
         `${t("project.deleteChat" as Parameters<typeof t>[0])}: ${
@@ -179,6 +204,13 @@ export function BindChatDialog({
         external_chat_name: chat.name,
       });
       toast.success(t("project.chatBindingSaved" as Parameters<typeof t>[0]));
+      setChats((prev) =>
+        prev.map((c) =>
+          c.external_chat_id === chat.external_chat_id
+            ? { ...c, bound_project_id: projectId }
+            : c,
+        ),
+      );
       await onBound();
       onOpenChange(false);
     } catch (err) {
