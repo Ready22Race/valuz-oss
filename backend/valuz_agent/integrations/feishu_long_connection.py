@@ -1117,6 +1117,9 @@ class FeishuChat:
     # The app owns this group — i.e. it created it, and is the only identity
     # Feishu lets dissolve it. Bot-owned groups come back with no ``owner_id``.
     bot_owned: bool
+    # A person is in the group. A Valuz-created group nobody joined has only
+    # the bot, and is the only case where "join" is a real answer.
+    has_people: bool = True
 
 
 async def list_feishu_chats(*, app_id: str, app_secret: str) -> list[FeishuChat]:
@@ -1162,7 +1165,40 @@ async def list_feishu_chats(*, app_id: str, app_secret: str) -> list[FeishuChat]
         page_token = getattr(data, "page_token", None) if data is not None else None
         if not page_token or not getattr(data, "has_more", False):
             break
-    return chats
+    return await _with_membership(client, chats)
+
+
+async def _with_membership(client: Any, chats: list[FeishuChat]) -> list[FeishuChat]:
+    """Fill in ``has_people`` for bot-owned groups.
+
+    The list endpoint carries no member count, so this costs one detail call
+    per bot-owned group — a handful at picker scale, and only for the groups
+    where the answer changes anything (a group someone made themselves always
+    has them in it).
+    """
+    from lark_oapi.api.im.v1 import GetChatRequest
+
+    async def resolve(chat: FeishuChat) -> FeishuChat:
+        if not chat.bot_owned:
+            return chat
+        try:
+            response = await client.im.v1.chat.aget(
+                GetChatRequest.builder().chat_id(chat.chat_id).build()
+            )
+        except Exception:  # noqa: BLE001 - a picker row must not fail the list
+            return chat
+        if not response.success() or response.data is None:
+            return chat
+        # Feishu returns the count as a string, and ``bool("0")`` is True —
+        # which read every empty group as occupied.
+        raw = getattr(response.data, "user_count", None)
+        try:
+            count = int(str(raw).strip() or 0)
+        except ValueError:
+            return chat
+        return replace(chat, has_people=count > 0)
+
+    return list(await asyncio.gather(*(resolve(chat) for chat in chats)))
 
 
 async def _add_feishu_reaction(

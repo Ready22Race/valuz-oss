@@ -56,6 +56,8 @@ export interface ChannelChatItem {
   bound_project_id?: string | null;
   /** Valuz created this group, so the bot owns it and may delete it. */
   created_by_valuz?: boolean;
+  /** …and nobody has joined yet, so a join link is the only way in. */
+  needs_join?: boolean;
 }
 
 export interface ChatProjectBinding {

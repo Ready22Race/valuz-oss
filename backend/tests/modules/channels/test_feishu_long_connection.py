@@ -409,3 +409,46 @@ def test_inbound_marks_a_p2p_message_as_a_direct_chat() -> None:
             ),
         )
         assert inbound.context.is_direct_chat is expected
+
+
+@pytest.mark.asyncio
+async def test_membership_reads_feishu_string_counts() -> None:
+    """Feishu returns user_count as a string, and ``bool("0")`` is True — which
+    read every empty group as occupied, hiding the join link on exactly the
+    groups that needed it."""
+    from valuz_agent.integrations.feishu_long_connection import (
+        FeishuChat,
+        _with_membership,
+    )
+
+    class _Resp:
+        def __init__(self, count: str) -> None:
+            self.data = SimpleNamespace(user_count=count)
+
+        def success(self) -> bool:
+            return True
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            counts = {"oc-empty": "0", "oc-joined": "2"}
+            self.im = SimpleNamespace(
+                v1=SimpleNamespace(
+                    chat=SimpleNamespace(
+                        aget=lambda req: self._get(req, counts),
+                    )
+                )
+            )
+
+        async def _get(self, req, counts):
+            return _Resp(counts[req.chat_id])
+
+    resolved = await _with_membership(
+        _FakeClient(),
+        [
+            FeishuChat(chat_id="oc-empty", name="空群", bot_owned=True),
+            FeishuChat(chat_id="oc-joined", name="有人", bot_owned=True),
+            FeishuChat(chat_id="oc-theirs", name="别人的", bot_owned=False),
+        ],
+    )
+
+    assert [c.has_people for c in resolved] == [False, True, True]

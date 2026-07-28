@@ -287,10 +287,10 @@ export function BindChatDialog({
                       replace nothing, and hiding them made the row's only
                       affordances discoverable by accident. */}
                   <div className="flex shrink-0 items-center gap-0.5">
-                    {/* Only for a group Valuz created: its sole member is the
-                        bot, so the link is the way in. A group someone made
-                        themselves already has them in it. */}
-                    {chat.created_by_valuz && (
+                    {/* Only while nobody has joined: the bot is then the sole
+                        member and the link is the way in. Once someone is in —
+                        or they made the group themselves — it is noise. */}
+                    {chat.needs_join && (
                       <button
                         type="button"
                         onClick={() => void join(chat)}

@@ -301,7 +301,10 @@ class ChannelChatItem(BaseModel):
     external_chat_id: str
     name: str
     bound_project_id: str | None = None
+    # Valuz created it, so the bot owns it and may dissolve it.
     created_by_valuz: bool = False
+    # …and nobody has joined yet, so a join link is the only way in.
+    needs_join: bool = False
 
 
 class ChatProjectBindingResponse(BaseModel):
@@ -372,6 +375,7 @@ async def list_feishu_chats(
             # intent for anything the live answer cannot see.
             created_by_valuz=chat.bot_owned
             or bool(getattr(bound.get(chat.chat_id), "created_by_valuz", False)),
+            needs_join=chat.bot_owned and not chat.has_people,
         )
         for chat in chats
     ]
