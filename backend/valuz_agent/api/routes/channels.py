@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from json import JSONDecodeError
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
@@ -36,6 +36,11 @@ from valuz_agent.modules.channels.schemas import AgentChannelBinding
 from valuz_agent.modules.channels.service import ChannelIngressService
 
 router = APIRouter(prefix="/v1/channels", tags=["channels"])
+# These reads follow a write the caller just made (link / unlink / dissolve),
+# so a cached copy shows the state before the change — which is indistinguish-
+# able from a view that never refreshed. Observed: a whole session served two
+# requests while the panel was loaded many times.
+_NO_STORE = "no-store"
 FEISHU_PLATFORM = "feishu"
 WECOM_AIBOT_PLATFORM = "wecom_aibot"
 
@@ -330,6 +335,7 @@ class ChatProjectBindingUpdate(BaseModel):
 
 @router.get("/feishu/chats", response_model=list[ChannelChatItem])
 async def list_feishu_chats(
+    response: Response,
     user_id: Annotated[str, Depends(get_current_user_id)],
     agent_slug: str | None = None,
 ) -> list[ChannelChatItem]:
@@ -342,6 +348,7 @@ async def list_feishu_chats(
     """
     from valuz_agent.integrations.feishu_long_connection import list_feishu_chats as fetch
 
+    response.headers["Cache-Control"] = _NO_STORE
     async with async_unit_of_work() as db:
         ds = AgentChannelBindingDatastore(db)
         binding = (
@@ -479,9 +486,11 @@ async def create_feishu_chat_for_project(
     response_model=list[ChatProjectBindingResponse],
 )
 async def list_chat_bindings(
+    response: Response,
     user_id: Annotated[str, Depends(get_current_user_id)],
     project_id: str | None = None,
 ) -> list[ChatProjectBindingResponse]:
+    response.headers["Cache-Control"] = _NO_STORE
     async with async_unit_of_work() as db:
         ds = ChannelChatBindingDatastore(db)
         rows = (
@@ -543,6 +552,7 @@ class ChatLinkResponse(BaseModel):
 @router.get("/feishu/chats/{external_chat_id}/link", response_model=ChatLinkResponse)
 async def get_feishu_chat_link(
     external_chat_id: str,
+    response: Response,
     user_id: Annotated[str, Depends(get_current_user_id)],
 ) -> ChatLinkResponse:
     """A join link for a group the bot is in — asked for on demand.
@@ -552,6 +562,7 @@ async def get_feishu_chat_link(
     """
     from valuz_agent.integrations.feishu_long_connection import feishu_chat_link
 
+    response.headers["Cache-Control"] = _NO_STORE
     async with async_unit_of_work() as db:
         binding = next(
             iter(

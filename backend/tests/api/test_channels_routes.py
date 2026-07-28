@@ -558,3 +558,29 @@ def test_delete_feishu_chat_works_without_a_binding(monkeypatch) -> None:
 
     assert response.status_code == 204
     assert deleted == ["oc-orphan"]
+
+
+def test_channel_reads_are_not_cacheable(monkeypatch) -> None:
+    """These reads follow a write the caller just made, so a cached copy shows
+    the state before the change — indistinguishable from a view that never
+    refreshed. One session was observed serving two requests while the panel
+    had been loaded many times."""
+
+    class _FakeChatBindings:
+        def __init__(self, _db: object) -> None:
+            pass
+
+        async def list_all(self, *, user_id: str) -> list:
+            return []
+
+    monkeypatch.setattr(channels_routes, "async_unit_of_work", lambda: _Uow())
+    monkeypatch.setattr(channels_routes, "ChannelChatBindingDatastore", _FakeChatBindings)
+
+    app = FastAPI()
+    app.include_router(channels_routes.router)
+    app.dependency_overrides[channels_routes.get_current_user_id] = lambda: "u1"
+
+    response = TestClient(app).get("/v1/channels/chat-bindings")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
