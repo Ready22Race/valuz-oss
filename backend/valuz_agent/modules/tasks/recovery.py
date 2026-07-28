@@ -35,7 +35,8 @@ from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.tasks import planning
 from valuz_agent.modules.tasks.actor_runner import ActorRunner, collect_manifest
 from valuz_agent.modules.tasks.coordination import CoordinationService
-from valuz_agent.modules.tasks.events import finalize_task  # noqa: I001
+from valuz_agent.adapters.agent_resolver import resolve_agent_display_name
+from valuz_agent.modules.tasks.events import finalize_task, record_subtask_stopped  # noqa: I001
 from valuz_agent.modules.tasks.datastore import (
     TaskDatastore,
     TaskEventDatastore,
@@ -610,14 +611,15 @@ class RecoveryService:
                             session_id=lead_session_id or None,
                             user_id=user_id,
                         )
-            await event_ds.append_event(
-                user_id,
-                project_id,
-                task_id,
-                "subtask_stopped",
-                actor="user",
+            await record_subtask_stopped(
+                event_ds,
+                user_id=user_id,
+                project_id=project_id,
+                task_id=task_id,
                 session_id=session_id,
-                payload={"subtask_key": subtask_key},
+                agent_slug=agent_slug,
+                agent_name=await resolve_agent_display_name(project_id, agent_slug, user_id),
+                subtask_key=subtask_key,
             )
 
         await self._interrupt_kernel_session(session_id, user_id=user_id)

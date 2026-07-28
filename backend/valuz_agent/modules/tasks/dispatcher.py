@@ -35,6 +35,7 @@ from valuz_agent.modules.tasks.actor_runner import (
     ActorRunner,
     _member_run_dir,
 )
+from valuz_agent.modules.tasks.events import record_subtask_failed
 from valuz_agent.modules.tasks.datastore import (
     TaskDatastore,
     TaskEventDatastore,
@@ -176,18 +177,17 @@ class DispatcherService:
                 # created (create_session below is unreached), so an id here
                 # would render in the task timeline as a clickable link to a
                 # session that 404s ("Session not found.").
-                await event_ds.append_event(
-                    user_id,
+                await record_subtask_failed(
+                    event_ds,
+                    user_id=user_id,
                     project_id=project_id,
                     task_id=task_id,
-                    type="subtask_failed",
-                    actor=agent,
-                    payload={
-                        "agent": agent,
-                        "agent_name": agent_name,
-                        "status": "failed",
-                        "error": resolved.credential_gap,
-                    },
+                    session_id=None,
+                    agent_slug=agent,
+                    agent_name=agent_name,
+                    subtask_key=subtask_key,
+                    summary=resolved.credential_gap,
+                    reason="dispatch_failed",
                 )
                 return {"error": resolved.credential_gap, "status": "failed", "agent": agent}
 

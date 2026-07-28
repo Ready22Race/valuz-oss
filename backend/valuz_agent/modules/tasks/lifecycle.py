@@ -81,7 +81,12 @@ from valuz_agent.modules.tasks.datastore import (
     TaskEventDatastore,
     TaskSessionDatastore,
 )
-from valuz_agent.modules.tasks.events import block_task, finalize_task
+from valuz_agent.modules.tasks.events import (
+    block_task,
+    finalize_task,
+    record_subtask_failed,
+    record_subtask_stopped,
+)
 from valuz_agent.modules.tasks.live_member_registry import LiveMemberRegistry
 from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 from valuz_agent.modules.tasks.models import TaskRow, TaskSessionRow
@@ -1074,18 +1079,18 @@ class LifecycleService:
                     agent_name = await resolve_agent_display_name(
                         project_id, agent_slug, user_id
                     )
-                    await event_ds.append_event(
-                        user_id,
+                    await record_subtask_failed(
+                        event_ds,
+                        user_id=user_id,
                         project_id=project_id,
                         task_id=task_id,
-                        type="subtask_failed",
-                        actor=agent_slug,
                         session_id=session_id,
-                        payload={
-                            "agent_name": agent_name,
-                            **manifest,
-                            **({"subtask_key": key} if key else {}),
-                        },
+                        agent_slug=agent_slug,
+                        agent_name=agent_name,
+                        subtask_key=key,
+                        summary=str(manifest.get("summary") or ""),
+                        reason="run_error",
+                        artifacts=list(manifest.get("artifacts") or []),
                     )
         except Exception:  # noqa: BLE001
             logger.exception("finalize_actor: failed to record terminal run for %s", session_id)
@@ -1143,18 +1148,15 @@ class LifecycleService:
                             user_id=user_id,
                         )
             agent_name = await resolve_agent_display_name(project_id, agent_slug, user_id)
-            await event_ds.append_event(
-                user_id,
+            await record_subtask_stopped(
+                event_ds,
+                user_id=user_id,
                 project_id=project_id,
                 task_id=task_id,
-                type="subtask_stopped",
-                actor="user",
                 session_id=session_id,
-                payload={
-                    "subtask_key": key,
-                    "agent": agent_slug,
-                    "agent_name": agent_name,
-                },
+                agent_slug=agent_slug,
+                agent_name=agent_name,
+                subtask_key=key,
             )
 
         if lead_session_id:

@@ -171,6 +171,93 @@ async def block_task(
 
 
 # ---------------------------------------------------------------------------
+# Subtask outcome events
+#
+# Both of these were emitted from more than one place with a DIFFERENT payload
+# each time. ``subtask_failed`` had three shapes — the heartbeat backstop wrote
+# {agent_name, subtask_key, status, summary, reason}, dispatch wrote {agent,
+# agent_name, status, error} with no key and no summary, and the actor-loop
+# finalize spread a whole manifest. The timeline renderer falls back to a
+# ``text|summary|goal|error`` lookup for these types, so the detail line a user
+# saw depended on which internal path had failed, and no consumer could rely on
+# ANY field being present.
+#
+# One emitter each, every key always populated. Add a field here, not at a call
+# site.
+# ---------------------------------------------------------------------------
+
+
+async def record_subtask_failed(
+    event_ds: TaskEventDatastore,
+    *,
+    user_id: str,
+    project_id: str,
+    task_id: str,
+    session_id: str | None,
+    agent_slug: str,
+    agent_name: str | None,
+    subtask_key: str | None,
+    summary: str,
+    reason: str,
+    artifacts: list[Any] | None = None,
+) -> None:
+    """A member run ended in failure.
+
+    ``reason`` is the MACHINE-readable cause — which path detected it
+    (``dispatch_failed`` / ``heartbeat_detected`` / ``run_error``); ``summary``
+    is the human line the timeline shows.
+    """
+    await event_ds.append_event(
+        user_id,
+        project_id=project_id,
+        task_id=task_id,
+        type="subtask_failed",
+        actor=agent_slug,
+        session_id=session_id,
+        payload={
+            "agent": agent_slug,
+            "agent_name": agent_name,
+            "subtask_key": subtask_key,
+            "status": "failed",
+            "summary": summary,
+            "reason": reason,
+            "artifacts": artifacts or [],
+        },
+    )
+
+
+async def record_subtask_stopped(
+    event_ds: TaskEventDatastore,
+    *,
+    user_id: str,
+    project_id: str,
+    task_id: str,
+    session_id: str | None,
+    agent_slug: str,
+    agent_name: str | None,
+    subtask_key: str | None,
+) -> None:
+    """A member run was stopped by the user — not a failure.
+
+    ``actor`` is ``"user"`` rather than the agent: the timeline renders this
+    amber-not-red precisely because a person chose it.
+    """
+    await event_ds.append_event(
+        user_id,
+        project_id=project_id,
+        task_id=task_id,
+        type="subtask_stopped",
+        actor="user",
+        session_id=session_id,
+        payload={
+            "agent": agent_slug,
+            "agent_name": agent_name,
+            "subtask_key": subtask_key,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
 # Decision-Inbox projections
 #
 # The Decision Inbox is a cross-cutting overlay keyed by ``task_id``: a pending

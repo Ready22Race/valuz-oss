@@ -46,6 +46,7 @@ from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.tasks import planning
 from valuz_agent.modules.tasks.actor_runner import _NON_REVIEWABLE_DONE, collect_manifest
+from valuz_agent.modules.tasks.events import record_subtask_failed
 from valuz_agent.modules.tasks.datastore import (
     TaskDatastore,
     TaskEventDatastore,
@@ -464,20 +465,17 @@ class CoordinationService:
                     agent_name = await resolve_agent_display_name(
                         project_id, run.agent_slug or "", user_id
                     )
-                    await event_ds.append_event(
-                        user_id,
+                    await record_subtask_failed(
+                        event_ds,
+                        user_id=user_id,
                         project_id=project_id,
                         task_id=task_id,
-                        type="subtask_failed",
-                        actor=run.agent_slug or "",
                         session_id=run.session_id,
-                        payload={
-                            "agent_name": agent_name,
-                            "subtask_key": key,
-                            "status": "failed",
-                            "summary": "member session errored",
-                            "reason": "heartbeat_detected",
-                        },
+                        agent_slug=run.agent_slug or "",
+                        agent_name=agent_name,
+                        subtask_key=key,
+                        summary="member session errored",
+                        reason="heartbeat_detected",
                     )
                     out[key] = {
                         "subtask_key": key,

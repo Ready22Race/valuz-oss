@@ -2288,7 +2288,13 @@ def test_dispatch_credential_gap_event_carries_no_session_id(
         db.close()
     assert len(rows) == 1, [r.type for r in rows]
     assert rows[0].session_id is None  # never-created session must not be linkable
-    assert (rows[0].payload or {}).get("error") == gap
+    # The human line lives in ``summary`` for EVERY subtask_failed now — this
+    # path used to be the odd one out, writing it as ``error`` while the other
+    # two wrote ``summary``, so the timeline detail differed by internal path.
+    payload = rows[0].payload or {}
+    assert payload["summary"] == gap
+    assert payload["reason"] == "dispatch_failed"
+    assert payload["subtask_key"] == "a"
 
 
 def test_commit_task_blocks_on_member_provider_preflight(db_factory, tmp_path, monkeypatch) -> None:
@@ -2598,3 +2604,71 @@ def test_plan_update_version_advances_with_every_plan_write(db_factory, tmp_path
     finally:
         db.close()
     assert versions == [1, 2]
+
+
+def test_every_subtask_failure_path_writes_the_same_payload_shape(
+    db_factory, tmp_path
+) -> None:
+    """One event type, one shape — whichever internal path detected the failure.
+
+    ``subtask_failed`` used to be emitted from three places with three
+    different payloads: the heartbeat backstop wrote {agent_name, subtask_key,
+    status, summary, reason}, dispatch wrote {agent, agent_name, status, error}
+    with no key and no summary, and the actor-loop finalize spread a whole
+    manifest. The timeline renderer falls back to a ``text|summary|goal|error``
+    lookup for this type, so the detail a user saw depended on which code path
+    had failed — and no consumer could rely on any field being present.
+    """
+    from valuz_agent.infra.db import async_unit_of_work
+    from valuz_agent.modules.tasks.datastore import TaskEventDatastore
+    from valuz_agent.modules.tasks.events import record_subtask_failed
+
+    _make_task(db_factory, tmp_path)
+
+    async def _emit(reason: str) -> None:
+        async with async_unit_of_work() as db:
+            await record_subtask_failed(
+                TaskEventDatastore(db),
+                user_id=OWNER,
+                project_id="w1",
+                task_id="t1",
+                session_id="s-1",
+                agent_slug="coder",
+                agent_name="Coder",
+                subtask_key="a",
+                summary="it broke",
+                reason=reason,
+            )
+
+    for reason in ("dispatch_failed", "heartbeat_detected", "run_error"):
+        asyncio.run(_emit(reason))
+
+    db = db_factory()
+    try:
+        rows = (
+            db.execute(select(TaskEventRow).filter_by(type="subtask_failed"))
+            .scalars()
+            .all()
+        )
+    finally:
+        db.close()
+
+    assert len(rows) == 3
+    expected_keys = {
+        "agent",
+        "agent_name",
+        "subtask_key",
+        "status",
+        "summary",
+        "reason",
+        "artifacts",
+    }
+    for row in rows:
+        assert set(row.payload) == expected_keys, "every path must fill every key"
+        assert row.payload["status"] == "failed"
+    # Only the machine-readable cause differs between paths.
+    assert {r.payload["reason"] for r in rows} == {
+        "dispatch_failed",
+        "heartbeat_detected",
+        "run_error",
+    }
