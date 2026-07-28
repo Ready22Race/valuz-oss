@@ -1082,9 +1082,12 @@ export const ProjectDetailPage = () => {
     }
   }, [id]);
 
+  // Keyed on the dialog being shut rather than on a callback from inside it:
+  // every close path (Cancel, the X, Escape, clicking away) lands here, and
+  // unlinking or dissolving a group in there changes the panel too.
   useEffect(() => {
-    void loadChatBindings();
-  }, [loadChatBindings]);
+    if (!bindChatOpen) void loadChatBindings();
+  }, [bindChatOpen, loadChatBindings]);
 
   const handleUnbindChat = async (externalChatId: string) => {
     try {
@@ -1730,13 +1733,7 @@ export const ProjectDetailPage = () => {
 
       <BindChatDialog
         open={bindChatOpen}
-        onOpenChange={(next) => {
-          setBindChatOpen(next);
-          // Refresh on close as well: unlinking or dissolving a group inside
-          // the dialog changes the panel too, and a stale panel after closing
-          // reads as the action not having happened.
-          if (!next) void loadChatBindings();
-        }}
+        onOpenChange={setBindChatOpen}
         projectId={id}
         onBound={loadChatBindings}
       />
