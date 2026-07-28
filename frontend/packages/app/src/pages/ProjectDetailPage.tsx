@@ -1112,6 +1112,8 @@ export const ProjectDetailPage = () => {
     try {
       await channelsApi.deleteFeishuChat(externalChatId);
       toast.success(t("project.deleteChatDone" as Parameters<typeof t>[0]));
+      // Gone the moment the server says so — the reload below reconciles.
+      setChatBindings((prev) => prev.filter((c) => c.id !== externalChatId));
       await loadChatBindings();
     } catch {
       toast.error(t("project.deleteChat" as Parameters<typeof t>[0]));
@@ -1122,6 +1124,7 @@ export const ProjectDetailPage = () => {
     try {
       await channelsApi.unbindChat(externalChatId);
       toast.success(t("project.chatBindingRemoved" as Parameters<typeof t>[0]));
+      setChatBindings((prev) => prev.filter((c) => c.id !== externalChatId));
       await loadChatBindings();
     } catch {
       toast.error(t("project.saveFailed" as Parameters<typeof t>[0]));
