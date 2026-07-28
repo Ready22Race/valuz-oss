@@ -33,7 +33,7 @@ def test_resolve_provider_id_none_when_missing():
     assert _resolve_provider_id(src) is None
 
 
-def test_direct_anthropic_deepseek_model_disables_thinking():
+def test_direct_anthropic_deepseek_model_enables_thinking():
     mp = SimpleNamespace(
         base_url="https://api.deepseek.com/anthropic/v1/messages",
         api_key="k",
@@ -42,7 +42,7 @@ def test_direct_anthropic_deepseek_model_disables_thinking():
 
     chat_model = r._build_direct_chat_model(model="deepseek-v4-flash", mp=mp)
 
-    assert chat_model.thinking == {"type": "disabled"}
+    assert chat_model.thinking == {"type": "enabled"}
     assert chat_model.max_tokens == 16384
 
 
@@ -204,7 +204,11 @@ async def test_completer_uses_direct_llm_for_non_official_api_key_provider(
     assert out == "root = Stack()"
     assert "req" not in patched
     assert patched.get("deleted", []) == []
-    assert patched["direct_messages"][0].content == "PROMPT"
+    direct_prompt = patched["direct_messages"][0].content
+    assert direct_prompt.startswith("PROMPT")
+    assert "Direct LLM final-output requirement" in direct_prompt
+    assert "emit the final answer as normal text containing ONLY valid OpenUI Lang" in direct_prompt
+    assert "Never stop after thinking" in direct_prompt
     assert patched["forwarded"] == [
         ("calling-sid", "tool_output_delta", {"id": "R1", "text": "root "}),
         ("calling-sid", "tool_output_delta", {"id": "R1", "text": "= Stack()"}),
@@ -298,8 +302,12 @@ async def test_direct_llm_falls_back_to_non_stream_when_stream_is_blank(
         out = await completer("PROMPT")
 
     assert out == "Fallback Chart"
-    assert patched["stream_messages"][0].content == "PROMPT"
-    assert patched["invoke_messages"][0].content == "PROMPT"
+    stream_prompt = patched["stream_messages"][0].content
+    invoke_prompt = patched["invoke_messages"][0].content
+    assert stream_prompt.startswith("PROMPT")
+    assert invoke_prompt == stream_prompt
+    assert "Direct LLM final-output requirement" in stream_prompt
+    assert "Never stop after thinking" in stream_prompt
     assert patched["forwarded"] == [
         ("calling-sid", "tool_output_delta", {"id": "R3", "text": "Fallback Chart"})
     ]

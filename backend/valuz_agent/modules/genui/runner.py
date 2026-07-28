@@ -28,6 +28,12 @@ logger = logging.getLogger(__name__)
 Completer = Callable[[str], Awaitable[str]]
 _LOG_PREVIEW_CHARS = 240
 _DIRECT_GENUI_MAX_TOKENS = 16384
+_DIRECT_LLM_FINAL_OUTPUT_INSTRUCTIONS = (
+    "Direct LLM final-output requirement: if you perform any thinking or reasoning, "
+    "you must continue after it and emit the final answer as normal text containing "
+    "ONLY valid OpenUI Lang. Never stop after thinking, never return only thinking "
+    "or reasoning blocks, and do not include prose or markdown fences."
+)
 
 
 def _resolve_provider_id(source: Any) -> str | None:
@@ -54,6 +60,10 @@ def _uses_official_cli_auth(*, runtime_provider: Any, mp: Any) -> bool:
 def _is_deepseek_anthropic_channel(*, model: str, mp: Any) -> bool:
     base_url = str(getattr(mp, "base_url", "") or "").lower()
     return "deepseek" in base_url or model.lower().startswith("deepseek-")
+
+
+def _with_direct_llm_final_output_requirement(prompt: str) -> str:
+    return f"{prompt.rstrip()}\n\n{_DIRECT_LLM_FINAL_OUTPUT_INSTRUCTIONS}"
 
 
 def _make_completer(
@@ -237,7 +247,9 @@ def _make_direct_llm_completer(
         logged_first_raw_chunk = False
         logged_first_text_chunk = False
         try:
-            messages = [HumanMessage(content=prompt)]
+            messages = [
+                HumanMessage(content=_with_direct_llm_final_output_requirement(prompt))
+            ]
             async for chunk in chat_model.astream(messages):
                 text = _extract_langchain_text(chunk)
                 if not logged_first_raw_chunk:
@@ -337,7 +349,7 @@ def _build_direct_chat_model(*, model: str, mp: Any) -> Any:
         if base_url is not None:
             kwargs["base_url"] = base_url
         if _is_deepseek_anthropic_channel(model=model, mp=mp):
-            kwargs["thinking"] = {"type": "disabled"}
+            kwargs["thinking"] = {"type": "enabled"}
         return ChatAnthropic(**kwargs)
 
     if protocol == "gemini":
