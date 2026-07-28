@@ -9,6 +9,7 @@ from typing import Any, Protocol
 from valuz_agent.modules.channels.adapters import InboundChannelMessage
 from valuz_agent.modules.channels.commands import (
     ChannelCommandKind,
+    extract_agent_hint,
     parse_channel_command,
 )
 from valuz_agent.modules.channels.resolver import (
@@ -18,6 +19,7 @@ from valuz_agent.modules.channels.resolver import (
 from valuz_agent.modules.channels.schemas import (
     AgentChannelRouteDecision,
     AgentPlacement,
+    ChannelMentionContext,
     ChannelRouteDecisionKind,
     ChannelRouteKey,
     ChannelThreadBinding,
@@ -40,6 +42,10 @@ class AgentPlacementReader(Protocol):
         user_id: str,
         source_agent_slug: str,
     ) -> list[AgentPlacement]: ...
+
+
+class ChannelProjectMemberReader(Protocol):
+    async def list_member_slugs(self, user_id: str, project_id: str) -> list[str]: ...
 
 
 class ChannelChatBindingStore(Protocol):
@@ -125,12 +131,14 @@ class ChannelIngressService:
         sessions: ChannelSessionRunner,
         resolver: AgentChannelResolver | None = None,
         chat_bindings: ChannelChatBindingStore | None = None,
+        project_members: ChannelProjectMemberReader | None = None,
     ) -> None:
         self._placements = placements
         self._bindings = bindings
         self._sessions = sessions
         self._resolver = resolver or AgentChannelResolver()
         self._chat_bindings = chat_bindings
+        self._project_members = project_members
 
     async def handle_inbound_message(
         self,
@@ -142,6 +150,10 @@ class ChannelIngressService:
         command_result = await self._handle_command(user_id=user_id, inbound=inbound)
         if command_result is not None:
             return command_result
+        chat_binding = await self._chat_binding(user_id=user_id, context=context)
+        context = await self._with_answering_agent(
+            user_id=user_id, inbound=inbound, chat_binding=chat_binding
+        )
         placements = await self._placements.list_placements(
             user_id,
             context.mentioned_agent_slug,
@@ -162,7 +174,7 @@ class ChannelIngressService:
             context,
             placements=placements,
             existing_binding=existing_binding,
-            chat_project_id=await self._chat_project_id(user_id=user_id, context=context),
+            chat_project_id=getattr(chat_binding, "project_id", None),
         )
         if decision.kind == ChannelRouteDecisionKind.QUEUE_SESSION and decision.session_id:
             await self._sessions.enqueue_message(
@@ -188,7 +200,9 @@ class ChannelIngressService:
         agent_slug = (
             context.mentioned_agent_slug
             if decision.project_id == CHAT_PROJECT_SENTINEL
-            else _placement_for_project(placements, decision.project_id).agent_slug
+            else _placement_for_project(
+                placements, decision.project_id, context.mentioned_agent_slug
+            ).agent_slug
         )
         created = await self._sessions.create_session(
             user_id=user_id,
@@ -299,19 +313,16 @@ class ChannelIngressService:
             logger.warning("Failed to resolve project name for %s", project_id, exc_info=True)
             return project_id
 
-    async def _chat_project_id(
-        self,
-        *,
-        user_id: str,
-        context: Any,
-    ) -> str | None:
-        """The project this chat is bound to, if any ("this group is that
-        project"). A read failure degrades to the placement heuristics rather
-        than dropping the turn."""
+    async def _chat_binding(self, *, user_id: str, context: Any) -> Any | None:
+        """The chat's binding ("this group is that project"), if any.
+
+        A read failure degrades to the placement heuristics rather than
+        dropping the turn.
+        """
         if self._chat_bindings is None:
             return None
         try:
-            binding = await self._chat_bindings.get(
+            return await self._chat_bindings.get(
                 user_id=user_id,
                 channel_instance_id=context.channel_instance_id,
                 external_chat_id=context.external_chat_id,
@@ -324,7 +335,38 @@ class ChannelIngressService:
                 exc_info=True,
             )
             return None
-        return getattr(binding, "project_id", None) if binding is not None else None
+
+    async def _with_answering_agent(
+        self,
+        *,
+        user_id: str,
+        inbound: InboundChannelMessage,
+        chat_binding: Any | None,
+    ) -> ChannelMentionContext:
+        """Who answers: named in the message > the chat's default > the app's
+        agent (§4.2).
+
+        The name is matched against the bound project's real members; an
+        unmatched name is ignored rather than guessed at, because handing work
+        to the wrong member is worse than answering as the default.
+        """
+        context = inbound.context
+        project_id: str | None = getattr(chat_binding, "project_id", None)
+        named = extract_agent_hint(inbound.text) if project_id else None
+        if named and project_id and self._project_members is not None:
+            try:
+                members = await self._project_members.list_member_slugs(user_id, project_id)
+            except Exception:  # noqa: BLE001 - fall back to the default agent
+                logger.warning("Failed to list members of %s", project_id, exc_info=True)
+                members = []
+            matched = _match_slug(members, named)
+            if matched:
+                return replace(context, mentioned_agent_slug=matched)
+
+        default_slug = getattr(chat_binding, "default_agent_slug", None)
+        if default_slug:
+            return replace(context, mentioned_agent_slug=default_slug)
+        return context
 
     async def _binding_with_live_session_status(
         self,
@@ -359,6 +401,14 @@ class ChannelIngressService:
         )
 
 
+def _match_slug(slugs: list[str], name: str) -> str | None:
+    wanted = " ".join(name.strip().casefold().split())
+    for slug in slugs:
+        if " ".join(slug.strip().casefold().split()) == wanted:
+            return slug
+    return None
+
+
 def _match_project_by_name(placements: list[AgentPlacement], name: str) -> AgentPlacement | None:
     """Match a project by name, normalized like the resolver's own hint match."""
     wanted = " ".join(name.strip().casefold().split())
@@ -371,16 +421,32 @@ def _match_project_by_name(placements: list[AgentPlacement], name: str) -> Agent
     return None
 
 
-def _placement_for_project(placements: list[AgentPlacement], project_id: str) -> AgentPlacement:
-    for placement in placements:
-        if placement.project_id == project_id:
-            return placement
+def _placement_for_project(
+    placements: list[AgentPlacement],
+    project_id: str,
+    agent_slug: str | None = None,
+) -> AgentPlacement:
+    """The placement to run this turn as.
+
+    ``agent_slug`` is the agent the turn resolved to; preferring it matters as
+    soon as a project has more than one member — picking "the first placement
+    in this project" would silently answer as somebody else, which is exactly
+    what naming an agent is meant to prevent.
+    """
+    in_project = [p for p in placements if p.project_id == project_id]
+    if agent_slug:
+        for placement in in_project:
+            if agent_slug in {placement.agent_slug, placement.source_agent_slug}:
+                return placement
+    if in_project:
+        return in_project[0]
     raise ValueError(f"agent placement for project '{project_id}' not found")
 
 
 __all__ = [
     "AgentPlacementReader",
     "ChannelChatBindingStore",
+    "ChannelProjectMemberReader",
     "ChannelIngressResult",
     "ChannelIngressService",
     "ChannelSessionRef",

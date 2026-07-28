@@ -340,3 +340,67 @@ async def test_unbind_command_clears_the_binding() -> None:
 
     assert result.direct_reply is not None
     assert store.project_id is None
+
+
+# ------------------------------------------------------------------ #
+# who answers (§4.2)
+# ------------------------------------------------------------------ #
+
+
+class _FakeMemberReader:
+    def __init__(self, slugs: list[str]) -> None:
+        self.slugs = slugs
+
+    async def list_member_slugs(self, _user_id: str, _project_id: str) -> list[str]:
+        return self.slugs
+
+
+class _RecordingSessions(_NoopSessions):
+    def __init__(self) -> None:
+        self.created: list[dict] = []
+
+    async def create_session(self, **kwargs):
+        from types import SimpleNamespace
+
+        self.created.append(kwargs)
+        return SimpleNamespace(id="session-new", project_id=kwargs["project_id"])
+
+    async def send_message(self, **_kwargs) -> None:
+        return None
+
+
+async def _route(text: str, members: list[str]):
+    from valuz_agent.modules.channels.service import ChannelIngressService
+
+    sessions = _RecordingSessions()
+    service = ChannelIngressService(
+        placements=_FakePlacements(
+            [
+                AgentPlacement(project_id="proj-a", project_name="研究", agent_slug=slug)
+                for slug in members
+            ]
+        ),
+        bindings=_NoopBindings(),
+        sessions=sessions,
+        chat_bindings=_FakeChatBindings(project_id="proj-a"),
+        project_members=_FakeMemberReader(members),
+    )
+    await service.handle_inbound_message(user_id="u1", inbound=_inbound(text))
+    return sessions
+
+
+async def test_naming_a_member_switches_who_answers() -> None:
+    sessions = await _route("让分析师看看这个报表", ["helper", "分析师"])
+    assert sessions.created[0]["agent_slug"] == "分析师"
+
+
+async def test_an_unmatched_name_is_ignored_not_guessed() -> None:
+    """Handing work to the wrong member is worse than answering as the
+    default, so a name nobody on the team carries falls through."""
+    sessions = await _route("让某个不存在的人看看这个", ["helper"])
+    assert sessions.created[0]["agent_slug"] == "helper"
+
+
+async def test_plain_message_uses_the_app_binding_agent() -> None:
+    sessions = await _route("这个季度收入怎么样", ["helper", "分析师"])
+    assert sessions.created[0]["agent_slug"] == "helper"

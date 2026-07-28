@@ -71,4 +71,33 @@ def parse_channel_command(text: str) -> ChannelCommand | None:
     return None
 
 
-__all__ = ["ChannelCommand", "ChannelCommandKind", "parse_channel_command"]
+# Naming who should answer. Deliberately explicit forms only: inferring an
+# agent from free prose would silently hand work to the wrong member, and the
+# member picker card covers the non-typing case (§4.2).
+_AGENT_HINT_PATTERNS = (
+    re.compile(r"^@(?P<name>[^\s，,。:：]+)"),
+    re.compile(r"(?:agent|智能体|助手)\s*[:：]\s*(?P<name>[^\s，,。]+)"),
+    re.compile(r"^让\s*(?P<name>[^\s，,。]{1,24}?)\s*(?:来)?(?:看看|处理|做|回答|说说|分析)"),
+    re.compile(r"^找\s*(?P<name>[^\s，,。]{1,24}?)\s*(?:来)?(?:看看|处理|做|回答|说说|分析)"),
+)
+
+
+def extract_agent_hint(text: str) -> str | None:
+    """The agent named in the message, if any — matched against real members
+    by the caller (an unmatched name is ignored, never guessed at)."""
+    normalized = " ".join((text or "").strip().split())
+    for pattern in _AGENT_HINT_PATTERNS:
+        match = pattern.search(normalized)
+        if match:
+            name = match.group("name").strip()
+            if name:
+                return name
+    return None
+
+
+__all__ = [
+    "ChannelCommand",
+    "ChannelCommandKind",
+    "extract_agent_hint",
+    "parse_channel_command",
+]

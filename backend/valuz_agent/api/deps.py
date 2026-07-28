@@ -287,7 +287,10 @@ async def get_settings_service() -> AsyncGenerator[SettingsService, None]:
 
 
 async def get_channel_ingress_service() -> AsyncGenerator[ChannelIngressService, None]:
-    from valuz_agent.adapters.channel_placement_reader import DatastoreAgentPlacementReader
+    from valuz_agent.adapters.channel_placement_reader import (
+        DatastoreAgentPlacementReader,
+        DatastoreProjectMemberReader,
+    )
     from valuz_agent.adapters.channel_session_runner import SessionServiceChannelRunner
     from valuz_agent.modules.channels.datastore import (
         ChannelChatBindingDatastore,
@@ -315,6 +318,9 @@ async def get_channel_ingress_service() -> AsyncGenerator[ChannelIngressService,
             ),
             bindings=ChannelThreadBindingDatastore(db),
             chat_bindings=ChannelChatBindingDatastore(db),
+            project_members=DatastoreProjectMemberReader(
+                members=ProjectMemberDatastore(db)
+            ),
             sessions=SessionServiceChannelRunner(session_service),
         )
 

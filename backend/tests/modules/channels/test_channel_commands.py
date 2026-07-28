@@ -60,3 +60,41 @@ def test_unbind_command_variants(text: str) -> None:
 )
 def test_ordinary_messages_are_not_commands(text: str) -> None:
     assert parse_channel_command(text) is None
+
+
+# ------------------------------------------------------------------ #
+# naming who answers (§4.2)
+# ------------------------------------------------------------------ #
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("@分析师 看看这个", "分析师"),
+        ("让分析师看看这个报表", "分析师"),
+        ("找研究员处理一下", "研究员"),
+        ("agent：分析师", "分析师"),
+        ("助手: 研究员", "研究员"),
+    ],
+)
+def test_agent_hint_variants(text: str, expected: str) -> None:
+    from valuz_agent.modules.channels.commands import extract_agent_hint
+
+    assert extract_agent_hint(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "帮我看看这个报表",
+        "",
+        # Prose that merely contains 让/找 must not name an agent — handing work
+        # to the wrong member is worse than answering as the default.
+        "我们讨论一下让大家分析的那个结论",
+        "这个季度的数据找不到来源",
+    ],
+)
+def test_prose_does_not_name_an_agent(text: str) -> None:
+    from valuz_agent.modules.channels.commands import extract_agent_hint
+
+    assert extract_agent_hint(text) is None
