@@ -59,6 +59,10 @@ class ChannelMentionContext:
     explicit_project_id: str | None = None
     explicit_project_name: str | None = None
     is_top_level_mention: bool = True
+    # 1:1 with the bot. A direct chat is a personal quick chat and must not be
+    # pulled into a project by placement heuristics — only an explicit project
+    # hint or a binding the user made on purpose can do that.
+    is_direct_chat: bool = False
     continuation_hint: bool = False
     explicit_continue_hint: bool = False
     explicit_new_hint: bool = False

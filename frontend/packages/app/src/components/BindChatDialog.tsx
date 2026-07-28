@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Button, FormDialog, Input } from "@valuz/ui";
+import { Button, FormDialog, Input, StatusPill } from "@valuz/ui";
 import {
   channelsApi,
   useTranslation,
@@ -194,16 +194,28 @@ export function BindChatDialog({
                     </div>
                   )}
                 </div>
-                <Button
-                  size="sm"
-                  variant={boundHere ? "outline" : "default"}
-                  disabled={boundHere || saving !== null}
-                  onClick={() => void bind(chat)}
-                >
-                  {boundHere
-                    ? t("project.chatBindingSaved" as Parameters<typeof t>[0])
-                    : t("project.bindChat" as Parameters<typeof t>[0])}
-                </Button>
+                {boundHere ? (
+                  // State, not an action — the tag taxonomy carries it, a
+                  // disabled button only looked like one you may not press.
+                  <StatusPill
+                    // ``connected`` (not ``ok``, which is absent from the tone
+                    // map and falls back to grey) — the group IS connected to
+                    // this project, and the tone map paints that green.
+                    status="connected"
+                    label={t(
+                      "project.chatBindingSaved" as Parameters<typeof t>[0],
+                    )}
+                    className="shrink-0"
+                  />
+                ) : (
+                  <Button
+                    size="sm"
+                    disabled={saving !== null}
+                    onClick={() => void bind(chat)}
+                  >
+                    {t("project.bindChat" as Parameters<typeof t>[0])}
+                  </Button>
+                )}
               </div>
             );
           })}

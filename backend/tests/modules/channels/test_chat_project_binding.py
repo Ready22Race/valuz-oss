@@ -404,3 +404,67 @@ async def test_an_unmatched_name_is_ignored_not_guessed() -> None:
 async def test_plain_message_uses_the_app_binding_agent() -> None:
     sessions = await _route("这个季度收入怎么样", ["helper", "分析师"])
     assert sessions.created[0]["agent_slug"] == "helper"
+
+
+# ------------------------------------------------------------------ #
+# a 1:1 chat is not a project (§2)
+# ------------------------------------------------------------------ #
+
+
+def test_direct_chat_stays_a_quick_chat_even_when_the_agent_is_deployed() -> None:
+    """Deploying an agent to a project is not consent to route every private
+    chat with it into that project — which is what the single-deployment
+    heuristic did, dragging DMs into the project's context and files."""
+    decision = AgentChannelResolver().resolve(
+        _context(is_direct_chat=True),
+        placements=[_placement("proj-a")],
+    )
+    assert decision.project_id == "chat-default"
+    assert decision.reason == "direct_chat_quick_chat"
+
+
+def test_direct_chat_honours_an_explicit_project() -> None:
+    decision = AgentChannelResolver().resolve(
+        _context(is_direct_chat=True, explicit_project_name="proj-a"),
+        placements=[_placement("proj-a")],
+    )
+    assert decision.project_id == "proj-a"
+
+
+def test_direct_chat_honours_a_deliberate_binding() -> None:
+    """Binding a DM is not offered in the UI, but someone who typed
+    绑定项目 X in one meant it."""
+    decision = AgentChannelResolver().resolve(
+        _context(is_direct_chat=True),
+        placements=[_placement("proj-a")],
+        chat_project_id="proj-a",
+    )
+    assert decision.project_id == "proj-a"
+    assert decision.reason == "chat_project_binding"
+
+
+def test_group_chat_still_uses_the_single_deployment_heuristic() -> None:
+    decision = AgentChannelResolver().resolve(
+        _context(is_direct_chat=False),
+        placements=[_placement("proj-a")],
+    )
+    assert decision.project_id == "proj-a"
+    assert decision.reason == "single_deployment"
+
+
+def test_direct_chat_continues_its_own_quick_chat_session() -> None:
+    existing = ChannelThreadBinding(
+        channel_instance_id="feishu-main",
+        external_chat_id="chat-1",
+        external_thread_id="chat-1",
+        agent_slug="helper",
+        project_id="chat-project-7",
+        session_id="session-7",
+    )
+    decision = AgentChannelResolver().resolve(
+        _context(is_direct_chat=True, is_top_level_mention=False),
+        placements=[_placement("proj-a")],
+        existing_binding=existing,
+    )
+    assert decision.kind == ChannelRouteDecisionKind.REUSE_SESSION
+    assert decision.session_id == "session-7"

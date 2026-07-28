@@ -376,3 +376,36 @@ async def test_load_enabled_configs_uses_row_owner_not_local_identity(
     assert configs[0].app_id == "cli_app_1"
     assert configs[0].app_secret == "s3cret"
     assert secret_reads == [("commercial-user-1", "channel/feishu/valuz-helper")]
+
+
+def test_inbound_marks_a_p2p_message_as_a_direct_chat() -> None:
+    """The routing rule that keeps DMs out of projects needs the adapter to
+    say which kind of chat the message came from."""
+    for chat_type, expected in (("p2p", True), ("group", False)):
+        event = P2ImMessageReceiveV1(
+            {
+                "schema": "2.0",
+                "header": {"event_id": "evt-3", "event_type": "im.message.receive_v1"},
+                "event": {
+                    "sender": {"sender_id": {"open_id": "ou-user"}},
+                    "message": {
+                        "message_id": "om-msg-3",
+                        "chat_id": "oc-chat",
+                        "chat_type": chat_type,
+                        "message_type": "text",
+                        "content": json.dumps({"text": "你好"}),
+                    },
+                },
+            }
+        )
+        inbound = inbound_from_sdk_event(
+            event,
+            FeishuLongConnectionConfig(
+                channel_instance_id="feishu-main",
+                owner_user_id="u1",
+                agent_slug="valuz-helper",
+                app_id="cli_app_1",
+                app_secret="app-secret",
+            ),
+        )
+        assert inbound.context.is_direct_chat is expected

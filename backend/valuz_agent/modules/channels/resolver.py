@@ -64,34 +64,27 @@ class AgentChannelResolver:
         by_project_id = {placement.project_id: placement for placement in active_placements}
         wants_continuation = self._wants_continuation(context)
 
-        if not active_placements:
-            # An agent with no project placement still works in the product —
-            # that is exactly a quick chat. Route the turn to an ephemeral chat
-            # project (``CHAT_PROJECT_SENTINEL``, materialized per session by
-            # SessionService) instead of refusing it. Continuation still works:
-            # the thread binding stores the concrete chat project id, which no
-            # longer appears in ``placements``, so it is matched by sentinel
-            # below rather than by placement lookup.
-            if not context.explicit_new_hint and existing_binding is not None:
-                reuse = self._reuse_chat_binding(context, existing_binding)
-                if reuse is not None:
-                    return reuse
-            return self._decision(
-                context,
-                ChannelRouteDecisionKind.NEW_SESSION,
-                project_id=CHAT_PROJECT_SENTINEL,
-                reason="no_deployment_quick_chat",
-            )
-
         explicit = self._select_explicit_project(context, active_placements)
-        if explicit is not None:
-            return self._new_session(context, explicit, reason="explicit_project_match")
-
         # The chat's bound project, when the mentioned agent is actually on that
         # team. A binding pointing at a project the agent was never deployed to
         # is a misconfiguration; falling through to the placement heuristics
         # degrades gracefully instead of failing session creation later.
         bound = by_project_id.get(chat_project_id) if chat_project_id else None
+
+        # Quick chat covers two cases:
+        #  - the agent is deployed nowhere, so there is no project to run in;
+        #  - a 1:1 chat with nothing said about a project. Deployment is not
+        #    consent to route someone's private chat into a project: deploying
+        #    an agent to one project would otherwise silently move every DM
+        #    with it into that project's context and files.
+        # Naming a project, or binding this chat on purpose, still wins.
+        if not active_placements or (
+            context.is_direct_chat and explicit is None and bound is None
+        ):
+            return self._quick_chat_decision(context, existing_binding)
+
+        if explicit is not None:
+            return self._new_session(context, explicit, reason="explicit_project_match")
 
         if not context.explicit_new_hint:
             for binding, reason in (
@@ -142,6 +135,32 @@ class AgentChannelResolver:
             ChannelRouteDecisionKind.ASK_PROJECT,
             reason="multiple_deployments",
             candidates=active_placements,
+        )
+
+    def _quick_chat_decision(
+        self,
+        context: ChannelMentionContext,
+        existing_binding: ChannelThreadBinding | None,
+    ) -> AgentChannelRouteDecision:
+        """Run the turn as a quick chat in an ephemeral project.
+
+        ``CHAT_PROJECT_SENTINEL`` is materialized per session by
+        SessionService. Continuation works through the thread binding, whose
+        project id is a concrete chat project and therefore never appears in
+        ``placements`` — hence the dedicated match below rather than a
+        placement lookup.
+        """
+        if not context.explicit_new_hint and existing_binding is not None:
+            reuse = self._reuse_chat_binding(context, existing_binding)
+            if reuse is not None:
+                return reuse
+        return self._decision(
+            context,
+            ChannelRouteDecisionKind.NEW_SESSION,
+            project_id=CHAT_PROJECT_SENTINEL,
+            reason="direct_chat_quick_chat"
+            if context.is_direct_chat
+            else "no_deployment_quick_chat",
         )
 
     def _reuse_chat_binding(
