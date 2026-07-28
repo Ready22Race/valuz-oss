@@ -701,8 +701,6 @@ export const AgentDetailView = ({
     agent.connector_types.some((slug) => !connectedSlugs.has(slug));
   const aibotBoundToThisAgent =
     aibotBinding?.enabled === true && aibotBinding.agent_slug === agent.slug;
-  const feishuBoundToThisAgent =
-    feishuBinding?.enabled === true && feishuBinding.agent_slug === agent.slug;
   const feishuRuntimeStatus = feishuBinding?.connected
     ? {
         status: "connected",
@@ -1347,31 +1345,13 @@ export const AgentDetailView = ({
                     <BookOpen className="h-4 w-4" />
                   </span>
                   <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <h3 className="text-sm font-medium text-ink-heading">
-                        {t("agent.feishuTitle" as Parameters<typeof t>[0])}
-                      </h3>
-                      {feishuBoundToThisAgent ? (
-                        <StatusPill
-                          status="ok"
-                          label={t(
-                            "agent.feishuBound" as Parameters<typeof t>[0],
-                          )}
-                          className="px-1.5 py-0 text-[10px] leading-4"
-                        />
-                      ) : null}
-                    </div>
+                    <h3 className="text-sm font-medium text-ink-heading">
+                      {t("agent.feishuTitle" as Parameters<typeof t>[0])}
+                    </h3>
                     {feishuBinding?.agent_slug === agent.slug ? (
-                      // Dot + text keeps this line visually lighter than the
-                      // pill tags next to the title (same status → tone map).
+                      // Dot + text: the enabled state is already implied by
+                      // the status label, so no extra "bound" pill.
                       <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-ink-body">
-                        <span>
-                          {t(
-                            "agent.feishuConnectionStatus" as Parameters<
-                              typeof t
-                            >[0],
-                          )}
-                        </span>
                         <span
                           className={`h-1.5 w-1.5 shrink-0 rounded-full ${statusDotClass(
                             !feishuBinding.enabled
