@@ -21,6 +21,9 @@ export interface ChatToolUse {
   input: string;
   output: string | null;
   isError: boolean;
+  /** Tool-scoped reasoning stream (``tool.call.thinking_delta``, live-only).
+   * Kept apart from ``output`` — output is the tool's result stream. */
+  thinking?: string;
 }
 
 export interface ChatMessage {
@@ -615,6 +618,29 @@ export const reduce = (
           ...msg,
           tools: msg.tools.map((t) =>
             t.id === toolId ? { ...t, output: (t.output ?? "") + text } : t,
+          ),
+        };
+      });
+      return {
+        messages: updatedMessages,
+        isStreaming: true,
+        lastSeq: nextLastSeq,
+      };
+    }
+
+    case "tool.call.thinking_delta": {
+      // Tool-scoped reasoning stream (live-only) — same accumulation shape as
+      // output_delta but onto ``thinking``, never ``output`` (the result
+      // stream, e.g. the OpenUI code generate_ui renders progressively).
+      const toolId = payload.tool_use_id ?? "";
+      if (!toolId) return { lastSeq: nextLastSeq };
+      const text = payload.text ?? "";
+      const updatedMessages = state.messages.map((msg) => {
+        if (!msg.tools.some((t) => t.id === toolId)) return msg;
+        return {
+          ...msg,
+          tools: msg.tools.map((t) =>
+            t.id === toolId ? { ...t, thinking: (t.thinking ?? "") + text } : t,
           ),
         };
       });

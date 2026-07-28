@@ -641,6 +641,29 @@ describe("buildTurns — tool input/output streaming", () => {
     expect(tool?.tool.output).toBe("line 1\nline 2\n");
   });
 
+  it("accumulates thinking_delta onto the card's thinking, never its output", () => {
+    // Tool-scoped reasoning stream (ephemeral generate_ui thinking forwarded
+    // onto the calling session). Must land on ``thinking`` — ``output`` is the
+    // tool's result stream (the OpenUI code the renderer paints) and mixing
+    // reasoning text into it would corrupt the progressive render.
+    const turns = buildTurns([
+      evt(1, "message.user", { text: "run", message_id: "u1" }),
+      evt(2, "tool.call.started", {
+        tool_use_id: "t1",
+        name: "mcp__harness__generate_ui",
+        message_id: "a1",
+      }),
+      evt(3, "tool.call.thinking_delta", { tool_use_id: "t1", text: "plan " }),
+      evt(4, "tool.call.thinking_delta", { tool_use_id: "t1", text: "layout" }),
+      evt(5, "tool.call.output_delta", { tool_use_id: "t1", text: "root = " }),
+    ]);
+
+    const tool = toolBlock(turns[0]!);
+    expect(tool?.tool.status).toBe("running");
+    expect(tool?.tool.thinking).toBe("plan layout");
+    expect(tool?.tool.output).toBe("root = ");
+  });
+
   it("lets completed replace streamed output with the canonical aggregated output", () => {
     const turns = buildTurns([
       evt(1, "message.user", { text: "run", message_id: "u1" }),

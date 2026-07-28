@@ -83,6 +83,28 @@ describe("GenerativeUICard", () => {
     render(<GenerativeUICard openui={"Chart"} status="success" />);
     expect(screen.getByTestId("renderer").getAttribute("data-streaming")).toBe("false");
   });
+
+  it("streams the reasoning while running, replacing the bare generating placeholder", () => {
+    render(
+      <GenerativeUICard openui={undefined} status="running" thinking={"planning the layout"} />,
+    );
+    const el = screen.getByTestId("genui-thinking");
+    expect(el.textContent).toBe("planning the layout");
+    // The reasoning section IS the progress surface — no second spinner row.
+    expect(screen.queryByTestId("genui-empty")).toBeNull();
+  });
+
+  it("keeps the reasoning visible alongside the progressive render", () => {
+    render(<GenerativeUICard openui={"Chart"} status="running" thinking={"still going"} />);
+    expect(screen.getByTestId("genui-thinking").textContent).toBe("still going");
+    expect(screen.getByTestId("renderer").textContent).toBe("Chart");
+  });
+
+  it("drops the reasoning once the tool completes", () => {
+    render(<GenerativeUICard openui={"Chart"} status="success" thinking={"planning"} />);
+    expect(screen.queryByTestId("genui-thinking")).toBeNull();
+    expect(screen.getByTestId("renderer").textContent).toBe("Chart");
+  });
 });
 
 describe("extractContentText", () => {
