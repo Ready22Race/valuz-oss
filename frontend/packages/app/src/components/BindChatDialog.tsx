@@ -54,7 +54,13 @@ export function BindChatDialog({
 
   const refreshChats = useCallback(async (): Promise<void> => {
     try {
-      setChats(await channelsApi.listFeishuChats());
+      const rows = await channelsApi.listFeishuChats();
+      // Same order the panel uses, so one set of groups reads as one list.
+      setChats(
+        [...rows].sort((a, b) =>
+          a.name.toLowerCase().localeCompare(b.name.toLowerCase()),
+        ),
+      );
     } catch (err) {
       setChats([]);
       toast.error(

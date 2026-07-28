@@ -318,8 +318,6 @@ class ChatProjectBindingResponse(BaseModel):
     platform: str = FEISHU_PLATFORM
     # Only a group Valuz created may be deleted from here — the bot owns it.
     created_by_valuz: bool = False
-    # …and nobody has joined it yet, so a join link is the only way in.
-    needs_join: bool = False
 
 
 class ChatProjectBindingUpdate(BaseModel):
@@ -367,6 +365,29 @@ async def list_feishu_chats(
         chats = await fetch(app_id=binding.bot_id, app_secret=secret.app_secret)
     except ChannelConfigError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    # The picker already pays for the live answer, so it is where the stored
+    # flag catches up — including for rows bound before the flag existed. The
+    # panel then needs no Feishu call of its own.
+    live_by_id = {chat.chat_id: chat for chat in chats}
+    stale = [
+        row
+        for row in bound.values()
+        if getattr(live_by_id.get(row.external_chat_id), "bot_owned", False)
+        and not row.created_by_valuz
+    ]
+    if stale:
+        async with async_unit_of_work() as db:
+            chat_ds = ChannelChatBindingDatastore(db)
+            for row in stale:
+                await chat_ds.upsert(
+                    user_id=user_id,
+                    channel_instance_id=row.channel_instance_id,
+                    external_chat_id=row.external_chat_id,
+                    project_id=row.project_id,
+                    default_agent_slug=row.default_agent_slug,
+                    created_by_valuz=True,
+                )
     return [
         ChannelChatItem(
             external_chat_id=chat.chat_id,
@@ -468,8 +489,14 @@ async def list_chat_bindings(
             if project_id
             else await ds.list_all(user_id=user_id)
         )
-    enriched = await _enrich_bindings(user_id, list(rows))
-    return [_chat_binding_response(row, live) for row, live in enriched]
+        # By name, which is also how the picker sorts — the same groups in two
+        # different orders read as two different lists.
+        rows = sorted(rows, key=lambda row: (row.external_chat_name or "").lower())
+    # Straight from the database: the panel loads on every project open, and
+    # hanging it on live Feishu calls made it slow enough for the client to
+    # give up, which renders as an empty panel. The picker keeps the stored
+    # facts fresh instead.
+    return [_chat_binding_response(row) for row in rows]
 
 
 @router.put("/chat-bindings", response_model=ChatProjectBindingResponse)
@@ -638,9 +665,7 @@ async def unbind_chat(
         raise HTTPException(status_code=404, detail="chat binding not found")
 
 
-def _chat_binding_response(
-    binding: Any, live: Any = None
-) -> ChatProjectBindingResponse:
+def _chat_binding_response(binding: Any) -> ChatProjectBindingResponse:
     return ChatProjectBindingResponse(
         channel_instance_id=binding.channel_instance_id,
         external_chat_id=binding.external_chat_id,
@@ -648,12 +673,7 @@ def _chat_binding_response(
         external_chat_name=binding.external_chat_name,
         default_agent_slug=binding.default_agent_slug,
         platform=_platform_of(binding.channel_instance_id),
-        # Ownership is what Feishu enforces for dissolving a group, and it
-        # also covers rows bound before the flag existed.
-        created_by_valuz=bool(getattr(live, "bot_owned", False))
-        or bool(getattr(binding, "created_by_valuz", False)),
-        needs_join=bool(getattr(live, "bot_owned", False))
-        and not getattr(live, "has_people", True),
+        created_by_valuz=bool(getattr(binding, "created_by_valuz", False)),
     )
 
 
@@ -669,75 +689,6 @@ def _platform_of(channel_instance_id: str) -> str:
         if channel_instance_id.startswith("wecom")
         else FEISHU_PLATFORM
     )
-
-
-async def _enrich_bindings(user_id: str, rows: list[Any]) -> list[Any]:
-    """Name the nameless rows and answer what each row can offer.
-
-    Two things the stored binding cannot say on its own: a binding made with
-    ``绑定项目 X`` starts nameless (the message event carries no group name),
-    and whether anyone has joined a Valuz-created group. Both come from one
-    pass over the bot's chats, so the panel offers exactly what the picker
-    does. Best-effort throughout — a nameless row beats a failed panel.
-    """
-    from valuz_agent.integrations.feishu_long_connection import (
-        list_feishu_chats as fetch,
-    )
-
-    if not rows:
-        return []
-    async with async_unit_of_work() as db:
-        binding = next(
-            iter(
-                await AgentChannelBindingDatastore(db).list_enabled(
-                    platform=FEISHU_PLATFORM, user_id=user_id
-                )
-            ),
-            None,
-        )
-        secret = (
-            _read_feishu_secret(user_id=user_id, secret_ref=binding.secret_ref)
-            if binding is not None
-            else _FeishuSecretPayload()
-        )
-    if binding is None or not secret.app_secret:
-        return [(row, None) for row in rows]
-    try:
-        live = {
-            chat.chat_id: chat
-            for chat in await fetch(
-                app_id=binding.bot_id, app_secret=secret.app_secret
-            )
-        }
-    except Exception:  # noqa: BLE001 - a nameless row beats a failed panel
-        return [(row, None) for row in rows]
-
-    # Follow the order the bot's chat list comes back in, which is what the
-    # picker shows — the same groups in a different sequence on two surfaces
-    # reads as two different lists.
-    order = {chat_id: index for index, chat_id in enumerate(live)}
-    rows = sorted(rows, key=lambda row: order.get(row.external_chat_id, len(order)))
-
-    named: list[Any] = []
-    async with async_unit_of_work() as db:
-        ds = ChannelChatBindingDatastore(db)
-        for row in rows:
-            chat = live.get(row.external_chat_id)
-            if row.external_chat_name or chat is None:
-                named.append(row)
-                continue
-            # Persist the name so the lookup happens once, not every load.
-            named.append(
-                await ds.upsert(
-                    user_id=user_id,
-                    channel_instance_id=row.channel_instance_id,
-                    external_chat_id=row.external_chat_id,
-                    project_id=row.project_id,
-                    default_agent_slug=row.default_agent_slug,
-                    external_chat_name=chat.name,
-                )
-            )
-    return [(row, live.get(row.external_chat_id)) for row in named]
 
 
 def _wecom_aibot_binding_response(

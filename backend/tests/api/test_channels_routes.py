@@ -375,72 +375,45 @@ def test_create_feishu_chat_creates_binds_and_returns_the_join_link(monkeypatch)
     assert bound[0]["external_chat_name"] == "研究群"
 
 
-def test_list_chat_bindings_backfills_names_and_labels_the_platform(monkeypatch) -> None:
-    """A binding made with an in-chat command starts nameless (the message
-    event carries no group name), so the UI would show a raw chat id. One list
-    call names every such row, and the name is persisted."""
-    _FakeAgentChannelBindingDatastore.binding = SimpleNamespace(
-        id="binding-1",
-        owner_user_id="u1",
-        platform="feishu",
-        channel_instance_id="feishu-main",
-        agent_slug="developer",
-        bot_id="cli_app_1",
-        secret_ref="channel/feishu/developer",
-        enabled=True,
-        bot_name=None,
-        ws_url=None,
-    )
-    saved = {
-        ("u1", "channel/feishu/developer"): json.dumps({"app_secret": "app-secret"})
-    }
-    nameless = SimpleNamespace(
-        channel_instance_id="feishu-main",
-        external_chat_id="oc-1",
-        project_id="proj-a",
-        external_chat_name=None,
-        default_agent_slug=None,
-    )
-    persisted: list[dict] = []
+def test_list_chat_bindings_reads_the_database_and_sorts_by_name(monkeypatch) -> None:
+    """The panel loads on every project open, so it answers from stored rows
+    alone — hanging it on live Feishu calls made it slow enough for the client
+    to give up, which renders as an empty panel. Order is by name, the same
+    order the picker shows."""
+    rows = [
+        SimpleNamespace(
+            channel_instance_id="feishu-main",
+            external_chat_id="oc-2",
+            project_id="proj-a",
+            external_chat_name="研究群",
+            default_agent_slug=None,
+            created_by_valuz=True,
+        ),
+        SimpleNamespace(
+            channel_instance_id="wecom-aibot-main",
+            external_chat_id="oc-1",
+            project_id="proj-a",
+            external_chat_name="Alpha",
+            default_agent_slug=None,
+            created_by_valuz=False,
+        ),
+    ]
 
     class _FakeChatBindings:
         def __init__(self, _db: object) -> None:
             pass
 
         async def list_all(self, *, user_id: str) -> list:
-            return [nameless]
+            return rows
 
-        async def upsert(self, **kwargs):
-            persisted.append(kwargs)
-            return SimpleNamespace(
-                channel_instance_id=kwargs["channel_instance_id"],
-                external_chat_id=kwargs["external_chat_id"],
-                project_id=kwargs["project_id"],
-                external_chat_name=kwargs["external_chat_name"],
-                default_agent_slug=kwargs["default_agent_slug"],
-            )
-
-    async def fake_list(*, app_id: str, app_secret: str):
-        from valuz_agent.integrations.feishu_long_connection import FeishuChat
-
-        return [
-            FeishuChat(chat_id="oc-1", name="研究群", bot_owned=False),
-            FeishuChat(chat_id="oc-2", name="别的群", bot_owned=False),
-        ]
+    async def exploding_list(**_kwargs):  # pragma: no cover
+        raise AssertionError("the panel must not call Feishu")
 
     monkeypatch.setattr(channels_routes, "async_unit_of_work", lambda: _Uow())
-    monkeypatch.setattr(
-        channels_routes,
-        "AgentChannelBindingDatastore",
-        _FakeAgentChannelBindingDatastore,
-    )
     monkeypatch.setattr(channels_routes, "ChannelChatBindingDatastore", _FakeChatBindings)
-    monkeypatch.setattr(
-        channels_routes.secret_store, "get", lambda user_id, ref: saved.get((user_id, ref))
-    )
     import valuz_agent.integrations.feishu_long_connection as feishu_mod
 
-    monkeypatch.setattr(feishu_mod, "list_feishu_chats", fake_list)
+    monkeypatch.setattr(feishu_mod, "list_feishu_chats", exploding_list)
 
     app = FastAPI()
     app.include_router(channels_routes.router)
@@ -448,9 +421,9 @@ def test_list_chat_bindings_backfills_names_and_labels_the_platform(monkeypatch)
 
     body = TestClient(app).get("/v1/channels/chat-bindings").json()
 
-    assert body[0]["external_chat_name"] == "研究群"
-    assert body[0]["platform"] == "feishu"
-    assert persisted[0]["external_chat_name"] == "研究群"
+    assert [row["external_chat_name"] for row in body] == ["Alpha", "研究群"]
+    assert [row["platform"] for row in body] == ["wecom_aibot", "feishu"]
+    assert [row["created_by_valuz"] for row in body] == [False, True]
 
 
 def test_delete_feishu_chat_refuses_a_group_valuz_did_not_create(monkeypatch) -> None:

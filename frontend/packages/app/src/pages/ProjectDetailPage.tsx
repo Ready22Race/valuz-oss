@@ -1079,9 +1079,10 @@ export const ProjectDetailPage = () => {
         })),
       );
     } catch {
-      // A channel-less install (no bot configured) simply has no bindings —
-      // an error here must not disturb the project page.
-      setChatBindings([]);
+      // A channel-less install simply has no bindings, and a failed refresh
+      // should leave what is on screen alone — blanking the list made a
+      // transient error look like every binding had vanished.
+      setChatBindings((current) => current);
     }
   }, [id]);
 

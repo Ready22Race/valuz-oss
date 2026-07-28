@@ -2422,7 +2422,10 @@ export const ProjectDetailContextPanel = ({
               ))}
             </div>
           ) : (
-            <p className="px-2 py-2 text-xs text-ink-meta">
+            // Matches the knowledge-base empty state: same type scale, same
+            // flush alignment. Two empty states in one panel should not read
+            // as two different components.
+            <p className="text-2xs text-ink-meta">
               {t("project.chatBindingsEmpty" as Parameters<typeof t>[0])}
             </p>
           )}
