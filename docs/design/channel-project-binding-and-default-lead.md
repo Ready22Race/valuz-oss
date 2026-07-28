@@ -1,302 +1,253 @@
-# Channel ↔ Project Binding and Default Lead
+# 通道 ↔ 项目绑定与项目默认 lead
 
-> Status: **proposed** · 2026-07-28
-> Extends [agent-channel-routing.md](agent-channel-routing.md), which fixed the
-> first rule of the channel layer — *a channel belongs to an agent identity; the
-> project is resolved at message time*. This note answers the two questions that
-> rule left open once people actually work in an IM group:
+> 状态：**方案待评审** · 2026-07-28
+> 承接 [agent-channel-routing.md](agent-channel-routing.md)。那份文档定下了通道层的第一条规则
+> ——**通道绑定的是 agent 身份，项目在消息到达时解析**。等飞书通道真正承载起日常对话之后，
+> 这条规则留下的两个问题必须回答：
 >
-> 1. How does a Feishu/WeCom group come to mean one Valuz project?
-> 2. When a project holds a team of agents, who answers, and who leads a task?
+> 1. 一个飞书/企微群，凭什么就等于某一个 Valuz 项目？
+> 2. 项目里是一个 agent 团队时，谁来应答，谁来当任务的 lead？
 
 ---
 
-## 1. Problem
+## 1. 问题
 
-A Valuz project is a **team**: several member agents, plus tasks that need a
-**lead**. A chat in the app picks an agent explicitly; creating a task picks a
-lead explicitly. An IM group has neither picker — there is only a text box.
+Valuz 的项目是一个**团队**：若干成员 agent，加上需要指定 **lead** 的任务。桌面端开对话要选
+一个 agent，建任务要选一个 lead。而 IM 群里没有任何选择器，只有一个输入框。
 
-Today the channel layer collapses three distinct roles into one:
+今天通道层把三个本该分开的角色压成了一个：
 
-| Role | What it decides | Today |
+| 角色 | 决定什么 | 现状 |
 |---|---|---|
-| Channel identity | who represents Valuz inside Feishu | the bot = one Feishu app |
-| Conversation agent | who answers this message | hard-wired to the app's bound agent |
-| Task lead | who leads a multi-step task | defaults to the conversation agent |
+| 通道身份 | 谁在飞书里代表 Valuz | 就是 bot（一个飞书应用） |
+| 对话执行者 | 谁回答这条消息 | 写死为该应用绑定的那个 agent |
+| 任务 lead | 谁领导多步任务 | 默认取当前对话 agent |
 
-The visible consequence: pull the helper bot into a project group and it becomes
-the lead of everything, regardless of which member agent is actually suited to
-the work.
+直接后果：把小助手拉进项目群，它就成了所有事情的 lead，哪怕项目里另有更合适的成员。
 
-Two shapes were rejected before landing on this design:
+在落到本方案之前，有两个形态被否掉了：
 
-- **One bot per project** — a bot is an *app*: created in the Feishu admin
-  console, permissioned, published, and its credentials pasted into Valuz. That
-  is an administrator action, while projects are created casually. N projects
-  would mean N apps, N long connections, N credential sets.
-- **A default lead stored on the channel binding** — the "who leads" question is
-  not a property of the chat. It is a property of the project, and the desktop
-  app needs the same answer when creating a task from the UI.
+- **每个项目一个 bot** —— bot 是**应用**：要在飞书开放平台建应用、配权限、发版，再把凭证填回
+  Valuz，这是管理员动作；而项目是随手新建的东西。N 个项目就是 N 个应用、N 条长连接、N 份凭证，
+  成本完全不成比例。
+- **把默认 lead 存在通道绑定上** —— "谁来牵头"不是聊天窗口的属性，而是项目的属性；桌面端从 UI
+  建任务时需要同一个答案。
 
-## 2. Model
+## 2. 模型
 
-**A group is a project. A bot is an entrance, not a worker. A project names its
-own default lead.**
+**群就是项目；bot 是入口，不是干活的人；项目自己指定默认 lead。**
 
 ```
-Feishu group ──binds to──► Valuz project ──names──► default lead agent
-     │                          │
-     │                          └── members: agent A, agent B, helper …
-     │
-     └── bot (app) = the entrance; the agent that answers is resolved per turn
+飞书群 ──绑定──► Valuz 项目 ──指定──► 默认 lead agent
+  │                  │
+  │                  └── 成员：agent A、agent B、小助手 …
+  │
+  └── bot（应用）= 入口；具体谁应答，按轮解析
 ```
 
-Direct 1:1 chats with the bot stay what they are today: a personal quick chat,
-with no project (see the quick-chat fallback in `AgentChannelResolver`).
+与 bot 的一对一单聊维持现状：个人快速对话，不归属任何项目（见 `AgentChannelResolver` 里的
+quick-chat 回落）。
 
-### 2.1 What already supports this
+### 2.1 现有实现已经支持的部分
 
-Verified against the current implementation — none of it needs redesign:
+以下均已对照当前代码核实，无需重新设计：
 
-- The route key is
-  `(channel_instance_id, external_chat_id, external_thread_id, agent_slug, project_id)`.
-  **Both `agent_slug` and `project_id` are already in the key**, so one chat
-  keeps an independent session lineage per (agent, project). Switching agent or
-  project is switching lineage; switching back resumes the earlier session
-  rather than starting over.
-- `ChannelThreadBindingDatastore.get_for_thread` returns the most recently
-  updated lineage for the chat, which makes "the last thing you worked on" the
-  natural continuation target.
-- `_extract_project_hint` already parses `项目：X` / `project: X` from message
-  text, and `AgentChannelResolver` matches it against placement project names
-  with normalization.
-- With several placements and no hint, the resolver returns `ASK_PROJECT` and
-  the runner replies with the candidate project names.
-- `create_task` already accepts a `lead_agent` argument — a task's lead does not
-  have to be the conversation agent.
-- The Feishu SDK exposes everything the binding flows need: `im.v1.chat.alist`
-  (groups the bot is in), `im.v1.chat.aget` (group name),
-  `im.chat.member.bot.added_v1` (bot pulled into a group), and
-  `card.action.trigger` (card button callbacks).
+- 路由 key 是
+  `(channel_instance_id, external_chat_id, external_thread_id, agent_slug, project_id)`。
+  **`agent_slug` 和 `project_id` 本来就在 key 里**，因此同一个聊天窗口天然按 (agent, 项目)
+  维持各自独立的会话线：切 agent 或切项目就是切换会话线，切回来会恢复原会话，而不是从头开始。
+- `ChannelThreadBindingDatastore.get_for_thread` 返回该聊天中最近更新的那条会话线，
+  于是"最近在做的那件事"自然成为续聊目标。
+- `_extract_project_hint` 已能解析消息里的 `项目：X` / `project: X`，
+  `AgentChannelResolver` 会把它与派驻项目名做归一化匹配。
+- 派驻了多个项目又没给提示时，resolver 返回 `ASK_PROJECT`，runner 会回复候选项目名。
+- `create_task` 已经接受 `lead_agent` 参数 —— 任务的 lead 本来就不必是当前对话 agent。
+- 飞书 SDK 已提供绑定流程所需的全部接口：`im.v1.chat.alist`（bot 所在的群）、
+  `im.v1.chat.aget`（群名）、`im.chat.member.bot.added_v1`（bot 被拉进群）、
+  `card.action.trigger`（卡片按钮回调）。
 
-### 2.2 What is missing
+### 2.2 缺失的部分
 
-1. No persistent **chat → project** binding. Project membership of a chat is
-   inferred from "most recently used lineage", which cannot be inspected,
-   changed, or reasoned about.
-2. No **project default lead**. `create_task` falls back to the conversation
-   agent, which is why the helper leads everything.
-3. No way to **choose the answering agent** in a chat: `agent_slug` comes from
-   the app binding and never varies.
+1. 没有持久化的**「聊天 → 项目」绑定**。项目归属只能靠"最近用过哪条会话线"推断，既看不见、
+   也改不了、更无从判断对错。
+2. 没有**项目默认 lead**。`create_task` 回落到当前对话 agent，这正是小助手包揽 lead 的原因。
+3. 没有**选择应答 agent** 的手段：`agent_slug` 取自应用绑定，恒定不变。
 
 ---
 
-## 3. Data model
+## 3. 数据模型
 
-### 3.1 Project default lead (project module)
+### 3.1 项目默认 lead（projects 模块）
 
 ```
 valuz_project
-  + default_lead_agent_slug: str | None     -- project-local member slug
+  + default_lead_agent_slug: str | None     -- 项目内的成员 slug
 ```
 
-Stored on the **project row**, not as an `is_default_lead` flag on
-`valuz_project_member`. "A project has at most one default lead" is then true by
-construction; a flag on the member table would need a partial unique index or
-application-level upkeep, and would fail open to two leads or none.
+存在**项目行**上，而不是在 `valuz_project_member` 上加 `is_default_lead` 布尔位。这样
+"一个项目至多一个默认 lead"是**结构性成立**的；放成员表则需要 partial unique index 或应用层
+维护，且失败方向是"两个 lead 或一个都没有"。
 
-Dangling-pointer rules:
+悬垂指针的处理：
 
-- On read, verify the slug is still a member of that project; if not, fall
-  through the resolution chain (§4.3) as if unset.
-- On member removal, clear the column when it pointed at the removed member.
+- 读取时校验该 slug 仍是该项目成员；若不是，按 §4.3 的回落链继续，视同未设置。
+- 移除成员时，若它正是默认 lead，顺带清空该列。
 
-This column is **not channel-specific**. The desktop task-creation UI should
-preselect it too — that is the main reason it belongs to the project model
-rather than to a channel binding.
+这一列**与通道无关**。桌面端建任务的 UI 也应当用它做预选 —— 这正是它属于项目模型、而不属于
+通道绑定的根本原因。
 
-### 3.2 Chat → project binding (channels module)
+### 3.2 聊天 → 项目绑定（channels 模块）
 
 ```
 valuz_channel_chat_binding
-  user_id                str      -- owner (the Valuz install)
+  user_id                str      -- 归属人（这台 Valuz 的所有者）
   channel_instance_id    str
   external_chat_id       str
   project_id             str
-  default_agent_slug     str|None -- who answers by default in this chat
-  external_chat_name     str|None -- cached for display in the Valuz UI
-  bound_by_external_user str|None -- audit: which IM user bound it
+  default_agent_slug     str|None -- 该聊天里默认由谁应答
+  external_chat_name     str|None -- 缓存群名，供 Valuz 端展示
+  bound_by_external_user str|None -- 审计：哪个 IM 用户建立的绑定
   UNIQUE (user_id, channel_instance_id, external_chat_id)
 ```
 
-One chat binds to exactly one project — otherwise "group = project" does not
-hold. A project may be bound from several groups (an internal group and a client
-group, say); their sessions stay independent and do not share context, which the
-UI must state plainly.
+一个聊天只能绑一个项目，否则"群 = 项目"这个前提就不成立。反过来，**一个项目可以被多个群绑定**
+（比如内部群和客户群），但它们的会话彼此独立、不共享上下文 —— 这一点必须在 UI 上明确写出来。
 
-`default_agent_slug` is optional and defaults to the app binding's agent. It
-exists so a group can be pointed straight at a specialist ("this group talks to
-the analyst") instead of always entering through the helper.
+`default_agent_slug` 可选，缺省取应用绑定的 agent。它的存在是为了让某个群可以直接指向专业成员
+（"这个群找分析师说话"），而不必每次都从小助手进入。
 
 ---
 
-## 4. Resolution
+## 4. 解析顺序
 
-### 4.1 Project
-
-```
-explicit hint in the message (项目：X)
-  > chat → project binding
-  > single placement of the mentioned agent (auto)
-  > several placements → ASK_PROJECT (reply lists candidates)
-  > no placement → quick chat (ephemeral chat project)
-```
-
-The binding slots in above the placement heuristics: once a group is bound,
-placement ambiguity stops being a question anyone is asked.
-
-### 4.2 Answering agent
+### 4.1 项目
 
 ```
-agent named in the message ("让分析师看看这个")
-  > chat binding's default_agent_slug
-  > the app binding's agent (today's behaviour)
+消息里的显式提示（项目：X）
+  > 聊天 → 项目绑定
+  > 该 agent 只派驻在一个项目（自动选中）
+  > 派驻多个 → ASK_PROJECT（回复列出候选）
+  > 未派驻 → 快速对话（临时 chat 项目）
 ```
 
-Naming an agent switches lineage, so each agent keeps its own thread of
-conversation inside the group and switching back resumes it. Parsing mirrors
-`_extract_project_hint`: a small `_extract_agent_hint` matching member slugs and
-display names of the resolved project, normalized the same way. A card with
-member buttons is the non-typing equivalent and shares the resolution path.
+绑定插在派驻推断之上：群一旦绑定，"到底是哪个项目"就不再需要问任何人。
 
-### 4.3 Task lead
+### 4.2 应答 agent
 
 ```
-lead named by the user / picked in a card
-  > project.default_lead_agent_slug (when still a member)
-  > the conversation agent            (today's behaviour, kept as a floor)
+消息里点名的 agent（"让分析师看看这个"）
+  > 聊天绑定的 default_agent_slug
+  > 应用绑定的 agent（今天的行为）
 ```
 
-Applies to **both** launcher paths — `create_task` (argument `lead_agent`) and
-`draft_task` (argument `lead_agent_slug`, currently required). They must share
-one resolution helper; two launchers disagreeing about who leads is the kind of
-inconsistency that is very hard to diagnose from a chat transcript.
+点名 agent 即切换会话线，因此群里每个 agent 各自保有一条对话脉络，切回去能恢复。解析方式对齐
+`_extract_project_hint`：新增一个 `_extract_agent_hint`，按同样的归一化规则匹配当前项目的成员
+slug 与显示名。列出成员按钮的卡片是它的"免打字"等价物，走同一条解析路径。
 
-When a project has no default lead and the conversation agent is the helper, the
-turn still runs with the helper as lead. Refusing would break the most common
-first contact ("pull the bot in and ask something"); instead the project page
-flags projects with no default lead.
+### 4.3 任务 lead
+
+```
+用户点名 / 卡片选定的 lead
+  > project.default_lead_agent_slug（且仍是该项目成员）
+  > 当前对话 agent（今天的行为，保留为兜底）
+```
+
+**两个启动入口都要遵循**：`create_task`（参数 `lead_agent`）与 `draft_task`（参数
+`lead_agent_slug`，目前必填）必须共用同一个解析器。两个入口对"谁当 lead"给出不同答案，是那种
+从聊天记录里极难诊断的不一致。
+
+当项目未设默认 lead、且当前对话 agent 就是小助手时，仍照常执行（小助手当 lead），不做拒绝 ——
+硬拒绝会让"把 bot 拉进群随口问一句"这个最常见的首次接触直接失败，代价过大；改为在项目页对未设
+默认 lead 的项目给出提示。
 
 ---
 
-## 5. Binding flows
+## 5. 绑定的建立方式
 
-Three ways to establish a group ↔ project mapping, in order of priority.
+建立「群 ↔ 项目」对应关系的三条路径，按优先级排列。
 
-### A. From the Valuz project page (primary)
+### A. 从 Valuz 项目页绑定（主路径）
 
-Project detail gains a *Feishu group* control listing the groups the bot is in
-(`im.v1.chat.alist` → chat id + name); pick one to bind. Binding is a
-configuration act, and only the Valuz side has the global view: which project is
-bound to which group, and the ability to rebind or unbind.
+项目详情页新增「飞书群」控件，列出 bot 当前所在的群（`im.v1.chat.alist` 拿 chat id 与群名），
+选中即绑定。绑定本质是配置行为，而只有 Valuz 侧具备全局视角：哪个项目绑了哪个群，以及改绑、
+解绑的能力。
 
-Full user journey: **create the group in Feishu → add the bot → return to the
-Valuz project page → pick that group.**
+完整动线：**在飞书建群 → 把 bot 拉进群 → 回到 Valuz 项目页选中该群。**
 
-### C. Guided binding when the bot joins (best first-run experience)
+### C. bot 入群时引导绑定（首次体验最佳）
 
-Subscribe to `im.chat.member.bot.added_v1`. The moment the bot is added to a
-group it posts a card — "Which project should this group work on?" — with a
-button per project. The click arrives as `card.action.trigger`, writes the
-binding, and the card updates in place to "bound to X". No typing, no switching
-back to the desktop app.
+订阅 `im.chat.member.bot.added_v1`。bot 一被拉进群就发一张卡片 —— "这个群要绑定到哪个项目？"
+—— 每个项目一个按钮。点击以 `card.action.trigger` 回调到达，写入绑定，卡片原地更新为"已绑定到
+XX"。全程不打字，也不用切回桌面端。
 
-### B. Text commands (cheap complement)
+### B. 群内文本指令（低成本补充）
 
-`绑定项目 X` · `当前项目` · `解绑`, reusing the existing normalized project-name
-matching. On a miss, reply with the candidate card from flow C rather than an
-error.
+`绑定项目 X` · `当前项目` · `解绑`，复用既有的项目名归一化匹配。匹配不中时，回一张路径 C 的候选
+卡片，而不是报错。
 
-Recommended scope: **A + C together** (C is the on-ramp, A is the manageable
-surface), with B added because it costs almost nothing.
+建议范围：**A + C 一起做**（C 是入口引导，A 是可管理的配置面），B 因为成本几乎为零而顺带加上。
 
 ---
 
-## 6. The helper agent's role
+## 6. 小助手的定位
 
-With a project default lead in place, the helper becomes a **receptionist**:
-it relays work and reports status, and does not execute.
+有了项目默认 lead 之后，小助手成为**前台**：负责转达工作与汇报状态，不亲自执行。
 
-Its tool set already exists — `create_task` (hand off), `list_tasks` /
-`get_task` (report progress). Two things make the role real:
+它需要的工具已经现成 —— `create_task`（转达）、`list_tasks` / `get_task`（汇报进度）。让这个
+角色真正成立只需两件事：
 
-1. the lead resolution chain of §4.3, so handing off without naming a lead
-   reaches the project's default lead instead of the helper itself;
-2. instructions that say plainly: *you do not perform the work yourself; on a
-   work request call `create_task`; answer only status and information
-   questions*.
+1. §4.3 的 lead 回落链，使"转达时不点名 lead"落到项目默认 lead，而不是它自己；
+2. instructions 里写明：**你不亲自执行工作**；收到干活类请求就调 `create_task`；只回答状态与
+   信息类问题。
 
-If the helper should also answer "who is on this project / what files are here /
-what is in the knowledge base", that needs read tools beyond the three above.
-Not a blocker — it can follow.
+如果还希望小助手能回答"这个项目有哪些成员 / 有哪些文件 / 知识库里有什么"，则需要上述三个之外的
+读取类工具。这不构成阻塞，可以后补。
 
 ---
 
-## 7. Permission boundary (decide before shipping groups)
+## 7. 权限边界（做群绑定之前必须定）
 
-The channel binding row carries the `user_id` of the Valuz install. **Every
-message from the group executes as that user** — reading and writing that
-person's project directory, spending their model quota, touching their knowledge
-base. Adding the bot to a group therefore means opening those projects to every
-member of the group.
+通道绑定行上记录的是这台 Valuz 所有者的 `user_id`。**群里任何人发的消息都以该用户身份执行** ——
+读写他的项目目录、消耗他的模型额度、动他的知识库。因此"把 bot 拉进群"实质等于"把这些项目的操作
+权开放给全体群成员"。
 
-Acceptable for single-user self-hosting; a real boundary for a team group. At
-minimum:
+单人自用没有问题；一旦是真实团队群，这就是一条明确的安全边界。至少要做到：
 
-- state it at binding time, in both flow A and flow C;
-- restrict who may bind — for example only commands from an IM account
-  associated with the Valuz owner (via `external_user_id` and a one-time binding
-  code) may create or change a binding.
+- 在路径 A 与路径 C 的绑定环节明确提示这件事；
+- 限制谁可以绑定 —— 例如只有与 Valuz 所有者关联的 IM 账号（通过 `external_user_id` 加一次性
+  绑定码建立关联）发出的指令才允许建立或修改绑定。
 
-A finer model (per-IM-user identity mapped to Valuz users, per-project sharing)
-is out of scope here and belongs to the commercial identity layer.
+更细的模型（IM 用户逐一映射到 Valuz 用户、按项目授权）不在本文范围内，属于商业版身份层。
 
 ---
 
-## 8. Out of scope: one app, many agents
+## 8. 不在本方案范围：一个应用承载多个 agent
 
-A Feishu app still binds to exactly one agent
-(`valuz_agent_channel_binding` is unique on `(user_id, platform, agent_slug)`,
-one long connection per binding). So a project group wanting several agents to
-be individually addressable as bots would need one app per agent — the same
-cost problem as one bot per project, on a different axis.
+一个飞书应用目前只能绑定一个 agent（`valuz_agent_channel_binding` 在
+`(user_id, platform, agent_slug)` 上唯一，每条绑定各起一条长连接）。因此，若希望项目群里多个
+agent 都能作为独立 bot 被 @ 到，就得一个 agent 一个应用 —— 与"每个项目一个 bot"是同一个成本
+问题，只是换了一个维度。
 
-This design deliberately avoids depending on that: agent selection happens
-*inside* one bot's conversation (§4.2), not by mentioning different bots. Making
-one app carry many agents is a larger change to the binding model and message
-routing, worth doing on its own merits later.
+本方案刻意不依赖那件事：agent 的选择发生在**同一个 bot 的对话内部**（§4.2），而不是靠 @ 不同的
+bot。把一个应用改造成承载多 agent，涉及绑定模型与消息路由的较大改动，值得日后单独立项。
 
 ---
 
-## 9. Implementation phases
+## 9. 实施分期
 
-| Phase | Scope | Notes |
+| 期 | 范围 | 说明 |
 |---|---|---|
-| 1 | Project default lead: column + migration, shared lead-resolution helper wired into `create_task` and `draft_task`, project-page selector, clear-on-member-removal | Independent of channels; the desktop task UI benefits immediately |
-| 2 | `valuz_channel_chat_binding` + project resolution order (§4.1) + flow A (project page ↔ `chat.alist`) | Makes "group = project" real and inspectable |
-| 3 | Flow C: `im.chat.member.bot.added_v1` subscription, project-picker card, `card.action.trigger` handling; flow B commands | Needs new event subscriptions and permissions on the Feishu app |
-| 4 | Agent selection (§4.2): `_extract_agent_hint`, member-picker card, `default_agent_slug` | Reuses the existing per-agent session lineage |
+| 1 | 项目默认 lead：加列 + 迁移、抽出共用的 lead 解析器并接入 `create_task` 与 `draft_task`、项目页选择器、移除成员时清空 | 与通道无关；桌面端建任务的 UI 立刻受益 |
+| 2 | `valuz_channel_chat_binding` + §4.1 的项目解析顺序 + 路径 A（项目页 ↔ `chat.alist`） | 让"群 = 项目"真正成立且可查看可修改 |
+| 3 | 路径 C：订阅 `im.chat.member.bot.added_v1`、项目选择卡片、`card.action.trigger` 处理；以及路径 B 的指令 | 需要新增事件订阅与飞书应用权限 |
+| 4 | agent 选择（§4.2）：`_extract_agent_hint`、成员选择卡片、`default_agent_slug` | 复用既有的按 agent 会话线机制 |
 
-Phase 1 is the smallest and pays off outside the channel layer, so it goes
-first.
+第 1 期最小，且收益外溢到通道之外，所以先做。
 
-## 10. Related
+## 10. 相关
 
-- [agent-channel-routing.md](agent-channel-routing.md) — the routing contract
-  this extends; also documents the session model (one chat conversation, one
-  long-lived session; `explicit_new_hint` resets; a user-opened topic branches).
-- `modules/channels/{resolver,service,datastore}.py` — routing, ingress, bindings
-- `modules/tasks/tools/{declarations,handlers}.py` — `create_task` / `draft_task`
-- `integrations/feishu_long_connection.py` — long connection, reaction
-  acknowledgement, streaming card output
+- [agent-channel-routing.md](agent-channel-routing.md) —— 本文承接的路由契约；其中也记录了会话
+  模型（一个聊天窗口一个常驻会话；`explicit_new_hint` 重置；用户自己开的话题分支）。
+- `modules/channels/{resolver,service,datastore}.py` —— 路由、入站编排、绑定存储
+- `modules/tasks/tools/{declarations,handlers}.py` —— `create_task` / `draft_task`
+- `integrations/feishu_long_connection.py` —— 长连接、表情回执、流式卡片输出

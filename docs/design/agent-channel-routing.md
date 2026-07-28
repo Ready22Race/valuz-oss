@@ -184,4 +184,5 @@ explicit public Gateway-to-Agent contract.
 Steps 1–4 above have landed. The questions that surfaced once the Feishu channel
 carried real conversations — how a group comes to mean one project, and who
 leads a task when the project holds a team — are answered in
-[channel-project-binding-and-default-lead.md](channel-project-binding-and-default-lead.md).
+[channel-project-binding-and-default-lead.md](channel-project-binding-and-default-lead.md)
+(written in Chinese).
