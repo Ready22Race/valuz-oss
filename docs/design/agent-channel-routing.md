@@ -178,3 +178,10 @@ explicit public Gateway-to-Agent contract.
    `ChannelMentionContext`.
 4. Add outbound dispatch plumbing that can stream kernel events back to the
    correct channel adapter using `ChannelRouteKey`.
+
+## Follow-up Design
+
+Steps 1–4 above have landed. The questions that surfaced once the Feishu channel
+carried real conversations — how a group comes to mean one project, and who
+leads a task when the project holds a team — are answered in
+[channel-project-binding-and-default-lead.md](channel-project-binding-and-default-lead.md).
