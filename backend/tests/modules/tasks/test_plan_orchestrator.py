@@ -2684,3 +2684,78 @@ def test_every_subtask_failure_path_writes_the_same_payload_shape(
         "heartbeat_detected",
         "run_error",
     }
+
+
+def test_finalize_actor_skips_parked_member_run(db_factory, tmp_path, monkeypatch) -> None:
+    """stop_task parked this run (→paused) while its member sat idle; the
+    member's shutdown loop-exit must NOT stamp it completed. Recovery only
+    resumes active/paused runs, so the overwrite makes the session invisible
+    on resume and the node is re-dispatched as a brand-new session — session
+    continuity and record truth both lost."""
+    from valuz_agent.modules.sessions import run_orchestrator as run_orch
+    from valuz_agent.modules.tasks import lifecycle as lc_mod
+
+    _make_task(db_factory, tmp_path)
+    _make_member_run(db_factory)
+    db = db_factory()
+    try:
+        db.query(TaskSessionRow).filter_by(session_id="mem-1").update({"status": "paused"})
+        db.commit()
+    finally:
+        db.close()
+
+    async def _noop(*_a: object, **_k: object) -> None: ...
+
+    async def _manifest(*_a: object, **_k: object) -> dict[str, str]:
+        return {"session_id": "mem-1", "status": "idle", "summary": ""}
+
+    monkeypatch.setattr(run_orch, "_finalize_session", _noop)
+    monkeypatch.setattr(lc_mod, "collect_manifest", _manifest)
+
+    orch = TaskOrchestrator()
+    asyncio.run(
+        orch.lifecycle.finalize_actor(
+            session_id="mem-1",
+            last_content="",
+            final_status="idle",
+            role="subtask",
+            task_id="t1",
+            project_id="w1",
+            via_shutdown=True,
+            user_id=OWNER,
+        )
+    )
+
+    db = db_factory()
+    try:
+        run = db.query(TaskSessionRow).filter_by(session_id="mem-1").one()
+        assert run.status == "paused", "a parked run must survive the loop exit untouched"
+        assert run.ended_at is None
+    finally:
+        db.close()
+
+
+def test_stop_member_wakes_idle_member_with_shutdown(db_factory, tmp_path) -> None:
+    """The kernel interrupt only reaches a member MID-TURN. An idle member
+    (parked on its mailbox between turns) must still exit immediately on
+    stop_member — without the shutdown message it sat out its full 10-minute
+    idle TTL after the user already cancelled it."""
+    from valuz_agent.modules.tasks.mailbox import mailbox_registry
+
+    _seed_lead_and_members(db_factory, tmp_path, members=[("B", "frontend", "sB", "in_progress")])
+    orch = TaskOrchestrator()
+    orch._members.set_members("t1", {"sB"})
+
+    async def _fake_interrupt(sid: str, user_id: str | None = None) -> None: ...
+
+    orch._recovery._interrupt_kernel_session = _fake_interrupt  # type: ignore[method-assign]
+    mailbox_registry.register("lead-s")
+    mailbox_registry.register("sB")  # the idle member's live inbox
+    try:
+        assert asyncio.run(orch.recovery.stop_member("sB", user_id=OWNER)) is True
+        assert mailbox_registry.has_pending("sB"), "idle member must be told to shut down"
+        msg = mailbox_registry._boxes["sB"].get_nowait()
+        assert msg.kind == "shutdown"
+    finally:
+        mailbox_registry.unregister("lead-s")
+        mailbox_registry.unregister("sB")

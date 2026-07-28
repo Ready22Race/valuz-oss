@@ -966,6 +966,16 @@ class LifecycleService:
                 run_ds = TaskSessionDatastore(db)
                 event_ds = TaskEventDatastore(db)
                 run = await run_ds.get_run(session_id)
+                if run is not None and run.status != "active":
+                    # stop_member (→rejected) or stop_task (→paused) already
+                    # recorded this run's outcome; the loop exit must not
+                    # overwrite it — same rule as _finalize_interrupted_member.
+                    logger.debug(
+                        "finalize_actor: run %s already settled (%s) — skipping",
+                        session_id,
+                        run.status,
+                    )
+                    return
                 run_dir = Path(run.run_dir) if run and run.run_dir else Path()
                 agent_slug = run.agent_slug if run else ""
 
@@ -980,12 +990,16 @@ class LifecycleService:
                 manifest["agent"] = agent_slug
 
                 ok = final_status not in ("terminated", "error")
-                await run_ds.update_run_by_session(
-                    session_id=session_id,
+                settled = await run_ds.settle_run_if_active(
+                    session_id,
                     status="completed" if ok else "archived",
                     result_manifest=manifest,
                     ended_at=now_ms(),
                 )
+                if run is not None and not settled:
+                    # Parked between our read and the write — the same rule as
+                    # the early return, enforced at the row this time.
+                    return
                 # The loop ending is NOT subtask completion — the lead decides
                 # that via review_subtask; only terminal FAILURE is surfaced
                 # here. The node goes to ``rework``, never ``failed``: a dead

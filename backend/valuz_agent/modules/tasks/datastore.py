@@ -563,3 +563,41 @@ class TaskSessionDatastore:
         )
         await async_commit_with_retry(self._db, where="TaskSessionDatastore.update_run_by_session")
         return bool(res.rowcount)
+
+    async def settle_run_if_active(
+        self,
+        session_id: str,
+        *,
+        status: str,
+        result_manifest: dict[str, Any] | None = None,
+        ended_at: int | None = None,
+    ) -> bool:
+        """Loop-exit settlement, gated on the run still being ``active``.
+
+        A run that is no longer active already had its outcome recorded by
+        someone with more context — ``stop_member`` (→rejected, lead notified)
+        or ``stop_task`` (→paused, resumable). Overwriting that with the
+        loop's own exit status destroys it: recovery only resumes
+        active/paused runs, so a parked run stamped ``completed`` goes
+        invisible and its node is re-dispatched as a brand-new session.
+
+        Returns False when the run was not active (nothing written).
+        """
+        updates: dict[str, Any] = {"status": status}
+        if result_manifest is not None:
+            updates["result_manifest"] = result_manifest
+        if ended_at is not None:
+            updates["ended_at"] = ended_at
+        res = cast(
+            "CursorResult[Any]",
+            await self._db.execute(
+                update(TaskSessionRow)
+                .where(
+                    TaskSessionRow.session_id == session_id,
+                    TaskSessionRow.status == "active",
+                )
+                .values(**updates)
+            ),
+        )
+        await async_commit_with_retry(self._db, where="TaskSessionDatastore.settle_run_if_active")
+        return bool(res.rowcount)

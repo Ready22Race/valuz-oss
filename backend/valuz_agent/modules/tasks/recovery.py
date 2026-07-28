@@ -567,6 +567,10 @@ class RecoveryService:
             )
 
         await self._interrupt_kernel_session(session_id, user_id=user_id)
+        # The interrupt only reaches a member MID-TURN. An idle member (waiting
+        # on its mailbox between turns) would otherwise sit out its full idle
+        # TTL (10 min) before exiting — and the user already cancelled it.
+        mailbox_registry.put(session_id, InboxMsg(kind="shutdown"))
         self._members.discard_member(task_id, session_id)
         if lead_session_id:
             mailbox_registry.put(
