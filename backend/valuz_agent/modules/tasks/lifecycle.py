@@ -85,6 +85,7 @@ from valuz_agent.modules.tasks.events import block_task, finalize_task
 from valuz_agent.modules.tasks.live_member_registry import LiveMemberRegistry
 from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 from valuz_agent.modules.tasks.models import TaskRow, TaskSessionRow
+from valuz_agent.modules.tasks.outcome import Failure
 from valuz_agent.modules.tasks.plan import PlanError, TaskPlan
 from valuz_agent.modules.tasks.provenance import resolve_trigger_provenance
 
@@ -266,8 +267,8 @@ class LifecycleService:
                 user_id=user_id,
                 worktree_notice=task_worktree_notice(wt_snapshot),
             )
-            if isinstance(resolved, str):
-                raise ValueError(resolved)
+            if isinstance(resolved, Failure):
+                raise ValueError(resolved.reason)
             lead_session = resolved.session
             lead_brief = resolved.brief
 
@@ -560,8 +561,8 @@ class LifecycleService:
                 plan_pre_committed=True,  # ← key flag (VALUZ-CHATPLAN D10)
                 worktree_notice=task_worktree_notice(task_worktree_snapshot(task_row)),
             )
-            if isinstance(resolved, str):
-                return {"error": resolved}
+            if isinstance(resolved, Failure):
+                return {"error": resolved.reason}
             lead_session = resolved.session
             lead_brief = resolved.brief
 

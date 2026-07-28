@@ -43,6 +43,7 @@ from valuz_agent.modules.tasks.datastore import (
 from valuz_agent.modules.tasks.live_member_registry import LiveMemberRegistry
 from valuz_agent.modules.tasks.mailbox import mailbox_registry
 from valuz_agent.modules.tasks.models import TaskSessionRow
+from valuz_agent.modules.tasks.outcome import Failure
 from valuz_agent.modules.tasks.plan import TaskPlan
 from valuz_agent.modules.tasks.resolution import task_session_resolver
 from valuz_agent.modules.tasks.task_worktree import (
@@ -106,8 +107,8 @@ class DispatcherService:
                 return {"error": f"task {task_id!r} not found", "status": "failed"}
             _plan = TaskPlan.from_dict(task_row.plan)
             resolved_node = planning.resolve_dispatch_node(_plan, subtask_key, agent, goal)
-            if isinstance(resolved_node, str):
-                return {"error": resolved_node, "status": "failed"}
+            if isinstance(resolved_node, Failure):
+                return {"error": resolved_node.reason, "status": "failed"}
             agent, goal = resolved_node
             _node = _plan.get(subtask_key)
             review_criteria = _node.review_criteria if _node else ""
@@ -163,8 +164,8 @@ class DispatcherService:
                 lead_session_id=lead_session_id,
                 worktree_notice=task_worktree_notice(wt_snapshot),
             )
-            if isinstance(resolved, str):
-                return {"error": resolved, "status": "failed"}
+            if isinstance(resolved, Failure):
+                return {"error": resolved.reason, "status": "failed"}
             member_session = resolved.session
             member_brief = resolved.brief
             agent_name = resolved.agent_name

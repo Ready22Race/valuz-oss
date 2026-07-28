@@ -12,10 +12,11 @@ never learn *how* it was resolved. The interface is shaped after
 the — currently deferred — kernel migration is ever revived, this class
 graduates into the port's host implementation verbatim.
 
-Error convention (mirrors ``planning.resolve_dispatch_node``): resolve
-methods return the resolved value on success or a human-readable ``str`` on
-failure — callers decide whether that string becomes a raise, an error dict,
-or a task event.
+Error convention (mirrors ``planning.resolve_dispatch_node``): resolve methods
+return the resolved value on success or a :class:`~tasks.outcome.Failure` on
+failure — callers decide whether that reason becomes a raise, an error dict, or
+a task event. It used to be a bare ``str``, told apart from success by
+``isinstance``; see ``outcome.py`` for why that was replaced.
 """
 
 # ruff: noqa: I001
@@ -37,6 +38,7 @@ from valuz_agent.adapters.agent_resolver import (
 )
 from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.modules.agents.datastore import ProjectMemberDatastore
+from valuz_agent.modules.tasks.outcome import Failure
 from valuz_agent.modules.projects.datastore import ProjectDatastore
 
 logger = logging.getLogger(__name__)
@@ -322,7 +324,7 @@ class TaskSessionResolver:
         user_id: str,
         plan_pre_committed: bool = False,
         worktree_notice: str | None = None,
-    ) -> ResolvedTaskSession | str:
+    ) -> ResolvedTaskSession | Failure:
         """Resolve a task lead session (kickoff and commit share this path).
 
         Fetches the lead's membership, materializes the per-task lead clone,
@@ -332,7 +334,9 @@ class TaskSessionResolver:
         member_ds = ProjectMemberDatastore(db)
         lead_member = await member_ds.get(user_id, project_id, agent_slug)
         if lead_member is None:
-            return f"lead agent {agent_slug!r} is not a member of project {project_id!r}"
+            return Failure(
+                f"lead agent {agent_slug!r} is not a member of project {project_id!r}"
+            )
         lead_agent = await _member_agent_config(lead_member, member_ds, user_id=user_id)
         lead_clone = materialize_lead_clone(lead_agent) if lead_agent is not None else None
 
@@ -364,7 +368,7 @@ class TaskSessionResolver:
             **_provider_resolver_deps(db),
         )
         if session is None:
-            return f"could not build lead session for {agent_slug!r}"
+            return Failure(f"could not build lead session for {agent_slug!r}")
         if lead_clone is not None:
             session = embed_agent_config(session, lead_clone)
 
@@ -390,7 +394,7 @@ class TaskSessionResolver:
         spill_label: str | None = None,
         lead_session_id: str | None = None,
         worktree_notice: str | None = None,
-    ) -> ResolvedTaskSession | str:
+    ) -> ResolvedTaskSession | Failure:
         """Resolve a dispatched member's sub-run session.
 
         Members run in goal mode (self-loop until the scoped goal is met,
@@ -426,7 +430,7 @@ class TaskSessionResolver:
             **_provider_resolver_deps(db),
         )
         if session is None:
-            return f"agent {agent_slug!r} not found in project {project_id!r}"
+            return Failure(f"agent {agent_slug!r} not found in project {project_id!r}")
 
         agent_name = await resolve_agent_display_name(project_id, agent_slug, user_id)
         gap = await _credential_gap(session, agent_slug, db=db, user_id=user_id)

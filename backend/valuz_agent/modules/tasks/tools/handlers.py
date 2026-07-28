@@ -34,6 +34,7 @@ from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.tasks import messaging, planning, queries
 from valuz_agent.modules.tasks.datastore import TaskDatastore
 from valuz_agent.modules.tasks.mailbox import mailbox_registry
+from valuz_agent.modules.tasks.outcome import Failure
 from valuz_agent.modules.tasks.plan import TaskPlan
 from valuz_agent.modules.tasks.resolution import task_session_resolver
 
@@ -123,8 +124,8 @@ async def _check_lead_gate(ctx: ExecContext) -> tuple[str, str] | ToolResult:
     if sess is None:
         return ToolResult(content="dispatch: caller session not found", is_error=True)
     verdict = gate.check_lead_gate(sess)
-    if isinstance(verdict, str):
-        return ToolResult(content=verdict, is_error=True)
+    if isinstance(verdict, Failure):
+        return ToolResult(content=verdict.reason, is_error=True)
     return verdict
 
 
@@ -204,9 +205,9 @@ async def _resolve_plan_reader_task(
     if task is None:
         return ToolResult(content=f"plan tool: task {task_id!r} not found", is_error=True)
 
-    reason = gate.check_plan_reader_gate(sess, task)
-    if reason is not None:
-        return ToolResult(content=reason, is_error=True)
+    failure = gate.check_plan_reader_gate(sess, task)
+    if failure is not None:
+        return ToolResult(content=failure.reason, is_error=True)
     return task, task.project_id, task_id
 
 
@@ -216,9 +217,9 @@ def _check_plan_writer_gate(sess: Any, task: Any) -> ToolResult | None:
     Pure policy lives in ``tools/gate.py`` (VALUZ-CHATPLAN D6 strict) — this
     wrapper only shapes the rejection for the tool wire.
     """
-    reason = gate.check_plan_writer_gate(sess, task)
-    if reason is not None:
-        return ToolResult(content=reason, is_error=True)
+    failure = gate.check_plan_writer_gate(sess, task)
+    if failure is not None:
+        return ToolResult(content=failure.reason, is_error=True)
     return None
 
 
@@ -237,8 +238,8 @@ async def _check_orchestration_gate(ctx: ExecContext) -> tuple[str, str] | ToolR
         return ToolResult(content="create_task: caller session not found", is_error=True)
 
     verdict = gate.check_orchestration_caller(sess)
-    if isinstance(verdict, str):
-        return ToolResult(content=verdict, is_error=True)
+    if isinstance(verdict, Failure):
+        return ToolResult(content=verdict.reason, is_error=True)
     project_id, agent_slug = verdict
 
     # Restrict to projects — chat projects are per-session ephemeral.

@@ -34,6 +34,7 @@ from valuz_agent.modules.tasks.datastore import (
 )
 from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 from valuz_agent.modules.tasks.models import TaskRow
+from valuz_agent.modules.tasks.outcome import Failure
 from valuz_agent.modules.tasks.plan import PlanError, TaskPlan
 from valuz_agent.modules.tasks.plan_render import render_plan_md
 
@@ -477,8 +478,8 @@ async def review_subtask(
 
 def resolve_dispatch_node(
     plan: TaskPlan, subtask_key: str, agent_override: str | None, goal_override: str | None
-) -> tuple[str, str] | str:
-    """Plan-first gate for dispatch. Returns (agent, goal) or an error string.
+) -> tuple[str, str] | Failure:
+    """Plan-first gate for dispatch. Returns ``(agent, goal)`` or a Failure.
 
     A node is dispatchable when it exists, its status is ``planned``,
     ``rework`` (re-dispatch after sync rework), or ``paused`` (re-dispatch a
@@ -488,19 +489,21 @@ def resolve_dispatch_node(
     """
     node = plan.get(subtask_key)
     if node is None:
-        return (
+        return Failure(
             f"no subtask {subtask_key!r} in the plan — call plan_task first, "
             "then dispatch by subtask_key"
         )
     if node.status not in ("planned", "rework", "paused"):
-        return f"subtask {subtask_key!r} is {node.status!r}, not dispatchable"
+        return Failure(f"subtask {subtask_key!r} is {node.status!r}, not dispatchable")
     done = {n.key for n in plan.nodes if n.status == "done"}
     unmet = [d for d in node.depends_on if d not in done]
     if unmet:
-        return f"subtask {subtask_key!r} is blocked on unfinished deps: {unmet}"
+        return Failure(f"subtask {subtask_key!r} is blocked on unfinished deps: {unmet}")
     agent = (agent_override or node.agent or "").strip()
     if not agent:
-        return f"subtask {subtask_key!r} has no agent — set one in the plan or pass agent"
+        return Failure(
+            f"subtask {subtask_key!r} has no agent — set one in the plan or pass agent"
+        )
     goal = goal_override or node.goal or node.title
     # Re-dispatch after a sync rework: fold the lead's review feedback into
     # the brief so the member knows WHY its prior attempt was sent back
