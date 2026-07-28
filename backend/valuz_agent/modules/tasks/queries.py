@@ -108,24 +108,31 @@ async def list_tasks(
         task_ds = TaskDatastore(db)
         run_ds = TaskSessionDatastore(db)
         rows = await task_ds.list_tasks(user_id, project_id)
-        result: list[dict[str, Any]] = []
+
+        # Filter + cap FIRST, then fetch run counts for exactly the tasks we
+        # are going to render — one grouped query instead of a ``list_runs``
+        # per task inside the loop (which also materialised every run row just
+        # to count it). ``count_runs_by_tasks`` returns (total, settled), where
+        # settled = completed | rejected | archived: an errored or
+        # user-stopped run is finished work, and omitting them made the
+        # progress reported back to the agent read low forever.
+        selected: list[Any] = []
         for row in rows:
             if status and row.status != status:
                 continue
-            meta = row.metadata_ or {}
-            originated_by = meta.get("originating_session_id")
+            originated_by = (row.metadata_ or {}).get("originating_session_id")
             if mine_session_id and originated_by != mine_session_id:
                 continue
-            runs = await run_ds.list_runs(user_id, row.id)
-            # "Settled" = the run will not produce more work. The run status
-            # enum is active | paused | completed | rejected | archived
-            # (models.TaskSessionRow) — this used to test for ``"failed"``,
-            # which is NOT one of them, so an errored run (``archived``) or a
-            # user-stopped one (``rejected``) never counted and the progress
-            # this tool reports to the agent read low forever.
-            done = sum(
-                1 for r in runs if r.status in ("completed", "rejected", "archived")
-            )
+            selected.append(row)
+            if len(selected) >= limit:
+                break
+
+        counts = await run_ds.count_runs_by_tasks(user_id, [r.id for r in selected])
+        result: list[dict[str, Any]] = []
+        for row in selected:
+            meta = row.metadata_ or {}
+            originated_by = meta.get("originating_session_id")
+            total, done = counts.get(row.id, (0, 0))
             result.append(
                 {
                     "task_id": row.id,
@@ -134,15 +141,13 @@ async def list_tasks(
                     "lead_agent": row.lead_agent_slug,
                     "dispatch_mode": meta.get("dispatch_mode"),
                     "created_at": str(row.created_at) if row.created_at else None,
-                    "runs": len(runs),
+                    "runs": total,
                     "runs_done": done,
                     "originated_by_me": (
                         bool(mine_session_id) and originated_by == mine_session_id
                     ),
                 }
             )
-            if len(result) >= limit:
-                break
         return result
 
 

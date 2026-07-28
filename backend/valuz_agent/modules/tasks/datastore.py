@@ -21,7 +21,7 @@ import logging
 import random
 from typing import Any, cast
 
-from sqlalchemy import func, select, update
+from sqlalchemy import case, func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -430,6 +430,37 @@ class TaskSessionDatastore:
             )
         ).all()
         return {sid: (tid, title, status) for sid, tid, title, status in rows}
+
+    # Run statuses that will produce no further work. The enum is
+    # active | paused | completed | rejected | archived, so this is everything
+    # except the two that are still in motion.
+    SETTLED_RUN_STATUSES = ("completed", "rejected", "archived")
+
+    async def count_runs_by_tasks(
+        self, user_id: str, task_ids: list[str]
+    ) -> dict[str, tuple[int, int]]:
+        """Map task_id → ``(total_runs, settled_runs)`` in ONE query.
+
+        Replaces a ``list_runs`` per task inside a loop: ``list_tasks`` renders
+        progress for up to ``limit`` tasks, which cost that many round trips and
+        materialised every run row only to count them.
+        """
+        if not task_ids:
+            return {}
+        settled = func.sum(
+            case((TaskSessionRow.status.in_(self.SETTLED_RUN_STATUSES), 1), else_=0)
+        )
+        rows = (
+            await self._db.execute(
+                select(TaskSessionRow.task_id, func.count(), settled)
+                .where(
+                    TaskSessionRow.task_id.in_(task_ids),
+                    TaskSessionRow.user_id == user_id,
+                )
+                .group_by(TaskSessionRow.task_id)
+            )
+        ).all()
+        return {tid: (int(total), int(done or 0)) for tid, total, done in rows}
 
     async def get_run(self, session_id: str) -> TaskSessionRow | None:
         """SYSTEM lookup by the globally-unique kernel ``session_id`` (runner +

@@ -59,6 +59,16 @@ logger = logging.getLogger(__name__)
 # in-flight members against their kernel session while waiting (VALUZ-RESUME §5.4).
 _HEARTBEAT_S = 8.0
 
+# Run the parked-member probe every Nth heartbeat slice rather than every one.
+# The probe asks the decision inbox "is EVERY pending member waiting on the
+# user?" — a state that can only change when a HUMAN acts, so 8-second
+# resolution buys nothing and costs a full run listing + one kernel-session
+# read per pending member + an inbox snapshot on every slice of a wait that can
+# run ten minutes. The heartbeat itself is NOT throttled: it is the backstop
+# for a member that died without delivering ``member_done``, and every slice it
+# skips is time the lead hangs on a result that will never arrive.
+_PROBE_EVERY_N_SLICES = 4
+
 # Max seconds a SINGLE await_members call parks. await is designed to be LOOPED
 # (the still_running hint + inbox-notice drive prompt re-await), so one call
 # never needs to wait longer — and it MUST stay under the MCP client's tool-call
@@ -198,6 +208,7 @@ class CoordinationService:
         # timeout is pure waste when nothing can move without the user.
         awaiting_user_break = False
         pending_probe: list[dict[str, Any]] = []
+        slices_waited = 0
 
         while True:
             if mode == "all" and target and target.issubset(collected.keys()):
@@ -215,6 +226,7 @@ class CoordinationService:
             try:
                 msg = await mailbox_registry.get(lead_session_id, timeout=slice_timeout)
             except TimeoutError:
+                slices_waited += 1
                 pending_now = (target - set(collected.keys())) if target else set()
                 collected.update(
                     await self._heartbeat_pending(
@@ -233,7 +245,7 @@ class CoordinationService:
                 # answers; the lead gets to react — do other work or end the
                 # turn and be woken by the eventual member_done).
                 still_pending = (target - set(collected.keys())) if target else set()
-                if still_pending:
+                if still_pending and slices_waited % _PROBE_EVERY_N_SLICES == 0:
                     probe = await self._probe_pending_members(
                         task_id=task_id, pending_keys=still_pending, user_id=user_id
                     )

@@ -448,6 +448,10 @@ async def test_await_breaks_early_when_all_pending_awaiting_user(
             timeout_s=30,  # would block ~30s without the early break
             user_id=LOCAL_USER_ID,
         )
+        # The probe runs every ``_PROBE_EVERY_N_SLICES`` heartbeat slices (it
+        # answers a question only a human can change), so the break costs that
+        # many slices — trivial here because ``_HEARTBEAT_S`` is patched to
+        # 0.05s above. The budget below just has to clear it.
         assert loop.time() - start < 2.0
         assert res["awaiting_user"] is True
         assert res["timed_out"] is False
