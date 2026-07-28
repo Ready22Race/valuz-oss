@@ -131,3 +131,75 @@ def test_feishu_message_event_normalizes_text_and_thread_context() -> None:
     assert result.context.is_top_level_mention is False
     assert result.context.continuation_hint is True
     assert result.context.mentioned_agent_slug == "developer"
+
+
+def test_feishu_top_level_message_extracts_continue_hint() -> None:
+    body = json.dumps(
+        {
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt-1",
+                "event_type": "im.message.receive_v1",
+            },
+            "event": {
+                "sender": {"sender_id": {"open_id": "ou-user"}},
+                "message": {
+                    "message_id": "om-msg",
+                    "chat_id": "oc-chat",
+                    "chat_type": "group",
+                    "message_type": "text",
+                    "content": json.dumps(
+                        {"text": '<at user_id="ou-bot">developer</at> 继续刚才的问题'}
+                    ),
+                    "mentions": [{"id": {"open_id": "ou-bot"}, "name": "developer"}],
+                },
+            },
+        }
+    ).encode()
+    adapter = FeishuChannelAdapter(
+        FeishuChannelConfig(channel_instance_id="feishu-main", agent_slug="developer")
+    )
+
+    result = adapter.parse_callback(raw_body=body, headers={})
+
+    assert isinstance(result, InboundChannelMessage)
+    assert result.context.is_top_level_mention is True
+    assert result.context.continuation_hint is False
+    assert result.context.explicit_continue_hint is True
+    assert result.context.explicit_new_hint is False
+
+
+def test_feishu_quoted_top_level_mention_is_a_continuation() -> None:
+    body = json.dumps(
+        {
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt-1",
+                "event_type": "im.message.receive_v1",
+            },
+            "event": {
+                "sender": {"sender_id": {"open_id": "ou-user"}},
+                "message": {
+                    "message_id": "om-msg",
+                    "chat_id": "oc-chat",
+                    "chat_type": "group",
+                    "message_type": "text",
+                    "content": json.dumps(
+                        {"text": '<at user_id="ou-bot">developer</at> 补一下单测'}
+                    ),
+                    "mentions": [{"id": {"open_id": "ou-bot"}, "name": "developer"}],
+                    "quote_msg_id": "om-old",
+                },
+            },
+        }
+    ).encode()
+    adapter = FeishuChannelAdapter(
+        FeishuChannelConfig(channel_instance_id="feishu-main", agent_slug="developer")
+    )
+
+    result = adapter.parse_callback(raw_body=body, headers={})
+
+    assert isinstance(result, InboundChannelMessage)
+    assert result.text == "补一下单测"
+    assert result.context.is_top_level_mention is False
+    assert result.context.continuation_hint is True

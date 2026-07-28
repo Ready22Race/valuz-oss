@@ -8,6 +8,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from valuz_agent.modules.channels.adapters.base import InboundChannelMessage
+from valuz_agent.modules.channels.adapters.intents import (
+    detect_session_intent_hints,
+    has_message_reference,
+)
 from valuz_agent.modules.channels.schemas import ChannelMentionContext
 
 WECOM_AIBOT_WS_URL = "wss://openws.work.weixin.qq.com"
@@ -95,6 +99,8 @@ def parse_wecom_aibot_frame(
     req_id = str(headers.get("req_id") or msg_id)
     chattype = str(body.get("chattype") or "")
     external_chat_id = str(body.get("chatid") or from_body.get("userid") or msg_id)
+    explicit_continue_hint, explicit_new_hint = detect_session_intent_hints(text)
+    has_reference = has_message_reference(body, text_body, text)
 
     context = ChannelMentionContext(
         user_id=config.owner_user_id,
@@ -102,8 +108,10 @@ def parse_wecom_aibot_frame(
         external_chat_id=external_chat_id,
         external_thread_id=None,
         mentioned_agent_slug=config.agent_slug,
-        is_top_level_mention=True,
-        continuation_hint=False,
+        is_top_level_mention=not has_reference,
+        continuation_hint=has_reference,
+        explicit_continue_hint=explicit_continue_hint,
+        explicit_new_hint=explicit_new_hint,
         request_id=req_id,
         external_message_id=msg_id,
         external_user_id=str(from_body.get("userid") or "") or None,

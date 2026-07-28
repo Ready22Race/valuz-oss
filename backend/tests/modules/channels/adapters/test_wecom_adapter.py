@@ -181,3 +181,53 @@ def test_wecom_message_without_bot_prefix_is_a_chat_continuation() -> None:
     assert result.context.external_thread_id is None
     assert result.context.is_top_level_mention is False
     assert result.context.continuation_hint is True
+
+
+def test_wecom_message_with_quote_field_is_a_continuation_even_when_mentioned() -> None:
+    token = "token-1"
+    timestamp = "1774524781"
+    nonce = "nonce-1"
+    encrypted = "encrypted-payload"
+    raw_xml = f"""
+    <xml>
+      <ToUserName><![CDATA[corp-id]]></ToUserName>
+      <Encrypt><![CDATA[{encrypted}]]></Encrypt>
+    </xml>
+    """.encode()
+    decrypted = """
+    <xml>
+      <FromUserName><![CDATA[UserA]]></FromUserName>
+      <CreateTime>1774524781</CreateTime>
+      <MsgType><![CDATA[text]]></MsgType>
+      <Content><![CDATA[@开发者 补一下单测]]></Content>
+      <MsgId>msg-3</MsgId>
+      <QuoteMsgId>msg-old</QuoteMsgId>
+      <AgentID>1000002</AgentID>
+      <ChatId><![CDATA[group-chat]]></ChatId>
+    </xml>
+    """
+    adapter = WeComChannelAdapter(
+        WeComChannelConfig(
+            channel_instance_id="wecom-main",
+            owner_user_id="u1",
+            agent_slug="developer",
+            token=token,
+            encoding_aes_key="a" * 43,
+            bot_name="开发者",
+        ),
+        decryptor=_FakeDecryptor({encrypted: decrypted}),
+    )
+
+    result = adapter.parse_callback(
+        raw_body=raw_xml,
+        query={
+            "msg_signature": _signature(token, timestamp, nonce, encrypted),
+            "timestamp": timestamp,
+            "nonce": nonce,
+        },
+    )
+
+    assert isinstance(result, InboundChannelMessage)
+    assert result.text == "补一下单测"
+    assert result.context.is_top_level_mention is False
+    assert result.context.continuation_hint is True

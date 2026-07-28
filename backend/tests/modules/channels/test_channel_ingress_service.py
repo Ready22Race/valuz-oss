@@ -54,9 +54,11 @@ class _Bindings:
 
 
 class _Sessions:
-    def __init__(self) -> None:
+    def __init__(self, *, statuses: dict[str, str] | None = None) -> None:
+        self.statuses = statuses or {}
         self.created: list[dict[str, str]] = []
         self.sent: list[tuple[str, str, str]] = []
+        self.queued: list[tuple[str, str, str]] = []
 
     async def create_session(
         self,
@@ -81,8 +83,20 @@ class _Sessions:
     async def send_message(self, *, user_id: str, session_id: str, content: str) -> None:
         self.sent.append((user_id, session_id, content))
 
+    async def get_session_status(self, *, user_id: str, session_id: str) -> str | None:
+        assert user_id == "u1"
+        return self.statuses.get(session_id, "idle")
 
-def _inbound(*, top_level: bool = True) -> InboundChannelMessage:
+    async def enqueue_message(self, *, user_id: str, session_id: str, content: str) -> None:
+        self.queued.append((user_id, session_id, content))
+
+
+def _inbound(
+    *,
+    top_level: bool = True,
+    explicit_continue_hint: bool = False,
+    explicit_new_hint: bool = False,
+) -> InboundChannelMessage:
     return InboundChannelMessage(
         text="修一下登录报错",
         context=ChannelMentionContext(
@@ -93,6 +107,8 @@ def _inbound(*, top_level: bool = True) -> InboundChannelMessage:
             mentioned_agent_slug="developer",
             is_top_level_mention=top_level,
             continuation_hint=not top_level,
+            explicit_continue_hint=explicit_continue_hint,
+            explicit_new_hint=explicit_new_hint,
             request_id="req-1",
             external_message_id="msg-1",
             external_user_id="external-user",
@@ -168,6 +184,118 @@ async def test_ingress_service_reuses_existing_thread_binding() -> None:
     assert sessions.created == []
     assert sessions.sent == [("u1", "session-old", "修一下登录报错")]
     assert bindings.upserts == []
+
+
+async def test_ingress_service_top_level_continue_hint_reuses_existing_thread_binding() -> None:
+    bindings = _Bindings(
+        ChannelThreadBinding(
+            channel_instance_id="feishu-main",
+            external_chat_id="chat-1",
+            external_thread_id="thread-1",
+            agent_slug="developer",
+            project_id="project-a",
+            session_id="session-old",
+        )
+    )
+    sessions = _Sessions()
+    service = ChannelIngressService(
+        placements=_Placements(
+            [
+                AgentPlacement(
+                    project_id="project-a",
+                    project_name="Alpha",
+                    agent_slug="developer-local",
+                    source_agent_slug="developer",
+                )
+            ]
+        ),
+        bindings=bindings,
+        sessions=sessions,
+    )
+
+    result = await service.handle_inbound_message(
+        user_id="u1",
+        inbound=_inbound(top_level=True, explicit_continue_hint=True),
+    )
+
+    assert result.decision.kind == ChannelRouteDecisionKind.REUSE_SESSION
+    assert result.session_id == "session-old"
+    assert sessions.created == []
+    assert sessions.sent == [("u1", "session-old", "修一下登录报错")]
+    assert sessions.queued == []
+
+
+async def test_ingress_service_queues_existing_running_session() -> None:
+    bindings = _Bindings(
+        ChannelThreadBinding(
+            channel_instance_id="feishu-main",
+            external_chat_id="chat-1",
+            external_thread_id="thread-1",
+            agent_slug="developer",
+            project_id="project-a",
+            session_id="session-old",
+        )
+    )
+    sessions = _Sessions(statuses={"session-old": "running"})
+    service = ChannelIngressService(
+        placements=_Placements(
+            [
+                AgentPlacement(
+                    project_id="project-a",
+                    project_name="Alpha",
+                    agent_slug="developer-local",
+                    source_agent_slug="developer",
+                )
+            ]
+        ),
+        bindings=bindings,
+        sessions=sessions,
+    )
+
+    result = await service.handle_inbound_message(user_id="u1", inbound=_inbound(top_level=False))
+
+    assert result.decision.kind == ChannelRouteDecisionKind.QUEUE_SESSION
+    assert result.session_id == "session-old"
+    assert sessions.created == []
+    assert sessions.sent == []
+    assert sessions.queued == [("u1", "session-old", "修一下登录报错")]
+    assert bindings.upserts == []
+
+
+async def test_ingress_service_opens_new_session_when_existing_session_failed() -> None:
+    bindings = _Bindings(
+        ChannelThreadBinding(
+            channel_instance_id="feishu-main",
+            external_chat_id="chat-1",
+            external_thread_id="thread-1",
+            agent_slug="developer",
+            project_id="project-a",
+            session_id="session-old",
+        )
+    )
+    sessions = _Sessions(statuses={"session-old": "failed"})
+    service = ChannelIngressService(
+        placements=_Placements(
+            [
+                AgentPlacement(
+                    project_id="project-a",
+                    project_name="Alpha",
+                    agent_slug="developer-local",
+                    source_agent_slug="developer",
+                )
+            ]
+        ),
+        bindings=bindings,
+        sessions=sessions,
+    )
+
+    result = await service.handle_inbound_message(user_id="u1", inbound=_inbound(top_level=False))
+
+    assert result.decision.kind == ChannelRouteDecisionKind.NEW_SESSION
+    assert result.session_id == "session-new"
+    assert sessions.created[0]["project_id"] == "project-a"
+    assert sessions.sent == [("u1", "session-new", "修一下登录报错")]
+    assert sessions.queued == []
 
 
 async def test_ingress_service_asks_project_for_multiple_deployments() -> None:

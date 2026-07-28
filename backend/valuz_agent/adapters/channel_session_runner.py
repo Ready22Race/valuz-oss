@@ -30,5 +30,12 @@ class SessionServiceChannelRunner:
     async def send_message(self, *, user_id: str, session_id: str, content: str) -> None:
         await self._session_service.send_message(session_id, content, user_id=user_id)
 
+    async def get_session_status(self, *, user_id: str, session_id: str) -> str | None:
+        session = await self._session_service.get_session(session_id, user_id=user_id)
+        return session.status
+
+    async def enqueue_message(self, *, user_id: str, session_id: str, content: str) -> None:
+        await self._session_service.enqueue(session_id, content, user_id=user_id)
+
 
 __all__ = ["SessionServiceChannelRunner"]

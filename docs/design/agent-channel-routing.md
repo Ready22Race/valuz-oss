@@ -42,7 +42,10 @@ Every platform callback should become a `ChannelMentionContext`:
 - `external_user_id`
 - `mentioned_agent_slug`
 - optional explicit project hint from text or structured command
-- whether the message is a top-level mention or a continuation/reply
+- whether the message is a top-level mention or a continuation/reply; quoted or
+  referenced messages count as continuations
+- optional explicit session intent hints from text, such as "continue/继续/刚才"
+  or "new session/新开/另起"
 
 The resolver also receives the agent's current `AgentPlacement` rows and an
 optional `ChannelThreadBinding` for the external thread.
@@ -76,15 +79,19 @@ The key is represented in code as `ChannelRouteKey`.
 1. If the agent has no live placements, return `not_deployed`.
 2. If the user names an explicit project and that agent is deployed there, open
    a new agent-bound session in that project.
-3. If the inbound message is a continuation/reply and the external thread is
-   bound to a runnable session for the same agent and project, reuse it.
-4. If a recent binding is supplied and the message has a continuation hint,
-   reuse that runnable session.
-5. If exactly one live placement exists, open a new session in that project.
-6. If multiple live placements exist and no hint disambiguates them, ask the
+3. If the user explicitly asks for a new session, do not reuse a saved binding.
+4. If the inbound message is a continuation/reply, or a top-level mention with
+   an explicit continue hint, and the external thread is bound to an idle/created
+   session for the same agent and project, reuse it.
+5. If that matching bound session is `running`, enqueue the message into the
+   session input queue and return `queue_session`.
+6. If a recent binding is supplied and the message has a continuation hint,
+   apply the same reuse-or-queue rule to that session.
+7. If exactly one live placement exists, open a new session in that project.
+8. If multiple live placements exist and no hint disambiguates them, ask the
    user to choose a project.
-7. If a saved binding points at a project where the agent is no longer deployed,
-   do not reuse it.
+9. If a saved binding points at a project where the agent is no longer deployed,
+   or at a session that is no longer directly runnable, do not reuse it.
 
 ## Platform Adapter Boundary
 
@@ -97,7 +104,9 @@ Feishu, WeCom, and DingTalk adapters should share the same host flow:
 5. Call the channel resolver.
 6. For `new_session`, call `SessionService.create_session(project_id, agent_slug=...)`.
 7. For `reuse_session`, call `SessionService.send_message(session_id, ...)`.
-8. Persist/update the external thread binding and dispatch streamed replies back
+8. For `queue_session`, call `SessionService.enqueue(session_id, ...)` and send a
+   short channel acknowledgement instead of subscribing to the in-flight stream.
+9. Persist/update the external thread binding and dispatch streamed replies back
    through the same adapter.
 
 The adapter layer owns each platform's callback quirks; the resolver owns only

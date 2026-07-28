@@ -19,6 +19,7 @@ class ChannelPlatform(StrEnum):
 
 class ChannelRouteDecisionKind(StrEnum):
     REUSE_SESSION = "reuse_session"
+    QUEUE_SESSION = "queue_session"
     NEW_SESSION = "new_session"
     ASK_PROJECT = "ask_project"
     NOT_DEPLOYED = "not_deployed"
@@ -47,6 +48,8 @@ class ChannelMentionContext:
     explicit_project_name: str | None = None
     is_top_level_mention: bool = True
     continuation_hint: bool = False
+    explicit_continue_hint: bool = False
+    explicit_new_hint: bool = False
     request_id: str | None = None
     external_message_id: str | None = None
     external_user_id: str | None = None
@@ -74,6 +77,7 @@ class ChannelThreadBinding:
     project_id: str | None
     session_id: str | None
     session_accepts_turn: bool = True
+    session_status: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

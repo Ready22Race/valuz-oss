@@ -38,6 +38,7 @@ class AgentChannelResolver:
             if self._placement_matches_agent(placement, context.mentioned_agent_slug)
         )
         by_project_id = {placement.project_id: placement for placement in active_placements}
+        wants_continuation = self._wants_continuation(context)
 
         if not active_placements:
             return self._decision(
@@ -50,31 +51,44 @@ class AgentChannelResolver:
         if explicit is not None:
             return self._new_session(context, explicit, reason="explicit_project_match")
 
-        for binding, reason in (
-            (existing_binding, "thread_binding"),
-            (recent_binding, "recent_continuation"),
-        ):
-            if binding is None:
-                continue
-            if not self._binding_matches_context(context, binding):
-                continue
-            if binding.project_id is None or binding.session_id is None:
-                continue
-            if not binding.session_accepts_turn:
-                continue
-            if binding.project_id not in by_project_id:
-                continue
-            if binding is recent_binding and not context.continuation_hint:
-                continue
-            if context.is_top_level_mention and binding is existing_binding:
-                continue
-            return self._decision(
-                context,
-                ChannelRouteDecisionKind.REUSE_SESSION,
-                project_id=binding.project_id,
-                session_id=binding.session_id,
-                reason=reason,
-            )
+        if not context.explicit_new_hint:
+            for binding, reason in (
+                (existing_binding, "thread_binding"),
+                (recent_binding, "recent_continuation"),
+            ):
+                if binding is None:
+                    continue
+                if not self._binding_matches_context(context, binding):
+                    continue
+                if binding.project_id is None or binding.session_id is None:
+                    continue
+                if binding.project_id not in by_project_id:
+                    continue
+                if binding is recent_binding and not wants_continuation:
+                    continue
+                if (
+                    context.is_top_level_mention
+                    and binding is existing_binding
+                    and not wants_continuation
+                ):
+                    continue
+                if not binding.session_accepts_turn:
+                    if binding.session_status == "running":
+                        return self._decision(
+                            context,
+                            ChannelRouteDecisionKind.QUEUE_SESSION,
+                            project_id=binding.project_id,
+                            session_id=binding.session_id,
+                            reason=f"{reason}_running",
+                        )
+                    continue
+                return self._decision(
+                    context,
+                    ChannelRouteDecisionKind.REUSE_SESSION,
+                    project_id=binding.project_id,
+                    session_id=binding.session_id,
+                    reason=reason,
+                )
 
         if len(active_placements) == 1:
             return self._new_session(context, active_placements[0], reason="single_deployment")
@@ -161,6 +175,10 @@ class AgentChannelResolver:
             reason=reason,
             candidates=candidates,
         )
+
+    @staticmethod
+    def _wants_continuation(context: ChannelMentionContext) -> bool:
+        return context.continuation_hint or context.explicit_continue_hint
 
 
 def _normalize_project_name(value: str | None) -> str | None:

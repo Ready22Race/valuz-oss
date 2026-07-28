@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 CHANNEL_EXECUTION_ERROR_MESSAGE = "执行异常，任务没有成功提交，请稍后重试或联系管理员。"
 CHANNEL_NO_ROUTE_MESSAGE = "消息已收到，但没有找到可执行的项目绑定。"
 CHANNEL_RECEIVED_MESSAGE = "收到，正在处理。"
+CHANNEL_QUEUED_MESSAGE = "已加入队列，当前任务结束后会继续处理。"
 CHANNEL_EMPTY_RESULT_MESSAGE = "执行完成，但没有返回文本结果。"
 WECOM_AIBOT_DISCONNECTED_EVENT = "disconnected_event"
 
@@ -248,6 +249,15 @@ class WeComAIBotLongConnectionRunner:
         inbound: InboundChannelMessage,
         result: ChannelIngressResult | None,
     ) -> None:
+        if result is not None and result.decision.kind == ChannelRouteDecisionKind.QUEUE_SESSION:
+            await self._try_send_channel_reply(
+                websocket,
+                inbound,
+                CHANNEL_QUEUED_MESSAGE,
+                True,
+            )
+            return
+
         session_id = result.session_id if result is not None else None
         if not session_id:
             await self._try_send_channel_reply(
@@ -392,7 +402,7 @@ class WeComAIBotSupervisor:
             runner = WeComAIBotLongConnectionRunner(
                 config,
                 dispatch=_dispatch_to_channel_ingress,
-                on_authenticated=lambda slug=config.agent_slug: self._mark_connected(slug),
+                on_authenticated=self._mark_connected_callback(config.agent_slug),
             )
             self._tasks[config.agent_slug] = asyncio.create_task(
                 self._run_loop(config.agent_slug, runner, stop_event),
@@ -447,6 +457,12 @@ class WeComAIBotSupervisor:
 
     def _mark_connected(self, agent_slug: str) -> None:
         self._statuses[agent_slug] = WeComAIBotRuntimeStatus(status="connected", connected=True)
+
+    def _mark_connected_callback(self, agent_slug: str) -> AuthenticatedCallback:
+        def callback() -> None:
+            self._mark_connected(agent_slug)
+
+        return callback
 
 
 async def _dispatch_to_channel_ingress(
@@ -624,6 +640,7 @@ __all__ = [
     "CHANNEL_EXECUTION_ERROR_MESSAGE",
     "CHANNEL_EMPTY_RESULT_MESSAGE",
     "CHANNEL_NO_ROUTE_MESSAGE",
+    "CHANNEL_QUEUED_MESSAGE",
     "CHANNEL_RECEIVED_MESSAGE",
     "WeComAIBotLongConnectionRunner",
     "WeComAIBotRuntimeStatus",

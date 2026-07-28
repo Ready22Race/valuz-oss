@@ -15,6 +15,10 @@ from valuz_agent.modules.channels.adapters.base import (
     ChannelVerificationError,
     InboundChannelMessage,
 )
+from valuz_agent.modules.channels.adapters.intents import (
+    detect_session_intent_hints,
+    has_message_reference,
+)
 from valuz_agent.modules.channels.schemas import ChannelMentionContext
 
 
@@ -126,14 +130,18 @@ class WeComChannelAdapter:
             message.get("Content") or "",
             self.config.bot_name,
         )
+        explicit_continue_hint, explicit_new_hint = detect_session_intent_hints(text)
+        has_reference = has_message_reference(message, text)
         context = ChannelMentionContext(
             user_id="",
             channel_instance_id=self.config.channel_instance_id,
             external_chat_id=chat_id,
             external_thread_id=None,
             mentioned_agent_slug=self.config.agent_slug,
-            is_top_level_mention=was_bot_mention,
-            continuation_hint=not was_bot_mention,
+            is_top_level_mention=was_bot_mention and not has_reference,
+            continuation_hint=(not was_bot_mention) or has_reference,
+            explicit_continue_hint=explicit_continue_hint,
+            explicit_new_hint=explicit_new_hint,
             request_id=msg_id,
             external_message_id=msg_id,
             external_user_id=message.get("FromUserName"),

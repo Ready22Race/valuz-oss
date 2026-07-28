@@ -11,6 +11,7 @@ import websockets
 from valuz_agent.integrations import wecom_aibot_long_connection as wecom_runtime
 from valuz_agent.integrations.wecom_aibot_long_connection import (
     CHANNEL_EXECUTION_ERROR_MESSAGE,
+    CHANNEL_QUEUED_MESSAGE,
     CHANNEL_RECEIVED_MESSAGE,
     WeComAIBotLongConnectionRunner,
     WeComAIBotServerDisconnectedError,
@@ -340,6 +341,85 @@ async def test_wecom_aibot_runner_closes_stream_when_route_has_no_session() -> N
                     "这个 Agent 派驻了多个项目，请在消息里说明项目名后再试。"
                     "可选项目：Alpha、Beta"
                 ),
+            },
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_wecom_aibot_runner_replies_when_message_is_queued() -> None:
+    fake_ws = FakeWebSocket(
+        [
+            {
+                "headers": {"req_id": "aibot_subscribe-fixed"},
+                "errcode": 0,
+                "errmsg": "ok",
+            },
+            {
+                "cmd": "aibot_msg_callback",
+                "headers": {"req_id": "req-1"},
+                "body": {
+                    "msgid": "msg-1",
+                    "aibotid": "bot-1",
+                    "chatid": "chat-1",
+                    "chattype": "group",
+                    "from": {"userid": "user-1"},
+                    "msgtype": "text",
+                    "text": {"content": "继续改一下项目问题"},
+                    "quote_msg": {"msgid": "stream-old-user-message"},
+                },
+            },
+        ]
+    )
+    dispatched: list[InboundChannelMessage] = []
+
+    async def dispatch(message: InboundChannelMessage) -> ChannelIngressResult:
+        dispatched.append(message)
+        return ChannelIngressResult(
+            decision=AgentChannelRouteDecision(
+                kind=ChannelRouteDecisionKind.QUEUE_SESSION,
+                agent_slug="developer",
+                project_id="project-1",
+                session_id="session-1",
+                reason="thread_binding_running",
+            ),
+            session_id="session-1",
+        )
+
+    async def stream_session_events(_user_id: str, _session_id: str):
+        raise AssertionError("queued channel messages must not subscribe to session output")
+        yield
+
+    runner = WeComAIBotLongConnectionRunner(
+        WeComAIBotConfig(
+            channel_instance_id="wecom-aibot-main",
+            owner_user_id="u1",
+            agent_slug="developer",
+            bot_id="bot-1",
+            secret="secret-1",
+        ),
+        dispatch=dispatch,
+        websocket_factory=lambda _url: fake_ws,
+        req_id_factory=lambda prefix: f"{prefix}-fixed",
+        session_event_stream_factory=stream_session_events,
+        heartbeat_interval_s=999,
+    )
+
+    await runner.run_once(asyncio.Event())
+
+    assert len(dispatched) == 1
+    assert dispatched[0].text == "继续改一下项目问题"
+    assert dispatched[0].context.is_top_level_mention is False
+    assert dispatched[0].context.continuation_hint is True
+    assert fake_ws.sent[2] == {
+        "cmd": WECOM_AIBOT_RESPOND_MSG_CMD,
+        "headers": {"req_id": "req-1"},
+        "body": {
+            "msgtype": "stream",
+            "stream": {
+                "id": "stream-msg-1",
+                "finish": True,
+                "content": CHANNEL_QUEUED_MESSAGE,
             },
         },
     }

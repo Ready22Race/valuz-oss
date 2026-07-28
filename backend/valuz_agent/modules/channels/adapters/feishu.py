@@ -13,6 +13,10 @@ from valuz_agent.modules.channels.adapters.base import (
     ChannelVerificationError,
     InboundChannelMessage,
 )
+from valuz_agent.modules.channels.adapters.intents import (
+    detect_session_intent_hints,
+    has_message_reference,
+)
 from valuz_agent.modules.channels.schemas import ChannelMentionContext
 
 _AT_TAG_RE = re.compile(r"<at\b[^>]*>.*?</at>", re.IGNORECASE)
@@ -81,9 +85,11 @@ class FeishuChannelAdapter:
         root_id = str(message.get("root_id") or "")
         parent_id = str(message.get("parent_id") or "")
         thread_id = root_id or parent_id or message_id
-        is_top_level = not bool(root_id or parent_id)
         text = _normalize_feishu_text(message.get("content"))
         project_name = _extract_project_hint(text)
+        explicit_continue_hint, explicit_new_hint = detect_session_intent_hints(text)
+        has_reference = has_message_reference(message, text)
+        is_top_level = not bool(root_id or parent_id) and not has_reference
 
         context = ChannelMentionContext(
             user_id="",
@@ -93,7 +99,9 @@ class FeishuChannelAdapter:
             mentioned_agent_slug=self.config.agent_slug,
             explicit_project_name=project_name,
             is_top_level_mention=is_top_level,
-            continuation_hint=not is_top_level,
+            continuation_hint=(not is_top_level) or has_reference,
+            explicit_continue_hint=explicit_continue_hint,
+            explicit_new_hint=explicit_new_hint,
             request_id=str(header.get("event_id") or message_id or ""),
             external_message_id=message_id or None,
             external_user_id=_first_str(sender_id, "open_id", "user_id", "union_id"),

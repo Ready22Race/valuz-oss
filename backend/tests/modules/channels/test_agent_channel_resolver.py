@@ -31,6 +31,8 @@ def _context(
     external_thread_id: str | None = "thread-1",
     is_top_level_mention: bool = True,
     continuation_hint: bool = False,
+    explicit_continue_hint: bool = False,
+    explicit_new_hint: bool = False,
     explicit_project_id: str | None = None,
     explicit_project_name: str | None = None,
 ) -> ChannelMentionContext:
@@ -42,6 +44,8 @@ def _context(
         mentioned_agent_slug=mentioned_agent_slug,
         is_top_level_mention=is_top_level_mention,
         continuation_hint=continuation_hint,
+        explicit_continue_hint=explicit_continue_hint,
+        explicit_new_hint=explicit_new_hint,
         explicit_project_id=explicit_project_id,
         explicit_project_name=explicit_project_name,
     )
@@ -73,6 +77,52 @@ def test_top_level_mention_with_one_deployment_opens_new_session() -> None:
     decision = AgentChannelResolver().resolve(
         _context(),
         placements=[_placement("project-a")],
+    )
+
+    assert decision.kind == ChannelRouteDecisionKind.NEW_SESSION
+    assert decision.project_id == "project-a"
+    assert decision.session_id is None
+
+
+def test_top_level_continue_hint_reuses_existing_thread_binding() -> None:
+    existing = ChannelThreadBinding(
+        channel_instance_id="feishu-main",
+        external_chat_id="chat-1",
+        external_thread_id="thread-1",
+        agent_slug="developer",
+        project_id="project-a",
+        session_id="session-a",
+    )
+
+    decision = AgentChannelResolver().resolve(
+        _context(is_top_level_mention=True, explicit_continue_hint=True),
+        placements=[_placement("project-a")],
+        existing_binding=existing,
+    )
+
+    assert decision.kind == ChannelRouteDecisionKind.REUSE_SESSION
+    assert decision.project_id == "project-a"
+    assert decision.session_id == "session-a"
+
+
+def test_explicit_new_hint_ignores_existing_thread_binding() -> None:
+    existing = ChannelThreadBinding(
+        channel_instance_id="feishu-main",
+        external_chat_id="chat-1",
+        external_thread_id="thread-1",
+        agent_slug="developer",
+        project_id="project-a",
+        session_id="session-a",
+    )
+
+    decision = AgentChannelResolver().resolve(
+        _context(
+            is_top_level_mention=False,
+            continuation_hint=True,
+            explicit_new_hint=True,
+        ),
+        placements=[_placement("project-a")],
+        existing_binding=existing,
     )
 
     assert decision.kind == ChannelRouteDecisionKind.NEW_SESSION
@@ -177,6 +227,29 @@ def test_not_runnable_thread_binding_opens_new_session_for_single_deployment() -
     assert decision.kind == ChannelRouteDecisionKind.NEW_SESSION
     assert decision.project_id == "project-a"
     assert decision.session_id is None
+
+
+def test_running_thread_binding_queues_continuation() -> None:
+    existing = ChannelThreadBinding(
+        channel_instance_id="feishu-main",
+        external_chat_id="chat-1",
+        external_thread_id="thread-1",
+        agent_slug="developer",
+        project_id="project-a",
+        session_id="running-session",
+        session_accepts_turn=False,
+        session_status="running",
+    )
+
+    decision = AgentChannelResolver().resolve(
+        _context(is_top_level_mention=False, continuation_hint=True),
+        placements=[_placement("project-a")],
+        existing_binding=existing,
+    )
+
+    assert decision.kind == ChannelRouteDecisionKind.QUEUE_SESSION
+    assert decision.project_id == "project-a"
+    assert decision.session_id == "running-session"
 
 
 def test_missing_deployment_reports_not_deployed() -> None:

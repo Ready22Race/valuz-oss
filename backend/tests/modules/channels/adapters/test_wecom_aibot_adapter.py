@@ -64,6 +64,9 @@ def test_parse_text_callback_normalizes_channel_message() -> None:
     assert inbound.context.request_id == "req-1"
     assert inbound.context.external_message_id == "msg-1"
     assert inbound.context.external_user_id == "user-1"
+    assert inbound.context.continuation_hint is False
+    assert inbound.context.explicit_continue_hint is False
+    assert inbound.context.explicit_new_hint is False
     assert inbound.channel_context == {
         "platform": "wecom",
         "transport": "aibot_long_connection",
@@ -71,6 +74,132 @@ def test_parse_text_callback_normalizes_channel_message() -> None:
         "aibotid": "bot-1",
         "message_type": "text",
     }
+
+
+def test_parse_text_callback_extracts_session_intent_hints() -> None:
+    inbound = parse_wecom_aibot_frame(
+        {
+            "cmd": "aibot_msg_callback",
+            "headers": {"req_id": "req-1"},
+            "body": {
+                "msgid": "msg-1",
+                "aibotid": "bot-1",
+                "chatid": "chat-1",
+                "chattype": "group",
+                "from": {"userid": "user-1"},
+                "msgtype": "text",
+                "text": {"content": "@RobotA 继续刚才的问题"},
+            },
+        },
+        WeComAIBotConfig(
+            channel_instance_id="wecom-aibot-main",
+            owner_user_id="u1",
+            agent_slug="developer",
+            bot_id="bot-1",
+            secret="secret-1",
+        ),
+    )
+
+    assert inbound is not None
+    assert inbound.context.is_top_level_mention is True
+    assert inbound.context.continuation_hint is False
+    assert inbound.context.explicit_continue_hint is True
+    assert inbound.context.explicit_new_hint is False
+
+
+def test_parse_text_callback_treats_quoted_message_as_continuation_without_at() -> None:
+    inbound = parse_wecom_aibot_frame(
+        {
+            "cmd": "aibot_msg_callback",
+            "headers": {"req_id": "req-1"},
+            "body": {
+                "msgid": "msg-1",
+                "aibotid": "bot-1",
+                "chatid": "chat-1",
+                "chattype": "group",
+                "from": {"userid": "user-1"},
+                "msgtype": "text",
+                "text": {"content": "补一下单测"},
+                "quote_msg": {"msgid": "stream-old-user-message"},
+            },
+        },
+        WeComAIBotConfig(
+            channel_instance_id="wecom-aibot-main",
+            owner_user_id="u1",
+            agent_slug="developer",
+            bot_id="bot-1",
+            secret="secret-1",
+        ),
+    )
+
+    assert inbound is not None
+    assert inbound.text == "补一下单测"
+    assert inbound.context.is_top_level_mention is False
+    assert inbound.context.continuation_hint is True
+    assert inbound.context.explicit_continue_hint is False
+    assert inbound.context.explicit_new_hint is False
+
+
+def test_parse_text_callback_treats_quoted_at_message_as_continuation() -> None:
+    inbound = parse_wecom_aibot_frame(
+        {
+            "cmd": "aibot_msg_callback",
+            "headers": {"req_id": "req-1"},
+            "body": {
+                "msgid": "msg-1",
+                "aibotid": "bot-1",
+                "chatid": "chat-1",
+                "chattype": "group",
+                "from": {"userid": "user-1"},
+                "msgtype": "text",
+                "text": {"content": "@RobotA 补一下单测"},
+                "quote_msg": {"msgid": "stream-old-user-message"},
+            },
+        },
+        WeComAIBotConfig(
+            channel_instance_id="wecom-aibot-main",
+            owner_user_id="u1",
+            agent_slug="developer",
+            bot_id="bot-1",
+            secret="secret-1",
+        ),
+    )
+
+    assert inbound is not None
+    assert inbound.text == "补一下单测"
+    assert inbound.context.is_top_level_mention is False
+    assert inbound.context.continuation_hint is True
+    assert inbound.context.explicit_continue_hint is False
+    assert inbound.context.explicit_new_hint is False
+
+
+def test_parse_text_callback_extracts_explicit_new_session_hint() -> None:
+    inbound = parse_wecom_aibot_frame(
+        {
+            "cmd": "aibot_msg_callback",
+            "headers": {"req_id": "req-1"},
+            "body": {
+                "msgid": "msg-1",
+                "aibotid": "bot-1",
+                "chatid": "chat-1",
+                "chattype": "group",
+                "from": {"userid": "user-1"},
+                "msgtype": "text",
+                "text": {"content": "@RobotA 新开一个任务改登录"},
+            },
+        },
+        WeComAIBotConfig(
+            channel_instance_id="wecom-aibot-main",
+            owner_user_id="u1",
+            agent_slug="developer",
+            bot_id="bot-1",
+            secret="secret-1",
+        ),
+    )
+
+    assert inbound is not None
+    assert inbound.context.explicit_continue_hint is False
+    assert inbound.context.explicit_new_hint is True
 
 
 def test_parse_callback_ignores_non_text_messages() -> None:
