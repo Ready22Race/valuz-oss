@@ -45,6 +45,7 @@ from typing import Any, Literal, Protocol
 from valuz_agent.adapters import kernel_client
 from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.infra.lifecycle import is_draining
+from valuz_agent.modules.tasks.mailbox import mailbox_registry
 from valuz_agent.modules.sessions.turn_driver import (
     _restamp_always_on_mcp,
     _resolve_turn_status,
@@ -305,7 +306,6 @@ class ActorRunner:
         turn status, then finalizes the session exactly once.
         """
         from valuz_agent.modules.tasks import planning
-        from valuz_agent.modules.tasks.mailbox import mailbox_registry
 
         if self._finalizer is None or self._coordinator is None:
             raise RuntimeError(

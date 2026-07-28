@@ -83,6 +83,7 @@ from valuz_agent.modules.tasks.datastore import (
 )
 from valuz_agent.modules.tasks.events import block_task, finalize_task
 from valuz_agent.modules.tasks.live_member_registry import LiveMemberRegistry
+from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 from valuz_agent.modules.tasks.models import TaskRow, TaskSessionRow
 from valuz_agent.modules.tasks.plan import PlanError, TaskPlan
 from valuz_agent.modules.tasks.provenance import resolve_trigger_provenance
@@ -348,7 +349,6 @@ class LifecycleService:
         # Drive the lead as a persistent actor: it ends a turn and is re-woken
         # by member_done / send until finish_task (the actor loop's finalize
         # callback auto-closes a lead that ends without an explicit finish).
-        from valuz_agent.modules.tasks.mailbox import mailbox_registry
 
         mailbox_registry.register(lead_session.id)
         asyncio.create_task(
@@ -637,7 +637,6 @@ class LifecycleService:
         # committed — see the docstring; there is no enclosing transaction to
         # roll back). If the spawn fails the task is already ``active``, and
         # the health monitor marks it blocked so the user can resume.
-        from valuz_agent.modules.tasks.mailbox import mailbox_registry
 
         mailbox_registry.register(lead_session.id)
         asyncio.create_task(
@@ -1106,7 +1105,6 @@ class LifecycleService:
         overwriting theirs would either double-notify the lead or destroy a
         parked run's resumability.
         """
-        from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 
         lead_session_id = ""
         key: str | None = None
@@ -1343,7 +1341,6 @@ class LifecycleService:
 
         # v2: tell any still-running members to finalize, and break the lead's
         # own actor loop after this turn (no-op for sync/v1 — no live mailboxes).
-        from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 
         self._coordination._broadcast_shutdown(task_id)
         mailbox_registry.put(lead_session_id, InboxMsg(kind="shutdown"))

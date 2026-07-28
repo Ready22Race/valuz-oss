@@ -51,6 +51,8 @@ from valuz_agent.modules.tasks.datastore import (
     TaskSessionDatastore,
 )
 from valuz_agent.modules.tasks.live_member_registry import LiveMemberRegistry
+from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
+from valuz_agent.modules.tasks.member_state import classify_member
 from valuz_agent.modules.tasks.plan import PlanError, TaskPlan
 
 logger = logging.getLogger(__name__)
@@ -124,7 +126,6 @@ class CoordinationService:
         ``timeout_s``: on expiry, return whatever was collected plus
         ``pending`` (so a stuck member can't hang the lead forever).
         """
-        from valuz_agent.modules.tasks.mailbox import mailbox_registry
 
         # Ensure the lead inbox exists so ``get`` blocks for member_done
         # instead of raising KeyError (which would return empty instantly and
@@ -387,8 +388,6 @@ class CoordinationService:
         """
         if not pending_keys:
             return {}
-        from valuz_agent.modules.tasks.recovery import classify_member
-
         out: dict[str, dict[str, Any]] = {}
         async with async_unit_of_work() as db:
             run_ds = TaskSessionDatastore(db)
@@ -605,7 +604,6 @@ class CoordinationService:
         are different events and now have different types; rows written before
         2026-07 keep the old type (the log is append-only and is not rewritten).
         """
-        from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 
         async with async_unit_of_work() as db:
             run_ds = TaskSessionDatastore(db)
@@ -684,7 +682,6 @@ class CoordinationService:
 
     def _broadcast_shutdown(self, task_id: str) -> None:
         """Tell every still-running member of a task to finalize after its turn."""
-        from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 
         for member_sid in self._members.drain_members(task_id):
             mailbox_registry.put(member_sid, InboxMsg(kind="shutdown"))

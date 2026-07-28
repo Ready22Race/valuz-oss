@@ -35,7 +35,7 @@ from valuz_agent.modules.tasks.actor_runner import (
 )
 from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 from valuz_agent.modules.tasks.orchestrator import TaskOrchestrator
-from valuz_agent.modules.tasks.recovery import classify_member
+from valuz_agent.modules.tasks.member_state import classify_member
 
 LOCAL_USER_ID = "local-test-owner"
 

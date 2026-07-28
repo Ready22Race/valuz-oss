@@ -32,6 +32,7 @@ from valuz_agent.modules.tasks.datastore import (
     TaskEventDatastore,
     TaskSessionDatastore,
 )
+from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 from valuz_agent.modules.tasks.plan import PlanError, TaskPlan
 from valuz_agent.modules.tasks.plan_render import render_plan_md
 
@@ -408,7 +409,6 @@ async def review_subtask(
 
     # decision == "rework": mailbox delivery must run on the event loop
     # (asyncio.Queue is NOT thread-safe), then the DB write reflects it.
-    from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 
     delivered = False
     if target_session and mailbox_registry.is_registered(target_session):

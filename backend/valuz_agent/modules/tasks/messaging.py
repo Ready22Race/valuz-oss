@@ -23,6 +23,7 @@ from valuz_agent.modules.tasks.datastore import (
     TaskEventDatastore,
     TaskSessionDatastore,
 )
+from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 
 
 async def send_to_member(
@@ -42,7 +43,6 @@ async def send_to_member(
     sibling task's session id) deliver across tasks. We refuse any target
     whose run doesn't belong to ``task_id``.
     """
-    from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 
     async with async_unit_of_work(commit=False) as db:
         target_run = await TaskSessionDatastore(db).get_run(to_session_id)
@@ -115,7 +115,6 @@ async def inject_into_task(
       - draft / completed / abandoned task →
         ``delivered=False, reason=TASK_NOT_ACTIVE``
     """
-    from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 
     async with async_unit_of_work(commit=False) as db:
         task_row = await TaskDatastore(db).get_task_by_project(
@@ -236,7 +235,6 @@ async def notify_lead_goal_revised(
     auto-completion may still track the ORIGINAL goal, so this revision is
     declared authoritative.
     """
-    from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 
     async with async_unit_of_work(commit=False) as db:
         runs = await TaskSessionDatastore(db).list_runs(user_id, task_id)

@@ -41,6 +41,7 @@ from valuz_agent.modules.tasks.datastore import (
     TaskSessionDatastore,
 )
 from valuz_agent.modules.tasks.live_member_registry import LiveMemberRegistry
+from valuz_agent.modules.tasks.mailbox import mailbox_registry
 from valuz_agent.modules.tasks.models import TaskSessionRow
 from valuz_agent.modules.tasks.plan import TaskPlan
 from valuz_agent.modules.tasks.resolution import task_session_resolver
@@ -248,7 +249,6 @@ class DispatcherService:
         # finish_task shutdown that races ahead of the member loop's first tick
         # is still queued rather than dropped — otherwise the member would hang
         # until its idle TTL. run_actor_loop's register() is idempotent.
-        from valuz_agent.modules.tasks.mailbox import mailbox_registry
 
         # Register the LEAD's mailbox too (idempotent) — the member posts
         # ``member_done`` here when it idles, and the lead's ``await_members``
