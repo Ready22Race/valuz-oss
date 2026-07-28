@@ -37,6 +37,7 @@ import {
   TabsList,
   TabsTrigger,
   Textarea,
+  statusDotClass,
 } from "@valuz/ui";
 import {
   agentsApi,
@@ -1361,6 +1362,8 @@ export const AgentDetailView = ({
                       ) : null}
                     </div>
                     {feishuBinding?.agent_slug === agent.slug ? (
+                      // Dot + text keeps this line visually lighter than the
+                      // pill tags next to the title (same status → tone map).
                       <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-ink-body">
                         <span>
                           {t(
@@ -1369,23 +1372,27 @@ export const AgentDetailView = ({
                             >[0],
                           )}
                         </span>
-                        <StatusPill
-                          status={
-                            feishuBinding.enabled
-                              ? feishuRuntimeStatus.status
-                              : "disconnected"
-                          }
-                          label={
-                            feishuBinding.enabled
-                              ? feishuRuntimeStatus.label
-                              : t(
-                                  "agent.feishuNotEnabled" as Parameters<
-                                    typeof t
-                                  >[0],
-                                )
-                          }
-                          className="px-1.5 py-0 text-[10px] leading-4"
+                        <span
+                          className={`h-1.5 w-1.5 shrink-0 rounded-full ${statusDotClass(
+                            !feishuBinding.enabled
+                              ? "stopped"
+                              : feishuBinding.connected
+                                ? "connected"
+                                : feishuBinding.connection_status ===
+                                    "connecting"
+                                  ? "connecting"
+                                  : "error",
+                          )}`}
                         />
+                        <span>
+                          {feishuBinding.enabled
+                            ? feishuRuntimeStatus.label
+                            : t(
+                                "agent.feishuNotEnabled" as Parameters<
+                                  typeof t
+                                >[0],
+                              )}
+                        </span>
                         {feishuBinding.enabled &&
                         feishuBinding.connection_error ? (
                           <span className="truncate text-ink-muted">
