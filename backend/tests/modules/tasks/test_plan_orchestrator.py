@@ -2397,3 +2397,64 @@ def test_commit_task_blocks_on_member_provider_preflight(db_factory, tmp_path, m
     assert member_gap in res["error"]
     # The draft must remain committable after the user fixes the provider.
     assert _task_row(db_factory).status == "draft"
+
+
+# ---------------------------------------------------------------------------
+# notify_lead_member_idle — the member -> lead timeline event
+# ---------------------------------------------------------------------------
+
+
+def test_member_report_emits_subtask_reported_with_agent_name(
+    db_factory, tmp_path, monkeypatch
+) -> None:
+    """A member finishing a round writes ``subtask_reported``, not ``subtask_message``.
+
+    The two directions shared one type (split only by ``payload.direction``)
+    until 2026-07, so the timeline could not tell "the lead said something"
+    from "a member finished a round" without reading the payload. This also
+    pins the ``agent_name`` stamp: the frontend renders it straight from the
+    payload rather than joining the slug against a racy async members list.
+    """
+    from valuz_agent.modules.tasks import coordination as coord_mod
+
+    _make_task(db_factory, tmp_path)
+    db = db_factory()
+    try:
+        db.add(
+            TaskSessionRow(
+                user_id=OWNER,
+                id="run-mem",
+                project_id="w1",
+                task_id="t1",
+                session_id="mem-sess",
+                agent_slug="researcher",
+                sequence=1,
+                kind="subtask",
+                status="active",
+                subtask_key="A",
+                dispatched_by="lead-sess",
+                run_dir=str(tmp_path),
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    async def _fake_manifest(*_a, **_k):
+        return {"session_id": "mem-sess", "status": "idle", "summary": "did the thing"}
+
+    async def _fake_name(_ws, slug, _uid):
+        return f"Name of {slug}"
+
+    monkeypatch.setattr(coord_mod, "collect_manifest", _fake_manifest)
+    monkeypatch.setattr(coord_mod, "resolve_agent_display_name", _fake_name)
+
+    orch = TaskOrchestrator()
+    asyncio.run(orch.coordination.notify_lead_member_idle("mem-sess", "idle", user_id=OWNER))
+
+    assert "subtask_reported" in _events(db_factory)
+    assert "subtask_message" not in _events(db_factory)
+    payload = _event_payload(db_factory, "subtask_reported")
+    assert payload["agent_name"] == "Name of researcher"
+    assert payload["summary"] == "did the thing"
+    assert payload["status"] == "idle"

@@ -69,6 +69,11 @@ async def send_to_member(
         }
 
     async with async_unit_of_work() as db:
+        # ``subtask_message`` is the lead → member direction only. The member →
+        # lead counterpart is ``subtask_reported`` (coordination.py); the two
+        # shared this type — split apart by ``payload.direction`` — until
+        # 2026-07. ``direction`` is kept on the payload because pre-split rows
+        # carry it and it costs nothing; new readers key on the type.
         await TaskEventDatastore(db).append_event(
             user_id,
             project_id=project_id,

@@ -223,10 +223,15 @@ export function LiveTaskCard(props: LiveTaskCardProps): ReactElement | null {
           );
           break;
         }
+        // Anything that can change a subtask's state → refetch the plan.
+        // `subtask_reported` is member→lead, `subtask_message` is lead→member;
+        // they were one type until 2026-07, so pre-split rows arrive under
+        // `subtask_message` in BOTH directions and must stay handled.
         case "subtask_spawned":
         case "subtask_completed":
         case "subtask_failed":
         case "subtask_reviewed":
+        case "subtask_reported":
         case "subtask_message":
           scheduleRefetchPlan();
           break;

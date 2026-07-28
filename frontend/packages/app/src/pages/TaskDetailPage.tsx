@@ -133,10 +133,19 @@ const EVENT_META: Record<string, EventMeta> = {
     node: "bg-amber-500/10 text-amber-500",
     labelKey: "task.event.subtaskStopped",
   },
+  // Lead → member: the lead sent a running member a follow-up instruction.
+  // (Before 2026-07 this type also covered the member → lead direction, split
+  // apart only by `payload.direction`; historical rows still land here.)
   subtask_message: {
     icon: MessageSquare,
     node: "bg-indigo-500/10 text-indigo-500",
     labelKey: "task.event.subtaskMessage",
+  },
+  // Member → lead: the member finished a round of work and reported back.
+  subtask_reported: {
+    icon: MessageSquare,
+    node: "bg-indigo-500/10 text-indigo-500",
+    labelKey: "task.event.subtaskReported",
   },
   user_note: {
     icon: MessageSquare,

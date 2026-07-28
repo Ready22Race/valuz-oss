@@ -2107,6 +2107,7 @@ export type KnownI18nKey =
   | "task.event.subtaskCompleted"
   | "task.event.subtaskFailed"
   | "task.event.subtaskMessage"
+  | "task.event.subtaskReported"
   | "task.event.subtaskReviewApprove"
   | "task.event.subtaskReviewApproveReason"
   | "task.event.subtaskReviewRework"

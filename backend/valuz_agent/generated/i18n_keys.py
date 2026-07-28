@@ -2113,6 +2113,7 @@ I18nKey = Literal[
     "task.event.subtaskCompleted",
     "task.event.subtaskFailed",
     "task.event.subtaskMessage",
+    "task.event.subtaskReported",
     "task.event.subtaskReviewApprove",
     "task.event.subtaskReviewApproveReason",
     "task.event.subtaskReviewRework",

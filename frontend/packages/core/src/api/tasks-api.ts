@@ -67,8 +67,8 @@ export interface TaskEvent {
   id: string;
   sequence: number;
   /** kickoff | subtask_spawned | subtask_completed | subtask_failed |
-   *  subtask_message | user_note | goal_revised | paused | resumed |
-   *  stopped | task_completed */
+   *  subtask_message (lead -> member) | subtask_reported (member -> lead) |
+   *  user_note | goal_revised | paused | resumed | stopped | task_completed */
   type: string;
   /** user | <agent_slug> | system */
   actor: string;

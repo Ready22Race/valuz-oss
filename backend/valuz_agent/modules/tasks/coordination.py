@@ -40,6 +40,7 @@ import logging
 from pathlib import Path
 from typing import Any, cast
 
+from valuz_agent.adapters.agent_resolver import resolve_agent_display_name
 from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.tasks import planning
@@ -445,10 +446,6 @@ class CoordinationService:
                     # user just saw the subtask silently blink active→pending.
                     # Stamp ``agent_name`` (established rule) so the frontend
                     # doesn't race an async member-list join.
-                    from valuz_agent.adapters.agent_resolver import (
-                        resolve_agent_display_name,
-                    )
-
                     agent_name = await resolve_agent_display_name(
                         project_id, run.agent_slug or "", user_id
                     )
@@ -584,9 +581,16 @@ class CoordinationService:
     ) -> None:
         """After a member turn, push a member_done message to its lead's inbox.
 
-        Also appends a ``subtask_message`` task event so the timeline shows the
-        member→lead notification. Best-effort — a missing lead inbox (lead
-        already finished) just means the message is dropped.
+        Also appends a ``subtask_reported`` task event so the timeline shows
+        that the member reported back. Best-effort — a missing lead inbox (lead
+        already finished) just means the mailbox message is dropped.
+
+        The event type used to be ``subtask_message`` with a
+        ``payload.direction`` discriminator shared with the lead→member
+        direction, so the timeline could not tell "the lead said something" from
+        "a member finished a round of work" without reading the payload. They
+        are different events and now have different types; rows written before
+        2026-07 keep the old type (the log is append-only and is not rewritten).
         """
         from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 
@@ -603,15 +607,22 @@ class CoordinationService:
                 session_id, run_dir, status, since_epoch=since, user_id=user_id
             )
             manifest["agent"] = run.agent_slug
+            # Stamp the display name at emit time (established rule): the
+            # frontend renders ``payload.agent_name`` directly instead of
+            # joining the slug against an async members list, which races the
+            # load and misses agents removed since.
+            agent_name = await resolve_agent_display_name(
+                run.project_id, run.agent_slug or "", user_id
+            )
             await event_ds.append_event(
                 user_id,
                 project_id=run.project_id,
                 task_id=run.task_id or "",
-                type="subtask_message",
+                type="subtask_reported",
                 actor=run.agent_slug,
                 session_id=session_id,
                 payload={
-                    "direction": "member->lead",
+                    "agent_name": agent_name,
                     "summary": manifest.get("summary", ""),
                     "status": status,
                 },

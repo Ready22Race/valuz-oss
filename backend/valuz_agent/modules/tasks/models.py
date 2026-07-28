@@ -24,9 +24,20 @@ Task (valuz_task):
 TaskEvent (valuz_task_event):
   Append-only event log scoped to a task. Monotonic ``sequence`` per
   (project_id, task_id). Types: kickoff | subtask_spawned |
-  subtask_completed | subtask_failed | user_note | goal_revised |
-  paused | resumed | stopped | task_completed | task_drafted |
-  committed | abandoned | user_inject | user_inject_dropped.
+  subtask_completed | subtask_failed | subtask_stopped | subtask_reviewed |
+  subtask_message | subtask_reported | user_note | goal_revised |
+  paused | resumed | stopped | task_completed | task_blocked |
+  task_drafted | committed | abandoned | user_inject |
+  user_inject_dropped | awaiting_user | user_answered |
+  task_plan_update | plan_revised | task_planned | deliverable_updated |
+  kickoff_failed.
+
+  ``subtask_message`` is lead → member; ``subtask_reported`` is member →
+  lead. They were ONE type discriminated by ``payload.direction`` until
+  2026-07 — a timeline could not tell "the lead said something" from "a
+  member finished a round" without reading the payload. Rows written before
+  the split keep the old type for BOTH directions: this log is append-only
+  and is never rewritten, so readers must keep handling it.
 
 TaskSession (valuz_task_session):
   Index of every kernel session that belongs to a task — the lead's
