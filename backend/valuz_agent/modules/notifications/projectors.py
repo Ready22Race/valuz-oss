@@ -35,7 +35,7 @@ async def record_task_failure_notification(
     title = task_title
     if title is None:
         try:
-            from valuz_agent.modules.tasks import queries as task_queries
+            from valuz_agent.modules.tasks import service as task_queries
 
             task, _runs = await task_queries.get_task_with_runs(user_id, task_id)
             title = task.title if task is not None else task_id

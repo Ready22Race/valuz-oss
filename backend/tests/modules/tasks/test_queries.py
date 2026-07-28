@@ -14,7 +14,7 @@ from __future__ import annotations
 import pytest
 
 from valuz_agent.modules.agents.models import ProjectMemberRow
-from valuz_agent.modules.tasks import queries
+from valuz_agent.modules.tasks import service as queries
 from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionRow
 
 LOCAL_USER_ID = "local-test-owner"

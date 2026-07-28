@@ -16,7 +16,7 @@ import pytest
 import valuz_agent.boot.kernel  # noqa: F401
 from sqlalchemy import select
 
-from valuz_agent.modules.tasks.health_monitor import (
+from valuz_agent.modules.tasks.recovery import (
     TaskHealthConfig,
     TaskHealthMonitor,
 )

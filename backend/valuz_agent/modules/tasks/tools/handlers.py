@@ -25,7 +25,8 @@ from src.core.tools import ExecContext, ToolHandler
 from valuz_agent.adapters.agent_resolver import summarize_role
 from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.infra.db import async_unit_of_work
-from valuz_agent.modules.tasks import messaging, plan_commands, planning, queries
+from valuz_agent.modules.tasks import messaging, plan_commands, planning
+from valuz_agent.modules.tasks import service as task_service
 from valuz_agent.modules.tasks.datastore import TaskDatastore
 from valuz_agent.modules.tasks.mailbox import mailbox_registry
 from valuz_agent.modules.tasks.outcome import Failure
@@ -633,7 +634,7 @@ async def _list_tasks_handler(
     if isinstance(gate, ToolResult):
         return gate
     project_id, _agent_slug = gate
-    tasks = await queries.list_tasks(
+    tasks = await task_service.list_tasks(
         project_id,
         status=args.get("status"),
         mine_session_id=ctx.session_id if args.get("mine_only") else None,
@@ -653,7 +654,7 @@ async def _get_task_handler(
     task_id = (args.get("task_id") or "").strip()
     if not task_id:
         return ToolResult(content="get_task: task_id is required", is_error=True)
-    detail = await queries.get_task(task_id, project_id, user_id=ctx.user_id)
+    detail = await task_service.get_task(task_id, project_id, user_id=ctx.user_id)
     if detail is None:
         return ToolResult(
             content=f"task {task_id!r} not found in this project", is_error=True
@@ -677,7 +678,7 @@ async def _list_members_handler(
     if not project_id:
         return ToolResult(content="list_members: caller session has no project", is_error=True)
 
-    members = await queries.list_members(project_id, user_id=user_id)
+    members = await task_service.list_members(project_id, user_id=user_id)
     if not members:
         # Project-less chat fallback (see ``_bound_agent_member``):
         # a chat project has no deployed project members, but the

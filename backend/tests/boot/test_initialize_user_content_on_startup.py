@@ -316,7 +316,7 @@ async def test_host_background_services_skip_scanners_when_disabled(monkeypatch)
     calls: list[str] = []
 
     monkeypatch.setattr(
-        "valuz_agent.modules.tasks.health_monitor.task_health_monitor.startup",
+        "valuz_agent.modules.tasks.recovery.task_health_monitor.startup",
         lambda: _async_call(calls, "task-health"),
     )
     monkeypatch.setattr(
@@ -339,7 +339,7 @@ async def test_host_background_services_do_not_start_agent_channels(monkeypatch)
     calls: list[str] = []
 
     monkeypatch.setattr(
-        "valuz_agent.modules.tasks.health_monitor.task_health_monitor.startup",
+        "valuz_agent.modules.tasks.recovery.task_health_monitor.startup",
         lambda: _async_call(calls, "task-health"),
     )
     monkeypatch.setattr(

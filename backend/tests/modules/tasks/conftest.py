@@ -26,7 +26,7 @@ from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionR
 # table, another two, the rest three).
 #
 # ``valuz_project_member`` rides along because a real read path reaches it:
-# ``queries.list_members`` goes through the resolver seam into
+# ``service.list_members`` goes through the resolver seam into
 # ``ProjectMemberDatastore``. One extra empty table costs nothing.
 _TASK_TABLES = [
     TaskRow.__table__,

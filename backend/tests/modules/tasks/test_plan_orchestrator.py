@@ -2499,7 +2499,7 @@ def test_list_tasks_counts_every_settled_run_as_done(db_factory, tmp_path) -> No
     them — so an errored run (archived) or a user-stopped one (rejected) never
     counted, and the progress reported to the agent read low forever.
     """
-    from valuz_agent.modules.tasks import queries
+    from valuz_agent.modules.tasks import service as queries
 
     _make_task(db_factory, tmp_path)
     db = db_factory()

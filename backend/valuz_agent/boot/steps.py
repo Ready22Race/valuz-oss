@@ -691,7 +691,7 @@ async def start_host_background_services(app: FastAPI) -> None:
     """Start non-automation host monitors and optional content scanners."""
     # Task watchdog: detect a lead that died without finalizing (the hole boot
     # recovery can't see mid-process) → mark blocked so it surfaces + resumes.
-    from valuz_agent.modules.tasks.health_monitor import task_health_monitor
+    from valuz_agent.modules.tasks.recovery import task_health_monitor
 
     await task_health_monitor.startup()
 
@@ -876,7 +876,7 @@ async def stop_automation_runtime(app: FastAPI) -> None:
 
 async def stop_host_background_services(app: FastAPI) -> None:
     """Stop non-automation host monitors and optional content scanners."""
-    from valuz_agent.modules.tasks.health_monitor import task_health_monitor
+    from valuz_agent.modules.tasks.recovery import task_health_monitor
 
     await task_health_monitor.shutdown()
 

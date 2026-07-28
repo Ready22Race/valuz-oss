@@ -23,7 +23,7 @@ from valuz_agent.adapters import kernel_client
 from valuz_agent.modules.activity.schemas import ActivityItem, ActivityPage
 from valuz_agent.modules.projects.service import project_name_map
 from valuz_agent.modules.sessions import project_index
-from valuz_agent.modules.tasks.queries import list_activity_tasks_page
+from valuz_agent.modules.tasks.service import list_activity_tasks_page
 
 # Sentinel ``project_id`` the chat launchers stamp on non-project quick chats.
 _CHAT_DEFAULT = "chat-default"
