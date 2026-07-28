@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from valuz_agent.modules.automations.service import AutomationService
+    from valuz_agent.modules.channels.service import ChannelIngressService
     from valuz_agent.modules.project_packs.service import ProjectPackService
 
 
@@ -291,6 +292,35 @@ async def get_settings_service() -> AsyncGenerator[SettingsService, None]:
         yield SettingsService(
             datastore=SettingsDatastore(db),
             event_bus=event_bus,
+        )
+
+
+async def get_channel_ingress_service() -> AsyncGenerator[ChannelIngressService, None]:
+    from valuz_agent.adapters.channel_placement_reader import DatastoreAgentPlacementReader
+    from valuz_agent.adapters.channel_session_runner import SessionServiceChannelRunner
+    from valuz_agent.modules.channels.datastore import ChannelThreadBindingDatastore
+    from valuz_agent.modules.channels.service import ChannelIngressService
+
+    async with async_unit_of_work() as db:
+        project_ds = ProjectDatastore(db)
+        session_service = SessionService(
+            event_bus=event_bus,
+            project_svc=ProjectService(datastore=project_ds, event_bus=event_bus),
+            providers=ProviderDatastore(db),
+            skills=SkillDatastore(db),
+            projects=project_ds,
+            docs=DocumentDatastore(db),
+            connectors=ConnectorDatastore(db),
+            skill_source=FilesystemSkillSource(),
+            extra_skill_sources=[OfficialSkillSource()],
+        )
+        yield ChannelIngressService(
+            placements=DatastoreAgentPlacementReader(
+                members=ProjectMemberDatastore(db),
+                projects=project_ds,
+            ),
+            bindings=ChannelThreadBindingDatastore(db),
+            sessions=SessionServiceChannelRunner(session_service),
         )
 
 

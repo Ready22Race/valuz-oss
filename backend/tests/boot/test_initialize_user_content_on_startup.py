@@ -334,6 +334,58 @@ async def test_host_background_services_skip_scanners_when_disabled(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_host_background_services_do_not_start_agent_channels(monkeypatch) -> None:
+    settings.initialize_user_content_on_startup = True
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        "valuz_agent.modules.tasks.health_monitor.task_health_monitor.startup",
+        lambda: _async_call(calls, "task-health"),
+    )
+    monkeypatch.setattr(
+        "valuz_agent.modules.docs.scheduler.start_auto_discovery",
+        lambda: calls.append("docs-scan"),
+    )
+    monkeypatch.setattr(
+        "valuz_agent.modules.skills.scheduler.start_skill_auto_scan",
+        lambda: calls.append("skill-scan"),
+    )
+    monkeypatch.setattr(
+        "valuz_agent.modules.backup.scheduler.start_backup_scheduler",
+        lambda: calls.append("backup"),
+    )
+    monkeypatch.setattr(
+        "valuz_agent.integrations.wecom_aibot_long_connection.wecom_aibot_supervisor.startup",
+        lambda: (_ for _ in ()).throw(AssertionError("channels start only post boot")),
+    )
+    monkeypatch.setattr(
+        "valuz_agent.integrations.feishu_long_connection.feishu_supervisor.startup",
+        lambda: (_ for _ in ()).throw(AssertionError("channels start only post boot")),
+    )
+
+    await steps.start_host_background_services(SimpleNamespace())
+
+    assert calls == ["task-health", "docs-scan", "skill-scan", "backup"]
+
+
+@pytest.mark.asyncio
+async def test_post_boot_agent_channels_starts_after_boot(monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "valuz_agent.integrations.wecom_aibot_long_connection.wecom_aibot_supervisor.startup",
+        lambda: _async_call(calls, "wecom-aibot"),
+    )
+    monkeypatch.setattr(
+        "valuz_agent.integrations.feishu_long_connection.feishu_supervisor.startup",
+        lambda: _async_call(calls, "feishu"),
+    )
+
+    await steps.start_post_boot_agent_channels(SimpleNamespace())
+
+    assert calls == ["wecom-aibot", "feishu"]
+
+
+@pytest.mark.asyncio
 async def test_bind_data_service_skips_local_owner_secret_when_startup_user_content_disabled(
     monkeypatch,
 ) -> None:
