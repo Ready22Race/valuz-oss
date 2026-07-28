@@ -14,11 +14,8 @@ import asyncio
 import pytest
 
 import valuz_agent.boot.kernel  # noqa: F401
-from sqlalchemy import create_engine, select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import select
 
-from valuz_agent.infra.database import Base
 from valuz_agent.modules.tasks.health_monitor import (
     TaskHealthConfig,
     TaskHealthMonitor,
@@ -29,20 +26,6 @@ from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionR
 OWNER = "local-test-owner"
 
 
-@pytest.fixture
-def db_factory(tmp_path, monkeypatch):
-    import valuz_agent.infra.db as db_mod
-
-    db_file = tmp_path / "health.db"
-    sync_engine = create_engine(f"sqlite:///{db_file}", connect_args={"check_same_thread": False})
-    Base.metadata.create_all(
-        sync_engine,
-        tables=[TaskRow.__table__, TaskEventRow.__table__, TaskSessionRow.__table__],
-    )
-    async_engine = create_async_engine(f"sqlite+aiosqlite:///{db_file}")
-    async_factory = async_sessionmaker(bind=async_engine, expire_on_commit=False)
-    monkeypatch.setattr(db_mod, "AsyncSessionLocal", async_factory)
-    return sessionmaker(bind=sync_engine, expire_on_commit=False)
 
 
 @pytest.fixture(autouse=True)

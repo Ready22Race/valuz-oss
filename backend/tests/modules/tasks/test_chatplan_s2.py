@@ -10,35 +10,16 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
 
 import valuz_agent.boot.kernel  # noqa: F401
-from sqlalchemy import create_engine, select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.orm import sessionmaker
-from valuz_agent.infra.database import Base
+from sqlalchemy import select
 from valuz_agent.modules.tasks import planning
-from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionRow
+from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow
 from valuz_agent.modules.tasks.orchestrator import TaskOrchestrator
 
 OWNER = "local-test-owner"
 
 
-@pytest.fixture
-def db_factory(tmp_path, monkeypatch):
-    """A tmp-SQLite async+sync sessionmaker pair (mirrors test_plan_orchestrator)."""
-    import valuz_agent.infra.db as db_mod
-
-    db_file = tmp_path / "chatplan.db"
-    sync_engine = create_engine(f"sqlite:///{db_file}", connect_args={"check_same_thread": False})
-    Base.metadata.create_all(
-        sync_engine,
-        tables=[TaskRow.__table__, TaskEventRow.__table__, TaskSessionRow.__table__],
-    )
-    async_engine = create_async_engine(f"sqlite+aiosqlite:///{db_file}")
-    async_factory = async_sessionmaker(bind=async_engine, expire_on_commit=False)
-    monkeypatch.setattr(db_mod, "AsyncSessionLocal", async_factory)
-    return sessionmaker(bind=sync_engine, expire_on_commit=False)
 
 
 def _events(db_factory, project_id="w1", task_id="t1") -> list[str]:

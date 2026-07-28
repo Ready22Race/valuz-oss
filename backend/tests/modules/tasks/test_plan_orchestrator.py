@@ -14,10 +14,7 @@ from pathlib import Path
 import pytest
 
 import valuz_agent.boot.kernel  # noqa: F401
-from sqlalchemy import create_engine, select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.orm import sessionmaker
-from valuz_agent.infra.database import Base
+from sqlalchemy import select
 from valuz_agent.adapters import kernel_client as kernel_client_mod
 from valuz_agent.modules.tasks import planning
 from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionRow
@@ -36,28 +33,6 @@ def _as_async(fn):
     return _f
 
 
-@pytest.fixture
-def db_factory(tmp_path, monkeypatch):
-    """A tmp-SQLite async sessionmaker bound into ``infra.db.AsyncSessionLocal``.
-
-    The host is now fully async (``async_unit_of_work`` / aiosqlite); we patch
-    ``infra.db.AsyncSessionLocal`` so the orchestrator's units of work bind to
-    this tmp engine. A parallel SYNC sessionmaker is returned for the test
-    helpers to seed/read rows synchronously (simpler than awaiting in helpers).
-    """
-    import valuz_agent.infra.db as db_mod
-
-    db_file = tmp_path / "plan.db"
-    # Sync engine for the test helpers (seed/read).
-    sync_engine = create_engine(f"sqlite:///{db_file}", connect_args={"check_same_thread": False})
-    Base.metadata.create_all(
-        sync_engine, tables=[TaskRow.__table__, TaskEventRow.__table__, TaskSessionRow.__table__]
-    )
-    # Async engine for the code-under-test.
-    async_engine = create_async_engine(f"sqlite+aiosqlite:///{db_file}")
-    async_factory = async_sessionmaker(bind=async_engine, expire_on_commit=False)
-    monkeypatch.setattr(db_mod, "AsyncSessionLocal", async_factory)
-    return sessionmaker(bind=sync_engine, expire_on_commit=False)
 
 
 def _make_task(db_factory, tmp_path, *, project_id="w1", task_id="t1") -> str:

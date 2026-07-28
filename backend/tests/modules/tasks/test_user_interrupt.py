@@ -34,8 +34,9 @@ from valuz_agent.modules.tasks.actor_runner import (
     _resolve_turn_status,
 )
 from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
-from valuz_agent.modules.tasks.orchestrator import TaskOrchestrator
 from valuz_agent.modules.tasks.member_state import classify_member
+from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionRow
+from valuz_agent.modules.tasks.orchestrator import TaskOrchestrator
 
 LOCAL_USER_ID = "local-test-owner"
 
@@ -184,106 +185,104 @@ def test_format_member_done_failure_guidance() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _patch_finalize_deps(
-    monkeypatch: pytest.MonkeyPatch,
+def _seed_interrupted_member(
+    db_factory,
     *,
     run_status: str,
-    plan_nodes: list[dict[str, Any]],
-) -> dict[str, Any]:
-    """Stub lifecycle's DB seams for _finalize_interrupted_member and record
-    every write. Returns the recorder dict."""
-    from valuz_agent.modules.tasks import lifecycle as lc_mod
+    node_status: str,
+) -> None:
+    """Seed a real task + member run for the finalize-callback tests.
 
-    rec: dict[str, Any] = {"run_updates": [], "events": [], "task_plan": None}
+    Was ``_patch_finalize_deps``: four hand-rolled fake datastores plus a fake
+    unit of work, recording writes into a dict. That fake broke twice during
+    the 2026-07 refactor on edits that had nothing to do with what it was
+    testing, because it modelled the datastore API rather than the data. A real
+    tmp sqlite row costs microseconds, cannot drift, and lets the assertions
+    read the ACTUAL persisted state instead of a recorder.
+    """
+    db = db_factory()
+    try:
+        db.add(
+            TaskRow(
+                user_id=LOCAL_USER_ID,
+                id="t1",
+                project_id="w1",
+                file_path="/tmp/t1.md",
+                title="T",
+                goal="g",
+                status="active",
+                created_by="user",
+                lead_agent_slug="lead",
+                current_holder="lead",
+                plan={
+                    "subtasks": [
+                        {"key": "dev", "title": "dev", "agent": "coder", "status": node_status}
+                    ]
+                },
+            )
+        )
+        db.add(
+            TaskSessionRow(
+                user_id=LOCAL_USER_ID,
+                id="run-mem",
+                project_id="w1",
+                task_id="t1",
+                session_id="mem-1",
+                agent_slug="coder",
+                sequence=1,
+                kind="subtask",
+                status=run_status,
+                subtask_key="dev",
+                dispatched_by="lead-1",
+                run_dir="/tmp",
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
 
-    run = SimpleNamespace(
-        session_id="mem-1",
-        kind="subtask",
-        subtask_key="dev",
-        agent_slug="coder",
-        dispatched_by="lead-1",
-        status=run_status,
-        run_dir="/tmp",
-        task_id="t1",
-        project_id="w1",
-    )
-    task_row = SimpleNamespace(
-        # ``id`` / ``project_id`` are read off the row by ``persist_plan`` (a
-        # real TaskRow always carries them) — the fake has to model that.
-        id="t-int",
-        project_id="w1",
-        plan={"subtasks": plan_nodes},
-        status="active",
-    )
 
-    class _FakeRunDs:
-        def __init__(self, _db):
-            pass
-
-        async def get_run(self, _sid):
-            return run
-
-        async def update_run_by_session(self, **kw):
-            rec["run_updates"].append(kw)
-
-    class _FakeTaskDs:
-        def __init__(self, _db):
-            pass
-
-        async def get_task_by_project(self, _uid, _ws, _tid):
-            return task_row
-
-        async def update_task(self, row):
-            rec["task_plan"] = row.plan
-
-    class _FakeEventDs:
-        def __init__(self, _db):
-            pass
-
-        async def append_event(self, *a, **kw):
-            rec["events"].append(kw.get("type") or (a[3] if len(a) > 3 else None))
-
-    @asynccontextmanager
-    async def _fake_uow(*_a, **_k):
-        yield SimpleNamespace()
-
-    async def _fake_emit(*_a, **_k):
-        return None
-
-    async def _fake_name(*_a, **_k):
-        return "Coder"
-
-    monkeypatch.setattr(lc_mod, "async_unit_of_work", _fake_uow)
-    monkeypatch.setattr(lc_mod, "TaskSessionDatastore", _FakeRunDs)
-    monkeypatch.setattr(lc_mod, "TaskDatastore", _FakeTaskDs)
-    monkeypatch.setattr(lc_mod, "TaskEventDatastore", _FakeEventDs)
-    monkeypatch.setattr(lc_mod, "resolve_agent_display_name", _fake_name)
-    monkeypatch.setattr(planning, "emit_plan_update", _fake_emit)
-    return rec
+def _read_state(db_factory) -> tuple[str, dict[str, Any], list[str]]:
+    """(run status, plan node, event types) straight from the DB."""
+    db = db_factory()
+    try:
+        run = db.query(TaskSessionRow).filter_by(session_id="mem-1").one()
+        task = db.query(TaskRow).filter_by(id="t1").one()
+        events = [
+            e.type
+            for e in db.query(TaskEventRow).order_by(TaskEventRow.sequence).all()
+        ]
+        return run.status, task.plan["subtasks"][0], events
+    finally:
+        db.close()
 
 
 async def test_finalize_interrupted_member_records_user_stop(
-    monkeypatch: pytest.MonkeyPatch,
+    db_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    rec = _patch_finalize_deps(
-        monkeypatch,
-        run_status="active",
-        plan_nodes=[{"key": "dev", "title": "dev", "status": "in_progress"}],
-    )
+    from valuz_agent.modules.tasks import lifecycle as lc_mod
+
+    async def _fake_name(*_a: Any, **_k: Any) -> str:
+        return "Coder"
+
+    monkeypatch.setattr(lc_mod, "resolve_agent_display_name", _fake_name)
+    _seed_interrupted_member(db_factory, run_status="active", node_status="in_progress")
+
     orch = TaskOrchestrator()
     mailbox_registry.register("lead-1")
     try:
-        await orch._lifecycle._finalize_interrupted_member(
+        await orch.lifecycle._finalize_interrupted_member(
             session_id="mem-1", task_id="t1", project_id="w1", user_id=LOCAL_USER_ID
         )
+        run_status, node, events = _read_state(db_factory)
         # run → rejected (the stop_member convention, not archived/failed)
-        assert rec["run_updates"] and rec["run_updates"][0]["status"] == "rejected"
+        assert run_status == "rejected"
         # node → rework with a user-stop note
-        node = rec["task_plan"]["subtasks"][0]
         assert node["status"] == "rework"
         assert "用户中断" in (node.get("review_feedback") or "")
-        # timeline shows a stop, NOT a failure
-        assert rec["events"] == ["subtask_stopped"]
+        # timeline shows a stop, NOT a failure (plus the plan snapshot)
+        assert "subtask_stopped" in events
+        assert "subtask_failed" not in events
         # exactly one member_done(cancelled) reached the lead
         msg = await mailbox_registry.get("lead-1", timeout=0.5)
         assert msg.kind == "member_done"
@@ -292,30 +291,28 @@ async def test_finalize_interrupted_member_records_user_stop(
         mailbox_registry.unregister("lead-1")
 
 
+@pytest.mark.parametrize("parked", ["rejected", "paused"])
 async def test_finalize_interrupted_member_skips_already_recorded_runs(
-    monkeypatch: pytest.MonkeyPatch,
+    db_factory, parked: str
 ) -> None:
     """stop_member (rejected) / stop_task (paused) already recorded the outcome
     — the loop-exit callback must not overwrite it or double-notify."""
-    for parked in ("rejected", "paused"):
-        rec = _patch_finalize_deps(
-            monkeypatch,
-            run_status=parked,
-            plan_nodes=[{"key": "dev", "title": "dev", "status": "paused"}],
+    _seed_interrupted_member(db_factory, run_status=parked, node_status="paused")
+
+    orch = TaskOrchestrator()
+    mailbox_registry.register("lead-1")
+    try:
+        await orch.lifecycle._finalize_interrupted_member(
+            session_id="mem-1", task_id="t1", project_id="w1", user_id=LOCAL_USER_ID
         )
-        orch = TaskOrchestrator()
-        mailbox_registry.register("lead-1")
-        try:
-            await orch._lifecycle._finalize_interrupted_member(
-                session_id="mem-1", task_id="t1", project_id="w1", user_id=LOCAL_USER_ID
-            )
-            assert rec["run_updates"] == []
-            assert rec["events"] == []
-            assert rec["task_plan"] is None
-            with pytest.raises(asyncio.TimeoutError):
-                await mailbox_registry.get("lead-1", timeout=0.05)
-        finally:
-            mailbox_registry.unregister("lead-1")
+        run_status, node, events = _read_state(db_factory)
+        assert run_status == parked, "the parked outcome must survive untouched"
+        assert node["status"] == "paused"
+        assert events == []
+        with pytest.raises(asyncio.TimeoutError):
+            await mailbox_registry.get("lead-1", timeout=0.05)
+    finally:
+        mailbox_registry.unregister("lead-1")
 
 
 # ---------------------------------------------------------------------------
