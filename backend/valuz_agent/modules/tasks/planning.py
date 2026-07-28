@@ -75,9 +75,8 @@ async def persist_plan(
     await task_ds.update_task(task_row)
     await emit_plan_update(
         event_ds,
-        project_id=task_row.project_id,
-        task_id=task_row.id,
-        plan=plan,
+        task_row,
+        plan,
         actor=actor,
         session_id=session_id,
         user_id=user_id,
@@ -86,22 +85,34 @@ async def persist_plan(
 
 async def emit_plan_update(
     event_ds: TaskEventDatastore,
-    *,
-    project_id: str,
-    task_id: str,
+    task_row: TaskRow,
     plan: TaskPlan,
+    *,
     actor: str,
     session_id: str | None,
     user_id: str,
 ) -> None:
-    """Append a ``task_plan_update`` snapshot event (frontend Todo panel)."""
+    """Append a ``task_plan_update`` snapshot event.
+
+    The payload is a SELF-CONTAINED SNAPSHOT, and every field below is load
+    bearing — this used to emit ``{"subtasks": ...}`` alone while the frontend
+    read four keys off it, which silently broke the live plan feed:
+    ``PlanCardFeed`` guards with ``if (payload.plan_version ?? 0) <=
+    card.planVersion) return``, so with the version absent every event
+    evaluated ``0 <= n`` and was DISCARDED. The feed only ever updated from its
+    initial fetch; nothing on screen moved as the plan progressed.
+
+    Keep it a snapshot. A consumer must be able to render the whole card from
+    one event without joining against anything, because these arrive over SSE
+    where "the event before this one" is not guaranteed to have been seen.
+    """
     panel = plan.to_panel()
     # Stamp each node's member display name so the Todo panel renders it
     # directly rather than joining the ``agent`` slug against an async members
     # list (which races the load / misses removed agents — the same
     # "成员智能体名称查询不到" bug as the timeline). Batched into one read UoW.
     names = await resolve_agent_display_names(
-        project_id, [n["agent"] for n in panel], user_id
+        task_row.project_id, [n["agent"] for n in panel], user_id
     )
     for n in panel:
         slug = n.get("agent")
@@ -109,12 +120,21 @@ async def emit_plan_update(
             n["agent_name"] = names.get(slug, slug)
     await event_ds.append_event(
         user_id,
-        project_id=project_id,
-        task_id=task_id,
+        project_id=task_row.project_id,
+        task_id=task_row.id,
         type="task_plan_update",
         actor=actor,
         session_id=session_id,
-        payload={"subtasks": panel},
+        payload={
+            "subtasks": panel,
+            # Monotonic CAS token — the consumer's dedup/ordering key.
+            "plan_version": task_row.plan_version or 0,
+            # Named ``task_status``, not ``status``: a plan snapshot also
+            # carries per-node statuses, and an unqualified ``status`` in this
+            # payload reads as "the plan's".
+            "task_status": task_row.status,
+            "title": task_row.title,
+        },
     )
 
 
@@ -171,9 +191,8 @@ async def plan_task(
         )
         await emit_plan_update(
             event_ds,
-            project_id=project_id,
-            task_id=task_id,
-            plan=plan,
+            task_row,
+            plan,
             actor=lead_session_id,
             session_id=lead_session_id,
             user_id=user_id,
@@ -279,9 +298,8 @@ async def modify_plan(
         )
         await emit_plan_update(
             event_ds,
-            project_id=project_id,
-            task_id=task_id,
-            plan=plan,
+            task_row,
+            plan,
             actor=lead_session_id,
             session_id=lead_session_id,
             user_id=user_id,

@@ -2523,3 +2523,78 @@ def test_list_tasks_counts_every_settled_run_as_done(db_factory, tmp_path) -> No
     assert rows[0]["runs"] == 4
     # completed + archived + rejected are settled; only the active one isn't.
     assert rows[0]["runs_done"] == 3
+
+
+def test_plan_update_payload_is_a_self_contained_snapshot(db_factory, tmp_path) -> None:
+    """``task_plan_update`` must carry everything a consumer renders from it.
+
+    Regression for a silent contract drift: the backend emitted
+    ``{"subtasks": ...}`` alone while ``PlanCardFeed`` read four keys off the
+    payload and guarded with
+
+        if ((payload.plan_version ?? 0) <= card.planVersion) return
+
+    With the version missing, every event evaluated ``0 <= n`` and was
+    DISCARDED — the live plan feed only ever updated from its initial fetch,
+    and nothing moved on screen as the plan progressed. Nothing failed; it just
+    quietly stopped working.
+
+    These events go out over SSE, where a consumer cannot assume it saw the
+    previous one, so the payload has to stand alone. Lock the shape.
+    """
+    _make_task(db_factory, tmp_path)
+    asyncio.run(
+        planning.plan_task(
+            task_id="t1",
+            project_id="w1",
+            user_id=OWNER,
+            lead_session_id="lead-sess",
+            subtasks=[{"key": "a", "title": "A", "agent": "x"}],
+        )
+    )
+    payload = _event_payload(db_factory, "task_plan_update")
+
+    assert set(payload) == {"subtasks", "plan_version", "task_status", "title"}
+    assert payload["plan_version"] == 1, "the CAS token is the consumer's dedup key"
+    assert payload["task_status"] == "active"
+    assert payload["title"] == "T"
+    # Nodes carry the resolved display name so the panel never has to join the
+    # slug against an async members list.
+    assert payload["subtasks"][0]["key"] == "a"
+    assert "agent_name" in payload["subtasks"][0]
+
+
+def test_plan_update_version_advances_with_every_plan_write(db_factory, tmp_path) -> None:
+    """Consecutive snapshots must be distinguishable, or the consumer's
+    ``version <= seen`` guard drops the newer one."""
+    _make_task(db_factory, tmp_path)
+    asyncio.run(
+        planning.plan_task(
+            task_id="t1",
+            project_id="w1",
+            user_id=OWNER,
+            lead_session_id="lead-sess",
+            subtasks=[{"key": "a", "title": "A", "agent": "x"}],
+        )
+    )
+    asyncio.run(
+        planning.modify_plan(
+            task_id="t1",
+            project_id="w1",
+            user_id=OWNER,
+            lead_session_id="lead-sess",
+            add=[{"key": "b", "title": "B", "agent": "x"}],
+        )
+    )
+    db = db_factory()
+    try:
+        versions = [
+            (e.payload or {}).get("plan_version")
+            for e in db.query(TaskEventRow)
+            .filter_by(type="task_plan_update")
+            .order_by(TaskEventRow.sequence)
+            .all()
+        ]
+    finally:
+        db.close()
+    assert versions == [1, 2]

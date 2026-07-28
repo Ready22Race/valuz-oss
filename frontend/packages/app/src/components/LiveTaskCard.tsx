@@ -250,8 +250,17 @@ export function LiveTaskCard(props: LiveTaskCardProps): ReactElement | null {
         case "task_blocked":
           setMeta((m) => (m ? { ...m, status: "blocked" } : m));
           break;
-        case "stopped":
+        // `stop_task` emits `paused` or `stopped` depending on the target;
+        // each maps to the SAME name as the task status it just wrote. This
+        // used to project `stopped` onto `paused` (and handle no `paused`
+        // event at all), so a stopped task rendered as merely paused and every
+        // status-derived affordance — resume/stop buttons, the attention dot —
+        // was computed from a status the backend never set.
+        case "paused":
           setMeta((m) => (m ? { ...m, status: "paused" } : m));
+          break;
+        case "stopped":
+          setMeta((m) => (m ? { ...m, status: "stopped" } : m));
           break;
         case "resumed":
           setMeta((m) => (m ? { ...m, status: "active" } : m));
