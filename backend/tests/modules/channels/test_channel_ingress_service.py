@@ -16,6 +16,7 @@ from valuz_agent.modules.channels.service import ChannelIngressService
 @dataclass
 class _Session:
     id: str
+    project_id: str = "project-a"
 
 
 class _Placements:
@@ -78,7 +79,10 @@ class _Sessions:
                 **creation_context,
             }
         )
-        return _Session(id="session-new")
+        materialized = (
+            "chat-project-9" if project_id == "chat-default" else project_id
+        )
+        return _Session(id="session-new", project_id=materialized)
 
     async def send_message(self, *, user_id: str, session_id: str, content: str) -> None:
         self.sent.append((user_id, session_id, content))
@@ -317,3 +321,25 @@ async def test_ingress_service_asks_project_for_multiple_deployments() -> None:
     assert result.session_id is None
     assert sessions.created == []
     assert sessions.sent == []
+
+
+async def test_agent_without_placement_opens_a_quick_chat() -> None:
+    """No deployment is not an error: the turn runs as a project-less chat,
+    and the binding records the materialized chat project (never the sentinel,
+    which would make every follow-up start over)."""
+    sessions = _Sessions()
+    bindings = _Bindings()
+    service = ChannelIngressService(
+        placements=_Placements([]),
+        bindings=bindings,
+        sessions=sessions,
+    )
+
+    result = await service.handle_inbound_message(user_id="u1", inbound=_inbound())
+
+    assert result.decision.kind == ChannelRouteDecisionKind.NEW_SESSION
+    assert result.session_id == "session-new"
+    assert sessions.created[0]["project_id"] == "chat-default"
+    assert sessions.created[0]["agent_slug"] == "developer"
+    assert sessions.sent == [("u1", "session-new", "修一下登录报错")]
+    assert bindings.upserts[0][1].project_id == "chat-project-9"

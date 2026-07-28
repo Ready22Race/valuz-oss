@@ -571,6 +571,8 @@
   "genui": {
     "cardTitle": "Generative UI",
     "empty": "Nothing to show yet",
+    "fullscreen": "Open fullscreen",
+    "fullscreenDescription": "Preview the generated UI in a larger workspace.",
     "generating": "Generating UI…",
     "error": "Generation failed"
   },
@@ -2172,7 +2174,6 @@
     "wecomAibotSecretRequired": "Secret is required",
     "feishuTitle": "Feishu bot",
     "feishuEnabled": "Enable Feishu bot",
-    "feishuBound": "Bound",
     "feishuConnected": "Connected",
     "feishuConnecting": "Connecting",
     "feishuDisconnected": "Disconnected",
@@ -2186,6 +2187,11 @@
     "feishuAppIdRequired": "App ID is required",
     "feishuAppSecretRequired": "App Secret is required",
     "feishuVerificationTokenRequired": "Verification Token is required",
+    "feishuNotEnabled": "Disabled",
+    "feishuTest": "Test",
+    "feishuTestCredentialOk": "App credentials are valid",
+    "feishuTestFailed": "Test failed",
+    "feishuEnableFailed": "Failed to save enabled state",
     "instructionsPlaceholder": "Describe in 1-2 paragraphs who this agent is, the method it follows, what it outputs, and what it does NOT do. For example:\n\nRole: (who you are, what outcome you own)\nMethod (in order): 1. … 2. …\nOutput discipline: - …\nBoundaries (don't): - …",
     "effortLabel": "Reasoning effort",
     "effortHint": "Thinking budget for this agent's conversations.",

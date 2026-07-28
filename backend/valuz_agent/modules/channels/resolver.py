@@ -13,6 +13,11 @@ from valuz_agent.modules.channels.schemas import (
     ChannelThreadBinding,
 )
 
+# Sentinel project id understood by ``SessionService``: it materializes a fresh
+# isolated ``kind="chat"`` project per session. Used when the mentioned agent
+# has no project placement — a channel turn then behaves like a quick chat.
+CHAT_PROJECT_SENTINEL = "chat-default"
+
 
 class AgentChannelResolver:
     """Pure router for IM channel mentions.
@@ -22,6 +27,21 @@ class AgentChannelResolver:
     placements and any thread binding. This resolver then decides whether the
     turn can continue an existing session, must open a new one, or needs a
     project clarification from the human.
+
+    **Session model** — one chat conversation maps to one long-lived session:
+
+    - A bound conversation continues by default, for as long as the user keeps
+      talking. There is no idle expiry; a session ends only when the user says
+      so. (The earlier rule — every top-level message starts fresh — matched
+      group ``@`` semantics, but read as amnesia in an ordinary IM chat.)
+    - ``explicit_new_hint`` ("新开" / "重开" / "new session" …) is the one reset
+      switch, and it is always user-initiated, so the context reset is never a
+      surprise.
+    - A platform thread (a Feishu topic the *user* opens) carries its own
+      binding through the route key, so it branches off without disturbing the
+      main conversation.
+    - Group chats share one session per (chat, agent): the sender is not part
+      of the route key, so everyone contributes to the same context.
     """
 
     def resolve(
@@ -41,10 +61,22 @@ class AgentChannelResolver:
         wants_continuation = self._wants_continuation(context)
 
         if not active_placements:
+            # An agent with no project placement still works in the product —
+            # that is exactly a quick chat. Route the turn to an ephemeral chat
+            # project (``CHAT_PROJECT_SENTINEL``, materialized per session by
+            # SessionService) instead of refusing it. Continuation still works:
+            # the thread binding stores the concrete chat project id, which no
+            # longer appears in ``placements``, so it is matched by sentinel
+            # below rather than by placement lookup.
+            if not context.explicit_new_hint and existing_binding is not None:
+                reuse = self._reuse_chat_binding(context, existing_binding)
+                if reuse is not None:
+                    return reuse
             return self._decision(
                 context,
-                ChannelRouteDecisionKind.NOT_DEPLOYED,
-                reason="agent_not_deployed",
+                ChannelRouteDecisionKind.NEW_SESSION,
+                project_id=CHAT_PROJECT_SENTINEL,
+                reason="no_deployment_quick_chat",
             )
 
         explicit = self._select_explicit_project(context, active_placements)
@@ -65,12 +97,6 @@ class AgentChannelResolver:
                 if binding.project_id not in by_project_id:
                     continue
                 if binding is recent_binding and not wants_continuation:
-                    continue
-                if (
-                    context.is_top_level_mention
-                    and binding is existing_binding
-                    and not wants_continuation
-                ):
                     continue
                 if not binding.session_accepts_turn:
                     if binding.session_status == "running":
@@ -98,6 +124,38 @@ class AgentChannelResolver:
             ChannelRouteDecisionKind.ASK_PROJECT,
             reason="multiple_deployments",
             candidates=active_placements,
+        )
+
+    def _reuse_chat_binding(
+        self,
+        context: ChannelMentionContext,
+        binding: ChannelThreadBinding,
+    ) -> AgentChannelRouteDecision | None:
+        """Continue a quick-chat thread bound to an ephemeral chat project.
+
+        Placement-based continuation cannot see these bindings: the project id
+        they carry is a per-session chat project, never a deployment.
+        """
+        if not self._binding_matches_context(context, binding):
+            return None
+        if binding.project_id is None or binding.session_id is None:
+            return None
+        if not binding.session_accepts_turn:
+            if binding.session_status == "running":
+                return self._decision(
+                    context,
+                    ChannelRouteDecisionKind.QUEUE_SESSION,
+                    project_id=binding.project_id,
+                    session_id=binding.session_id,
+                    reason="quick_chat_binding_running",
+                )
+            return None
+        return self._decision(
+            context,
+            ChannelRouteDecisionKind.REUSE_SESSION,
+            project_id=binding.project_id,
+            session_id=binding.session_id,
+            reason="quick_chat_binding",
         )
 
     @staticmethod

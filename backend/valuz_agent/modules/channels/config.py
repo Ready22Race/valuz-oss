@@ -16,6 +16,21 @@ class ChannelConfigError(ValueError):
     """Raised when an external channel callback has no usable local config."""
 
 
+def agent_channels_active() -> bool:
+    """Whether this deployment should run IM channel long connections.
+
+    Auto mode (the default) keeps them to single-tenant local installs: a
+    shared ``database_url`` marks a multi-user server deployment, where every
+    replica would otherwise open every user's bot connection. The explicit
+    setting overrides auto in both directions.
+    """
+    from valuz_agent.infra.config import settings
+
+    if settings.agent_channels_enabled is not None:
+        return settings.agent_channels_enabled
+    return not settings.database_url
+
+
 @dataclass(frozen=True, slots=True)
 class WeComAIBotBindingConfig:
     enabled: bool

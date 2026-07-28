@@ -89,6 +89,24 @@ paths:
               schema:
                 $ref: "#/components/schemas/FeishuBinding"
 
+  /v1/channels/feishu/bindings/{agent_slug}/test:
+    post:
+      summary: Probe a Feishu binding — validate credentials and report connection status
+      operationId: testFeishuBinding
+      tags: [channels]
+      parameters:
+        - name: agent_slug
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: Credential check outcome plus live long-connection status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeishuBindingTestResult"
+
   /v1/channels/feishu/{channel_instance_id}/callback:
     post:
       summary: Feishu bot event callback
@@ -3543,6 +3561,25 @@ components:
           type: string
         encrypt_key:
           type: string
+    FeishuBindingTestResult:
+      type: object
+      required:
+        - credential_ok
+        - connected
+        - connection_status
+      properties:
+        credential_ok:
+          type: boolean
+        error:
+          type: string
+          nullable: true
+        connected:
+          type: boolean
+        connection_status:
+          type: string
+        connection_error:
+          type: string
+          nullable: true
     FileCapabilities:
       type: object
       required: [canPreview, canDownload, canOpenExternal, canCopyContent]

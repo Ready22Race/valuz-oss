@@ -30,3 +30,13 @@ def test_constants_are_set():
     assert "never generate an application shell" in GENERATIVE_UI_INSTRUCTIONS
     assert "charts must render one per row" in GENERATIVE_UI_INSTRUCTIONS
     assert "use Tabs to switch" in GENERATIVE_UI_INSTRUCTIONS
+    assert "mobile-first responsive layout" in GENERATIVE_UI_INSTRUCTIONS
+    assert "do not force every module to occupy a full-width row" in GENERATIVE_UI_INSTRUCTIONS
+    assert "Peer modules may share wrapping rows or responsive grids" in GENERATIVE_UI_INSTRUCTIONS
+    assert "avoid narrow sidebars" in GENERATIVE_UI_INSTRUCTIONS
+    assert "must wrap before they overflow" in GENERATIVE_UI_INSTRUCTIONS
+    assert "stack all major sections top-to-bottom" not in GENERATIVE_UI_INSTRUCTIONS
+    assert (
+        "Row layouts are allowed only for compact KPI chips/cards"
+        not in GENERATIVE_UI_INSTRUCTIONS
+    )

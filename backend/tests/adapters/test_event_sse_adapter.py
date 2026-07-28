@@ -172,6 +172,23 @@ def test_should_translate_tool_output_delta_with_stream_discriminator():
     assert payload["message_id"] == "msg-o"
 
 
+def test_should_translate_tool_thinking_delta():
+    # Tool-scoped reasoning stream (ephemeral generate_ui thinking forwarded
+    # onto the calling session). A separate type from tool.call.output_delta —
+    # the frontend concatenates output deltas into the tool card's output (the
+    # OpenUI code stream) unconditionally, so reasoning text must not ride it.
+    result = _translate_kernel_event(
+        "tool_thinking_delta",
+        {"id": "tool-3", "text": "planning the layout", "message_id": "msg-t"},
+    )
+    assert result is not None
+    legacy_type, payload = result
+    assert legacy_type == "tool.call.thinking_delta"
+    assert payload["tool_use_id"] == "tool-3"
+    assert payload["text"] == "planning the layout"
+    assert payload["message_id"] == "msg-t"
+
+
 def test_should_translate_workflow_progress_with_nested_state():
     # Claude dynamic-workflow live progress. ``id`` is the Workflow tool_use_id
     # the frontend attaches the progress card to; ``state`` is the nested

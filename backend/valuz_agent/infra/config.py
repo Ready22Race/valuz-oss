@@ -49,6 +49,13 @@ class Settings(BaseSettings):
     # Accepts postgresql://... for multi-user deployments.
     database_url: str | None = None
 
+    # IM channel long connections (Feishu / WeCom AIBot). ``None`` = auto:
+    # active only on a single-tenant local install (no shared ``database_url``)
+    # — a multi-user server would otherwise open every user's bot connection
+    # from every replica. Set explicitly to force either way
+    # (``VALUZ_AGENT_CHANNELS_ENABLED``).
+    agent_channels_enabled: bool | None = None
+
     # Explicit override for the kernel database URL (e.g. a Postgres DSN, or
     # a custom SQLite path). When unset, the kernel still gets its OWN file —
     # ``data_dir/kernel_db_filename`` — for the local SQLite default; it only

@@ -952,6 +952,12 @@ def mark_boot_complete() -> None:
 
 async def start_post_boot_agent_channels(app: FastAPI) -> None:
     """Schedule channel long connections after the host has finished booting."""
+    from valuz_agent.modules.channels.config import agent_channels_active
+
+    if not agent_channels_active():
+        logger.info("agent channel long connections disabled for this deployment")
+        return
+
     from valuz_agent.integrations.wecom_aibot_long_connection import wecom_aibot_supervisor
 
     await wecom_aibot_supervisor.startup()
