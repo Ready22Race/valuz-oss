@@ -77,9 +77,12 @@ class _RecordingCollaborators:
         return None
 
     async def lead_idle_with_no_pending(
-        self, task_id: str, project_id: str, user_id: str
+        self, task_id: str, project_id: str, user_id: str, lead_session_id: str = ""
     ) -> bool:
         return True
+
+    async def session_still_working(self, session_id: str) -> bool:
+        return False
 
 
 def _runner_recording(calls: list[str], turn_status: str) -> ActorRunner:
@@ -157,3 +160,100 @@ def test_run_session_to_idle_draining_skips_finalize(monkeypatch: pytest.MonkeyP
     asyncio.run(run_session_to_idle("s3", "hi", _Bus(), user_id=LOCAL_USER_ID))
 
     assert finalize_calls == []  # finalize skipped while draining
+
+
+# ---------------------------------------------------------------------------
+# idle-TTL vs background work (the "task blocked while still running" bug)
+# ---------------------------------------------------------------------------
+
+
+class _BgAwareCollaborators(_RecordingCollaborators):
+    """Fake collaborators that report the session as still doing background work
+    for the first ``busy_for`` probes, then idle."""
+
+    def __init__(self, calls: list[str], busy_for: int) -> None:
+        super().__init__(calls)
+        self._busy_left = busy_for
+        self.probes = 0
+
+    async def lead_idle_with_no_pending(
+        self, task_id: str, project_id: str, user_id: str, lead_session_id: str = ""
+    ) -> bool:
+        # Matches the real case: the plan still had unresolved nodes, so the
+        # lead did NOT take the fast exit and parked on its mailbox instead.
+        return False
+
+    async def session_still_working(self, session_id: str) -> bool:
+        self.probes += 1
+        if self._busy_left > 0:
+            self._busy_left -= 1
+            return True
+        return False
+
+
+def _bg_runner(calls: list[str], fake: _BgAwareCollaborators) -> ActorRunner:
+    runner = ActorRunner(finalizer=fake, coordinator=fake)
+
+    async def _turn(session_id: str, content: str, user_id: str | None = None) -> str:
+        calls.append("turn")
+        return "idle"
+
+    runner.run_turn = _turn  # type: ignore[method-assign]
+    return runner
+
+
+def test_idle_ttl_does_not_reap_a_session_with_background_work() -> None:
+    """Regression for a real task that was closed while still working.
+
+    A lead spawned two ``run_in_background`` subagents. Its own turn ended, so
+    the loop parked on the mailbox — but the CLI kept driving follow-up turns
+    on the session as the subagents reported in, and the loop saw none of it.
+    Its TTL clock, started at the FIRST turn, expired 30 minutes later and the
+    task was finalized ``blocked`` while the work was still running.
+
+    The TTL now only means "our mailbox was quiet"; whether the ACTOR is done
+    is a separate question, and the loop asks it before finalizing.
+    """
+    calls: list[str] = []
+    fake = _BgAwareCollaborators(calls, busy_for=2)
+    runner = _bg_runner(calls, fake)
+
+    asyncio.run(
+        runner.run_actor_loop(
+            session_id="lead-bg",
+            initial_prompt="go",
+            role="lead",
+            task_id="t-bg",
+            project_id="p1",
+            idle_ttl=0.01,
+            user_id=LOCAL_USER_ID,
+        )
+    )
+    # Probed on each expiry: extended twice while background work was live,
+    # then finalized once the session really was idle.
+    assert fake.probes == 3
+    assert calls.count("finalize") == 1
+
+
+def test_idle_ttl_extension_is_bounded() -> None:
+    """A session wedged ``running`` forever must not pin the loop forever."""
+    from valuz_agent.modules.tasks.actor_runner import MAX_IDLE_EXTENSIONS
+
+    calls: list[str] = []
+    fake = _BgAwareCollaborators(calls, busy_for=10_000)  # never goes idle
+    runner = _bg_runner(calls, fake)
+
+    asyncio.run(
+        runner.run_actor_loop(
+            session_id="lead-wedged",
+            initial_prompt="go",
+            role="lead",
+            task_id="t-wedged",
+            project_id="p1",
+            idle_ttl=0.01,
+            user_id=LOCAL_USER_ID,
+        )
+    )
+    # Extended up to the cap, then gave up and finalized rather than looping on.
+    assert fake.probes == MAX_IDLE_EXTENSIONS
+    assert calls.count("finalize") == 1

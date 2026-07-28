@@ -40,6 +40,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from valuz_agent.adapters import kernel_client
 from valuz_agent.adapters.agent_resolver import resolve_agent_display_name
 from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.infra.db import async_unit_of_work
@@ -651,19 +652,26 @@ class CoordinationService:
             )
 
     async def lead_idle_with_no_pending(
-        self, task_id: str, project_id: str, user_id: str
+        self, task_id: str, project_id: str, user_id: str, lead_session_id: str = ""
     ) -> bool:
         """True when a lead has nothing left to wait for after a turn.
 
         The actor loop normally parks on the mailbox for LEAD_IDLE_TTL_S between
         turns to catch ``member_done`` / follow-ups. But a lead only has a reason
-        to wait if it has a member in flight OR an unresolved plan node still to
-        drive (``TaskPlan.unresolved_keys`` — the shared predicate, ``paused``
-        included). When neither holds, the lead is done — break now so
-        ``_finalize_actor`` closes the task immediately instead of after 30min.
+        to wait if it has a member in flight, BACKGROUND WORK of its own still
+        running, or an unresolved plan node still to drive
+        (``TaskPlan.unresolved_keys`` — the shared predicate, ``paused``
+        included). When none holds, the lead is done — break now so
+        ``finalize_actor`` closes the task immediately instead of after 30min.
         """
         if self._members.has_live_members(task_id):
             return False  # a member is still running — keep waiting for its result
+        if lead_session_id and await self._session_has_background_work(lead_session_id):
+            # The lead spawned a ``run_in_background`` subagent. Its own turn
+            # genuinely ended, but the work has NOT — and when the task finishes
+            # the CLI wakes the session with the result. Finalising here would
+            # close the task out from under work that is still running.
+            return False
         async with async_unit_of_work(commit=False) as db:
             task = await TaskDatastore(db).get_task_by_project(
                 user_id, project_id, task_id
@@ -675,6 +683,35 @@ class CoordinationService:
             except PlanError:
                 return True
             return not plan.unresolved_keys()
+
+    async def session_still_working(self, session_id: str) -> bool:
+        """ActorCoordinator: is this session doing work the loop cannot see?
+
+        Today that means a live ``run_in_background`` task. The actor loop asks
+        this before treating an idle-TTL expiry as "this actor is done".
+        """
+        return await self._session_has_background_work(session_id)
+
+    @staticmethod
+    async def _session_has_background_work(session_id: str) -> bool:
+        """Is this session running a ``run_in_background`` task right now?
+
+        A background task OUTLIVES the turn that launched it: the turn ends,
+        the session goes ``idle``, and the work carries on. The actor loop
+        cannot see any of it — the CLI drives the follow-up turns itself — so
+        without this probe an actor is "idle" while its own subagents are
+        mid-flight.
+
+        ``bg_busy_session_ids`` is the same signal the conversation header and
+        the Activity list read, so every surface agrees on whether a session is
+        busy. Best-effort: if the kernel cannot answer we report False rather
+        than pinning an actor loop forever on a failed lookup.
+        """
+        try:
+            return session_id in set(await kernel_client.bg_busy_session_ids())
+        except Exception:  # noqa: BLE001
+            logger.debug("bg-busy probe failed for %s", session_id, exc_info=True)
+            return False
 
     # ------------------------------------------------------------------
     # shutdown broadcast — the atomic shutdown primitive

@@ -184,6 +184,13 @@ ACTOR_MAX_TURNS = 60
 LEAD_IDLE_TTL_S = 1800.0
 MEMBER_IDLE_TTL_S = 600.0
 
+# How many times an idle-TTL expiry may be EXTENDED because the session turned
+# out to still be working (see the ``session_still_working`` probe in
+# ``run_actor_loop``). Bounded so a session wedged in ``running`` forever cannot
+# pin an actor loop for the life of the process; generous enough that real
+# background work — which routinely outlasts one TTL — is never reaped.
+MAX_IDLE_EXTENSIONS = 6
+
 
 # ---------------------------------------------------------------------------
 # Collaborator protocols
@@ -217,9 +224,18 @@ class ActorCoordinator(Protocol):
         ...
 
     async def lead_idle_with_no_pending(
-        self, task_id: str, project_id: str, user_id: str
+        self, task_id: str, project_id: str, user_id: str, lead_session_id: str = ""
     ) -> bool:
         """True when a lead has nothing left to wait for and should stop looping."""
+        ...
+
+    async def session_still_working(self, session_id: str) -> bool:
+        """True when the session is doing work THIS loop cannot see.
+
+        Chiefly a ``run_in_background`` subagent: the launching turn ended, so
+        the loop is parked on its mailbox, but the CLI keeps driving follow-up
+        turns on the session and the work is very much alive.
+        """
         ...
 
 
@@ -330,6 +346,7 @@ class ActorRunner:
         # the old loop's finalize runs after resume flips the task back to
         # ``active`` and wrongly blocks it (VALUZ pause/resume).
         exited_on_shutdown = False
+        extensions = 0
         try:
             while True:
                 # App is shutting down — do NOT start a new turn (it would spawn
@@ -376,7 +393,7 @@ class ActorRunner:
                     role == "lead"
                     and not mailbox_registry.has_pending(session_id)
                     and await coordinator.lead_idle_with_no_pending(
-                        task_id, project_id, user_id=user_id
+                        task_id, project_id, user_id=user_id, lead_session_id=session_id
                     )
                 ):
                     logger.info(
@@ -389,6 +406,31 @@ class ActorRunner:
                 try:
                     msg = await mailbox_registry.get(session_id, timeout=ttl)
                 except TimeoutError:
+                    # The TTL measures silence on OUR mailbox, which is not the
+                    # same as the session being idle. A ``run_in_background``
+                    # subagent keeps working after the turn that launched it,
+                    # and the CLI drives the follow-up turns itself — the loop
+                    # sees none of that and its clock never resets. A real task
+                    # was reaped exactly this way: the lead spawned two
+                    # subagents, the session ran two more turns while the loop
+                    # sat parked, and 1800s after the FIRST turn the task was
+                    # closed as ``blocked`` while the work was still running.
+                    #
+                    # So ask before concluding. Bounded by MAX_IDLE_EXTENSIONS
+                    # so a session wedged ``running`` cannot pin the loop.
+                    if extensions < MAX_IDLE_EXTENSIONS and await coordinator.session_still_working(
+                        session_id
+                    ):
+                        extensions += 1
+                        logger.info(
+                            "actor loop %s (%s) idle-TTL expired but the session is "
+                            "still working (background task) — extending (%d/%d)",
+                            session_id,
+                            role,
+                            extensions,
+                            MAX_IDLE_EXTENSIONS,
+                        )
+                        continue
                     logger.info("actor loop %s (%s) idle-TTL expired", session_id, role)
                     break
 
@@ -482,6 +524,7 @@ __all__ = [
     "_member_run_dir",
     "ACTOR_MAX_TURNS",
     "LEAD_IDLE_TTL_S",
+    "MAX_IDLE_EXTENSIONS",
     "MEMBER_IDLE_TTL_S",
     "_NON_REVIEWABLE_DONE",
 ]
