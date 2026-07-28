@@ -5,9 +5,9 @@ writes (``add_note`` / ``revise_goal`` — the latter must reach a RUNNING lead,
 not just the row). Ownership is a parameter, never ambient; methods return
 ``None`` instead of raising HTTP errors so non-HTTP callers can reuse them.
 
-NOT here: lifecycle orchestration (``task_orchestrator`` services), plan
-writes (``plan_commands``), agent-facing reads (``queries`` — loose dicts on
-their own UoW for the MCP context).
+NOT here: lifecycle orchestration (``task_orchestrator`` services) and plan
+writes (``plan_commands``). Agent-facing MCP reads ARE here — the
+module-level functions below return loose dicts on their own UoW.
 """
 
 from __future__ import annotations

@@ -337,19 +337,6 @@ class TaskEventDatastore:
             .all()
         )
 
-    async def get_event(self, user_id: str, event_id: str) -> TaskEventRow | None:
-        return (
-            (
-                await self._db.execute(
-                    select(TaskEventRow).where(
-                        TaskEventRow.id == event_id, TaskEventRow.user_id == user_id
-                    )
-                )
-            )
-            .scalars()
-            .first()
-        )
-
     async def latest_event(self, user_id: str, task_id: str) -> TaskEventRow | None:
         """The most recent timeline event for one of the caller's tasks."""
         return (
@@ -456,36 +443,12 @@ class TaskSessionDatastore:
             .all()
         )
 
-    async def get_task_status_by_session_ids(
-        self, user_id: str, session_ids: list[str]
-    ) -> dict[str, str]:
-        """Map run ``session_id`` → its owning task's current ``status``.
-
-        Batch join ``valuz_task_session`` → ``valuz_task`` for the given session
-        ids. Used by the automations activity log to surface a task automation's
-        *live* outcome (the lead task is still running long after the kickoff run
-        row was stamped ``success``). Sessions with no task row are omitted.
-        """
-        if not session_ids:
-            return {}
-        rows = (
-            await self._db.execute(
-                select(TaskSessionRow.session_id, TaskRow.status)
-                .join(TaskRow, TaskRow.id == TaskSessionRow.task_id)
-                .where(
-                    TaskSessionRow.session_id.in_(session_ids),
-                    TaskSessionRow.user_id == user_id,
-                )
-            )
-        ).all()
-        return {session_id: status for session_id, status in rows}
-
     async def get_task_links_by_session_ids(
         self, user_id: str, session_ids: list[str]
     ) -> dict[str, tuple[str, str, str]]:
         """Map run ``session_id`` → ``(task_id, title, status)`` of its owning task.
 
-        Superset of ``get_task_status_by_session_ids`` — adds the task id + title
+        Adds the task id + title to the per-session status join
         so the automation activity log can deep-link to the spawned task (not only
         show its live status). Sessions with no task row are omitted.
         """
@@ -544,19 +507,6 @@ class TaskSessionDatastore:
         kernel-event finalization). Not a user query — no owner filter."""
         return (
             (await self._db.execute(select(TaskSessionRow).filter_by(session_id=session_id)))
-            .scalars()
-            .first()
-        )
-
-    async def get_run_by_id(self, user_id: str, run_id: str) -> TaskSessionRow | None:
-        return (
-            (
-                await self._db.execute(
-                    select(TaskSessionRow).where(
-                        TaskSessionRow.id == run_id, TaskSessionRow.user_id == user_id
-                    )
-                )
-            )
             .scalars()
             .first()
         )

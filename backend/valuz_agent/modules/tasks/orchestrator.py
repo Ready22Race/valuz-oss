@@ -22,7 +22,7 @@ Related seams, deliberately NOT here:
   - plan writes → ``tasks/plan_commands.py`` (the single authorized door)
   - host-knowledge session resolution → ``tasks/resolution.py``
   - composed event writes → ``tasks/events.py`` · plan authoring → ``planning``
-  - agent-facing reads → ``queries`` · HTTP reads → ``service`` · mailbox
+  - HTTP + agent-facing reads → ``service`` · mailbox
     delivery → ``messaging``
 """
 

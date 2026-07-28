@@ -57,16 +57,6 @@ TaskStatus = Literal[
 
 TASK_STATUSES: tuple[str, ...] = get_args(TaskStatus)
 
-# Statuses that mean the task is "still in motion" — sweepers / recovery
-# scan these. Excludes terminals (completed/stopped/abandoned/blocked) and
-# draft (no lead session yet, nothing to sweep / recover).
-RECOVERABLE_STATUSES: frozenset[str] = frozenset({"active", "paused"})
-
-# Statuses where the task is "alive" from a UX perspective — the user can
-# still act on it (commit a draft, resume a pause, talk to a running task).
-# Terminals (completed/stopped/abandoned/blocked) are excluded.
-LIVE_STATUSES: frozenset[str] = frozenset({"draft", "active", "paused"})
-
 # Hard-terminal states — no transitions out.
 # ``stopped`` is intentionally NOT here even though it's a closed
 # user-driven end-state: keeping it revivable lets a chat "继续刚才那个
@@ -108,19 +98,6 @@ def is_valid_status(status: str) -> bool:
     return status in TASK_STATUSES
 
 
-def is_terminal(status: str) -> bool:
-    return status in TERMINAL_STATUSES
-
-
-def is_live(status: str) -> bool:
-    return status in LIVE_STATUSES
-
-
-def is_recoverable(status: str) -> bool:
-    """True when startup recovery / sweepers should consider this task."""
-    return status in RECOVERABLE_STATUSES
-
-
 def assert_transition(from_status: str | None, to_status: str) -> None:
     """Raise ``TaskStateError`` if ``from_status → to_status`` is illegal.
 
@@ -141,16 +118,11 @@ def assert_transition(from_status: str | None, to_status: str) -> None:
 
 __all__ = [
     "ALLOWED_TRANSITIONS",
-    "LIVE_STATUSES",
-    "RECOVERABLE_STATUSES",
     "TASK_STATUSES",
     "TERMINAL_STATUSES",
     "TaskStateError",
     "TaskStatus",
     "assert_transition",
-    "is_live",
-    "is_recoverable",
-    "is_terminal",
     "is_valid_status",
 ]
 
