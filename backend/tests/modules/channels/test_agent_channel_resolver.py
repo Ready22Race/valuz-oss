@@ -328,3 +328,76 @@ def test_quick_chat_running_session_queues() -> None:
 
     assert decision.kind == ChannelRouteDecisionKind.QUEUE_SESSION
     assert decision.session_id == "session-chat-1"
+
+
+# --- session model: one chat ⇒ one long-lived session --------------------- #
+
+
+def _chat_binding(
+    *,
+    project_id: str = "project-a",
+    session_id: str = "session-a",
+    external_thread_id: str | None = None,
+    session_accepts_turn: bool = True,
+    session_status: str | None = None,
+) -> ChannelThreadBinding:
+    return ChannelThreadBinding(
+        channel_instance_id="feishu-main",
+        external_chat_id="chat-1",
+        external_thread_id=external_thread_id or "chat-1",
+        agent_slug="developer",
+        project_id=project_id,
+        session_id=session_id,
+        session_accepts_turn=session_accepts_turn,
+        session_status=session_status,
+    )
+
+
+def test_plain_chat_message_continues_the_bound_session() -> None:
+    """The core of the session model: an ordinary message in a bound chat is a
+    follow-up, not a fresh start. (Top-level-starts-new matched group @-mention
+    semantics but reads as amnesia in an IM conversation.)"""
+    decision = AgentChannelResolver().resolve(
+        _context(external_thread_id=None),
+        placements=[_placement("project-a")],
+        existing_binding=_chat_binding(),
+    )
+
+    assert decision.kind == ChannelRouteDecisionKind.REUSE_SESSION
+    assert decision.session_id == "session-a"
+
+
+def test_explicit_new_hint_is_the_only_reset_switch() -> None:
+    decision = AgentChannelResolver().resolve(
+        _context(external_thread_id=None, explicit_new_hint=True),
+        placements=[_placement("project-a")],
+        existing_binding=_chat_binding(),
+    )
+
+    assert decision.kind == ChannelRouteDecisionKind.NEW_SESSION
+    assert decision.project_id == "project-a"
+
+
+def test_bound_session_still_running_queues_instead_of_forking() -> None:
+    decision = AgentChannelResolver().resolve(
+        _context(external_thread_id=None),
+        placements=[_placement("project-a")],
+        existing_binding=_chat_binding(
+            session_accepts_turn=False, session_status="running"
+        ),
+    )
+
+    assert decision.kind == ChannelRouteDecisionKind.QUEUE_SESSION
+    assert decision.session_id == "session-a"
+
+
+def test_topic_branch_does_not_match_the_main_chat_binding() -> None:
+    """A user-opened topic carries its own thread id, so the main chat's
+    binding must not answer for it — the branch gets its own session."""
+    decision = AgentChannelResolver().resolve(
+        _context(external_thread_id="topic-1", is_top_level_mention=False),
+        placements=[_placement("project-a")],
+        existing_binding=_chat_binding(external_thread_id="chat-1"),
+    )
+
+    assert decision.kind == ChannelRouteDecisionKind.NEW_SESSION

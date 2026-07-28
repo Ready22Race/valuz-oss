@@ -27,6 +27,21 @@ class AgentChannelResolver:
     placements and any thread binding. This resolver then decides whether the
     turn can continue an existing session, must open a new one, or needs a
     project clarification from the human.
+
+    **Session model** — one chat conversation maps to one long-lived session:
+
+    - A bound conversation continues by default, for as long as the user keeps
+      talking. There is no idle expiry; a session ends only when the user says
+      so. (The earlier rule — every top-level message starts fresh — matched
+      group ``@`` semantics, but read as amnesia in an ordinary IM chat.)
+    - ``explicit_new_hint`` ("新开" / "重开" / "new session" …) is the one reset
+      switch, and it is always user-initiated, so the context reset is never a
+      surprise.
+    - A platform thread (a Feishu topic the *user* opens) carries its own
+      binding through the route key, so it branches off without disturbing the
+      main conversation.
+    - Group chats share one session per (chat, agent): the sender is not part
+      of the route key, so everyone contributes to the same context.
     """
 
     def resolve(
@@ -83,12 +98,6 @@ class AgentChannelResolver:
                     continue
                 if binding is recent_binding and not wants_continuation:
                     continue
-                if (
-                    context.is_top_level_mention
-                    and binding is existing_binding
-                    and not wants_continuation
-                ):
-                    continue
                 if not binding.session_accepts_turn:
                     if binding.session_status == "running":
                         return self._decision(
@@ -130,8 +139,6 @@ class AgentChannelResolver:
         if not self._binding_matches_context(context, binding):
             return None
         if binding.project_id is None or binding.session_id is None:
-            return None
-        if context.is_top_level_mention and not self._wants_continuation(context):
             return None
         if not binding.session_accepts_turn:
             if binding.session_status == "running":

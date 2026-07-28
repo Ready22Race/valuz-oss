@@ -56,7 +56,44 @@ def test_inbound_from_sdk_event_normalizes_message_for_bound_agent() -> None:
     assert inbound.context.user_id == "u1"
     assert inbound.context.mentioned_agent_slug == "valuz-helper"
     assert inbound.context.external_chat_id == "oc-chat"
-    assert inbound.context.external_thread_id == "om-msg"
+    # A plain chat message is NOT a thread. Keying it by its own message id
+    # made the route key unique per message, so no session was ever continued.
+    assert inbound.context.external_thread_id is None
+
+
+def test_inbound_from_sdk_event_keeps_user_opened_topic_as_thread() -> None:
+    """A topic the user opens branches off: its root id becomes the thread id,
+    giving that branch its own route key (and therefore its own session)."""
+    event = P2ImMessageReceiveV1(
+        {
+            "schema": "2.0",
+            "header": {"event_id": "evt-2", "event_type": "im.message.receive_v1"},
+            "event": {
+                "sender": {"sender_id": {"open_id": "ou-user"}},
+                "message": {
+                    "message_id": "om-msg-2",
+                    "root_id": "om-root",
+                    "chat_id": "oc-chat",
+                    "message_type": "text",
+                    "content": json.dumps({"text": "继续说"}),
+                },
+            },
+        }
+    )
+
+    inbound = inbound_from_sdk_event(
+        event,
+        FeishuLongConnectionConfig(
+            channel_instance_id="feishu-main",
+            owner_user_id="u1",
+            agent_slug="valuz-helper",
+            app_id="cli_app_1",
+            app_secret="app-secret",
+        ),
+    )
+
+    assert inbound.context.external_thread_id == "om-root"
+    assert inbound.context.is_top_level_mention is False
 
 
 @pytest.mark.asyncio
