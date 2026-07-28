@@ -1,10 +1,12 @@
-"""Generative-UI ephemeral-session completer — the LLM-call seam.
+"""Generative-UI completers — the LLM-call seam.
 
-Mirrors ``modules/memory/runner.py::_make_completer``: a throwaway no-tools
-kernel session cloning the calling session's resolved runtime/provider/model,
-one ``run_turn`` returning OpenUI Lang, then delete + rmtree. Best-effort by
-contract — failures bubble to the tool handler, which converts them to an
-error result without affecting the originating turn.
+Official Claude/Codex subscription channels use a throwaway no-tools kernel
+session, mirroring ``modules/memory/runner.py::_make_completer``, because their
+credentials live in the CLI keychain and the runtime self-authenticates.
+Explicit-credential channels skip session creation and call the chat model
+directly, streaming chunks to the originating tool card. Best-effort by
+contract — failures bubble to the tool handler, which converts them to an error
+result without affecting the originating turn.
 """
 
 from __future__ import annotations
@@ -24,6 +26,8 @@ from valuz_agent.modules.genui.prompts import GENERATIVE_UI_INSTRUCTIONS
 logger = logging.getLogger(__name__)
 
 Completer = Callable[[str], Awaitable[str]]
+_LOG_PREVIEW_CHARS = 240
+_DIRECT_GENUI_MAX_TOKENS = 16384
 
 
 def _resolve_provider_id(source: Any) -> str | None:
@@ -38,6 +42,18 @@ def _resolve_provider_id(source: Any) -> str | None:
     meta = (getattr(ac, "metadata", None) or {}) if ac is not None else {}
     pid = meta.get("provider_id")
     return str(pid) if pid else None
+
+
+def _uses_official_cli_auth(*, runtime_provider: Any, mp: Any) -> bool:
+    """True for Claude/Codex subscription channels whose credentials live in
+    the official CLI keychain. These must keep the kernel session path so the
+    runtime can self-authenticate out-of-band."""
+    return mp is None and str(runtime_provider) in {"claude_agent", "codex"}
+
+
+def _is_deepseek_anthropic_channel(*, model: str, mp: Any) -> bool:
+    base_url = str(getattr(mp, "base_url", "") or "").lower()
+    return "deepseek" in base_url or model.lower().startswith("deepseek-")
 
 
 def _make_completer(
@@ -61,6 +77,15 @@ def _make_completer(
     ``<Renderer isStreaming>`` paints progressively. ``run_turn`` still returns
     the full text as the canonical ToolResult. When either is None, behaves as
     the synchronous (non-streaming) version."""
+
+    if not _uses_official_cli_auth(runtime_provider=runtime_provider, mp=mp):
+        return _make_direct_llm_completer(
+            user_id=user_id,
+            model=model,
+            mp=mp,
+            calling_session_id=calling_session_id,
+            tool_use_id=tool_use_id,
+        )
 
     async def _forward_deltas(ephem_id: str) -> None:
         forwarded = 0
@@ -165,3 +190,193 @@ def _make_completer(
                 logger.debug("generative-ui: ephemeral session cleanup failed")
 
     return _complete
+
+
+def _make_direct_llm_completer(
+    *,
+    user_id: str,
+    model: str,
+    mp: Any,
+    calling_session_id: str | None = None,
+    tool_use_id: str | None = None,
+) -> Completer:
+    """Build a no-session completer for API-key / non-official model channels.
+
+    ``CreateSessionRequest`` is only needed for Claude/Codex official CLI
+    subscription auth. When ``mp`` carries an explicit key, generating OpenUI is
+    a one-shot text completion; stream the model chunks directly into the
+    original tool card and return the assembled OpenUI Lang.
+    """
+    if mp is None or not getattr(mp, "api_key", None):
+        raise ValueError("generate_ui: direct LLM path requires model credentials")
+
+    async def _emit_delta(text: str) -> None:
+        if not (calling_session_id and tool_use_id and text):
+            return
+        await kernel_client.emit_live_event(
+            user_id,
+            calling_session_id,
+            "tool_output_delta",
+            {"id": tool_use_id, "text": text},
+        )
+
+    async def _complete(prompt: str) -> str:
+        from langchain_core.messages import HumanMessage
+
+        protocol = str(getattr(mp, "api_protocol", "") or "openai_completion")
+        logger.info(
+            "generate_ui: using direct LLM stream protocol=%s model=%s tool_use_id=%s",
+            protocol,
+            model,
+            tool_use_id,
+        )
+        chat_model = _build_direct_chat_model(model=model, mp=mp)
+        chunks: list[str] = []
+        status = "ok"
+        output = ""
+        logged_first_raw_chunk = False
+        logged_first_text_chunk = False
+        try:
+            messages = [HumanMessage(content=prompt)]
+            async for chunk in chat_model.astream(messages):
+                text = _extract_langchain_text(chunk)
+                if not logged_first_raw_chunk:
+                    logged_first_raw_chunk = True
+                    logger.info(
+                        "generate_ui: direct LLM first_token raw_content=%s "
+                        "protocol=%s model=%s tool_use_id=%s",
+                        _preview_for_log(getattr(chunk, "content", None)),
+                        protocol,
+                        model,
+                        tool_use_id,
+                    )
+                if not text:
+                    continue
+                if not logged_first_text_chunk:
+                    logged_first_text_chunk = True
+                    logger.info(
+                        "generate_ui: direct LLM first_token text=%s "
+                        "protocol=%s model=%s tool_use_id=%s",
+                        _preview_for_log(text),
+                        protocol,
+                        model,
+                        tool_use_id,
+                    )
+                chunks.append(text)
+                await _emit_delta(text)
+            output = "".join(chunks)
+            if not output.strip():
+                logger.info(
+                    "generate_ui: direct LLM stream produced no text; "
+                    "trying non-stream fallback protocol=%s model=%s tool_use_id=%s",
+                    protocol,
+                    model,
+                    tool_use_id,
+                )
+                fallback = _extract_langchain_text(await chat_model.ainvoke(messages))
+                if fallback:
+                    output = fallback
+                    logger.info(
+                        "generate_ui: direct LLM non-stream fallback text=%s "
+                        "protocol=%s model=%s tool_use_id=%s",
+                        _preview_for_log(fallback),
+                        protocol,
+                        model,
+                        tool_use_id,
+                    )
+                    await _emit_delta(fallback)
+            return output
+        except asyncio.CancelledError:
+            status = "cancelled"
+            output = "".join(chunks)
+            raise
+        except Exception:
+            status = "error"
+            output = "".join(chunks)
+            raise
+        finally:
+            logger.info(
+                "generate_ui: direct LLM stream finished status=%s "
+                "protocol=%s model=%s chunks=%d chars=%d tool_use_id=%s",
+                status,
+                protocol,
+                model,
+                len(chunks),
+                len(output),
+                tool_use_id,
+            )
+
+    return _complete
+
+
+def _preview_for_log(value: Any, *, max_chars: int = _LOG_PREVIEW_CHARS) -> str:
+    preview = repr(value)
+    if len(preview) <= max_chars:
+        return preview
+    return preview[:max_chars] + "...<truncated>"
+
+
+def _build_direct_chat_model(*, model: str, mp: Any) -> Any:
+    """Construct the LangChain chat model for direct GenUI generation."""
+    from pydantic import SecretStr
+
+    protocol = str(getattr(mp, "api_protocol", "") or "openai_completion")
+    api_key = SecretStr(str(mp.api_key))
+    base_url = getattr(mp, "base_url", None)
+
+    if protocol == "anthropic":
+        from langchain_anthropic import ChatAnthropic
+
+        kwargs: dict[str, Any] = {
+            "api_key": api_key,
+            "model_name": model,
+            "max_tokens_to_sample": _DIRECT_GENUI_MAX_TOKENS,
+            "timeout": None,
+            "stop": None,
+        }
+        if base_url is not None:
+            kwargs["base_url"] = base_url
+        if _is_deepseek_anthropic_channel(model=model, mp=mp):
+            kwargs["thinking"] = {"type": "disabled"}
+        return ChatAnthropic(**kwargs)
+
+    if protocol == "gemini":
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        kwargs = {"model": model, "google_api_key": api_key}
+        if base_url:
+            kwargs["client_options"] = {"api_endpoint": base_url}
+        return ChatGoogleGenerativeAI(**kwargs)
+
+    # ``openai_response`` is a Codex-runtime protocol at the session layer. For
+    # this direct one-shot UI generator we only need plain text, so use the
+    # OpenAI-compatible chat-completions client for both OpenAI wire variants.
+    from langchain_openai import ChatOpenAI
+
+    kwargs = {
+        "api_key": api_key,
+        "model": model,
+        "stream_usage": True,
+    }
+    if base_url is not None:
+        kwargs["base_url"] = base_url
+    return ChatOpenAI(**kwargs)
+
+
+def _extract_langchain_text(chunk: Any) -> str:
+    content = getattr(chunk, "content", None)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                if part.get("type") in {"thinking", "reasoning"}:
+                    continue
+                text = part.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts)
+    return ""

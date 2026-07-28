@@ -841,6 +841,8 @@ I18nKey = Literal[
     "genui.cardTitle",
     "genui.empty",
     "genui.error",
+    "genui.fullscreen",
+    "genui.fullscreenDescription",
     "genui.generating",
     "knowledge.add",
     "knowledge.addFiles",
