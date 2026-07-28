@@ -2458,3 +2458,93 @@ def test_member_report_emits_subtask_reported_with_agent_name(
     assert payload["agent_name"] == "Name of researcher"
     assert payload["summary"] == "did the thing"
     assert payload["status"] == "idle"
+
+
+def test_review_subtask_rejects_when_task_vanishes_between_phases(
+    db_factory, tmp_path, monkeypatch
+) -> None:
+    """``review_subtask`` reads in TWO units of work — guard both.
+
+    Phase 1 resolves the node on a read-only UoW; phase 2 re-reads on a
+    writable one. Only phase 1 checked for a missing task, so a task deleted in
+    between crashed phase 2 with AttributeError on ``None.plan`` (a 500 out of
+    the tool) instead of returning the same actionable "not found".
+    """
+    _make_task(db_factory, tmp_path)
+    asyncio.run(
+        planning.plan_task(
+            task_id="t1",
+            project_id="w1",
+            user_id=OWNER,
+            lead_session_id="lead-sess",
+            subtasks=[{"key": "a", "title": "A", "agent": "x"}],
+        )
+    )
+
+    # Delete the task after phase 1 has resolved the node: patch the datastore
+    # read so the SECOND call (phase 2) reports the row gone.
+    calls = {"n": 0}
+    real = planning.TaskDatastore.get_task_by_project
+
+    async def _vanish_after_first(self, user_id, project_id, task_id):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        if calls["n"] > 1:
+            return None
+        return await real(self, user_id, project_id, task_id)
+
+    monkeypatch.setattr(
+        planning.TaskDatastore, "get_task_by_project", _vanish_after_first
+    )
+
+    res = asyncio.run(
+        planning.review_subtask(
+            task_id="t1",
+            project_id="w1",
+            lead_session_id="lead-sess",
+            decision="approve",
+            subtask_key="a",
+            user_id=OWNER,
+        )
+    )
+    assert "not found" in res["error"]
+
+
+def test_list_tasks_counts_every_settled_run_as_done(db_factory, tmp_path) -> None:
+    """``runs_done`` must count archived/rejected runs, not a status that
+    doesn't exist.
+
+    The run status enum is active | paused | completed | rejected | archived.
+    This counted ``("completed", "failed")`` — and ``failed`` is not one of
+    them — so an errored run (archived) or a user-stopped one (rejected) never
+    counted, and the progress reported to the agent read low forever.
+    """
+    from valuz_agent.modules.tasks import queries
+
+    _make_task(db_factory, tmp_path)
+    db = db_factory()
+    try:
+        for i, status in enumerate(
+            ["completed", "archived", "rejected", "active"], start=1
+        ):
+            db.add(
+                TaskSessionRow(
+                    user_id=OWNER,
+                    id=f"run-{i}",
+                    project_id="w1",
+                    task_id="t1",
+                    session_id=f"s-{i}",
+                    agent_slug="x",
+                    sequence=i,
+                    kind="subtask",
+                    status=status,
+                    subtask_key=f"k{i}",
+                )
+            )
+        db.commit()
+    finally:
+        db.close()
+
+    rows = asyncio.run(queries.list_tasks("w1", user_id=OWNER))
+    assert rows[0]["runs"] == 4
+    # completed + archived + rejected are settled; only the active one isn't.
+    assert rows[0]["runs_done"] == 3

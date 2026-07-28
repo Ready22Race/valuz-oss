@@ -301,8 +301,18 @@ async def review_subtask(
             task_row = await task_ds.get_task_by_project(
                 user_id, project_id, task_id
             )
+            # Re-guard. Phase 1 read on a SEPARATE read-only unit of work, so
+            # everything it established can be gone by now: the task may have
+            # been deleted, and the node may have been dropped by a concurrent
+            # modify_plan. Without these two checks the next lines raise
+            # (AttributeError on None / PlanError on a missing key) and the tool
+            # returns a 500 instead of the same actionable error phase 1 gives.
+            if task_row is None:
+                return {"error": f"task {task_id!r} not found"}
             plan = TaskPlan.from_dict(task_row.plan)
             node = plan.get(key)
+            if node is None:
+                return {"error": f"no subtask with key {key!r}"}
             plan.update_node(key, status="done", review_feedback=None)
             if target_session:
                 await run_ds.update_run_by_session(
@@ -319,7 +329,7 @@ async def review_subtask(
                 session_id=target_session,
                 payload={"subtask_key": key, "decision": "approve", "feedback": feedback or ""},
             )
-            completed_agent = (node.agent or "") if node else ""
+            completed_agent = node.agent or ""
             # Stamp the member's display name into the payload so the frontend
             # renders it directly rather than joining the ``actor`` slug against
             # an async members list (which races the load / misses removed
@@ -379,7 +389,14 @@ async def review_subtask(
         task_ds = TaskDatastore(db)
         event_ds = TaskEventDatastore(db)
         task_row = await task_ds.get_task_by_project(user_id, project_id, task_id)
+        # Re-guard — see the approve branch: phase 1 ran on a separate
+        # read-only unit of work, so neither the task nor the node is
+        # guaranteed to still exist.
+        if task_row is None:
+            return {"error": f"task {task_id!r} not found"}
         plan = TaskPlan.from_dict(task_row.plan)
+        if plan.get(key) is None:
+            return {"error": f"no subtask with key {key!r}"}
         plan.update_node(
             key,
             status="in_progress" if delivered else "rework",

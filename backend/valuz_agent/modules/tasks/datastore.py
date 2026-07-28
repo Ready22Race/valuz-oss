@@ -19,9 +19,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import func, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -194,10 +195,16 @@ class TaskDatastore:
                     task_id,
                     status,
                 )
-        res = await self._db.execute(
-            update(TaskRow)
-            .where(TaskRow.id == task_id, TaskRow.user_id == user_id)
-            .values(status=status, updated_at=now_ms())
+        # ``AsyncSession.execute`` is typed as returning ``Result``, but a DML
+        # statement always yields a ``CursorResult`` — the only shape carrying
+        # ``rowcount``. Narrow once here instead of ignoring the error.
+        res = cast(
+            "CursorResult[Any]",
+            await self._db.execute(
+                update(TaskRow)
+                .where(TaskRow.id == task_id, TaskRow.user_id == user_id)
+                .values(status=status, updated_at=now_ms())
+            ),
         )
         await async_commit_with_retry(self._db, where="TaskDatastore.update_task_status")
         return bool(res.rowcount)
@@ -484,8 +491,13 @@ class TaskSessionDatastore:
         if ended_at is not None:
             updates["ended_at"] = ended_at
 
-        res = await self._db.execute(
-            update(TaskSessionRow).where(TaskSessionRow.session_id == session_id).values(**updates)
+        res = cast(
+            "CursorResult[Any]",
+            await self._db.execute(
+                update(TaskSessionRow)
+                .where(TaskSessionRow.session_id == session_id)
+                .values(**updates)
+            ),
         )
         await async_commit_with_retry(self._db, where="TaskSessionDatastore.update_run_by_session")
         return bool(res.rowcount)

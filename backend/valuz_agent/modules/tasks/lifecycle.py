@@ -49,7 +49,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal
 from uuid import uuid4
 
 from valuz_agent.adapters import kernel_client
@@ -1136,7 +1136,7 @@ class LifecycleService:
         session_id: str,
         task_id: str,
         project_id: str,
-        user_id: str | None,
+        user_id: str,
     ) -> None:
         """Record a user-interrupted member run — converges with ``stop_member``.
 
@@ -1148,7 +1148,6 @@ class LifecycleService:
         """
         from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 
-        uid = cast(str, user_id)
         lead_session_id = ""
         key: str | None = None
         agent_slug = ""
@@ -1166,7 +1165,7 @@ class LifecycleService:
                 session_id=session_id, status="rejected", ended_at=now_ms()
             )
             if key:
-                task_row = await task_ds.get_task_by_project(uid, project_id, task_id)
+                task_row = await task_ds.get_task_by_project(user_id, project_id, task_id)
                 if task_row is not None:
                     plan = TaskPlan.from_dict(task_row.plan)
                     if plan.get(key) is not None:
@@ -1186,9 +1185,9 @@ class LifecycleService:
                             session_id=session_id,
                             user_id=user_id,
                         )
-            agent_name = await resolve_agent_display_name(project_id, agent_slug, uid)
+            agent_name = await resolve_agent_display_name(project_id, agent_slug, user_id)
             await event_ds.append_event(
-                uid,
+                user_id,
                 project_id=project_id,
                 task_id=task_id,
                 type="subtask_stopped",
@@ -1282,7 +1281,7 @@ class LifecycleService:
             async with async_unit_of_work(commit=False) as db:
                 live_keys = sorted(
                     r.subtask_key
-                    for r in await TaskSessionDatastore(db).list_runs(cast(str, user_id), task_id)
+                    for r in await TaskSessionDatastore(db).list_runs(user_id, task_id)
                     if r.kind == "subtask" and r.subtask_key and r.status == "active"
                 )
             return {
@@ -1310,27 +1309,36 @@ class LifecycleService:
             # teardown after the terminal writes commit.
             finished_task_row = await task_ds.get_task_by_project(user_id, project_id, task_id)
 
+            # No row = nothing to close. This used to be checked only INSIDE
+            # the completeness guard below, so a wrong/stale task_id skipped
+            # the guard entirely and still wrote a ``task_completed`` event for
+            # a task that does not exist.
+            if finished_task_row is None:
+                return {
+                    "ok": False,
+                    "error": f"finish_task: task {task_id!r} not found",
+                    "status": "rejected",
+                }
+
             # Guard: don't let a "completed" finish leave planned work behind.
             if final_status == "completed":
-                task_row = finished_task_row
-                if task_row is not None:
-                    # Shared predicate (TaskPlan.unresolved_keys) — includes
-                    # ``paused``, so a node parked by a pause/stop that was never
-                    # re-dispatched still blocks a ``completed`` close.
-                    unresolved = TaskPlan.from_dict(task_row.plan).unresolved_keys()
-                    if unresolved:
-                        rejected = {
-                            "error": (
-                                "finish_task rejected: the plan still has "
-                                f"unresolved subtasks {unresolved}. Dispatch and "
-                                "review them first (a dependent node like a final "
-                                "summary becomes ready once its deps are done), or "
-                                "drop them with modify_plan, or call finish_task "
-                                "with status='stopped' to terminate the task."
-                            ),
-                            "pending_subtasks": unresolved,
-                            "status": "rejected",
-                        }
+                # Shared predicate (TaskPlan.unresolved_keys) — includes
+                # ``paused``, so a node parked by a pause/stop that was never
+                # re-dispatched still blocks a ``completed`` close.
+                unresolved = TaskPlan.from_dict(finished_task_row.plan).unresolved_keys()
+                if unresolved:
+                    rejected = {
+                        "error": (
+                            "finish_task rejected: the plan still has "
+                            f"unresolved subtasks {unresolved}. Dispatch and "
+                            "review them first (a dependent node like a final "
+                            "summary becomes ready once its deps are done), or "
+                            "drop them with modify_plan, or call finish_task "
+                            "with status='stopped' to terminate the task."
+                        ),
+                        "pending_subtasks": unresolved,
+                        "status": "rejected",
+                    }
 
             if rejected is None:
                 # Mark lead run as completed

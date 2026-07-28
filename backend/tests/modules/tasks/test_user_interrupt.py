@@ -513,7 +513,12 @@ async def test_finish_task_stopped_force_bypasses_guard(
             pass
 
         async def get_task_by_project(self, *_a):
-            return None  # no plan guard / no worktree cleanup
+            # A REAL row. This used to return None, which happened to skip the
+            # guards — but ``finish_task`` now rejects a missing task outright
+            # (it used to write a terminal event for a task that doesn't
+            # exist). An empty plan + no worktree keeps this test on its actual
+            # subject: that ``force`` gets past the LIVE-MEMBER guard.
+            return SimpleNamespace(plan={}, metadata_={})
 
         async def update_task_status(self, _uid, _tid, status):
             writes.append(status)

@@ -117,7 +117,15 @@ async def list_tasks(
             if mine_session_id and originated_by != mine_session_id:
                 continue
             runs = await run_ds.list_runs(user_id, row.id)
-            done = sum(1 for r in runs if r.status in ("completed", "failed"))
+            # "Settled" = the run will not produce more work. The run status
+            # enum is active | paused | completed | rejected | archived
+            # (models.TaskSessionRow) — this used to test for ``"failed"``,
+            # which is NOT one of them, so an errored run (``archived``) or a
+            # user-stopped one (``rejected``) never counted and the progress
+            # this tool reports to the agent read low forever.
+            done = sum(
+                1 for r in runs if r.status in ("completed", "rejected", "archived")
+            )
             result.append(
                 {
                     "task_id": row.id,

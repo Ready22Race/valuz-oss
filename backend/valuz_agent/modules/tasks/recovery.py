@@ -313,7 +313,9 @@ class RecoveryService:
                         fields["attempts"] = node.attempts + 1
                     if rec.reason and rec.node_status == "rework":
                         fields["review_feedback"] = rec.reason
-                    plan.update_node(run.subtask_key, **fields)
+                    # ``node`` was looked up BY ``run.subtask_key``, so a
+                    # non-None node means the key is a real str.
+                    plan.update_node(node.key, **fields)
                     plan_dirty = True
                 if rec.deliver_member_done and manifest is not None:
                     member_done.append((run.session_id, manifest))

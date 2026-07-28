@@ -38,7 +38,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from valuz_agent.adapters.agent_resolver import resolve_agent_display_name
 from valuz_agent.adapters.data_reader import data_reader
@@ -179,8 +179,11 @@ class CoordinationService:
         # larger model-supplied timeout_s doesn't buy anything — await loops — and
         # would risk exceeding the codex tool-call ceiling, turning a healthy wait
         # into a "timed out awaiting tools/call" transport failure.
-        requested = timeout_s if timeout_s is not None else _MAX_AWAIT_WINDOW_S
-        effective_timeout = min(requested, _MAX_AWAIT_WINDOW_S)
+        # NB: distinct from the ``requested`` key list above — this one is the
+        # caller's wait window. They shared a name until 2026-07, which only
+        # worked because the key-list branch returns before reaching here.
+        requested_window = timeout_s if timeout_s is not None else _MAX_AWAIT_WINDOW_S
+        effective_timeout = min(requested_window, _MAX_AWAIT_WINDOW_S)
         deadline = loop.time() + effective_timeout
         collected: dict[str, dict[str, Any]] = {}
         # VALUZ-CHATPLAN S5: if a user-injected ``message`` arrives in the
@@ -512,7 +515,7 @@ class CoordinationService:
             async with async_unit_of_work(commit=False) as db:
                 runs_by_key = {
                     r.subtask_key: r
-                    for r in await TaskSessionDatastore(db).list_runs(cast(str, user_id), task_id)
+                    for r in await TaskSessionDatastore(db).list_runs(user_id, task_id)
                     if r.kind == "subtask" and r.subtask_key and r.status == "active"
                 }
         except Exception:  # noqa: BLE001
@@ -526,7 +529,7 @@ class CoordinationService:
                 continue
             kernel_status: str | None = None
             try:
-                ks = await data_reader().get_session(cast(str, user_id), run.session_id)
+                ks = await data_reader().get_session(user_id, run.session_id)
                 kernel_status = getattr(ks, "status", None) if ks is not None else None
             except Exception:  # noqa: BLE001
                 logger.debug(
