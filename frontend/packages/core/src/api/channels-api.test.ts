@@ -31,8 +31,12 @@ const feishuBinding: FeishuBinding = {
   owner_user_id: "u1",
   agent_slug: "developer",
   app_id: "cli_app_1",
+  has_app_secret: true,
   has_verification_token: true,
   has_encrypt_key: true,
+  connected: false,
+  connection_status: "stopped",
+  connection_error: null,
 };
 
 describe("channelsApi", () => {
@@ -95,7 +99,7 @@ describe("channelsApi", () => {
     );
   });
 
-  it("does not send empty Feishu secrets when saving a binding", async () => {
+  it("does not send an empty Feishu app secret when saving a binding", async () => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(jsonResponse(feishuBinding));
@@ -104,8 +108,7 @@ describe("channelsApi", () => {
       enabled: true,
       agent_slug: "developer",
       app_id: "cli_app_1",
-      verification_token: "",
-      encrypt_key: "",
+      app_secret: "",
     });
 
     const [, init] = fetchMock.mock.calls[0] ?? [];
@@ -117,6 +120,28 @@ describe("channelsApi", () => {
       enabled: true,
       agent_slug: "developer",
       app_id: "cli_app_1",
+    });
+  });
+
+  it("sends the Feishu app secret when provided", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(jsonResponse(feishuBinding));
+
+    await channelsApi.updateFeishuBinding({
+      enabled: true,
+      agent_slug: "developer",
+      app_id: "cli_app_1",
+      app_secret: " app-secret ",
+    });
+
+    const [, init] = fetchMock.mock.calls[0] ?? [];
+    const body = JSON.parse(String(init?.body));
+    expect(body).toEqual({
+      enabled: true,
+      agent_slug: "developer",
+      app_id: "cli_app_1",
+      app_secret: "app-secret",
     });
   });
 });

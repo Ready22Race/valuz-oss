@@ -3493,8 +3493,11 @@ components:
         - owner_user_id
         - agent_slug
         - app_id
+        - has_app_secret
         - has_verification_token
         - has_encrypt_key
+        - connected
+        - connection_status
       properties:
         enabled:
           type: boolean
@@ -3506,10 +3509,19 @@ components:
           type: string
         app_id:
           type: string
+        has_app_secret:
+          type: boolean
         has_verification_token:
           type: boolean
         has_encrypt_key:
           type: boolean
+        connected:
+          type: boolean
+        connection_status:
+          type: string
+        connection_error:
+          type: string
+          nullable: true
     FeishuBindingUpdate:
       type: object
       required:
@@ -3524,6 +3536,8 @@ components:
         agent_slug:
           type: string
         app_id:
+          type: string
+        app_secret:
           type: string
         verification_token:
           type: string

@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from valuz_agent.api.deps import get_channel_ingress_service, get_current_user_id
 from valuz_agent.infra import secret_store
 from valuz_agent.infra.db import async_unit_of_work
+from valuz_agent.integrations.feishu_long_connection import feishu_supervisor
 from valuz_agent.integrations.wecom_aibot_long_connection import wecom_aibot_supervisor
 from valuz_agent.modules.channels.adapters import (
     ChannelVerificationError,
@@ -62,8 +63,12 @@ class FeishuBindingResponse(BaseModel):
     owner_user_id: str
     agent_slug: str
     app_id: str
+    has_app_secret: bool
     has_verification_token: bool
     has_encrypt_key: bool
+    connected: bool = False
+    connection_status: str = "stopped"
+    connection_error: str | None = None
 
 
 class FeishuBindingUpdate(BaseModel):
@@ -71,12 +76,14 @@ class FeishuBindingUpdate(BaseModel):
     channel_instance_id: str | None = Field(default=None, min_length=1)
     agent_slug: str = Field(min_length=1)
     app_id: str = Field(min_length=1)
+    app_secret: str | None = None
     verification_token: str | None = None
     encrypt_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class _FeishuSecretPayload:
+    app_secret: str | None = None
     verification_token: str | None = None
     encrypt_key: str | None = None
 
@@ -188,17 +195,22 @@ async def update_feishu_binding(
             else _feishu_secret_ref(agent_slug)
         )
         existing_secret = _read_feishu_secret(user_id=user_id, secret_ref=secret_ref)
+        app_secret = _coalesce_secret_value(
+            body.app_secret,
+            existing_secret.app_secret,
+        )
         verification_token = _coalesce_secret_value(
             body.verification_token,
             existing_secret.verification_token,
         )
         encrypt_key = _coalesce_secret_value(body.encrypt_key, existing_secret.encrypt_key)
-        if not verification_token:
-            raise HTTPException(status_code=422, detail="Verification token is required")
+        if not app_secret:
+            raise HTTPException(status_code=422, detail="App Secret is required")
         _write_feishu_secret(
             user_id=user_id,
             secret_ref=secret_ref,
             payload=_FeishuSecretPayload(
+                app_secret=app_secret,
                 verification_token=verification_token,
                 encrypt_key=encrypt_key,
             ),
@@ -212,6 +224,7 @@ async def update_feishu_binding(
             secret_ref=secret_ref,
             enabled=body.enabled,
         )
+    await feishu_supervisor.restart()
     return _feishu_binding_response(user_id=user_id, agent_slug=agent_slug, binding=binding)
 
 
@@ -252,6 +265,7 @@ def _feishu_binding_response(
     agent_slug: str,
     binding: AgentChannelBinding | None,
 ) -> FeishuBindingResponse:
+    runtime = feishu_supervisor.status_for(agent_slug)
     secret = (
         _read_feishu_secret(user_id=user_id, secret_ref=binding.secret_ref)
         if binding is not None
@@ -263,8 +277,12 @@ def _feishu_binding_response(
         owner_user_id=user_id,
         agent_slug=agent_slug,
         app_id=binding.bot_id if binding is not None else "",
+        has_app_secret=bool(secret.app_secret),
         has_verification_token=bool(secret.verification_token),
         has_encrypt_key=bool(secret.encrypt_key),
+        connected=runtime.connected,
+        connection_status=runtime.status,
+        connection_error=runtime.last_error,
     )
 
 
@@ -290,7 +308,11 @@ def _read_feishu_secret(
         return _FeishuSecretPayload()
     verification_token = data.get("verification_token")
     encrypt_key = data.get("encrypt_key")
+    app_secret = data.get("app_secret")
     return _FeishuSecretPayload(
+        app_secret=app_secret.strip()
+        if isinstance(app_secret, str) and app_secret.strip()
+        else None,
         verification_token=verification_token.strip()
         if isinstance(verification_token, str) and verification_token.strip()
         else None,
@@ -311,6 +333,7 @@ def _write_feishu_secret(
         secret_ref,
         json.dumps(
             {
+                "app_secret": payload.app_secret or "",
                 "verification_token": payload.verification_token or "",
                 "encrypt_key": payload.encrypt_key or "",
             },

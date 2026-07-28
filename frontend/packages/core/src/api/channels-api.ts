@@ -34,8 +34,12 @@ export interface FeishuBinding {
   owner_user_id: string;
   agent_slug: string;
   app_id: string;
+  has_app_secret: boolean;
   has_verification_token: boolean;
   has_encrypt_key: boolean;
+  connected: boolean;
+  connection_status: string;
+  connection_error?: string | null;
 }
 
 export interface UpdateFeishuBindingPayload {
@@ -43,8 +47,7 @@ export interface UpdateFeishuBindingPayload {
   channel_instance_id?: string;
   agent_slug: string;
   app_id: string;
-  verification_token?: string;
-  encrypt_key?: string;
+  app_secret?: string;
 }
 
 const fetchJson = createFetchJson(() => _apiBase);
@@ -90,8 +93,7 @@ export const channelsApi = {
   },
 
   updateFeishuBinding(payload: UpdateFeishuBindingPayload): Promise<FeishuBinding> {
-    const verificationToken = payload.verification_token?.trim();
-    const encryptKey = payload.encrypt_key?.trim();
+    const appSecret = payload.app_secret?.trim();
     const body: UpdateFeishuBindingPayload = {
       enabled: payload.enabled,
       agent_slug: payload.agent_slug,
@@ -100,11 +102,8 @@ export const channelsApi = {
     if (payload.channel_instance_id?.trim()) {
       body.channel_instance_id = payload.channel_instance_id.trim();
     }
-    if (verificationToken) {
-      body.verification_token = verificationToken;
-    }
-    if (encryptKey) {
-      body.encrypt_key = encryptKey;
+    if (appSecret) {
+      body.app_secret = appSecret;
     }
     return fetchJson(
       `/v1/channels/feishu/bindings/${encodeURIComponent(payload.agent_slug)}`,

@@ -66,6 +66,8 @@ class _FakeAgentChannelBindingDatastore:
         bot_id: str,
         secret_ref: str | None,
         enabled: bool,
+        bot_name: str | None = None,
+        ws_url: str | None = None,
     ) -> Any:
         self.__class__.binding = SimpleNamespace(
             id="binding-1",
@@ -76,10 +78,18 @@ class _FakeAgentChannelBindingDatastore:
             bot_id=bot_id,
             secret_ref=secret_ref,
             enabled=enabled,
-            bot_name=None,
-            ws_url=None,
+            bot_name=bot_name,
+            ws_url=ws_url,
         )
         return self.__class__.binding
+
+
+class _FakeSupervisor:
+    def status_for(self, _agent_slug: str) -> SimpleNamespace:
+        return SimpleNamespace(status="stopped", connected=False, last_error=None)
+
+    async def restart(self) -> None:
+        return None
 
 
 def test_feishu_url_verification_uses_bound_agent_secret(
@@ -150,6 +160,7 @@ def test_update_feishu_binding_stores_token_payload(
         "put",
         lambda user_id, ref, value: saved.__setitem__((user_id, ref), value),
     )
+    monkeypatch.setattr(channels_routes, "feishu_supervisor", _FakeSupervisor())
     app = FastAPI()
     app.include_router(channels_routes.router)
     app.dependency_overrides[channels_routes.get_current_user_id] = lambda: "u1"
@@ -160,6 +171,7 @@ def test_update_feishu_binding_stores_token_payload(
             "enabled": True,
             "agent_slug": "developer",
             "app_id": "cli_app_1",
+            "app_secret": "app-secret",
             "verification_token": "verify-token",
             "encrypt_key": "encrypt-key",
         },
@@ -172,10 +184,49 @@ def test_update_feishu_binding_stores_token_payload(
         "owner_user_id": "u1",
         "agent_slug": "developer",
         "app_id": "cli_app_1",
+        "has_app_secret": True,
         "has_verification_token": True,
         "has_encrypt_key": True,
+        "connected": False,
+        "connection_status": "stopped",
+        "connection_error": None,
     }
     assert json.loads(saved[("u1", "channel/feishu/developer")]) == {
+        "app_secret": "app-secret",
         "verification_token": "verify-token",
         "encrypt_key": "encrypt-key",
     }
+
+
+def test_update_feishu_binding_requires_app_secret_for_new_binding(
+    monkeypatch,
+) -> None:
+    _FakeAgentChannelBindingDatastore.binding = None
+    saved: dict[tuple[str, str], str] = {}
+    monkeypatch.setattr(channels_routes, "async_unit_of_work", lambda: _Uow())
+    monkeypatch.setattr(
+        channels_routes,
+        "AgentChannelBindingDatastore",
+        _FakeAgentChannelBindingDatastore,
+    )
+    monkeypatch.setattr(
+        channels_routes.secret_store,
+        "get",
+        lambda user_id, ref: saved.get((user_id, ref)),
+    )
+    monkeypatch.setattr(channels_routes, "feishu_supervisor", _FakeSupervisor())
+    app = FastAPI()
+    app.include_router(channels_routes.router)
+    app.dependency_overrides[channels_routes.get_current_user_id] = lambda: "u1"
+
+    response = TestClient(app).put(
+        "/v1/channels/feishu/bindings/developer",
+        json={
+            "enabled": True,
+            "agent_slug": "developer",
+            "app_id": "cli_app_1",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "App Secret is required"
