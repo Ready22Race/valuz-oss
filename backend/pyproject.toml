@@ -139,6 +139,7 @@ dependencies = [
     # ``_resolve_codex_bin`` prefers it over a stray PATH ``codex``.
     "openai-codex>=0.144.4",
     "python-socks[asyncio]>=2.4",
+    "lark-oapi>=1.7.1",
 ]
 
 # Note: built-in parser plugins live in ``backend/parser_plugins/`` and

@@ -49,6 +49,79 @@ paths:
               schema:
                 $ref: "#/components/schemas/WeComAIBotBinding"
 
+  /v1/channels/feishu/bindings/{agent_slug}:
+    get:
+      summary: Get an agent's Feishu bot binding
+      operationId: getFeishuBinding
+      tags: [channels]
+      parameters:
+        - name: agent_slug
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: Current Feishu agent binding
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeishuBinding"
+    put:
+      summary: Update an agent's Feishu bot binding
+      operationId: updateFeishuBinding
+      tags: [channels]
+      parameters:
+        - name: agent_slug
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FeishuBindingUpdate"
+      responses:
+        "200":
+          description: Updated Feishu agent binding
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeishuBinding"
+
+  /v1/channels/feishu/{channel_instance_id}/callback:
+    post:
+      summary: Feishu bot event callback
+      operationId: feishuChannelCallback
+      tags: [channels]
+      parameters:
+        - name: channel_instance_id
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+      responses:
+        "200":
+          description: Feishu URL verification challenge or success acknowledgement
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    required: [challenge]
+                    properties:
+                      challenge: {type: string}
+                  - type: object
+                    required: [code]
+                    properties:
+                      code: {type: integer, enum: [0]}
+        "401":
+          description: Signature or token rejected
+
   /v1/channels/wecom/{channel_instance_id}/callback:
     get:
       summary: WeCom channel URL verification
@@ -3411,6 +3484,64 @@ components:
         bot_id:
           type: string
         secret:
+          type: string
+    FeishuBinding:
+      type: object
+      required:
+        - enabled
+        - channel_instance_id
+        - owner_user_id
+        - agent_slug
+        - app_id
+        - has_app_secret
+        - has_verification_token
+        - has_encrypt_key
+        - connected
+        - connection_status
+      properties:
+        enabled:
+          type: boolean
+        channel_instance_id:
+          type: string
+        owner_user_id:
+          type: string
+        agent_slug:
+          type: string
+        app_id:
+          type: string
+        has_app_secret:
+          type: boolean
+        has_verification_token:
+          type: boolean
+        has_encrypt_key:
+          type: boolean
+        connected:
+          type: boolean
+        connection_status:
+          type: string
+        connection_error:
+          type: string
+          nullable: true
+    FeishuBindingUpdate:
+      type: object
+      required:
+        - enabled
+        - agent_slug
+        - app_id
+      properties:
+        enabled:
+          type: boolean
+        channel_instance_id:
+          type: string
+        agent_slug:
+          type: string
+        app_id:
+          type: string
+        app_secret:
+          type: string
+        verification_token:
+          type: string
+        encrypt_key:
           type: string
     FileCapabilities:
       type: object

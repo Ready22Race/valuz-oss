@@ -1,0 +1,187 @@
+from __future__ import annotations
+
+import json
+from types import SimpleNamespace
+
+import pytest
+from lark_oapi.api.im.v1.model.p2_im_message_receive_v1 import P2ImMessageReceiveV1
+
+from valuz_agent.integrations import feishu_long_connection as feishu_runtime
+from valuz_agent.integrations.feishu_long_connection import (
+    CHANNEL_RECEIVED_MESSAGE,
+    FeishuLongConnectionConfig,
+    FeishuLongConnectionRunner,
+    inbound_from_sdk_event,
+)
+from valuz_agent.modules.channels import AgentChannelRouteDecision, ChannelRouteDecisionKind
+from valuz_agent.modules.channels.adapters.base import InboundChannelMessage
+from valuz_agent.modules.channels.service import ChannelIngressResult
+
+
+def test_inbound_from_sdk_event_normalizes_message_for_bound_agent() -> None:
+    event = P2ImMessageReceiveV1(
+        {
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt-1",
+                "event_type": "im.message.receive_v1",
+            },
+            "event": {
+                "sender": {"sender_id": {"open_id": "ou-user"}},
+                "message": {
+                    "message_id": "om-msg",
+                    "chat_id": "oc-chat",
+                    "message_type": "text",
+                    "content": json.dumps(
+                        {"text": '<at user_id="ou-bot">Valuz 小助手</at> 你好'}
+                    ),
+                    "mentions": [{"id": {"open_id": "ou-bot"}, "name": "Valuz 小助手"}],
+                },
+            },
+        }
+    )
+
+    inbound = inbound_from_sdk_event(
+        event,
+        FeishuLongConnectionConfig(
+            channel_instance_id="feishu-main",
+            owner_user_id="u1",
+            agent_slug="valuz-helper",
+            app_id="cli_app_1",
+            app_secret="app-secret",
+        ),
+    )
+
+    assert inbound.text == "你好"
+    assert inbound.context.user_id == "u1"
+    assert inbound.context.mentioned_agent_slug == "valuz-helper"
+    assert inbound.context.external_chat_id == "oc-chat"
+    assert inbound.context.external_thread_id == "om-msg"
+
+
+@pytest.mark.asyncio
+async def test_feishu_runner_replies_and_patches_session_output() -> None:
+    config = FeishuLongConnectionConfig(
+        channel_instance_id="feishu-main",
+        owner_user_id="u1",
+        agent_slug="valuz-helper",
+        app_id="cli_app_1",
+        app_secret="app-secret",
+    )
+    inbound = InboundChannelMessage(
+        text="你好",
+        context=inbound_from_sdk_event(
+            _message_event(),
+            config,
+        ).context,
+        params={"query": "你好", "content": "你好"},
+        channel_context={"platform": "feishu"},
+    )
+    replies: list[str] = []
+    patches: list[tuple[str, str]] = []
+
+    async def dispatch(message: InboundChannelMessage) -> ChannelIngressResult:
+        assert message.text == "你好"
+        return ChannelIngressResult(
+            decision=AgentChannelRouteDecision(
+                kind=ChannelRouteDecisionKind.REUSE_SESSION,
+                agent_slug="valuz-helper",
+                project_id="project-1",
+                session_id="session-1",
+                reason="existing thread binding",
+            ),
+            session_id="session-1",
+        )
+
+    async def reply_sender(
+        _config: FeishuLongConnectionConfig,
+        message: InboundChannelMessage,
+        content: str,
+    ) -> str | None:
+        assert message.context.external_message_id == "om-msg"
+        replies.append(content)
+        return "om-reply"
+
+    async def reply_updater(
+        _config: FeishuLongConnectionConfig,
+        message_id: str,
+        content: str,
+    ) -> None:
+        patches.append((message_id, content))
+
+    async def stream_session_events(user_id: str, session_id: str):
+        assert user_id == "u1"
+        assert session_id == "session-1"
+        yield SimpleNamespace(type="text_delta", data={"text": "Hel"})
+        yield SimpleNamespace(type="text_delta", data={"text": "lo"})
+        yield SimpleNamespace(type="session_idle", data={"stop_reason": "end_turn"})
+
+    runner = FeishuLongConnectionRunner(
+        config,
+        dispatch=dispatch,
+        reply_sender=reply_sender,
+        reply_updater=reply_updater,
+        session_event_stream_factory=stream_session_events,
+    )
+
+    await runner._dispatch_event(inbound)
+
+    assert replies == [CHANNEL_RECEIVED_MESSAGE]
+    assert patches == [
+        ("om-reply", "Hel"),
+        ("om-reply", "Hello"),
+        ("om-reply", "Hello"),
+    ]
+
+
+def test_feishu_event_handler_ignores_p2p_chat_entered_event() -> None:
+    message_events: list[object] = []
+    handler = feishu_runtime._build_event_handler(
+        FeishuLongConnectionConfig(
+            channel_instance_id="feishu-main",
+            owner_user_id="u1",
+            agent_slug="valuz-helper",
+            app_id="cli_app_1",
+            app_secret="app-secret",
+        ),
+        message_events.append,
+    )
+
+    handler._do_without_validation(
+        json.dumps(
+            {
+                "schema": "2.0",
+                "header": {
+                    "event_id": "evt-p2p-1",
+                    "event_type": "im.chat.access_event.bot_p2p_chat_entered_v1",
+                },
+                "event": {
+                    "operator_id": {"open_id": "ou-user"},
+                    "chat_id": "oc-chat",
+                },
+            }
+        ).encode("utf-8")
+    )
+
+    assert message_events == []
+
+
+def _message_event() -> P2ImMessageReceiveV1:
+    return P2ImMessageReceiveV1(
+        {
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt-1",
+                "event_type": "im.message.receive_v1",
+            },
+            "event": {
+                "sender": {"sender_id": {"open_id": "ou-user"}},
+                "message": {
+                    "message_id": "om-msg",
+                    "chat_id": "oc-chat",
+                    "message_type": "text",
+                    "content": json.dumps({"text": "你好"}),
+                },
+            },
+        }
+    )

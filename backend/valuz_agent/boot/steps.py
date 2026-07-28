@@ -896,6 +896,10 @@ async def stop_host_background_services(app: FastAPI) -> None:
 
     await wecom_aibot_supervisor.shutdown()
 
+    from valuz_agent.integrations.feishu_long_connection import feishu_supervisor
+
+    await feishu_supervisor.shutdown()
+
     watcher = getattr(app.state, "skill_watcher", None)
     if watcher is not None:
         await watcher.stop()
@@ -949,6 +953,10 @@ async def start_post_boot_agent_channels(app: FastAPI) -> None:
     from valuz_agent.integrations.wecom_aibot_long_connection import wecom_aibot_supervisor
 
     await wecom_aibot_supervisor.startup()
+
+    from valuz_agent.integrations.feishu_long_connection import feishu_supervisor
+
+    await feishu_supervisor.startup()
 
 
 async def stop_managed_browser() -> None:

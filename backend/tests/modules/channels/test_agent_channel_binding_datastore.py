@@ -84,3 +84,41 @@ async def test_list_enabled_wecom_aibot_bindings_is_owner_scoped(sessionmaker_) 
 
     assert [row.agent_slug for row in rows] == ["developer"]
     assert rows[0].bot_id == "bot-1"
+
+
+async def test_get_enabled_binding_by_channel_instance_returns_owner(sessionmaker_) -> None:
+    async with sessionmaker_() as db:
+        ds = AgentChannelBindingDatastore(db)
+        await ds.upsert(
+            user_id="u1",
+            platform="feishu",
+            agent_slug="developer",
+            channel_instance_id="feishu-main",
+            bot_id="cli_app_1",
+            secret_ref="channel/feishu/developer",
+            enabled=True,
+        )
+        await ds.upsert(
+            user_id="u2",
+            platform="feishu",
+            agent_slug="reviewer",
+            channel_instance_id="feishu-disabled",
+            bot_id="cli_app_2",
+            secret_ref="channel/feishu/reviewer",
+            enabled=False,
+        )
+
+        active = await ds.get_enabled_by_channel_instance(
+            platform="feishu",
+            channel_instance_id="feishu-main",
+        )
+        disabled = await ds.get_enabled_by_channel_instance(
+            platform="feishu",
+            channel_instance_id="feishu-disabled",
+        )
+
+    assert active is not None
+    assert active.owner_user_id == "u1"
+    assert active.agent_slug == "developer"
+    assert active.bot_id == "cli_app_1"
+    assert disabled is None
