@@ -105,10 +105,10 @@ async def inject_into_task(
 
     Returns ``{delivered: bool, lead_session_id: str | None, reason: str | None}``:
       - active task + registered lead inbox → ``delivered=True``
-      - paused / blocked / stopped task → the task is REVIVED
-        (``resume_task`` with the text as the resume instruction) →
-        ``delivered=True, reason=TASK_RESUMED``; a failed revive returns
-        ``delivered=False, reason=RESUME_FAILED``
+      - paused / blocked / stopped task → ``delivered=False,
+        reason=TASK_HALTED`` plus ``task_status``. Reviving it is usually the
+        right move, but it is ORCHESTRATION and therefore the caller's
+        decision — this module only delivers.
       - no lead run found for the task → ``delivered=False, reason=NO_LEAD``
       - lead run exists but mailbox unregistered (already finished) →
         ``delivered=False, reason=LEAD_OFFLINE``
@@ -127,38 +127,23 @@ async def inject_into_task(
             "reason": "TASK_NOT_FOUND",
         }
     if task_row.status in ("paused", "blocked", "stopped"):
-        # Halted task: the lead loop is torn down and its mailbox is
-        # unregistered, so a plain put() can never deliver. "Talking to a
-        # halted task" IS the user's resume intent (the intervene docstring
-        # promised "chat/inject can also revive it") — route through
-        # resume_task with the text as the resume instruction: it flips the
-        # status, reconciles members, and embeds the text in the respawned
-        # lead's recovery brief. resume_task appends the ``resumed`` +
-        # ``user_inject`` events itself — don't double-append here.
-        # ``completed`` stays excluded: reopening a finished task is a
-        # deliberate act (detail-page reopen / explicit resume_task), not a
-        # side effect of a stray chat message.
-        from valuz_agent.modules.tasks.orchestrator import task_orchestrator
-
-        result = await task_orchestrator.resume_task(
-            task_id, project_id, user_id=user_id, instruction=text
-        )
-        lead_session_id = None
-        async with async_unit_of_work(commit=False) as db:
-            runs = await TaskSessionDatastore(db).list_runs(user_id, task_id)
-            lead = next((r for r in runs if r.kind == "lead"), None)
-            if lead is not None:
-                lead_session_id = lead.session_id
-        if result.get("ok"):
-            return {
-                "delivered": True,
-                "lead_session_id": lead_session_id,
-                "reason": "TASK_RESUMED",
-            }
+        # Halted: the lead loop is torn down and its mailbox unregistered, so a
+        # plain put() can never deliver. Reviving it IS usually what the user
+        # meant — but reviving is orchestration, and deciding to do it is the
+        # CALLER's call, not a delivery helper's. This module puts messages in
+        # mailboxes; reaching up to the composition root for ``resume_task``
+        # from here inverted the dependency (a leaf importing the root, through
+        # a function-local import to dodge the cycle it created).
+        #
+        # So: report the state and let the caller act. ``tools/handlers`` and
+        # ``routes/tasks`` both already hold the orchestrator.
+        # ``completed`` is deliberately NOT in this set — reopening a finished
+        # task is a deliberate act, not a side effect of a stray chat message.
         return {
             "delivered": False,
-            "lead_session_id": lead_session_id,
-            "reason": "RESUME_FAILED",
+            "lead_session_id": None,
+            "reason": "TASK_HALTED",
+            "task_status": task_row.status,
         }
     if task_row.status != "active":
         return {

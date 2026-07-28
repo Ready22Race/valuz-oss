@@ -45,7 +45,7 @@ from typing import Any, Literal, Protocol
 from valuz_agent.adapters import kernel_client
 from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.infra.lifecycle import is_draining
-from valuz_agent.modules.tasks.mailbox import mailbox_registry
+from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 from valuz_agent.modules.sessions.turn_driver import (
     _restamp_always_on_mcp,
     _resolve_turn_status,
@@ -160,7 +160,7 @@ async def collect_manifest(
     }
 
 
-def _member_run_dir(project_cwd: Any, task_id: str, run_seq: int, mode: str) -> Path:
+def _member_run_dir(project_cwd: str | Path, task_id: str, run_seq: int, mode: str) -> Path:
     """Resolve a member's working directory (v2.1: always the project cwd).
 
     Members read and write project files natively in the SHARED project cwd
@@ -440,7 +440,7 @@ class ActorRunner:
                 )
 
     @staticmethod
-    def _format_member_done(msg: Any) -> str:
+    def _format_member_done(msg: InboxMsg) -> str:
         """Render a member_done mailbox message as the lead's next turn prompt."""
         m = msg.payload or {}
         arts = m.get("artifacts") or []

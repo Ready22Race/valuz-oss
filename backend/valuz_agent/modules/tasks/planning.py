@@ -33,6 +33,7 @@ from valuz_agent.modules.tasks.datastore import (
     TaskSessionDatastore,
 )
 from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
+from valuz_agent.modules.tasks.models import TaskRow
 from valuz_agent.modules.tasks.plan import PlanError, TaskPlan
 from valuz_agent.modules.tasks.plan_render import render_plan_md
 
@@ -47,7 +48,7 @@ logger = logging.getLogger(__name__)
 async def persist_plan(
     task_ds: TaskDatastore,
     event_ds: TaskEventDatastore,
-    task_row: Any,
+    task_row: TaskRow,
     plan: TaskPlan,
     *,
     actor: str,

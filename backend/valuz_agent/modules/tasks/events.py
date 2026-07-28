@@ -22,6 +22,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.tasks.datastore import TaskDatastore, TaskEventDatastore
 
@@ -58,7 +60,7 @@ def publish_task_finalized(task_id: str, owner_user_id: str, status: str) -> Non
 
 
 async def finalize_task(
-    db: Any,
+    db: AsyncSession,
     *,
     user_id: str,
     project_id: str,
@@ -114,7 +116,7 @@ async def finalize_task(
 
 
 async def block_task(
-    db: Any,
+    db: AsyncSession,
     *,
     user_id: str,
     project_id: str,

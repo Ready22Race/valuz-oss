@@ -337,6 +337,30 @@ def _with_inbox_notice(handler: ToolHandler) -> ToolHandler:
     return _wrapped
 
 
+def _guarded(tool_name: str, handler: ToolHandler) -> ToolHandler:
+    """Turn an unexpected exception into a tool error instead of a transport fault.
+
+    Every handler used to end with its own copy of this — nineteen identical
+    ``except Exception: log; return ToolResult(is_error=True)`` tails. Uniform
+    behaviour belongs in one place: a handler body should read as the happy
+    path plus its OWN validation errors, and a crash it did not anticipate is
+    not something nineteen call sites should each decide how to report.
+
+    Expected failures still return their own ``ToolResult`` — this only catches
+    what nobody planned for. Sits beside ``_with_inbox_notice`` in the same
+    decorator layer applied by ``build_task_tool_defs``.
+    """
+
+    async def _wrapped(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
+        try:
+            return await handler(args, ctx)
+        except Exception as exc:  # noqa: BLE001 — the point is to catch everything
+            logger.exception("%s handler failed (session %s)", tool_name, ctx.session_id)
+            return ToolResult(content=f"{tool_name} failed: {exc}", is_error=True)
+
+    return _wrapped
+
+
 # Lead tools worth augmenting: those a lead can call *during* a wait gap. Excludes
 # await_members (the consumer itself), terminal/plain-text tools (finish_task,
 # update_deliverable), and chat-side orchestration tools (create/list/get_task,
@@ -371,27 +395,20 @@ async def _dispatch_handler(
     subtask_key: str = (args.get("subtask_key") or "").strip()
     if not subtask_key:
         return ToolResult(content="dispatch: 'subtask_key' is required", is_error=True)
-    try:
-        # v0.14: dispatch is NON-BLOCKING — spawn the member actor and
-        # return its handle immediately. The lead collects results in the
-        # same turn via ``await_members``.
-        result = await orch.dispatch_async(
-            task_id=task_id,
-            project_id=project_id,
-            lead_session_id=ctx.session_id,
-            subtask_key=subtask_key,
-            agent=args.get("agent"),
-            goal=args.get("goal"),
-            refs=args.get("refs") or [],
-            project_mode=args.get("project_mode"),
-            user_id=ctx.user_id,
-        )
-        return ToolResult(
-            content=json.dumps(result, ensure_ascii=False), is_error="error" in result
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("dispatch handler error for task %s", task_id)
-        return ToolResult(content=f"dispatch failed: {exc}", is_error=True)
+    result = await orch.dispatch_async(
+        task_id=task_id,
+        project_id=project_id,
+        lead_session_id=ctx.session_id,
+        subtask_key=subtask_key,
+        agent=args.get("agent"),
+        goal=args.get("goal"),
+        refs=args.get("refs") or [],
+        project_mode=args.get("project_mode"),
+        user_id=ctx.user_id,
+    )
+    return ToolResult(
+        content=json.dumps(result, ensure_ascii=False), is_error="error" in result
+    )
 
 
 async def _await_members_handler(
@@ -401,26 +418,22 @@ async def _await_members_handler(
     if isinstance(gate, ToolResult):
         return gate
     task_id, project_id = gate
-    try:
-        result = await orch.await_member_results(
-            lead_session_id=ctx.session_id,
-            project_id=project_id,
-            task_id=task_id,
-            keys=args.get("keys"),
-            # Default to "any" for immediate per-member review: return as
-            # soon as one member finishes so the lead reviews it without
-            # waiting for the slowest sibling. Loop to collect the rest.
-            mode=args.get("mode") or "any",
-            timeout_s=args.get("timeout_s"),
-            user_id=ctx.user_id,
-        )
-        return ToolResult(
-            content=json.dumps(result, ensure_ascii=False),
-            is_error="error" in result,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("await_members handler error for task %s", task_id)
-        return ToolResult(content=f"await_members failed: {exc}", is_error=True)
+    result = await orch.await_member_results(
+        lead_session_id=ctx.session_id,
+        project_id=project_id,
+        task_id=task_id,
+        keys=args.get("keys"),
+        # Default to "any" for immediate per-member review: return as
+        # soon as one member finishes so the lead reviews it without
+        # waiting for the slowest sibling. Loop to collect the rest.
+        mode=args.get("mode") or "any",
+        timeout_s=args.get("timeout_s"),
+        user_id=ctx.user_id,
+    )
+    return ToolResult(
+        content=json.dumps(result, ensure_ascii=False),
+        is_error="error" in result,
+    )
 
 
 async def _send_handler(
@@ -436,22 +449,18 @@ async def _send_handler(
     if not to_session_id or not text:
         return ToolResult(content="send: session_id and text are required", is_error=True)
 
-    try:
-        result = await messaging.send_to_member(
-            from_session_id=ctx.session_id,
-            to_session_id=to_session_id,
-            text=text,
-            project_id=project_id,
-            task_id=task_id,
-            user_id=ctx.user_id,
-        )
-        return ToolResult(
-            content=json.dumps(result, ensure_ascii=False),
-            is_error=not result.get("delivered"),
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("send handler error for task %s", task_id)
-        return ToolResult(content=f"send failed: {exc}", is_error=True)
+    result = await messaging.send_to_member(
+        from_session_id=ctx.session_id,
+        to_session_id=to_session_id,
+        text=text,
+        project_id=project_id,
+        task_id=task_id,
+        user_id=ctx.user_id,
+    )
+    return ToolResult(
+        content=json.dumps(result, ensure_ascii=False),
+        is_error=not result.get("delivered"),
+    )
 
 
 async def _draft_task_handler(
@@ -495,10 +504,9 @@ async def _draft_task_handler(
             )
         )
     except ValueError as exc:
+        # An EXPECTED failure (unknown project / agent not a member) — keep it
+        # here with its own message. Anything unexpected is _guarded's job.
         return ToolResult(content=f"draft_task: {exc}", is_error=True)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("draft_task handler error in project %s", project_id)
-        return ToolResult(content=f"draft_task failed: {exc}", is_error=True)
 
 
 async def _commit_task_handler(
@@ -511,21 +519,17 @@ async def _commit_task_handler(
     if isinstance(resolved, ToolResult):
         return resolved
     task, project_id, task_id = resolved
-    try:
-        result = await orch.commit_task(
-            task_id=task_id,
-            project_id=project_id,
-            caller_session_id=ctx.session_id,
-            lead_agent_slug_override=args.get("lead_agent_slug"),
-            user_id=user_id,
-        )
-        return ToolResult(
-            content=json.dumps(result, ensure_ascii=False),
-            is_error="error" in result,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("commit_task handler error for task %s", task_id)
-        return ToolResult(content=f"commit_task failed: {exc}", is_error=True)
+    result = await orch.commit_task(
+        task_id=task_id,
+        project_id=project_id,
+        caller_session_id=ctx.session_id,
+        lead_agent_slug_override=args.get("lead_agent_slug"),
+        user_id=user_id,
+    )
+    return ToolResult(
+        content=json.dumps(result, ensure_ascii=False),
+        is_error="error" in result,
+    )
 
 
 async def _abandon_task_handler(
@@ -536,21 +540,17 @@ async def _abandon_task_handler(
     if isinstance(resolved, ToolResult):
         return resolved
     task, project_id, task_id = resolved
-    try:
-        result = await orch.abandon_task(
-            task_id=task_id,
-            project_id=project_id,
-            caller_session_id=ctx.session_id,
-            reason=(args.get("reason") or ""),
-            user_id=user_id,
-        )
-        return ToolResult(
-            content=json.dumps(result, ensure_ascii=False),
-            is_error="error" in result,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("abandon_task handler error for task %s", task_id)
-        return ToolResult(content=f"abandon_task failed: {exc}", is_error=True)
+    result = await orch.abandon_task(
+        task_id=task_id,
+        project_id=project_id,
+        caller_session_id=ctx.session_id,
+        reason=(args.get("reason") or ""),
+        user_id=user_id,
+    )
+    return ToolResult(
+        content=json.dumps(result, ensure_ascii=False),
+        is_error="error" in result,
+    )
 
 
 async def _inject_into_task_handler(
@@ -595,21 +595,32 @@ async def _inject_into_task_handler(
             is_error=True,
         )
 
-    try:
-        result = await messaging.inject_into_task(
-            task_id=task_id,
-            project_id=task.project_id,
-            text=text,
-            from_session_id=ctx.session_id,
-            user_id=ctx.user_id,
+    result = await messaging.inject_into_task(
+        task_id=task_id,
+        project_id=task.project_id,
+        text=text,
+        from_session_id=ctx.session_id,
+        user_id=ctx.user_id,
+    )
+    # Talking to a HALTED task is the user's resume intent (the intervene
+    # contract promises "chat/inject can also revive it"). Deciding that is
+    # orchestration, so it happens here rather than inside the delivery
+    # helper — ``resume_task`` flips the status, reconciles members and
+    # embeds the text in the respawned lead's recovery brief, appending its
+    # own ``resumed`` + ``user_inject`` events.
+    if result.get("reason") == "TASK_HALTED":
+        revived = await orch.resume_task(
+            task_id, task.project_id, user_id=ctx.user_id, instruction=text
         )
-        return ToolResult(
-            content=json.dumps(result, ensure_ascii=False),
-            is_error=not result.get("delivered"),
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("inject_into_task handler error for task %s", task_id)
-        return ToolResult(content=f"inject_into_task failed: {exc}", is_error=True)
+        result = {
+            "delivered": bool(revived.get("ok")),
+            "lead_session_id": None,
+            "reason": "TASK_RESUMED" if revived.get("ok") else "RESUME_FAILED",
+        }
+    return ToolResult(
+        content=json.dumps(result, ensure_ascii=False),
+        is_error=not result.get("delivered"),
+    )
 
 
 async def _resume_task_handler(
@@ -650,20 +661,16 @@ async def _resume_task_handler(
             is_error=True,
         )
 
-    try:
-        result = await orch.resume_task(
-            task_id=task_id,
-            project_id=task.project_id,
-            actor=ctx.session_id,
-            user_id=user_id,
-        )
-        return ToolResult(
-            content=json.dumps(result, ensure_ascii=False),
-            is_error=not result.get("ok"),
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("resume_task handler error for task %s", task_id)
-        return ToolResult(content=f"resume_task failed: {exc}", is_error=True)
+    result = await orch.resume_task(
+        task_id=task_id,
+        project_id=task.project_id,
+        actor=ctx.session_id,
+        user_id=user_id,
+    )
+    return ToolResult(
+        content=json.dumps(result, ensure_ascii=False),
+        is_error=not result.get("ok"),
+    )
 
 
 async def _create_task_handler(
@@ -683,31 +690,27 @@ async def _create_task_handler(
             content="create_task: no lead_agent given and conversation has no agent",
             is_error=True,
         )
-    try:
-        task_row = await orch.kickoff(
-            project_id=project_id,
-            goal=goal,
-            lead_agent_slug=lead_agent,
-            refs=args.get("refs") or [],
-            created_by=ctx.session_id,
-            title=args.get("title"),
-            originating_session_id=ctx.session_id,
-            user_id=ctx.user_id,
+    task_row = await orch.kickoff(
+        project_id=project_id,
+        goal=goal,
+        lead_agent_slug=lead_agent,
+        refs=args.get("refs") or [],
+        created_by=ctx.session_id,
+        title=args.get("title"),
+        originating_session_id=ctx.session_id,
+        user_id=ctx.user_id,
+    )
+    return ToolResult(
+        content=json.dumps(
+            {
+                "task_id": task_row.id,
+                "title": task_row.title,
+                "lead_agent": lead_agent,
+                "status": "active",
+            },
+            ensure_ascii=False,
         )
-        return ToolResult(
-            content=json.dumps(
-                {
-                    "task_id": task_row.id,
-                    "title": task_row.title,
-                    "lead_agent": lead_agent,
-                    "status": "active",
-                },
-                ensure_ascii=False,
-            )
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("create_task handler error in project %s", project_id)
-        return ToolResult(content=f"create_task failed: {exc}", is_error=True)
+    )
 
 
 async def _list_tasks_handler(
@@ -717,18 +720,14 @@ async def _list_tasks_handler(
     if isinstance(gate, ToolResult):
         return gate
     project_id, _agent_slug = gate
-    try:
-        tasks = await queries.list_tasks(
-            project_id,
-            status=args.get("status"),
-            mine_session_id=ctx.session_id if args.get("mine_only") else None,
-            limit=int(args.get("limit") or 20),
-            user_id=ctx.user_id,
-        )
-        return ToolResult(content=json.dumps({"tasks": tasks}, ensure_ascii=False))
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("list_tasks handler error in project %s", project_id)
-        return ToolResult(content=f"list_tasks failed: {exc}", is_error=True)
+    tasks = await queries.list_tasks(
+        project_id,
+        status=args.get("status"),
+        mine_session_id=ctx.session_id if args.get("mine_only") else None,
+        limit=int(args.get("limit") or 20),
+        user_id=ctx.user_id,
+    )
+    return ToolResult(content=json.dumps({"tasks": tasks}, ensure_ascii=False))
 
 
 async def _get_task_handler(
@@ -741,16 +740,12 @@ async def _get_task_handler(
     task_id = (args.get("task_id") or "").strip()
     if not task_id:
         return ToolResult(content="get_task: task_id is required", is_error=True)
-    try:
-        detail = await queries.get_task(task_id, project_id, user_id=ctx.user_id)
-        if detail is None:
-            return ToolResult(
-                content=f"task {task_id!r} not found in this project", is_error=True
-            )
-        return ToolResult(content=json.dumps(detail, ensure_ascii=False))
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("get_task handler error for %s", task_id)
-        return ToolResult(content=f"get_task failed: {exc}", is_error=True)
+    detail = await queries.get_task(task_id, project_id, user_id=ctx.user_id)
+    if detail is None:
+        return ToolResult(
+            content=f"task {task_id!r} not found in this project", is_error=True
+        )
+    return ToolResult(content=json.dumps(detail, ensure_ascii=False))
 
 
 async def _list_members_handler(
@@ -769,22 +764,18 @@ async def _list_members_handler(
     if not project_id:
         return ToolResult(content="list_members: caller session has no project", is_error=True)
 
-    try:
-        members = await queries.list_members(project_id, user_id=user_id)
-        if not members:
-            # Project-less chat fallback (see ``_bound_agent_member``):
-            # a chat project has no deployed project members, but the
-            # conversation IS driven by its bound agent. Surface it so the
-            # roster isn't an empty dead-end that makes the caller give up
-            # (e.g. abort an automation create) — the slug is usable
-            # directly as the automation's agent_slug.
-            bound = await _bound_agent_member(sess)
-            if bound is not None:
-                members = [bound]
-        return ToolResult(content=json.dumps(members, ensure_ascii=False))
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("list_members handler error")
-        return ToolResult(content=f"list_members failed: {exc}", is_error=True)
+    members = await queries.list_members(project_id, user_id=user_id)
+    if not members:
+        # Project-less chat fallback (see ``_bound_agent_member``):
+        # a chat project has no deployed project members, but the
+        # conversation IS driven by its bound agent. Surface it so the
+        # roster isn't an empty dead-end that makes the caller give up
+        # (e.g. abort an automation create) — the slug is usable
+        # directly as the automation's agent_slug.
+        bound = await _bound_agent_member(sess)
+        if bound is not None:
+            members = [bound]
+    return ToolResult(content=json.dumps(members, ensure_ascii=False))
 
 
 async def _finish_task_handler(
@@ -800,27 +791,23 @@ async def _finish_task_handler(
     status: str = args.get("status") or "completed"
     force: bool = bool(args.get("force") or False)
 
-    try:
-        result = await orch.finish_task(
-            task_id=task_id,
-            project_id=project_id,
-            lead_session_id=ctx.session_id,
-            summary=summary,
-            artifacts=artifacts,
-            status=status,
-            force=force,
-            user_id=ctx.user_id,
+    result = await orch.finish_task(
+        task_id=task_id,
+        project_id=project_id,
+        lead_session_id=ctx.session_id,
+        summary=summary,
+        artifacts=artifacts,
+        status=status,
+        force=force,
+        user_id=ctx.user_id,
+    )
+    # Plan-completeness guard rejected the close — surface it so the
+    # lead dispatches the remaining subtasks instead of stopping.
+    if isinstance(result, dict) and result.get("status") == "rejected":
+        return ToolResult(
+            content=result.get("error", "finish_task rejected"), is_error=True
         )
-        # Plan-completeness guard rejected the close — surface it so the
-        # lead dispatches the remaining subtasks instead of stopping.
-        if isinstance(result, dict) and result.get("status") == "rejected":
-            return ToolResult(
-                content=result.get("error", "finish_task rejected"), is_error=True
-            )
-        return ToolResult(content="Task closed. Events appended. Do not continue working.")
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("finish_task handler error for task %s", task_id)
-        return ToolResult(content=f"finish_task failed: {exc}", is_error=True)
+    return ToolResult(content="Task closed. Events appended. Do not continue working.")
 
 
 async def _plan_task_handler(
@@ -847,20 +834,16 @@ async def _plan_task_handler(
             )
 
     subtasks = args.get("subtasks") or []
-    try:
-        result = await planning.plan_task(
-            task_id=task_id,
-            project_id=project_id,
-            lead_session_id=ctx.session_id,
-            subtasks=subtasks,
-            user_id=ctx.user_id,
-        )
-        return ToolResult(
-            content=json.dumps(result, ensure_ascii=False), is_error="error" in result
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("plan_task handler error for task %s", task_id)
-        return ToolResult(content=f"plan_task failed: {exc}", is_error=True)
+    result = await planning.plan_task(
+        task_id=task_id,
+        project_id=project_id,
+        lead_session_id=ctx.session_id,
+        subtasks=subtasks,
+        user_id=ctx.user_id,
+    )
+    return ToolResult(
+        content=json.dumps(result, ensure_ascii=False), is_error="error" in result
+    )
 
 
 async def _get_plan_handler(
@@ -871,16 +854,12 @@ async def _get_plan_handler(
     if isinstance(resolved, ToolResult):
         return resolved
     _task, project_id, task_id = resolved
-    try:
-        result = await planning.get_plan(
-            task_id=task_id, project_id=project_id, user_id=ctx.user_id
-        )
-        return ToolResult(
-            content=json.dumps(result, ensure_ascii=False), is_error="error" in result
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("get_plan handler error for task %s", task_id)
-        return ToolResult(content=f"get_plan failed: {exc}", is_error=True)
+    result = await planning.get_plan(
+        task_id=task_id, project_id=project_id, user_id=ctx.user_id
+    )
+    return ToolResult(
+        content=json.dumps(result, ensure_ascii=False), is_error="error" in result
+    )
 
 
 async def _modify_plan_handler(
@@ -891,24 +870,20 @@ async def _modify_plan_handler(
         return resolved
     _task, project_id, task_id = resolved
     expected_version_arg = args.get("expected_version")
-    try:
-        result = await planning.modify_plan(
-            task_id=task_id,
-            project_id=project_id,
-            lead_session_id=ctx.session_id,
-            add=args.get("add"),
-            update=args.get("update"),
-            expected_version=(
-                int(expected_version_arg) if expected_version_arg is not None else None
-            ),
-            user_id=ctx.user_id,
-        )
-        return ToolResult(
-            content=json.dumps(result, ensure_ascii=False), is_error="error" in result
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("modify_plan handler error for task %s", task_id)
-        return ToolResult(content=f"modify_plan failed: {exc}", is_error=True)
+    result = await planning.modify_plan(
+        task_id=task_id,
+        project_id=project_id,
+        lead_session_id=ctx.session_id,
+        add=args.get("add"),
+        update=args.get("update"),
+        expected_version=(
+            int(expected_version_arg) if expected_version_arg is not None else None
+        ),
+        user_id=ctx.user_id,
+    )
+    return ToolResult(
+        content=json.dumps(result, ensure_ascii=False), is_error="error" in result
+    )
 
 
 async def _review_subtask_handler(
@@ -928,23 +903,19 @@ async def _review_subtask_handler(
             content="review_subtask: 'feedback' is required when decision='rework'",
             is_error=True,
         )
-    try:
-        result = await planning.review_subtask(
-            task_id=task_id,
-            project_id=project_id,
-            lead_session_id=ctx.session_id,
-            decision=decision,
-            subtask_key=args.get("subtask_key"),
-            session_id=args.get("session_id"),
-            feedback=args.get("feedback"),
-            user_id=ctx.user_id,
-        )
-        return ToolResult(
-            content=json.dumps(result, ensure_ascii=False), is_error="error" in result
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("review_subtask handler error for task %s", task_id)
-        return ToolResult(content=f"review_subtask failed: {exc}", is_error=True)
+    result = await planning.review_subtask(
+        task_id=task_id,
+        project_id=project_id,
+        lead_session_id=ctx.session_id,
+        decision=decision,
+        subtask_key=args.get("subtask_key"),
+        session_id=args.get("session_id"),
+        feedback=args.get("feedback"),
+        user_id=ctx.user_id,
+    )
+    return ToolResult(
+        content=json.dumps(result, ensure_ascii=False), is_error="error" in result
+    )
 
 
 async def _stop_subtask_handler(
@@ -996,34 +967,30 @@ async def _stop_subtask_handler(
             )
 
     reason = (args.get("reason") or "").strip()
-    try:
-        ok = await orch.stop_member(target_session_id, user_id=user_id)
-        if not ok:
-            return ToolResult(
-                content=(
-                    f"stop_subtask: member session {target_session_id!r} not found "
-                    "or is not a subtask (already finished?)"
-                ),
-                is_error=True,
-            )
+    ok = await orch.stop_member(target_session_id, user_id=user_id)
+    if not ok:
         return ToolResult(
-            content=json.dumps(
-                {
-                    "stopped": True,
-                    "session_id": target_session_id,
-                    "subtask_key": subtask_key or None,
-                    "reason": reason,
-                    "next": (
-                        "plan node is now `rework`; call dispatch(key) to retry "
-                        "with a corrected goal, or modify_plan to retire it"
-                    ),
-                },
-                ensure_ascii=False,
-            )
+            content=(
+                f"stop_subtask: member session {target_session_id!r} not found "
+                "or is not a subtask (already finished?)"
+            ),
+            is_error=True,
         )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("stop_subtask handler error for task %s", task_id)
-        return ToolResult(content=f"stop_subtask failed: {exc}", is_error=True)
+    return ToolResult(
+        content=json.dumps(
+            {
+                "stopped": True,
+                "session_id": target_session_id,
+                "subtask_key": subtask_key or None,
+                "reason": reason,
+                "next": (
+                    "plan node is now `rework`; call dispatch(key) to retry "
+                    "with a corrected goal, or modify_plan to retire it"
+                ),
+            },
+            ensure_ascii=False,
+        )
+    )
 
 
 async def _update_deliverable_handler(
@@ -1038,24 +1005,20 @@ async def _update_deliverable_handler(
     summary: str = args.get("summary", "")
     artifacts: list[str] = args.get("artifacts") or []
 
-    try:
-        result = await orch.update_deliverable(
-            task_id=task_id,
-            project_id=project_id,
-            lead_session_id=ctx.session_id,
-            summary=summary,
-            artifacts=artifacts,
-            user_id=user_id,
+    result = await orch.update_deliverable(
+        task_id=task_id,
+        project_id=project_id,
+        lead_session_id=ctx.session_id,
+        summary=summary,
+        artifacts=artifacts,
+        user_id=user_id,
+    )
+    if isinstance(result, dict) and result.get("status") == "rejected":
+        return ToolResult(
+            content=result.get("error", "update_deliverable rejected"),
+            is_error=True,
         )
-        if isinstance(result, dict) and result.get("status") == "rejected":
-            return ToolResult(
-                content=result.get("error", "update_deliverable rejected"),
-                is_error=True,
-            )
-        return ToolResult(content="Deliverable card refreshed.")
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("update_deliverable handler error for task %s", task_id)
-        return ToolResult(content=f"update_deliverable failed: {exc}", is_error=True)
+    return ToolResult(content="Deliverable card refreshed.")
 
 
 # ---------------------------------------------------------------------------
@@ -1216,7 +1179,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
     """
     defs: list[ToolDef] = []
     for spec in _TOOL_SPECS:
-        handler: ToolHandler = partial(spec.handler, orchestrator)
+        handler: ToolHandler = _guarded(spec.name, partial(spec.handler, orchestrator))
         # Pull-gap: wrap gap-callable lead tools so a member_done queued between
         # await_members calls is surfaced on the next tool result (self-gating).
         if spec.name in _INBOX_NOTICE_TOOLS:

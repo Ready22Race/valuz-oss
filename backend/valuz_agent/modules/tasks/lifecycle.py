@@ -1256,7 +1256,7 @@ class LifecycleService:
             }
 
         rejected: dict[str, Any] | None = None
-        finished_task_row: Any | None = None
+        finished_task_row: TaskRow | None = None
         async with async_unit_of_work() as db:
             task_ds = TaskDatastore(db)
             run_ds = TaskSessionDatastore(db)

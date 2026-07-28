@@ -668,6 +668,20 @@ async def inject_into_task(
         from_session_id=payload.from_session_id,
         user_id=user_id,
     )
+    # A halted task can't be delivered to — its lead loop is gone. Talking to
+    # it IS the user's resume intent (see the :intervene contract), so revive
+    # it here: that decision is orchestration, which is why the delivery helper
+    # reports the state instead of reaching for the orchestrator itself.
+    if result.get("reason") == "TASK_HALTED":
+        revived = await task_orchestrator.resume_task(
+            task_id, task.project_id, user_id=user_id, instruction=payload.text
+        )
+        ok = bool(revived.get("ok"))
+        return InjectTaskResponse(
+            delivered=ok,
+            lead_session_id=None,
+            reason="TASK_RESUMED" if ok else "RESUME_FAILED",
+        )
     return InjectTaskResponse(
         delivered=bool(result.get("delivered")),
         lead_session_id=result.get("lead_session_id"),

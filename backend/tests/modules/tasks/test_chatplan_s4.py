@@ -9,6 +9,7 @@ fixture (no kernel session bring-up needed). Pattern mirrors
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -250,84 +251,73 @@ def test_inject_into_completed_task_rejects(db_factory, tmp_path):
     assert result["reason"] == "TASK_NOT_ACTIVE"
 
 
-def test_inject_into_stopped_task_revives_via_resume(db_factory, tmp_path, monkeypatch):
-    """Injecting into a halted (stopped) task no longer bounces with
-    TASK_NOT_ACTIVE — it revives the task through ``resume_task`` with the
-    text riding along as the resume instruction ("说句话就能继续")."""
-    from valuz_agent.modules.tasks import orchestrator as orch_mod
+def test_inject_reports_halted_instead_of_reviving(db_factory, tmp_path):
+    """The DELIVERY layer reports the state; it does not orchestrate.
+
+    Injecting into a halted task can't be delivered — the lead loop is torn
+    down and its mailbox unregistered. ``messaging`` says so and stops there:
+    deciding to revive is orchestration, and a leaf delivery helper reaching up
+    to the composition root for ``resume_task`` was an inverted dependency
+    (masked by a function-local import). The revive itself is asserted by
+    ``test_inject_handler_revives_halted_task`` below, at the layer that owns
+    the decision.
+    """
+    for i, status in enumerate(("stopped", "paused", "blocked")):
+        tid = f"t-halted-{i}"
+        _seed_task(db_factory, tmp_path, task_id=tid, status=status)
+        result = asyncio.run(
+            messaging.inject_into_task(
+                task_id=tid,
+                project_id="w1",
+                text="继续,并且优先做数据核对",
+                from_session_id="chat-session-1",
+                user_id=LOCAL_USER_ID,
+            )
+        )
+        assert result["delivered"] is False, status
+        assert result["reason"] == "TASK_HALTED", status
+        assert result["task_status"] == status
+
+
+def test_inject_handler_revives_halted_task(db_factory, tmp_path, monkeypatch):
+    """"说句话就能继续" — end to end, at the layer that decides it.
+
+    The chat-facing ``inject_into_task`` tool turns the delivery layer's
+    TASK_HALTED into a ``resume_task`` carrying the text as the resume
+    instruction, so the behaviour users rely on is unchanged by the move.
+    """
+    from valuz_agent.adapters import data_reader as dr_mod
+    from valuz_agent.integrations.toolkit_mcp_server import HostExecContext
+    from valuz_agent.modules.tasks.tools import handlers as h_mod
 
     _seed_task(db_factory, tmp_path, status="stopped")
     calls: list[dict] = []
 
-    async def _fake_resume(task_id, project_id, **kw):
-        calls.append({"task_id": task_id, "project_id": project_id, **kw})
-        return {"ok": True, "prior_status": "stopped", "resumed": True}
+    class _Orch:
+        async def resume_task(self, task_id, project_id, **kw):
+            calls.append({"task_id": task_id, "project_id": project_id, **kw})
+            return {"ok": True, "prior_status": "stopped", "resumed": True}
 
-    monkeypatch.setattr(orch_mod.task_orchestrator, "resume_task", _fake_resume)
-    result = asyncio.run(
-        messaging.inject_into_task(
-            task_id="t1",
-            project_id="w1",
-            text="继续,并且优先做数据核对",
-            from_session_id="chat-session-1",
-            user_id=LOCAL_USER_ID,
+    class _Reader:
+        async def get_session(self, _uid, _sid):
+            return SimpleNamespace(
+                id="chat-session-1", project_id="w1", metadata={"valuz": {}}
+            )
+
+    monkeypatch.setattr(dr_mod, "data_reader", lambda: _Reader())
+    monkeypatch.setattr(h_mod, "data_reader", lambda: _Reader())
+
+    res = asyncio.run(
+        h_mod._inject_into_task_handler(
+            _Orch(),
+            {"task_id": "t1", "text": "继续,并且优先做数据核对"},
+            HostExecContext(session_id="chat-session-1", user_id=LOCAL_USER_ID),
         )
     )
-    assert result["delivered"] is True
-    assert result["reason"] == "TASK_RESUMED"
-    assert result["lead_session_id"] == "lead-sess-1"
+    assert not res.is_error
+    assert "TASK_RESUMED" in res.content
     assert calls and calls[0]["instruction"] == "继续,并且优先做数据核对"
 
-
-def test_inject_into_paused_task_revives_via_resume(db_factory, tmp_path, monkeypatch):
-    """Paused went the same way: the pause tears the lead loop down
-    (mailbox unregistered), so mailbox delivery could only ever race —
-    inject now resumes the task with the text as instruction."""
-    from valuz_agent.modules.tasks import orchestrator as orch_mod
-
-    _seed_task(db_factory, tmp_path, status="paused")
-    calls: list[dict] = []
-
-    async def _fake_resume(task_id, project_id, **kw):
-        calls.append({"task_id": task_id, "project_id": project_id, **kw})
-        return {"ok": True, "prior_status": "paused", "resumed": True}
-
-    monkeypatch.setattr(orch_mod.task_orchestrator, "resume_task", _fake_resume)
-    result = asyncio.run(
-        messaging.inject_into_task(
-            task_id="t1",
-            project_id="w1",
-            text="resume soon please",
-            from_session_id="chat-session-1",
-            user_id=LOCAL_USER_ID,
-        )
-    )
-    assert result["delivered"] is True
-    assert result["reason"] == "TASK_RESUMED"
-    assert calls and calls[0]["instruction"] == "resume soon please"
-
-
-def test_inject_into_blocked_task_revive_failure_reports(db_factory, tmp_path, monkeypatch):
-    """A failed revive must not masquerade as delivery."""
-    from valuz_agent.modules.tasks import orchestrator as orch_mod
-
-    _seed_task(db_factory, tmp_path, status="blocked")
-
-    async def _fake_resume(task_id, project_id, **kw):
-        return {"ok": False, "error": "boom", "prior_status": "blocked"}
-
-    monkeypatch.setattr(orch_mod.task_orchestrator, "resume_task", _fake_resume)
-    result = asyncio.run(
-        messaging.inject_into_task(
-            task_id="t1",
-            project_id="w1",
-            text="hi",
-            from_session_id="chat-session-1",
-            user_id=LOCAL_USER_ID,
-        )
-    )
-    assert result["delivered"] is False
-    assert result["reason"] == "RESUME_FAILED"
 
 
 # ── no lead run row at all ──────────────────────────────────────────────
