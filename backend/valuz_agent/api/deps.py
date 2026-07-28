@@ -17,6 +17,16 @@ from valuz_agent.integrations.skills_official import OfficialSkillSource
 from valuz_agent.modules.agents.datastore import ProjectMemberDatastore
 from valuz_agent.modules.automations.datastore import AutomationDatastore
 from valuz_agent.modules.connectors.datastore import ConnectorDatastore
+
+# Decision Inbox (ADR-022): the process-scoped singleton is owned by the
+# decisions module itself — the API layer is only one of its consumers.
+# Re-exported so routes keep writing ``Depends(get_decision_aggregator)``.
+from valuz_agent.modules.decisions.aggregator import (
+    get_decision_aggregator as get_decision_aggregator,
+)
+from valuz_agent.modules.decisions.aggregator import (
+    set_decision_aggregator as set_decision_aggregator,
+)
 from valuz_agent.modules.docs.datastore import DocumentDatastore
 from valuz_agent.modules.docs.service import DocumentLibraryService
 from valuz_agent.modules.parser import ParserRouter, build_default_registry
@@ -42,7 +52,6 @@ if TYPE_CHECKING:
 
     from valuz_agent.modules.automations.service import AutomationService
     from valuz_agent.modules.channels.service import ChannelIngressService
-    from valuz_agent.modules.decisions.aggregator import DecisionAggregator
     from valuz_agent.modules.project_packs.service import ProjectPackService
 
 
@@ -378,28 +387,3 @@ async def get_runs_service() -> AsyncGenerator[RunsService, None]:
             task_events=TaskEventDatastore(db),
             automations=AutomationDatastore(db),
         )
-
-
-# ---------------------------------------------------------------------------
-# Decision Inbox (ADR-022) — process-scoped singleton, set at startup
-# ---------------------------------------------------------------------------
-
-_decision_aggregator: DecisionAggregator | None = None
-
-
-def set_decision_aggregator(agg: DecisionAggregator) -> None:
-    """Register the process-scoped aggregator. Called by app startup."""
-    global _decision_aggregator
-    _decision_aggregator = agg
-
-
-def get_decision_aggregator() -> DecisionAggregator:
-    """FastAPI Depends provider for the inbox aggregator.
-
-    Returns the singleton wired up at startup. Raises ``RuntimeError`` if
-    called before startup — defensive: indicates a misconfigured app
-    (route is registered but the lifecycle hook didn't fire).
-    """
-    if _decision_aggregator is None:
-        raise RuntimeError("decision aggregator not initialized — startup hook didn't run")
-    return _decision_aggregator

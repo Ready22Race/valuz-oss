@@ -423,7 +423,7 @@ def _wire_task(monkeypatch, *, task, runs):  # noqa: ANN001, ANN202
         return task, runs
 
     monkeypatch.setattr(
-        "valuz_agent.modules.tasks.queries.get_task_with_runs",
+        "valuz_agent.modules.tasks.service.get_task_with_runs",
         _get_task_with_runs,
     )
 

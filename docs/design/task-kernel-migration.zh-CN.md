@@ -9,6 +9,8 @@
 > `tasks/events.finalize_task`(组合式终态写入)、`tasks/tools/gate.py`(纯工具门禁
 > 策略)。**不再计划执行**的部分:`valuz_task*` 表迁移、actor 迁入 kernel 侧运行、
 > task MCP 工具由 kernel serve。
+>
+> **2026-07-28 补记:** 本文档中的模块清单反映重构前的目录布局。此后 host 侧已演进:`queries.py` 并入 `service.py`、`health_monitor.py` 并入 `recovery.py`、新增 `launcher.py`(唯一 actor 启动原语)、`plan_commands.py`(plan 写入唯一授权入口)、`member_state.py`/`outcome.py`(纯域)。若迁移复活,以当前代码树为准。
 
 > Task 子系统**整体迁入 kernel**。它的表变为 kernel 所有(去掉前缀、保留
 > `user_id`),并像 `sessions`/`messages`/`events` 一样通过 **DataService** 持久化。

@@ -22,11 +22,14 @@ Task (valuz_task):
     "drafting", ``NULL`` + ``status=active`` as "legacy committed".
 
 TaskEvent (valuz_task_event):
-  Append-only event log scoped to a task. Monotonic ``sequence`` per
-  (project_id, task_id). Types: kickoff | subtask_spawned |
-  subtask_completed | subtask_failed | user_note | goal_revised |
-  paused | resumed | stopped | task_completed | task_drafted |
-  committed | abandoned | user_inject | user_inject_dropped.
+  Append-only event log scoped to a task; monotonic ``sequence`` per
+  (project_id, task_id). The type vocabulary is open (plain string column);
+  the frontend's ``TaskEventType`` union lists the known ones.
+
+  ``subtask_message`` is lead → member; ``subtask_reported`` is member →
+  lead. Pre-2026-07 rows carry ``subtask_message`` for BOTH directions
+  (split by ``payload.direction``) — the log is never rewritten, so readers
+  must keep handling that.
 
 TaskSession (valuz_task_session):
   Index of every kernel session that belongs to a task — the lead's
@@ -158,7 +161,12 @@ class TaskSessionRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     # lead run; for subtask runs = the plan node ``key`` (one node → 1..N runs
     # across rework re-dispatches). The plan itself lives on TaskRow.plan.
     subtask_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    # active | completed | rejected | archived
+    # active | paused | completed | rejected | archived
+    #   active    — run in flight
+    #   paused    — parked by stop_task (task pause/stop); resumable
+    #   completed — finished normally, or approved by review_subtask
+    #   rejected  — user-cancelled (stop_member / an interrupted member turn)
+    #   archived  — the run errored terminally
     status: Mapped[str] = mapped_column(String(16), default="active")
     # Human label, e.g. "Kickoff" or None
     label: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -166,7 +174,9 @@ class TaskSessionRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     goal: Mapped[str | None] = mapped_column(Text, nullable=True)
     # session_id of the lead run that dispatched this subtask
     dispatched_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    # isolated | repo-worktree
+    # Display-only; always ``shared`` since v2.1 (members share the project
+    # cwd, a task worktree relocates it wholesale). Legacy per-member modes
+    # are retired; the default remains only for old rows.
     project_mode: Mapped[str] = mapped_column(String(16), default="isolated")
     # Absolute path to this run's working directory
     run_dir: Mapped[str | None] = mapped_column(Text, nullable=True)

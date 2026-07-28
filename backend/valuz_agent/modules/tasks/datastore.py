@@ -19,9 +19,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import func, select, update
+from sqlalchemy import case, func, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -194,10 +195,16 @@ class TaskDatastore:
                     task_id,
                     status,
                 )
-        res = await self._db.execute(
-            update(TaskRow)
-            .where(TaskRow.id == task_id, TaskRow.user_id == user_id)
-            .values(status=status, updated_at=now_ms())
+        # ``AsyncSession.execute`` is typed as returning ``Result``, but a DML
+        # statement always yields a ``CursorResult`` — the only shape carrying
+        # ``rowcount``. Narrow once here instead of ignoring the error.
+        res = cast(
+            "CursorResult[Any]",
+            await self._db.execute(
+                update(TaskRow)
+                .where(TaskRow.id == task_id, TaskRow.user_id == user_id)
+                .values(status=status, updated_at=now_ms())
+            ),
         )
         await async_commit_with_retry(self._db, where="TaskDatastore.update_task_status")
         return bool(res.rowcount)
@@ -424,6 +431,37 @@ class TaskSessionDatastore:
         ).all()
         return {sid: (tid, title, status) for sid, tid, title, status in rows}
 
+    # Run statuses that will produce no further work. The enum is
+    # active | paused | completed | rejected | archived, so this is everything
+    # except the two that are still in motion.
+    SETTLED_RUN_STATUSES = ("completed", "rejected", "archived")
+
+    async def count_runs_by_tasks(
+        self, user_id: str, task_ids: list[str]
+    ) -> dict[str, tuple[int, int]]:
+        """Map task_id → ``(total_runs, settled_runs)`` in ONE query.
+
+        Replaces a ``list_runs`` per task inside a loop: ``list_tasks`` renders
+        progress for up to ``limit`` tasks, which cost that many round trips and
+        materialised every run row only to count them.
+        """
+        if not task_ids:
+            return {}
+        settled = func.sum(
+            case((TaskSessionRow.status.in_(self.SETTLED_RUN_STATUSES), 1), else_=0)
+        )
+        rows = (
+            await self._db.execute(
+                select(TaskSessionRow.task_id, func.count(), settled)
+                .where(
+                    TaskSessionRow.task_id.in_(task_ids),
+                    TaskSessionRow.user_id == user_id,
+                )
+                .group_by(TaskSessionRow.task_id)
+            )
+        ).all()
+        return {tid: (int(total), int(done or 0)) for tid, total, done in rows}
+
     async def get_run(self, session_id: str) -> TaskSessionRow | None:
         """SYSTEM lookup by the globally-unique kernel ``session_id`` (runner +
         kernel-event finalization). Not a user query — no owner filter."""
@@ -464,11 +502,6 @@ class TaskSessionDatastore:
         await async_commit_with_retry(self._db, where="TaskSessionDatastore.create_run")
         return row
 
-    async def update_run(self, row: TaskSessionRow) -> TaskSessionRow:
-        await self._db.merge(row)
-        await async_commit_with_retry(self._db, where="TaskSessionDatastore.update_run")
-        return row
-
     async def update_run_by_session(
         self,
         session_id: str,
@@ -484,8 +517,13 @@ class TaskSessionDatastore:
         if ended_at is not None:
             updates["ended_at"] = ended_at
 
-        res = await self._db.execute(
-            update(TaskSessionRow).where(TaskSessionRow.session_id == session_id).values(**updates)
+        res = cast(
+            "CursorResult[Any]",
+            await self._db.execute(
+                update(TaskSessionRow)
+                .where(TaskSessionRow.session_id == session_id)
+                .values(**updates)
+            ),
         )
         await async_commit_with_retry(self._db, where="TaskSessionDatastore.update_run_by_session")
         return bool(res.rowcount)

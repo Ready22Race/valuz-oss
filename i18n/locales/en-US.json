@@ -2431,6 +2431,7 @@
       "subtaskFailed": "Subtask failed",
       "subtaskStopped": "Subtask stopped",
       "subtaskMessage": "Member message",
+      "subtaskReported": "Member reported back",
       "userNote": "Note added",
       "goalRevised": "Goal revised",
       "paused": "Paused",

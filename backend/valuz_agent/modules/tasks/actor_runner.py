@@ -1,38 +1,29 @@
-"""ActorRunner — the single session-turn-to-idle / actor-loop primitive.
+"""ActorRunner — the persistent actor loop and its per-turn primitive.
 
-Runtime layer (ADR-023). Owns the agent-turn engine that drives a kernel
-session through one or more turns:
+``run_turn`` drives one turn on a persistent session; ``run_actor_loop`` runs
+turn → idle → await mailbox → repeat until shutdown/terminal/TTL. Shared turn
+semantics (``_resolve_turn_status`` / ``_restamp_always_on_mcp``) are imported
+from ``sessions/turn_driver`` so both drivers read one implementation.
 
-  * :class:`ActorRunner` — the persistent v2 actor loop (``run_actor_loop``)
-    plus its per-turn primitive (``_run_turn_with_sink``) and the member_done
-    prompt renderer (``_format_member_done``).
-  * :func:`collect_manifest` — pure manifest builder used by dispatcher /
-    coordination / recovery.
-  * :func:`_member_run_dir` — resolve a member's working dir by isolation mode.
-
-The one-shot chat-path driver (``run_session_to_idle``) lives in
-``sessions/turn_driver.py``; the shared turn semantics
-(``_resolve_turn_status`` / ``_restamp_always_on_mcp``) are imported from
-there so both drivers read one implementation.
-
-The actor loop's three seams — finalize (loop ``finally``), member-idle notify
-(role=="subtask"), and lead-idle-no-pending check (role=="lead") — are NOT
-``self`` calls. ``ActorRunner`` resolves them from an injected host handle at
-call time so the lifecycle / coordination services own that I/O and the runner
-stays state-light. The host handle also supplies the per-turn ``_run_turn``
-primitive so a caller can stub it (used by the actor-loop unit tests).
+What happens *around* a turn is delegated through two typed protocols bound at
+the composition root: :class:`ActorFinalizer` (loop exit → LifecycleService)
+and :class:`ActorCoordinator` (between-turn questions → CoordinationService).
+Typed on purpose: the seam is the heart of the task system, and mypy verifying
+the concrete services beats duck typing that once let delegators rot unnoticed.
 """
 
 # ruff: noqa: I001
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from valuz_agent.adapters import kernel_client
 from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.infra.lifecycle import is_draining
+from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 from valuz_agent.modules.sessions.turn_driver import (
     _restamp_always_on_mcp,
     _resolve_turn_status,
@@ -61,6 +52,37 @@ _NON_REVIEWABLE_DONE = frozenset({"terminated", "error", "cancelled", "interrupt
 _ARTIFACT_SKIP_DIRS = frozenset({"node_modules", "__pycache__", "dist", "build", ".venv"})
 # Cap on artifacts listed in a manifest (shared project cwd can be large).
 _ARTIFACT_LIMIT = 200
+
+
+def _scan_artifacts(run_dir: Path, since_epoch: float) -> list[dict[str, Any]]:
+    """List up to ``_ARTIFACT_LIMIT`` files under *run_dir* touched since
+    *since_epoch*, in sorted path order. BLOCKING — always call via
+    ``asyncio.to_thread`` (``run_dir`` is usually the whole project cwd).
+    """
+    artifacts: list[dict[str, Any]] = []
+    if not run_dir.exists():
+        return artifacts
+    for fpath in sorted(run_dir.rglob("*")):
+        if len(artifacts) >= _ARTIFACT_LIMIT:
+            break
+        # Skip hidden parts (.claude/, .git/) and known noise dirs.
+        if any(p.startswith(".") for p in fpath.parts):
+            continue
+        if any(p in _ARTIFACT_SKIP_DIRS for p in fpath.parts):
+            continue
+        if not fpath.is_file():
+            continue
+        try:
+            st = fpath.stat()
+            # Attribute by mtime: under the shared project cwd this keeps only
+            # what the member touched during its run (approximate — see M10
+            # 附录 D.2). since_epoch=0 → include all.
+            if st.st_mtime < since_epoch:
+                continue
+            artifacts.append({"path": str(fpath), "size": st.st_size})
+        except OSError:
+            pass
+    return artifacts
 
 
 async def collect_manifest(
@@ -99,31 +121,14 @@ async def collect_manifest(
         logger.debug("collect_manifest: could not extract summary for %s", session_id)
 
     # Scan run_dir for artifact files written during this member's run.
-    artifacts: list[dict[str, Any]] = []
+    # Offloaded: under v2.1 ``run_dir`` is the whole shared project cwd, so this
+    # walks an arbitrarily large tree with blocking ``stat`` calls. On the event
+    # loop that stalled EVERY other session for the duration.
     try:
-        if run_dir.exists():
-            for fpath in sorted(run_dir.rglob("*")):
-                if len(artifacts) >= _ARTIFACT_LIMIT:
-                    break
-                # Skip hidden parts (.claude/, .git/) and known noise dirs.
-                if any(p.startswith(".") for p in fpath.parts):
-                    continue
-                if any(p in _ARTIFACT_SKIP_DIRS for p in fpath.parts):
-                    continue
-                if not fpath.is_file():
-                    continue
-                try:
-                    st = fpath.stat()
-                    # Attribute by mtime: under the shared project cwd this keeps
-                    # only what the member touched during its run (approximate —
-                    # see M10 附录 D.2). since_epoch=0 → include all.
-                    if st.st_mtime < since_epoch:
-                        continue
-                    artifacts.append({"path": str(fpath), "size": st.st_size})
-                except OSError:
-                    pass
+        artifacts = await asyncio.to_thread(_scan_artifacts, run_dir, since_epoch)
     except Exception:  # noqa: BLE001
         logger.debug("collect_manifest: artifact scan failed for %s", run_dir)
+        artifacts = []
 
     return {
         "session_id": session_id,
@@ -133,7 +138,7 @@ async def collect_manifest(
     }
 
 
-def _member_run_dir(project_cwd: Any, task_id: str, run_seq: int, mode: str) -> Path:
+def _member_run_dir(project_cwd: str | Path, task_id: str, run_seq: int, mode: str) -> Path:
     """Resolve a member's working directory (v2.1: always the project cwd).
 
     Members read and write project files natively in the SHARED project cwd
@@ -157,6 +162,60 @@ ACTOR_MAX_TURNS = 60
 LEAD_IDLE_TTL_S = 1800.0
 MEMBER_IDLE_TTL_S = 600.0
 
+# How many times an idle-TTL expiry may be EXTENDED because the session turned
+# out to still be working (see the ``session_still_working`` probe in
+# ``run_actor_loop``). Bounded so a session wedged in ``running`` forever cannot
+# pin an actor loop for the life of the process; generous enough that real
+# background work — which routinely outlasts one TTL — is never reaped.
+MAX_IDLE_EXTENSIONS = 6
+
+
+# ---------------------------------------------------------------------------
+# Collaborator protocols
+# ---------------------------------------------------------------------------
+
+
+class ActorFinalizer(Protocol):
+    """What the actor loop calls once, when it exits. (``LifecycleService``.)"""
+
+    async def finalize_actor(
+        self,
+        *,
+        session_id: str,
+        last_content: str,
+        final_status: str,
+        role: Literal["lead", "subtask"],
+        task_id: str,
+        project_id: str,
+        via_shutdown: bool = False,
+        user_id: str,
+    ) -> None: ...
+
+
+class ActorCoordinator(Protocol):
+    """The two role-specific between-turn questions. (``CoordinationService``.)"""
+
+    async def notify_lead_member_idle(
+        self, session_id: str, status: str, user_id: str
+    ) -> None:
+        """A member finished a turn — post ``member_done`` to its lead's inbox."""
+        ...
+
+    async def lead_idle_with_no_pending(
+        self, task_id: str, project_id: str, user_id: str, lead_session_id: str = ""
+    ) -> bool:
+        """True when a lead has nothing left to wait for and should stop looping."""
+        ...
+
+    async def session_still_working(self, session_id: str) -> bool:
+        """True when the session is doing work THIS loop cannot see.
+
+        Chiefly a ``run_in_background`` subagent: the launching turn ended, so
+        the loop is parked on its mailbox, but the CLI keeps driving follow-up
+        turns on the session and the work is very much alive.
+        """
+        ...
+
 
 # ---------------------------------------------------------------------------
 # ActorRunner
@@ -164,35 +223,26 @@ MEMBER_IDLE_TTL_S = 600.0
 
 
 class ActorRunner:
-    """The persistent v2 actor-loop + per-turn primitive.
-
-    Constructed once at the composition root and injected into the dispatcher,
-    coordination, lifecycle, and recovery services. Holds NO task state — its
-    three loop seams (finalize, member-idle notify, lead-idle-no-pending check)
-    and its per-turn ``_run_turn`` primitive are resolved from an injected host
-    handle at call time, so the lifecycle / coordination services own that I/O
-    and a test can stub the per-turn primitive.
-
-    The host handle is bound after construction via :meth:`bind` (the root
-    wires the runner first, then the services, then binds them) and must expose:
-
-      * ``_run_turn_with_sink(session_id, content) -> str``
-      * ``_finalize_actor(*, session_id, last_content, final_status, role,
-        task_id, project_id) -> None``
-      * ``_notify_lead_member_idle(session_id, status) -> None``
-      * ``_lead_idle_with_no_pending(task_id, project_id) -> bool``
+    """The persistent actor loop. Holds NO task state; collaborators are bound
+    after construction via :meth:`bind` (the services need the runner first,
+    then the runner needs two of them back).
     """
 
-    def __init__(self, host: Any | None = None) -> None:
-        self._host = host
+    def __init__(
+        self,
+        *,
+        finalizer: ActorFinalizer | None = None,
+        coordinator: ActorCoordinator | None = None,
+    ) -> None:
+        self._finalizer = finalizer
+        self._coordinator = coordinator
 
-    def bind(self, host: Any) -> None:
-        """Bind the host handle that supplies the loop seams + per-turn run."""
-        self._host = host
+    def bind(self, *, finalizer: ActorFinalizer, coordinator: ActorCoordinator) -> None:
+        """Bind the collaborators the loop delegates its around-a-turn work to."""
+        self._finalizer = finalizer
+        self._coordinator = coordinator
 
-    async def _run_turn_with_sink(
-        self, session_id: str, content: str, user_id: str
-    ) -> str:
+    async def run_turn(self, session_id: str, content: str, user_id: str) -> str:
         """Run ONE turn on a persistent session and return its final status.
 
         Unlike :func:`run_session_to_idle`, this does NOT finalize or clean up
@@ -243,9 +293,14 @@ class ActorRunner:
         turn status, then finalizes the session exactly once.
         """
         from valuz_agent.modules.tasks import planning
-        from valuz_agent.modules.tasks.mailbox import mailbox_registry
 
-        host = self._host
+        if self._finalizer is None or self._coordinator is None:
+            raise RuntimeError(
+                "ActorRunner.run_actor_loop: collaborators not bound — the "
+                "composition root must call bind(finalizer=..., coordinator=...) "
+                "before any actor loop starts"
+            )
+        finalizer, coordinator = self._finalizer, self._coordinator
         ttl = (
             idle_ttl
             if idle_ttl is not None
@@ -262,6 +317,7 @@ class ActorRunner:
         # the old loop's finalize runs after resume flips the task back to
         # ``active`` and wrongly blocks it (VALUZ pause/resume).
         exited_on_shutdown = False
+        extensions = 0
         try:
             while True:
                 # App is shutting down — do NOT start a new turn (it would spawn
@@ -271,7 +327,7 @@ class ActorRunner:
                 if is_draining():
                     exited_on_shutdown = True
                     break
-                final_status = await host._run_turn_with_sink(session_id, prompt, user_id=user_id)
+                final_status = await self.run_turn(session_id, prompt, user_id=user_id)
                 turns += 1
 
                 # A member notifies its lead after every idle (carries manifest).
@@ -280,7 +336,9 @@ class ActorRunner:
                 # (or none, when ``stop_member`` already notified the lead) —
                 # notifying here too would double-deliver.
                 if role == "subtask" and final_status != "interrupted":
-                    await host._notify_lead_member_idle(session_id, final_status, user_id=user_id)
+                    await coordinator.notify_lead_member_idle(
+                        session_id, final_status, user_id=user_id
+                    )
 
                 if final_status in ("terminated", "error", "interrupted"):
                     break
@@ -305,7 +363,9 @@ class ActorRunner:
                 if (
                     role == "lead"
                     and not mailbox_registry.has_pending(session_id)
-                    and await host._lead_idle_with_no_pending(task_id, project_id, user_id=user_id)
+                    and await coordinator.lead_idle_with_no_pending(
+                        task_id, project_id, user_id=user_id, lead_session_id=session_id
+                    )
                 ):
                     logger.info(
                         "actor loop %s (lead) idle with no in-flight members / unresolved "
@@ -317,6 +377,24 @@ class ActorRunner:
                 try:
                     msg = await mailbox_registry.get(session_id, timeout=ttl)
                 except TimeoutError:
+                    # The TTL measures silence on OUR mailbox — not session
+                    # idleness. A run_in_background subagent outlives the turn
+                    # and the CLI drives follow-up turns the loop never sees,
+                    # so ask before concluding (bounded by MAX_IDLE_EXTENSIONS
+                    # so a wedged session cannot pin the loop forever).
+                    if extensions < MAX_IDLE_EXTENSIONS and await coordinator.session_still_working(
+                        session_id
+                    ):
+                        extensions += 1
+                        logger.info(
+                            "actor loop %s (%s) idle-TTL expired but the session is "
+                            "still working (background task) — extending (%d/%d)",
+                            session_id,
+                            role,
+                            extensions,
+                            MAX_IDLE_EXTENSIONS,
+                        )
+                        continue
                     logger.info("actor loop %s (%s) idle-TTL expired", session_id, role)
                     break
 
@@ -344,7 +422,7 @@ class ActorRunner:
                             user_id=user_id,
                         )
                     prompt = self._format_member_done(msg)
-                else:  # "message" / "revise_goal" — authoritative text → next turn
+                else:  # "text" / "revise_goal" — authoritative text → next turn
                     prompt = msg.text
         finally:
             mailbox_registry.unregister(session_id)
@@ -356,7 +434,7 @@ class ActorRunner:
             # ``active``; recovery resumes it. (A plain ``if`` — never ``return``
             # from a ``finally``, which would swallow a propagating CancelledError.)
             if not is_draining():
-                await host._finalize_actor(
+                await finalizer.finalize_actor(
                     session_id=session_id,
                     last_content=prompt,
                     final_status=final_status,
@@ -368,7 +446,7 @@ class ActorRunner:
                 )
 
     @staticmethod
-    def _format_member_done(msg: Any) -> str:
+    def _format_member_done(msg: InboxMsg) -> str:
         """Render a member_done mailbox message as the lead's next turn prompt."""
         m = msg.payload or {}
         arts = m.get("artifacts") or []
@@ -403,11 +481,14 @@ class ActorRunner:
 
 
 __all__ = [
+    "ActorCoordinator",
+    "ActorFinalizer",
     "ActorRunner",
     "collect_manifest",
     "_member_run_dir",
     "ACTOR_MAX_TURNS",
     "LEAD_IDLE_TTL_S",
+    "MAX_IDLE_EXTENSIONS",
     "MEMBER_IDLE_TTL_S",
     "_NON_REVIEWABLE_DONE",
 ]

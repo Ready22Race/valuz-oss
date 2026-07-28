@@ -1,69 +1,39 @@
-"""LifecycleService — task lifecycle (ADR-023, Step 3c).
+"""LifecycleService — the single owner of the task lifecycle.
 
-The single owner of the task lifecycle surface (the orchestrator keeps thin
-delegators only — the earlier split left stale duplicate bodies on both
-sides, and fixes kept landing on whichever copy the author found first):
+kickoff · draft_task · commit_task · abandon_task · finish_task (the
+authoritative terminal: event + status + lead-mode reset + shutdown broadcast)
+· update_deliverable, plus the actor-loop callbacks: :meth:`finalize_actor`
+(the ``run_actor_loop`` ``finally``) and :meth:`_auto_finalize_lead_task`
+(terminal fallback for a lead that never called finish_task).
 
-  * :meth:`kickoff` — create TaskRow + lead session; async-mode spawns the lead
-    actor loop, sync-mode runs the lead one turn to idle then auto-finalizes.
-  * :meth:`draft_task` — create a ``draft`` task without a lead session.
-  * :meth:`commit_task` — flip a draft to ``active`` by spawning its lead.
-  * :meth:`abandon_task` — discard a draft task.
-  * :meth:`finish_task` — the authoritative terminal: append the terminal
-    event, set task status, reset the lead session mode, then broadcast
-    shutdown to members + the lead.
-  * :meth:`_finalize_actor` — the ``run_actor_loop`` ``finally`` callback;
-    lead → auto-finalize, subtask → discard + terminal run write.
-  * :meth:`_auto_finalize_lead_task` — host-side terminal fallback for a lead
-    that ends without an explicit ``finish_task``.
-  * :meth:`update_deliverable` — refresh a completed task's deliverable card.
-  * :meth:`_last_assistant_summary` — best-effort summary helper for the above.
-  * :meth:`_materialize_lead_agent` — per-task lead-clone builder.
-
-Collaborators are injected at the composition root:
-
-  * ``registry``     — shared :class:`LiveMemberRegistry`
-    (``has_live_members`` / ``discard_member`` / ``pop_dispatch_started``).
-  * ``actor_runner`` — shared :class:`ActorRunner` (``kickoff`` / ``commit_task``
-    spawn ``run_actor_loop``; ``kickoff`` sync-mode runs ``run_session_to_idle``).
-  * ``coordination`` — :class:`CoordinationService` (``finish_task`` calls
-    ``_broadcast_shutdown``).
-
-``_finalize_actor`` is the ``ActorRunner.run_actor_loop`` ``finally`` callback,
-so the runner is bound to a host that resolves ``_finalize_actor`` back onto
-this service (via the orchestrator's thin delegator). The orchestrator keeps
-delegators for the whole public lifecycle surface so its callers + the
-actor-loop seams keep resolving on it.
+This class is the runner's concrete
+:class:`~valuz_agent.modules.tasks.actor_runner.ActorFinalizer`, bound at the
+composition root — the protocol keeps the seam typed.
 """
 
 # ruff: noqa: I001
 from __future__ import annotations
 
-import asyncio
 import logging
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal
 from uuid import uuid4
 
 from valuz_agent.adapters import kernel_client
-from valuz_agent.ports.sandbox_allocator import SandboxScope
 from valuz_agent.adapters.data_reader import data_reader
-from valuz_agent.modules.sessions import project_index
 from valuz_agent.adapters.agent_resolver import (
     resolve_agent_display_name,
 )
 from valuz_agent.infra.db import async_unit_of_work
-from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.infra.time_utils import now_ms
-from valuz_agent.modules.tasks import planning
+from valuz_agent.modules.tasks import launcher, planning
 from valuz_agent.modules.tasks.task_worktree import (
     resolve_task_cwd,
     task_worktree_notice,
     task_worktree_snapshot,
 )
 from valuz_agent.modules.tasks.resolution import (
-    materialize_lead_clone,
     task_session_resolver,
 )
 from valuz_agent.modules.tasks.actor_runner import (
@@ -76,9 +46,16 @@ from valuz_agent.modules.tasks.datastore import (
     TaskEventDatastore,
     TaskSessionDatastore,
 )
-from valuz_agent.modules.tasks.events import finalize_task
+from valuz_agent.modules.tasks.events import (
+    block_task,
+    finalize_task,
+    record_subtask_failed,
+    record_subtask_stopped,
+)
 from valuz_agent.modules.tasks.live_member_registry import LiveMemberRegistry
+from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 from valuz_agent.modules.tasks.models import TaskRow, TaskSessionRow
+from valuz_agent.modules.tasks.outcome import Failure
 from valuz_agent.modules.tasks.plan import PlanError, TaskPlan
 from valuz_agent.modules.tasks.provenance import resolve_trigger_provenance
 
@@ -86,14 +63,11 @@ logger = logging.getLogger(__name__)
 
 
 class LifecycleService:
-    """Task lifecycle — kickoff / draft / commit / abandon / finish + the
-    actor-loop finalize callbacks and the lead-clone builder.
+    """Task lifecycle — kickoff / draft / commit / abandon / finish, plus the
+    actor-loop finalize callback.
 
-    Constructed once at the composition root with the shared registry +
-    runtime ActorRunner + CoordinationService (+ the event bus the sync-kickoff
-    lead drives its turn on); the orchestrator's lifecycle surface delegates
-    straight onto it, and the ActorRunner resolves its finalize callback
-    (``_finalize_actor``) through the bound host onto this service.
+    Built once at the composition root with the shared registry, ActorRunner
+    and CoordinationService; bound into the runner as its ``ActorFinalizer``.
     """
 
     def __init__(
@@ -102,12 +76,49 @@ class LifecycleService:
         registry: LiveMemberRegistry,
         actor_runner: ActorRunner,
         coordination: CoordinationService,
-        bus: EventBus,
     ) -> None:
         self._members = registry
         self._actor = actor_runner
         self._coordination = coordination
-        self._bus = bus
+
+    @staticmethod
+    async def _complete_task(
+        db: Any,
+        *,
+        user_id: str,
+        project_id: str,
+        task_id: str,
+        lead_session_id: str,
+        summary: str,
+        artifacts: list[str],
+        auto_finalized: bool = False,
+    ) -> None:
+        """The ``completed`` terminal pair: settle the lead run + finalize.
+
+        The two spellings (explicit ``finish_task``, host-side auto-finalize)
+        must stay identical — they differ only in who decided and whether the
+        ``auto_finalized`` marker rides the payload.
+        """
+        await TaskSessionDatastore(db).update_run_by_session(
+            session_id=lead_session_id,
+            status="completed",
+            ended_at=now_ms(),
+        )
+        await finalize_task(
+            db,
+            user_id=user_id,
+            project_id=project_id,
+            task_id=task_id,
+            status="completed",
+            event_type="task_completed",
+            actor=lead_session_id,
+            session_id=lead_session_id,
+            payload={
+                "summary": summary,
+                "artifacts": artifacts,
+                **({"auto_finalized": True} if auto_finalized else {}),
+            },
+        )
 
     # ------------------------------------------------------------------
     # kickoff
@@ -257,8 +268,8 @@ class LifecycleService:
                 user_id=user_id,
                 worktree_notice=task_worktree_notice(wt_snapshot),
             )
-            if isinstance(resolved, str):
-                raise ValueError(resolved)
+            if isinstance(resolved, Failure):
+                raise ValueError(resolved.reason)
             lead_session = resolved.session
             lead_brief = resolved.brief
 
@@ -271,27 +282,14 @@ class LifecycleService:
                 # the lead). The ``kickoff_failed`` event below still records
                 # the cause. The old ``"failed"`` write left an out-of-enum,
                 # un-resumable status stuck forever.
-                kickoff_ev = await finalize_task(
+                await block_task(
                     db,
                     user_id=user_id,
                     project_id=project_id,
                     task_id=task_id,
-                    status="blocked",
                     event_type="kickoff_failed",
                     actor=created_by,
-                    payload={"error": reason},
-                )
-                from valuz_agent.modules.notifications.projectors import (
-                    record_task_failure_notification,
-                )
-
-                await record_task_failure_notification(
-                    task_id=task_id,
-                    project_id=project_id,
-                    event_id=kickoff_ev.id,
-                    event_type="kickoff_failed",
                     reason=reason,
-                    user_id=user_id,
                 )
                 raise ValueError(reason)
 
@@ -312,15 +310,12 @@ class LifecycleService:
                     + "\n".join(f"- {g}" for g in member_gaps)
                 )
 
-            await kernel_client.create_session(
-                user_id, lead_session, scope=SandboxScope(kind="task", id=task_id)
-            )
-            await project_index.record(
-                project_id,
-                lead_session.id,
+            await launcher.create_task_session(
+                user_id,
+                lead_session,
+                task_id=task_id,
+                project_id=project_id,
                 kind="task_lead",
-                origin="task",
-                user_id=user_id,
             )
 
             # Record the lead run in valuz_task_session
@@ -353,18 +348,15 @@ class LifecycleService:
         # Drive the lead as a persistent actor: it ends a turn and is re-woken
         # by member_done / send until finish_task (the actor loop's finalize
         # callback auto-closes a lead that ends without an explicit finish).
-        from valuz_agent.modules.tasks.mailbox import mailbox_registry
 
-        mailbox_registry.register(lead_session.id)
-        asyncio.create_task(
-            self._actor.run_actor_loop(
-                session_id=lead_session.id,
-                initial_prompt=lead_brief,
-                role="lead",
-                task_id=task_id,
-                project_id=project_id,
-                user_id=user_id,
-            )
+        launcher.spawn_actor(
+            self._actor,
+            session_id=lead_session.id,
+            prompt=lead_brief,
+            role="lead",
+            task_id=task_id,
+            project_id=project_id,
+            user_id=user_id,
         )
 
         return task_row
@@ -484,12 +476,13 @@ class LifecycleService:
     ) -> dict[str, Any]:
         """Transition a draft task to active by spawning its lead session.
 
-        Atomicity (D2 — half-atomic): the DB writes (lead session row + task
-        status flip + committed event) commit together. If the actor loop fails
-        to spawn afterwards we do NOT roll the task back to draft (the state
-        machine forbids ``active → draft``); the task stays ``active`` with no
-        running actor — the sweeper picks it up and marks it ``blocked`` so the
-        user can resume.
+        NOT atomic: the three DB writes (lead run row → status flip →
+        ``committed`` event) each commit on their own — repo-wide datastore
+        convention, so ``async_unit_of_work`` is a session scope, not a
+        transaction. What is guaranteed is ordering + recovery: the actor
+        spawns after the writes, and a failed spawn is NOT rolled back
+        (``active → draft`` is illegal) — the health monitor sees a lead with
+        no live mailbox and marks the task ``blocked`` for the user to resume.
 
         The new lead session gets the ``plan_pre_committed=True`` brief
         variant which tells it to skip ``plan_task`` and dispatch directly
@@ -555,8 +548,8 @@ class LifecycleService:
                 plan_pre_committed=True,  # ← key flag (VALUZ-CHATPLAN D10)
                 worktree_notice=task_worktree_notice(task_worktree_snapshot(task_row)),
             )
-            if isinstance(resolved, str):
-                return {"error": resolved}
+            if isinstance(resolved, Failure):
+                return {"error": resolved.reason}
             lead_session = resolved.session
             lead_brief = resolved.brief
 
@@ -574,15 +567,12 @@ class LifecycleService:
                     "for project members:\n" + "\n".join(f"- {g}" for g in member_gaps)
                 }
 
-            await kernel_client.create_session(
-                user_id, lead_session, scope=SandboxScope(kind="task", id=task_id)
-            )
-            await project_index.record(
-                project_id,
-                lead_session.id,
+            await launcher.create_task_session(
+                user_id,
+                lead_session,
+                task_id=task_id,
+                project_id=project_id,
                 kind="task_lead",
-                origin="task",
-                user_id=user_id,
             )
 
             # DB writes: create lead run row + flip task status + append event
@@ -628,21 +618,19 @@ class LifecycleService:
                 },
             )
 
-        # Half-atomic D2: actor spawn happens AFTER the DB txn. If spawn
-        # fails the DB is already in `active` — the sweeper will mark
-        # the task blocked so the user can resume.
-        from valuz_agent.modules.tasks.mailbox import mailbox_registry
+        # Actor spawn happens AFTER the writes above (which are individually
+        # committed — see the docstring; there is no enclosing transaction to
+        # roll back). If the spawn fails the task is already ``active``, and
+        # the health monitor marks it blocked so the user can resume.
 
-        mailbox_registry.register(lead_session.id)
-        asyncio.create_task(
-            self._actor.run_actor_loop(
-                session_id=lead_session.id,
-                initial_prompt=lead_brief,
-                role="lead",
-                task_id=task_id,
-                project_id=project_id,
-                user_id=user_id,
-            )
+        launcher.spawn_actor(
+            self._actor,
+            session_id=lead_session.id,
+            prompt=lead_brief,
+            role="lead",
+            task_id=task_id,
+            project_id=project_id,
+            user_id=user_id,
         )
 
         return {
@@ -724,21 +712,13 @@ class LifecycleService:
         final_status: str,
         user_id: str,
     ) -> None:
-        """Close a task when its lead actor-loop ends without an explicit
-        ``finish_task`` call.
-
-        ``finish_task`` is the authoritative terminal, but a goal-mode lead
-        often satisfies a simple goal inline (does the work itself), the goal
-        evaluator auto-exits to default, and the loop ends at idle-TTL — never
-        calling finish_task. Without this the task is orphaned ``active``
-        forever. Restores the original §7.3 intent ("lead session naturally
-        ends → task_completed"). Disposition:
-          - status != active   → no-op (finish_task / stop / intervene won);
-          - members in flight   → no-op (defensive; not the terminal moment);
-          - turn errored (final_status terminated/error OR session.stop_reason
-            is an error — an errored turn can still leave status "idle") →
-            ``failed`` (never "completed"!);
-          - plan has unresolved nodes (no error) → ``blocked``;
+        """Close a task whose lead loop ended without calling ``finish_task``
+        (common: a goal-mode lead satisfies a simple goal inline) — otherwise
+        the task is orphaned ``active`` forever. Disposition:
+          - status != active / members in flight → no-op;
+          - turn errored (status OR stop_reason — an errored turn can still
+            read "idle") → ``blocked``, never ``completed``;
+          - unresolved plan nodes → ``blocked``;
           - else → ``completed`` (summary = lead's last assistant message).
         """
         # Fail loud: a missing owner silently misses the owner-scoped task
@@ -747,7 +727,6 @@ class LifecycleService:
         # bug this fallback exists to prevent. Every caller must thread the owner.
         async with async_unit_of_work() as db:
             task_ds = TaskDatastore(db)
-            run_ds = TaskSessionDatastore(db)
 
             task = await task_ds.get_task_by_project(user_id, project_id, task_id)
             if task is None or task.status != "active":
@@ -756,12 +735,10 @@ class LifecycleService:
                 return  # members still running — not the lead's terminal moment
 
             try:
-                plan = TaskPlan.from_dict(task.plan)
-                unresolved = [
-                    n.key
-                    for n in plan.nodes
-                    if n.status in ("planned", "in_progress", "in_review", "rework")
-                ]
+                # Shared predicate (TaskPlan.unresolved_keys) — ``paused`` counts
+                # as outstanding, so a task halted mid-flight whose parked node
+                # was never re-dispatched can no longer be closed ``completed``.
+                unresolved = TaskPlan.from_dict(task.plan).unresolved_keys()
             except PlanError:
                 unresolved = []
 
@@ -802,17 +779,10 @@ class LifecycleService:
 
             if error_msg:
                 if error_category in ("user_interrupt", "interrupted") and not unresolved:
-                    # User/host-driven cancellation BEFORE any plan node exists —
-                    # there's no in-flight or half-done work to protect, so locking
-                    # the task forces an unnecessary ``resume_task`` ceremony for
-                    # what is effectively still a fresh kickoff. Real bug report
-                    # (2026-05-29): an automation-fired lead entered the Claude
-                    # Agent SDK's ``EnterPlanMode`` + a nested ``Agent`` that hung;
-                    # the SDK cancelled the turn ~3.5 min later
-                    # (``category='user_interrupt'``); plan still empty. Keep the
-                    # task ``active`` so the next driver (user message → fresh turn;
-                    # or the next automation fire) picks it up cleanly. Logged for
-                    # the audit trail; no ``task_blocked`` event (nothing pending).
+                    # Cancellation BEFORE any plan node exists: nothing half-done
+                    # to protect, so blocking would force a pointless resume
+                    # ceremony on what is still a fresh kickoff. Stay ``active``
+                    # for the next driver (user message / automation fire).
                     logger.warning(
                         "auto-finalize: task %s lead turn cancelled with empty plan "
                         "(%s) — staying active for next driver",
@@ -821,41 +791,23 @@ class LifecycleService:
                     )
                     return
 
-                # Genuine failure (API/network/exec error, or a raised exception),
-                # OR a cancellation that left pending work. Per task_state.py:
-                # task-level ``failed`` is intentionally not in the enum — this
-                # maps to ``blocked`` (recoverable; the plan is intact, the user
-                # resumes via the detail page's retry/继续 entry → resume_task
-                # rebuilds the lead). The ``reason`` payload tags this as a
-                # lead-turn-error to distinguish from the unresolved-subtasks
-                # blocked case below.
-                blocked_ev = await finalize_task(
+                # Genuine failure, or a cancellation that left pending work.
+                # Task-level ``failed`` is not in the enum (task_state.py) —
+                # this maps to ``blocked``, recoverable via resume_task.
+                await block_task(
                     db,
                     user_id=user_id,
                     project_id=project_id,
                     task_id=task_id,
-                    status="blocked",
                     event_type="task_blocked",
                     actor=lead_session_id,
                     session_id=lead_session_id,
+                    reason=error_msg,
                     payload={
                         "reason": "lead_turn_error",
-                        "error": error_msg,
                         "category": error_category,
                         "pending_subtasks": unresolved,
                     },
-                )
-                from valuz_agent.modules.notifications.projectors import (
-                    record_task_failure_notification,
-                )
-
-                await record_task_failure_notification(
-                    task_id=task_id,
-                    project_id=project_id,
-                    event_id=blocked_ev.id,
-                    event_type="task_blocked",
-                    reason=error_msg,
-                    user_id=user_id,
                 )
                 logger.warning(
                     "auto-finalize: task %s -> blocked (lead turn error: %s, category=%s)",
@@ -867,28 +819,16 @@ class LifecycleService:
             if unresolved:
                 # Lead stopped with planned work undispatched — surface as blocked
                 # (not a hard error, but not done either).
-                blocked_ev = await finalize_task(
+                await block_task(
                     db,
                     user_id=user_id,
                     project_id=project_id,
                     task_id=task_id,
-                    status="blocked",
                     event_type="task_blocked",
                     actor=lead_session_id,
                     session_id=lead_session_id,
-                    payload={"reason": "unresolved_subtasks", "pending_subtasks": unresolved},
-                )
-                from valuz_agent.modules.notifications.projectors import (
-                    record_task_failure_notification,
-                )
-
-                await record_task_failure_notification(
-                    task_id=task_id,
-                    project_id=project_id,
-                    event_id=blocked_ev.id,
-                    event_type="task_blocked",
                     reason="子任务未全部完成，Lead 未收尾",
-                    user_id=user_id,
+                    payload={"reason": "unresolved_subtasks", "pending_subtasks": unresolved},
                 )
                 logger.warning(
                     "auto-finalize: task %s -> blocked (unresolved=%s); lead ended without "
@@ -902,21 +842,15 @@ class LifecycleService:
                 "(auto-finalized) Lead ended its turn with no pending subtasks; "
                 "task closed automatically."
             )
-            await run_ds.update_run_by_session(
-                session_id=lead_session_id,
-                status="completed",
-                ended_at=now_ms(),
-            )
-            await finalize_task(
+            await self._complete_task(
                 db,
                 user_id=user_id,
                 project_id=project_id,
                 task_id=task_id,
-                status="completed",
-                event_type="task_completed",
-                actor=lead_session_id,
-                session_id=lead_session_id,
-                payload={"summary": summary, "artifacts": [], "auto_finalized": True},
+                lead_session_id=lead_session_id,
+                summary=summary,
+                artifacts=[],
+                auto_finalized=True,
             )
             logger.info(
                 "auto-finalize: task %s completed (lead natural end, no explicit finish_task)",
@@ -924,10 +858,10 @@ class LifecycleService:
             )
 
     # ------------------------------------------------------------------
-    # _finalize_actor — the run_actor_loop finally callback
+    # finalize_actor — the run_actor_loop finally callback
     # ------------------------------------------------------------------
 
-    async def _finalize_actor(
+    async def finalize_actor(
         self,
         *,
         session_id: str,
@@ -967,12 +901,12 @@ class LifecycleService:
             # quietly instead of spamming a "Dependencies not initialized"
             # traceback for every in-flight session at shutdown.
             logger.debug(
-                "_finalize_actor: kernel unavailable (shutdown) — deferring "
+                "finalize_actor: kernel unavailable (shutdown) — deferring "
                 "finalize of %s to boot recovery",
                 session_id,
             )
         except Exception:  # noqa: BLE001
-            logger.exception("_finalize_actor: finalize failed for %s", session_id)
+            logger.exception("finalize_actor: finalize failed for %s", session_id)
 
         if role == "lead":
             # A ``shutdown``-triggered exit (pause / stop / finish_task
@@ -1023,7 +957,7 @@ class LifecycleService:
                 )
             except Exception:  # noqa: BLE001
                 logger.exception(
-                    "_finalize_actor: interrupted-member finalize failed for %s", session_id
+                    "finalize_actor: interrupted-member finalize failed for %s", session_id
                 )
             return
 
@@ -1041,7 +975,7 @@ class LifecycleService:
                         session_id, run_dir, final_status, since_epoch=since, user_id=user_id
                     )
                 except Exception:  # noqa: BLE001
-                    logger.exception("_finalize_actor: manifest failed for %s", session_id)
+                    logger.exception("finalize_actor: manifest failed for %s", session_id)
                     manifest = {"session_id": session_id, "status": final_status, "summary": ""}
                 manifest["agent"] = agent_slug
 
@@ -1052,20 +986,12 @@ class LifecycleService:
                     result_manifest=manifest,
                     ended_at=now_ms(),
                 )
-                # Review model (VALUZ-TASK §6.1): the actor loop ending is NOT
-                # subtask completion — the lead decides that via review_subtask. We
-                # only surface a terminal *failure* (terminated/error) here. The
-                # node goes to ``rework`` (NOT ``failed``): a member run dying —
-                # including an API/socket drop that Layer-1 stamps as an
-                # ``Error(api_error)`` and ``_resolve_turn_status`` elevates to
-                # ``terminated`` — is recoverable. ``rework`` is dispatchable by
-                # the gate (planned/rework) and is the bucket both a live lead and
-                # a resumed lead re-dispatch, matching ``reconcile()`` /
-                # ``stop_member``. ``failed`` would strand it (excluded from
-                # ready_keys + non-dispatchable), so a blocked→resume could never
-                # relaunch it. The error rides along as ``review_feedback`` so the
-                # retry brief explains why; the ``subtask_failed`` event below
-                # still records the failed attempt on the timeline.
+                # The loop ending is NOT subtask completion — the lead decides
+                # that via review_subtask; only terminal FAILURE is surfaced
+                # here. The node goes to ``rework``, never ``failed``: a dead
+                # member run is recoverable, and ``failed`` would strand it
+                # (non-dispatchable), so a blocked→resume could never relaunch
+                # it. The error rides along as ``review_feedback``.
                 if not ok:
                     key = run.subtask_key if run else None
                     if key:
@@ -1083,13 +1009,11 @@ class LifecycleService:
                                         manifest.get("summary") or "上次运行因错误中断,请重试。"
                                     ),
                                 )
-                                task_row.plan = plan.to_dict()
-                                await task_ds.update_task(task_row)
-                                await planning.emit_plan_update(
+                                await planning.persist_plan(
+                                    task_ds,
                                     event_ds,
-                                    project_id=project_id,
-                                    task_id=task_id,
-                                    plan=plan,
+                                    task_row,
+                                    plan,
                                     actor=agent_slug,
                                     session_id=session_id,
                                     user_id=user_id,
@@ -1097,21 +1021,21 @@ class LifecycleService:
                     agent_name = await resolve_agent_display_name(
                         project_id, agent_slug, user_id
                     )
-                    await event_ds.append_event(
-                        user_id,
+                    await record_subtask_failed(
+                        event_ds,
+                        user_id=user_id,
                         project_id=project_id,
                         task_id=task_id,
-                        type="subtask_failed",
-                        actor=agent_slug,
                         session_id=session_id,
-                        payload={
-                            "agent_name": agent_name,
-                            **manifest,
-                            **({"subtask_key": key} if key else {}),
-                        },
+                        agent_slug=agent_slug,
+                        agent_name=agent_name,
+                        subtask_key=key,
+                        summary=str(manifest.get("summary") or ""),
+                        reason="run_error",
+                        artifacts=list(manifest.get("artifacts") or []),
                     )
         except Exception:  # noqa: BLE001
-            logger.exception("_finalize_actor: failed to record terminal run for %s", session_id)
+            logger.exception("finalize_actor: failed to record terminal run for %s", session_id)
 
     async def _finalize_interrupted_member(
         self,
@@ -1119,7 +1043,7 @@ class LifecycleService:
         session_id: str,
         task_id: str,
         project_id: str,
-        user_id: str | None,
+        user_id: str,
     ) -> None:
         """Record a user-interrupted member run — converges with ``stop_member``.
 
@@ -1129,9 +1053,7 @@ class LifecycleService:
         overwriting theirs would either double-notify the lead or destroy a
         parked run's resumability.
         """
-        from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 
-        uid = cast(str, user_id)
         lead_session_id = ""
         key: str | None = None
         agent_slug = ""
@@ -1149,7 +1071,7 @@ class LifecycleService:
                 session_id=session_id, status="rejected", ended_at=now_ms()
             )
             if key:
-                task_row = await task_ds.get_task_by_project(uid, project_id, task_id)
+                task_row = await task_ds.get_task_by_project(user_id, project_id, task_id)
                 if task_row is not None:
                     plan = TaskPlan.from_dict(task_row.plan)
                     if plan.get(key) is not None:
@@ -1158,30 +1080,25 @@ class LifecycleService:
                             status="rework",
                             review_feedback="用户中断了该子任务",
                         )
-                        task_row.plan = plan.to_dict()
-                        await task_ds.update_task(task_row)
-                        await planning.emit_plan_update(
+                        await planning.persist_plan(
+                            task_ds,
                             event_ds,
-                            project_id=project_id,
-                            task_id=task_id,
-                            plan=plan,
+                            task_row,
+                            plan,
                             actor="user",
                             session_id=session_id,
                             user_id=user_id,
                         )
-            agent_name = await resolve_agent_display_name(project_id, agent_slug, uid)
-            await event_ds.append_event(
-                uid,
+            agent_name = await resolve_agent_display_name(project_id, agent_slug, user_id)
+            await record_subtask_stopped(
+                event_ds,
+                user_id=user_id,
                 project_id=project_id,
                 task_id=task_id,
-                type="subtask_stopped",
-                actor="user",
                 session_id=session_id,
-                payload={
-                    "subtask_key": key,
-                    "agent": agent_slug,
-                    "agent_name": agent_name,
-                },
+                agent_slug=agent_slug,
+                agent_name=agent_name,
+                subtask_key=key,
             )
 
         if lead_session_id:
@@ -1215,31 +1132,19 @@ class LifecycleService:
         force: bool = False,
         user_id: str,
     ) -> dict[str, Any]:
-        """Close the task — append a terminal event and set the task status.
+        """Close the task: terminal event + status + lead-mode reset + shutdown.
 
-        ``status`` is ``completed`` (goal achieved) or ``stopped`` (user-
-        requested terminate or lead-judged unreachable). Emits
-        ``task_completed`` / ``task_stopped`` accordingly.
+        ``status`` is ``completed`` or ``stopped``; ``failed`` is rejected
+        loudly (task-level failure is ``blocked``, written by recovery /
+        auto-finalize — see task_state.py).
 
-        Note: task-level ``failed`` is intentionally NOT a valid finish status
-        — see ``task_state.py``. Hard lead-turn crashes are surfaced as
-        ``blocked`` by ``recover_active_tasks`` / auto-finalize, not via this
-        path. Any caller still passing ``status='failed'`` is rejected loudly
-        rather than silently aliased — fail fast keeps stale prompts visible.
-
-        Plan-completeness guard (v0.14): a ``completed`` finish is REJECTED
-        while the plan still has unresolved nodes (planned / in_progress /
-        in_review / rework) — otherwise the lead can silently skip a planned
-        subtask (e.g. a final aggregation node) and still mark the task done.
-        The lead must dispatch+review those nodes first (or drop them via
-        modify_plan, or finish with status='stopped' to terminate the task).
-
-        Live-member guard: a ``stopped`` finish is REJECTED while members are
-        still running (a member deep in a long build looks exactly like a hang
-        from the lead's side — killing the whole task is almost never right).
-        The lead must first check them (``await_members`` reports pending
-        members' live status), stop them individually (``stop_subtask``), or
-        pass ``force=True`` after a deliberate decision.
+        Two guards:
+        * completed → REJECTED while ``TaskPlan.unresolved_keys()`` is
+          non-empty (paused included), or the lead could skip planned work and
+          still mark the task done.
+        * stopped → REJECTED while members are live unless ``force=True`` — a
+          member deep in a long build looks exactly like a hang from the
+          lead's side, and killing the task is almost never right.
         """
         if status not in ("completed", "stopped"):
             return {
@@ -1264,7 +1169,7 @@ class LifecycleService:
             async with async_unit_of_work(commit=False) as db:
                 live_keys = sorted(
                     r.subtask_key
-                    for r in await TaskSessionDatastore(db).list_runs(cast(str, user_id), task_id)
+                    for r in await TaskSessionDatastore(db).list_runs(user_id, task_id)
                     if r.kind == "subtask" and r.subtask_key and r.status == "active"
                 )
             return {
@@ -1283,61 +1188,74 @@ class LifecycleService:
             }
 
         rejected: dict[str, Any] | None = None
-        finished_task_row: Any | None = None
+        finished_task_row: TaskRow | None = None
         async with async_unit_of_work() as db:
             task_ds = TaskDatastore(db)
-            run_ds = TaskSessionDatastore(db)
 
             # Fetched for the plan guard below AND for the task-worktree
             # teardown after the terminal writes commit.
             finished_task_row = await task_ds.get_task_by_project(user_id, project_id, task_id)
 
+            # No row = nothing to close. This used to be checked only INSIDE
+            # the completeness guard below, so a wrong/stale task_id skipped
+            # the guard entirely and still wrote a ``task_completed`` event for
+            # a task that does not exist.
+            if finished_task_row is None:
+                return {
+                    "ok": False,
+                    "error": f"finish_task: task {task_id!r} not found",
+                    "status": "rejected",
+                }
+
             # Guard: don't let a "completed" finish leave planned work behind.
             if final_status == "completed":
-                task_row = finished_task_row
-                if task_row is not None:
-                    plan = TaskPlan.from_dict(task_row.plan)
-                    unresolved = [
-                        n.key
-                        for n in plan.nodes
-                        if n.status in ("planned", "in_progress", "in_review", "rework")
-                    ]
-                    if unresolved:
-                        rejected = {
-                            "error": (
-                                "finish_task rejected: the plan still has "
-                                f"unresolved subtasks {unresolved}. Dispatch and "
-                                "review them first (a dependent node like a final "
-                                "summary becomes ready once its deps are done), or "
-                                "drop them with modify_plan, or call finish_task "
-                                "with status='stopped' to terminate the task."
-                            ),
-                            "pending_subtasks": unresolved,
-                            "status": "rejected",
-                        }
+                # Shared predicate (TaskPlan.unresolved_keys) — includes
+                # ``paused``, so a node parked by a pause/stop that was never
+                # re-dispatched still blocks a ``completed`` close.
+                unresolved = TaskPlan.from_dict(finished_task_row.plan).unresolved_keys()
+                if unresolved:
+                    rejected = {
+                        "error": (
+                            "finish_task rejected: the plan still has "
+                            f"unresolved subtasks {unresolved}. Dispatch and "
+                            "review them first (a dependent node like a final "
+                            "summary becomes ready once its deps are done), or "
+                            "drop them with modify_plan, or call finish_task "
+                            "with status='stopped' to terminate the task."
+                        ),
+                        "pending_subtasks": unresolved,
+                        "status": "rejected",
+                    }
 
             if rejected is None:
                 # Mark lead run as completed
-                await run_ds.update_run_by_session(
-                    session_id=lead_session_id,
-                    status="completed",
-                    ended_at=now_ms(),
-                )
-
-                await finalize_task(
-                    db,
-                    user_id=user_id,
-                    project_id=project_id,
-                    task_id=task_id,
-                    status=final_status,
-                    event_type=event_type,
-                    actor=lead_session_id,
-                    session_id=lead_session_id,
-                    payload={
-                        "summary": summary,
-                        "artifacts": artifacts or [],
-                    },
-                )
+                if final_status == "completed":
+                    await self._complete_task(
+                        db,
+                        user_id=user_id,
+                        project_id=project_id,
+                        task_id=task_id,
+                        lead_session_id=lead_session_id,
+                        summary=summary,
+                        artifacts=artifacts or [],
+                    )
+                else:  # stopped — same settle, different terminal event
+                    await TaskSessionDatastore(db).update_run_by_session(
+                        session_id=lead_session_id,
+                        status="completed",
+                        ended_at=now_ms(),
+                    )
+                    await finalize_task(
+                        db,
+                        user_id=user_id,
+                        project_id=project_id,
+                        task_id=task_id,
+                        status=final_status,
+                        event_type=event_type,
+                        actor=lead_session_id,
+                        session_id=lead_session_id,
+                        payload={"summary": summary, "artifacts": artifacts or []},
+                    )
 
         if rejected is not None:
             return rejected
@@ -1361,7 +1279,6 @@ class LifecycleService:
 
         # v2: tell any still-running members to finalize, and break the lead's
         # own actor loop after this turn (no-op for sync/v1 — no live mailboxes).
-        from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 
         self._coordination._broadcast_shutdown(task_id)
         mailbox_registry.put(lead_session_id, InboxMsg(kind="shutdown"))
@@ -1438,20 +1355,5 @@ class LifecycleService:
             )
 
         return {"ok": True, "status": "updated"}
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    async def _materialize_lead_agent(self, base_agent: Any) -> Any:
-        """Materialize a per-task lead clone of *base_agent*.
-
-        Thin wrapper over :func:`tasks.resolution.materialize_lead_clone`
-        (kept as an async method so tests keep awaiting
-        ``orch._materialize_lead_agent``); the resolver calls the function
-        directly on the lead-resolution path.
-        """
-        return materialize_lead_clone(base_agent)
-
 
 __all__ = ["LifecycleService"]

@@ -26,15 +26,14 @@ import logging
 import time
 from typing import Any
 
-from valuz_agent.adapters import kernel_client
-from valuz_agent.ports.sandbox_allocator import SandboxScope
-from valuz_agent.modules.sessions import project_index
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.tasks import planning
 from valuz_agent.modules.tasks.actor_runner import (
     ActorRunner,
     _member_run_dir,
 )
+from valuz_agent.modules.tasks import launcher
+from valuz_agent.modules.tasks.events import record_subtask_failed
 from valuz_agent.modules.tasks.datastore import (
     TaskDatastore,
     TaskEventDatastore,
@@ -42,6 +41,7 @@ from valuz_agent.modules.tasks.datastore import (
 )
 from valuz_agent.modules.tasks.live_member_registry import LiveMemberRegistry
 from valuz_agent.modules.tasks.models import TaskSessionRow
+from valuz_agent.modules.tasks.outcome import Failure
 from valuz_agent.modules.tasks.plan import TaskPlan
 from valuz_agent.modules.tasks.resolution import task_session_resolver
 from valuz_agent.modules.tasks.task_worktree import (
@@ -105,8 +105,8 @@ class DispatcherService:
                 return {"error": f"task {task_id!r} not found", "status": "failed"}
             _plan = TaskPlan.from_dict(task_row.plan)
             resolved_node = planning.resolve_dispatch_node(_plan, subtask_key, agent, goal)
-            if isinstance(resolved_node, str):
-                return {"error": resolved_node, "status": "failed"}
+            if isinstance(resolved_node, Failure):
+                return {"error": resolved_node.reason, "status": "failed"}
             agent, goal = resolved_node
             _node = _plan.get(subtask_key)
             review_criteria = _node.review_criteria if _node else ""
@@ -162,8 +162,8 @@ class DispatcherService:
                 lead_session_id=lead_session_id,
                 worktree_notice=task_worktree_notice(wt_snapshot),
             )
-            if isinstance(resolved, str):
-                return {"error": resolved, "status": "failed"}
+            if isinstance(resolved, Failure):
+                return {"error": resolved.reason, "status": "failed"}
             member_session = resolved.session
             member_brief = resolved.brief
             agent_name = resolved.agent_name
@@ -174,30 +174,26 @@ class DispatcherService:
                 # created (create_session below is unreached), so an id here
                 # would render in the task timeline as a clickable link to a
                 # session that 404s ("Session not found.").
-                await event_ds.append_event(
-                    user_id,
+                await record_subtask_failed(
+                    event_ds,
+                    user_id=user_id,
                     project_id=project_id,
                     task_id=task_id,
-                    type="subtask_failed",
-                    actor=agent,
-                    payload={
-                        "agent": agent,
-                        "agent_name": agent_name,
-                        "status": "failed",
-                        "error": resolved.credential_gap,
-                    },
+                    session_id=None,
+                    agent_slug=agent,
+                    agent_name=agent_name,
+                    subtask_key=subtask_key,
+                    summary=resolved.credential_gap,
+                    reason="dispatch_failed",
                 )
                 return {"error": resolved.credential_gap, "status": "failed", "agent": agent}
 
-            await kernel_client.create_session(
-                user_id, member_session, scope=SandboxScope(kind="task", id=task_id)
-            )
-            await project_index.record(
-                project_id,
-                member_session.id,
+            await launcher.create_task_session(
+                user_id,
+                member_session,
+                task_id=task_id,
+                project_id=project_id,
                 kind="task_subtask",
-                origin="task",
-                user_id=user_id,
             )
 
             await run_ds.create_run(
@@ -243,32 +239,17 @@ class DispatcherService:
             user_id=user_id,
         )
 
-        # Track as a live member + start its actor loop (non-blocking).
-        # Register the mailbox SYNCHRONOUSLY (before create_task) so a
-        # finish_task shutdown that races ahead of the member loop's first tick
-        # is still queued rather than dropped — otherwise the member would hang
-        # until its idle TTL. run_actor_loop's register() is idempotent.
-        from valuz_agent.modules.tasks.mailbox import mailbox_registry
-
-        # Register the LEAD's mailbox too (idempotent) — the member posts
-        # ``member_done`` here when it idles, and the lead's ``await_members``
-        # drains it. Registering at dispatch time guarantees delivery even
-        # when the lead wasn't started via the async-kickoff path (e.g. a
-        # goal-mode single-turn lead): otherwise the member's ``put`` lands on
-        # an unregistered inbox and is DROPPED, and ``await_members`` raises
-        # KeyError + returns empty → the lead wrongly thinks members are stuck.
-        mailbox_registry.register(lead_session_id)
-        self._members.add_member(task_id, member_session.id, dispatch_epoch=time.time())
-        mailbox_registry.register(member_session.id)
-        asyncio.create_task(
-            self._actor.run_actor_loop(
-                session_id=member_session.id,
-                initial_prompt=member_brief,
-                role="subtask",
-                task_id=task_id,
-                project_id=project_id,
-                user_id=user_id,
-            )
+        launcher.spawn_actor(
+            self._actor,
+            session_id=member_session.id,
+            prompt=member_brief,
+            role="subtask",
+            task_id=task_id,
+            project_id=project_id,
+            user_id=user_id,
+            registry=self._members,
+            dispatch_epoch=time.time(),
+            lead_session_id=lead_session_id,
         )
 
         return {

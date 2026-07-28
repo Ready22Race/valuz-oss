@@ -6,33 +6,14 @@ goal revision to a running task's lead via a ``revise_goal`` mailbox message
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.orm import sessionmaker
 
-from valuz_agent.infra.database import Base
 from valuz_agent.modules.tasks import messaging
 from valuz_agent.modules.tasks.mailbox import mailbox_registry
-from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionRow
+from valuz_agent.modules.tasks.models import TaskSessionRow
 
 LOCAL_USER_ID = "local-test-owner"
 
 
-@pytest.fixture
-def db_factory(tmp_path, monkeypatch):
-    import valuz_agent.infra.db as db_mod
-
-    db_file = tmp_path / "revise_goal.db"
-    sync_engine = create_engine(f"sqlite:///{db_file}", connect_args={"check_same_thread": False})
-    Base.metadata.create_all(
-        sync_engine,
-        tables=[TaskRow.__table__, TaskSessionRow.__table__, TaskEventRow.__table__],
-    )
-    async_engine = create_async_engine(f"sqlite+aiosqlite:///{db_file}")
-    monkeypatch.setattr(
-        db_mod, "AsyncSessionLocal", async_sessionmaker(bind=async_engine, expire_on_commit=False)
-    )
-    return sessionmaker(bind=sync_engine, expire_on_commit=False)
 
 
 @pytest.fixture(autouse=True)

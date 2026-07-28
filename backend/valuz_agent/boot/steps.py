@@ -632,7 +632,7 @@ async def recover_active_tasks() -> None:
     kernel_client.bind_sandbox_scope_resolver(resolve_sandbox_scope)
 
     try:
-        await task_orchestrator.recover_active_tasks()
+        await task_orchestrator.recovery.recover_active_tasks()
     except Exception:  # noqa: BLE001 — startup must not block on bookkeeping
         logging.getLogger(__name__).exception("recover_active_tasks failed")
 
@@ -691,7 +691,7 @@ async def start_host_background_services(app: FastAPI) -> None:
     """Start non-automation host monitors and optional content scanners."""
     # Task watchdog: detect a lead that died without finalizing (the hole boot
     # recovery can't see mid-process) → mark blocked so it surfaces + resumes.
-    from valuz_agent.modules.tasks.health_monitor import task_health_monitor
+    from valuz_agent.modules.tasks.recovery import task_health_monitor
 
     await task_health_monitor.startup()
 
@@ -876,7 +876,7 @@ async def stop_automation_runtime(app: FastAPI) -> None:
 
 async def stop_host_background_services(app: FastAPI) -> None:
     """Stop non-automation host monitors and optional content scanners."""
-    from valuz_agent.modules.tasks.health_monitor import task_health_monitor
+    from valuz_agent.modules.tasks.recovery import task_health_monitor
 
     await task_health_monitor.shutdown()
 
@@ -918,8 +918,10 @@ async def start_decision_aggregator(app: FastAPI) -> None:
     then subscribes to the kernel broadcast bus for live updates.
     Lives for the whole app lifetime.
     """
-    from valuz_agent.api.deps import set_decision_aggregator
-    from valuz_agent.modules.decisions.aggregator import DecisionAggregator
+    from valuz_agent.modules.decisions.aggregator import (
+        DecisionAggregator,
+        set_decision_aggregator,
+    )
 
     agg = DecisionAggregator()
     await agg.start()

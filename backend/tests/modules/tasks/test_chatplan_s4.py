@@ -9,15 +9,14 @@ fixture (no kernel session bring-up needed). Pattern mirrors
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import valuz_agent.boot.kernel  # noqa: F401
-from sqlalchemy import create_engine, select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import select
 
-from valuz_agent.infra.database import Base
 from valuz_agent.modules.tasks import messaging
 from valuz_agent.modules.tasks.mailbox import mailbox_registry
 from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionRow
@@ -26,21 +25,6 @@ from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionR
 LOCAL_USER_ID = "local-test-owner"
 
 
-@pytest.fixture
-def db_factory(tmp_path, monkeypatch):
-    """A tmp-SQLite async+sync sessionmaker pair (mirrors test_chatplan_s2)."""
-    import valuz_agent.infra.db as db_mod
-
-    db_file = tmp_path / "chatplan_s4.db"
-    sync_engine = create_engine(f"sqlite:///{db_file}", connect_args={"check_same_thread": False})
-    Base.metadata.create_all(
-        sync_engine,
-        tables=[TaskRow.__table__, TaskEventRow.__table__, TaskSessionRow.__table__],
-    )
-    async_engine = create_async_engine(f"sqlite+aiosqlite:///{db_file}")
-    async_factory = async_sessionmaker(bind=async_engine, expire_on_commit=False)
-    monkeypatch.setattr(db_mod, "AsyncSessionLocal", async_factory)
-    return sessionmaker(bind=sync_engine, expire_on_commit=False)
 
 
 @pytest.fixture(autouse=True)
@@ -166,7 +150,7 @@ def test_inject_queues_wrapped_message_in_lead_mailbox(db_factory, tmp_path):
     box = mailbox_registry._boxes["lead-sess-1"]
     assert box.qsize() == 1
     msg = box.get_nowait()
-    assert msg.kind == "message"
+    assert msg.kind == "text"
     assert msg.from_session == "chat-session-1"
     assert '<user-instruction source="chat">' in msg.text
     assert "please pivot to Q4" in msg.text
@@ -250,84 +234,76 @@ def test_inject_into_completed_task_rejects(db_factory, tmp_path):
     assert result["reason"] == "TASK_NOT_ACTIVE"
 
 
-def test_inject_into_stopped_task_revives_via_resume(db_factory, tmp_path, monkeypatch):
-    """Injecting into a halted (stopped) task no longer bounces with
-    TASK_NOT_ACTIVE — it revives the task through ``resume_task`` with the
-    text riding along as the resume instruction ("说句话就能继续")."""
-    from valuz_agent.modules.tasks import orchestrator as orch_mod
+def test_inject_reports_halted_instead_of_reviving(db_factory, tmp_path):
+    """The DELIVERY layer reports the state; it does not orchestrate.
+
+    Injecting into a halted task can't be delivered — the lead loop is torn
+    down and its mailbox unregistered. ``messaging`` says so and stops there:
+    deciding to revive is orchestration, and a leaf delivery helper reaching up
+    to the composition root for ``resume_task`` was an inverted dependency
+    (masked by a function-local import). The revive itself is asserted by
+    ``test_inject_handler_revives_halted_task`` below, at the layer that owns
+    the decision.
+    """
+    for i, status in enumerate(("stopped", "paused", "blocked")):
+        tid = f"t-halted-{i}"
+        _seed_task(db_factory, tmp_path, task_id=tid, status=status)
+        result = asyncio.run(
+            messaging.inject_into_task(
+                task_id=tid,
+                project_id="w1",
+                text="继续,并且优先做数据核对",
+                from_session_id="chat-session-1",
+                user_id=LOCAL_USER_ID,
+            )
+        )
+        assert result["delivered"] is False, status
+        assert result["reason"] == "TASK_HALTED", status
+        assert result["task_status"] == status
+
+
+def test_inject_handler_revives_halted_task(db_factory, tmp_path, monkeypatch):
+    """"说句话就能继续" — end to end, at the layer that decides it.
+
+    The chat-facing ``inject_into_task`` tool turns the delivery layer's
+    TASK_HALTED into a ``resume_task`` carrying the text as the resume
+    instruction, so the behaviour users rely on is unchanged by the move.
+    """
+    from valuz_agent.adapters import data_reader as dr_mod
+    from valuz_agent.integrations.toolkit_mcp_server import HostExecContext
+    from valuz_agent.modules.tasks.tools import handlers as h_mod
 
     _seed_task(db_factory, tmp_path, status="stopped")
     calls: list[dict] = []
 
-    async def _fake_resume(task_id, project_id, **kw):
-        calls.append({"task_id": task_id, "project_id": project_id, **kw})
-        return {"ok": True, "prior_status": "stopped", "resumed": True}
+    class _Recovery:
+        async def resume_task(self, task_id, project_id, **kw):
+            calls.append({"task_id": task_id, "project_id": project_id, **kw})
+            return {"ok": True, "prior_status": "stopped", "resumed": True}
 
-    monkeypatch.setattr(orch_mod.task_orchestrator, "resume_task", _fake_resume)
-    result = asyncio.run(
-        messaging.inject_into_task(
-            task_id="t1",
-            project_id="w1",
-            text="继续,并且优先做数据核对",
-            from_session_id="chat-session-1",
-            user_id=LOCAL_USER_ID,
+    class _Orch:
+        recovery = _Recovery()
+
+    class _Reader:
+        async def get_session(self, _uid, _sid):
+            return SimpleNamespace(
+                id="chat-session-1", project_id="w1", metadata={"valuz": {}}
+            )
+
+    monkeypatch.setattr(dr_mod, "data_reader", lambda: _Reader())
+    monkeypatch.setattr(h_mod, "data_reader", lambda: _Reader())
+
+    res = asyncio.run(
+        h_mod._inject_into_task_handler(
+            _Orch(),
+            {"task_id": "t1", "text": "继续,并且优先做数据核对"},
+            HostExecContext(session_id="chat-session-1", user_id=LOCAL_USER_ID),
         )
     )
-    assert result["delivered"] is True
-    assert result["reason"] == "TASK_RESUMED"
-    assert result["lead_session_id"] == "lead-sess-1"
+    assert not res.is_error
+    assert "TASK_RESUMED" in res.content
     assert calls and calls[0]["instruction"] == "继续,并且优先做数据核对"
 
-
-def test_inject_into_paused_task_revives_via_resume(db_factory, tmp_path, monkeypatch):
-    """Paused went the same way: the pause tears the lead loop down
-    (mailbox unregistered), so mailbox delivery could only ever race —
-    inject now resumes the task with the text as instruction."""
-    from valuz_agent.modules.tasks import orchestrator as orch_mod
-
-    _seed_task(db_factory, tmp_path, status="paused")
-    calls: list[dict] = []
-
-    async def _fake_resume(task_id, project_id, **kw):
-        calls.append({"task_id": task_id, "project_id": project_id, **kw})
-        return {"ok": True, "prior_status": "paused", "resumed": True}
-
-    monkeypatch.setattr(orch_mod.task_orchestrator, "resume_task", _fake_resume)
-    result = asyncio.run(
-        messaging.inject_into_task(
-            task_id="t1",
-            project_id="w1",
-            text="resume soon please",
-            from_session_id="chat-session-1",
-            user_id=LOCAL_USER_ID,
-        )
-    )
-    assert result["delivered"] is True
-    assert result["reason"] == "TASK_RESUMED"
-    assert calls and calls[0]["instruction"] == "resume soon please"
-
-
-def test_inject_into_blocked_task_revive_failure_reports(db_factory, tmp_path, monkeypatch):
-    """A failed revive must not masquerade as delivery."""
-    from valuz_agent.modules.tasks import orchestrator as orch_mod
-
-    _seed_task(db_factory, tmp_path, status="blocked")
-
-    async def _fake_resume(task_id, project_id, **kw):
-        return {"ok": False, "error": "boom", "prior_status": "blocked"}
-
-    monkeypatch.setattr(orch_mod.task_orchestrator, "resume_task", _fake_resume)
-    result = asyncio.run(
-        messaging.inject_into_task(
-            task_id="t1",
-            project_id="w1",
-            text="hi",
-            from_session_id="chat-session-1",
-            user_id=LOCAL_USER_ID,
-        )
-    )
-    assert result["delivered"] is False
-    assert result["reason"] == "RESUME_FAILED"
 
 
 # ── no lead run row at all ──────────────────────────────────────────────
@@ -369,3 +345,63 @@ def test_wrapped_envelope_uses_user_instruction_source_chat_tag(db_factory, tmp_
     # The raw text is preserved inside the envelope (no escaping shenanigans).
     expected = '<user-instruction source="chat">\nraw user text\n</user-instruction>'
     assert msg.text == expected
+
+
+def test_chat_created_task_is_attributed_to_the_user(monkeypatch):
+    """``created_by`` is a source KIND, not an id.
+
+    The create_task tool used to pass its own chat session UUID, which leaked
+    into ``TaskRow.created_by`` (documented enum: user | automation | …) AND
+    the kickoff event's actor — so the timeline's first row rendered a bare
+    32-hex id instead of "你". The channel attribution ("via chat") is
+    provenance's job, carried by ``originating_session_id``, which must keep
+    flowing unchanged.
+    """
+    from valuz_agent.adapters import data_reader as dr_mod
+    from valuz_agent.integrations.toolkit_mcp_server import HostExecContext
+    from valuz_agent.modules.tasks.resolution import TaskProjectEnv
+    from valuz_agent.modules.tasks.tools import handlers as h_mod
+
+    kickoffs: list[dict] = []
+
+    class _Lifecycle:
+        async def kickoff(self, **kw):
+            kickoffs.append(kw)
+            return SimpleNamespace(id="t-new", title="T", plan_version=0)
+
+    class _Orch:
+        lifecycle = _Lifecycle()
+
+    class _Reader:
+        async def get_session(self, _uid, sid):
+            return SimpleNamespace(
+                id=sid,
+                user_id=LOCAL_USER_ID,
+                project_id="w1",
+                metadata={"valuz": {"agent_slug": "helper"}},
+            )
+
+    monkeypatch.setattr(dr_mod, "data_reader", lambda: _Reader())
+    monkeypatch.setattr(h_mod, "data_reader", lambda: _Reader())
+
+    async def _fake_env(self, db, *, user_id, project_id):
+        return TaskProjectEnv(
+            project_row=SimpleNamespace(kind="project", name="P"),
+            project_cwd=Path("/tmp"),
+            instructions_md=None,
+        )
+
+    monkeypatch.setattr(
+        type(h_mod.task_session_resolver), "resolve_project_env", _fake_env
+    )
+
+    res = asyncio.run(
+        h_mod._create_task_handler(
+            _Orch(),
+            {"goal": "查询热门板块", "lead_agent": "lead"},
+            HostExecContext(session_id="chat-sess-1", user_id=LOCAL_USER_ID),
+        )
+    )
+    assert not res.is_error
+    assert kickoffs[0]["created_by"] == "user"
+    assert kickoffs[0]["originating_session_id"] == "chat-sess-1"

@@ -81,7 +81,7 @@ durable 表 `valuz_notification`:
   - `action_resolved` → `resolve(q:{pending_id})`
   - （我已加的 `record_awaiting_user`/`record_user_answered` 任务事件保留——它是
     任务**时间线**的记录;通知账本是**注意力**的记录,两者正交。）
-- **失败源**:任务失败事件的落点(`_auto_finalize_lead_task`、`health_monitor`、
+- **失败源**:任务失败事件的落点(`_auto_finalize_lead_task`、`TaskHealthMonitor`(2026-07-28 起在 `tasks/recovery.py`)、
   kickoff capability-gap)本就 append `task_blocked`/`kickoff_failed`。在同一处
   调 `ingest(task_failed, f:{event_id}, action=resume, route=/tasks/{task_id})`。
   - 可选:`resumed`/`abandoned` → `resolve` 对应失败通知。

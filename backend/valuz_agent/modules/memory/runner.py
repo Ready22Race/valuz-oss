@@ -333,9 +333,9 @@ async def run_task_finish_extraction(task_id: str, user_id: str | None) -> None:
         return
     token = set_current_user_id(user_id)
     try:
-        from valuz_agent.modules.tasks import queries
+        from valuz_agent.modules.tasks import service as task_queries
 
-        task, runs = await queries.get_task_with_runs(user_id, task_id)
+        task, runs = await task_queries.get_task_with_runs(user_id, task_id)
         # Only graduate lessons from a successfully completed task.
         if task is None or task.status != "completed":
             return

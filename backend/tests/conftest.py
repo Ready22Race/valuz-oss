@@ -91,11 +91,11 @@ for _escape_key in [
 # owner, and inserts from a never-seeded context keep failing loudly (covered
 # by ``tests/infra/test_ownership.py``, which opts out via fresh Contexts).
 # ---------------------------------------------------------------------------
-import pytest  # noqa: E402
 import inspect
 import sys  # noqa: E402
 from contextlib import contextmanager  # noqa: E402
 
+import pytest  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Module re-import sandbox — the ONE supported way to reload settings-bearing
@@ -284,18 +284,22 @@ def _patch_default_user_id(defaulted_fn, default_user_id: str = _DEFAULT_TEST_US
 
 
 def _apply_default_user_id_patches():
-    from valuz_agent.adapters import agent_resolver, capability_resolver, event_sse_adapter
-    from valuz_agent.adapters import model_resolver, provider_resolver
+    from valuz_agent.adapters import (
+        agent_resolver,
+        capability_resolver,
+        event_sse_adapter,
+        model_resolver,
+        provider_resolver,
+    )
     from valuz_agent.api.routes import onboarding
+    from valuz_agent.integrations import tools_agent_proposal, tools_skill_creator
+    from valuz_agent.modules.decisions import aggregator as decisions_aggregator
     from valuz_agent.modules.decisions import service as decisions_service
     from valuz_agent.modules.memory import runner
+    from valuz_agent.modules.memory import tools as memory_tools
+    from valuz_agent.modules.parser.setup_jobs import base as setup_jobs_base
     from valuz_agent.modules.projects import tools as project_tools
     from valuz_agent.modules.settings import parser_routing
-    from valuz_agent.integrations import tools_agent_proposal
-    from valuz_agent.integrations import tools_skill_creator
-    from valuz_agent.modules.parser.setup_jobs import base as setup_jobs_base
-    from valuz_agent.modules.decisions import aggregator as decisions_aggregator
-    from valuz_agent.modules.memory import tools as memory_tools
 
     patches = [
         (agent_resolver, "_resolve_agent_provider"),

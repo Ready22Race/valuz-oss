@@ -12,6 +12,14 @@
 > `tasks/tools/gate.py` (pure tool-gate policy). What is **no longer planned**:
 > moving the `valuz_task*` tables, running actors kernel-side, and serving the
 > task MCP tools from the kernel.
+>
+> **Addendum 2026-07-28:** the module inventory below reflects the
+> PRE-refactor tree. The host module has since evolved: `queries.py`
+> merged into `service.py`, `health_monitor.py` into `recovery.py`;
+> `launcher.py` (the single actor-launch primitive), `plan_commands.py`
+> (the single authorized plan-write door) and `member_state.py` /
+> `outcome.py` (pure domain) were added. If this migration is ever
+> revived, inventory against the live tree, not this table.
 
 > The Task subsystem moves **wholesale into the kernel**. Its tables become
 > kernel-owned (unprefixed, `user_id` retained) and are persisted through the

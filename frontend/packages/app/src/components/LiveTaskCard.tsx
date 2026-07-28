@@ -223,10 +223,15 @@ export function LiveTaskCard(props: LiveTaskCardProps): ReactElement | null {
           );
           break;
         }
+        // Anything that can change a subtask's state → refetch the plan.
+        // `subtask_reported` is member→lead, `subtask_message` is lead→member;
+        // they were one type until 2026-07, so pre-split rows arrive under
+        // `subtask_message` in BOTH directions and must stay handled.
         case "subtask_spawned":
         case "subtask_completed":
         case "subtask_failed":
         case "subtask_reviewed":
+        case "subtask_reported":
         case "subtask_message":
           scheduleRefetchPlan();
           break;
@@ -245,8 +250,17 @@ export function LiveTaskCard(props: LiveTaskCardProps): ReactElement | null {
         case "task_blocked":
           setMeta((m) => (m ? { ...m, status: "blocked" } : m));
           break;
-        case "stopped":
+        // `stop_task` emits `paused` or `stopped` depending on the target;
+        // each maps to the SAME name as the task status it just wrote. This
+        // used to project `stopped` onto `paused` (and handle no `paused`
+        // event at all), so a stopped task rendered as merely paused and every
+        // status-derived affordance — resume/stop buttons, the attention dot —
+        // was computed from a status the backend never set.
+        case "paused":
           setMeta((m) => (m ? { ...m, status: "paused" } : m));
+          break;
+        case "stopped":
+          setMeta((m) => (m ? { ...m, status: "stopped" } : m));
           break;
         case "resumed":
           setMeta((m) => (m ? { ...m, status: "active" } : m));
