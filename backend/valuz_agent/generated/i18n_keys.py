@@ -1403,6 +1403,8 @@ I18nKey = Literal[
     "project.openInSystem",
     "project.parseFailed",
     "project.pickFolder",
+    "project.platformFeishu",
+    "project.platformWecom",
     "project.projectDir",
     "project.projectFiles",
     "project.projectMemory",

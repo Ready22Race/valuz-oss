@@ -1121,7 +1121,9 @@
     "createChatHint": "The bot creates the group and links it to this project; use the link below to join.",
     "createChatJoin": "Join the group",
     "createChatDone": "Group created and linked",
-    "createChatLinkMissing": "Group created — search for it by name in Feishu to join."
+    "createChatLinkMissing": "Group created — search for it by name in Feishu to join.",
+    "platformFeishu": "Feishu",
+    "platformWecom": "WeCom"
   },
   "schedule": {
     "create": "Create Schedule",

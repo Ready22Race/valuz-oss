@@ -1121,7 +1121,9 @@
     "createChatHint": "机器人会创建群并自动关联到本项目；创建后用下面的链接加入。",
     "createChatJoin": "加入群",
     "createChatDone": "群已创建并关联",
-    "createChatLinkMissing": "群已创建，请在飞书中按群名搜索加入。"
+    "createChatLinkMissing": "群已创建，请在飞书中按群名搜索加入。",
+    "platformFeishu": "飞书",
+    "platformWecom": "企业微信"
   },
   "schedule": {
     "create": "创建定时任务",

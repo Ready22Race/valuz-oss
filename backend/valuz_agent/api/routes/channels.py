@@ -309,6 +309,9 @@ class ChatProjectBindingResponse(BaseModel):
     project_id: str
     external_chat_name: str | None = None
     default_agent_slug: str | None = None
+    # Which IM the group lives in, so a bound group reads as "飞书 · 研究群"
+    # rather than an opaque id.
+    platform: str = FEISHU_PLATFORM
 
 
 class ChatProjectBindingUpdate(BaseModel):
@@ -450,6 +453,7 @@ async def list_chat_bindings(
             if project_id
             else await ds.list_all(user_id=user_id)
         )
+    rows = await _backfill_chat_names(user_id, list(rows))
     return [_chat_binding_response(row) for row in rows]
 
 
@@ -498,7 +502,81 @@ def _chat_binding_response(binding: Any) -> ChatProjectBindingResponse:
         project_id=binding.project_id,
         external_chat_name=binding.external_chat_name,
         default_agent_slug=binding.default_agent_slug,
+        platform=_platform_of(binding.channel_instance_id),
     )
+
+
+def _platform_of(channel_instance_id: str) -> str:
+    """Which IM a chat binding belongs to.
+
+    Derived from the channel instance id, which both writers set by convention
+    ("feishu-main" / "wecom-aibot-main"). Storing it would mean a column whose
+    only reader is a UI label, and a migration for existing rows.
+    """
+    return (
+        WECOM_AIBOT_PLATFORM
+        if channel_instance_id.startswith("wecom")
+        else FEISHU_PLATFORM
+    )
+
+
+async def _backfill_chat_names(
+    user_id: str, rows: list[Any]
+) -> list[Any]:
+    """Fill in group names missing from bindings made by an in-chat command.
+
+    The message event carries no group name, so a binding created with
+    ``绑定项目 X`` starts nameless and the UI would show a raw chat id. One
+    list call names every such row at once (rather than one lookup per row),
+    and the names are persisted so this happens only once.
+    """
+    from valuz_agent.integrations.feishu_long_connection import (
+        list_feishu_chats as fetch,
+    )
+
+    missing = [row for row in rows if not row.external_chat_name]
+    if not missing:
+        return rows
+    async with async_unit_of_work() as db:
+        binding = next(
+            iter(
+                await AgentChannelBindingDatastore(db).list_enabled(
+                    platform=FEISHU_PLATFORM, user_id=user_id
+                )
+            ),
+            None,
+        )
+        secret = (
+            _read_feishu_secret(user_id=user_id, secret_ref=binding.secret_ref)
+            if binding is not None
+            else _FeishuSecretPayload()
+        )
+    if binding is None or not secret.app_secret:
+        return rows
+    try:
+        names = dict(await fetch(app_id=binding.bot_id, app_secret=secret.app_secret))
+    except Exception:  # noqa: BLE001 - a nameless row is better than a failed page
+        return rows
+
+    resolved: list[Any] = []
+    async with async_unit_of_work() as db:
+        ds = ChannelChatBindingDatastore(db)
+        for row in rows:
+            name = names.get(row.external_chat_id)
+            if row.external_chat_name or not name:
+                resolved.append(row)
+                continue
+            resolved.append(
+                await ds.upsert(
+                    user_id=user_id,
+                    channel_instance_id=row.channel_instance_id,
+                    external_chat_id=row.external_chat_id,
+                    project_id=row.project_id,
+                    default_agent_slug=row.default_agent_slug,
+                    external_chat_name=name,
+                )
+            )
+    return resolved
 
 
 def _wecom_aibot_binding_response(

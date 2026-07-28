@@ -247,7 +247,7 @@ export interface ProjectContextPanelProps {
   /** Set (or clear, with null) the project's default task lead. */
   onSetDefaultLead?: (slug: string | null) => void;
   /** IM groups bound to this project ("this group is that project"). */
-  chatBindings?: { id: string; name: string }[];
+  chatBindings?: { id: string; name: string; platformLabel?: string }[];
   /** Open the group picker; undefined hides the section entirely. */
   onBindChat?: () => void;
   onUnbindChat?: (externalChatId: string) => void;
@@ -2317,6 +2317,9 @@ export const ProjectDetailContextPanel = ({
                     <MessageSquare className="h-3 w-3" />
                   </div>
                   <div className="min-w-0 flex-1 truncate text-xs text-ink-heading">
+                    {chat.platformLabel ? (
+                      <span className="text-ink-meta">{chat.platformLabel} · </span>
+                    ) : null}
                     {chat.name}
                   </div>
                   {onUnbindChat && (

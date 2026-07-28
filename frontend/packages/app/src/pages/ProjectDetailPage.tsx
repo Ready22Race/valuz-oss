@@ -1066,6 +1066,13 @@ export const ProjectDetailPage = () => {
         rows.map((row) => ({
           id: row.external_chat_id,
           name: row.external_chat_name || row.external_chat_id,
+          // Module-level ``t``: putting the hook's ``t`` in this callback's
+          // deps is the pattern that once turned a panel render into a
+          // refetch storm (see .claude/rules/frontend.md).
+          platformLabel:
+            row.platform === "wecom_aibot"
+              ? _t("project.platformWecom" as Parameters<typeof _t>[0])
+              : _t("project.platformFeishu" as Parameters<typeof _t>[0]),
         })),
       );
     } catch {

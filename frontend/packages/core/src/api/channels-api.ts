@@ -62,6 +62,8 @@ export interface ChatProjectBinding {
   project_id: string;
   external_chat_name?: string | null;
   default_agent_slug?: string | null;
+  /** Which IM the group lives in — "feishu" | "wecom_aibot". */
+  platform?: string;
 }
 
 export interface CreatedChat {
