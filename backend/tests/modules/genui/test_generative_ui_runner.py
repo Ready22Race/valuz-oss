@@ -77,6 +77,8 @@ def patched(tmp_path, monkeypatch):
         captured.setdefault("deleted", []).append(sid)
 
     async def _gen():
+        # Reasoning first (as reasoning-capable models stream it), then text.
+        yield SimpleNamespace(type="thinking_delta", data={"text": "planning the layout"})
         for d in ({"text": "root "}, {"text": "= Stack()"}):
             yield SimpleNamespace(type="text_delta", data=d)
         yield SimpleNamespace(type="assistant_message", data={"text": "Chart\n  data: 1,2,3"})
@@ -132,9 +134,11 @@ async def test_generative_ui_sessions_share_one_fixed_cwd(patched):
     assert reqs[0].id not in reqs[0].cwd and reqs[1].id not in reqs[1].cwd
 
 
-async def test_completer_streams_text_deltas_to_calling_session(patched):
-    """tool_use_id 非空时,订阅 ephemeral 的 text_delta,转发成调用方 session
-    的 tool_output_delta(keyed by tool_use_id);run_turn 全文仍作为返回值。"""
+async def test_completer_streams_text_and_thinking_deltas_to_calling_session(patched):
+    """tool_use_id 非空时,订阅 ephemeral 的 text_delta / thinking_delta,分别转发成
+    调用方 session 的 tool_output_delta / tool_thinking_delta(keyed by
+    tool_use_id,后者独立类型 —— output_delta 会被前端无条件拼进 OpenUI 代码流,
+    推理文本混入会污染渲染);run_turn 全文仍作为返回值。"""
     completer = r._make_completer(
         user_id="u1",
         runtime_provider="claude_agent",
@@ -147,6 +151,7 @@ async def test_completer_streams_text_deltas_to_calling_session(patched):
     assert out == "Chart\n  data: 1,2,3"  # run_turn 全文(canonical)
     forwarded = patched.get("forwarded", [])
     assert forwarded == [
+        ("calling-sid", "tool_thinking_delta", {"id": "R1", "text": "planning the layout"}),
         ("calling-sid", "tool_output_delta", {"id": "R1", "text": "root "}),
         ("calling-sid", "tool_output_delta", {"id": "R1", "text": "= Stack()"}),
     ]
