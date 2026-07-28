@@ -142,6 +142,7 @@ import {
   extractToolOutputJson,
 } from "./conversation-plan-anchors";
 import {
+  deriveBackgroundActive,
   deriveTurnActive,
   shouldApplySessionStatus,
   shouldRefreshConversationHistory,
@@ -1545,6 +1546,22 @@ export const ConversationPage = () => {
   // turn-boundary effects (queue refetch, file-tree refresh, bookkeeping)
   // stay on raw ``isBusy`` because they must fire per drained turn.
   const displayBusy = isBusy || (queueDraining && !queuePaused);
+  // A ``run_in_background`` task outlives the turn that launched it: the turn
+  // ends (status → idle) but the session is NOT done, and the server keeps
+  // saying so via ``SessionSummary.background``. Keep the loading affordances
+  // up for it — DISPLAY ONLY.
+  //
+  // Deliberately NOT folded into ``isBusy`` / ``displayBusy``: those also drive
+  // send ROUTING (the enqueue branch below) and the Stop button. Routing a
+  // message into the queue here would hit the host's 409 "Session is already
+  // running", and a Stop button would stop nothing — there is no turn to
+  // interrupt. See ``deriveBackgroundActive`` and the backend's
+  // ``SessionSummary.background`` docstring, which spells out the same rule.
+  const backgroundActive = deriveBackgroundActive(
+    selectedSession?.status,
+    selectedSession?.background,
+  );
+  const loadingVisible = displayBusy || backgroundActive;
 
   // The agent actually bound to this composer: an existing session is frozen to
   // its ``sessionAgentSlug`` (ADR-006), a fresh draft uses the picker's
@@ -5966,7 +5983,7 @@ export const ConversationPage = () => {
                 key={conversationInstanceKey}
                 turns={effectiveTurns}
                 scrollContainerRef={scrollContainerRef}
-                sending={displayBusy}
+                sending={loadingVisible}
                 loading={id === NEW_SESSION_ID ? false : loading}
                 error={error}
                 onRetry={handleRetry}
@@ -6113,7 +6130,7 @@ export const ConversationPage = () => {
               onClick={handleScrollToBottom}
               className={cn(
                 "absolute bottom-full left-1/2 z-20 mb-3 flex h-8 w-8 -translate-x-1/2 items-center justify-center rounded-full border border-surface-border bg-surface shadow-md transition-opacity hover:bg-surface-soft",
-                displayBusy &&
+                loadingVisible &&
                   "animate-[border-breathe_1.8s_ease-in-out_infinite] border-brand/60",
               )}
             >

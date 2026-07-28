@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  deriveBackgroundActive,
   deriveTurnActive,
   isTerminalSessionStatus,
   shouldApplySessionStatus,
@@ -144,5 +145,33 @@ describe("shouldApplySessionStatus", () => {
     expect(shouldApplySessionStatus(undefined, false)).toBe(false);
     expect(shouldApplySessionStatus(null, false)).toBe(false);
     expect(shouldApplySessionStatus("", false)).toBe(false);
+  });
+});
+
+describe("deriveBackgroundActive", () => {
+  it("is true when a background task outlives its launching turn", () => {
+    // The exact live case: the turn ended (idle) but the server still reports
+    // background work in flight, so the session is not done.
+    expect(deriveBackgroundActive("idle", true)).toBe(true);
+  });
+
+  it("is false while a turn is running", () => {
+    // The turn's own affordances already cover this; callers OR the two, so
+    // returning true here would just double-count.
+    expect(deriveBackgroundActive("running", true)).toBe(false);
+  });
+
+  it("is false without background work", () => {
+    expect(deriveBackgroundActive("idle", false)).toBe(false);
+    expect(deriveBackgroundActive("idle", undefined)).toBe(false);
+    expect(deriveBackgroundActive(undefined, undefined)).toBe(false);
+  });
+
+  it("stays independent of deriveTurnActive", () => {
+    // Load-bearing: deriveTurnActive drives the Stop button and send routing.
+    // Background work must not make it true — a Stop would stop nothing and
+    // the next message would be routed into the queue (host 409).
+    expect(deriveTurnActive(false, "idle")).toBe(false);
+    expect(deriveBackgroundActive("idle", true)).toBe(true);
   });
 });

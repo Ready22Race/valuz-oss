@@ -51,6 +51,34 @@ export const deriveTurnActive = (
 ): boolean => sendPending || status === "running";
 
 /**
+ * Whether the session has BACKGROUND work in flight while no turn is running.
+ *
+ * A ``run_in_background`` task outlives the turn that launched it: the turn
+ * genuinely ends (``status`` goes ``idle``), but the session is not done —
+ * the server keeps saying so via ``SessionDetail.background`` /
+ * ``SessionSummary.background`` (both read ``bg_busy_session_ids()``).
+ *
+ * This is deliberately SEPARATE from ``deriveTurnActive`` rather than folded
+ * into it, because the two drive different affordances and the difference is
+ * load-bearing (see ``SessionSummary.background`` in the backend dto):
+ *
+ * - loading affordances (shimmer, "已处理 X 秒" timer, header pill) → BOTH
+ * - the Stop button and send ROUTING → only ``deriveTurnActive``
+ *
+ * Folding background into the turn-active flag would offer a Stop that stops
+ * nothing (there is no turn to interrupt) and would route the next message
+ * into the queue, where the host rejects it with 409 "Session is already
+ * running". So callers must keep them apart.
+ *
+ * Returns false while a turn IS running — the turn's own affordances already
+ * cover that, and the caller ORs the two for display.
+ */
+export const deriveBackgroundActive = (
+  status: string | null | undefined,
+  background: boolean | null | undefined,
+): boolean => background === true && status !== "running";
+
+/**
  * Whether a ``session.update`` frame's status may be applied to the session
  * list (and thereby the header pill / composer busy state).
  *
