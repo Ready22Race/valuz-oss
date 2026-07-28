@@ -167,10 +167,12 @@ OAuth 页面，以及对外的 HTTP 接口。宿主自有的表以 `valuz_*` 为
 **任务**是一种 lead/member 编排。持久的 `valuz_task` 头部拥有结构化的 **plan DAG**；
 `valuz_task_session` 索引它所拥有的内核 session——恰好一个 **lead** session 加 N 个 **member** 子运行。
 lead 驱动一个 `plan → dispatch(按 key) → review(approve|rework) → finish` 循环：
-它把一个就绪的 plan 节点派给一个 member（在自己子运行目录中的兄弟 `asyncio` 任务），
-member 把 manifest 同步返回到 lead 的工具调用中，lead 再审阅它（approve 解锁后继；rework 下发反馈）。
-任务子系统按层划分（Transport / Services / Runtime / Domain），以状态优先的 `LiveMemberRegistry`
-为基石。
+dispatch 是**非阻塞**的——member 作为兄弟 `asyncio` actor 运行在任务共享的 cwd 中，
+经进程内邮箱（`member_done`）回报，lead 用 `await_members` 收集结果后再审阅
+（approve 解锁后继；rework 下发反馈）。子系统按层划分（Transport / Services /
+Runtime / Domain）：所有 actor 经由唯一的启动原语（`tasks/launcher.py`）拉起，
+所有 plan 写入经由唯一的授权入口（`tasks/plan_commands.py`，MCP 工具与 REST 共用），
+以状态优先的 `LiveMemberRegistry` 为协调基石。
 
 ---
 

@@ -215,11 +215,14 @@ A **task** is a lead/member orchestration. A durable `valuz_task`
 header owns a structured **plan DAG**; `valuz_task_session` indexes the kernel
 sessions it owns — exactly one **lead** session plus N **member** sub-runs. The
 lead drives a `plan → dispatch(by key) → review(approve|rework) → finish` loop:
-it dispatches a ready plan node to a member (a sibling `asyncio` task in its own
-subrun directory), the member returns a manifest synchronously into the lead's
-tool call, and the lead reviews it (approve unlocks dependents; rework sends
-feedback). The task subsystem is layered (Transport / Services / Runtime /
-Domain) with a state-first `LiveMemberRegistry` as its keystone.
+dispatch is **non-blocking** — the member runs as a sibling `asyncio` actor in
+the task's shared cwd, reports back through an in-process mailbox
+(`member_done`), and the lead collects results with `await_members` before
+reviewing (approve unlocks dependents; rework sends feedback). The subsystem is
+layered (Transport / Services / Runtime / Domain): every actor is started
+through one launch primitive (`tasks/launcher.py`), every plan write goes
+through one authorized door (`tasks/plan_commands.py`, shared by the MCP tools
+and REST), and a state-first `LiveMemberRegistry` is the coordination keystone.
 
 ---
 
