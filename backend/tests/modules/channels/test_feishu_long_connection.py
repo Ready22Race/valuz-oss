@@ -185,3 +185,62 @@ def _message_event() -> P2ImMessageReceiveV1:
             },
         }
     )
+
+
+async def test_load_enabled_configs_uses_row_owner_not_local_identity(
+    tmp_path, monkeypatch
+) -> None:
+    """Bindings created under an edition user id (e.g. a logged-in commercial
+    user) must load with that owner — resolving the device-fingerprint local
+    id here would silently produce zero connections."""
+    from contextlib import asynccontextmanager
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from valuz_agent.infra.database import Base
+    from valuz_agent.modules.channels.datastore import AgentChannelBindingDatastore
+    from valuz_agent.modules.channels.models import AgentChannelBindingRow
+
+    db_file = tmp_path / "channels.db"
+    sync_engine = create_engine(
+        f"sqlite:///{db_file}", connect_args={"check_same_thread": False}
+    )
+    Base.metadata.create_all(sync_engine, tables=[AgentChannelBindingRow.__table__])
+    sessionmaker_ = async_sessionmaker(
+        bind=create_async_engine(f"sqlite+aiosqlite:///{db_file}"),
+        expire_on_commit=False,
+    )
+
+    async with sessionmaker_() as db:
+        await AgentChannelBindingDatastore(db).upsert(
+            user_id="commercial-user-1",
+            platform="feishu",
+            agent_slug="valuz-helper",
+            channel_instance_id="feishu-main",
+            bot_id="cli_app_1",
+            secret_ref="channel/feishu/valuz-helper",
+            enabled=True,
+        )
+        await db.commit()
+
+    @asynccontextmanager
+    async def fake_unit_of_work(**_kwargs):
+        async with sessionmaker_() as session:
+            yield session
+
+    secret_reads: list[tuple[str, str]] = []
+
+    def fake_secret_get(user_id: str, ref: str) -> str:
+        secret_reads.append((user_id, ref))
+        return json.dumps({"app_secret": "s3cret"})
+
+    monkeypatch.setattr(feishu_runtime, "async_unit_of_work", fake_unit_of_work)
+    monkeypatch.setattr(feishu_runtime.secret_store, "get", fake_secret_get)
+
+    configs = await feishu_runtime._load_enabled_feishu_configs()
+
+    assert [config.owner_user_id for config in configs] == ["commercial-user-1"]
+    assert configs[0].app_id == "cli_app_1"
+    assert configs[0].app_secret == "s3cret"
+    assert secret_reads == [("commercial-user-1", "channel/feishu/valuz-helper")]

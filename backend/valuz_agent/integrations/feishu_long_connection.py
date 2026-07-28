@@ -328,6 +328,10 @@ class FeishuSupervisor:
     async def restart(self) -> None:
         await self._cancel_startup_task()
         await self._shutdown_connections()
+        from valuz_agent.modules.channels.config import agent_channels_active
+
+        if not agent_channels_active():
+            return
         configs = await _load_enabled_feishu_configs()
         for config in configs:
             stop_event = asyncio.Event()
@@ -475,24 +479,24 @@ async def _dispatch_to_channel_ingress(
 
 
 async def _load_enabled_feishu_configs() -> list[FeishuLongConnectionConfig]:
-    from valuz_agent.infra.local_identity import resolve_local_user_id
-
-    owner = resolve_local_user_id()
+    # Owner comes from each binding row, never from ambient process identity:
+    # editions that override request identity (e.g. a logged-in commercial
+    # user) store bindings under that user, which the device-fingerprint
+    # local id would never match — the supervisor would silently load nothing.
     async with async_unit_of_work() as db:
         rows = await AgentChannelBindingDatastore(db).list_enabled(
-            user_id=owner,
             platform="feishu",
         )
     configs: list[FeishuLongConnectionConfig] = []
     for row in rows:
-        secret = _read_secret(owner, row.secret_ref)
+        secret = _read_secret(row.owner_user_id, row.secret_ref)
         if not secret.get("app_secret"):
             logger.warning("Feishu binding for %s has no stored app secret", row.agent_slug)
             continue
         configs.append(
             FeishuLongConnectionConfig(
                 channel_instance_id=row.channel_instance_id,
-                owner_user_id=owner,
+                owner_user_id=row.owner_user_id,
                 agent_slug=row.agent_slug,
                 app_id=row.bot_id,
                 app_secret=str(secret["app_secret"]),

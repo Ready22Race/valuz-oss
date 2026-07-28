@@ -399,6 +399,10 @@ class WeComAIBotSupervisor:
     async def restart(self) -> None:
         await self._cancel_startup_task()
         await self._shutdown_connections()
+        from valuz_agent.modules.channels.config import agent_channels_active
+
+        if not agent_channels_active():
+            return
         configs = await _load_enabled_wecom_aibot_configs()
         if not configs:
             return
@@ -531,24 +535,24 @@ async def _dispatch_to_channel_ingress(
 
 
 async def _load_enabled_wecom_aibot_configs() -> list[WeComAIBotConfig]:
-    from valuz_agent.infra.local_identity import resolve_local_user_id
-
-    owner = resolve_local_user_id()
+    # Owner comes from each binding row, never from ambient process identity:
+    # editions that override request identity (e.g. a logged-in commercial
+    # user) store bindings under that user, which the device-fingerprint
+    # local id would never match — the supervisor would silently load nothing.
     async with async_unit_of_work() as db:
         rows = await AgentChannelBindingDatastore(db).list_enabled(
-            user_id=owner,
             platform="wecom_aibot",
         )
     configs: list[WeComAIBotConfig] = []
     for row in rows:
-        secret = secret_store.get(owner, row.secret_ref) if row.secret_ref else None
+        secret = secret_store.get(row.owner_user_id, row.secret_ref) if row.secret_ref else None
         if not secret:
             logger.warning("WeCom AIBot binding for %s has no stored secret", row.agent_slug)
             continue
         configs.append(
             WeComAIBotConfig(
                 channel_instance_id=row.channel_instance_id,
-                owner_user_id=owner,
+                owner_user_id=row.owner_user_id,
                 agent_slug=row.agent_slug,
                 bot_id=row.bot_id,
                 secret=secret,
