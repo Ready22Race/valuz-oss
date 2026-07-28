@@ -26,15 +26,13 @@ import logging
 import time
 from typing import Any
 
-from valuz_agent.adapters import kernel_client
-from valuz_agent.ports.sandbox_allocator import SandboxScope
-from valuz_agent.modules.sessions import project_index
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.tasks import planning
 from valuz_agent.modules.tasks.actor_runner import (
     ActorRunner,
     _member_run_dir,
 )
+from valuz_agent.modules.tasks import launcher
 from valuz_agent.modules.tasks.events import record_subtask_failed
 from valuz_agent.modules.tasks.datastore import (
     TaskDatastore,
@@ -42,7 +40,6 @@ from valuz_agent.modules.tasks.datastore import (
     TaskSessionDatastore,
 )
 from valuz_agent.modules.tasks.live_member_registry import LiveMemberRegistry
-from valuz_agent.modules.tasks.mailbox import mailbox_registry
 from valuz_agent.modules.tasks.models import TaskSessionRow
 from valuz_agent.modules.tasks.outcome import Failure
 from valuz_agent.modules.tasks.plan import TaskPlan
@@ -191,15 +188,12 @@ class DispatcherService:
                 )
                 return {"error": resolved.credential_gap, "status": "failed", "agent": agent}
 
-            await kernel_client.create_session(
-                user_id, member_session, scope=SandboxScope(kind="task", id=task_id)
-            )
-            await project_index.record(
-                project_id,
-                member_session.id,
+            await launcher.create_task_session(
+                user_id,
+                member_session,
+                task_id=task_id,
+                project_id=project_id,
                 kind="task_subtask",
-                origin="task",
-                user_id=user_id,
             )
 
             await run_ds.create_run(
@@ -245,13 +239,17 @@ class DispatcherService:
             user_id=user_id,
         )
 
-        self._spawn_member(
+        launcher.spawn_actor(
+            self._actor,
+            session_id=member_session.id,
+            prompt=member_brief,
+            role="subtask",
             task_id=task_id,
             project_id=project_id,
-            lead_session_id=lead_session_id,
-            member_session_id=member_session.id,
-            brief=member_brief,
             user_id=user_id,
+            registry=self._members,
+            dispatch_epoch=time.time(),
+            lead_session_id=lead_session_id,
         )
 
         return {
@@ -259,41 +257,3 @@ class DispatcherService:
             "agent": agent,
             "status": "dispatched",
         }
-
-    def _spawn_member(
-        self,
-        *,
-        task_id: str,
-        project_id: str,
-        lead_session_id: str,
-        member_session_id: str,
-        brief: str,
-        user_id: str,
-    ) -> None:
-        """Register the member and start its actor loop — ATOMICALLY.
-
-        A plain ``def`` on purpose: a concurrent ``_broadcast_shutdown`` drains
-        the live set in ONE pop, so an ``await`` between "member exists" and
-        "member registered" lets the broadcast miss it — the member is never
-        told to stop and hangs until its idle TTL. Inside a sync function
-        ``await`` is a SyntaxError, so the compiler enforces the rule on every
-        edit; work that must await belongs before this call, not inside it.
-
-        The LEAD's mailbox registers here too (idempotent) so a member's
-        ``member_done`` can never land on an unregistered inbox and vanish.
-        """
-        mailbox_registry.register(lead_session_id)
-        self._members.add_member(task_id, member_session_id, dispatch_epoch=time.time())
-        mailbox_registry.register(member_session_id)
-        # run_actor_loop's own register() is idempotent; doing it above means a
-        # shutdown racing ahead of the loop's first tick is queued, not dropped.
-        asyncio.create_task(
-            self._actor.run_actor_loop(
-                session_id=member_session_id,
-                initial_prompt=brief,
-                role="subtask",
-                task_id=task_id,
-                project_id=project_id,
-                user_id=user_id,
-            )
-        )

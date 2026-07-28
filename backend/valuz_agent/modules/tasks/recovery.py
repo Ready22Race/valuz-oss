@@ -27,6 +27,7 @@ from valuz_agent.modules.tasks import planning
 from valuz_agent.modules.tasks.actor_runner import ActorRunner, collect_manifest
 from valuz_agent.modules.tasks.coordination import CoordinationService
 from valuz_agent.adapters.agent_resolver import resolve_agent_display_name
+from valuz_agent.modules.tasks import launcher
 from valuz_agent.modules.tasks.events import block_task, finalize_task, record_subtask_stopped  # noqa: I001
 from valuz_agent.modules.tasks.datastore import (
     TaskDatastore,
@@ -228,7 +229,6 @@ class RecoveryService:
             )
         for member_sid, brief, m_run_dir, m_slug, m_key in resume_members:
             await _evict_runtime(member_sid)
-            self._members.add_member(task_id, member_sid)
             resume_prompt = brief or "继续完成你的子任务,完成后会汇报给 lead。"
             # Fence the goal-mode re-injection: an over-cap subtask goal would
             # blow the ``/goal`` payload again on resume — spill it to a doc and
@@ -241,15 +241,17 @@ class RecoveryService:
                     label=f"{m_slug}-{m_key}",
                     is_lead=False,
                 )
-            asyncio.create_task(
-                self._actor.run_actor_loop(
-                    session_id=member_sid,
-                    initial_prompt=resume_prompt,
-                    role="subtask",
-                    task_id=task_id,
-                    project_id=project_id,
-                    user_id=user_id,
-                )
+            # No dispatch_epoch on the recovery branch: a resumed member's
+            # artifacts predate the respawn, so attribution restarts from zero.
+            launcher.spawn_actor(
+                self._actor,
+                session_id=member_sid,
+                prompt=resume_prompt,
+                role="subtask",
+                task_id=task_id,
+                project_id=project_id,
+                user_id=user_id,
+                registry=self._members,
             )
         await _evict_runtime(lead_session_id)
         lead_brief = (
@@ -266,15 +268,14 @@ class RecoveryService:
                 "用户在恢复任务时附带了上面的指令——它是权威的用户意图,请优先据此调整编排"
                 "(必要时 modify_plan / rework)再继续。"
             )
-        asyncio.create_task(
-            self._actor.run_actor_loop(
-                session_id=lead_session_id,
-                initial_prompt=lead_brief,
-                role="lead",
-                task_id=task_id,
-                project_id=project_id,
-                user_id=user_id,
-            )
+        launcher.spawn_actor(
+            self._actor,
+            session_id=lead_session_id,
+            prompt=lead_brief,
+            role="lead",
+            task_id=task_id,
+            project_id=project_id,
+            user_id=user_id,
         )
         return True
 

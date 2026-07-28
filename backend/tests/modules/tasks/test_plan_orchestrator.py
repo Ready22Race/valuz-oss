@@ -16,6 +16,7 @@ import pytest
 import valuz_agent.boot.kernel  # noqa: F401
 from sqlalchemy import select
 from valuz_agent.adapters import kernel_client as kernel_client_mod
+from valuz_agent.modules.tasks import launcher as launcher_mod
 from valuz_agent.modules.tasks import planning
 from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionRow
 from valuz_agent.modules.tasks.orchestrator import TaskOrchestrator
@@ -1971,7 +1972,9 @@ def test_commit_task_creates_lead_session_with_task_scope(
     monkeypatch.setattr(res_mod, "_provider_resolver_deps", lambda _db: {})
     monkeypatch.setattr(lc_mod.kernel_client, "create_session", _capture_create_session)
     monkeypatch.setattr(
-        lc_mod, "project_index", SimpleNamespace(record=_as_async(lambda *_a, **_k: None))
+        launcher_mod,
+        "project_index",
+        SimpleNamespace(record=_as_async(lambda *_a, **_k: None)),
     )
 
     async def _run() -> dict:
@@ -2063,7 +2066,9 @@ def test_task_lifecycle_event_trace_golden(db_factory, tmp_path, monkeypatch) ->
     monkeypatch.setattr(kernel_client_mod, "get_session", _as_async(lambda *_a, **_k: None))
     monkeypatch.setattr(kernel_client_mod, "set_mode", _as_async(lambda *_a, **_k: None))
     monkeypatch.setattr(
-        lc_mod, "project_index", SimpleNamespace(record=_as_async(lambda *_a, **_k: None))
+        launcher_mod,
+        "project_index",
+        SimpleNamespace(record=_as_async(lambda *_a, **_k: None)),
     )
     # draft_task needs a project row + task file path via lifecycle namespace too.
     import valuz_agent.modules.projects.datastore as ws_src
@@ -2085,11 +2090,15 @@ def test_task_lifecycle_event_trace_golden(db_factory, tmp_path, monkeypatch) ->
     async def _run() -> None:
         orch = TaskOrchestrator()
         monkeypatch.setattr(orch._actor, "run_actor_loop", _as_async(lambda **_k: None))
-        from valuz_agent.modules.tasks.dispatcher import (
-            kernel_client as disp_kernel,  # shared module object
+        # session creation goes through the launcher now — same shared
+        # kernel_client module object, patched once.
+        from valuz_agent.modules.tasks.launcher import (
+            kernel_client as launch_kernel,
         )
 
-        monkeypatch.setattr(disp_kernel, "create_session", _as_async(lambda *_a, **_k: None))
+        monkeypatch.setattr(
+            launch_kernel, "create_session", _as_async(lambda *_a, **_k: None)
+        )
 
         # 1) draft → 2) plan → 3) commit
         row = await orch.lifecycle.draft_task(

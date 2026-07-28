@@ -14,23 +14,20 @@ composition root — the protocol keeps the seam typed.
 # ruff: noqa: I001
 from __future__ import annotations
 
-import asyncio
 import logging
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
 from valuz_agent.adapters import kernel_client
-from valuz_agent.ports.sandbox_allocator import SandboxScope
 from valuz_agent.adapters.data_reader import data_reader
-from valuz_agent.modules.sessions import project_index
 from valuz_agent.adapters.agent_resolver import (
     resolve_agent_display_name,
 )
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.infra.time_utils import now_ms
-from valuz_agent.modules.tasks import planning
+from valuz_agent.modules.tasks import launcher, planning
 from valuz_agent.modules.tasks.task_worktree import (
     resolve_task_cwd,
     task_worktree_notice,
@@ -83,6 +80,45 @@ class LifecycleService:
         self._members = registry
         self._actor = actor_runner
         self._coordination = coordination
+
+    @staticmethod
+    async def _complete_task(
+        db: Any,
+        *,
+        user_id: str,
+        project_id: str,
+        task_id: str,
+        lead_session_id: str,
+        summary: str,
+        artifacts: list[str],
+        auto_finalized: bool = False,
+    ) -> None:
+        """The ``completed`` terminal pair: settle the lead run + finalize.
+
+        The two spellings (explicit ``finish_task``, host-side auto-finalize)
+        must stay identical — they differ only in who decided and whether the
+        ``auto_finalized`` marker rides the payload.
+        """
+        await TaskSessionDatastore(db).update_run_by_session(
+            session_id=lead_session_id,
+            status="completed",
+            ended_at=now_ms(),
+        )
+        await finalize_task(
+            db,
+            user_id=user_id,
+            project_id=project_id,
+            task_id=task_id,
+            status="completed",
+            event_type="task_completed",
+            actor=lead_session_id,
+            session_id=lead_session_id,
+            payload={
+                "summary": summary,
+                "artifacts": artifacts,
+                **({"auto_finalized": True} if auto_finalized else {}),
+            },
+        )
 
     # ------------------------------------------------------------------
     # kickoff
@@ -274,15 +310,12 @@ class LifecycleService:
                     + "\n".join(f"- {g}" for g in member_gaps)
                 )
 
-            await kernel_client.create_session(
-                user_id, lead_session, scope=SandboxScope(kind="task", id=task_id)
-            )
-            await project_index.record(
-                project_id,
-                lead_session.id,
+            await launcher.create_task_session(
+                user_id,
+                lead_session,
+                task_id=task_id,
+                project_id=project_id,
                 kind="task_lead",
-                origin="task",
-                user_id=user_id,
             )
 
             # Record the lead run in valuz_task_session
@@ -316,16 +349,14 @@ class LifecycleService:
         # by member_done / send until finish_task (the actor loop's finalize
         # callback auto-closes a lead that ends without an explicit finish).
 
-        mailbox_registry.register(lead_session.id)
-        asyncio.create_task(
-            self._actor.run_actor_loop(
-                session_id=lead_session.id,
-                initial_prompt=lead_brief,
-                role="lead",
-                task_id=task_id,
-                project_id=project_id,
-                user_id=user_id,
-            )
+        launcher.spawn_actor(
+            self._actor,
+            session_id=lead_session.id,
+            prompt=lead_brief,
+            role="lead",
+            task_id=task_id,
+            project_id=project_id,
+            user_id=user_id,
         )
 
         return task_row
@@ -536,15 +567,12 @@ class LifecycleService:
                     "for project members:\n" + "\n".join(f"- {g}" for g in member_gaps)
                 }
 
-            await kernel_client.create_session(
-                user_id, lead_session, scope=SandboxScope(kind="task", id=task_id)
-            )
-            await project_index.record(
-                project_id,
-                lead_session.id,
+            await launcher.create_task_session(
+                user_id,
+                lead_session,
+                task_id=task_id,
+                project_id=project_id,
                 kind="task_lead",
-                origin="task",
-                user_id=user_id,
             )
 
             # DB writes: create lead run row + flip task status + append event
@@ -595,16 +623,14 @@ class LifecycleService:
         # roll back). If the spawn fails the task is already ``active``, and
         # the health monitor marks it blocked so the user can resume.
 
-        mailbox_registry.register(lead_session.id)
-        asyncio.create_task(
-            self._actor.run_actor_loop(
-                session_id=lead_session.id,
-                initial_prompt=lead_brief,
-                role="lead",
-                task_id=task_id,
-                project_id=project_id,
-                user_id=user_id,
-            )
+        launcher.spawn_actor(
+            self._actor,
+            session_id=lead_session.id,
+            prompt=lead_brief,
+            role="lead",
+            task_id=task_id,
+            project_id=project_id,
+            user_id=user_id,
         )
 
         return {
@@ -701,7 +727,6 @@ class LifecycleService:
         # bug this fallback exists to prevent. Every caller must thread the owner.
         async with async_unit_of_work() as db:
             task_ds = TaskDatastore(db)
-            run_ds = TaskSessionDatastore(db)
 
             task = await task_ds.get_task_by_project(user_id, project_id, task_id)
             if task is None or task.status != "active":
@@ -817,21 +842,15 @@ class LifecycleService:
                 "(auto-finalized) Lead ended its turn with no pending subtasks; "
                 "task closed automatically."
             )
-            await run_ds.update_run_by_session(
-                session_id=lead_session_id,
-                status="completed",
-                ended_at=now_ms(),
-            )
-            await finalize_task(
+            await self._complete_task(
                 db,
                 user_id=user_id,
                 project_id=project_id,
                 task_id=task_id,
-                status="completed",
-                event_type="task_completed",
-                actor=lead_session_id,
-                session_id=lead_session_id,
-                payload={"summary": summary, "artifacts": [], "auto_finalized": True},
+                lead_session_id=lead_session_id,
+                summary=summary,
+                artifacts=[],
+                auto_finalized=True,
             )
             logger.info(
                 "auto-finalize: task %s completed (lead natural end, no explicit finish_task)",
@@ -1172,7 +1191,6 @@ class LifecycleService:
         finished_task_row: TaskRow | None = None
         async with async_unit_of_work() as db:
             task_ds = TaskDatastore(db)
-            run_ds = TaskSessionDatastore(db)
 
             # Fetched for the plan guard below AND for the task-worktree
             # teardown after the terminal writes commit.
@@ -1211,26 +1229,33 @@ class LifecycleService:
 
             if rejected is None:
                 # Mark lead run as completed
-                await run_ds.update_run_by_session(
-                    session_id=lead_session_id,
-                    status="completed",
-                    ended_at=now_ms(),
-                )
-
-                await finalize_task(
-                    db,
-                    user_id=user_id,
-                    project_id=project_id,
-                    task_id=task_id,
-                    status=final_status,
-                    event_type=event_type,
-                    actor=lead_session_id,
-                    session_id=lead_session_id,
-                    payload={
-                        "summary": summary,
-                        "artifacts": artifacts or [],
-                    },
-                )
+                if final_status == "completed":
+                    await self._complete_task(
+                        db,
+                        user_id=user_id,
+                        project_id=project_id,
+                        task_id=task_id,
+                        lead_session_id=lead_session_id,
+                        summary=summary,
+                        artifacts=artifacts or [],
+                    )
+                else:  # stopped — same settle, different terminal event
+                    await TaskSessionDatastore(db).update_run_by_session(
+                        session_id=lead_session_id,
+                        status="completed",
+                        ended_at=now_ms(),
+                    )
+                    await finalize_task(
+                        db,
+                        user_id=user_id,
+                        project_id=project_id,
+                        task_id=task_id,
+                        status=final_status,
+                        event_type=event_type,
+                        actor=lead_session_id,
+                        session_id=lead_session_id,
+                        payload={"summary": summary, "artifacts": artifacts or []},
+                    )
 
         if rejected is not None:
             return rejected

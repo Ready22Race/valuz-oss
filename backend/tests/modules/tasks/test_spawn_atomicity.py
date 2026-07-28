@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 
+from valuz_agent.modules.tasks import launcher
 from valuz_agent.modules.tasks.actor_runner import ActorRunner
 from valuz_agent.modules.tasks.coordination import CoordinationService
 from valuz_agent.modules.tasks.dispatcher import DispatcherService
@@ -40,16 +41,16 @@ LOCAL_USER_ID = "local-test-owner"
 # ---------------------------------------------------------------------------
 
 
-def test_spawn_member_is_synchronous() -> None:
-    """``DispatcherService._spawn_member`` must never become ``async``.
+def test_spawn_actor_is_synchronous() -> None:
+    """``launcher.spawn_actor`` must never become ``async``.
 
-    It registers the member's mailbox, adds it to the live set and starts its
-    actor loop. Those three have to land without the event loop getting a turn,
-    or a concurrent ``_broadcast_shutdown`` drains the set in between and the
-    member is lost. Keeping the function sync makes ``await`` a SyntaxError, so
-    the rule is checked on every edit rather than remembered.
+    It registers mailboxes, seeds the live set and starts the loop. Those have
+    to land without the event loop getting a turn, or a concurrent
+    ``_broadcast_shutdown`` drains the set in between and the member is lost.
+    Sync makes ``await`` a SyntaxError — checked on every edit, not remembered.
+    Every launch path (dispatch, kickoff, commit, recovery) goes through it.
     """
-    assert not inspect.iscoroutinefunction(DispatcherService._spawn_member)
+    assert not inspect.iscoroutinefunction(launcher.spawn_actor)
 
 
 def test_broadcast_shutdown_is_synchronous() -> None:
@@ -101,13 +102,17 @@ async def test_shutdown_reaches_a_member_spawned_concurrently() -> None:
     runner.run_actor_loop = _never_runs  # type: ignore[method-assign]
 
     async def _spawn() -> None:
-        dispatcher._spawn_member(
+        launcher.spawn_actor(
+            runner,
+            session_id=member,
+            prompt="do it",
+            role="subtask",
             task_id=task_id,
             project_id="w1",
-            lead_session_id=lead,
-            member_session_id=member,
-            brief="do it",
             user_id=LOCAL_USER_ID,
+            registry=registry,
+            dispatch_epoch=1.0,
+            lead_session_id=lead,
         )
 
     async def _shutdown() -> None:
