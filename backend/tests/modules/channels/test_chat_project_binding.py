@@ -468,3 +468,25 @@ def test_direct_chat_continues_its_own_quick_chat_session() -> None:
     )
     assert decision.kind == ChannelRouteDecisionKind.REUSE_SESSION
     assert decision.session_id == "session-7"
+
+
+def test_direct_chat_does_not_resume_a_leftover_project_session() -> None:
+    """The DM used to run in the project, so its newest lineage points there.
+    Continuing it would drop the turn straight back into the project this
+    branch just decided against — observed live before this guard."""
+    leftover = ChannelThreadBinding(
+        channel_instance_id="feishu-main",
+        external_chat_id="chat-1",
+        external_thread_id="chat-1",
+        agent_slug="helper",
+        project_id="proj-a",
+        session_id="session-in-project",
+    )
+    decision = AgentChannelResolver().resolve(
+        _context(is_direct_chat=True, is_top_level_mention=False),
+        placements=[_placement("proj-a")],
+        existing_binding=leftover,
+    )
+    assert decision.kind == ChannelRouteDecisionKind.NEW_SESSION
+    assert decision.project_id == "chat-default"
+    assert decision.reason == "direct_chat_quick_chat"

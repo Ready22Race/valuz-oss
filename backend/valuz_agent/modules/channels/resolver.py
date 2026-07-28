@@ -81,7 +81,9 @@ class AgentChannelResolver:
         if not active_placements or (
             context.is_direct_chat and explicit is None and bound is None
         ):
-            return self._quick_chat_decision(context, existing_binding)
+            return self._quick_chat_decision(
+                context, existing_binding, project_placements=set(by_project_id)
+            )
 
         if explicit is not None:
             return self._new_session(context, explicit, reason="explicit_project_match")
@@ -141,17 +143,27 @@ class AgentChannelResolver:
         self,
         context: ChannelMentionContext,
         existing_binding: ChannelThreadBinding | None,
+        project_placements: set[str] | None = None,
     ) -> AgentChannelRouteDecision:
         """Run the turn as a quick chat in an ephemeral project.
 
         ``CHAT_PROJECT_SENTINEL`` is materialized per session by
         SessionService. Continuation works through the thread binding, whose
         project id is a concrete chat project and therefore never appears in
-        ``placements`` — hence the dedicated match below rather than a
-        placement lookup.
+        ``placements`` — which is also how a *project* lineage is told apart
+        from a quick-chat one: a chat that used to run in a project keeps that
+        lineage, and continuing it would drop the turn straight back into the
+        project this branch just decided against.
         """
         if not context.explicit_new_hint and existing_binding is not None:
-            reuse = self._reuse_chat_binding(context, existing_binding)
+            in_project = (
+                existing_binding.project_id in project_placements
+                if project_placements
+                else False
+            )
+            reuse = (
+                None if in_project else self._reuse_chat_binding(context, existing_binding)
+            )
             if reuse is not None:
                 return reuse
         return self._decision(
