@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -30,6 +31,31 @@ def test_resolve_provider_id_falls_back_to_agent_config():
 def test_resolve_provider_id_none_when_missing():
     src = SimpleNamespace(metadata={"valuz": {}}, agent_config=SimpleNamespace(metadata={}))
     assert _resolve_provider_id(src) is None
+
+
+def test_direct_anthropic_deepseek_model_disables_thinking():
+    mp = SimpleNamespace(
+        base_url="https://api.deepseek.com/anthropic/v1/messages",
+        api_key="k",
+        api_protocol="anthropic",
+    )
+
+    chat_model = r._build_direct_chat_model(model="deepseek-v4-flash", mp=mp)
+
+    assert chat_model.thinking == {"type": "disabled"}
+    assert chat_model.max_tokens == 16384
+
+
+def test_direct_anthropic_non_deepseek_model_does_not_force_thinking():
+    mp = SimpleNamespace(
+        base_url="https://api.anthropic.com",
+        api_key="k",
+        api_protocol="anthropic",
+    )
+
+    chat_model = r._build_direct_chat_model(model="claude-sonnet-4-6", mp=mp)
+
+    assert chat_model.thinking is None
 
 
 @pytest.fixture
@@ -139,3 +165,154 @@ async def test_completer_sync_when_no_tool_use_id(patched):
     assert out == "Chart\n  data: 1,2,3"
     assert patched.get("forwarded", []) == []
     assert patched.get("subscribed", []) == []  # 没订阅
+
+
+async def test_completer_uses_direct_llm_for_non_official_api_key_provider(
+    patched, monkeypatch, caplog
+):
+    """非 Claude/Codex 官方订阅路径有显式 credential，不能再创建
+    ephemeral session；直接调用模型流，并把 chunk 转给调用方 tool card。"""
+
+    class _FakeChatModel:
+        async def astream(self, messages):
+            patched["direct_messages"] = messages
+            yield SimpleNamespace(content="root ")
+            yield SimpleNamespace(content=[{"type": "text", "text": "= Stack()"}])
+
+    monkeypatch.setattr(
+        r,
+        "_build_direct_chat_model",
+        lambda *, model, mp: _FakeChatModel(),
+    )
+    mp = SimpleNamespace(
+        base_url="https://example.test/v1",
+        api_key="k",
+        api_protocol="openai_response",
+    )
+    completer = r._make_completer(
+        user_id="u1",
+        runtime_provider="codex",
+        model="gpt-5-codex-api-key",
+        mp=mp,
+        calling_session_id="calling-sid",
+        tool_use_id="R1",
+    )
+
+    with caplog.at_level(logging.INFO, logger=r.__name__):
+        out = await completer("PROMPT")
+
+    assert out == "root = Stack()"
+    assert "req" not in patched
+    assert patched.get("deleted", []) == []
+    assert patched["direct_messages"][0].content == "PROMPT"
+    assert patched["forwarded"] == [
+        ("calling-sid", "tool_output_delta", {"id": "R1", "text": "root "}),
+        ("calling-sid", "tool_output_delta", {"id": "R1", "text": "= Stack()"}),
+    ]
+    assert (
+        "generate_ui: using direct LLM stream protocol=openai_response "
+        "model=gpt-5-codex-api-key tool_use_id=R1"
+    ) in caplog.text
+    assert (
+        "generate_ui: direct LLM first_token raw_content='root ' "
+        "protocol=openai_response model=gpt-5-codex-api-key tool_use_id=R1"
+    ) in caplog.text
+    assert (
+        "generate_ui: direct LLM first_token text='root ' "
+        "protocol=openai_response model=gpt-5-codex-api-key tool_use_id=R1"
+    ) in caplog.text
+    assert "generate_ui: direct LLM stream_chunk #" not in caplog.text
+    assert (
+        "generate_ui: direct LLM stream finished status=ok protocol=openai_response "
+        "model=gpt-5-codex-api-key chunks=2 chars=14 tool_use_id=R1"
+    ) in caplog.text
+
+
+async def test_direct_llm_logs_finished_when_stream_errors(patched, monkeypatch, caplog):
+    class _FailingChatModel:
+        async def astream(self, messages):
+            yield SimpleNamespace(content="partial")
+            raise RuntimeError("stream broke")
+
+    monkeypatch.setattr(
+        r,
+        "_build_direct_chat_model",
+        lambda *, model, mp: _FailingChatModel(),
+    )
+    mp = SimpleNamespace(
+        base_url="https://example.test/v1",
+        api_key="k",
+        api_protocol="anthropic",
+    )
+    completer = r._make_completer(
+        user_id="u1",
+        runtime_provider="codex",
+        model="deepseek-v4-flash",
+        mp=mp,
+        calling_session_id="calling-sid",
+        tool_use_id="R2",
+    )
+
+    with caplog.at_level(logging.INFO, logger=r.__name__):
+        with pytest.raises(RuntimeError, match="stream broke"):
+            await completer("PROMPT")
+
+    assert (
+        "generate_ui: direct LLM stream finished status=error protocol=anthropic "
+        "model=deepseek-v4-flash chunks=1 chars=7 tool_use_id=R2"
+    ) in caplog.text
+
+
+async def test_direct_llm_falls_back_to_non_stream_when_stream_is_blank(
+    patched, monkeypatch, caplog
+):
+    class _BlankStreamChatModel:
+        async def astream(self, messages):
+            patched["stream_messages"] = messages
+            yield SimpleNamespace(content="")
+
+        async def ainvoke(self, messages):
+            patched["invoke_messages"] = messages
+            return SimpleNamespace(content="Fallback Chart")
+
+    monkeypatch.setattr(
+        r,
+        "_build_direct_chat_model",
+        lambda *, model, mp: _BlankStreamChatModel(),
+    )
+    mp = SimpleNamespace(
+        base_url="https://example.test/v1",
+        api_key="k",
+        api_protocol="anthropic",
+    )
+    completer = r._make_completer(
+        user_id="u1",
+        runtime_provider="codex",
+        model="deepseek-v4-flash",
+        mp=mp,
+        calling_session_id="calling-sid",
+        tool_use_id="R3",
+    )
+
+    with caplog.at_level(logging.INFO, logger=r.__name__):
+        out = await completer("PROMPT")
+
+    assert out == "Fallback Chart"
+    assert patched["stream_messages"][0].content == "PROMPT"
+    assert patched["invoke_messages"][0].content == "PROMPT"
+    assert patched["forwarded"] == [
+        ("calling-sid", "tool_output_delta", {"id": "R3", "text": "Fallback Chart"})
+    ]
+    assert (
+        "generate_ui: direct LLM stream produced no text; trying non-stream fallback "
+        "protocol=anthropic model=deepseek-v4-flash tool_use_id=R3"
+    ) in caplog.text
+    assert "generate_ui: direct LLM stream_chunk #" not in caplog.text
+    assert (
+        "generate_ui: direct LLM non-stream fallback text='Fallback Chart' "
+        "protocol=anthropic model=deepseek-v4-flash tool_use_id=R3"
+    ) in caplog.text
+    assert (
+        "generate_ui: direct LLM stream finished status=ok protocol=anthropic "
+        "model=deepseek-v4-flash chunks=0 chars=14 tool_use_id=R3"
+    ) in caplog.text

@@ -571,6 +571,8 @@
   "genui": {
     "cardTitle": "Generative UI",
     "empty": "Nothing to show yet",
+    "fullscreen": "Open fullscreen",
+    "fullscreenDescription": "Preview the generated UI in a larger workspace.",
     "generating": "Generating UI…",
     "error": "Generation failed"
   },

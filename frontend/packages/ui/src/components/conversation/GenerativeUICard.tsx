@@ -1,10 +1,25 @@
-import type { ComponentProps } from "react";
+import { useState, type ComponentProps } from "react";
 import { Renderer } from "@openuidev/react-lang";
 import { ThemeProvider } from "@openuidev/react-ui";
 import { openuiLibrary } from "@openuidev/react-ui/genui-lib";
+import { Maximize2 } from "lucide-react";
 
 import { useI18n } from "../../hooks/use-i18n";
+import { Button } from "../ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "../ui/dialog";
 import { Spinner } from "../ui/spinner";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "../ui/tooltip";
 
 type OpenUiTheme = NonNullable<
   ComponentProps<typeof ThemeProvider>["lightTheme"]
@@ -237,19 +252,60 @@ export interface GenerativeUICardProps {
   status?: "running" | "success" | "error";
 }
 
+const OPENUI_SCOPE_SELECTOR = '[data-openui-scope="generative-ui"]';
+
 const GENERATIVE_UI_LAYOUT_CSS = `
-  [data-slot="generative-ui-card"]
+  ${OPENUI_SCOPE_SELECTOR} {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} * {
+    box-sizing: border-box;
+    min-width: 0;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} :where([class^="openui-"], [class*=" openui-"]) {
+    max-width: 100%;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} :where(p, span, div, td, th) {
+    overflow-wrap: anywhere;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR}
     .openui-horizontal-bar-chart-container-inner-wrapper {
     height: auto !important;
     overflow: visible;
   }
 
-  [data-slot="generative-ui-card"]
+  ${OPENUI_SCOPE_SELECTOR}
     .openui-horizontal-bar-chart-main-container {
     height: auto;
     overflow-y: visible;
   }
 `;
+
+function OpenUiBody({
+  body,
+  status,
+}: {
+  body: string;
+  status?: GenerativeUICardProps["status"];
+}) {
+  return (
+    <ThemeProvider
+      lightTheme={VALUZ_OPENUUI_THEME}
+      cssSelector={OPENUI_SCOPE_SELECTOR}
+    >
+      <Renderer
+        library={openuiLibrary}
+        response={body}
+        isStreaming={status === "running"}
+      />
+    </ThemeProvider>
+  );
+}
 
 /**
  * Renders the OpenUI Lang produced by the ``generate_ui`` MCP tool as live,
@@ -259,31 +315,45 @@ const GENERATIVE_UI_LAYOUT_CSS = `
  */
 export function GenerativeUICard({ openui, status }: GenerativeUICardProps) {
   const { t } = useI18n();
+  const [fullscreenOpen, setFullscreenOpen] = useState(false);
   const body = extractContentText(openui);
+  const cardTitle = t("genui.cardTitle" as Parameters<typeof t>[0]);
+  const fullscreenLabel = t("genui.fullscreen" as Parameters<typeof t>[0]);
 
   return (
     <div
       data-slot="generative-ui-card"
+      data-openui-scope="generative-ui"
       className="rounded-xl border border-surface-border bg-surface overflow-hidden"
     >
       <style>{GENERATIVE_UI_LAYOUT_CSS}</style>
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-surface-border">
-        <span className="text-sm font-medium text-ink-heading">
-          {t("genui.cardTitle" as Parameters<typeof t>[0])}
+      <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-surface-border">
+        <span className="min-w-0 truncate text-sm font-medium text-ink-heading">
+          {cardTitle}
         </span>
+        <TooltipProvider delayDuration={150}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label={fullscreenLabel}
+                title={fullscreenLabel}
+                disabled={!body}
+                onClick={() => setFullscreenOpen(true)}
+                className="shrink-0 text-ink-muted hover:text-ink-heading"
+              >
+                <Maximize2 className="size-3.5" aria-hidden="true" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="left">{fullscreenLabel}</TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
       </div>
       <div className="min-w-0 overflow-x-auto p-3 [&>*]:min-w-0 [&>*]:max-w-full">
         {body ? (
-          <ThemeProvider
-            lightTheme={VALUZ_OPENUUI_THEME}
-            cssSelector="[data-slot='generative-ui-card']"
-          >
-            <Renderer
-              library={openuiLibrary}
-              response={body}
-              isStreaming={status === "running"}
-            />
-          </ThemeProvider>
+          <OpenUiBody body={body} status={status} />
         ) : (
           <div
             data-testid="genui-empty"
@@ -300,6 +370,24 @@ export function GenerativeUICard({ openui, status }: GenerativeUICardProps) {
           </div>
         )}
       </div>
+      <Dialog open={fullscreenOpen} onOpenChange={setFullscreenOpen}>
+        <DialogContent className="top-9 right-4 bottom-4 left-4 h-auto max-h-none w-auto max-w-none translate-x-0 translate-y-0 gap-0 overflow-hidden p-0 sm:max-w-none">
+          <DialogHeader className="border-b border-surface-border px-4 py-3 pr-12">
+            <DialogTitle className="text-sm leading-5">{cardTitle}</DialogTitle>
+            <DialogDescription className="sr-only">
+              {t("genui.fullscreenDescription" as Parameters<typeof t>[0])}
+            </DialogDescription>
+          </DialogHeader>
+          <div
+            data-testid="genui-fullscreen"
+            data-slot="generative-ui-fullscreen"
+            data-openui-scope="generative-ui"
+            className="min-h-0 flex-1 overflow-auto p-4 [&>*]:min-w-0 [&>*]:max-w-full"
+          >
+            {body ? <OpenUiBody body={body} status={status} /> : null}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
