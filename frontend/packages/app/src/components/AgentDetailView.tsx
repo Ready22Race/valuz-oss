@@ -208,6 +208,7 @@ export const AgentDetailView = ({
   const [feishuAppId, setFeishuAppId] = useState("");
   const [feishuAppSecret, setFeishuAppSecret] = useState("");
   const [savingFeishuChannel, setSavingFeishuChannel] = useState(false);
+  const [testingFeishuChannel, setTestingFeishuChannel] = useState(false);
 
   const { canDelete } = useResourceGuard(agent ?? {});
 
@@ -238,7 +239,12 @@ export const AgentDetailView = ({
   useEffect(() => {
     // No project outlet (e.g. the agent-library right panel) → nothing to
     // drive; the panel owns its own chrome.
-    if (!pageHeader || !setHeader || !setHeaderClassName || !setContentInnerClassName) {
+    if (
+      !pageHeader ||
+      !setHeader ||
+      !setHeaderClassName ||
+      !setContentInnerClassName
+    ) {
       return;
     }
     setHeader(pageHeader);
@@ -253,13 +259,14 @@ export const AgentDetailView = ({
 
   const loadData = useCallback(async () => {
     try {
-      const [tpl, wsRes, depRes, channelRes, feishuChannelRes] = await Promise.all([
-        agentsApi.getAgent(slug),
-        projectsApi.list(),
-        agentsApi.listDeployments(slug),
-        channelsApi.getWeComAIBotBinding(slug).catch(() => null),
-        channelsApi.getFeishuBinding(slug).catch(() => null),
-      ]);
+      const [tpl, wsRes, depRes, channelRes, feishuChannelRes] =
+        await Promise.all([
+          agentsApi.getAgent(slug),
+          projectsApi.list(),
+          agentsApi.listDeployments(slug),
+          channelsApi.getWeComAIBotBinding(slug).catch(() => null),
+          channelsApi.getFeishuBinding(slug).catch(() => null),
+        ]);
       setAgent(tpl);
       setProjects(wsRes.projects.filter((w) => w.kind === "project"));
       setDeployments(depRes.deployments);
@@ -274,7 +281,9 @@ export const AgentDetailView = ({
       setFeishuBinding(feishuChannelRes);
       if (feishuChannelRes) {
         setFeishuEnabled(
-          feishuChannelRes.agent_slug === slug ? feishuChannelRes.enabled : true,
+          feishuChannelRes.agent_slug === slug
+            ? feishuChannelRes.enabled
+            : true,
         );
         setFeishuAppId(feishuChannelRes.app_id);
         setFeishuAppSecret("");
@@ -497,11 +506,15 @@ export const AgentDetailView = ({
     const botId = aibotBotId.trim();
     const secret = aibotSecret.trim();
     if (!botId) {
-      toast.error(t("agent.wecomAibotBotIdRequired" as Parameters<typeof t>[0]));
+      toast.error(
+        t("agent.wecomAibotBotIdRequired" as Parameters<typeof t>[0]),
+      );
       return;
     }
     if (!aibotBinding?.has_secret && !secret) {
-      toast.error(t("agent.wecomAibotSecretRequired" as Parameters<typeof t>[0]));
+      toast.error(
+        t("agent.wecomAibotSecretRequired" as Parameters<typeof t>[0]),
+      );
       return;
     }
     setSavingChannel(true);
@@ -525,8 +538,9 @@ export const AgentDetailView = ({
     }
   };
 
-  const saveFeishuBinding = async () => {
+  const saveFeishuBinding = async (enabledOverride?: boolean) => {
     if (!agent) return;
+    const enabled = enabledOverride ?? feishuEnabled;
     const appId = feishuAppId.trim();
     const appSecret = feishuAppSecret.trim();
     if (!appId) {
@@ -534,18 +548,21 @@ export const AgentDetailView = ({
       return;
     }
     if (!feishuBinding?.has_app_secret && !appSecret) {
-      toast.error(t("agent.feishuAppSecretRequired" as Parameters<typeof t>[0]));
+      toast.error(
+        t("agent.feishuAppSecretRequired" as Parameters<typeof t>[0]),
+      );
       return;
     }
     setSavingFeishuChannel(true);
     try {
       const next = await channelsApi.updateFeishuBinding({
-        enabled: feishuEnabled,
+        enabled,
         agent_slug: agent.slug,
         app_id: appId,
         app_secret: appSecret,
       });
       setFeishuBinding(next);
+      setFeishuEnabled(next.enabled);
       setFeishuAppSecret("");
       toast.success(t("agent.feishuSaved" as Parameters<typeof t>[0]));
     } catch (err) {
@@ -555,6 +572,72 @@ export const AgentDetailView = ({
       );
     } finally {
       setSavingFeishuChannel(false);
+    }
+  };
+
+  // The enable switch persists immediately — a toggle that only lives in
+  // component state silently reverts on the next app restart (the stored
+  // binding still carries the old flag). Only possible once a binding with a
+  // stored secret exists; before that the switch just stages the initial save.
+  const toggleFeishuEnabled = (checked: boolean) => {
+    setFeishuEnabled(checked);
+    if (!agent || savingFeishuChannel) return;
+    const persistable =
+      feishuBinding?.agent_slug === agent.slug &&
+      feishuBinding.has_app_secret &&
+      feishuAppId.trim().length > 0;
+    if (!persistable) return;
+    void (async () => {
+      setSavingFeishuChannel(true);
+      try {
+        const next = await channelsApi.updateFeishuBinding({
+          enabled: checked,
+          agent_slug: agent.slug,
+          app_id: feishuAppId.trim(),
+          app_secret: feishuAppSecret.trim(),
+        });
+        setFeishuBinding(next);
+        setFeishuEnabled(next.enabled);
+      } catch (err) {
+        setFeishuEnabled(!checked);
+        const msg = err instanceof Error ? err.message : String(err);
+        toast.error(
+          `${t("agent.feishuEnableFailed" as Parameters<typeof t>[0])}: ${msg}`,
+        );
+      } finally {
+        setSavingFeishuChannel(false);
+      }
+    })();
+  };
+
+  const testFeishuBinding = async () => {
+    if (!agent) return;
+    setTestingFeishuChannel(true);
+    try {
+      const result = await channelsApi.testFeishuBinding(agent.slug);
+      if (result.credential_ok) {
+        toast.success(
+          t("agent.feishuTestCredentialOk" as Parameters<typeof t>[0]),
+        );
+      } else {
+        toast.error(
+          `${t("agent.feishuTestFailed" as Parameters<typeof t>[0])}: ${
+            result.error ?? result.connection_error ?? ""
+          }`,
+        );
+      }
+      // Refresh the stored binding so the status line reflects the probe.
+      const fresh = await channelsApi
+        .getFeishuBinding(agent.slug)
+        .catch(() => null);
+      if (fresh) setFeishuBinding(fresh);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(
+        `${t("agent.feishuTestFailed" as Parameters<typeof t>[0])}: ${msg}`,
+      );
+    } finally {
+      setTestingFeishuChannel(false);
     }
   };
 
@@ -1047,7 +1130,9 @@ export const AgentDetailView = ({
                           onClick={() =>
                             // Open the skill in the 技能库 (master-detail panel),
                             // not the standalone detail page.
-                            navigate(`/skills?skill=${encodeURIComponent(meta.id)}`)
+                            navigate(
+                              `/skills?skill=${encodeURIComponent(meta.id)}`,
+                            )
                           }
                           className="min-w-0 flex-1 cursor-pointer text-left"
                         >
@@ -1169,92 +1254,92 @@ export const AgentDetailView = ({
           <TabsContent value="channels" className="mt-4">
             <div className="flex flex-col gap-3">
               <div className="rounded-[14px] bg-card p-4 shadow-[var(--shadow-1)]">
-              <div className="flex items-start gap-3">
-                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-surface-soft text-ink-meta">
-                  <Bot className="h-4 w-4" />
-                </span>
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <h3 className="text-sm font-medium text-ink-heading">
-                      {t("agent.wecomAibotTitle" as Parameters<typeof t>[0])}
-                    </h3>
-                    {aibotBoundToThisAgent ? (
-                      <StatusPill
-                        status="ok"
-                        label={t(
-                          "agent.wecomAibotBound" as Parameters<typeof t>[0],
-                        )}
-                        className="px-1.5 py-0 text-[10px] leading-4"
-                      />
-                    ) : null}
-                    {aibotBoundToThisAgent ? (
-                      <StatusPill
-                        status={aibotRuntimeStatus.status}
-                        label={aibotRuntimeStatus.label}
-                        className="px-1.5 py-0 text-[10px] leading-4"
-                      />
-                    ) : null}
-                  </div>
-                </div>
-                <Switch
-                  checked={aibotEnabled}
-                  onCheckedChange={setAibotEnabled}
-                  aria-label={t(
-                    "agent.wecomAibotEnabled" as Parameters<typeof t>[0],
-                  )}
-                />
-              </div>
-
-              <div className="mt-4 flex flex-col gap-3">
-                <label className="flex flex-col gap-1.5">
-                  <span className="text-xs font-medium text-ink-heading">
-                    {t("agent.wecomAibotBotId" as Parameters<typeof t>[0])}
+                <div className="flex items-start gap-3">
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-surface-soft text-ink-meta">
+                    <Bot className="h-4 w-4" />
                   </span>
-                  <Input
-                    value={aibotBotId}
-                    onChange={(e) => setAibotBotId(e.target.value)}
-                    placeholder="aib..."
-                    className="font-mono text-xs"
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h3 className="text-sm font-medium text-ink-heading">
+                        {t("agent.wecomAibotTitle" as Parameters<typeof t>[0])}
+                      </h3>
+                      {aibotBoundToThisAgent ? (
+                        <StatusPill
+                          status="ok"
+                          label={t(
+                            "agent.wecomAibotBound" as Parameters<typeof t>[0],
+                          )}
+                          className="px-1.5 py-0 text-[10px] leading-4"
+                        />
+                      ) : null}
+                      {aibotBoundToThisAgent ? (
+                        <StatusPill
+                          status={aibotRuntimeStatus.status}
+                          label={aibotRuntimeStatus.label}
+                          className="px-1.5 py-0 text-[10px] leading-4"
+                        />
+                      ) : null}
+                    </div>
+                  </div>
+                  <Switch
+                    checked={aibotEnabled}
+                    onCheckedChange={setAibotEnabled}
+                    aria-label={t(
+                      "agent.wecomAibotEnabled" as Parameters<typeof t>[0],
+                    )}
                   />
-                </label>
-                <label className="flex flex-col gap-1.5">
-                  <span className="text-xs font-medium text-ink-heading">
-                    {t("agent.wecomAibotSecret" as Parameters<typeof t>[0])}
-                  </span>
-                  <div className="relative">
-                    <KeyRound className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-muted" />
+                </div>
+
+                <div className="mt-4 flex flex-col gap-3">
+                  <label className="flex flex-col gap-1.5">
+                    <span className="text-xs font-medium text-ink-heading">
+                      {t("agent.wecomAibotBotId" as Parameters<typeof t>[0])}
+                    </span>
                     <Input
-                      type="password"
-                      value={aibotSecret}
-                      onChange={(e) => setAibotSecret(e.target.value)}
-                      placeholder={
-                        aibotBinding?.has_secret
-                          ? t(
-                              "agent.wecomAibotSecretSaved" as Parameters<
-                                typeof t
-                              >[0],
-                            )
-                          : ""
-                      }
-                      className="pl-8 font-mono text-xs"
+                      value={aibotBotId}
+                      onChange={(e) => setAibotBotId(e.target.value)}
+                      placeholder="aib..."
+                      className="font-mono text-xs"
                     />
+                  </label>
+                  <label className="flex flex-col gap-1.5">
+                    <span className="text-xs font-medium text-ink-heading">
+                      {t("agent.wecomAibotSecret" as Parameters<typeof t>[0])}
+                    </span>
+                    <div className="relative">
+                      <KeyRound className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-muted" />
+                      <Input
+                        type="password"
+                        value={aibotSecret}
+                        onChange={(e) => setAibotSecret(e.target.value)}
+                        placeholder={
+                          aibotBinding?.has_secret
+                            ? t(
+                                "agent.wecomAibotSecretSaved" as Parameters<
+                                  typeof t
+                                >[0],
+                              )
+                            : ""
+                        }
+                        className="pl-8 font-mono text-xs"
+                      />
+                    </div>
+                  </label>
+                  <div className="flex justify-end">
+                    <Button
+                      size="sm"
+                      disabled={
+                        savingChannel ||
+                        !aibotBotId.trim() ||
+                        (!aibotBinding?.has_secret && !aibotSecret.trim())
+                      }
+                      onClick={() => void saveAibotBinding()}
+                    >
+                      {t("agent.wecomAibotBind" as Parameters<typeof t>[0])}
+                    </Button>
                   </div>
-                </label>
-                <div className="flex justify-end">
-                  <Button
-                    size="sm"
-                    disabled={
-                      savingChannel ||
-                      !aibotBotId.trim() ||
-                      (!aibotBinding?.has_secret && !aibotSecret.trim())
-                    }
-                    onClick={() => void saveAibotBinding()}
-                  >
-                    {t("agent.wecomAibotBind" as Parameters<typeof t>[0])}
-                  </Button>
                 </div>
               </div>
-            </div>
               <div className="rounded-[14px] bg-card p-4 shadow-[var(--shadow-1)]">
                 <div className="flex items-start gap-3">
                   <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-surface-soft text-ink-meta">
@@ -1274,18 +1359,45 @@ export const AgentDetailView = ({
                           className="px-1.5 py-0 text-[10px] leading-4"
                         />
                       ) : null}
-                      {feishuBoundToThisAgent ? (
+                    </div>
+                    {feishuBinding?.agent_slug === agent.slug ? (
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-ink-body">
+                        <span>
+                          {t(
+                            "agent.feishuConnectionStatus" as Parameters<
+                              typeof t
+                            >[0],
+                          )}
+                        </span>
                         <StatusPill
-                          status={feishuRuntimeStatus.status}
-                          label={feishuRuntimeStatus.label}
+                          status={
+                            feishuBinding.enabled
+                              ? feishuRuntimeStatus.status
+                              : "disconnected"
+                          }
+                          label={
+                            feishuBinding.enabled
+                              ? feishuRuntimeStatus.label
+                              : t(
+                                  "agent.feishuNotEnabled" as Parameters<
+                                    typeof t
+                                  >[0],
+                                )
+                          }
                           className="px-1.5 py-0 text-[10px] leading-4"
                         />
-                      ) : null}
-                    </div>
+                        {feishuBinding.enabled &&
+                        feishuBinding.connection_error ? (
+                          <span className="truncate text-ink-muted">
+                            {feishuBinding.connection_error}
+                          </span>
+                        ) : null}
+                      </div>
+                    ) : null}
                   </div>
                   <Switch
                     checked={feishuEnabled}
-                    onCheckedChange={setFeishuEnabled}
+                    onCheckedChange={toggleFeishuEnabled}
                     aria-label={t(
                       "agent.feishuEnabled" as Parameters<typeof t>[0],
                     )}
@@ -1327,13 +1439,27 @@ export const AgentDetailView = ({
                       />
                     </div>
                   </label>
-                  <div className="flex justify-end">
+                  <div className="flex justify-end gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={
+                        testingFeishuChannel ||
+                        savingFeishuChannel ||
+                        feishuBinding?.agent_slug !== agent.slug ||
+                        !feishuBinding?.has_app_secret
+                      }
+                      onClick={() => void testFeishuBinding()}
+                    >
+                      {t("agent.feishuTest" as Parameters<typeof t>[0])}
+                    </Button>
                     <Button
                       size="sm"
                       disabled={
                         savingFeishuChannel ||
                         !feishuAppId.trim() ||
-                        (!feishuBinding?.has_app_secret && !feishuAppSecret.trim())
+                        (!feishuBinding?.has_app_secret &&
+                          !feishuAppSecret.trim())
                       }
                       onClick={() => void saveFeishuBinding()}
                     >

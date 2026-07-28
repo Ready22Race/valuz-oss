@@ -144,4 +144,23 @@ describe("channelsApi", () => {
       app_secret: "app-secret",
     });
   });
+  it("probes a Feishu binding via the test endpoint", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({
+        credential_ok: true,
+        error: null,
+        connected: false,
+        connection_status: "stopped",
+        connection_error: null,
+      }),
+    );
+
+    const result = await channelsApi.testFeishuBinding("developer");
+
+    expect(result.credential_ok).toBe(true);
+    const [url, init] = fetchMock.mock.calls[0] ?? [];
+    expect(String(url)).toContain("/v1/channels/feishu/bindings/developer/test");
+    expect(init?.method).toBe("POST");
+  });
 });
+

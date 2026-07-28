@@ -228,6 +228,70 @@ async def update_feishu_binding(
     return _feishu_binding_response(user_id=user_id, agent_slug=agent_slug, binding=binding)
 
 
+class FeishuBindingTestResponse(BaseModel):
+    credential_ok: bool
+    error: str | None = None
+    connected: bool = False
+    connection_status: str = "stopped"
+    connection_error: str | None = None
+
+
+FEISHU_TENANT_TOKEN_URL = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+
+
+async def _check_feishu_credentials(app_id: str, app_secret: str) -> tuple[bool, str | None]:
+    """Exchange the app credentials for a tenant access token — the cheapest
+    call that proves app_id/app_secret are valid and Feishu is reachable."""
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                FEISHU_TENANT_TOKEN_URL,
+                json={"app_id": app_id, "app_secret": app_secret},
+            )
+        data: dict[str, Any] = resp.json()
+    except Exception as exc:  # noqa: BLE001 — an unreachable Feishu is a test result
+        return False, str(exc)
+    if resp.status_code >= 400 or data.get("code") != 0:
+        return False, str(data.get("msg") or f"HTTP {resp.status_code}")
+    return True, None
+
+
+@router.post(
+    "/feishu/bindings/{agent_slug}/test",
+    response_model=FeishuBindingTestResponse,
+)
+async def test_feishu_binding(
+    agent_slug: str,
+    user_id: Annotated[str, Depends(get_current_user_id)],
+) -> FeishuBindingTestResponse:
+    """One-click health probe: validate the stored app credentials against
+    Feishu and report the live long-connection status."""
+    async with async_unit_of_work() as db:
+        binding = await AgentChannelBindingDatastore(db).get(
+            user_id=user_id,
+            platform=FEISHU_PLATFORM,
+            agent_slug=agent_slug,
+        )
+    if binding is None:
+        raise HTTPException(status_code=404, detail="feishu binding not found")
+    secret = _read_feishu_secret(user_id=user_id, secret_ref=binding.secret_ref)
+    if not secret.app_secret:
+        raise HTTPException(status_code=422, detail="App Secret is required")
+    credential_ok, error = await _check_feishu_credentials(
+        binding.bot_id, secret.app_secret
+    )
+    runtime = feishu_supervisor.status_for(agent_slug)
+    return FeishuBindingTestResponse(
+        credential_ok=credential_ok,
+        error=error,
+        connected=runtime.connected,
+        connection_status=runtime.status,
+        connection_error=runtime.last_error,
+    )
+
+
 def _wecom_aibot_binding_response(
     *,
     user_id: str,
