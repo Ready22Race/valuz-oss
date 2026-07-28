@@ -208,6 +208,10 @@ def _patch_finalize_deps(
         project_id="w1",
     )
     task_row = SimpleNamespace(
+        # ``id`` / ``project_id`` are read off the row by ``persist_plan`` (a
+        # real TaskRow always carries them) — the fake has to model that.
+        id="t-int",
+        project_id="w1",
         plan={"subtasks": plan_nodes},
         status="active",
     )

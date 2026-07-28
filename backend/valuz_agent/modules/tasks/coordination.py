@@ -476,13 +476,11 @@ class CoordinationService:
                         "artifacts": [],
                     }
             if plan_dirty and plan is not None and task is not None:
-                task.plan = plan.to_dict()
-                await task_ds.update_task(task)
-                await planning.emit_plan_update(
+                await planning.persist_plan(
+                    task_ds,
                     event_ds,
-                    project_id=project_id,
-                    task_id=task_id,
-                    plan=plan,
+                    task,
+                    plan,
                     actor="system",
                     session_id=None,
                     user_id=user_id,

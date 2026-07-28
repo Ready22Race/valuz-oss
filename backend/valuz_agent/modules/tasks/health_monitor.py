@@ -38,7 +38,7 @@ from valuz_agent.modules.tasks.datastore import (
     TaskDatastore,
     TaskSessionDatastore,
 )
-from valuz_agent.modules.tasks.events import finalize_task
+from valuz_agent.modules.tasks.events import block_task
 from valuz_agent.modules.tasks.mailbox import mailbox_registry
 
 logger = logging.getLogger(__name__)
@@ -215,28 +215,16 @@ class TaskHealthMonitor:
                 "stayed up but its loop exited). Resume to rebuild the lead "
                 "and continue."
             )
-            blocked_ev = await finalize_task(
+            await block_task(
                 db,
                 user_id=user_id,
                 project_id=project_id,
                 task_id=task_id,
-                status="blocked",
                 event_type="task_blocked",
                 actor=lead_session_id,
                 session_id=lead_session_id,
-                payload={"reason": "lead_dead", "error": reason},
-            )
-            from valuz_agent.modules.notifications.projectors import (
-                record_task_failure_notification,
-            )
-
-            await record_task_failure_notification(
-                task_id=task_id,
-                project_id=project_id,
-                event_id=blocked_ev.id,
-                event_type="task_blocked",
                 reason=reason,
-                user_id=user_id,
+                payload={"reason": "lead_dead"},
             )
         logger.warning(
             "task health monitor: task %s -> blocked (lead loop dead, session %s)",

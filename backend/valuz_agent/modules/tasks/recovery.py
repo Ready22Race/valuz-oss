@@ -332,13 +332,11 @@ class RecoveryService:
                 summary.append(f"- {run.subtask_key}({run.agent_slug}): {rec.disposition}")
 
             if plan_dirty:
-                task.plan = plan.to_dict()
-                await task_ds.update_task(task)
-                await planning.emit_plan_update(
+                await planning.persist_plan(
+                    task_ds,
                     event_ds,
-                    project_id=project_id,
-                    task_id=task_id,
-                    plan=plan,
+                    task,
+                    plan,
                     actor="system",
                     session_id=lead_session_id,
                     user_id=user_id,
@@ -499,13 +497,11 @@ class RecoveryService:
                     plan.update_node(node.key, status="paused")
                     parked += 1
             if parked:
-                task.plan = plan.to_dict()
-                await task_ds.update_task(task)
-                await planning.emit_plan_update(
+                await planning.persist_plan(
+                    task_ds,
                     event_ds,
-                    project_id=project_id,
-                    task_id=task_id,
-                    plan=plan,
+                    task,
+                    plan,
                     actor="user",
                     session_id=lead_session_id,
                     user_id=user_id,
@@ -718,13 +714,11 @@ class RecoveryService:
                             status="rework",
                             review_feedback="用户手动停止了该子任务",
                         )
-                        task.plan = plan.to_dict()
-                        await task_ds.update_task(task)
-                        await planning.emit_plan_update(
+                        await planning.persist_plan(
+                            task_ds,
                             event_ds,
-                            project_id=project_id,
-                            task_id=task_id,
-                            plan=plan,
+                            task,
+                            plan,
                             actor="user",
                             session_id=lead_session_id or None,
                             user_id=user_id,

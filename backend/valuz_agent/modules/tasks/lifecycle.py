@@ -81,7 +81,7 @@ from valuz_agent.modules.tasks.datastore import (
     TaskEventDatastore,
     TaskSessionDatastore,
 )
-from valuz_agent.modules.tasks.events import finalize_task
+from valuz_agent.modules.tasks.events import block_task, finalize_task
 from valuz_agent.modules.tasks.live_member_registry import LiveMemberRegistry
 from valuz_agent.modules.tasks.models import TaskRow, TaskSessionRow
 from valuz_agent.modules.tasks.plan import PlanError, TaskPlan
@@ -279,27 +279,14 @@ class LifecycleService:
                 # the lead). The ``kickoff_failed`` event below still records
                 # the cause. The old ``"failed"`` write left an out-of-enum,
                 # un-resumable status stuck forever.
-                kickoff_ev = await finalize_task(
+                await block_task(
                     db,
                     user_id=user_id,
                     project_id=project_id,
                     task_id=task_id,
-                    status="blocked",
                     event_type="kickoff_failed",
                     actor=created_by,
-                    payload={"error": reason},
-                )
-                from valuz_agent.modules.notifications.projectors import (
-                    record_task_failure_notification,
-                )
-
-                await record_task_failure_notification(
-                    task_id=task_id,
-                    project_id=project_id,
-                    event_id=kickoff_ev.id,
-                    event_type="kickoff_failed",
                     reason=reason,
-                    user_id=user_id,
                 )
                 raise ValueError(reason)
 
@@ -846,33 +833,20 @@ class LifecycleService:
                 # rebuilds the lead). The ``reason`` payload tags this as a
                 # lead-turn-error to distinguish from the unresolved-subtasks
                 # blocked case below.
-                blocked_ev = await finalize_task(
+                await block_task(
                     db,
                     user_id=user_id,
                     project_id=project_id,
                     task_id=task_id,
-                    status="blocked",
                     event_type="task_blocked",
                     actor=lead_session_id,
                     session_id=lead_session_id,
+                    reason=error_msg,
                     payload={
                         "reason": "lead_turn_error",
-                        "error": error_msg,
                         "category": error_category,
                         "pending_subtasks": unresolved,
                     },
-                )
-                from valuz_agent.modules.notifications.projectors import (
-                    record_task_failure_notification,
-                )
-
-                await record_task_failure_notification(
-                    task_id=task_id,
-                    project_id=project_id,
-                    event_id=blocked_ev.id,
-                    event_type="task_blocked",
-                    reason=error_msg,
-                    user_id=user_id,
                 )
                 logger.warning(
                     "auto-finalize: task %s -> blocked (lead turn error: %s, category=%s)",
@@ -884,28 +858,16 @@ class LifecycleService:
             if unresolved:
                 # Lead stopped with planned work undispatched — surface as blocked
                 # (not a hard error, but not done either).
-                blocked_ev = await finalize_task(
+                await block_task(
                     db,
                     user_id=user_id,
                     project_id=project_id,
                     task_id=task_id,
-                    status="blocked",
                     event_type="task_blocked",
                     actor=lead_session_id,
                     session_id=lead_session_id,
-                    payload={"reason": "unresolved_subtasks", "pending_subtasks": unresolved},
-                )
-                from valuz_agent.modules.notifications.projectors import (
-                    record_task_failure_notification,
-                )
-
-                await record_task_failure_notification(
-                    task_id=task_id,
-                    project_id=project_id,
-                    event_id=blocked_ev.id,
-                    event_type="task_blocked",
                     reason="子任务未全部完成，Lead 未收尾",
-                    user_id=user_id,
+                    payload={"reason": "unresolved_subtasks", "pending_subtasks": unresolved},
                 )
                 logger.warning(
                     "auto-finalize: task %s -> blocked (unresolved=%s); lead ended without "
@@ -1100,13 +1062,11 @@ class LifecycleService:
                                         manifest.get("summary") or "上次运行因错误中断,请重试。"
                                     ),
                                 )
-                                task_row.plan = plan.to_dict()
-                                await task_ds.update_task(task_row)
-                                await planning.emit_plan_update(
+                                await planning.persist_plan(
+                                    task_ds,
                                     event_ds,
-                                    project_id=project_id,
-                                    task_id=task_id,
-                                    plan=plan,
+                                    task_row,
+                                    plan,
                                     actor=agent_slug,
                                     session_id=session_id,
                                     user_id=user_id,
@@ -1174,13 +1134,11 @@ class LifecycleService:
                             status="rework",
                             review_feedback="用户中断了该子任务",
                         )
-                        task_row.plan = plan.to_dict()
-                        await task_ds.update_task(task_row)
-                        await planning.emit_plan_update(
+                        await planning.persist_plan(
+                            task_ds,
                             event_ds,
-                            project_id=project_id,
-                            task_id=task_id,
-                            plan=plan,
+                            task_row,
+                            plan,
                             actor="user",
                             session_id=session_id,
                             user_id=user_id,

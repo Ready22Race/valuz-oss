@@ -113,6 +113,61 @@ async def finalize_task(
     )
 
 
+async def block_task(
+    db: Any,
+    *,
+    user_id: str,
+    project_id: str,
+    task_id: str,
+    event_type: str,
+    actor: str,
+    reason: str,
+    session_id: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> Any:  # returns the appended TaskEventRow
+    """Put a task into ``blocked`` AND raise the user-facing notification.
+
+    ``blocked`` is the module's single "needs your attention" state — a task
+    reaches it only when something went wrong and a human has to decide what
+    happens next. That makes the notification part of the transition, not an
+    optional extra: a blocked task nobody is told about is a task that silently
+    stops.
+
+    Every ``blocked`` write went through :func:`finalize_task` and then
+    hand-wrote the same notification call (kickoff credential failure, lead
+    turn error, unresolved subtasks, health-monitor zombie sweep — four sites,
+    four copies, four chances to forget). This composes them.
+
+    ``reason`` is the human-readable line shown in the notification; it is also
+    folded into the event payload so the timeline and the notification cannot
+    disagree about why.
+    """
+    from valuz_agent.modules.notifications.projectors import (
+        record_task_failure_notification,
+    )
+
+    event = await finalize_task(
+        db,
+        user_id=user_id,
+        project_id=project_id,
+        task_id=task_id,
+        status="blocked",
+        event_type=event_type,
+        actor=actor,
+        session_id=session_id,
+        payload={**(payload or {}), "error": reason},
+    )
+    await record_task_failure_notification(
+        task_id=task_id,
+        project_id=project_id,
+        event_id=event.id,
+        event_type=event_type,
+        reason=reason,
+        user_id=user_id,
+    )
+    return event
+
+
 # ---------------------------------------------------------------------------
 # Decision-Inbox projections
 #

@@ -43,6 +43,44 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+async def persist_plan(
+    task_ds: TaskDatastore,
+    event_ds: TaskEventDatastore,
+    task_row: Any,
+    plan: TaskPlan,
+    *,
+    actor: str,
+    session_id: str | None,
+    user_id: str,
+) -> None:
+    """Write a mutated plan back to the task AND announce it. Both, always.
+
+    The two halves are one operation. Persisting without announcing leaves the
+    frontend Todo panel showing a stale plan until something else happens to
+    emit — a silent staleness bug this module has shipped before. This idiom
+    was hand-written at 10 mutation sites (planning / recovery / lifecycle /
+    coordination); routing them all through here means no future site can do
+    half of it. Same reasoning as :func:`tasks.events.finalize_task`.
+
+    Two callers deliberately do NOT use this: ``plan_task`` and ``modify_plan``
+    append their own ``task_planned`` / ``plan_revised`` event BETWEEN the
+    write and the announce, and that event order is on the wire (the timeline
+    renders them in sequence). They also bump ``plan_version`` — the CAS token
+    this function never touches, since only the authoring paths may move it.
+    """
+    task_row.plan = plan.to_dict()
+    await task_ds.update_task(task_row)
+    await emit_plan_update(
+        event_ds,
+        project_id=task_row.project_id,
+        task_id=task_row.id,
+        plan=plan,
+        actor=actor,
+        session_id=session_id,
+        user_id=user_id,
+    )
+
+
 async def emit_plan_update(
     event_ds: TaskEventDatastore,
     *,
@@ -351,13 +389,11 @@ async def review_subtask(
                     "agent_name": completed_agent_name,
                 },
             )
-            task_row.plan = plan.to_dict()
-            await task_ds.update_task(task_row)
-            await emit_plan_update(
+            await persist_plan(
+                task_ds,
                 event_ds,
-                project_id=project_id,
-                task_id=task_id,
-                plan=plan,
+                task_row,
+                plan,
                 actor=lead_session_id,
                 session_id=lead_session_id,
                 user_id=user_id,
@@ -411,13 +447,11 @@ async def review_subtask(
             session_id=target_session,
             payload={"subtask_key": key, "decision": "rework", "feedback": feedback or ""},
         )
-        task_row.plan = plan.to_dict()
-        await task_ds.update_task(task_row)
-        await emit_plan_update(
+        await persist_plan(
+            task_ds,
             event_ds,
-            project_id=project_id,
-            task_id=task_id,
-            plan=plan,
+            task_row,
+            plan,
             actor=lead_session_id,
             session_id=lead_session_id,
             user_id=user_id,
@@ -506,13 +540,11 @@ async def mark_node_dispatched(
             agent=agent,
             latest_run_session_id=session_id,
         )
-        task_row.plan = plan.to_dict()
-        await task_ds.update_task(task_row)
-        await emit_plan_update(
+        await persist_plan(
+            task_ds,
             event_ds,
-            project_id=project_id,
-            task_id=task_id,
-            plan=plan,
+            task_row,
+            plan,
             actor=agent,
             session_id=session_id,
             user_id=user_id,
@@ -547,13 +579,11 @@ async def mark_in_review(
             if node is None or node.status not in ("in_progress", "rework"):
                 return
             plan.update_node(key, status="in_review")
-            task_row.plan = plan.to_dict()
-            await task_ds.update_task(task_row)
-            await emit_plan_update(
+            await persist_plan(
+                task_ds,
                 event_ds,
-                project_id=project_id,
-                task_id=task_id,
-                plan=plan,
+                task_row,
+                plan,
                 actor="system",
                 session_id=member_session_id,
                 user_id=user_id,
