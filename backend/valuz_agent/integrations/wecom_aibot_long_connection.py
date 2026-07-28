@@ -375,6 +375,7 @@ class WeComAIBotSupervisor:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._stop_events: dict[str, asyncio.Event] = {}
         self._statuses: dict[str, WeComAIBotRuntimeStatus] = {}
+        self._startup_task: asyncio.Task[None] | None = None
 
     @property
     def status(self) -> WeComAIBotRuntimeStatus:
@@ -388,10 +389,16 @@ class WeComAIBotSupervisor:
         return self._statuses.get(agent_slug, WeComAIBotRuntimeStatus(status="stopped"))
 
     async def startup(self) -> None:
-        await self.restart()
+        if self._startup_task is not None and not self._startup_task.done():
+            return
+        self._startup_task = asyncio.create_task(
+            self._startup_connect(),
+            name="wecom-aibot-startup-connect",
+        )
 
     async def restart(self) -> None:
-        await self.shutdown()
+        await self._cancel_startup_task()
+        await self._shutdown_connections()
         configs = await _load_enabled_wecom_aibot_configs()
         if not configs:
             return
@@ -410,6 +417,10 @@ class WeComAIBotSupervisor:
             )
 
     async def shutdown(self) -> None:
+        await self._cancel_startup_task()
+        await self._shutdown_connections()
+
+    async def _shutdown_connections(self) -> None:
         for stop_event in self._stop_events.values():
             stop_event.set()
         for task in self._tasks.values():
@@ -418,6 +429,34 @@ class WeComAIBotSupervisor:
         self._tasks.clear()
         self._stop_events.clear()
         self._statuses.clear()
+
+    async def _cancel_startup_task(self) -> None:
+        task = self._startup_task
+        if task is None:
+            return
+        if task is asyncio.current_task():
+            return
+        self._startup_task = None
+        if not task.done():
+            task.cancel()
+            await _await_cancelled(task)
+
+    async def _startup_connect(self) -> None:
+        try:
+            await asyncio.sleep(0)
+            await self.restart()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - channels must never break app startup
+            self._statuses["startup"] = WeComAIBotRuntimeStatus(
+                status="error",
+                connected=False,
+                last_error=str(exc),
+            )
+            logger.warning("WeCom AIBot startup connection failed: %s", exc, exc_info=True)
+        finally:
+            if self._startup_task is asyncio.current_task():
+                self._startup_task = None
 
     async def _run_loop(
         self,

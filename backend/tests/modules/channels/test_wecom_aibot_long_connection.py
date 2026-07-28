@@ -91,6 +91,26 @@ async def test_wecom_aibot_connect_disables_proxy_and_protocol_ping(
 
 
 @pytest.mark.asyncio
+async def test_wecom_aibot_supervisor_startup_schedules_background_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supervisor = wecom_runtime.WeComAIBotSupervisor()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def restart() -> None:
+        started.set()
+        await release.wait()
+
+    monkeypatch.setattr(supervisor, "restart", restart)
+
+    await asyncio.wait_for(supervisor.startup(), timeout=0.1)
+    await asyncio.wait_for(started.wait(), timeout=0.1)
+    release.set()
+    await supervisor.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_wecom_aibot_runner_still_dispatches_when_immediate_reply_fails() -> None:
     fake_ws = ReplyFailingWebSocket(
         [

@@ -711,10 +711,6 @@ async def start_host_background_services(app: FastAPI) -> None:
 
     start_backup_scheduler()
 
-    from valuz_agent.integrations.wecom_aibot_long_connection import wecom_aibot_supervisor
-
-    await wecom_aibot_supervisor.startup()
-
 
 async def start_automation_runner(app: FastAPI) -> None:
     """Backward-compatible aggregate used by older embedding tests/callers."""
@@ -946,6 +942,13 @@ def mark_boot_complete() -> None:
     from valuz_agent.modules.system.service import record_boot_complete
 
     record_boot_complete()
+
+
+async def start_post_boot_agent_channels(app: FastAPI) -> None:
+    """Schedule channel long connections after the host has finished booting."""
+    from valuz_agent.integrations.wecom_aibot_long_connection import wecom_aibot_supervisor
+
+    await wecom_aibot_supervisor.startup()
 
 
 async def stop_managed_browser() -> None:
