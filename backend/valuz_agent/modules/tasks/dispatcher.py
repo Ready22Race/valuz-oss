@@ -21,17 +21,14 @@ an empty live set would otherwise drop the just-spawned member.
 # ruff: noqa: I001
 from __future__ import annotations
 
-import asyncio
 import logging
+from pathlib import Path
 import time
 from typing import Any
 
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.tasks import planning
-from valuz_agent.modules.tasks.actor_runner import (
-    ActorRunner,
-    _member_run_dir,
-)
+from valuz_agent.modules.tasks.actor_runner import ActorRunner
 from valuz_agent.modules.tasks import launcher
 from valuz_agent.modules.tasks.events import record_subtask_failed
 from valuz_agent.modules.tasks.datastore import (
@@ -128,10 +125,9 @@ class DispatcherService:
             else:
                 mode = project_mode or "shared"
                 work_cwd = str(env.project_cwd)
-            # Legacy per-member ``repo-worktree`` shells out to ``git worktree
-            # add`` (blocking subprocess); offload so dispatch never blocks the
-            # event loop. The default ``shared`` mode is a no-op Path().
-            run_dir = await asyncio.to_thread(_member_run_dir, work_cwd, task_id, run_seq, mode)
+            # v2.1: members run in the SHARED project cwd (a task worktree
+            # relocates it wholesale); per-member isolation is retired.
+            run_dir = Path(work_cwd)
 
             refs_text = "\n".join(f"- {r}" for r in (refs or []))
             # Goal mode prepends ``/goal `` (wrap_for_mode); drop the redundant

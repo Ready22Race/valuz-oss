@@ -15,14 +15,13 @@ the concrete services beats duck typing that once let delegators rot unnoticed.
 # ruff: noqa: I001
 from __future__ import annotations
 
-import asyncio
 import logging
-from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Literal, Protocol
 
 from valuz_agent.adapters import kernel_client
 from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.infra.lifecycle import is_draining
+from valuz_agent.modules.tasks.task_state import NON_REVIEWABLE_DONE
 from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 from valuz_agent.modules.sessions.turn_driver import (
     _restamp_always_on_mcp,
@@ -33,122 +32,6 @@ logger = logging.getLogger(__name__)
 
 
 # ``member_done`` payload statuses that carry NO reviewable deliverable — the
-# member died (terminated/error) or was cancelled by the user/stop_member
-# (cancelled/interrupted). Consumers must NOT flip the plan node to
-# ``in_review`` for these: the node is already parked in ``rework`` and
-# presenting a dead run as a pending deliverable confuses the lead.
-_NON_REVIEWABLE_DONE = frozenset({"terminated", "error", "cancelled", "interrupted"})
-
-
-
-
-# ---------------------------------------------------------------------------
-# collect_manifest
-# ---------------------------------------------------------------------------
-
-
-# Skip these directory names when scanning a (possibly project-root) cwd for
-# artifacts — they are noise, not member output.
-_ARTIFACT_SKIP_DIRS = frozenset({"node_modules", "__pycache__", "dist", "build", ".venv"})
-# Cap on artifacts listed in a manifest (shared project cwd can be large).
-_ARTIFACT_LIMIT = 200
-
-
-def _scan_artifacts(run_dir: Path, since_epoch: float) -> list[dict[str, Any]]:
-    """List up to ``_ARTIFACT_LIMIT`` files under *run_dir* touched since
-    *since_epoch*, in sorted path order. BLOCKING — always call via
-    ``asyncio.to_thread`` (``run_dir`` is usually the whole project cwd).
-    """
-    artifacts: list[dict[str, Any]] = []
-    if not run_dir.exists():
-        return artifacts
-    for fpath in sorted(run_dir.rglob("*")):
-        if len(artifacts) >= _ARTIFACT_LIMIT:
-            break
-        # Skip hidden parts (.claude/, .git/) and known noise dirs.
-        if any(p.startswith(".") for p in fpath.parts):
-            continue
-        if any(p in _ARTIFACT_SKIP_DIRS for p in fpath.parts):
-            continue
-        if not fpath.is_file():
-            continue
-        try:
-            st = fpath.stat()
-            # Attribute by mtime: under the shared project cwd this keeps only
-            # what the member touched during its run (approximate — see M10
-            # 附录 D.2). since_epoch=0 → include all.
-            if st.st_mtime < since_epoch:
-                continue
-            artifacts.append({"path": str(fpath), "size": st.st_size})
-        except OSError:
-            pass
-    return artifacts
-
-
-async def collect_manifest(
-    session_id: str,
-    run_dir: Path,
-    status: str,
-    *,
-    since_epoch: float = 0.0,
-    user_id: str,
-) -> dict[str, Any]:
-    """Build a SubtaskResult manifest after a member session completes.
-
-    summary    — text of the last assistant message (best-effort)
-    artifacts  — list of {path, size} for files under run_dir written by this
-                 member. Under v2.1 the member's cwd is the shared project dir,
-                 so we attribute artifacts by mtime ≥ *since_epoch* (the
-                 dispatch-start time) instead of relying on a private run dir.
-                 ``since_epoch=0.0`` means "include everything" (worktree /
-                 legacy private dir, where every file is the member's).
-    status     — the final session status string
-    session_id — for cross-reference
-    """
-    # Extract summary from the last assistant event
-    summary = ""
-    try:
-        events = await kernel_client.get_events(user_id, session_id, limit=200)
-        # Walk backwards: find last assistant_message text
-        for event in reversed(events):
-            payload = event.data if hasattr(event, "data") else {}
-            if event.type in ("assistant_message", "text_delta", "content_block"):
-                text = payload.get("text") or payload.get("content") or ""
-                if text:
-                    summary = str(text)[:2000]  # cap at 2k chars
-                    break
-    except Exception:  # noqa: BLE001
-        logger.debug("collect_manifest: could not extract summary for %s", session_id)
-
-    # Scan run_dir for artifact files written during this member's run.
-    # Offloaded: under v2.1 ``run_dir`` is the whole shared project cwd, so this
-    # walks an arbitrarily large tree with blocking ``stat`` calls. On the event
-    # loop that stalled EVERY other session for the duration.
-    try:
-        artifacts = await asyncio.to_thread(_scan_artifacts, run_dir, since_epoch)
-    except Exception:  # noqa: BLE001
-        logger.debug("collect_manifest: artifact scan failed for %s", run_dir)
-        artifacts = []
-
-    return {
-        "session_id": session_id,
-        "status": status,
-        "summary": summary,
-        "artifacts": artifacts,
-    }
-
-
-def _member_run_dir(project_cwd: str | Path, task_id: str, run_seq: int, mode: str) -> Path:
-    """Resolve a member's working directory (v2.1: always the project cwd).
-
-    Members read and write project files natively in the SHARED project cwd
-    (task-level worktrees relocate that cwd wholesale — see task_worktree.py);
-    the legacy per-member ``repo-worktree`` isolation mode is retired. ``mode``
-    is still recorded on the run row for display.
-    """
-    return Path(project_cwd)
-
-
 # ---------------------------------------------------------------------------
 # v2 actor-loop tuning (M10 附录 B)
 # ---------------------------------------------------------------------------
@@ -413,7 +296,7 @@ class ActorRunner:
                     if (
                         role == "lead"
                         and msg.from_session
-                        and done_status not in _NON_REVIEWABLE_DONE
+                        and done_status not in NON_REVIEWABLE_DONE
                     ):
                         await planning.mark_in_review(
                             task_id=task_id,
@@ -452,7 +335,7 @@ class ActorRunner:
         arts = m.get("artifacts") or []
         art_lines = "\n".join(f"- {a.get('path')}" for a in arts) if arts else "(none)"
         status = str(m.get("status", "") or "")
-        if status in _NON_REVIEWABLE_DONE:
+        if status in NON_REVIEWABLE_DONE:
             # No deliverable to review — the run died or was cancelled. The
             # node is already parked in ``rework``; guide the lead toward a
             # decision instead of a review of nothing.
@@ -484,11 +367,8 @@ __all__ = [
     "ActorCoordinator",
     "ActorFinalizer",
     "ActorRunner",
-    "collect_manifest",
-    "_member_run_dir",
     "ACTOR_MAX_TURNS",
     "LEAD_IDLE_TTL_S",
     "MAX_IDLE_EXTENSIONS",
     "MEMBER_IDLE_TTL_S",
-    "_NON_REVIEWABLE_DONE",
 ]

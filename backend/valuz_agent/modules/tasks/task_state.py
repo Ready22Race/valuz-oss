@@ -153,3 +153,13 @@ __all__ = [
     "is_terminal",
     "is_valid_status",
 ]
+
+
+# Member final statuses that are NOT reviewable as deliverables: the member
+# died (terminated/error) or was cancelled by the user/stop_member
+# (cancelled/interrupted). Consumers must NOT flip the plan node to
+# ``in_review`` for these — it is already parked in ``rework``, and presenting
+# a dead run as a pending deliverable confuses the lead.
+NON_REVIEWABLE_DONE: frozenset[str] = frozenset(
+    {"terminated", "error", "cancelled", "interrupted"}
+)

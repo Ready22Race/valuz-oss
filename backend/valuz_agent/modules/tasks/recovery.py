@@ -24,7 +24,8 @@ from valuz_agent.adapters.agent_resolver import spill_goal_brief_if_too_long
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.lifecycle import is_draining
 from valuz_agent.modules.tasks import planning
-from valuz_agent.modules.tasks.actor_runner import ActorRunner, collect_manifest
+from valuz_agent.modules.tasks.actor_runner import ActorRunner
+from valuz_agent.modules.tasks.manifest import collect_manifest
 from valuz_agent.modules.tasks.coordination import CoordinationService
 from valuz_agent.adapters.agent_resolver import resolve_agent_display_name
 from valuz_agent.modules.tasks import launcher

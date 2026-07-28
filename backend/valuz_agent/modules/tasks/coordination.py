@@ -28,7 +28,8 @@ from valuz_agent.adapters.agent_resolver import resolve_agent_display_name
 from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.tasks import planning
-from valuz_agent.modules.tasks.actor_runner import _NON_REVIEWABLE_DONE, collect_manifest
+from valuz_agent.modules.tasks.manifest import collect_manifest
+from valuz_agent.modules.tasks.task_state import NON_REVIEWABLE_DONE
 from valuz_agent.modules.tasks.events import record_subtask_failed
 from valuz_agent.modules.tasks.datastore import (
     TaskDatastore,
@@ -271,7 +272,7 @@ class CoordinationService:
             # a delivering member — a failed/cancelled member_done has no work
             # to review; its node is already parked in ``rework`` and flipping
             # it back would present a dead run as a pending deliverable.
-            if run and run.subtask_key and str(m.get("status") or "") not in _NON_REVIEWABLE_DONE:
+            if run and run.subtask_key and str(m.get("status") or "") not in NON_REVIEWABLE_DONE:
                 await planning.mark_in_review(
                     task_id=task_id,
                     project_id=project_id,

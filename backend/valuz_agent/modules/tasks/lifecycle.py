@@ -36,10 +36,8 @@ from valuz_agent.modules.tasks.task_worktree import (
 from valuz_agent.modules.tasks.resolution import (
     task_session_resolver,
 )
-from valuz_agent.modules.tasks.actor_runner import (
-    ActorRunner,
-    collect_manifest,
-)
+from valuz_agent.modules.tasks.actor_runner import ActorRunner
+from valuz_agent.modules.tasks.manifest import collect_manifest, last_assistant_text
 from valuz_agent.modules.tasks.coordination import CoordinationService
 from valuz_agent.modules.tasks.datastore import (
     TaskDatastore,
@@ -711,19 +709,7 @@ class LifecycleService:
     @staticmethod
     async def _last_assistant_summary(session_id: str, user_id: str) -> str:
         """Best-effort last assistant-message text, for an auto-finalize summary."""
-        try:
-            events = await kernel_client.get_events(
-                user_id, session_id, limit=200
-            )
-            for event in reversed(events):
-                payload = event.data if hasattr(event, "data") else {}
-                if event.type in ("assistant_message", "text_delta", "content_block"):
-                    text = payload.get("text") or payload.get("content") or ""
-                    if text:
-                        return str(text)[:2000]
-        except Exception:  # noqa: BLE001
-            logger.debug("auto-finalize: summary extract failed for %s", session_id)
-        return ""
+        return await last_assistant_text(user_id, session_id)
 
     async def _auto_finalize_lead_task(
         self,

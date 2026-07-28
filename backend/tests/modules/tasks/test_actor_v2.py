@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from valuz_agent.modules.tasks import planning
-from valuz_agent.modules.tasks.actor_runner import _member_run_dir, collect_manifest
+from valuz_agent.modules.tasks.manifest import collect_manifest
 from valuz_agent.modules.tasks.mailbox import (
     InboxMsg,
     MailboxRegistry,
@@ -324,14 +324,6 @@ def test_no_model_provider_reports_gap() -> None:
 # ---------------------------------------------------------------------------
 # v2.1 — shared project cwd + mtime artifact attribution
 # ---------------------------------------------------------------------------
-
-
-def test_member_run_dir_defaults_to_project_cwd() -> None:
-    from pathlib import Path
-
-    # shared (default) and legacy "isolated" both → the project cwd itself.
-    assert _member_run_dir("/proj", "t1", 1, "shared") == Path("/proj")
-    assert _member_run_dir("/proj", "t1", 1, "isolated") == Path("/proj")
 
 
 def test_build_member_session_injects_skill_scoping(
