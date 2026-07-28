@@ -162,12 +162,15 @@ export function BindChatDialog({
               {created.name}
             </span>
             {created.share_link ? (
-              <Button size="sm" variant="outline" asChild>
-                <a href={created.share_link} target="_blank" rel="noreferrer">
-                  {t("project.createChatJoin" as Parameters<typeof t>[0])}
-                  <ExternalLink />
-                </a>
-              </Button>
+              <a
+                href={created.share_link}
+                target="_blank"
+                rel="noreferrer"
+                className="flex shrink-0 items-center gap-1 text-xs text-brand hover:underline"
+              >
+                {t("project.createChatJoin" as Parameters<typeof t>[0])}
+                <ExternalLink className="h-3 w-3" />
+              </a>
             ) : (
               <span className="text-2xs text-ink-meta">
                 {t("project.createChatLinkMissing" as Parameters<typeof t>[0])}
@@ -191,7 +194,7 @@ export function BindChatDialog({
             {t("project.bindChatEmpty" as Parameters<typeof t>[0])}
           </p>
         ) : (
-          <div className="max-h-[40vh] divide-y divide-surface-border overflow-y-auto rounded-md border border-surface-border">
+          <div className="flex max-h-[40vh] flex-col overflow-y-auto">
             {chats.map((chat) => {
               const boundElsewhere =
                 !!chat.bound_project_id && chat.bound_project_id !== projectId;
@@ -199,7 +202,7 @@ export function BindChatDialog({
               return (
                 <div
                   key={chat.external_chat_id}
-                  className="flex items-center gap-2 px-2.5 py-2 transition-colors hover:bg-surface-muted"
+                  className="flex items-center gap-2 rounded-md px-2 py-2 transition-colors hover:bg-surface-muted"
                 >
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-xs text-ink-heading">
