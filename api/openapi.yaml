@@ -596,6 +596,36 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/Task"
+  /v1/projects/{project_id}/tasks:draft:
+    post:
+      summary: Open a draft task (chat plan-then-execute)
+      description: >-
+        Creates the task header in status=draft with plan_version=0. No lead
+        session is started — the originating chat session is recorded as the
+        draft-phase plan writer. Commit with tasks:commit; discard with
+        tasks:abandon.
+      operationId: draftTask
+      tags: [tasks]
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DraftTaskRequest"
+      responses:
+        "201":
+          description: Draft created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DraftTask"
+        "400":
+          description: Project or lead agent not found
   /v1/projects/{project_id}/worktrees:
     get:
       summary: List the project's git worktrees (git is the source of truth)
@@ -770,6 +800,212 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Task"
+        "404":
+          description: Task not found
+  /v1/tasks/{task_id}:commit:
+    post:
+      summary: Promote a draft task to active (spawns its lead session)
+      description: >-
+        The draft→active flip is a compare-and-swap on status=draft — of two
+        concurrent commits exactly one wins; the loser gets 400.
+      operationId: commitTask
+      tags: [tasks]
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CommitTaskRequest"
+      responses:
+        "200":
+          description: Committed — task is active, lead session spawned
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task_id: {type: string}
+                  lead_session_id: {type: string}
+                  status: {type: string}
+                  committed_at: {type: integer, format: int64}
+        "400":
+          description: Not a draft, no plan, or committed concurrently
+        "404":
+          description: Task not found
+  /v1/tasks/{task_id}:abandon:
+    post:
+      summary: Discard a draft task (terminal)
+      operationId: abandonTask
+      tags: [tasks]
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AbandonTaskRequest"
+      responses:
+        "200":
+          description: Abandoned
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task_id: {type: string}
+                  status: {type: string}
+        "400":
+          description: Not a draft / changed concurrently
+        "404":
+          description: Task not found
+  /v1/tasks/{task_id}:inject:
+    post:
+      summary: Push a user instruction into the running lead's mailbox
+      description: >-
+        delivered=false with a reason when the lead is offline. Injecting into
+        a HALTED (paused/stopped/blocked) task is treated as resume intent —
+        the task is revived and the text rides the lead's recovery brief
+        (reason=TASK_RESUMED / RESUME_FAILED).
+      operationId: injectIntoTask
+      tags: [tasks]
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InjectTaskRequest"
+      responses:
+        "200":
+          description: Delivery outcome
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InjectTaskResult"
+        "404":
+          description: Task not found
+        "422":
+          description: text is required
+  /v1/tasks/{task_id}/plan:
+    get:
+      summary: Read the plan snapshot (+ ready keys, counts, current_version)
+      operationId: getTaskPlan
+      tags: [tasks]
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: Plan snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskPlan"
+        "404":
+          description: Task not found
+    post:
+      summary: Lay down the initial plan
+      description: >-
+        Errors if a plan with progress already exists (use PATCH). Authorized
+        by task ownership — the request body carries no caller identity.
+      operationId: planTask
+      tags: [tasks]
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlanWriteRequest"
+      responses:
+        "200":
+          description: Plan written
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskPlan"
+        "400":
+          description: Invalid plan / plan with progress exists / task not writable
+        "404":
+          description: Task not found
+        "422":
+          description: subtasks is required and must be non-empty
+    patch:
+      summary: Modify the plan (add nodes / patch nodes by key)
+      description: >-
+        Optimistic-lock via expected_version — REQUIRED when the task is
+        active (the CAS token is what protects against a concurrent lead
+        write); 409 carries current_version for refresh-and-retry.
+      operationId: modifyTaskPlan
+      tags: [tasks]
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlanWriteRequest"
+      responses:
+        "200":
+          description: Plan updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskPlan"
+        "400":
+          description: Invalid change / task not writable
+        "404":
+          description: Task not found
+        "409":
+          description: PLAN_VERSION_CONFLICT — body carries current_version
+  /v1/tasks/{task_id}/events/stream:
+    get:
+      summary: Live task event stream (SSE)
+      description: >-
+        Server-Sent Events; frames mirror the TaskEvent shape. Closes after
+        the terminal event unless keep_alive=1 (post-terminal notes/audit
+        still stream). after_seq resumes from a known sequence.
+      operationId: streamTaskEvents
+      tags: [tasks]
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: after_seq
+          in: query
+          required: false
+          schema: {type: integer, default: 0}
+        - name: keep_alive
+          in: query
+          required: false
+          schema: {type: integer, enum: [0, 1], default: 0}
+      responses:
+        "200":
+          description: text/event-stream of TaskEvent frames
         "404":
           description: Task not found
   /v1/runs/{session_id}:stop:
@@ -4505,7 +4741,6 @@ components:
           nullable: true
           items: {type: string}
         title: {type: string, nullable: true}
-        created_by: {type: string, default: user}
         worktree:
           type: boolean
           default: false
@@ -4622,6 +4857,88 @@ components:
           items:
             $ref: "#/components/schemas/NotificationEntry"
         unread: {type: integer}
+    DraftTaskRequest:
+      type: object
+      required: [goal, lead_agent_slug, originating_session_id]
+      properties:
+        goal: {type: string}
+        lead_agent_slug: {type: string}
+        originating_session_id: {type: string, description: "The chat session opening the draft — recorded as the draft-phase plan writer."}
+        refs:
+          type: array
+          nullable: true
+          items: {type: string}
+        title: {type: string, nullable: true}
+    DraftTask:
+      type: object
+      required: [task_id, status, plan_version, title, lead_agent_slug]
+      properties:
+        task_id: {type: string}
+        status: {type: string}
+        plan_version: {type: integer}
+        title: {type: string}
+        lead_agent_slug: {type: string}
+    CommitTaskRequest:
+      type: object
+      required: [caller_session_id]
+      properties:
+        caller_session_id: {type: string}
+        lead_agent_slug: {type: string, nullable: true, description: "Override the draft's lead agent at commit time."}
+    AbandonTaskRequest:
+      type: object
+      required: [caller_session_id]
+      properties:
+        caller_session_id: {type: string}
+        reason: {type: string, nullable: true}
+    InjectTaskRequest:
+      type: object
+      required: [text, from_session_id]
+      properties:
+        text: {type: string}
+        from_session_id: {type: string}
+    InjectTaskResult:
+      type: object
+      required: [delivered]
+      properties:
+        delivered: {type: boolean}
+        lead_session_id: {type: string, nullable: true}
+        reason: {type: string, nullable: true, description: "e.g. TASK_RESUMED / RESUME_FAILED / lead offline reasons."}
+    PlanWriteRequest:
+      type: object
+      description: >-
+        POST uses subtasks (initial plan); PATCH uses add/update (+
+        expected_version). Carries NO caller identity on purpose — REST
+        callers are authorized by owning the task.
+      properties:
+        subtasks:
+          type: array
+          nullable: true
+          items: {type: object, additionalProperties: true}
+        add:
+          type: array
+          nullable: true
+          items: {type: object, additionalProperties: true}
+        update:
+          type: array
+          nullable: true
+          items: {type: object, additionalProperties: true}
+        expected_version: {type: integer, nullable: true, description: "Optimistic-lock token; REQUIRED for PATCH on an active task."}
+    TaskPlan:
+      type: object
+      required: [subtasks, ready, current_version]
+      properties:
+        subtasks:
+          type: array
+          items: {type: object, additionalProperties: true}
+        ready:
+          type: array
+          items: {type: string}
+        counts:
+          type: object
+          nullable: true
+          additionalProperties: {type: integer}
+        all_done: {type: boolean, nullable: true}
+        current_version: {type: integer}
     InterveneRequest:
       type: object
       required: [action]

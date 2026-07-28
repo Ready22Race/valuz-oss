@@ -160,12 +160,11 @@ export interface KickoffTaskPayload {
   lead_agent_slug: string;
   refs?: string[] | null;
   title?: string | null;
-  created_by?: string;
   /**
    * Task-level worktree isolation: the whole task (lead + every member)
    * runs in ONE git worktree of the project repo. A clean worktree is
    * removed when the task finishes; one with work left surfaces in the
-   * project's worktrees panel. Requires a git-repo project (422 otherwise).
+   * project's worktrees panel. Requires a git-repo project (400 otherwise).
    */
   worktree?: boolean;
 }
@@ -247,7 +246,6 @@ export interface InjectTaskResponse {
 }
 
 export interface PlanWritePayload {
-  lead_session_id: string;
   /** Initial plan creation (POST /plan). */
   subtasks?: Array<Record<string, unknown>>;
   /** Patch operations (PATCH /plan). */

@@ -24,7 +24,7 @@ import json
 from collections.abc import AsyncIterator, Callable
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
@@ -52,7 +52,6 @@ class KickoffTaskRequest(BaseModel):
     lead_agent_slug: str
     refs: list[str] | None = None
     title: str | None = None
-    created_by: str = "user"
     # Task-level worktree isolation (design §5): the whole task — lead and
     # every member — runs in ONE git worktree of the project repo; the
     # branch merges back (or is discarded) when the task ends. Requires the
@@ -226,11 +225,13 @@ class InjectTaskResponse(BaseModel):
 
 
 class PlanTaskRequest(BaseModel):
-    """Used by both POST (initial plan) and PATCH (modify). ``lead_session_id``
-    is the caller's session — for draft-mode chat sessions, the originating
-    chat; for active-mode lead callers, the lead session id."""
+    """Used by both POST (initial plan) and PATCH (modify).
 
-    lead_session_id: str
+    Deliberately carries NO caller-identity field: a session id arriving in
+    the request body is self-declared, so gating on it would be authorization
+    theatre. REST callers are authorized by owning the task (OwnerCaller in
+    ``plan_commands``)."""
+
     subtasks: list[dict[str, Any]] | None = None  # POST: initial plan
     add: list[dict[str, Any]] | None = None  # PATCH: add nodes
     update: list[dict[str, Any]] | None = None  # PATCH: patch nodes
@@ -263,7 +264,9 @@ async def kickoff_task(
             goal=payload.goal,
             lead_agent_slug=payload.lead_agent_slug,
             refs=payload.refs,
-            created_by=payload.created_by,
+            # Provenance is server-stamped — a client-supplied created_by would
+            # let any caller write arbitrary strings into the UI's "由 … 触发".
+            created_by="user",
             title=payload.title,
             worktree=payload.worktree,
             user_id=user_id,
@@ -302,7 +305,7 @@ async def list_tasks(
 
 @router.get("/v1/tasks", response_model=dict[str, list[TaskResponse]])
 async def list_all_tasks(
-    limit: int = 50,
+    limit: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_async_session),
     user_id: str = Depends(get_current_user_id),
 ) -> dict[str, list[TaskResponse]]:
@@ -562,7 +565,8 @@ async def intervene(
 
     db.expire_all()  # drop cached rows so we see the orchestrator's committed write
     refreshed = await service.get_owned_task(user_id, task_id)
-    assert refreshed is not None
+    if refreshed is None:  # deleted concurrently with the intervention
+        raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
     return await _task_response_with_trigger(db, user_id, refreshed)
 
 
@@ -745,7 +749,7 @@ async def modify_plan_route(
     if result.get("error") == "PLAN_VERSION_CONFLICT":
         raise HTTPException(status_code=409, detail=result)
     if "error" in result:
-        raise HTTPException(status_code=400, detail=result["error"])
+        raise HTTPException(status_code=_plan_error_status(result), detail=result["error"])
     return PlanResponse(
         subtasks=result["subtasks"],
         ready=result["ready"],
