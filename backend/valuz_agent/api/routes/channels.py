@@ -364,14 +364,16 @@ async def list_feishu_chats(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return [
         ChannelChatItem(
-            external_chat_id=chat_id,
-            name=name,
-            bound_project_id=getattr(bound.get(chat_id), "project_id", None),
-            created_by_valuz=bool(
-                getattr(bound.get(chat_id), "created_by_valuz", False)
-            ),
+            external_chat_id=chat.chat_id,
+            name=chat.name,
+            bound_project_id=getattr(bound.get(chat.chat_id), "project_id", None),
+            # Ownership is the truth Feishu itself enforces, and it also covers
+            # groups created before the flag existed; the stored flag records
+            # intent for anything the live answer cannot see.
+            created_by_valuz=chat.bot_owned
+            or bool(getattr(bound.get(chat.chat_id), "created_by_valuz", False)),
         )
-        for chat_id, name in chats
+        for chat in chats
     ]
 
 
@@ -486,6 +488,21 @@ async def bind_chat_to_project(
     return _chat_binding_response(binding)
 
 
+async def _bot_owns_chat(*, app_id: str, app_secret: str, chat_id: str) -> bool:
+    """Whether the app owns the group — the condition Feishu itself enforces
+    for dissolving one, and the honest signal for a group bound before the
+    stored flag existed."""
+    from valuz_agent.integrations.feishu_long_connection import (
+        list_feishu_chats as fetch,
+    )
+
+    try:
+        chats = await fetch(app_id=app_id, app_secret=app_secret)
+    except ChannelConfigError:
+        return False
+    return any(chat.chat_id == chat_id and chat.bot_owned for chat in chats)
+
+
 class ChatLinkResponse(BaseModel):
     share_link: str | None = None
 
@@ -553,11 +570,6 @@ async def delete_feishu_chat(
         )
         if binding is None:
             raise HTTPException(status_code=404, detail="chat binding not found")
-        if not binding.created_by_valuz:
-            raise HTTPException(
-                status_code=409,
-                detail="this group was not created by Valuz; unlink it instead",
-            )
         app_binding = next(
             iter(
                 await AgentChannelBindingDatastore(db).list_enabled(
@@ -573,6 +585,18 @@ async def delete_feishu_chat(
         )
     if app_binding is None or not secret.app_secret:
         raise HTTPException(status_code=404, detail="feishu binding not found")
+
+    if not binding.created_by_valuz and not await _bot_owns_chat(
+        app_id=app_binding.bot_id,
+        app_secret=secret.app_secret,
+        chat_id=external_chat_id,
+    ):
+        # Unbinding is the most this side may do to a group it does not own —
+        # dissolving somebody's group by mistake is not recoverable.
+        raise HTTPException(
+            status_code=409,
+            detail="this group was not created by Valuz; unlink it instead",
+        )
 
     try:
         await delete_chat(
@@ -667,7 +691,12 @@ async def _backfill_chat_names(
     if binding is None or not secret.app_secret:
         return rows
     try:
-        names = dict(await fetch(app_id=binding.bot_id, app_secret=secret.app_secret))
+        names = {
+            chat.chat_id: chat.name
+            for chat in await fetch(
+                app_id=binding.bot_id, app_secret=secret.app_secret
+            )
+        }
     except Exception:  # noqa: BLE001 - a nameless row is better than a failed page
         return rows
 

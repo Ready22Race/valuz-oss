@@ -282,25 +282,29 @@ export function BindChatDialog({
                       </div>
                     )}
                   </div>
-                  {/* Actions sit ahead of the state tag and surface on
-                      hover, so a row reads as name → what you can do → what it
-                      is, and stays quiet until pointed at. */}
-                  <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
-                    {/* Joining matters most for a Valuz-created group, whose
-                        only member is the bot. */}
-                    <button
-                      type="button"
-                      onClick={() => void join(chat)}
-                      className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-2"
-                      title={t(
-                        "project.createChatJoin" as Parameters<typeof t>[0],
-                      )}
-                      aria-label={t(
-                        "project.createChatJoin" as Parameters<typeof t>[0],
-                      )}
-                    >
-                      <LogIn className="h-3.5 w-3.5" />
-                    </button>
+                  {/* Actions sit ahead of the state tag: a row reads as
+                      name → what you can do → what it is. Kept visible — they
+                      replace nothing, and hiding them made the row's only
+                      affordances discoverable by accident. */}
+                  <div className="flex shrink-0 items-center gap-0.5">
+                    {/* Only for a group Valuz created: its sole member is the
+                        bot, so the link is the way in. A group someone made
+                        themselves already has them in it. */}
+                    {chat.created_by_valuz && (
+                      <button
+                        type="button"
+                        onClick={() => void join(chat)}
+                        className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-2"
+                        title={t(
+                          "project.createChatJoin" as Parameters<typeof t>[0],
+                        )}
+                        aria-label={t(
+                          "project.createChatJoin" as Parameters<typeof t>[0],
+                        )}
+                      >
+                        <LogIn className="h-3.5 w-3.5" />
+                      </button>
+                    )}
                     {boundHere && (
                       <button
                         type="button"

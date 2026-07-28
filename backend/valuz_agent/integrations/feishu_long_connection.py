@@ -1110,8 +1110,17 @@ async def delete_feishu_chat(*, app_id: str, app_secret: str, chat_id: str) -> N
         )
 
 
-async def list_feishu_chats(*, app_id: str, app_secret: str) -> list[tuple[str, str]]:
-    """``(chat_id, name)`` for every group the bot is a member of.
+@dataclass(frozen=True, slots=True)
+class FeishuChat:
+    chat_id: str
+    name: str
+    # The app owns this group — i.e. it created it, and is the only identity
+    # Feishu lets dissolve it. Bot-owned groups come back with no ``owner_id``.
+    bot_owned: bool
+
+
+async def list_feishu_chats(*, app_id: str, app_secret: str) -> list[FeishuChat]:
+    """Every group the bot is a member of.
 
     Powers the project page's group picker: the bot must already be in the
     group (that half of the flow only an IM client can do), and Valuz then owns
@@ -1127,7 +1136,7 @@ async def list_feishu_chats(*, app_id: str, app_secret: str) -> list[tuple[str, 
         app_secret=app_secret,
     )
     client = _new_openapi_client(config)
-    chats: list[tuple[str, str]] = []
+    chats: list[FeishuChat] = []
     page_token: str | None = None
     # Bounded: a bot in more than a few hundred groups is not a picker problem.
     for _ in range(10):
@@ -1143,7 +1152,13 @@ async def list_feishu_chats(*, app_id: str, app_secret: str) -> list[tuple[str, 
         for item in getattr(data, "items", None) or []:
             chat_id = getattr(item, "chat_id", None)
             if chat_id:
-                chats.append((chat_id, getattr(item, "name", None) or chat_id))
+                chats.append(
+                    FeishuChat(
+                        chat_id=chat_id,
+                        name=getattr(item, "name", None) or chat_id,
+                        bot_owned=not getattr(item, "owner_id", None),
+                    )
+                )
         page_token = getattr(data, "page_token", None) if data is not None else None
         if not page_token or not getattr(data, "has_more", False):
             break

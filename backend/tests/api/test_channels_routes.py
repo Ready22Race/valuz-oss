@@ -421,7 +421,12 @@ def test_list_chat_bindings_backfills_names_and_labels_the_platform(monkeypatch)
             )
 
     async def fake_list(*, app_id: str, app_secret: str):
-        return [("oc-1", "研究群"), ("oc-2", "别的群")]
+        from valuz_agent.integrations.feishu_long_connection import FeishuChat
+
+        return [
+            FeishuChat(chat_id="oc-1", name="研究群", bot_owned=False),
+            FeishuChat(chat_id="oc-2", name="别的群", bot_owned=False),
+        ]
 
     monkeypatch.setattr(channels_routes, "async_unit_of_work", lambda: _Uow())
     monkeypatch.setattr(
@@ -486,6 +491,12 @@ def test_delete_feishu_chat_refuses_a_group_valuz_did_not_create(monkeypatch) ->
     async def fake_delete(**kwargs):  # pragma: no cover
         deleted.append(kwargs["chat_id"])
 
+    async def fake_list(*, app_id: str, app_secret: str):
+        from valuz_agent.integrations.feishu_long_connection import FeishuChat
+
+        # Owned by a person — the guard must refuse.
+        return [FeishuChat(chat_id="oc-1", name="别人的群", bot_owned=False)]
+
     monkeypatch.setattr(channels_routes, "async_unit_of_work", lambda: _Uow())
     monkeypatch.setattr(
         channels_routes,
@@ -496,6 +507,12 @@ def test_delete_feishu_chat_refuses_a_group_valuz_did_not_create(monkeypatch) ->
     import valuz_agent.integrations.feishu_long_connection as feishu_mod
 
     monkeypatch.setattr(feishu_mod, "delete_feishu_chat", fake_delete)
+    monkeypatch.setattr(feishu_mod, "list_feishu_chats", fake_list)
+    monkeypatch.setattr(
+        channels_routes.secret_store,
+        "get",
+        lambda user_id, ref: json.dumps({"app_secret": "app-secret"}),
+    )
 
     app = FastAPI()
     app.include_router(channels_routes.router)
