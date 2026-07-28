@@ -154,7 +154,11 @@ def _make_completer(
         )
         ephem_id = uuid4().hex
         gen_cwd = fs_registry.generative_ui_cwd(user_id)
-        marker = {"valuz": {"ephemeral_generative_ui": True}}
+        # ``bare_completion`` is the kernel-recognized strip switch
+        # (``src.core.types.is_bare_completion``): every runtime drops its
+        # agentic scaffolding — built-in tools, preset/base system prompts,
+        # settings/skills discovery — for this one-shot no-tool session.
+        marker = {"bare_completion": True, "valuz": {"ephemeral_generative_ui": True}}
         req = CreateSessionRequest(
             id=ephem_id,
             agent_config=AgentConfigSchema(

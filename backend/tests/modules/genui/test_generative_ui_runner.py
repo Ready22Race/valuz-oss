@@ -107,7 +107,9 @@ async def test_completer_builds_ephemeral_session_and_returns_text(patched):
     assert req.model == "claude-sonnet-4-6"
     assert req.runtime_provider == "claude_agent"
     assert req.model_provider is None  # mp=None → OAuth-style self-auth
-    assert req.metadata == {"valuz": {"ephemeral_generative_ui": True}}
+    # ``bare_completion`` is the kernel-recognized strip switch: every runtime
+    # drops its agentic scaffolding for this one-shot no-tool session.
+    assert req.metadata == {"bare_completion": True, "valuz": {"ephemeral_generative_ui": True}}
     assert "OpenUI Lang" in req.instructions
     assert patched["prompt"] == "PROMPT"
     assert patched["deleted"] == [req.id]  # cleanup ran

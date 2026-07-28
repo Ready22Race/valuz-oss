@@ -76,6 +76,7 @@ from src.core.types import (
     Session,
     StopReason,
     UserMessage,
+    is_bare_completion,
 )
 
 # Approval bridge — pure helpers live in ``approval_bridge.py``; we
@@ -1346,6 +1347,28 @@ def _build_config_overrides(
     # ``_build_turn_kwargs`` (``TurnStartParams.effort``), which
     # documented semantics override per-turn-and-subsequent — that path
     # works regardless of whether the thread was just started or resumed.
+
+    # Bare one-shot completion (``is_bare_completion``): strip the optional
+    # built-in tools codex's config surface lets us drop. The codex base
+    # instructions are baked into the CLI and cannot be removed, but each
+    # tool below otherwise adds its schema (and prompt guidance) to every
+    # request of a session that will never call a tool:
+    #
+    # * ``include_plan_tool`` — the update_plan/planning tool
+    # * ``include_apply_patch_tool`` — the freeform apply_patch tool
+    # * ``include_view_image_tool`` — the local-image attach tool
+    # * ``web_search="disabled"`` — only on the subscription path
+    #   (``provider is None``); the api-key branch below already emits it.
+    if is_bare_completion(session):
+        overrides.extend(
+            [
+                "include_plan_tool=false",
+                "include_apply_patch_tool=false",
+                "include_view_image_tool=false",
+            ]
+        )
+        if provider is None:
+            overrides.append('web_search="disabled"')
 
     # ``model_reasoning_summary``: subprocess-global default for
     # whether codex requests reasoning summaries from the model. The

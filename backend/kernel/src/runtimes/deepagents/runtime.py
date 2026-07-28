@@ -53,6 +53,7 @@ from src.core.types import (
     Session,
     StopReason,
     UserMessage,
+    is_bare_completion,
 )
 from src.runtimes.deepagents._patches import (
     MAIN_GRAPH_RECURSION_LIMIT,
@@ -282,7 +283,19 @@ class DeepAgentsRuntime:
                 cwd=self.workspace_root,
                 now=datetime.now().astimezone(),
             )
-            stream_input: Any = {"messages": [{"role": "user", "content": prompt}]}
+            bare = is_bare_completion(session)
+            if bare:
+                # Raw chat model (see ``_ensure_graph``): it takes a plain
+                # message list, not the graph's ``{"messages": [...]}``
+                # state dict, and the session instructions must ride as an
+                # explicit system message (the graph normally injects them).
+                bare_messages: list[dict[str, str]] = []
+                if session.instructions:
+                    bare_messages.append({"role": "system", "content": session.instructions})
+                bare_messages.append({"role": "user", "content": prompt})
+                stream_input: Any = bare_messages
+            else:
+                stream_input = {"messages": [{"role": "user", "content": prompt}]}
             # ``recursion_limit`` MUST be set here, in the call-time config:
             # ``astream_events`` (below) ignores the budget deepagents binds onto
             # the graph with ``.with_config``, so without this the main loop runs
@@ -410,6 +423,11 @@ class DeepAgentsRuntime:
                         )
 
                 if self._cancelled:
+                    break
+
+                if bare:
+                    # Raw chat model: no tools, no HITL, no ``aget_state`` —
+                    # a cleanly-ended stream IS the completed turn.
                     break
 
                 # The stream loop exited cleanly — either the graph completed
@@ -903,6 +921,20 @@ class DeepAgentsRuntime:
 
     async def _ensure_graph(self, session: Session) -> Any:
         if self._graph is not None:
+            return self._graph
+
+        # Bare one-shot completion (``is_bare_completion``): skip the
+        # deepagents graph entirely — no base agent prompt, no built-in
+        # planning/filesystem/subagent tools, no checkpointer, no HITL.
+        # The raw langchain chat model is itself a Runnable, so ``run()``
+        # streams it through the same ``astream_events`` loop; the
+        # bare-mode branches there feed it a plain message list and skip
+        # the graph-only interrupt/state machinery.
+        if is_bare_completion(session):
+            self._graph = self._build_model_client(session)
+            self._cached_permission_mode = session.permission_mode
+            self._applied_permission_mode = session.permission_mode
+            self._applied_effort = session.model_settings.effort if session.model_settings else None
             return self._graph
 
         # inherit_env=True so the agent shell sees the host's PATH / HOME / etc.
