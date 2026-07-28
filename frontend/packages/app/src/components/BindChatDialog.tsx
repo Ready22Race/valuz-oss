@@ -1,8 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { ExternalLink } from "lucide-react";
+import { ExternalLink, LogIn, Trash2, Unlink } from "lucide-react";
 import { t as _t } from "@valuz/shared/i18n";
-import { Button, FormDialog, Input, StatusPill } from "@valuz/ui";
+import {
+  Button,
+  DeleteConfirmDialog,
+  FormDialog,
+  Input,
+  StatusPill,
+} from "@valuz/ui";
 import {
   channelsApi,
   useTranslation,
@@ -38,6 +44,9 @@ export function BindChatDialog({
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
   const [created, setCreated] = useState<CreatedChat | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<ChannelChatItem | null>(
+    null,
+  );
 
   const refreshChats = useCallback(async (): Promise<void> => {
     try {
@@ -94,6 +103,58 @@ export function BindChatDialog({
       );
     } finally {
       setCreating(false);
+    }
+  };
+
+  const join = async (chat: ChannelChatItem) => {
+    try {
+      const link = await channelsApi.feishuChatLink(chat.external_chat_id);
+      if (link) {
+        window.open(link, "_blank", "noreferrer");
+        return;
+      }
+      toast.error(t("project.createChatLinkMissing" as Parameters<typeof t>[0]));
+    } catch (err) {
+      toast.error(
+        `${t("project.createChatJoin" as Parameters<typeof t>[0])}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  };
+
+  const unbind = async (chat: ChannelChatItem) => {
+    setSaving(chat.external_chat_id);
+    try {
+      await channelsApi.unbindChat(chat.external_chat_id);
+      toast.success(t("project.chatBindingRemoved" as Parameters<typeof t>[0]));
+      await Promise.all([refreshChats(), onBound()]);
+    } catch (err) {
+      toast.error(
+        `${t("project.unbindChat" as Parameters<typeof t>[0])}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const destroy = async (chat: ChannelChatItem) => {
+    setSaving(chat.external_chat_id);
+    try {
+      await channelsApi.deleteFeishuChat(chat.external_chat_id);
+      toast.success(t("project.deleteChatDone" as Parameters<typeof t>[0]));
+      await Promise.all([refreshChats(), onBound()]);
+    } catch (err) {
+      toast.error(
+        `${t("project.deleteChat" as Parameters<typeof t>[0])}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    } finally {
+      setSaving(null);
+      setDeleteTarget(null);
     }
   };
 
@@ -205,7 +266,7 @@ export function BindChatDialog({
               return (
                 <div
                   key={chat.external_chat_id}
-                  className="flex items-center gap-2 rounded-md px-2 py-2 transition-colors hover:bg-surface-muted"
+                  className="group flex items-center gap-2 rounded-md px-2 py-2 transition-colors hover:bg-surface-muted"
                 >
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-xs text-ink-heading">
@@ -244,12 +305,73 @@ export function BindChatDialog({
                       {t("project.bindChatShort" as Parameters<typeof t>[0])}
                     </Button>
                   )}
+                  {/* Secondary actions stay out of the way until pointed at —
+                      joining matters most for a Valuz-created group, whose
+                      only member is the bot. */}
+                  <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                    <button
+                      type="button"
+                      onClick={() => void join(chat)}
+                      className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-muted"
+                      title={t(
+                        "project.createChatJoin" as Parameters<typeof t>[0],
+                      )}
+                      aria-label={t(
+                        "project.createChatJoin" as Parameters<typeof t>[0],
+                      )}
+                    >
+                      <LogIn className="h-3.5 w-3.5" />
+                    </button>
+                    {boundHere && (
+                      <button
+                        type="button"
+                        disabled={saving !== null}
+                        onClick={() => void unbind(chat)}
+                        className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-muted"
+                        title={t(
+                          "project.unbindChat" as Parameters<typeof t>[0],
+                        )}
+                        aria-label={t(
+                          "project.unbindChat" as Parameters<typeof t>[0],
+                        )}
+                      >
+                        <Unlink className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                    {chat.created_by_valuz && (
+                      <button
+                        type="button"
+                        disabled={saving !== null}
+                        onClick={() => setDeleteTarget(chat)}
+                        className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-red-50 hover:text-red-600"
+                        title={t(
+                          "project.deleteChat" as Parameters<typeof t>[0],
+                        )}
+                        aria-label={t(
+                          "project.deleteChat" as Parameters<typeof t>[0],
+                        )}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
                 </div>
               );
             })}
           </div>
         )}
       </div>
+      <DeleteConfirmDialog
+        open={deleteTarget !== null}
+        onOpenChange={(next) => {
+          if (!next) setDeleteTarget(null);
+        }}
+        itemName={deleteTarget?.name}
+        description={t("project.deleteChatDesc" as Parameters<typeof t>[0])}
+        onConfirm={() => {
+          if (deleteTarget) void destroy(deleteTarget);
+        }}
+      />
     </FormDialog>
   );
 }

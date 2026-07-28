@@ -61,6 +61,10 @@ class ChannelChatBindingRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     # Audit: which IM account established the binding (see §7 — adding a bot to
     # a group opens those projects to everyone in it).
     bound_by_external_user: Mapped[str | None] = mapped_column(String(256))
+    # Valuz created this group (so the bot owns it and may delete it). A group
+    # the user made is never deleted from here — unbinding is the most this
+    # side may do to something it does not own.
+    created_by_valuz: Mapped[bool] = mapped_column(Boolean(), default=False)
 
 
 class ChannelThreadBindingRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):

@@ -301,6 +301,7 @@ class ChannelChatItem(BaseModel):
     external_chat_id: str
     name: str
     bound_project_id: str | None = None
+    created_by_valuz: bool = False
 
 
 class ChatProjectBindingResponse(BaseModel):
@@ -312,6 +313,8 @@ class ChatProjectBindingResponse(BaseModel):
     # Which IM the group lives in, so a bound group reads as "飞书 · 研究群"
     # rather than an opaque id.
     platform: str = FEISHU_PLATFORM
+    # Only a group Valuz created may be deleted from here — the bot owns it.
+    created_by_valuz: bool = False
 
 
 class ChatProjectBindingUpdate(BaseModel):
@@ -350,7 +353,7 @@ async def list_feishu_chats(
             raise HTTPException(status_code=404, detail="feishu binding not found")
         secret = _read_feishu_secret(user_id=user_id, secret_ref=binding.secret_ref)
         bound = {
-            row.external_chat_id: row.project_id
+            row.external_chat_id: row
             for row in await ChannelChatBindingDatastore(db).list_all(user_id=user_id)
         }
     if not secret.app_secret:
@@ -363,7 +366,10 @@ async def list_feishu_chats(
         ChannelChatItem(
             external_chat_id=chat_id,
             name=name,
-            bound_project_id=bound.get(chat_id),
+            bound_project_id=getattr(bound.get(chat_id), "project_id", None),
+            created_by_valuz=bool(
+                getattr(bound.get(chat_id), "created_by_valuz", False)
+            ),
         )
         for chat_id, name in chats
     ]
@@ -429,6 +435,7 @@ async def create_feishu_chat_for_project(
             external_chat_id=chat_id,
             project_id=body.project_id.strip(),
             external_chat_name=name,
+            created_by_valuz=True,
         )
     return CreatedChatResponse(
         external_chat_id=chat_id,
@@ -479,6 +486,111 @@ async def bind_chat_to_project(
     return _chat_binding_response(binding)
 
 
+class ChatLinkResponse(BaseModel):
+    share_link: str | None = None
+
+
+@router.get("/feishu/chats/{external_chat_id}/link", response_model=ChatLinkResponse)
+async def get_feishu_chat_link(
+    external_chat_id: str,
+    user_id: Annotated[str, Depends(get_current_user_id)],
+) -> ChatLinkResponse:
+    """A join link for a group the bot is in — asked for on demand.
+
+    A Valuz-created group has only the bot in it, so without this the link
+    shown once at creation is the only way in.
+    """
+    from valuz_agent.integrations.feishu_long_connection import feishu_chat_link
+
+    async with async_unit_of_work() as db:
+        binding = next(
+            iter(
+                await AgentChannelBindingDatastore(db).list_enabled(
+                    platform=FEISHU_PLATFORM, user_id=user_id
+                )
+            ),
+            None,
+        )
+        secret = (
+            _read_feishu_secret(user_id=user_id, secret_ref=binding.secret_ref)
+            if binding is not None
+            else _FeishuSecretPayload()
+        )
+    if binding is None or not secret.app_secret:
+        raise HTTPException(status_code=404, detail="feishu binding not found")
+    try:
+        link = await feishu_chat_link(
+            app_id=binding.bot_id,
+            app_secret=secret.app_secret,
+            chat_id=external_chat_id,
+        )
+    except ChannelConfigError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return ChatLinkResponse(share_link=link)
+
+
+@router.delete("/feishu/chats/{external_chat_id}", status_code=204)
+async def delete_feishu_chat(
+    external_chat_id: str,
+    user_id: Annotated[str, Depends(get_current_user_id)],
+    channel_instance_id: str = "feishu-main",
+) -> None:
+    """Delete a group Valuz created, and drop its binding.
+
+    Refused for a group somebody else made: the bot is not its owner, and
+    unbinding is the most this side may do to something it does not own.
+    """
+    from valuz_agent.integrations.feishu_long_connection import (
+        delete_feishu_chat as delete_chat,
+    )
+
+    async with async_unit_of_work() as db:
+        chat_ds = ChannelChatBindingDatastore(db)
+        binding = await chat_ds.get(
+            user_id=user_id,
+            channel_instance_id=channel_instance_id,
+            external_chat_id=external_chat_id,
+        )
+        if binding is None:
+            raise HTTPException(status_code=404, detail="chat binding not found")
+        if not binding.created_by_valuz:
+            raise HTTPException(
+                status_code=409,
+                detail="this group was not created by Valuz; unlink it instead",
+            )
+        app_binding = next(
+            iter(
+                await AgentChannelBindingDatastore(db).list_enabled(
+                    platform=FEISHU_PLATFORM, user_id=user_id
+                )
+            ),
+            None,
+        )
+        secret = (
+            _read_feishu_secret(user_id=user_id, secret_ref=app_binding.secret_ref)
+            if app_binding is not None
+            else _FeishuSecretPayload()
+        )
+    if app_binding is None or not secret.app_secret:
+        raise HTTPException(status_code=404, detail="feishu binding not found")
+
+    try:
+        await delete_chat(
+            app_id=app_binding.bot_id,
+            app_secret=secret.app_secret,
+            chat_id=external_chat_id,
+        )
+    except ChannelConfigError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    async with async_unit_of_work() as db:
+        await ChannelChatBindingDatastore(db).delete(
+            user_id=user_id,
+            channel_instance_id=channel_instance_id,
+            external_chat_id=external_chat_id,
+        )
+
+
 @router.delete("/chat-bindings", status_code=204)
 async def unbind_chat(
     external_chat_id: str,
@@ -503,6 +615,7 @@ def _chat_binding_response(binding: Any) -> ChatProjectBindingResponse:
         external_chat_name=binding.external_chat_name,
         default_agent_slug=binding.default_agent_slug,
         platform=_platform_of(binding.channel_instance_id),
+        created_by_valuz=bool(getattr(binding, "created_by_valuz", False)),
     )
 
 

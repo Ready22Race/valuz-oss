@@ -1125,7 +1125,10 @@
     "platformFeishu": "飞书",
     "platformWecom": "企业微信",
     "bindChatExistingTitle": "已有的群",
-    "bindChatShort": "关联"
+    "bindChatShort": "关联",
+    "deleteChat": "解散群",
+    "deleteChatDone": "群已解散",
+    "deleteChatDesc": "该群由 Valuz 创建。解散后群和聊天记录都会消失，且无法恢复。"
   },
   "schedule": {
     "create": "创建定时任务",

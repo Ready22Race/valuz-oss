@@ -294,6 +294,7 @@ class ChannelChatBindingDatastore:
         default_agent_slug: str | None = None,
         external_chat_name: str | None = None,
         bound_by_external_user: str | None = None,
+        created_by_valuz: bool | None = None,
     ) -> ChannelChatBinding:
         """Bind (or rebind) the chat. One chat holds one project, so rebinding
         overwrites rather than accumulating — see §3.2."""
@@ -317,6 +318,8 @@ class ChannelChatBindingDatastore:
             row.external_chat_name = external_chat_name
         if bound_by_external_user is not None:
             row.bound_by_external_user = bound_by_external_user
+        if created_by_valuz is not None:
+            row.created_by_valuz = created_by_valuz
         await self._db.flush()
         return _chat_binding_to_schema(row)
 
@@ -360,6 +363,7 @@ def _chat_binding_to_schema(row: ChannelChatBindingRow) -> ChannelChatBinding:
         default_agent_slug=row.default_agent_slug,
         external_chat_name=row.external_chat_name,
         bound_by_external_user=row.bound_by_external_user,
+        created_by_valuz=bool(row.created_by_valuz),
     )
 
 

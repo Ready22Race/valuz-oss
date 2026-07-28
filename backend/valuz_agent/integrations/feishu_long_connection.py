@@ -1057,6 +1057,59 @@ async def create_feishu_chat(
     return chat_id, share_link
 
 
+async def feishu_chat_link(*, app_id: str, app_secret: str, chat_id: str) -> str | None:
+    """A share link for a group the bot is in.
+
+    Generated on demand rather than stored: the link at creation time is easy
+    to miss, and without a way to ask again a Valuz-created group becomes
+    unreachable — nobody but the bot is in it yet.
+    """
+    from lark_oapi.api.im.v1 import LinkChatRequest, LinkChatRequestBody
+
+    config = FeishuLongConnectionConfig(
+        channel_instance_id="",
+        owner_user_id="",
+        agent_slug="",
+        app_id=app_id,
+        app_secret=app_secret,
+    )
+    client = _new_openapi_client(config)
+    response = await client.im.v1.chat.alink(
+        LinkChatRequest.builder()
+        .chat_id(chat_id)
+        .request_body(
+            LinkChatRequestBody.builder().validity_period("permanently").build()
+        )
+        .build()
+    )
+    if not response.success():
+        raise ChannelConfigError(
+            f"Feishu chat link failed: {response.code} {response.msg or ''}".strip()
+        )
+    return response.data.share_link if response.data is not None else None
+
+
+async def delete_feishu_chat(*, app_id: str, app_secret: str, chat_id: str) -> None:
+    """Dissolve a group. Only valid for groups the app created — it owns those."""
+    from lark_oapi.api.im.v1 import DeleteChatRequest
+
+    config = FeishuLongConnectionConfig(
+        channel_instance_id="",
+        owner_user_id="",
+        agent_slug="",
+        app_id=app_id,
+        app_secret=app_secret,
+    )
+    client = _new_openapi_client(config)
+    response = await client.im.v1.chat.adelete(
+        DeleteChatRequest.builder().chat_id(chat_id).build()
+    )
+    if not response.success():
+        raise ChannelConfigError(
+            f"Feishu chat delete failed: {response.code} {response.msg or ''}".strip()
+        )
+
+
 async def list_feishu_chats(*, app_id: str, app_secret: str) -> list[tuple[str, str]]:
     """``(chat_id, name)`` for every group the bot is a member of.
 

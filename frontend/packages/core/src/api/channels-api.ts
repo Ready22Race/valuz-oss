@@ -54,6 +54,8 @@ export interface ChannelChatItem {
   external_chat_id: string;
   name: string;
   bound_project_id?: string | null;
+  /** Valuz created this group, so the bot owns it and may delete it. */
+  created_by_valuz?: boolean;
 }
 
 export interface ChatProjectBinding {
@@ -64,6 +66,7 @@ export interface ChatProjectBinding {
   default_agent_slug?: string | null;
   /** Which IM the group lives in — "feishu" | "wecom_aibot". */
   platform?: string;
+  created_by_valuz?: boolean;
 }
 
 export interface CreatedChat {
@@ -172,6 +175,22 @@ export const channelsApi = {
         channel_instance_id: payload.channel_instance_id ?? "feishu-main",
       }),
     });
+  },
+
+  /** A join link for a group the bot is in, generated on demand. */
+  async feishuChatLink(externalChatId: string): Promise<string | null> {
+    const result = await fetchJson<{ share_link: string | null }>(
+      `/v1/channels/feishu/chats/${encodeURIComponent(externalChatId)}/link`,
+    );
+    return result.share_link ?? null;
+  },
+
+  /** Dissolve a group Valuz created (and drop its binding). */
+  async deleteFeishuChat(externalChatId: string): Promise<void> {
+    await fetchJson(
+      `/v1/channels/feishu/chats/${encodeURIComponent(externalChatId)}`,
+      { method: "DELETE" },
+    );
   },
 
   listChatBindings(projectId?: string): Promise<ChatProjectBinding[]> {

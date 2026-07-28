@@ -45,6 +45,7 @@ class ChannelChatBinding:
     default_agent_slug: str | None = None
     external_chat_name: str | None = None
     bound_by_external_user: str | None = None
+    created_by_valuz: bool = False
 
 
 @dataclass(frozen=True, slots=True)

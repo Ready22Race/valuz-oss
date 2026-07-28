@@ -1125,7 +1125,10 @@
     "platformFeishu": "Feishu",
     "platformWecom": "WeCom",
     "bindChatExistingTitle": "Existing groups",
-    "bindChatShort": "Link"
+    "bindChatShort": "Link",
+    "deleteChat": "Delete group",
+    "deleteChatDone": "Group deleted",
+    "deleteChatDesc": "Valuz created this group. Deleting it removes the group and its history for good."
   },
   "schedule": {
     "create": "Create Schedule",
