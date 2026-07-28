@@ -557,11 +557,12 @@ async def _send_feishu_text_reply(
     if not source_message_id:
         raise ChannelConfigError("Feishu cannot reply without source message id")
     client = _new_openapi_client(config)
+    # Plain reply, not ``reply_in_thread``: threading turns every answer into a
+    # Feishu topic, which reads as a side-channel instead of an ordinary chat.
     body = (
         ReplyMessageRequestBody.builder()
         .msg_type("text")
         .content(_feishu_text_content(content))
-        .reply_in_thread(True)
         .build()
     )
     request = (

@@ -7,7 +7,10 @@ from dataclasses import dataclass, replace
 from typing import Protocol
 
 from valuz_agent.modules.channels.adapters import InboundChannelMessage
-from valuz_agent.modules.channels.resolver import AgentChannelResolver
+from valuz_agent.modules.channels.resolver import (
+    CHAT_PROJECT_SENTINEL,
+    AgentChannelResolver,
+)
 from valuz_agent.modules.channels.schemas import (
     AgentChannelRouteDecision,
     AgentPlacement,
@@ -44,6 +47,9 @@ class ChannelThreadBindingStore(Protocol):
 
 class ChannelSessionRef(Protocol):
     id: str
+    # The project the session actually landed in. Differs from the requested id
+    # when the quick-chat sentinel is expanded into a fresh chat project.
+    project_id: str
 
 
 class ChannelSessionRunner(Protocol):
@@ -131,11 +137,17 @@ class ChannelIngressService:
         if decision.kind != ChannelRouteDecisionKind.NEW_SESSION or decision.project_id is None:
             return ChannelIngressResult(decision=decision)
 
-        placement = _placement_for_project(placements, decision.project_id)
+        # No placement for the quick-chat sentinel — the agent is used straight
+        # from the library, exactly like a project-less conversation in the app.
+        agent_slug = (
+            context.mentioned_agent_slug
+            if decision.project_id == CHAT_PROJECT_SENTINEL
+            else _placement_for_project(placements, decision.project_id).agent_slug
+        )
         created = await self._sessions.create_session(
             user_id=user_id,
             project_id=decision.project_id,
-            agent_slug=placement.agent_slug,
+            agent_slug=agent_slug,
             origin="channel",
             creation_context={
                 "kind": "channel",
@@ -151,7 +163,11 @@ class ChannelIngressService:
             session_id=session_id,
             content=inbound.text,
         )
-        key = self._resolver.route_key(context, project_id=decision.project_id)
+        # Bind the project the session actually landed in: the sentinel is
+        # expanded into a fresh chat project, and storing the sentinel would
+        # make every follow-up open a brand-new chat.
+        bound_project_id = getattr(created, "project_id", None) or decision.project_id
+        key = self._resolver.route_key(context, project_id=str(bound_project_id))
         await self._bindings.upsert(user_id=user_id, key=key, session_id=session_id)
         return ChannelIngressResult(decision=decision, session_id=session_id)
 
