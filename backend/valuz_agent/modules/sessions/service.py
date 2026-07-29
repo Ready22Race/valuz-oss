@@ -48,6 +48,11 @@ from valuz_agent.adapters.system_prompt_builder import build_project_system_prom
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.integrations.skills_filesystem import FilesystemSkillSource
+from valuz_agent.modules.agents.effective_resources import (
+    EffectiveResourceManifest,
+    EffectiveResourceResolver,
+    current_execution_supports_stdio,
+)
 from valuz_agent.modules.connectors.datastore import ConnectorDatastore
 from valuz_agent.modules.docs.datastore import DocumentDatastore
 from valuz_agent.modules.projects.datastore import ProjectDatastore
@@ -237,6 +242,21 @@ class SessionService:
         self._skill_source = skill_source
         self._extra_skill_sources = extra_skill_sources or []
         self._auth = auth_facade
+
+    async def _resolve_all_available_resources(
+        self,
+        user_id: str,
+        runtime: object,
+    ) -> EffectiveResourceManifest:
+        return await EffectiveResourceResolver(
+            skills=self._skills,
+            connectors=self._connectors,
+            docs=self._docs,
+        ).resolve(
+            user_id,
+            runtime=str(runtime),
+            supports_stdio=current_execution_supports_stdio(),
+        )
 
     async def _has_official_entitlement(self) -> bool:
         """Check if the connected account grants ``skills:official``.
@@ -787,16 +807,33 @@ class SessionService:
             assemble_session_instructions,
         )
         from valuz_agent.modules.memory.injection import memory_instructions_block
-        from valuz_agent.ports.instructions import global_instructions_preamble
+        from valuz_agent.ports.instructions import (
+            agent_inherits_global_instructions,
+            resolve_global_instructions,
+        )
 
         # Frozen memory snapshot (memory-system-design §8): rendered once here
         # and frozen into ``Session.instructions`` — one copy per session
         # instead of one per user message (the old additional-context path).
         mem_block = await memory_instructions_block(user_id=user_id, project_id=project_id)
 
+        agent_meta = agent.metadata or {}
+        inherits_global = agent_inherits_global_instructions(
+            kind=agent_meta.get("agent_kind", "standard"),
+            inherit_global_instructions=agent_meta.get("inherit_global_instructions", True),
+        )
+        prompt_snapshot = await resolve_global_instructions(user_id) if inherits_global else None
+        all_available_manifest = (
+            await self._resolve_all_available_resources(user_id, runtime_provider)
+            if agent_meta.get("resource_policy") == "all_available"
+            else None
+        )
         instructions = assemble_session_instructions(
             [
-                ("global-instructions", await global_instructions_preamble()),
+                (
+                    "global-instructions",
+                    prompt_snapshot.content if prompt_snapshot is not None else "",
+                ),
                 ("agent-instructions", agent.instructions or ""),
                 ("project-instructions", project_prompt),
                 ("memory", mem_block),
@@ -837,37 +874,52 @@ class SessionService:
         #  - HTTP MCP (valuz_docs / valuz_schedules / valuz_connectors) + the
         #    baseline skills (valuz-project-docs / skill-creator) are session
         #    fields, injected here on top of the agent's own connectors/skills.
-        from valuz_agent.adapters.capability_resolver import (
-            always_on_http_mcp_servers,
-            always_on_skill_paths,
-            resolve_skill_slugs_to_paths,
-        )
+        if all_available_manifest is not None:
+            caps = await resolve_session_capabilities(
+                projects=self._projects,
+                skills=self._skills,
+                project_id=project_id,
+                user_id=user_id,
+                enabled_mcp_provider_slugs=all_available_manifest.connector_slugs,
+                connectors=self._connectors,
+                docs=self._docs,
+                session_id=session_id,
+                all_available_skill_paths=all_available_manifest.skill_paths,
+            )
+            session_mcp = list(caps.mcp_servers)
+            session_skills = caps.skills
+        else:
+            from valuz_agent.adapters.capability_resolver import (
+                always_on_http_mcp_servers,
+                always_on_skill_paths,
+                resolve_skill_slugs_to_paths,
+            )
 
-        existing_mcp_names = {getattr(m, "name", None) for m in (agent.mcp_servers or ())}
-        from app.serializers import mcp_to_schema
+            existing_mcp_names = {getattr(m, "name", None) for m in (agent.mcp_servers or ())}
+            from app.serializers import mcp_to_schema
 
-        session_mcp = [mcp_to_schema(m) for m in (agent.mcp_servers or ())] + [
-            m
-            for m in await always_on_http_mcp_servers(session_id, owner_user_id=user_id)
-            if m.name not in existing_mcp_names
-        ]
-        import os as _os
+            session_mcp = [mcp_to_schema(m) for m in (agent.mcp_servers or ())] + [
+                m
+                for m in await always_on_http_mcp_servers(session_id, owner_user_id=user_id)
+                if m.name not in existing_mcp_names
+            ]
+            import os as _os
 
-        own_skill_keys = {(s.name if hasattr(s, "name") else str(s)) for s in (agent.skills or ())}
-        # Resolve the agent's skill SLUGS → absolute source dirs (same shared
-        # chokepoint the task path uses). Passing raw slugs crashed the kernel
-        # materializer with "Skill source path not found ...: <slug>" the moment
-        # an agent carried any skill.
-        own_skill_paths = await resolve_skill_slugs_to_paths(
-            agent.skills,
-            session_cwd,
-            user_id=user_id,
-        )
-        session_skills = tuple(own_skill_paths) + tuple(
-            p
-            for p in always_on_skill_paths(user_id=user_id)
-            if _os.path.basename(p) not in own_skill_keys
-        )
+            own_skill_keys = {
+                (s.name if hasattr(s, "name") else str(s)) for s in (agent.skills or ())
+            }
+            own_skill_paths = await resolve_skill_slugs_to_paths(
+                agent.skills,
+                session_cwd,
+                user_id=user_id,
+            )
+            session_skills = tuple(own_skill_paths) + tuple(
+                p
+                for p in always_on_skill_paths(user_id=user_id)
+                if _os.path.basename(p) not in own_skill_keys
+            )
+
+        from valuz_agent.modules.agents.builtin import canonical_agent_slug
 
         valuz_meta: dict[str, object] = {
             "name": title,
@@ -877,8 +929,12 @@ class SessionService:
             "last_user_message_text": None,
             "locked_provider_id": provider_id,
             "extra_skill_ids": [],
-            "agent_slug": agent_slug,
+            "agent_slug": canonical_agent_slug(agent_slug),
         }
+        if prompt_snapshot is not None:
+            valuz_meta["global_instructions"] = prompt_snapshot.metadata()
+        if all_available_manifest is not None:
+            valuz_meta["capability_manifest"] = all_available_manifest.session_metadata()
         if wt_handle is not None:
             valuz_meta["worktree"] = self._worktree_snapshot(wt_handle)
         if creation_context:
@@ -1105,16 +1161,14 @@ class SessionService:
             # clean error to the user.
             raise SessionNotRunnable(str(exc)) from exc
 
-        # MCP defaulting: when the caller passes ``None`` (front-end omits
-        # the field) auto-include every connected provider so users don't
-        # have to repick their connections per session. ``[]`` is honoured
-        # as "explicitly none". An explicit non-empty list is also honoured.
-        effective_mcp_slugs = mcp_provider_slugs
-        if effective_mcp_slugs is None and self._connectors is not None:
-            effective_mcp_slugs = await self._auto_default_mcp_slugs(
-                project_id,
-                user_id,
-            )
+        # Agentless shares Valurion's all-available resource definition.
+        # Caller-provided connector picks are retained in the public request
+        # for compatibility but cannot narrow/broaden the authorized set.
+        del mcp_provider_slugs
+        all_available_manifest = await self._resolve_all_available_resources(
+            user_id,
+            runtime_provider,
+        )
 
         # Allocate session id up-front so capability resolution can stamp
         # it into the in-process docs MCP URL (the URL embeds the session
@@ -1129,13 +1183,11 @@ class SessionService:
                 skills=self._skills,
                 project_id=project_id,
                 user_id=user_id,
-                skill_source=self._skill_source,
-                extra_skill_sources=self._extra_skill_sources,
-                official_entitled=await self._has_official_entitlement(),
-                enabled_mcp_provider_slugs=effective_mcp_slugs,
+                enabled_mcp_provider_slugs=all_available_manifest.connector_slugs,
                 connectors=self._connectors,
                 docs=self._docs,
                 session_id=session_id,
+                all_available_skill_paths=all_available_manifest.skill_paths,
             )
         except KeyError:
             caps_skills: tuple[str, ...] = ()
@@ -1182,8 +1234,14 @@ class SessionService:
             prepend_global_instructions,
         )
         from valuz_agent.modules.memory.injection import memory_instructions_block
+        from valuz_agent.ports.instructions import resolve_global_instructions
 
-        session_instructions = await prepend_global_instructions(session_instructions)
+        prompt_snapshot = await resolve_global_instructions(user_id)
+        session_instructions = await prepend_global_instructions(
+            session_instructions,
+            user_id=user_id,
+            snapshot=prompt_snapshot,
+        )
 
         # Frozen memory snapshot (memory-system-design §8), same section the
         # agent-bound and task paths get. Quick-chat ephemeral projects have
@@ -1206,6 +1264,8 @@ class SessionService:
             "last_user_message_text": None,
             "locked_provider_id": resolved_provider_id,
             "extra_skill_ids": [],
+            "global_instructions": prompt_snapshot.metadata(),
+            "capability_manifest": all_available_manifest.session_metadata(),
         }
         # Optional ``creation_context`` records *why* the session was
         # opened (chat / project / skills_library) so the

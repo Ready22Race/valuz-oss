@@ -172,8 +172,13 @@ class ResourceLibrary:
                     "model": row.model,
                     "skills": row.skills,
                     "connector_types": row.connector_types,
+                    "knowledge_scope": row.knowledge_scope,
                     "provider_id": row.provider_id,
                     "effort": row.effort,
+                    "kind": row.kind,
+                    "resource_policy": row.resource_policy,
+                    "inherit_global_instructions": row.inherit_global_instructions,
+                    "permission_mode": row.permission_mode,
                     "avatar": row.avatar,
                 },
             )

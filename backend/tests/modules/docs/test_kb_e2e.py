@@ -673,6 +673,53 @@ class TestScopeResolution:
         scope = await svc.resolve_doc_scope("local-test-owner", "project-1")
         assert scope == [target_doc.id]
 
+    async def test_all_available_allowlist_ignores_project_bindings_and_reauthorizes(
+        self,
+        svc,
+        tmp_path,
+        db,
+    ):
+        first_root = tmp_path / "first"
+        second_root = tmp_path / "second"
+        first_root.mkdir()
+        second_root.mkdir()
+        (first_root / "a.md").write_text("a", encoding="utf-8")
+        (second_root / "b.md").write_text("b", encoding="utf-8")
+        first = await _create_kb_and_settle(svc, name="First", root_path=str(first_root))
+        second = await _create_kb_and_settle(svc, name="Second", root_path=str(second_root))
+
+        ds = DocumentDatastore(db)
+        for kb in (first, second):
+            for doc in await ds.list_documents("local-test-owner", kb_id=kb.id):
+                doc.status = "ready"
+                await ds.update(doc)
+
+        # Project binding points at Second, but a session snapshot allowlisting
+        # First must see only First.
+        await svc.update_project_bindings(
+            "local-test-owner",
+            "project-1",
+            [{"binding_kind": "kb", "target_id": second.id}],
+        )
+        first_scope = await svc.resolve_doc_scope(
+            "local-test-owner",
+            "project-1",
+            knowledge_base_ids=[first.id],
+        )
+        assert len(first_scope) == 1
+        assert (await ds.get_by_id("local-test-owner", first_scope[0])).kb_id == first.id
+
+        # Revocation/deletion fails closed immediately for the old snapshot.
+        await svc.delete_kb("local-test-owner", first.id)
+        assert (
+            await svc.resolve_doc_scope(
+                "local-test-owner",
+                "project-1",
+                knowledge_base_ids=[first.id],
+            )
+            == []
+        )
+
 
 # ── 6. Doc scope tree (M09 integration) ──────────────────────────────
 

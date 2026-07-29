@@ -74,7 +74,12 @@ def assemble_session_instructions(sections: list[tuple[str, str]]) -> str:
     return "\n\n".join(out)
 
 
-async def prepend_global_instructions(instructions: str) -> str:
+async def prepend_global_instructions(
+    instructions: str,
+    *,
+    user_id: str,
+    snapshot: object | None = None,
+) -> str:
     """Prepend the deployment-wide preamble ahead of a bare prompt string.
 
     The raw/no-agent ``create_session`` branch (quick chat, skill-creator,
@@ -85,13 +90,17 @@ async def prepend_global_instructions(instructions: str) -> str:
     *instructions* unchanged, byte-identical) when no override is bound or
     the provider returns nothing.
     """
-    from valuz_agent.ports.instructions import global_instructions_preamble
-
-    block = assemble_session_instructions(
-        [("global-instructions", await global_instructions_preamble())]
+    from valuz_agent.ports.instructions import (
+        PromptSnapshot,
+        resolve_global_instructions,
     )
-    if not block:
-        return instructions
+
+    resolved = (
+        snapshot
+        if isinstance(snapshot, PromptSnapshot)
+        else await resolve_global_instructions(user_id)
+    )
+    block = assemble_session_instructions([("global-instructions", resolved.content)])
     return f"{block}\n\n{instructions}" if instructions else block
 
 

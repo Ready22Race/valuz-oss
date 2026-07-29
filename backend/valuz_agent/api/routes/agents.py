@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.infra.db import get_async_session
 from valuz_agent.modules.agents.service import (
+    AgentManagedFieldError,
     AgentNotDeletableError,
     AgentNotFoundError,
     AgentService,
@@ -76,8 +77,13 @@ class AgentResponse(BaseModel):
     model: str
     skills: list[str]
     connector_types: list[str]
+    knowledge_scope: list[str] = []
     provider_id: str | None = None
     effort: EffortLevel | None = None
+    kind: Literal["system", "standard"] = "standard"
+    resource_policy: Literal["explicit", "all_available"] = "explicit"
+    inherit_global_instructions: bool = True
+    permission_mode: str = "full_access"
     source: str
     readonly: bool = False
     deletable: bool = True
@@ -225,6 +231,22 @@ async def list_agent_deployments(
     return {"deployments": deployments, "count": len(deployments)}
 
 
+@router.get("/v1/agents/{slug}/effective-resources")
+async def get_agent_effective_resources(
+    slug: str,
+    user_id: str = Depends(get_current_user_id),
+    svc: AgentService = Depends(_get_agent_service),
+) -> dict[str, Any]:
+    """Read-only, secret-free effective resources for all-available Agents."""
+    try:
+        manifest = await svc.resolve_effective_resources(user_id, slug)
+    except AgentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Agent not found: {slug}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return manifest.to_api()
+
+
 class CreateAgentRequest(BaseModel):
     # Optional: backend derives a CJK-preserving, globally-unique slug from
     # ``name`` when omitted (VALUZ-AGENT-SLUG). UI sends name only.
@@ -236,6 +258,9 @@ class CreateAgentRequest(BaseModel):
     model: str | None = None  # None → factory default (ext.model_defaults)
     skills: list[str] = []
     connector_types: list[str] = []
+    knowledge_scope: list[str] = []
+    inherit_global_instructions: bool = True
+    permission_mode: str = "full_access"
     provider_id: str | None = None
     effort: EffortLevel | None = None
     avatar: str | None = None
@@ -249,6 +274,9 @@ class UpdateAgentRequest(BaseModel):
     model: str | None = None
     skills: list[str] | None = None
     connector_types: list[str] | None = None
+    knowledge_scope: list[str] | None = None
+    inherit_global_instructions: bool | None = None
+    permission_mode: str | None = None
     provider_id: str | None = None
     effort: EffortLevel | None = None
     avatar: str | None = None
@@ -277,7 +305,32 @@ async def update_agent(
 ) -> AgentResponse:
     """Patch an agent (official or custom)."""
     try:
-        row = await svc.update_agent(user_id, slug, payload.model_dump(exclude_none=True))
+        row = await svc.update_agent(user_id, slug, payload.model_dump(exclude_unset=True))
+    except AgentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Agent not found: {slug}") from exc
+    except AgentManagedFieldError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return AgentResponse.model_validate(row)
+
+
+class CopyAgentRequest(BaseModel):
+    name: str | None = None
+
+
+@router.post("/v1/agents/{slug}/copy", status_code=201, response_model=AgentResponse)
+async def copy_agent(
+    slug: str,
+    payload: CopyAgentRequest | None = None,
+    user_id: str = Depends(get_current_user_id),
+    svc: AgentService = Depends(_get_agent_service),
+) -> AgentResponse:
+    """Copy portable Agent configuration using the Valurion-specific rules."""
+    try:
+        row = await svc.copy_agent(
+            user_id,
+            slug,
+            name=payload.name if payload is not None else None,
+        )
     except AgentNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"Agent not found: {slug}") from exc
     return AgentResponse.model_validate(row)

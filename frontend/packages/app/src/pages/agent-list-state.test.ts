@@ -3,6 +3,7 @@ import type { Agent } from "@valuz/core";
 import {
   isCloudOnlyAgent,
   isCloudOnlyResource,
+  isSystemAgent,
 } from "./agent-list-state";
 
 const agent = {
@@ -49,5 +50,18 @@ describe("isCloudOnlyResource", () => {
         },
       }),
     ).toBe(true);
+  });
+});
+
+describe("isSystemAgent", () => {
+  it("uses the backend kind instead of a display slug or source heuristic", () => {
+    expect(isSystemAgent({ ...agent, kind: "system" } as Agent)).toBe(true);
+    expect(
+      isSystemAgent({
+        ...agent,
+        slug: "valurion",
+        kind: "standard",
+      } as Agent),
+    ).toBe(false);
   });
 });

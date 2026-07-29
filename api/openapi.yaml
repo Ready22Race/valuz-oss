@@ -384,6 +384,32 @@ paths:
           description: Agent not found
         "409":
           description: Agent still deployed to one or more projects (解除派驻 first; pass cascade=true to force)
+  /v1/agents/{slug}/copy:
+    post:
+      summary: Copy portable Agent configuration
+      operationId: copyAgent
+      tags: [agents]
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CopyAgentRequest"
+      responses:
+        "201":
+          description: Copied standard Agent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Agent"
+        "404":
+          description: Agent not found
   /v1/agents/{slug}/deployments:
     get:
       summary: List the projects an agent is deployed (派驻) into
@@ -417,6 +443,28 @@ paths:
                           description: Project-local member handle.
         "404":
           description: Agent not found
+  /v1/agents/{slug}/effective-resources:
+    get:
+      summary: Resolve an all-available Agent's current resources
+      operationId: getAgentEffectiveResources
+      tags: [agents]
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Secret-free current resource manifest
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EffectiveResourceManifest"
+        "404":
+          description: Agent not found
+        "409":
+          description: Agent uses explicit resources
   /v1/projects/{project_id}/agents:
     get:
       summary: List project member agents
@@ -1860,8 +1908,8 @@ paths:
         `context.kind` and stamps `creation_context` onto session metadata so
         the downstream `submit_skill` tool applies the right side-effects on
         confirmation. The session binds `agent_slug` when given; otherwise the
-        backend picks the default assistant (seeded `default-assistant`, then
-        the onboarding-created `valuz-helper`), falling back to an agentless
+        backend picks the built-in `valurion` agent (accepting legacy aliases
+        during migration), falling back to an agentless
         session when neither exists yet.
       operationId: startSkillCreate
       tags: [skills]
@@ -4545,7 +4593,7 @@ components:
           items: {$ref: "#/components/schemas/ConnectorToConfigure"}
     Agent:
       type: object
-      required: [id, slug, name, description, instructions, runtime, model, skills, connector_types, source]
+      required: [id, slug, name, description, instructions, runtime, model, skills, connector_types, knowledge_scope, kind, resource_policy, inherit_global_instructions, permission_mode, source]
       properties:
         id: {type: string}
         slug: {type: string}
@@ -4558,6 +4606,9 @@ components:
           type: array
           items: {type: string}
         connector_types:
+          type: array
+          items: {type: string}
+        knowledge_scope:
           type: array
           items: {type: string}
         provider_id:
@@ -4574,6 +4625,18 @@ components:
             Default reasoning-effort budget prefilled into instances. null =
             no override (runtime SDK default). Project conversations read the
             budget from the bound agent.
+        kind:
+          type: string
+          enum: [system, standard]
+          description: System identity. Only Valurion is system.
+        resource_policy:
+          type: string
+          enum: [explicit, all_available]
+        inherit_global_instructions:
+          type: boolean
+          default: true
+          description: Whether standard Agents inherit Valurion's current product instructions.
+        permission_mode: {type: string, default: full_access}
         source: {type: string}
         readonly: {type: boolean, default: false, description: "If true, the agent cannot be edited."}
         deletable: {type: boolean, default: true, description: "If false, the agent cannot be deleted."}
@@ -4601,6 +4664,11 @@ components:
         connector_types:
           type: array
           items: {type: string}
+        knowledge_scope:
+          type: array
+          items: {type: string}
+        inherit_global_instructions: {type: boolean, default: true}
+        permission_mode: {type: string, default: full_access}
         provider_id: {type: string, nullable: true}
         effort: {type: string, nullable: true, enum: [low, medium, high, xhigh, max]}
         avatar: {type: string, nullable: true}
@@ -4620,9 +4688,61 @@ components:
           type: array
           nullable: true
           items: {type: string}
+        knowledge_scope:
+          type: array
+          nullable: true
+          items: {type: string}
+        inherit_global_instructions: {type: boolean, nullable: true}
+        permission_mode: {type: string, nullable: true}
         provider_id: {type: string, nullable: true}
         effort: {type: string, nullable: true, enum: [low, medium, high, xhigh, max]}
         avatar: {type: string, nullable: true}
+    CopyAgentRequest:
+      type: object
+      properties:
+        name: {type: string, nullable: true}
+    EffectiveResource:
+      type: object
+      required: [id, slug, name, source, status]
+      properties:
+        id: {type: string}
+        slug: {type: string}
+        name: {type: string}
+        source: {type: string}
+        status: {type: string}
+    EffectiveResourceWarning:
+      type: object
+      required: [resource_type, resource_id, code, message]
+      properties:
+        resource_type: {type: string}
+        resource_id: {type: string}
+        code: {type: string}
+        message: {type: string}
+    EffectiveResourceManifest:
+      type: object
+      required: [policy, resolved_at, counts, skills, connectors, knowledge_bases, warnings]
+      properties:
+        policy: {type: string, enum: [all_available]}
+        resolved_at: {type: integer, format: int64}
+        counts:
+          type: object
+          required: [skills, connectors, knowledge_bases]
+          properties:
+            skills: {type: integer}
+            connectors: {type: integer}
+            knowledge_bases: {type: integer}
+        skills:
+          type: array
+          items: {$ref: "#/components/schemas/EffectiveResource"}
+        connectors:
+          type: array
+          items: {$ref: "#/components/schemas/EffectiveResource"}
+        knowledge_bases:
+          type: array
+          items: {$ref: "#/components/schemas/EffectiveResource"}
+        warnings:
+          type: array
+          items: {$ref: "#/components/schemas/EffectiveResourceWarning"}
     ConnectorBindingInput:
       type: object
       required: [type]

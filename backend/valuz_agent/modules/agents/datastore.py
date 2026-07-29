@@ -13,8 +13,8 @@ stamps the owner explicitly (no ContextVar write-stamp default).
 
 from __future__ import annotations
 
+from sqlalchemy import case, select
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from valuz_agent.modules.agents.models import AgentRow, ProjectMemberRow
@@ -26,7 +26,14 @@ class AgentDatastore:
         self._db = db
 
     async def list_agents(self, user_id: str, source: str | None = None) -> list[AgentRow]:
-        stmt = select(AgentRow).where(AgentRow.user_id == user_id).order_by(AgentRow.created_at)
+        stmt = (
+            select(AgentRow)
+            .where(AgentRow.user_id == user_id)
+            .order_by(
+                case((AgentRow.kind == "system", 0), else_=1),
+                AgentRow.created_at,
+            )
+        )
         if source is not None:
             stmt = stmt.where(AgentRow.source == source)
         return list((await self._db.execute(stmt)).scalars().all())
@@ -83,8 +90,13 @@ class AgentDatastore:
             existing.model = row.model
             existing.skills = row.skills
             existing.connector_types = row.connector_types
+            existing.knowledge_scope = row.knowledge_scope
             existing.provider_id = row.provider_id
             existing.effort = row.effort
+            existing.kind = row.kind
+            existing.resource_policy = row.resource_policy
+            existing.inherit_global_instructions = row.inherit_global_instructions
+            existing.permission_mode = row.permission_mode
             existing.source = row.source
             existing.readonly = row.readonly
             existing.deletable = row.deletable

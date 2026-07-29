@@ -1,16 +1,24 @@
 import { useCallback, useEffect, useState } from "react";
 import { agentsApi, type Agent } from "@valuz/core";
 
-/** The general assistant seeded by onboarding; default-deployed into a new
- *  project when it exists in the library (every onboarding exit path tries to
- *  seed it, so it usually does). */
-export const VALUZ_HELPER_SLUG = "valuz-helper";
+/** The built-in runtime Agent. The legacy slug remains a read-only fallback
+ *  while existing local databases are migrated. */
+export const VALURION_SLUG = "valurion";
+export const LEGACY_VALUZ_HELPER_SLUG = "valuz-helper";
+
+function defaultSystemAgentSlug(agents: Agent[]): string | null {
+  return (
+    agents.find((agent) => agent.slug === VALURION_SLUG)?.slug ??
+    agents.find((agent) => agent.slug === LEGACY_VALUZ_HELPER_SLUG)?.slug ??
+    null
+  );
+}
 
 export interface AgentDeployPicker {
   agents: Agent[];
   selected: string[];
   toggle: (slug: string) => void;
-  /** Reset the selection to its default (Valuz Helper when present). */
+  /** Reset the selection to its default (Valurion when present). */
   reset: () => void;
   /** Deploy the selected agents into a freshly-created project. Best-effort:
    *  resolves to the number that failed (membership is mutable, so a partial
@@ -19,7 +27,7 @@ export interface AgentDeployPicker {
 }
 
 /** Shared state for the create-project dialogs' "deploy agents" multi-select.
- *  Loads the library and defaults the selection to Valuz Helper when present.
+ *  Loads the library and defaults the selection to Valurion when present.
  *  Used by both create entry points (projects page + sidebar) so they can't
  *  drift. Pass the chosen execution target's ``baseUrl`` (multi-target
  *  editions) so a cloud-bound project lists cloud-deployable agents — a cloud
@@ -34,19 +42,16 @@ export function useAgentDeployPicker(baseUrl?: string): AgentDeployPicker {
       .then((d) => {
         // Surface the default assistant first so it reads as the primary pick
         // (stable sort keeps the rest in the library's order).
+        const preferredSlug = defaultSystemAgentSlug(d.agents);
         const ordered = [...d.agents].sort((a, b) =>
-          a.slug === VALUZ_HELPER_SLUG
+          a.slug === preferredSlug
             ? -1
-            : b.slug === VALUZ_HELPER_SLUG
+            : b.slug === preferredSlug
               ? 1
               : 0,
         );
         setAgents(ordered);
-        setSelected(
-          ordered.some((a) => a.slug === VALUZ_HELPER_SLUG)
-            ? [VALUZ_HELPER_SLUG]
-            : [],
-        );
+        setSelected(preferredSlug ? [preferredSlug] : []);
       })
       .catch(() => {
         /* non-fatal: the picker just shows no agents to deploy */
@@ -54,11 +59,8 @@ export function useAgentDeployPicker(baseUrl?: string): AgentDeployPicker {
   }, [baseUrl]);
 
   const reset = useCallback(() => {
-    setSelected(
-      agents.some((a) => a.slug === VALUZ_HELPER_SLUG)
-        ? [VALUZ_HELPER_SLUG]
-        : [],
-    );
+    const preferredSlug = defaultSystemAgentSlug(agents);
+    setSelected(preferredSlug ? [preferredSlug] : []);
   }, [agents]);
 
   const toggle = useCallback((slug: string) => {

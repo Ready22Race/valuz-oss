@@ -85,6 +85,30 @@ async def _resolve_project_id(user_id: str, session_id: str) -> str | None:
     return str(project_id) if project_id else None
 
 
+async def _resolve_session_knowledge_bases(
+    user_id: str,
+    session_id: str,
+) -> list[str] | None:
+    """Return the session's all-available KB snapshot, or project mode.
+
+    ``None`` means use the existing project bindings. An explicit list
+    (including ``[]``) means the session was created under all-available policy.
+    DocumentService re-authorizes every id at tool-call time.
+    """
+    from valuz_agent.adapters.data_reader import data_reader
+
+    session = await data_reader().get_session(user_id, session_id)
+    if session is None:
+        return []
+    metadata = getattr(session, "metadata", None) or {}
+    valuz = metadata.get("valuz", {}) if isinstance(metadata, dict) else {}
+    manifest = valuz.get("capability_manifest", {}) if isinstance(valuz, dict) else {}
+    if not isinstance(manifest, dict) or manifest.get("policy") != "all_available":
+        return None
+    ids = manifest.get("knowledge_bases", [])
+    return [str(item) for item in ids] if isinstance(ids, list) else []
+
+
 def _build_doc_service(db: Any, user_id: str) -> Any:  # type: ignore[no-untyped-def]
     """Build a one-shot DocumentLibraryService against ``db`` (an open
     ``AsyncSession``).
@@ -149,6 +173,7 @@ async def doc_search(
     project_id = await _resolve_project_id(user_id, session_id)
     if project_id is None:
         return []
+    knowledge_base_ids = await _resolve_session_knowledge_bases(user_id, session_id)
     async with async_unit_of_work(commit=False) as db:
         svc = _build_doc_service(db, user_id)
         hits = await svc.search_docs(
@@ -158,6 +183,7 @@ async def doc_search(
             folder_ids=folder_ids or None,
             document_ids=document_ids or None,
             top_k=top_k or 5,
+            knowledge_base_ids=knowledge_base_ids,
         )
     return [
         {
@@ -193,9 +219,14 @@ async def list_doc_scope(folder_id: str | None = None) -> dict[str, Any]:
     project_id = await _resolve_project_id(user_id, session_id)
     if project_id is None:
         return {"knowledge_bases": [], "total_documents": 0}
+    knowledge_base_ids = await _resolve_session_knowledge_bases(user_id, session_id)
     async with async_unit_of_work(commit=False) as db:
         svc = _build_doc_service(db, user_id)
-        tree = await svc.build_doc_scope_tree(user_id, project_id)
+        tree = await svc.build_doc_scope_tree(
+            user_id,
+            project_id,
+            knowledge_base_ids=knowledge_base_ids,
+        )
     return _scope_tree_to_dict(tree)
 
 

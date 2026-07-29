@@ -41,7 +41,10 @@ from valuz_agent.ports.connector_oauth_refresh import (
     LocalConnectorOAuthRefreshProvider,
 )
 from valuz_agent.ports.file_address import FileAddressResolverPort, LocalFileAddressResolver
-from valuz_agent.ports.instructions import InstructionsPort
+from valuz_agent.ports.instructions import (
+    GlobalInstructionsPort,
+    OSSGlobalInstructionsProvider,
+)
 from valuz_agent.ports.llm_provider import LLMProvider, NoopLLMProvider
 from valuz_agent.ports.model_defaults import ModelDefaultsPort, SettingsModelDefaults
 from valuz_agent.ports.provider_policy import AllowAllProviderPolicy, ProviderPolicyPort
@@ -121,9 +124,19 @@ class Extensions:
         # Optional runtime-availability override. OSS asks the kernel; managed
         # deployments may bind a provider for their controlled runtime image.
         self.runtime_availability: RuntimeAvailabilityPort | None = None
-        # Optional deployment-level instruction extensions. OSS leaves this
-        # unbound so sessions start with the agent's own instructions.
-        self.instructions: InstructionsPort | None = None
+        # One complete, owner-aware product prompt for the active
+        # distribution. Managed editions replace this provider; they do not
+        # append to the OSS prompt.
+        self.global_instructions: GlobalInstructionsPort = OSSGlobalInstructionsProvider()
+
+    @property
+    def instructions(self) -> GlobalInstructionsPort:
+        """Deprecated attribute alias for overlays migrating to the new name."""
+        return self.global_instructions
+
+    @instructions.setter
+    def instructions(self, provider: GlobalInstructionsPort) -> None:
+        self.global_instructions = provider
 
 
 ext = Extensions()
