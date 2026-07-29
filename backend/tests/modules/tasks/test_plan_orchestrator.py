@@ -1918,8 +1918,6 @@ def test_commit_task_creates_lead_session_with_task_scope(
     dispatched member — c81ab288 originally landed this on the dead copy."""
     from types import SimpleNamespace
 
-    from valuz_agent.modules.tasks import launcher as launcher_mod
-    from valuz_agent.modules.tasks import lifecycle as lc_mod
     from valuz_agent.modules.tasks import resolution as res_mod
 
     # Draft task with a plan (commit refuses empty plans).
@@ -2020,7 +2018,6 @@ def test_commit_task_creates_lead_session_with_task_scope(
 def test_task_lifecycle_event_trace_golden(db_factory, tmp_path, monkeypatch) -> None:
     from types import SimpleNamespace
 
-    from valuz_agent.modules.tasks import launcher as launcher_mod
     from valuz_agent.modules.tasks import lifecycle as lc_mod
     from valuz_agent.modules.tasks import resolution as res_mod
 
