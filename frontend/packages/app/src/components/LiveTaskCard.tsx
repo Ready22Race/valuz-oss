@@ -32,6 +32,7 @@ import {
   recordEntityOrigin,
 } from "@valuz/core";
 import { Badge } from "@valuz/ui";
+import { TaskStatusLabel } from "./TaskStatusLabel";
 
 // Backend ``TaskPlan.to_panel()`` (plan.py:_PANEL_MAP) collapses the
 // 6 internal subtask statuses into a 4-state UI vocabulary —
@@ -398,9 +399,11 @@ export function LiveTaskCard(props: LiveTaskCardProps): ReactElement | null {
             </span>
             <Badge
               variant={taskStatusVariant(status)}
-              className="shrink-0 uppercase tracking-wide"
+              className="shrink-0 tracking-wide"
             >
-              {status}
+              {/* Localized, not the raw backend enum uppercased — the detail
+                  page has always used this component. */}
+              <TaskStatusLabel status={status} />
             </Badge>
             {meta.planVersion > 0 && (
               <span className="shrink-0 rounded bg-surface-soft px-1.5 py-0.5 text-2xs text-ink-muted">

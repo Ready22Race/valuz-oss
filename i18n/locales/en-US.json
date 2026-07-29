@@ -2479,7 +2479,11 @@
       "leadWorking": "Lead is working…",
       "userInject": "User instruction",
       "awaitingUser": "Waiting for you",
-      "userAnswered": "You answered"
+      "userAnswered": "You answered",
+      "unknown": "Task update",
+      "abandoned": "Draft discarded",
+      "userInjectDropped": "Instruction not delivered (the lead was offline)",
+      "kickoffCancelled": "Kickoff cancelled"
     },
     "viewSession": "View session →",
     "needsConfirm": "Your confirmation needed",
@@ -2491,7 +2495,9 @@
     "reworkRunErrored": "The previous run was interrupted by an error — please retry.",
     "reworkUserInterrupted": "The user interrupted this subtask",
     "reworkUserStopped": "The user manually stopped this subtask",
-    "summaryUserStopped": "The user stopped this subtask"
+    "summaryUserStopped": "The user stopped this subtask",
+    "statusAbandoned": "Abandoned",
+    "subtaskHalted": "Stopped before reporting"
   },
   "marketplace": {
     "title": "Marketplace",
