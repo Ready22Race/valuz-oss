@@ -74,4 +74,11 @@ export interface ArtifactRendererProps {
   content: ArtifactContent | null;
   target?: ArtifactOpenTarget | null;
   onOpenExternal?: () => void;
+  /**
+   * Re-resolve the file and rebuild ``content``. Renderers that fetch from
+   * ``openUrl`` must offer this on load failure: a remote address is a
+   * short-lived presigned URL, so retrying the SAME url after it expires can
+   * only fail again — recovery needs a fresh resolve.
+   */
+  onReload?: () => void;
 }

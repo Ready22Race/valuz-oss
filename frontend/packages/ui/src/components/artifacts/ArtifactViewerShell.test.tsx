@@ -219,6 +219,65 @@ describe("ArtifactViewerShell", () => {
     }
   });
 
+  it("re-resolves on PDF retry instead of reusing a possibly expired address", () => {
+    const onReload = vi.fn();
+    vi.useFakeTimers();
+    try {
+      render(
+        <ArtifactViewerShell
+          artifact={{
+            ...artifact(),
+            previewKind: "pdf",
+            mimeType: "application/pdf",
+            name: "preview.pdf",
+          }}
+          content={{
+            kind: "binary",
+            openUrl: "https://example.invalid/preview.pdf",
+            mimeType: "application/pdf",
+          }}
+          onReload={onReload}
+        />,
+      );
+
+      act(() => vi.advanceTimersByTime(15_000));
+      fireEvent.click(
+        within(screen.getByRole("alert")).getByRole("button", { name: "重试" }),
+      );
+
+      expect(onReload).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("offers a re-resolving retry when an image fails to load", () => {
+    const onReload = vi.fn();
+    render(
+      <ArtifactViewerShell
+        artifact={{
+          ...artifact(),
+          previewKind: "image",
+          mimeType: "image/png",
+          name: "preview.png",
+        }}
+        content={{
+          kind: "binary",
+          openUrl: "https://example.invalid/preview.png",
+          mimeType: "image/png",
+        }}
+        onReload={onReload}
+      />,
+    );
+
+    fireEvent.error(screen.getByRole("img", { name: "preview.png" }));
+    fireEvent.click(
+      within(screen.getByRole("alert")).getByRole("button", { name: "重试" }),
+    );
+
+    expect(onReload).toHaveBeenCalledOnce();
+  });
+
   it("exposes fullscreen controls and a keyboard shortcut for PDFs", () => {
     const originalRequestFullscreen = Object.getOwnPropertyDescriptor(
       Element.prototype,

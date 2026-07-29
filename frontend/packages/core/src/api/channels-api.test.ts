@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { setApiBaseResolver } from "./base-resolver";
 import {
   channelsApi,
   setChannelsApiBase,
@@ -161,6 +162,65 @@ describe("channelsApi", () => {
     const [url, init] = fetchMock.mock.calls[0] ?? [];
     expect(String(url)).toContain("/v1/channels/feishu/bindings/developer/test");
     expect(init?.method).toBe("POST");
+  });
+});
+
+describe("channelsApi project routing", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    setChannelsApiBase("http://api.test");
+    // A chat binding lives on the backend that owns its project.
+    setApiBaseResolver((ref) =>
+      ref.projectId === "cloud-project" ? "http://cloud.test" : undefined,
+    );
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    setApiBaseResolver(null);
+  });
+
+  it("reads a cloud project's bindings from the cloud backend", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(jsonResponse([]));
+
+    await channelsApi.listChatBindings("cloud-project");
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("http://cloud.test/");
+  });
+
+  it("writes a cloud project's binding to the cloud backend", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(jsonResponse({}));
+
+    await channelsApi.bindChatToProject({
+      external_chat_id: "chat-1",
+      project_id: "cloud-project",
+    });
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("http://cloud.test/");
+  });
+
+  it("routes chat-scoped calls by the project passed alongside them", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(jsonResponse({}));
+
+    await channelsApi.unbindChat("chat-1", "feishu-main", "cloud-project");
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("http://cloud.test/");
+  });
+
+  it("stays on the module base for a local project", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(jsonResponse([]));
+
+    await channelsApi.listChatBindings("local-project");
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("http://api.test/");
   });
 });
 
