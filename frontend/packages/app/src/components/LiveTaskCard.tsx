@@ -185,7 +185,11 @@ export function LiveTaskCard(props: LiveTaskCardProps): ReactElement | null {
         plan_version?: number;
         subtasks?: PlanSubtask[];
         title?: string;
+        // Lifecycle events carry ``status``; a plan SNAPSHOT carries
+        // ``task_status`` (an unqualified ``status`` there would read as the
+        // plan's) — see TaskPlanUpdateEvent in api/openapi.yaml.
         status?: string;
+        task_status?: string;
         goal?: string;
       };
       switch (ev.type) {
@@ -211,15 +215,28 @@ export function LiveTaskCard(props: LiveTaskCardProps): ReactElement | null {
         case "plan_revised": {
           const v = payload.plan_version ?? 0;
           if (Array.isArray(payload.subtasks)) setSubtasks(payload.subtasks);
+          // ``task_status`` is the contract field (an unqualified ``status``
+          // in a plan snapshot would read as "the plan's"); reading ``status``
+          // here was a permanent no-op, so the badge never moved on a plan
+          // write. ``task_plan_update`` is a SELF-CONTAINED snapshot, so it
+          // can also bootstrap the card when the initial fetch lost the race
+          // (otherwise the card sat on "loading" forever).
+          const nextStatus = payload.task_status ?? payload.status;
           setMeta((m) =>
             m
               ? {
                   ...m,
                   planVersion: v || m.planVersion,
                   title: payload.title ?? m.title,
-                  status: payload.status ?? m.status,
+                  status: nextStatus ?? m.status,
                 }
-              : null,
+              : payload.title
+                ? {
+                    title: payload.title,
+                    status: nextStatus ?? "active",
+                    planVersion: v,
+                  }
+                : null,
           );
           break;
         }
@@ -287,17 +304,30 @@ export function LiveTaskCard(props: LiveTaskCardProps): ReactElement | null {
     handleEvent,
   );
 
+  // On a halted task (anything but ``active``) no member is live, yet the
+  // backend still projects ``in_review`` / ``rework`` nodes as the spinning
+  // ``active`` panel state (it parks only ``in_progress``). Show those as
+  // ``paused`` so nothing spins on a stopped task — display-only; the stored
+  // node status is untouched and resume reconciles it. Mirrors
+  // TaskContextPanel's displaySubtaskStatus.
+  const displayStatus = useCallback(
+    (status: string): string =>
+      meta && meta.status !== "active" && status === "active" ? "paused" : status,
+    [meta],
+  );
+
   const counts = useMemo(() => {
     let done = 0;
     let failed = 0;
     let inProgress = 0;
     for (const s of subtasks) {
-      if (STATUS_DONE.has(s.status)) done++;
-      else if (s.status === "failed") failed++;
-      else if (STATUS_RUNNING.has(s.status)) inProgress++;
+      const st = displayStatus(s.status);
+      if (STATUS_DONE.has(st)) done++;
+      else if (st === "failed") failed++;
+      else if (STATUS_RUNNING.has(st)) inProgress++;
     }
     return { done, failed, inProgress, total: subtasks.length };
-  }, [subtasks]);
+  }, [subtasks, displayStatus]);
 
   const handleExecute = useCallback(async () => {
     if (busy) return;
@@ -436,11 +466,11 @@ export function LiveTaskCard(props: LiveTaskCardProps): ReactElement | null {
             >
               <span
                 className={`inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-xs ${
-                  STATUS_TONE[s.status] ?? "text-ink-muted"
+                  STATUS_TONE[displayStatus(s.status)] ?? "text-ink-muted"
                 }`}
-                aria-label={s.status}
+                aria-label={displayStatus(s.status)}
               >
-                {STATUS_GLYPH[s.status] ?? "·"}
+                {STATUS_GLYPH[displayStatus(s.status)] ?? "·"}
               </span>
               <span className="shrink-0 rounded bg-surface-soft px-1.5 py-0.5 font-mono text-2xs text-ink-muted">
                 {s.key}

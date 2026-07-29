@@ -26,10 +26,6 @@ export {
 } from "./ResourceActionSlot";
 export { useCliLoginFlow } from "./CliLoginFlow";
 export type { CliTool, CliLoginState, CliLoginStatus } from "./CliLoginFlow";
-export { PlanCard } from "./PlanCard";
-export type { PlanCardProps } from "./PlanCard";
-export { PlanCardFeed } from "./PlanCardFeed";
-export type { PlanCardFeedProps } from "./PlanCardFeed";
 export { CreateKbDialog } from "./CreateKbDialog";
 export type { CreateKbDialogProps } from "./CreateKbDialog";
 export { TaskStatusLabel } from "./TaskStatusLabel";
