@@ -100,6 +100,9 @@ def test_client_surface_has_no_undeclared_kernel_ops() -> None:
     }
     # latest_message_id is a pure derivation of list_messages.
     public.discard("latest_message_id")
+    # current_kernel_id asks the ALLOCATOR which sandbox currently serves a
+    # session; it never talks to a kernel, so it has no route by construction.
+    public.discard("current_kernel_id")
     assert public == set(EXPECTED_ROUTES), (
         f"client facade drifted from the contract table: {public ^ set(EXPECTED_ROUTES)}"
     )

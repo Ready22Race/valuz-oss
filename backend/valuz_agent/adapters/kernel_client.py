@@ -876,6 +876,42 @@ async def _kernel_for_existing(
     return cached
 
 
+# Identity of "the process-global client". A host with no allocator, or one on
+# the boot-singleton default, has exactly ONE kernel for its whole life, so this
+# constant never changes and identity-watching consumers never rebind — local /
+# desktop behaviour is untouched.
+_PROCESS_KERNEL_ID = ""
+
+
+async def current_kernel_id(user_id: str, session_id: str) -> str | None:
+    """Opaque identity of the kernel serving ``session_id`` right now, or
+    ``None`` when the owner has no live kernel. NEVER provisions (peek-only).
+
+    Exists because a session's kernel is a MOVING TARGET under scoped
+    allocation: chat provisions a fresh instance per turn, so a long-lived
+    subscriber has to be able to notice that the session it follows has been
+    handed to a different sandbox. Callers only ever compare the value for
+    equality; ``base_url`` backs it because that is what actually decides which
+    endpoint a client connects to (see ``_endpoint_clients``).
+    """
+    from valuz_agent.ports.extensions import ext
+
+    alloc = getattr(ext, "sandbox_allocator", None)
+    if alloc is None:
+        return _PROCESS_KERNEL_ID
+    peek = getattr(alloc, "peek", None)
+    if peek is None:
+        return _PROCESS_KERNEL_ID  # allocator predates the peek seam
+    scope = await _scope_for(user_id, session_id)
+    if _accepts(peek, "scope"):
+        lease = await peek(owner_user_id=user_id, scope=scope)
+    else:
+        lease = await peek(owner_user_id=user_id)
+    if lease is None:
+        return None
+    return _PROCESS_KERNEL_ID if lease.endpoint is None else lease.endpoint.base_url
+
+
 async def create_session(
     user_id: str, req: CreateSessionRequest, *, scope: SandboxScope | None = None
 ) -> SessionData:
