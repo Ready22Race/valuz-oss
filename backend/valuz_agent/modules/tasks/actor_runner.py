@@ -189,7 +189,7 @@ class ActorRunner:
             if idle_ttl is not None
             else (LEAD_IDLE_TTL_S if role == "lead" else MEMBER_IDLE_TTL_S)
         )
-        mailbox_registry.register(session_id)
+        claim_token = mailbox_registry.claim(session_id)
         prompt = initial_prompt
         final_status = "idle"
         turns = 0
@@ -259,6 +259,18 @@ class ActorRunner:
 
                 try:
                     msg = await mailbox_registry.get(session_id, timeout=ttl)
+                except KeyError:
+                    # Our box was dropped externally — ownership moved (a newer
+                    # loop claimed the session). Exit as an externally-managed
+                    # shutdown; running auto-finalize here would fight the new
+                    # owner exactly like the pause→resume race.
+                    logger.info(
+                        "actor loop %s (%s): mailbox ownership moved — exiting",
+                        session_id,
+                        role,
+                    )
+                    exited_on_shutdown = True
+                    break
                 except TimeoutError:
                     # The TTL measures silence on OUR mailbox — not session
                     # idleness. A run_in_background subagent outlives the turn
@@ -308,7 +320,7 @@ class ActorRunner:
                 else:  # "text" / "revise_goal" — authoritative text → next turn
                     prompt = msg.text
         finally:
-            mailbox_registry.unregister(session_id)
+            mailbox_registry.release(session_id, claim_token)
             # When draining, skip the ENTIRE finalize. ``_finalize_actor`` touches
             # the kernel store (status flip) AND the host DB (lead auto-finalize /
             # member run record), both being torn down right now; running it spams

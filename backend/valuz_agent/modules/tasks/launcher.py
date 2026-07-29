@@ -82,9 +82,12 @@ def spawn_actor(
             registry.add_member(task_id, session_id, dispatch_epoch=dispatch_epoch)
         else:
             registry.add_member(task_id, session_id)
-    # Eager so a shutdown racing ahead of the loop's first tick is queued, not
-    # dropped (run_actor_loop's own register() is idempotent).
-    mailbox_registry.register(session_id)
+    # Eager CLAIM: the box exists before the loop's first tick (a shutdown
+    # racing ahead is queued, not dropped) AND any stale prior loop's pending
+    # release is invalidated NOW — not at the new loop's first tick — so it
+    # cannot pop the box recovery is about to seed with member_done results.
+    # (run_actor_loop claims again for its own release token.)
+    mailbox_registry.claim(session_id)
     asyncio.create_task(
         actor.run_actor_loop(
             session_id=session_id,

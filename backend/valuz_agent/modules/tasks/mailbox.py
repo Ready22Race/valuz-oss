@@ -61,9 +61,19 @@ class MailboxRegistry:
 
     def __init__(self) -> None:
         self._boxes: dict[str, asyncio.Queue[InboxMsg]] = {}
+        # session_id → current OWNER claim (see claim/release). Guards against
+        # a stale actor loop's ``finally`` dropping the box a freshly resumed
+        # loop is reading from.
+        self._claims: dict[str, int] = {}
+        self._claim_seq = 0
 
     def register(self, session_id: str) -> asyncio.Queue[InboxMsg]:
-        """Create (or return existing) inbox for a session. Idempotent."""
+        """Create (or return existing) inbox for a session. Idempotent.
+
+        NON-OWNING — for senders that need the box to exist before the owner's
+        loop ticks (dispatch/await belt-and-suspenders, recovery pre-seeding).
+        The actor loop itself uses :meth:`claim`.
+        """
         box = self._boxes.get(session_id)
         if box is None:
             box = asyncio.Queue()
@@ -71,8 +81,37 @@ class MailboxRegistry:
             logger.debug("mailbox: registered %s", session_id)
         return box
 
+    def claim(self, session_id: str) -> int:
+        """Register (idempotent) AND take ownership; returns the claim token.
+
+        A later claim on the same session invalidates every earlier token, so
+        a STALE loop's :meth:`release` becomes a no-op instead of stealing the
+        new loop's box. The race this closes: stop_task interrupts the lead,
+        the old loop is still unwinding SDK teardown (seconds) when a rapid
+        resume — user click or inject's TASK_HALTED auto-revive — spawns a new
+        loop on the same session id; the old ``finally`` then popped the
+        SHARED box, recovery's queued ``member_done``s died with it, and the
+        new loop's next ``get`` raised into a spurious auto-finalize→blocked.
+        """
+        self.register(session_id)
+        self._claim_seq += 1
+        self._claims[session_id] = self._claim_seq
+        return self._claim_seq
+
+    def release(self, session_id: str, token: int) -> None:
+        """Drop the inbox — only if *token* is still the current claim."""
+        if self._claims.get(session_id) != token:
+            logger.debug("mailbox: stale release(%d) for %s ignored", token, session_id)
+            return
+        self._claims.pop(session_id, None)
+        self.unregister(session_id)
+
     def unregister(self, session_id: str) -> None:
-        """Drop a session's inbox. Idempotent."""
+        """Drop a session's inbox unconditionally. Idempotent.
+
+        Prefer :meth:`release` from actor loops — this bypasses the claim
+        guard and exists for tests / non-loop teardown.
+        """
         if self._boxes.pop(session_id, None) is not None:
             logger.debug("mailbox: unregistered %s", session_id)
 
