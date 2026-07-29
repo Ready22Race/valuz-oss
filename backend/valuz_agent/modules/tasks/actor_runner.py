@@ -21,6 +21,8 @@ from typing import Literal, Protocol
 from valuz_agent.adapters import kernel_client
 from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.infra.lifecycle import is_draining
+from valuz_agent.infra.db import async_unit_of_work
+from valuz_agent.modules.tasks.datastore import TaskDatastore
 from valuz_agent.modules.tasks.task_state import NON_REVIEWABLE_DONE
 from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 from valuz_agent.modules.sessions.turn_driver import (
@@ -190,6 +192,10 @@ class ActorRunner:
             else (LEAD_IDLE_TTL_S if role == "lead" else MEMBER_IDLE_TTL_S)
         )
         claim_token = mailbox_registry.claim(session_id)
+        # Read once: every lead wake-up restates it (see _with_goal_restated).
+        task_goal = (
+            await self._task_goal(task_id, project_id, user_id) if role == "lead" else ""
+        )
         prompt = initial_prompt
         final_status = "idle"
         turns = 0
@@ -317,8 +323,20 @@ class ActorRunner:
                             user_id=user_id,
                         )
                     prompt = self._format_member_done(msg)
-                else:  # "text" / "revise_goal" — authoritative text → next turn
+                    if role == "lead":
+                        prompt = self._with_goal_restated(task_goal, prompt)
+                elif msg.kind == "revise_goal":
+                    # The user REPLACED the goal — this text is the new
+                    # objective, so it must NOT be prefixed with the old one.
                     prompt = msg.text
+                    if role == "lead":
+                        task_goal = msg.text
+                else:  # "text" — an inject/follow-up: context, not a new goal
+                    prompt = (
+                        self._with_goal_restated(task_goal, msg.text)
+                        if role == "lead"
+                        else msg.text
+                    )
         finally:
             mailbox_registry.release(session_id, claim_token)
             # When draining, skip the ENTIRE finalize. ``_finalize_actor`` touches
@@ -339,6 +357,41 @@ class ActorRunner:
                     via_shutdown=exited_on_shutdown,
                     user_id=user_id,
                 )
+
+    @staticmethod
+    async def _task_goal(task_id: str, project_id: str, user_id: str) -> str:
+        """The task's goal text, read once per loop (best-effort)."""
+        try:
+            async with async_unit_of_work(commit=False) as db:
+                row = await TaskDatastore(db).get_task_by_project(
+                    user_id, project_id, task_id
+                )
+                return (row.goal or "").strip() if row is not None else ""
+        except Exception:  # noqa: BLE001 — a wake-up must never fail on this
+            logger.debug("actor loop: goal read failed for task %s", task_id)
+            return ""
+
+    @staticmethod
+    def _with_goal_restated(goal: str, body: str) -> str:
+        """Prefix a lead WAKE-UP with the task goal.
+
+        Load-bearing, and subtle: the kernel wraps EVERY non-slash message of
+        a goal-mode session as ``/goal <text>`` (``wrap_for_mode`` — "each
+        turn enters its native mode for that turn"), so whatever we send on a
+        wake-up is what the runtime treats as the turn's goal. A bare member
+        result would therefore re-goal the lead to "review this result", and
+        the runtime's goal-auto-exit fires as soon as THAT trivial goal is
+        met — the lead stops driving the real task. Restating the task goal
+        keeps the objective stable under that contract, and is harmless if
+        the runtime appends rather than replaces.
+        """
+        if not goal:
+            return body
+        return (
+            f"<task-goal>{goal}</task-goal>\n\n"
+            "The goal above is unchanged — it is what you are still driving.\n\n"
+            f"{body}"
+        )
 
     @staticmethod
     def _format_member_done(msg: InboxMsg) -> str:

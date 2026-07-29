@@ -1137,11 +1137,17 @@ async def build_member_session(
 
     # Session-modes (docs/exec-plans/active/task-goal-mode.md): when the
     # caller opts into goal mode (lead whole-task / member sub-run), set
-    # ``Session.mode="goal"`` so the kernel wraps this session's first
-    # message into ``/goal <brief>`` and the runtime auto-loops until the
-    # goal is met (Claude Haiku evaluator / codex goal protocol). Gated on
-    # runtime support — deepagents has no native goal mode (kernel routes
-    # 400), so it falls back to a single ``default`` run_turn.
+    # ``Session.mode="goal"`` so the kernel wraps the session's messages
+    # into ``/goal <text>`` and the runtime auto-loops until the goal is met
+    # (Claude Haiku evaluator / codex goal protocol). Gated on runtime
+    # support — deepagents has no native goal mode (kernel routes 400), so
+    # it falls back to a single ``default`` run_turn.
+    #
+    # NOTE the wrap is per-MESSAGE, not first-message-only (``wrap_for_mode``:
+    # "each turn enters its native mode for that turn"). This comment used to
+    # say "first message", and the task actor loop was written against that
+    # belief — see ActorRunner._with_goal_restated for what the real contract
+    # forces on every lead wake-up.
     session_mode = (
         "goal" if goal_mode and agent.runtime_provider in ("claude_agent", "codex") else "default"
     )
