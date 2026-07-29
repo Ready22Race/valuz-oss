@@ -674,7 +674,7 @@ class FinalizationService:
                             f"unresolved subtasks {unresolved}. Dispatch and "
                             "review them first (a dependent node like a final "
                             "summary becomes ready once its deps are done), or "
-                            "drop them with modify_plan, or call finish_task "
+                            "re-scope them with modify_plan(update=[...]), or call finish_task "
                             "with status='stopped' to terminate the task."
                         ),
                         "pending_subtasks": unresolved,

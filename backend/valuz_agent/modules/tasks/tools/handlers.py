@@ -919,8 +919,8 @@ async def _stop_subtask_handler(
                 "subtask_key": subtask_key or None,
                 "reason": reason,
                 "next": (
-                    "plan node is now `rework`; call dispatch(key) to retry "
-                    "with a corrected goal, or modify_plan to retire it"
+                    "plan node is now `rework`; call dispatch(subtask_key=...) to retry "
+                    "with a corrected goal, or re-scope it with modify_plan(update=[...]) first"
                 ),
             },
             ensure_ascii=False,
