@@ -1095,7 +1095,7 @@ export const ProjectDetailPage = () => {
 
   const handleJoinChat = async (externalChatId: string) => {
     try {
-      const link = await channelsApi.feishuChatLink(externalChatId);
+      const link = await channelsApi.feishuChatLink(externalChatId, id);
       if (link) {
         window.open(link, "_blank", "noreferrer");
         return;
@@ -1110,7 +1110,7 @@ export const ProjectDetailPage = () => {
 
   const handleDeleteChat = async (externalChatId: string) => {
     try {
-      await channelsApi.deleteFeishuChat(externalChatId);
+      await channelsApi.deleteFeishuChat(externalChatId, id);
       toast.success(t("project.deleteChatDone" as Parameters<typeof t>[0]));
       // Gone the moment the server says so — the reload below reconciles.
       setChatBindings((prev) => prev.filter((c) => c.id !== externalChatId));
@@ -1122,7 +1122,7 @@ export const ProjectDetailPage = () => {
 
   const handleUnbindChat = async (externalChatId: string) => {
     try {
-      await channelsApi.unbindChat(externalChatId);
+      await channelsApi.unbindChat(externalChatId, "feishu-main", id);
       toast.success(t("project.chatBindingRemoved" as Parameters<typeof t>[0]));
       setChatBindings((prev) => prev.filter((c) => c.id !== externalChatId));
       await loadChatBindings();

@@ -93,6 +93,27 @@ class TestStatMeta:
         m = stat_meta(tmp_path / "missing.png")
         assert not m.exists and m.size is None and m.preview_kind == "image"
 
+    def test_directory_is_not_a_file(self, tmp_path: Path) -> None:
+        d = tmp_path / "sub"
+        d.mkdir()
+        m = stat_meta(d)
+        assert not m.exists and m.size is None
+
+    def test_vanishing_file_degrades_instead_of_raising(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A file deleted mid-call (agent overwrite, cleanup job) must come back
+        # as exists=False — raising here failed the whole resolve batch.
+        f = tmp_path / "gone.md"
+        f.write_text("x")
+
+        def boom(self: Path, *a: object, **kw: object) -> None:
+            raise FileNotFoundError(str(self))
+
+        monkeypatch.setattr(Path, "stat", boom)
+        m = stat_meta(f)
+        assert not m.exists and m.size is None and m.preview_kind == "markdown"
+
 
 class _RemoteResolver:
     async def to_address(self, *, owner_user_id: str, abs_path: Path) -> ResolvedAddress:

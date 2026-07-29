@@ -54,7 +54,7 @@ export function BindChatDialog({
 
   const refreshChats = useCallback(async (): Promise<void> => {
     try {
-      const rows = await channelsApi.listFeishuChats();
+      const rows = await channelsApi.listFeishuChats(undefined, projectId);
       // Same order the panel uses, so one set of groups reads as one list.
       setChats(
         [...rows].sort((a, b) =>
@@ -129,7 +129,10 @@ export function BindChatDialog({
 
   const join = async (chat: ChannelChatItem) => {
     try {
-      const link = await channelsApi.feishuChatLink(chat.external_chat_id);
+      const link = await channelsApi.feishuChatLink(
+        chat.external_chat_id,
+        projectId,
+      );
       if (link) {
         window.open(link, "_blank", "noreferrer");
         return;
@@ -149,7 +152,11 @@ export function BindChatDialog({
   const unbind = async (chat: ChannelChatItem) => {
     setSaving(chat.external_chat_id);
     try {
-      await channelsApi.unbindChat(chat.external_chat_id);
+      await channelsApi.unbindChat(
+        chat.external_chat_id,
+        "feishu-main",
+        projectId,
+      );
       toast.success(t("project.chatBindingRemoved" as Parameters<typeof t>[0]));
       setChats((prev) =>
         prev.map((c) =>
