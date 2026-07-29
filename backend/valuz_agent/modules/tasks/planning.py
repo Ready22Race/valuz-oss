@@ -97,6 +97,7 @@ async def persist_plan(
                 actor=actor,
                 session_id=session_id,
                 user_id=user_id,
+                plan_version=expected + 1,
             )
             return plan
     logger.error(
@@ -113,6 +114,7 @@ async def emit_plan_update(
     actor: str,
     session_id: str | None,
     user_id: str,
+    plan_version: int | None = None,
 ) -> None:
     """Append a ``task_plan_update`` SNAPSHOT — every field is load-bearing.
 
@@ -120,6 +122,11 @@ async def emit_plan_update(
     guarantee the previous one was seen). ``plan_version`` in particular is
     the feed's dedup key: without it every event was silently discarded.
     Shape locked by test_plan_update_payload_is_a_self_contained_snapshot.
+
+    ``plan_version``: the version THIS write installed (CAS ``expected + 1``).
+    Pass it explicitly — re-reading the row can pick up a LATER writer's
+    version (cas_update_plan refreshes after commit) and stamp it onto this
+    older snapshot, making the feed's dedup drop the real newer snapshot.
     """
     panel = plan.to_panel()
     # Stamp each node's member display name so the Todo panel renders it
@@ -143,7 +150,9 @@ async def emit_plan_update(
         payload={
             "subtasks": panel,
             # Monotonic CAS token — the consumer's dedup/ordering key.
-            "plan_version": task_row.plan_version or 0,
+            "plan_version": (
+                plan_version if plan_version is not None else task_row.plan_version or 0
+            ),
             # Named ``task_status``, not ``status``: a plan snapshot also
             # carries per-node statuses, and an unqualified ``status`` in this
             # payload reads as "the plan's".
@@ -192,14 +201,18 @@ async def plan_task(
             plan.add(subtasks)
         except PlanError as exc:
             return {"error": f"invalid plan: {exc}"}
+        expected = task_row.plan_version or 0
         if not await task_ds.cas_update_plan(
-            user_id, task_row, plan.to_dict(), expected_version=task_row.plan_version or 0
+            user_id, task_row, plan.to_dict(), expected_version=expected
         ):
             return {
                 "error": "PLAN_VERSION_CONFLICT",
                 "current_version": task_row.plan_version or 0,
                 "hint": "another writer changed the plan mid-call; re-read and retry",
             }
+        # Stamp the version THIS write installed — the refreshed row may
+        # already carry a later writer's version (see emit_plan_update).
+        installed = expected + 1
         await event_ds.append_event(
             user_id,
             project_id=project_id,
@@ -207,7 +220,7 @@ async def plan_task(
             type="task_planned",
             actor=lead_session_id,
             session_id=lead_session_id,
-            payload={**plan.to_dict(), "plan_version": task_row.plan_version},
+            payload={**plan.to_dict(), "plan_version": installed},
         )
         await emit_plan_update(
             event_ds,
@@ -216,12 +229,13 @@ async def plan_task(
             actor=lead_session_id,
             session_id=lead_session_id,
             user_id=user_id,
+            plan_version=installed,
         )
         render_plan_md(task_row, plan)
         return {
             "subtasks": plan.to_panel(),
             "ready": plan.ready_keys(),
-            "current_version": task_row.plan_version,
+            "current_version": installed,
         }
 
 
@@ -312,6 +326,7 @@ async def modify_plan(
                     "re-read, merge your changes, then retry"
                 ),
             }
+        installed = current_version + 1  # the version THIS write installed
         await event_ds.append_event(
             user_id,
             project_id=project_id,
@@ -322,7 +337,7 @@ async def modify_plan(
             payload={
                 "add": add or [],
                 "update": update or [],
-                "plan_version": task_row.plan_version,
+                "plan_version": installed,
             },
         )
         await emit_plan_update(
@@ -332,12 +347,13 @@ async def modify_plan(
             actor=lead_session_id,
             session_id=lead_session_id,
             user_id=user_id,
+            plan_version=installed,
         )
         render_plan_md(task_row, plan)
         return {
             "subtasks": plan.to_panel(),
             "ready": plan.ready_keys(),
-            "current_version": task_row.plan_version,
+            "current_version": installed,
         }
 
 

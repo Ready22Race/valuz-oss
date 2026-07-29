@@ -190,3 +190,60 @@ def test_cas_conflict_reapplies_mutation_on_fresh_plan(db_factory) -> None:
         assert row.plan_version == 5, "two writes → 3 → 5"
     finally:
         db.close()
+
+
+def test_snapshot_carries_the_version_this_write_installed(db_factory, monkeypatch) -> None:
+    """If ANOTHER writer lands between our CAS commit and the row refresh, the
+    refreshed row already shows the later version — stamping that onto OUR
+    (older) snapshot makes the feed's dedup discard the real newer snapshot.
+    The emitted version must be expected+1, what this write provably installed."""
+    from valuz_agent.modules.tasks.datastore import TaskDatastore
+
+    _seed_task(db_factory, task_id="t-stamp")
+    real = TaskDatastore.cas_update_plan
+
+    async def _cas_then_lose_refresh_race(self, user_id, row, plan, *, expected_version):
+        wrote = await real(self, user_id, row, plan, expected_version=expected_version)
+        if wrote:
+            # Simulate the refresh picking up a later writer's version.
+            row.plan_version = (row.plan_version or 0) + 1
+        return wrote
+
+    monkeypatch.setattr(TaskDatastore, "cas_update_plan", _cas_then_lose_refresh_race)
+
+    async def _run() -> None:
+        async with async_unit_of_work() as db:
+            task_ds = TaskDatastore(db)
+            event_ds = TaskEventDatastore(db)
+            row = await task_ds.get_task(OWNER, "t-stamp")
+
+            def _mut(p: TaskPlan) -> bool:
+                p.update_node("a", status="in_progress")
+                return True
+
+            assert (
+                await planning.persist_plan(
+                    task_ds,
+                    event_ds,
+                    row,
+                    mutate=_mut,
+                    actor="system",
+                    session_id=None,
+                    user_id=OWNER,
+                )
+                is not None
+            )
+
+    asyncio.run(_run())
+
+    db = db_factory()
+    try:
+        snap = [
+            e
+            for e in db.execute(select(TaskEventRow).order_by(TaskEventRow.sequence)).scalars()
+            if e.type == "task_plan_update"
+        ][-1]
+        # Seeded at version 3; this write installed 4 — NOT the raced-ahead 5.
+        assert snap.payload["plan_version"] == 4, snap.payload["plan_version"]
+    finally:
+        db.close()
