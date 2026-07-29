@@ -74,6 +74,7 @@ import {
 import { toFileTree } from "../lib/file-tree";
 import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
 import { useArtifactFile } from "../hooks/use-artifact-file";
+import { toAbsoluteProjectPath } from "../lib/project-paths";
 
 /** One tab body: owns its own cursor-paginated feed. Radix unmounts inactive
  *  ``TabsContent``, so only the active tab's feed polls / paginates. */
@@ -949,18 +950,10 @@ export const ProjectDetailPage = () => {
   };
 
   const locateArtifactFile = useCallback(
-    (relPath: string) => {
-      const root = project?.root_path ?? "";
-      const isAbs = /^(\/|[a-zA-Z]:[\\/])/.test(relPath);
-      return {
-        absolutePath: isAbs
-          ? relPath
-          : root
-            ? `${root.replace(/\/+$/, "")}/${relPath}`
-            : relPath,
-        relativePath: relPath,
-      };
-    },
+    (relPath: string) => ({
+      absolutePath: toAbsoluteProjectPath(relPath, project?.root_path ?? ""),
+      relativePath: relPath,
+    }),
     [project?.root_path],
   );
   const artifactFile = useArtifactFile({
