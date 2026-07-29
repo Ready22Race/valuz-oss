@@ -382,11 +382,14 @@ _MODIFY_PLAN_PARAMETERS: dict[str, Any] = {
         "expected_version": {
             "type": "integer",
             "description": (
-                "CAS optimistic-lock token (from get_plan response). When passed, "
-                "the call is rejected with PLAN_VERSION_CONFLICT if it does not "
-                "equal the current plan_version. Chat callers (multi-session "
-                "concurrency possible) should always pass it; lead callers "
-                "(single-actor serial) may omit it."
+                "CAS optimistic-lock token (from get_plan's current_version). "
+                "When passed, the call is rejected with PLAN_VERSION_CONFLICT if "
+                "it no longer matches. A lead editing its OWN task is the single "
+                "writer and may omit it; a human/REST editor of a RUNNING task "
+                "must pass it (the request is refused otherwise — the lead is "
+                "writing the same document concurrently). Note every plan write "
+                "bumps the version, including a subtask moving to in_review or "
+                "done, so re-read before retrying."
             ),
         },
     },
@@ -498,7 +501,10 @@ _REVIEW_SUBTASK_PARAMETERS: dict[str, Any] = {
         "decision": {
             "type": "string",
             "enum": ["approve", "rework"],
-            "description": "approve → mark done (unlocks dependents); rework → send back.",
+            "description": (
+                "approve → mark done (unlocks dependents; only for a subtask "
+                "that ran); rework → send back for another attempt."
+            ),
         },
         "feedback": {
             "type": "string",
@@ -642,7 +648,10 @@ REVIEW_SUBTASK_TOOL_DECLARATION = ToolDef(
     description=(
         "Review a finished subtask: approve (mark done, unlocking dependents) or "
         "rework (send it back with feedback). Identify it by subtask_key or the "
-        "member's session_id. Call this after a member reports a result."
+        "member's session_id. Call this after a member reports a result — a "
+        "subtask that was never dispatched cannot be approved (dispatch it "
+        "first), and the task itself must still be active. Re-approving an "
+        "already-approved subtask is a no-op that returns already_done=true."
     ),
     parameters=_REVIEW_SUBTASK_PARAMETERS,
     handler=None,
