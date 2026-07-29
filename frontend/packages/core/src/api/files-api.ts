@@ -1,3 +1,4 @@
+import { resolveApiBase, type ApiBaseRef } from "./base-resolver";
 import { createFetchJson, type RequestOptions } from "./fetch-json";
 
 let _apiBase =
@@ -58,6 +59,18 @@ export interface ResolvedFileDescriptor {
 
 const MAX_REFS = 256;
 
+export interface FileResolveOptions extends Pick<RequestOptions, "signal"> {
+  /**
+   * The entity the file belongs to (session / project / task). A file lives on
+   * the backend that owns its entity, so multi-target editions must route the
+   * resolve call there — the module default would send a cloud-owned path to
+   * the local backend, which rejects it as ``forbidden`` (its owner-root
+   * allowlist has no such prefix). Pass the same ref the surface uses for its
+   * own entity-scoped calls. Omitted → module default (OSS single-backend).
+   */
+  baseRef?: ApiBaseRef;
+}
+
 export const filesApi = {
   /**
    * Resolve a batch of ``valuz-file://`` refs into access-address descriptors.
@@ -66,10 +79,12 @@ export const filesApi = {
    */
   resolve(
     refs: string[],
-    options: Pick<RequestOptions, "signal"> = {},
+    options: FileResolveOptions = {},
   ): Promise<{ results: ResolvedFileDescriptor[] }> {
+    const { baseRef, ...init } = options;
     return fetchJson("/v1/files/resolve", {
-      ...options,
+      ...init,
+      baseUrl: resolveApiBase(baseRef ?? {}, _apiBase),
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ refs: refs.slice(0, MAX_REFS) }),
@@ -79,7 +94,7 @@ export const filesApi = {
   /** Convenience: resolve a single ref (returns null on error/empty). */
   async resolveOne(
     ref: string,
-    options: Pick<RequestOptions, "signal"> = {},
+    options: FileResolveOptions = {},
   ): Promise<ResolvedFileDescriptor | null> {
     const res = await filesApi.resolve([ref], options);
     return res.results[0] ?? null;

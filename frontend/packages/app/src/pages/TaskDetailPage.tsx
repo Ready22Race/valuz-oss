@@ -501,6 +501,9 @@ export const TaskDetailPage = () => {
     platform,
     locate: locateArtifactFile,
     missingErrorMessage: t("task.artifactOpenInFinder" as Parameters<typeof t>[0]),
+    // The file lives on the backend that owns the task — route the resolve with
+    // the same ref the rest of this page uses.
+    baseRef: { taskId: taskId || undefined, projectId: projectId ?? undefined },
   });
   const {
     selectedPath: selectedArtifactPath,

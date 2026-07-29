@@ -19,6 +19,7 @@ vi.mock("@valuz/core", async (loadOriginal) => {
 vi.mock("../lib/resolve-artifact", () => ({ resolvedToArtifactFile }));
 
 import type {
+  ApiBaseRef,
   ArtifactFileResponse,
   PlatformCapabilities,
   ResolvedFileDescriptor,
@@ -86,7 +87,7 @@ function response(name: string): ArtifactFileResponse {
   };
 }
 
-const renderArtifactHook = () =>
+const renderArtifactHook = (baseRef?: ApiBaseRef) =>
   renderHook(() =>
     useArtifactFile({
       projectId: "p1",
@@ -96,6 +97,7 @@ const renderArtifactHook = () =>
         relativePath: path,
       }),
       missingErrorMessage: "missing",
+      baseRef,
     }),
   );
 
@@ -154,6 +156,32 @@ describe("useArtifactFile", () => {
 
     expect(result.current.error).toBe("missing");
     expect(result.current.loading).toBe(false);
+  });
+
+  it("routes the resolve with the caller's entity ref", async () => {
+    resolveOne.mockResolvedValue(descriptor("a.txt"));
+    const { result } = renderArtifactHook({ sessionId: "s1", projectId: "p1" });
+
+    await act(async () => result.current.open("a.txt"));
+
+    expect(resolveOne.mock.calls[0]?.[1]?.baseRef).toEqual({
+      sessionId: "s1",
+      projectId: "p1",
+      taskId: undefined,
+      automationId: undefined,
+      kbId: undefined,
+    });
+  });
+
+  it("defaults the entity ref to the project", async () => {
+    resolveOne.mockResolvedValue(descriptor("a.txt"));
+    const { result } = renderArtifactHook();
+
+    await act(async () => result.current.open("a.txt"));
+
+    expect(resolveOne.mock.calls[0]?.[1]?.baseRef).toEqual({
+      projectId: "p1",
+    });
   });
 
   it("preserves an artifact target across reload and clears it on close", async () => {
