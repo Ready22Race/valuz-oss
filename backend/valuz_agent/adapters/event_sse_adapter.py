@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections import deque
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
@@ -905,7 +906,39 @@ async def iter_events_sse(
             # ended — e.g. its sandbox was stopped): wait, then re-peek.
             await asyncio.sleep(DB_BACKFILL_INTERVAL_SECONDS)
 
+    async def _observations() -> None:
+        # Third source, and the only one that does not depend on a kernel: HOST
+        # observations about this session (sandbox boot progress). It is exactly
+        # the window where the other two are blind — the live bus belongs to a
+        # kernel that is still coming up, and nothing is persisted because an
+        # observation is not session content. Frames go onto the same queue so
+        # the merge loop below needs no special case.
+        from valuz_agent.ports.extensions import ext
+
+        while True:
+            try:
+                async for obs_type, obs_data in ext.session_observations.subscribe(
+                    owner_id, session_id
+                ):
+                    # Stamped HERE, at the moment the host observed it: an
+                    # observation has no store to date it and the client needs
+                    # the timing to be useful at all.
+                    await queue.put(
+                        kernel_client.EventData(
+                            type=obs_type,
+                            data=obs_data,
+                            timestamp=int(time.time() * 1000),
+                            seq=None,
+                        )
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — a rebound transport may drop out
+                logger.debug("session observation subscription failed; retrying", exc_info=True)
+            await asyncio.sleep(DB_BACKFILL_INTERVAL_SECONDS)
+
     pump_task = asyncio.create_task(_pump(), name=f"sse-pump-{session_id}")
+    obs_task = asyncio.create_task(_observations(), name=f"sse-obs-{session_id}")
     # 0.0 → 连接后的第一个空闲 tick 立即回读一次(订阅竞态窗口)。
     last_db_poll = 0.0
     try:
@@ -979,11 +1012,13 @@ async def iter_events_sse(
                 yield {"event": frame.event_type, "data": frame.to_sse_data()}
                 last_emit = asyncio.get_event_loop().time()
     finally:
-        pump_task.cancel()
-        try:
-            await pump_task
-        except (asyncio.CancelledError, Exception):  # noqa: BLE001
-            pass
+        for task in (pump_task, obs_task):
+            task.cancel()
+        for task in (pump_task, obs_task):
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
 
 
 # ---------------------------------------------------------------------------
