@@ -6,7 +6,7 @@ import importlib.util
 import json
 import pathlib
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import Boolean, create_engine, text
 
 _MIG = (
     pathlib.Path(__file__).resolve().parents[2]
@@ -31,6 +31,34 @@ def _load():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+class _RecordingResult:
+    def __init__(self, rows=()) -> None:  # type: ignore[no-untyped-def]
+        self._rows = rows
+
+    def __iter__(self):  # type: ignore[no-untyped-def]
+        return iter(self._rows)
+
+    def first(self):  # type: ignore[no-untyped-def]
+        return self._rows[0] if self._rows else None
+
+    def mappings(self):  # type: ignore[no-untyped-def]
+        return self
+
+
+class _RecordingBind:
+    def __init__(self) -> None:
+        self.writes: list[tuple[object, dict]] = []
+
+    def execute(self, statement, params=None):  # type: ignore[no-untyped-def]
+        sql = str(statement)
+        if "SELECT DISTINCT user_id" in sql:
+            return _RecordingResult([("owner-1",)])
+        if sql.lstrip().startswith("SELECT"):
+            return _RecordingResult()
+        self.writes.append((statement, params or {}))
+        return _RecordingResult()
 
 
 def _create_schema(conn) -> None:  # type: ignore[no-untyped-def]
@@ -128,6 +156,24 @@ def _insert_agent(
             "user_id": user_id,
         },
     )
+
+
+def test_postgresql_boolean_values_use_typed_boolean_bind_params() -> None:
+    migration = _load()
+    bind = _RecordingBind()
+    migration.op = _Op(bind)
+
+    migration._install_valurion()
+    migration._uninstall_valurion()
+
+    assert len(bind.writes) == 2
+    for statement, params in bind.writes:
+        for name in ("readonly", "deletable"):
+            assert isinstance(statement._bindparams[name].type, Boolean)
+            assert isinstance(params[name], bool)
+    insert_stmt, insert_params = bind.writes[0]
+    assert isinstance(insert_stmt._bindparams["inherit_global_instructions"].type, Boolean)
+    assert insert_params["inherit_global_instructions"] is True
 
 
 def test_install_valurion_keeps_legacy_helper_and_live_refs_unchanged() -> None:

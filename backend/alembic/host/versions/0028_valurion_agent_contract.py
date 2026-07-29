@@ -62,9 +62,8 @@ def _install_valurion() -> None:
             .first()
         )
         now_ms = int(time.time() * 1000)
-        bind.execute(
-            sa.text(
-                """
+        insert_stmt = sa.text(
+            """
                 INSERT INTO valuz_agent (
                     slug, name, description, instructions, runtime, model, skills,
                     connector_types, knowledge_scope, provider_id, effort, kind,
@@ -74,11 +73,18 @@ def _install_valurion() -> None:
                 ) VALUES (
                     :slug, 'Valurion', :description, '', :runtime, :model, :empty,
                     :empty, :empty, :provider_id, :effort, 'system',
-                    'all_available', 1, 'full_access', 'builtin', 1, 0, 'bot',
+                    'all_available', :inherit_global_instructions,
+                    'full_access', 'builtin', :readonly, :deletable, 'bot',
                     :id, :created_at, :updated_at, :user_id
                 )
                 """
-            ),
+        ).bindparams(
+            sa.bindparam("inherit_global_instructions", type_=sa.Boolean()),
+            sa.bindparam("readonly", type_=sa.Boolean()),
+            sa.bindparam("deletable", type_=sa.Boolean()),
+        )
+        bind.execute(
+            insert_stmt,
             {
                 "slug": _VALURION_SLUG,
                 "description": _VALURION_DESCRIPTION,
@@ -87,6 +93,9 @@ def _install_valurion() -> None:
                 "empty": json.dumps([]),
                 "provider_id": brain.get("provider_id") if brain else None,
                 "effort": _VALURION_DEFAULT_EFFORT,
+                "inherit_global_instructions": True,
+                "readonly": True,
+                "deletable": False,
                 "id": str(uuid.uuid4()),
                 "created_at": now_ms,
                 "updated_at": now_ms,
@@ -98,18 +107,22 @@ def _install_valurion() -> None:
 def _uninstall_valurion() -> None:
     """Remove only the system row introduced by this contract on downgrade."""
     bind = op.get_bind()
+    delete_stmt = sa.text(
+        """
+        DELETE FROM valuz_agent
+        WHERE slug = :slug
+          AND kind = 'system'
+          AND source = 'builtin'
+          AND readonly = :readonly
+          AND deletable = :deletable
+        """
+    ).bindparams(
+        sa.bindparam("readonly", type_=sa.Boolean()),
+        sa.bindparam("deletable", type_=sa.Boolean()),
+    )
     bind.execute(
-        sa.text(
-            """
-            DELETE FROM valuz_agent
-            WHERE slug = :slug
-              AND kind = 'system'
-              AND source = 'builtin'
-              AND readonly = 1
-              AND deletable = 0
-            """
-        ),
-        {"slug": _VALURION_SLUG},
+        delete_stmt,
+        {"slug": _VALURION_SLUG, "readonly": True, "deletable": False},
     )
 
 
