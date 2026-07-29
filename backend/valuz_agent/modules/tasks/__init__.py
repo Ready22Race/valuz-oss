@@ -19,7 +19,7 @@ Layout — each layer has exactly one owner:
       service.py        the API layer's reads + intervention writes
       lifecycle · dispatcher · coordination · recovery
       planning (plan authoring) · messaging (mailbox delivery)
-      events (task-event writes + bus topics) · queries (agent-facing reads)
+      events (task-event writes + bus topics) · service (HTTP + agent reads)
   Runtime
       actor_runner.py   the actor loop + its two collaborator protocols
       mailbox.py · live_member_registry.py

@@ -214,7 +214,7 @@ _LIST_TASKS_PARAMETERS: dict[str, Any] = {
     "properties": {
         "status": {
             "type": "string",
-            "enum": ["active", "completed", "failed"],
+            "enum": ["draft", "active", "paused", "stopped", "completed", "blocked"],
             "description": "Optional filter by task status.",
         },
         "mine_only": {
@@ -896,7 +896,3 @@ ORCHESTRATION_TOOL_DECLARATIONS: tuple[ToolDef, ...] = (
     INJECT_INTO_TASK_TOOL_DECLARATION,
     RESUME_TASK_TOOL_DECLARATION,
 )
-
-# Names of conversation-launcher tools — dropped from the per-task lead clone
-# (the lead dispatches; it doesn't launch new tasks). ``list_members`` is NOT
-# in this set: it stays on the lead too (it's part of the dispatch toolset),

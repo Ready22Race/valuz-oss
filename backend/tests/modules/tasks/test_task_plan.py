@@ -100,9 +100,46 @@ def test_should_reject_invalid_status() -> None:
 
 def test_should_update_node_status() -> None:
     plan = TaskPlan.from_dict({"subtasks": [_node("a")]})
-    plan.update_node("a", status="done")
+    for st in ("in_progress", "in_review", "done"):  # the happy-path chain
+        plan.update_node("a", status=st)
     node = plan.get("a")
     assert node is not None and node.status == "done"
+
+
+def test_update_node_enforces_transition_table() -> None:
+    """Illegal jumps are refused at the one choke point every writer uses.
+
+    The two that matter most: ``failed`` can never be WRITTEN (a failed-stamped
+    node is not 'unresolved', so it silently passes the finish_task(completed)
+    guard — planned work skipped by relabeling), and a never-dispatched node
+    can't be approved straight to ``done``.
+    """
+    plan = TaskPlan.from_dict({"subtasks": [_node("a")]})
+    with pytest.raises(PlanError, match="illegal subtask transition"):
+        plan.update_node("a", status="done")  # planned → done (approve w/o dispatch)
+    with pytest.raises(PlanError, match="illegal subtask transition"):
+        plan.update_node("a", status="failed")  # failed is not a write target
+    plan.update_node("a", status="in_progress")
+    with pytest.raises(PlanError, match="illegal subtask transition"):
+        plan.update_node("a", status="planned")  # no rewind
+    # done is terminal
+    plan.update_node("a", status="in_review")
+    plan.update_node("a", status="done")
+    with pytest.raises(PlanError, match="illegal subtask transition"):
+        plan.update_node("a", status="rework")
+    # same-status writes stay no-ops (feedback updates ride them)
+    plan.update_node("a", status="done")
+
+
+def test_update_node_allows_legacy_failed_revival() -> None:
+    """The ONE edge out of ``failed`` — modify_plan can revive a legacy
+    stranded node back to ``planned`` (dispatchable)."""
+    node = _node("a")
+    node["status"] = "failed"  # legacy row, written before enforcement
+    plan = TaskPlan.from_dict({"subtasks": [node]})
+    plan.update_node("a", status="planned")
+    got = plan.get("a")
+    assert got is not None and got.status == "planned"
 
 
 def test_should_raise_when_updating_unknown_node() -> None:

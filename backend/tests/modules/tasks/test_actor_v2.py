@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from valuz_agent.modules.tasks import planning
-from valuz_agent.modules.tasks.actor_runner import _member_run_dir, collect_manifest
+from valuz_agent.modules.tasks.manifest import collect_manifest
 from valuz_agent.modules.tasks.mailbox import (
     InboxMsg,
     MailboxRegistry,
@@ -131,7 +131,7 @@ async def test_lead_loop_runs_turns_until_shutdown() -> None:
         finalized.append((str(kwargs["session_id"]), str(kwargs["final_status"])))
 
     orch.actor.run_turn = fake_turn  # type: ignore[method-assign]
-    orch.lifecycle.finalize_actor = fake_finalize  # type: ignore[method-assign]
+    orch.finalization.finalize_actor = fake_finalize  # type: ignore[method-assign]
 
     # Pre-load the inbox: a follow-up, then a shutdown. register() in the loop
     # is idempotent so these survive.
@@ -175,7 +175,7 @@ async def test_member_loop_notifies_lead_and_self_reaps_on_ttl() -> None:
 
     orch.actor.run_turn = fake_turn  # type: ignore[method-assign]
     orch.coordination.notify_lead_member_idle = fake_notify  # type: ignore[method-assign]
-    orch.lifecycle.finalize_actor = fake_finalize  # type: ignore[method-assign]
+    orch.finalization.finalize_actor = fake_finalize  # type: ignore[method-assign]
 
     # No messages arrive → the member reaps via the (tiny) idle TTL.
     await asyncio.wait_for(
@@ -208,7 +208,7 @@ async def test_terminal_turn_status_breaks_loop_immediately() -> None:
         return None
 
     orch.actor.run_turn = fake_turn  # type: ignore[method-assign]
-    orch.lifecycle.finalize_actor = fake_finalize  # type: ignore[method-assign]
+    orch.finalization.finalize_actor = fake_finalize  # type: ignore[method-assign]
 
     await asyncio.wait_for(
         orch.actor.run_actor_loop(
@@ -324,14 +324,6 @@ def test_no_model_provider_reports_gap() -> None:
 # ---------------------------------------------------------------------------
 # v2.1 — shared project cwd + mtime artifact attribution
 # ---------------------------------------------------------------------------
-
-
-def test_member_run_dir_defaults_to_project_cwd() -> None:
-    from pathlib import Path
-
-    # shared (default) and legacy "isolated" both → the project cwd itself.
-    assert _member_run_dir("/proj", "t1", 1, "shared") == Path("/proj")
-    assert _member_run_dir("/proj", "t1", 1, "isolated") == Path("/proj")
 
 
 def test_build_member_session_injects_skill_scoping(
@@ -635,7 +627,7 @@ def test_broadcast_shutdown_signals_live_members() -> None:
     mailbox_registry.register("m1")
     mailbox_registry.register("m2")
 
-    orch.coordination._broadcast_shutdown("t1")
+    orch.coordination.broadcast_shutdown("t1")
 
     assert mailbox_registry._boxes["m1"].get_nowait().kind == "shutdown"
     assert mailbox_registry._boxes["m2"].get_nowait().kind == "shutdown"

@@ -21,10 +21,12 @@ from typing import Any
 
 from valuz_agent.adapters import kernel_client
 from valuz_agent.adapters.agent_resolver import spill_goal_brief_if_too_long
+from valuz_agent.i18n import t
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.lifecycle import is_draining
 from valuz_agent.modules.tasks import planning
-from valuz_agent.modules.tasks.actor_runner import ActorRunner, collect_manifest
+from valuz_agent.modules.tasks.actor_runner import ActorRunner
+from valuz_agent.modules.tasks.manifest import collect_manifest_safe
 from valuz_agent.modules.tasks.coordination import CoordinationService
 from valuz_agent.adapters.agent_resolver import resolve_agent_display_name
 from valuz_agent.modules.tasks import launcher
@@ -33,13 +35,14 @@ from valuz_agent.modules.tasks.datastore import (
     TaskDatastore,
     TaskEventDatastore,
     TaskSessionDatastore,
+    pick_lead_run,
 )
 from valuz_agent.modules.tasks.live_member_registry import LiveMemberRegistry
 from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 from valuz_agent.modules.tasks.member_state import (
     reconcile,
 )
-from valuz_agent.modules.tasks.plan import TaskPlan
+from valuz_agent.modules.tasks.plan import PlanError, TaskPlan
 
 logger = logging.getLogger(__name__)
 
@@ -135,13 +138,15 @@ class RecoveryService:
             if task is None or task.status not in ("active", "paused"):
                 return False
             runs = await run_ds.list_runs(user_id, task_id)
-            lead_run = next((r for r in runs if r.kind == "lead"), None)
+            lead_run = pick_lead_run(runs)
             if lead_run is None:
                 return False
             lead_session_id = lead_run.session_id
 
             plan = TaskPlan.from_dict(task.plan)
-            plan_dirty = False
+            # (key, fields, bump_attempts) — applied inside persist_plan's CAS
+            # closure; ``plan`` above only feeds the reconcile classification.
+            mutations: list[tuple[str, dict[str, Any], bool]] = []
             for run in runs:
                 if run.kind != "subtask" or run.status not in ("active", "paused"):
                     continue
@@ -154,34 +159,24 @@ class RecoveryService:
                 )
                 manifest: dict[str, Any] | None = None
                 if rec.disposition == "completed":
-                    try:
-                        manifest = await collect_manifest(
-                            run.session_id,
-                            Path(run.run_dir) if run.run_dir else Path(),
-                            "idle",
-                            user_id=user_id,
-                        )
-                    except Exception:  # noqa: BLE001
-                        manifest = {
-                            "session_id": run.session_id,
-                            "status": "completed",
-                            "summary": "",
-                        }
-                    manifest["agent"] = run.agent_slug
+                    manifest = await collect_manifest_safe(
+                        run.session_id,
+                        Path(run.run_dir) if run.run_dir else Path(),
+                        "idle",
+                        agent_slug=run.agent_slug or "",
+                        user_id=user_id,
+                    )
                 if rec.run_status:
                     await run_ds.update_run_by_session(
                         session_id=run.session_id, status=rec.run_status, result_manifest=manifest
                     )
                 if node is not None and rec.node_status:
                     fields: dict[str, Any] = {"status": rec.node_status}
-                    if rec.resume:
-                        fields["attempts"] = node.attempts + 1
                     if rec.reason and rec.node_status == "rework":
                         fields["review_feedback"] = rec.reason
                     # ``node`` was looked up BY ``run.subtask_key``, so a
                     # non-None node means the key is a real str.
-                    plan.update_node(node.key, **fields)
-                    plan_dirty = True
+                    mutations.append((node.key, fields, rec.resume))
                 if rec.deliver_member_done and manifest is not None:
                     member_done.append((run.session_id, manifest))
                 if rec.resume:
@@ -196,12 +191,31 @@ class RecoveryService:
                     )
                 summary.append(f"- {run.subtask_key}({run.agent_slug}): {rec.disposition}")
 
-            if plan_dirty:
+            if mutations:
+
+                def _apply(p: TaskPlan) -> bool:
+                    changed = False
+                    for key, fields, bump_attempts in mutations:
+                        n = p.get(key)
+                        if n is None:
+                            continue
+                        if bump_attempts:
+                            fields = {**fields, "attempts": n.attempts + 1}
+                        try:
+                            p.update_node(key, **fields)
+                        except PlanError:
+                            logger.warning(
+                                "reconcile: skipping illegal node write %s %s", key, fields
+                            )
+                            continue
+                        changed = True
+                    return changed
+
                 await planning.persist_plan(
                     task_ds,
                     event_ds,
                     task,
-                    plan,
+                    mutate=_apply,
                     actor="system",
                     session_id=lead_session_id,
                     user_id=user_id,
@@ -323,9 +337,8 @@ class RecoveryService:
             if task.status not in allowed_from:
                 return False
             runs = await run_ds.list_runs(user_id, task_id)
-            lead_session_id: str | None = next(
-                (r.session_id for r in runs if r.kind == "lead"), None
-            )
+            lead_pick = pick_lead_run(runs)
+            lead_session_id: str | None = lead_pick.session_id if lead_pick else None
             member_sids = [
                 r.session_id for r in runs if r.kind == "subtask" and r.status == "active"
             ]
@@ -339,22 +352,23 @@ class RecoveryService:
             # a parked node back to ``in_progress`` if its run survived;
             # otherwise it stays ``paused`` and is re-dispatchable (ready_keys +
             # resolve_dispatch_node both accept ``paused``).
-            plan = TaskPlan.from_dict(task.plan)
-            parked = 0
-            for node in plan.nodes:
-                if node.status == "in_progress":
-                    plan.update_node(node.key, status="paused")
-                    parked += 1
-            if parked:
-                await planning.persist_plan(
-                    task_ds,
-                    event_ds,
-                    task,
-                    plan,
-                    actor="user",
-                    session_id=lead_session_id,
-                    user_id=user_id,
-                )
+            def _park_running(p: TaskPlan) -> bool:
+                parked = 0
+                for node in p.nodes:
+                    if node.status == "in_progress":
+                        p.update_node(node.key, status="paused")
+                        parked += 1
+                return parked > 0
+
+            await planning.persist_plan(
+                task_ds,
+                event_ds,
+                task,
+                mutate=_park_running,
+                actor="user",
+                session_id=lead_session_id,
+                user_id=user_id,
+            )
             if target_status == "stopped":
                 # Terminal write — goes through finalize_task so the status
                 # flip rides the task_state guard AND ``task.finalized`` is
@@ -372,7 +386,13 @@ class RecoveryService:
                     payload={"members_paused": len(member_sids)},
                 )
             else:
-                await task_ds.update_task_status(user_id, task_id, "paused")
+                if not await task_ds.update_task_status(user_id, task_id, "paused"):
+                    # Lost the flip (lead finalize landed between our status
+                    # check and the write) — the winner owns the terminal;
+                    # appending "paused" here would put a lying event on a
+                    # completed/blocked task's timeline.
+                    logger.warning("stop_task: pause flip lost a race for %s", task_id)
+                    return False
                 await event_ds.append_event(
                     user_id,
                     project_id,
@@ -387,7 +407,7 @@ class RecoveryService:
             await self._interrupt_kernel_session(sid, user_id=user_id)
         if lead_session_id is not None:
             await self._interrupt_kernel_session(lead_session_id, user_id=user_id)
-        self._coordination._broadcast_shutdown(task_id)
+        self._coordination.broadcast_shutdown(task_id)
         if lead_session_id is not None:
 
             mailbox_registry.put(lead_session_id, InboxMsg(kind="shutdown"))
@@ -449,7 +469,15 @@ class RecoveryService:
             # skip the formal check there.
             if prior_status != "failed":
                 assert_transition(prior_status, "active")
-            await task_ds.update_task_status(user_id, task_id, "active")
+            if not await task_ds.update_task_status(user_id, task_id, "active"):
+                # Lost the flip (e.g. a concurrent stop moved the task under
+                # us) — do NOT append "resumed", normalise runs, or clear the
+                # failure notification off a state we did not create.
+                return {
+                    "ok": False,
+                    "error": "resume_task: task changed concurrently — refresh and retry",
+                    "prior_status": prior_status,
+                }
             # When reviving a stopped OR completed task: finish_task previously
             # marked the lead run as "completed" and broadcast shutdown to
             # members. _recover_one_task respawns the lead unconditionally, but
@@ -458,7 +486,7 @@ class RecoveryService:
             # rows may carry any run status — normalise them the same way.
             if prior_status in ("stopped", "completed", "failed"):
                 runs = await run_ds.list_runs(user_id, task_id)
-                lead_run = next((r for r in runs if r.kind == "lead"), None)
+                lead_run = pick_lead_run(runs)
                 if lead_run is not None and lead_run.status != "active":
                     await run_ds.update_run_by_session(
                         session_id=lead_run.session_id,
@@ -499,6 +527,45 @@ class RecoveryService:
         )
         return {"ok": ok, "prior_status": prior_status, "resumed": ok}
 
+    async def inject_or_revive(
+        self,
+        *,
+        task_id: str,
+        project_id: str,
+        text: str,
+        from_session_id: str,
+        user_id: str,
+    ) -> dict[str, Any]:
+        """Deliver a user instruction to the lead — reviving a halted task.
+
+        The ONE spelling of the "talking to a halted task is resume intent"
+        policy (the :intervene contract promises chat/inject can revive).
+        Both transports (REST :inject, MCP inject_into_task) call this; the
+        policy used to be duplicated in each with drifting result shaping.
+        Returns the messaging result dict, reshaped on the revive path to
+        ``{"delivered", "lead_session_id", "reason"}``.
+        """
+        from valuz_agent.modules.tasks import messaging
+
+        result = await messaging.inject_into_task(
+            task_id=task_id,
+            project_id=project_id,
+            text=text,
+            from_session_id=from_session_id,
+            user_id=user_id,
+        )
+        if result.get("reason") == "TASK_HALTED":
+            revived = await self.resume_task(
+                task_id, project_id, user_id=user_id, instruction=text
+            )
+            ok = bool(revived.get("ok"))
+            return {
+                "delivered": ok,
+                "lead_session_id": None,
+                "reason": "TASK_RESUMED" if ok else "RESUME_FAILED",
+            }
+        return result
+
     async def stop_member(self, session_id: str, user_id: str) -> bool:
         """User-initiated single-member stop (task stays ``active``).
 
@@ -524,22 +591,27 @@ class RecoveryService:
             if subtask_key:
                 task = await task_ds.get_task_by_project(user_id, project_id, task_id)
                 if task is not None:
-                    plan = TaskPlan.from_dict(task.plan)
-                    if plan.get(subtask_key) is not None:
-                        plan.update_node(
-                            subtask_key,
-                            status="rework",
-                            review_feedback="用户手动停止了该子任务",
+
+                    def _park(p: TaskPlan, *, _key: str = subtask_key or "") -> bool:
+                        n = p.get(_key)
+                        if n is None or n.status not in (
+                            "in_progress", "in_review", "rework", "paused"
+                        ):
+                            return False
+                        p.update_node(
+                            _key, status="rework", review_feedback=t("task.reworkUserStopped")
                         )
-                        await planning.persist_plan(
-                            task_ds,
-                            event_ds,
-                            task,
-                            plan,
-                            actor="user",
-                            session_id=lead_session_id or None,
-                            user_id=user_id,
-                        )
+                        return True
+
+                    await planning.persist_plan(
+                        task_ds,
+                        event_ds,
+                        task,
+                        mutate=_park,
+                        actor="user",
+                        session_id=lead_session_id or None,
+                        user_id=user_id,
+                    )
             await record_subtask_stopped(
                 event_ds,
                 user_id=user_id,
@@ -552,6 +624,10 @@ class RecoveryService:
             )
 
         await self._interrupt_kernel_session(session_id, user_id=user_id)
+        # The interrupt only reaches a member MID-TURN. An idle member (waiting
+        # on its mailbox between turns) would otherwise sit out its full idle
+        # TTL (10 min) before exiting — and the user already cancelled it.
+        mailbox_registry.put(session_id, InboxMsg(kind="shutdown"))
         self._members.discard_member(task_id, session_id)
         if lead_session_id:
             mailbox_registry.put(
@@ -562,7 +638,7 @@ class RecoveryService:
                     payload={
                         "agent": agent_slug,
                         "status": "cancelled",
-                        "summary": "用户停止了该子任务",
+                        "summary": t("task.summaryUserStopped"),
                         "artifacts": [],
                     },
                 ),
@@ -694,7 +770,7 @@ class TaskHealthMonitor:
             candidates: list[tuple[str, str, str, str | None]] = []
             for task in tasks:
                 runs = await run_ds.list_runs(task.user_id, task.id)
-                lead = next((r for r in runs if r.kind == "lead"), None)
+                lead = pick_lead_run(runs)
                 candidates.append(
                     (task.id, task.user_id, task.project_id, lead.session_id if lead else None)
                 )

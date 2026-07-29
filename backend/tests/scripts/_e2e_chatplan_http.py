@@ -206,7 +206,6 @@ def main() -> int:
         "POST",
         f"{base}/v1/tasks/{task_id}/plan",
         {
-            "lead_session_id": chat_session_id,
             "subtasks": [
                 {"key": "extract", "title": "Pull annual reports", "goal": "Fetch 5yr 10-K"},
                 {
@@ -240,7 +239,6 @@ def main() -> int:
         "PATCH",
         f"{base}/v1/tasks/{task_id}/plan",
         {
-            "lead_session_id": chat_session_id,
             "add": [
                 {"key": "valuate", "title": "Valuation", "goal": "DCF + EVA"},
             ],
@@ -256,7 +254,6 @@ def main() -> int:
         "PATCH",
         f"{base}/v1/tasks/{task_id}/plan",
         {
-            "lead_session_id": chat_session_id,
             "add": [
                 {"key": "doomed", "title": "Doomed", "goal": "Won't land"},
             ],

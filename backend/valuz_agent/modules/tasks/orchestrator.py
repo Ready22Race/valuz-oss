@@ -12,7 +12,8 @@ That created two ways to reach every method — delegator for production,
 property for tests — and ~240 lines of pure signature duplication that had
 to be kept in sync with the services. One path, no mirror.)
 
-  lifecycle     kickoff · draft/commit/abandon · finish_task · update_deliverable
+  lifecycle     kickoff · draft/commit/abandon (task authoring)
+  finalization  finish_task · update_deliverable · actor finalize callbacks
   dispatcher    dispatch_async (member spawn)
   coordination  await_member_results
   recovery      recover_active_tasks · stop_task · resume_task · stop_member
@@ -21,7 +22,7 @@ Related seams, deliberately NOT here:
   - plan writes → ``tasks/plan_commands.py`` (the single authorized door)
   - host-knowledge session resolution → ``tasks/resolution.py``
   - composed event writes → ``tasks/events.py`` · plan authoring → ``planning``
-  - agent-facing reads → ``queries`` · HTTP reads → ``service`` · mailbox
+  - HTTP + agent-facing reads → ``service`` · mailbox
     delivery → ``messaging``
 """
 
@@ -35,6 +36,7 @@ import valuz_agent.boot.kernel  # noqa: F401
 from valuz_agent.modules.tasks.actor_runner import ActorRunner
 from valuz_agent.modules.tasks.coordination import CoordinationService
 from valuz_agent.modules.tasks.dispatcher import DispatcherService
+from valuz_agent.modules.tasks.finalization import FinalizationService
 from valuz_agent.modules.tasks.lifecycle import LifecycleService
 from valuz_agent.modules.tasks.live_member_registry import LiveMemberRegistry
 from valuz_agent.modules.tasks.recovery import RecoveryService
@@ -73,6 +75,11 @@ class TaskOrchestrator:
             actor_runner=self._actor,
             coordination=self._coordination,
         )
+        self._finalization = FinalizationService(
+            registry=self._members,
+            actor_runner=self._actor,
+            coordination=self._coordination,
+        )
         self._recovery = RecoveryService(
             registry=self._members,
             actor_runner=self._actor,
@@ -83,7 +90,7 @@ class TaskOrchestrator:
         # everything around a turn to these two — typed as ActorFinalizer /
         # ActorCoordinator, so mypy checks that the services still satisfy the
         # seam (an untyped handle here previously let delegators rot silently).
-        self._actor.bind(finalizer=self._lifecycle, coordinator=self._coordination)
+        self._actor.bind(finalizer=self._finalization, coordinator=self._coordination)
 
     @property
     def members(self) -> LiveMemberRegistry:
@@ -97,8 +104,13 @@ class TaskOrchestrator:
 
     @property
     def lifecycle(self) -> LifecycleService:
-        """kickoff / draft / commit / abandon / finish + actor finalize."""
+        """Task authoring: kickoff / draft / commit / abandon."""
         return self._lifecycle
+
+    @property
+    def finalization(self) -> FinalizationService:
+        """Terminal writes: finish / update_deliverable / actor finalize."""
+        return self._finalization
 
     @property
     def dispatcher(self) -> DispatcherService:

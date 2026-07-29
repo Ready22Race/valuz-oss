@@ -19,7 +19,10 @@ Two groups share this module:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any
+
+from sqlalchemy.exc import InvalidRequestError
 
 from valuz_agent.adapters.agent_resolver import (
     resolve_agent_display_name,
@@ -46,33 +49,61 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+_PLAN_CAS_RETRIES = 5
+
+
 async def persist_plan(
     task_ds: TaskDatastore,
     event_ds: TaskEventDatastore,
     task_row: TaskRow,
-    plan: TaskPlan,
     *,
+    mutate: Callable[[TaskPlan], bool],
     actor: str,
     session_id: str | None,
     user_id: str,
-) -> None:
-    """Write a mutated plan back AND announce it — both, always (persisting
-    without the ``task_plan_update`` leaves the Todo panel silently stale).
+) -> TaskPlan | None:
+    """Mutate the plan and write it back — the ONE door for node mutations.
 
-    ``plan_task`` / ``modify_plan`` deliberately keep their own copy: they
-    append ``task_planned`` / ``plan_revised`` BETWEEN write and announce
-    (that order is on the wire) and they alone bump ``plan_version``.
+    ``mutate`` runs against the freshest plan and returns False to abort (its
+    node is gone, or already in the target state). The write is a CAS on
+    ``plan_version``: on conflict the row is refreshed and ``mutate`` is
+    re-applied to the winner's plan, so concurrent writers (lead loop vs
+    heartbeat vs a user stop) compose instead of silently reverting each
+    other's nodes. Announcing (``task_plan_update``) always follows the write —
+    persisting without it leaves the Todo panel silently stale.
+
+    ``plan_task`` / ``modify_plan`` keep their own copy of the write+announce
+    pair: they append ``task_planned`` / ``plan_revised`` BETWEEN the two (that
+    order is on the wire) — but their write leg is the same CAS.
+
+    Returns the persisted plan, or None when nothing was written.
     """
-    task_row.plan = plan.to_dict()
-    await task_ds.update_task(task_row)
-    await emit_plan_update(
-        event_ds,
-        task_row,
-        plan,
-        actor=actor,
-        session_id=session_id,
-        user_id=user_id,
+    for _ in range(_PLAN_CAS_RETRIES):
+        expected = task_row.plan_version or 0
+        plan = TaskPlan.from_dict(task_row.plan)
+        if not mutate(plan):
+            return None
+        try:
+            wrote = await task_ds.cas_update_plan(
+                user_id, task_row, plan.to_dict(), expected_version=expected
+            )
+        except InvalidRequestError:  # row vanished (task deleted concurrently)
+            return None
+        if wrote:
+            await emit_plan_update(
+                event_ds,
+                task_row,
+                plan,
+                actor=actor,
+                session_id=session_id,
+                user_id=user_id,
+                plan_version=expected + 1,
+            )
+            return plan
+    logger.error(
+        "persist_plan: gave up after %d CAS conflicts for task %s", _PLAN_CAS_RETRIES, task_row.id
     )
+    return None
 
 
 async def emit_plan_update(
@@ -83,6 +114,7 @@ async def emit_plan_update(
     actor: str,
     session_id: str | None,
     user_id: str,
+    plan_version: int | None = None,
 ) -> None:
     """Append a ``task_plan_update`` SNAPSHOT — every field is load-bearing.
 
@@ -90,6 +122,11 @@ async def emit_plan_update(
     guarantee the previous one was seen). ``plan_version`` in particular is
     the feed's dedup key: without it every event was silently discarded.
     Shape locked by test_plan_update_payload_is_a_self_contained_snapshot.
+
+    ``plan_version``: the version THIS write installed (CAS ``expected + 1``).
+    Pass it explicitly — re-reading the row can pick up a LATER writer's
+    version (cas_update_plan refreshes after commit) and stamp it onto this
+    older snapshot, making the feed's dedup drop the real newer snapshot.
     """
     panel = plan.to_panel()
     # Stamp each node's member display name so the Todo panel renders it
@@ -113,7 +150,9 @@ async def emit_plan_update(
         payload={
             "subtasks": panel,
             # Monotonic CAS token — the consumer's dedup/ordering key.
-            "plan_version": task_row.plan_version or 0,
+            "plan_version": (
+                plan_version if plan_version is not None else task_row.plan_version or 0
+            ),
             # Named ``task_status``, not ``status``: a plan snapshot also
             # carries per-node statuses, and an unqualified ``status`` in this
             # payload reads as "the plan's".
@@ -162,9 +201,18 @@ async def plan_task(
             plan.add(subtasks)
         except PlanError as exc:
             return {"error": f"invalid plan: {exc}"}
-        task_row.plan = plan.to_dict()
-        task_row.plan_version = (task_row.plan_version or 0) + 1
-        await task_ds.update_task(task_row)
+        expected = task_row.plan_version or 0
+        if not await task_ds.cas_update_plan(
+            user_id, task_row, plan.to_dict(), expected_version=expected
+        ):
+            return {
+                "error": "PLAN_VERSION_CONFLICT",
+                "current_version": task_row.plan_version or 0,
+                "hint": "another writer changed the plan mid-call; re-read and retry",
+            }
+        # Stamp the version THIS write installed — the refreshed row may
+        # already carry a later writer's version (see emit_plan_update).
+        installed = expected + 1
         await event_ds.append_event(
             user_id,
             project_id=project_id,
@@ -172,7 +220,7 @@ async def plan_task(
             type="task_planned",
             actor=lead_session_id,
             session_id=lead_session_id,
-            payload={**plan.to_dict(), "plan_version": task_row.plan_version},
+            payload={**plan.to_dict(), "plan_version": installed},
         )
         await emit_plan_update(
             event_ds,
@@ -181,12 +229,13 @@ async def plan_task(
             actor=lead_session_id,
             session_id=lead_session_id,
             user_id=user_id,
+            plan_version=installed,
         )
         render_plan_md(task_row, plan)
         return {
             "subtasks": plan.to_panel(),
             "ready": plan.ready_keys(),
-            "current_version": task_row.plan_version,
+            "current_version": installed,
         }
 
 
@@ -265,9 +314,19 @@ async def modify_plan(
                 plan.update_node(key, **fields)
         except PlanError as exc:
             return {"error": f"invalid plan change: {exc}"}
-        task_row.plan = plan.to_dict()
-        task_row.plan_version = current_version + 1
-        await task_ds.update_task(task_row)
+        if not await task_ds.cas_update_plan(
+            user_id, task_row, plan.to_dict(), expected_version=current_version
+        ):
+            return {
+                "error": "PLAN_VERSION_CONFLICT",
+                "current_version": task_row.plan_version or 0,
+                "you_passed": expected_version,
+                "hint": (
+                    "another writer changed the plan mid-call; call get_plan to "
+                    "re-read, merge your changes, then retry"
+                ),
+            }
+        installed = current_version + 1  # the version THIS write installed
         await event_ds.append_event(
             user_id,
             project_id=project_id,
@@ -278,7 +337,7 @@ async def modify_plan(
             payload={
                 "add": add or [],
                 "update": update or [],
-                "plan_version": task_row.plan_version,
+                "plan_version": installed,
             },
         )
         await emit_plan_update(
@@ -288,12 +347,13 @@ async def modify_plan(
             actor=lead_session_id,
             session_id=lead_session_id,
             user_id=user_id,
+            plan_version=installed,
         )
         render_plan_md(task_row, plan)
         return {
             "subtasks": plan.to_panel(),
             "ready": plan.ready_keys(),
-            "current_version": task_row.plan_version,
+            "current_version": installed,
         }
 
 
@@ -325,6 +385,10 @@ async def review_subtask(
         task_row = await task_ds.get_task_by_project(user_id, project_id, task_id)
         if task_row is None:
             return {"error": f"task {task_id!r} not found"}
+        if task_row.status != "active":
+            # Same rationale as plan_commands' writable-status guard: a halted
+            # (paused/stopped/completed) task's plan must not move under review.
+            return {"error": f"task is {task_row.status!r} — review applies to an active task"}
         plan = TaskPlan.from_dict(task_row.plan)
         key = subtask_key
         if not key and session_id:
@@ -353,11 +417,48 @@ async def review_subtask(
             # returns a 500 instead of the same actionable error phase 1 gives.
             if task_row is None:
                 return {"error": f"task {task_id!r} not found"}
-            plan = TaskPlan.from_dict(task_row.plan)
-            node = plan.get(key)
+            if task_row.status != "active":
+                return {
+                    "error": f"task is {task_row.status!r} — review applies to an active task"
+                }
+            fresh_plan = TaskPlan.from_dict(task_row.plan)
+            node = fresh_plan.get(key)
             if node is None:
                 return {"error": f"no subtask with key {key!r}"}
-            plan.update_node(key, status="done", review_feedback=None)
+            if node.status == "done":
+                # Duplicate approve (double tool call / CAS-race echo): the
+                # first one already announced and settled — re-announcing
+                # appends a second subtask_reviewed/subtask_completed pair.
+                return {
+                    "decision": "approve",
+                    "subtask_key": key,
+                    "already_done": True,
+                    "ready": fresh_plan.ready_keys(),
+                    "all_done": fresh_plan.all_done(),
+                }
+
+            def _approve(p: TaskPlan) -> bool:
+                if p.get(key) is None:
+                    return False
+                p.update_node(key, status="done", review_feedback=None)
+                return True
+
+            try:
+                persisted = await persist_plan(
+                    task_ds,
+                    event_ds,
+                    task_row,
+                    mutate=_approve,
+                    actor=lead_session_id,
+                    session_id=lead_session_id,
+                    user_id=user_id,
+                )
+            except PlanError as exc:
+                # e.g. approving a never-dispatched node — the transition table
+                # (plan.NODE_TRANSITIONS) refuses planned → done.
+                return {"error": f"invalid review: {exc}"}
+            if persisted is None:
+                return {"error": f"no subtask with key {key!r}"}
             if target_session:
                 await run_ds.update_run_by_session(
                     session_id=target_session,
@@ -395,21 +496,12 @@ async def review_subtask(
                     "agent_name": completed_agent_name,
                 },
             )
-            await persist_plan(
-                task_ds,
-                event_ds,
-                task_row,
-                plan,
-                actor=lead_session_id,
-                session_id=lead_session_id,
-                user_id=user_id,
-            )
-            render_plan_md(task_row, plan)
+            render_plan_md(task_row, persisted)
             return {
                 "decision": "approve",
                 "subtask_key": key,
-                "ready": plan.ready_keys(),
-                "all_done": plan.all_done(),
+                "ready": persisted.ready_keys(),
+                "all_done": persisted.all_done(),
             }
 
     # decision == "rework": mailbox delivery must run on the event loop
@@ -435,14 +527,35 @@ async def review_subtask(
         # guaranteed to still exist.
         if task_row is None:
             return {"error": f"task {task_id!r} not found"}
-        plan = TaskPlan.from_dict(task_row.plan)
-        if plan.get(key) is None:
+        if task_row.status != "active":
+            return {"error": f"task is {task_row.status!r} — review applies to an active task"}
+        if TaskPlan.from_dict(task_row.plan).get(key) is None:
             return {"error": f"no subtask with key {key!r}"}
-        plan.update_node(
-            key,
-            status="in_progress" if delivered else "rework",
-            review_feedback=feedback,
-        )
+
+        def _rework(p: TaskPlan) -> bool:
+            if p.get(key) is None:
+                return False
+            p.update_node(
+                key,
+                status="in_progress" if delivered else "rework",
+                review_feedback=feedback,
+            )
+            return True
+
+        try:
+            persisted = await persist_plan(
+                task_ds,
+                event_ds,
+                task_row,
+                mutate=_rework,
+                actor=lead_session_id,
+                session_id=lead_session_id,
+                user_id=user_id,
+            )
+        except PlanError as exc:
+            return {"error": f"invalid review: {exc}"}
+        if persisted is None:
+            return {"error": f"no subtask with key {key!r}"}
         await event_ds.append_event(
             user_id,
             project_id=project_id,
@@ -452,16 +565,7 @@ async def review_subtask(
             session_id=target_session,
             payload={"subtask_key": key, "decision": "rework", "feedback": feedback or ""},
         )
-        await persist_plan(
-            task_ds,
-            event_ds,
-            task_row,
-            plan,
-            actor=lead_session_id,
-            session_id=lead_session_id,
-            user_id=user_id,
-        )
-        render_plan_md(task_row, plan)
+        render_plan_md(task_row, persisted)
         return {
             "decision": "rework",
             "subtask_key": key,
@@ -536,22 +640,25 @@ async def mark_node_dispatched(
         task_row = await task_ds.get_task_by_project(user_id, project_id, task_id)
         if task_row is None:
             return
-        plan = TaskPlan.from_dict(task_row.plan)
-        node = plan.get(subtask_key)
-        if node is None:
-            return
-        plan.update_node(
-            subtask_key,
-            status="in_progress",
-            attempts=node.attempts + 1,
-            agent=agent,
-            latest_run_session_id=session_id,
-        )
+
+        def _dispatch(p: TaskPlan) -> bool:
+            node = p.get(subtask_key)
+            if node is None or node.status not in ("planned", "rework", "paused"):
+                return False  # mirrors the resolve_dispatch_node gate
+            p.update_node(
+                subtask_key,
+                status="in_progress",
+                attempts=node.attempts + 1,
+                agent=agent,
+                latest_run_session_id=session_id,
+            )
+            return True
+
         await persist_plan(
             task_ds,
             event_ds,
             task_row,
-            plan,
+            mutate=_dispatch,
             actor=agent,
             session_id=session_id,
             user_id=user_id,
@@ -581,16 +688,19 @@ async def mark_in_review(
             )
             if task_row is None:
                 return
-            plan = TaskPlan.from_dict(task_row.plan)
-            node = plan.get(key)
-            if node is None or node.status not in ("in_progress", "rework"):
-                return
-            plan.update_node(key, status="in_review")
+
+            def _in_review(p: TaskPlan) -> bool:
+                node = p.get(key)
+                if node is None or node.status not in ("in_progress", "rework"):
+                    return False
+                p.update_node(key, status="in_review")
+                return True
+
             await persist_plan(
                 task_ds,
                 event_ds,
                 task_row,
-                plan,
+                mutate=_in_review,
                 actor="system",
                 session_id=member_session_id,
                 user_id=user_id,

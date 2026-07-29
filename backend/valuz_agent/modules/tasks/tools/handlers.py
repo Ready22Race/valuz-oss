@@ -60,7 +60,7 @@ from valuz_agent.modules.tasks.tools.declarations import (
 if TYPE_CHECKING:
     from valuz_agent.modules.tasks.orchestrator import TaskOrchestrator
 
-from valuz_agent.modules.tasks.tools import gate
+from valuz_agent.modules.tasks import gate
 
 logger = logging.getLogger(__name__)
 
@@ -70,19 +70,22 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-async def _check_lead_gate(ctx: ExecContext) -> tuple[str, str] | ToolResult:
+async def _check_lead_gate(
+    ctx: ExecContext, *, tool: str = "dispatch"
+) -> tuple[str, str] | ToolResult:
     """Verify the caller is a lead session and return (task_id, project_id).
 
     I/O wrapper: loads the caller session, applies the pure policy in
     ``tools/gate.py`` and wraps a rejection into ToolResult(is_error=True).
+    ``tool`` labels rejections with the actual tool the model called.
     """
     # Source the caller from the per-request built-in MCP context when not
     # passed explicitly (the toolkit MCP server publishes the session owner).
     user_id = ctx.user_id
     sess = await data_reader().get_session(user_id, ctx.session_id)
     if sess is None:
-        return ToolResult(content="dispatch: caller session not found", is_error=True)
-    verdict = gate.check_lead_gate(sess)
+        return ToolResult(content=f"{tool}: caller session not found", is_error=True)
+    verdict = gate.check_lead_gate(sess, tool=tool)
     if isinstance(verdict, Failure):
         return ToolResult(content=verdict.reason, is_error=True)
     return verdict
@@ -295,6 +298,14 @@ def _with_inbox_notice(handler: ToolHandler) -> ToolHandler:
     return _wrapped
 
 
+def _json_result(result: dict[str, Any]) -> ToolResult:
+    """The ONE spelling of the JSON tool envelope: a service dict goes to the
+    model as JSON, and ``{"error": ...}`` is the error marker. Handlers whose
+    service returns a different failure key (``delivered``/``ok``/``status``)
+    map it explicitly at the call site — don't invent a second envelope."""
+    return ToolResult(content=json.dumps(result, ensure_ascii=False), is_error="error" in result)
+
+
 def _guarded(tool_name: str, handler: ToolHandler) -> ToolHandler:
     """Turn an unexpected exception into a tool error instead of a transport fault.
 
@@ -314,7 +325,16 @@ def _guarded(tool_name: str, handler: ToolHandler) -> ToolHandler:
             return await handler(args, ctx)
         except Exception as exc:  # noqa: BLE001 — the point is to catch everything
             logger.exception("%s handler failed (session %s)", tool_name, ctx.session_id)
-            return ToolResult(content=f"{tool_name} failed: {exc}", is_error=True)
+            # Never echo str(exc) to the model: a SQLAlchemy OperationalError
+            # stringifies with the SQL + parameters, filesystem errors carry
+            # absolute host paths. The full traceback is already in the log.
+            return ToolResult(
+                content=(
+                    f"{tool_name} failed unexpectedly ({type(exc).__name__}) — "
+                    "details are in the server logs"
+                ),
+                is_error=True,
+            )
 
     return _wrapped
 
@@ -345,7 +365,7 @@ _INBOX_NOTICE_TOOLS: frozenset[str] = frozenset(
 async def _dispatch_handler(
     orch: TaskOrchestrator, args: dict[str, Any], ctx: ExecContext
 ) -> ToolResult:
-    gate = await _check_lead_gate(ctx)
+    gate = await _check_lead_gate(ctx, tool="dispatch")
     if isinstance(gate, ToolResult):
         return gate
     task_id, project_id = gate
@@ -364,15 +384,13 @@ async def _dispatch_handler(
         project_mode=args.get("project_mode"),
         user_id=ctx.user_id,
     )
-    return ToolResult(
-        content=json.dumps(result, ensure_ascii=False), is_error="error" in result
-    )
+    return _json_result(result)
 
 
 async def _await_members_handler(
     orch: TaskOrchestrator, args: dict[str, Any], ctx: ExecContext
 ) -> ToolResult:
-    gate = await _check_lead_gate(ctx)
+    gate = await _check_lead_gate(ctx, tool="await_members")
     if isinstance(gate, ToolResult):
         return gate
     task_id, project_id = gate
@@ -388,16 +406,13 @@ async def _await_members_handler(
         timeout_s=args.get("timeout_s"),
         user_id=ctx.user_id,
     )
-    return ToolResult(
-        content=json.dumps(result, ensure_ascii=False),
-        is_error="error" in result,
-    )
+    return _json_result(result)
 
 
 async def _send_handler(
     orch: TaskOrchestrator, args: dict[str, Any], ctx: ExecContext
 ) -> ToolResult:
-    gate = await _check_lead_gate(ctx)
+    gate = await _check_lead_gate(ctx, tool="send")
     if isinstance(gate, ToolResult):
         return gate
     task_id, project_id = gate
@@ -489,10 +504,7 @@ async def _commit_task_handler(
         lead_agent_slug_override=args.get("lead_agent_slug"),
         user_id=user_id,
     )
-    return ToolResult(
-        content=json.dumps(result, ensure_ascii=False),
-        is_error="error" in result,
-    )
+    return _json_result(result)
 
 
 async def _abandon_task_handler(
@@ -510,10 +522,7 @@ async def _abandon_task_handler(
         reason=(args.get("reason") or ""),
         user_id=user_id,
     )
-    return ToolResult(
-        content=json.dumps(result, ensure_ascii=False),
-        is_error="error" in result,
-    )
+    return _json_result(result)
 
 
 async def _authorize_task_conversation_caller(
@@ -551,7 +560,6 @@ async def _inject_into_task_handler(
     # than the writer gate (a chat session may not be the originator AND
     # the task is past draft) — project-member is enough because the
     # lead retains full authority over what to do with the message.
-    user_id = ctx.user_id
     task_id = (args.get("task_id") or "").strip()
     text = args.get("text") or ""
     if not task_id:
@@ -559,55 +567,20 @@ async def _inject_into_task_handler(
     if not text.strip():
         return ToolResult(content="inject_into_task: text is required", is_error=True)
 
-    sess = await data_reader().get_session(user_id, ctx.session_id)
-    if sess is None:
-        return ToolResult(content="inject_into_task: caller session not found", is_error=True)
+    authorized = await _authorize_task_conversation_caller(ctx, task_id, "inject_into_task")
+    if isinstance(authorized, ToolResult):
+        return authorized
+    _sess, task = authorized
 
-
-    async with async_unit_of_work(commit=False) as db:
-        task = await TaskDatastore(db).get_task(user_id, task_id)
-    if task is None:
-        return ToolResult(
-            content=f"inject_into_task: task {task_id!r} not found", is_error=True
-        )
-
-    v: dict[str, Any] = (sess.metadata or {}).get("valuz", {})
-    caller_ws = getattr(sess, "project_id", "") or v.get("project_id", "")
-    origin = (task.metadata_ or {}).get("originating_session_id")
-    is_originator = bool(origin) and sess.id == origin
-    is_project_mate = bool(caller_ws) and caller_ws == task.project_id
-    if not (is_originator or is_project_mate):
-        return ToolResult(
-            content=(
-                f"inject_into_task: FORBIDDEN — caller is neither the task's "
-                f"originator nor a session in the task's project "
-                f"(task project {task.project_id!r})"
-            ),
-            is_error=True,
-        )
-
-    result = await messaging.inject_into_task(
+    # Halted-task revive policy lives in ONE place (recovery.inject_or_revive)
+    # — both transports call it.
+    result = await orch.recovery.inject_or_revive(
         task_id=task_id,
         project_id=task.project_id,
         text=text,
         from_session_id=ctx.session_id,
         user_id=ctx.user_id,
     )
-    # Talking to a HALTED task is the user's resume intent (the intervene
-    # contract promises "chat/inject can also revive it"). Deciding that is
-    # orchestration, so it happens here rather than inside the delivery
-    # helper — ``resume_task`` flips the status, reconciles members and
-    # embeds the text in the respawned lead's recovery brief, appending its
-    # own ``resumed`` + ``user_inject`` events.
-    if result.get("reason") == "TASK_HALTED":
-        revived = await orch.recovery.resume_task(
-            task_id, task.project_id, user_id=ctx.user_id, instruction=text
-        )
-        result = {
-            "delivered": bool(revived.get("ok")),
-            "lead_session_id": None,
-            "reason": "TASK_RESUMED" if revived.get("ok") else "RESUME_FAILED",
-        }
     return ToolResult(
         content=json.dumps(result, ensure_ascii=False),
         is_error=not result.get("delivered"),
@@ -751,13 +724,13 @@ async def _list_members_handler(
         bound = await _bound_agent_member(sess)
         if bound is not None:
             members = [bound]
-    return ToolResult(content=json.dumps(members, ensure_ascii=False))
+    return ToolResult(content=json.dumps({"members": members}, ensure_ascii=False))
 
 
 async def _finish_task_handler(
     orch: TaskOrchestrator, args: dict[str, Any], ctx: ExecContext
 ) -> ToolResult:
-    gate = await _check_lead_gate(ctx)
+    gate = await _check_lead_gate(ctx, tool="finish_task")
     if isinstance(gate, ToolResult):
         return gate
     task_id, project_id = gate
@@ -767,7 +740,7 @@ async def _finish_task_handler(
     status: str = args.get("status") or "completed"
     force: bool = bool(args.get("force") or False)
 
-    result = await orch.lifecycle.finish_task(
+    result = await orch.finalization.finish_task(
         task_id=task_id,
         project_id=project_id,
         lead_session_id=ctx.session_id,
@@ -798,10 +771,6 @@ async def _resolve_plan_task_id(ctx: ExecContext, args: dict[str, Any]) -> str |
     return (sess.metadata or {}).get("valuz", {}).get("task_id") or None
 
 
-def _plan_result(result: dict[str, Any]) -> ToolResult:
-    return ToolResult(content=json.dumps(result, ensure_ascii=False), is_error="error" in result)
-
-
 async def _plan_task_handler(
     orch: TaskOrchestrator, args: dict[str, Any], ctx: ExecContext
 ) -> ToolResult:
@@ -814,7 +783,7 @@ async def _plan_task_handler(
             ),
             is_error=True,
         )
-    return _plan_result(
+    return _json_result(
         await plan_commands.plan_task(
             plan_commands.AgentCaller(ctx.session_id, ctx.user_id),
             task_id=task_id,
@@ -829,7 +798,7 @@ async def _get_plan_handler(
     task_id = await _resolve_plan_task_id(ctx, args)
     if not task_id:
         return ToolResult(content="plan tool: task_id is required", is_error=True)
-    return _plan_result(
+    return _json_result(
         await plan_commands.get_plan(
             plan_commands.AgentCaller(ctx.session_id, ctx.user_id), task_id=task_id
         )
@@ -843,7 +812,7 @@ async def _modify_plan_handler(
     if not task_id:
         return ToolResult(content="plan tool: task_id is required", is_error=True)
     expected = args.get("expected_version")
-    return _plan_result(
+    return _json_result(
         await plan_commands.modify_plan(
             plan_commands.AgentCaller(ctx.session_id, ctx.user_id),
             task_id=task_id,
@@ -857,7 +826,7 @@ async def _modify_plan_handler(
 async def _review_subtask_handler(
     orch: TaskOrchestrator, args: dict[str, Any], ctx: ExecContext
 ) -> ToolResult:
-    gate = await _check_lead_gate(ctx)
+    gate = await _check_lead_gate(ctx, tool="review_subtask")
     if isinstance(gate, ToolResult):
         return gate
     task_id, project_id = gate
@@ -881,9 +850,7 @@ async def _review_subtask_handler(
         feedback=args.get("feedback"),
         user_id=ctx.user_id,
     )
-    return ToolResult(
-        content=json.dumps(result, ensure_ascii=False), is_error="error" in result
-    )
+    return _json_result(result)
 
 
 async def _stop_subtask_handler(
@@ -894,7 +861,7 @@ async def _stop_subtask_handler(
     ``:intervene`` HTTP route) so the lead can cancel a member from inside
     its own turn."""
     user_id = ctx.user_id
-    gate = await _check_lead_gate(ctx)
+    gate = await _check_lead_gate(ctx, tool="stop_subtask")
     if isinstance(gate, ToolResult):
         return gate
     task_id, project_id = gate
@@ -965,7 +932,7 @@ async def _update_deliverable_handler(
     orch: TaskOrchestrator, args: dict[str, Any], ctx: ExecContext
 ) -> ToolResult:
     user_id = ctx.user_id
-    gate = await _check_lead_gate(ctx)
+    gate = await _check_lead_gate(ctx, tool="update_deliverable")
     if isinstance(gate, ToolResult):
         return gate
     task_id, project_id = gate
@@ -973,7 +940,7 @@ async def _update_deliverable_handler(
     summary: str = args.get("summary", "")
     artifacts: list[str] = args.get("artifacts") or []
 
-    result = await orch.lifecycle.update_deliverable(
+    result = await orch.finalization.update_deliverable(
         task_id=task_id,
         project_id=project_id,
         lead_session_id=ctx.session_id,

@@ -1,7 +1,7 @@
 """The dispatch/shutdown race — the module's sharpest concurrency invariant.
 
 ``dispatch_async`` registers a new member; ``finish_task`` /``stop_task`` tell
-every live member to shut down via ``_broadcast_shutdown``, which drains the
+every live member to shut down via ``broadcast_shutdown``, which drains the
 live-member set in ONE pop. If the loop yields to the event loop between
 "member exists" and "member is registered", a concurrent broadcast sees an
 empty set, the just-spawned member is never told to stop, and it hangs until
@@ -46,7 +46,7 @@ def test_spawn_actor_is_synchronous() -> None:
 
     It registers mailboxes, seeds the live set and starts the loop. Those have
     to land without the event loop getting a turn, or a concurrent
-    ``_broadcast_shutdown`` drains the set in between and the member is lost.
+    ``broadcast_shutdown`` drains the set in between and the member is lost.
     Sync makes ``await`` a SyntaxError — checked on every edit, not remembered.
     Every launch path (dispatch, kickoff, commit, recovery) goes through it.
     """
@@ -54,13 +54,13 @@ def test_spawn_actor_is_synchronous() -> None:
 
 
 def test_broadcast_shutdown_is_synchronous() -> None:
-    """``CoordinationService._broadcast_shutdown`` must never become ``async``.
+    """``CoordinationService.broadcast_shutdown`` must never become ``async``.
 
     It pops the whole live set and then delivers to each member. An ``await``
     between the pop and the puts would let a member spawned meanwhile be
     dropped — the same race from the other side.
     """
-    assert not inspect.iscoroutinefunction(CoordinationService._broadcast_shutdown)
+    assert not inspect.iscoroutinefunction(CoordinationService.broadcast_shutdown)
 
 
 def test_live_member_registry_is_entirely_synchronous() -> None:
@@ -116,7 +116,7 @@ async def test_shutdown_reaches_a_member_spawned_concurrently() -> None:
         )
 
     async def _shutdown() -> None:
-        coordination._broadcast_shutdown(task_id)
+        coordination.broadcast_shutdown(task_id)
 
     try:
         await asyncio.gather(_spawn(), _shutdown())
@@ -152,13 +152,13 @@ async def test_broadcast_drains_every_member_exactly_once() -> None:
         boxes.register(m)
         mailbox_registry.register(m)
     try:
-        coordination._broadcast_shutdown("t1")
+        coordination.broadcast_shutdown("t1")
         assert all(mailbox_registry.has_pending(m) for m in members)
         assert not registry.has_live_members("t1")
 
         for m in members:
             assert (await mailbox_registry.get(m, timeout=0.01)).kind == "shutdown"
-        coordination._broadcast_shutdown("t1")  # second halt — nothing to do
+        coordination.broadcast_shutdown("t1")  # second halt — nothing to do
         assert not any(mailbox_registry.has_pending(m) for m in members)
     finally:
         for m in members:

@@ -3,12 +3,12 @@
 await_member_results (in-turn mailbox drain, heartbeat-sliced) · the
 role callbacks the ActorRunner binds as its ``ActorCoordinator``
 (notify_lead_member_idle / lead_idle_with_no_pending / session_still_working)
-· _broadcast_shutdown, the atomic halt primitive.
+· broadcast_shutdown, the atomic halt primitive.
 
 Text DELIVERY (send_to_member / inject_into_task / goal revision) lives in
 ``messaging`` — callers import it directly; there is no wrapper here.
 
-CRITICAL invariant: ``_broadcast_shutdown`` must stay a plain ``def`` — the
+CRITICAL invariant: ``broadcast_shutdown`` must stay a plain ``def`` — the
 single ``drain_members`` pop and the per-member puts may not be separated by
 an ``await``, or a concurrently spawned member is dropped. ``await`` inside a
 sync function is a SyntaxError, so the compiler enforces it (as it does for
@@ -28,7 +28,8 @@ from valuz_agent.adapters.agent_resolver import resolve_agent_display_name
 from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.tasks import planning
-from valuz_agent.modules.tasks.actor_runner import _NON_REVIEWABLE_DONE, collect_manifest
+from valuz_agent.modules.tasks.manifest import collect_manifest_safe
+from valuz_agent.modules.tasks.task_state import NON_REVIEWABLE_DONE
 from valuz_agent.modules.tasks.events import record_subtask_failed
 from valuz_agent.modules.tasks.datastore import (
     TaskDatastore,
@@ -65,6 +66,27 @@ _PROBE_EVERY_N_SLICES = 4
 # capability_resolver._INTERNAL_MCP_TOOL_TIMEOUT_SEC). A model-supplied
 # ``timeout_s`` above this is clamped.
 _MAX_AWAIT_WINDOW_S = 600.0
+
+
+def _member_result(
+    subtask_key: str | None,
+    session_id: str,
+    agent: str | None,
+    *,
+    status: str,
+    summary: str = "",
+    artifacts: list[Any] | None = None,
+) -> dict[str, Any]:
+    """The member-result entry shape await_members / heartbeat hand the lead —
+    one spelling, three producers."""
+    return {
+        "subtask_key": subtask_key,
+        "session_id": session_id,
+        "agent": agent or "",
+        "status": status,
+        "summary": summary,
+        "artifacts": artifacts or [],
+    }
 
 
 class CoordinationService:
@@ -271,21 +293,21 @@ class CoordinationService:
             # a delivering member — a failed/cancelled member_done has no work
             # to review; its node is already parked in ``rework`` and flipping
             # it back would present a dead run as a pending deliverable.
-            if run and run.subtask_key and str(m.get("status") or "") not in _NON_REVIEWABLE_DONE:
+            if run and run.subtask_key and str(m.get("status") or "") not in NON_REVIEWABLE_DONE:
                 await planning.mark_in_review(
                     task_id=task_id,
                     project_id=project_id,
                     member_session_id=from_sid,
                     user_id=user_id,
                 )
-            collected[sk] = {
-                "subtask_key": run.subtask_key if (run and run.subtask_key) else None,
-                "session_id": from_sid,
-                "agent": m.get("agent", ""),
-                "status": m.get("status", ""),
-                "summary": m.get("summary", ""),
-                "artifacts": m.get("artifacts", []),
-            }
+            collected[sk] = _member_result(
+                run.subtask_key if (run and run.subtask_key) else None,
+                from_sid,
+                m.get("agent", ""),
+                status=m.get("status", ""),
+                summary=m.get("summary", ""),
+                artifacts=m.get("artifacts", []),
+            )
 
         pending = sorted(target - set(collected.keys())) if target else []
         out: dict[str, Any] = {
@@ -377,8 +399,9 @@ class CoordinationService:
             if not any(k in runs_by_key for k in pending_keys):
                 return {}  # nothing in-flight for these keys — don't touch the plan
             task = await task_ds.get_task_by_project(user_id, project_id, task_id)
-            plan = TaskPlan.from_dict(task.plan) if task is not None else None
-            plan_dirty = False
+            # Node mutations are recorded as (key, fields, only_from) and
+            # applied inside persist_plan's CAS closure against the fresh plan.
+            mutations: list[tuple[str, dict[str, Any], tuple[str, ...] | None]] = []
             for key in pending_keys:
                 run = runs_by_key.get(key)
                 if run is None:
@@ -390,45 +413,38 @@ class CoordinationService:
                     getattr(ks, "status", None) if ks is not None else None,
                     getattr(ks, "stop_reason", None) if ks is not None else None,
                 )
-                node = plan.get(key) if plan is not None else None
                 if disp == "completed":
-                    try:
-                        manifest = await collect_manifest(
-                            run.session_id,
-                            Path(run.run_dir) if run.run_dir else Path(),
-                            "idle",
-                            user_id=user_id,
-                        )
-                    except Exception:  # noqa: BLE001
-                        manifest = {
-                            "session_id": run.session_id,
-                            "status": "completed",
-                            "summary": "",
-                        }
-                    manifest["agent"] = run.agent_slug
+                    manifest = await collect_manifest_safe(
+                        run.session_id,
+                        Path(run.run_dir) if run.run_dir else Path(),
+                        "idle",
+                        agent_slug=run.agent_slug or "",
+                        user_id=user_id,
+                    )
                     await run_ds.update_run_by_session(
                         session_id=run.session_id, status="completed", result_manifest=manifest
                     )
-                    if node is not None and node.status in ("in_progress", "rework"):
-                        plan.update_node(key, status="in_review")  # type: ignore[union-attr]
-                        plan_dirty = True
-                    out[key] = {
-                        "subtask_key": key,
-                        "session_id": run.session_id,
-                        "agent": run.agent_slug,
-                        "status": manifest.get("status", "completed"),
-                        "summary": manifest.get("summary", ""),
-                        "artifacts": manifest.get("artifacts", []),
-                    }
+                    mutations.append((key, {"status": "in_review"}, ("in_progress", "rework")))
+                    out[key] = _member_result(
+                        key,
+                        run.session_id,
+                        run.agent_slug,
+                        status=manifest.get("status", "completed"),
+                        summary=manifest.get("summary", ""),
+                        artifacts=manifest.get("artifacts", []),
+                    )
                 elif disp == "failed":
                     await run_ds.update_run_by_session(session_id=run.session_id, status="archived")
-                    if node is not None:
-                        plan.update_node(  # type: ignore[union-attr]
+                    mutations.append(
+                        (
                             key,
-                            status="rework",
-                            review_feedback="member session errored (heartbeat)",
+                            {
+                                "status": "rework",
+                                "review_feedback": "member session errored (heartbeat)",
+                            },
+                            ("in_progress", "in_review", "rework", "paused"),
                         )
-                        plan_dirty = True
+                    )
                     # Same emitter as every other failure path — without it a
                     # heartbeat-detected failure reworked the node invisibly.
                     agent_name = await resolve_agent_display_name(
@@ -446,20 +462,30 @@ class CoordinationService:
                         summary="member session errored",
                         reason="heartbeat_detected",
                     )
-                    out[key] = {
-                        "subtask_key": key,
-                        "session_id": run.session_id,
-                        "agent": run.agent_slug,
-                        "status": "failed",
-                        "summary": "member session errored",
-                        "artifacts": [],
-                    }
-            if plan_dirty and plan is not None and task is not None:
+                    out[key] = _member_result(
+                        key,
+                        run.session_id,
+                        run.agent_slug,
+                        status="failed",
+                        summary="member session errored",
+                    )
+            if mutations and task is not None:
+
+                def _apply(p: TaskPlan) -> bool:
+                    changed = False
+                    for key, fields, only_from in mutations:
+                        n = p.get(key)
+                        if n is None or (only_from and n.status not in only_from):
+                            continue
+                        p.update_node(key, **fields)
+                        changed = True
+                    return changed
+
                 await planning.persist_plan(
                     task_ds,
                     event_ds,
                     task,
-                    plan,
+                    mutate=_apply,
                     actor="system",
                     session_id=None,
                     user_id=user_id,
@@ -568,10 +594,14 @@ class CoordinationService:
             lead_session_id = run.dispatched_by or ""
             run_dir = Path(run.run_dir) if run.run_dir else Path()
             since = self._members.dispatch_started_at(session_id)
-            manifest = await collect_manifest(
-                session_id, run_dir, status, since_epoch=since, user_id=user_id
+            manifest = await collect_manifest_safe(
+                session_id,
+                run_dir,
+                status,
+                agent_slug=run.agent_slug or "",
+                since_epoch=since,
+                user_id=user_id,
             )
-            manifest["agent"] = run.agent_slug
             # Stamp the display name at emit time (established rule): the
             # frontend renders ``payload.agent_name`` directly instead of
             # joining the slug against an async members list, which races the
@@ -664,8 +694,16 @@ class CoordinationService:
     # shutdown broadcast — the atomic shutdown primitive
     # ------------------------------------------------------------------
 
-    def _broadcast_shutdown(self, task_id: str) -> None:
-        """Tell every still-running member of a task to finalize after its turn."""
+    def broadcast_shutdown(self, task_id: str) -> None:
+        """Tell every still-running member of a task to finalize after its turn.
+
+        Public on purpose — finalization and recovery are its callers, and a
+        load-bearing cross-service contract must not hide behind a private
+        name. MUST stay a plain ``def``: the single ``drain_members`` pop and
+        the per-member puts may not be separated by an ``await``, or a
+        concurrently spawned member is dropped (compiler-enforced; pinned by
+        test_spawn_atomicity).
+        """
 
         for member_sid in self._members.drain_members(task_id):
             mailbox_registry.put(member_sid, InboxMsg(kind="shutdown"))

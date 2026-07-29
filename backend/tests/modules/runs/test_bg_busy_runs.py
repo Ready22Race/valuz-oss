@@ -27,6 +27,12 @@ class _FakeStore:
     async def list_all(self, *_a, **_k):
         return []
 
+    async def list_by_session_ids(self, *_a, **_k):
+        return []
+
+    async def list_by_ids(self, *_a, **_k):
+        return []
+
     async def list_run_session_ids(self, *_a, **_k):
         return set()
 

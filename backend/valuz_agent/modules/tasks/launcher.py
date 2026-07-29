@@ -9,7 +9,7 @@ These two primitives are now the only spelling.
 
 :func:`create_task_session` — the awaitable half (kernel + index).
 :func:`spawn_actor` — the SYNCHRONOUS half. A concurrent
-``_broadcast_shutdown`` drains the live-member set in one pop, so nothing may
+``broadcast_shutdown`` drains the live-member set in one pop, so nothing may
 yield between "the member is registered" and "its loop is spawned"; inside a
 plain ``def``, ``await`` is a SyntaxError, so the compiler enforces the rule on
 every edit. Work that must await belongs before the call, not inside it.
@@ -82,9 +82,12 @@ def spawn_actor(
             registry.add_member(task_id, session_id, dispatch_epoch=dispatch_epoch)
         else:
             registry.add_member(task_id, session_id)
-    # Eager so a shutdown racing ahead of the loop's first tick is queued, not
-    # dropped (run_actor_loop's own register() is idempotent).
-    mailbox_registry.register(session_id)
+    # Eager CLAIM: the box exists before the loop's first tick (a shutdown
+    # racing ahead is queued, not dropped) AND any stale prior loop's pending
+    # release is invalidated NOW — not at the new loop's first tick — so it
+    # cannot pop the box recovery is about to seed with member_done results.
+    # (run_actor_loop claims again for its own release token.)
+    mailbox_registry.claim(session_id)
     asyncio.create_task(
         actor.run_actor_loop(
             session_id=session_id,

@@ -21,12 +21,11 @@ from typing import Any
 
 from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.infra.db import async_unit_of_work
-from valuz_agent.modules.tasks import planning
+from valuz_agent.modules.tasks import gate, planning
 from valuz_agent.modules.tasks.datastore import TaskDatastore
 from valuz_agent.modules.tasks.models import TaskRow
 from valuz_agent.modules.tasks.outcome import Failure
 from valuz_agent.modules.tasks.plan import TaskPlan
-from valuz_agent.modules.tasks.tools import gate
 
 # Statuses whose plan may still change. Everything else — stopped, completed,
 # blocked, abandoned — is a record of what happened and is read-only. This is

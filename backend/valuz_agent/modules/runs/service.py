@@ -176,11 +176,20 @@ class RunsService:
         ws_map: dict[str, ProjectRow] = {
             str(r.id): r for r in await self._projects.list_projects(user_id)
         }
+        # Bounded to the index pool: the overview is polled, and unbounded
+        # full-table maps here grow with install age (automations mint tasks
+        # continuously) — thousands of ORM rows per tick for a ≤500-row need.
         ts_map: dict[str, TaskSessionRow] = {
-            r.session_id: r for r in await self._task_sessions.list_all(user_id)
+            r.session_id: r
+            for r in await self._task_sessions.list_by_session_ids(
+                user_id, list(proj_by_session)
+            )
         }
         task_map: dict[str, TaskRow] = {
-            str(r.id): r for r in await self._tasks.list_all(user_id, limit=None)
+            str(r.id): r
+            for r in await self._tasks.list_by_ids(
+                user_id, sorted({r.task_id for r in ts_map.values() if r.task_id})
+            )
         }
         # Session ids spawned by a scheduled automation run. A task created by
         # an automation has a lead session whose own origin stays "user" and

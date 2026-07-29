@@ -44,6 +44,24 @@ async def _lock_backoff_sleep(attempt: int) -> None:
     await asyncio.sleep(min(0.05 * (2**attempt), 1.5) + random.uniform(0, 0.05))
 
 
+def pick_lead_run(runs: list[TaskSessionRow]) -> TaskSessionRow | None:
+    """The task's REAL lead run — never a commit-race loser.
+
+    ``commit_task`` rejects its OWN lead run when the draft→active CAS flip
+    loses (two concurrent commits), leaving a ``rejected`` lead-kind row next
+    to the winner's. ``list_runs`` orders by sequence and both losers tie at
+    0, so a bare "first lead-kind row" picker can hand inject / resume / the
+    health watchdog a session whose mailbox will never register — the
+    watchdog then flips a HEALTHY active task to blocked. Prefer any
+    non-rejected lead; fall back to whatever exists (legacy rows).
+    """
+    leads = [r for r in runs if r.kind == "lead"]
+    for r in leads:
+        if r.status != "rejected":
+            return r
+    return leads[0] if leads else None
+
+
 class TaskDatastore:
     """CRUD for valuz_task rows."""
 
@@ -144,6 +162,24 @@ class TaskDatastore:
             stmt = stmt.limit(limit)
         return list((await self._db.execute(stmt)).scalars().all())
 
+    async def list_by_ids(self, user_id: str, task_ids: list[str]) -> list[TaskRow]:
+        """Batch fetch by id — the activity overview's bounded lookup (it used
+        to materialize EVERY task row on every poll; a long-lived install with
+        automations minting tasks pays that each tick)."""
+        if not task_ids:
+            return []
+        return list(
+            (
+                await self._db.execute(
+                    select(TaskRow).where(
+                        TaskRow.id.in_(task_ids), TaskRow.user_id == user_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
     async def list_active(self) -> list[TaskRow]:
         """SYSTEM SWEEP (cross-owner). All ``active`` tasks across every owner —
         startup recovery (VALUZ-RESUME Layer 1) resumes each under its own owner
@@ -165,36 +201,95 @@ class TaskDatastore:
         await async_commit_with_retry(self._db, where="TaskDatastore.update_task")
         return row
 
-    async def update_task_status(self, user_id: str, task_id: str, status: str) -> bool:
-        """Update task status, enforcing the ``task_state`` state machine.
+    async def cas_update_plan(
+        self, user_id: str, row: TaskRow, plan: dict[str, Any], *, expected_version: int
+    ) -> bool:
+        """Compare-and-swap plan write: succeeds only at ``expected_version``.
 
-        Refuses to persist an out-of-enum target (e.g. the legacy ``"failed"``)
-        and rejects illegal transitions from a known source — so the state
-        machine in ``task_state.py`` is a real guard, not just documentation.
+        The plan column is a whole-document JSON write, so without the version
+        predicate two concurrent writers (lead loop vs heartbeat vs stop) each
+        read-modify-write and the loser's nodes are silently reverted. Every
+        plan write goes through here and bumps ``plan_version`` by 1 — the
+        version is the write counter, not just the structural-edit counter.
+
+        After the statement the ORM row is refreshed IN PLACE (sessions run
+        ``expire_on_commit=False``, so a plain re-select would return the same
+        stale identity-mapped object): on success the caller sees the new
+        values, on conflict the winner's — ready for a retry loop. Raises if
+        the row vanished (task deleted concurrently).
+
+        Returns True when the row was written.
+        """
+        res = cast(
+            "CursorResult[Any]",
+            await self._db.execute(
+                update(TaskRow)
+                .where(
+                    TaskRow.id == row.id,
+                    TaskRow.user_id == user_id,
+                    TaskRow.plan_version == expected_version,
+                )
+                .values(plan=plan, plan_version=expected_version + 1, updated_at=now_ms())
+                .execution_options(synchronize_session=False)
+            ),
+        )
+        await async_commit_with_retry(self._db, where="TaskDatastore.cas_update_plan")
+        await self._db.refresh(row)
+        return bool(res.rowcount)
+
+    async def _current_status(self, user_id: str, task_id: str) -> str | None:
+        """The row's persisted status (seam for the CAS door; tests fake it
+        to drive the read→write race deterministically)."""
+        return cast(
+            "str | None",
+            await self._db.scalar(
+                select(TaskRow.status).where(TaskRow.id == task_id, TaskRow.user_id == user_id)
+            ),
+        )
+
+    async def update_task_status(
+        self, user_id: str, task_id: str, status: str, *, expect: str | None = None
+    ) -> bool:
+        """Status door: ``task_state`` machine + a compare-and-swap write.
+
+        Refuses an out-of-enum target (e.g. the legacy ``"failed"``) and an
+        illegal transition from a known source. The UPDATE itself carries a
+        ``status = <source>`` predicate, so two concurrent writers who both
+        read the same source can't both land — without it, a stop_task racing
+        an auto-finalize could persist the forbidden net transition
+        stopped → blocked and publish ``task.finalized`` twice with
+        contradictory statuses. Losing the race returns False (True when the
+        winner performed the SAME transition — idempotent), and the caller
+        must not proceed with the side effects that ride the flip.
+
+        ``expect``: assert the source status too (``commit_task`` passes
+        ``"draft"`` — the flip then doubles as the commit mutex: exactly one
+        of two concurrent commits wins the rowcount).
 
         Tolerances (logged, not raised): a same-status write is a no-op, and a
         legacy/unknown *source* status (a row written before this enforcement)
         is allowed through so it can still be recovered (e.g. → ``active`` on
         resume) instead of being bricked.
-
-        Returns True when the row was updated.
         """
         if not is_valid_status(status):
             raise TaskStateError(f"refusing to write invalid task status {status!r}")
-        current = await self._db.scalar(
-            select(TaskRow.status).where(TaskRow.id == task_id, TaskRow.user_id == user_id)
-        )
-        if current is not None and current != status:
-            if is_valid_status(current):
-                assert_transition(current, status)  # raises TaskStateError if illegal
-            else:
-                logger.warning(
-                    "update_task_status: legacy/unknown source status %r for task %s "
-                    "→ %r (allowed without transition check)",
-                    current,
-                    task_id,
-                    status,
-                )
+        current = await self._current_status(user_id, task_id)
+        if current is None:
+            return False
+        if expect is not None and current != expect:
+            return False
+        if current == status:
+            return True  # no-op
+        if is_valid_status(current):
+            assert_transition(current, status)  # raises TaskStateError if illegal
+        else:
+            logger.warning(
+                "update_task_status: legacy/unknown source status %r for task %s "
+                "→ %r (allowed without transition check)",
+                current,
+                task_id,
+                status,
+            )
         # ``AsyncSession.execute`` is typed as returning ``Result``, but a DML
         # statement always yields a ``CursorResult`` — the only shape carrying
         # ``rowcount``. Narrow once here instead of ignoring the error.
@@ -202,12 +297,30 @@ class TaskDatastore:
             "CursorResult[Any]",
             await self._db.execute(
                 update(TaskRow)
-                .where(TaskRow.id == task_id, TaskRow.user_id == user_id)
+                .where(
+                    TaskRow.id == task_id,
+                    TaskRow.user_id == user_id,
+                    TaskRow.status == current,
+                )
                 .values(status=status, updated_at=now_ms())
+                .execution_options(synchronize_session=False)
             ),
         )
         await async_commit_with_retry(self._db, where="TaskDatastore.update_task_status")
-        return bool(res.rowcount)
+        if res.rowcount:
+            return True
+        landed = await self._current_status(user_id, task_id)
+        if landed == status and expect is None:
+            return True  # someone else performed the same transition
+        logger.error(
+            "update_task_status: lost status race for task %s — read %r, "
+            "row now %r, refused writing %r",
+            task_id,
+            current,
+            landed,
+            status,
+        )
+        return False
 
 
 class TaskEventDatastore:
@@ -258,19 +371,6 @@ class TaskEventDatastore:
             )
             .scalars()
             .all()
-        )
-
-    async def get_event(self, user_id: str, event_id: str) -> TaskEventRow | None:
-        return (
-            (
-                await self._db.execute(
-                    select(TaskEventRow).where(
-                        TaskEventRow.id == event_id, TaskEventRow.user_id == user_id
-                    )
-                )
-            )
-            .scalars()
-            .first()
         )
 
     async def latest_event(self, user_id: str, task_id: str) -> TaskEventRow | None:
@@ -367,48 +467,32 @@ class TaskSessionDatastore:
             .all()
         )
 
-    async def list_all(self, user_id: str) -> list[TaskSessionRow]:
-        """The caller's run-index rows across all tasks (activity overview)."""
+    async def list_by_session_ids(
+        self, user_id: str, session_ids: list[str]
+    ) -> list[TaskSessionRow]:
+        """Batch fetch run rows for the given kernel session ids (bounded
+        activity-overview lookup — see TaskDatastore.list_by_ids)."""
+        if not session_ids:
+            return []
         return list(
             (
                 await self._db.execute(
-                    select(TaskSessionRow).where(TaskSessionRow.user_id == user_id)
+                    select(TaskSessionRow).where(
+                        TaskSessionRow.session_id.in_(session_ids),
+                        TaskSessionRow.user_id == user_id,
+                    )
                 )
             )
             .scalars()
             .all()
         )
 
-    async def get_task_status_by_session_ids(
-        self, user_id: str, session_ids: list[str]
-    ) -> dict[str, str]:
-        """Map run ``session_id`` → its owning task's current ``status``.
-
-        Batch join ``valuz_task_session`` → ``valuz_task`` for the given session
-        ids. Used by the automations activity log to surface a task automation's
-        *live* outcome (the lead task is still running long after the kickoff run
-        row was stamped ``success``). Sessions with no task row are omitted.
-        """
-        if not session_ids:
-            return {}
-        rows = (
-            await self._db.execute(
-                select(TaskSessionRow.session_id, TaskRow.status)
-                .join(TaskRow, TaskRow.id == TaskSessionRow.task_id)
-                .where(
-                    TaskSessionRow.session_id.in_(session_ids),
-                    TaskSessionRow.user_id == user_id,
-                )
-            )
-        ).all()
-        return {session_id: status for session_id, status in rows}
-
     async def get_task_links_by_session_ids(
         self, user_id: str, session_ids: list[str]
     ) -> dict[str, tuple[str, str, str]]:
         """Map run ``session_id`` → ``(task_id, title, status)`` of its owning task.
 
-        Superset of ``get_task_status_by_session_ids`` — adds the task id + title
+        Adds the task id + title to the per-session status join
         so the automation activity log can deep-link to the spawned task (not only
         show its live status). Sessions with no task row are omitted.
         """
@@ -471,19 +555,6 @@ class TaskSessionDatastore:
             .first()
         )
 
-    async def get_run_by_id(self, user_id: str, run_id: str) -> TaskSessionRow | None:
-        return (
-            (
-                await self._db.execute(
-                    select(TaskSessionRow).where(
-                        TaskSessionRow.id == run_id, TaskSessionRow.user_id == user_id
-                    )
-                )
-            )
-            .scalars()
-            .first()
-        )
-
     async def next_sequence(self, task_id: str) -> int:
         """Next run sequence for *task_id* (per-task counter; no owner filter —
         ``task_id`` already scopes it and it returns a number, not rows)."""
@@ -526,4 +597,42 @@ class TaskSessionDatastore:
             ),
         )
         await async_commit_with_retry(self._db, where="TaskSessionDatastore.update_run_by_session")
+        return bool(res.rowcount)
+
+    async def settle_run_if_active(
+        self,
+        session_id: str,
+        *,
+        status: str,
+        result_manifest: dict[str, Any] | None = None,
+        ended_at: int | None = None,
+    ) -> bool:
+        """Loop-exit settlement, gated on the run still being ``active``.
+
+        A run that is no longer active already had its outcome recorded by
+        someone with more context — ``stop_member`` (→rejected, lead notified)
+        or ``stop_task`` (→paused, resumable). Overwriting that with the
+        loop's own exit status destroys it: recovery only resumes
+        active/paused runs, so a parked run stamped ``completed`` goes
+        invisible and its node is re-dispatched as a brand-new session.
+
+        Returns False when the run was not active (nothing written).
+        """
+        updates: dict[str, Any] = {"status": status}
+        if result_manifest is not None:
+            updates["result_manifest"] = result_manifest
+        if ended_at is not None:
+            updates["ended_at"] = ended_at
+        res = cast(
+            "CursorResult[Any]",
+            await self._db.execute(
+                update(TaskSessionRow)
+                .where(
+                    TaskSessionRow.session_id == session_id,
+                    TaskSessionRow.status == "active",
+                )
+                .values(**updates)
+            ),
+        )
+        await async_commit_with_retry(self._db, where="TaskSessionDatastore.settle_run_if_active")
         return bool(res.rowcount)

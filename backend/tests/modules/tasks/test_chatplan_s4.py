@@ -276,7 +276,13 @@ def test_inject_handler_revives_halted_task(db_factory, tmp_path, monkeypatch):
     _seed_task(db_factory, tmp_path, status="stopped")
     calls: list[dict] = []
 
+    from valuz_agent.modules.tasks.recovery import RecoveryService
+
     class _Recovery:
+        # The REAL halted→revive policy, with only the respawn faked — the
+        # test pins the deciding layer, not the respawn machinery.
+        inject_or_revive = RecoveryService.inject_or_revive
+
         async def resume_task(self, task_id, project_id, **kw):
             calls.append({"task_id": task_id, "project_id": project_id, **kw})
             return {"ok": True, "prior_status": "stopped", "resumed": True}

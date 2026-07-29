@@ -5,7 +5,10 @@ plain functions over already-loaded session/task objects, returning an error
 *string* (or the granted value) — makes the rules unit-testable without DB or
 transport fixtures, and keeps them portable (task-kernel-migration.md D5 would
 move them with the tool surface; that migration is currently deferred).
-``handlers.py`` owns the reads and wraps error strings for the wire.
+Domain-level on purpose: it used to live under ``tools/`` (transport), which
+made ``plan_commands`` (a service) import upward into the transport package —
+the module's only inverted edge. ``tools/handlers.py`` owns the reads and
+wraps error strings for the wire.
 
 Rules mirror VALUZ-CHATPLAN D4/D6 and M10 附录 E — see each function.
 """
@@ -23,19 +26,21 @@ def _valuz_meta(sess: Any) -> dict[str, Any]:
     return v if isinstance(v, dict) else {}
 
 
-def check_lead_gate(sess: Any) -> tuple[str, str] | Failure:
+def check_lead_gate(sess: Any, *, tool: str = "dispatch") -> tuple[str, str] | Failure:
     """Lead-only tools (dispatch / await_members / send / review / finish).
 
     Returns ``(task_id, project_id)`` when *sess* is a lead session with its
     task binding intact, else a :class:`Failure` carrying the rejection reason.
+    ``tool`` labels the rejection — the same gate guards seven tools, and a
+    finish_task rejection reading "dispatch: …" misdirects the model.
     """
     v = _valuz_meta(sess)
     if v.get("run_kind") != "lead":
-        return Failure("only the lead session may call dispatch tools")
+        return Failure(f"{tool}: only the lead session may call this tool")
     task_id = v.get("task_id", "")
     project_id = v.get("project_id", "")
     if not task_id or not project_id:
-        return Failure("dispatch: lead session is missing task_id or project_id in metadata")
+        return Failure(f"{tool}: lead session is missing task_id or project_id in metadata")
     return task_id, project_id
 
 

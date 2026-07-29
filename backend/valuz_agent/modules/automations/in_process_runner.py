@@ -635,7 +635,7 @@ class InProcessAutomationRunner:
         title derivation rule.
         """
         from valuz_agent.infra.db import async_unit_of_work
-        from valuz_agent.modules.tasks.datastore import TaskSessionDatastore
+        from valuz_agent.modules.tasks.datastore import TaskSessionDatastore, pick_lead_run
         from valuz_agent.modules.tasks.orchestrator import task_orchestrator
 
         try:
@@ -674,10 +674,7 @@ class InProcessAutomationRunner:
                     runs = await TaskSessionDatastore(ts_db).list_runs(
                         user_id, task.id
                     )
-                    lead_run = next(
-                        (r for r in runs if r.kind == "lead"),
-                        None,
-                    )
+                    lead_run = pick_lead_run(runs)
                     lead_session_id = lead_run.session_id if lead_run else None
             except Exception:
                 # Lookup failure is non-fatal — the kickoff itself worked
