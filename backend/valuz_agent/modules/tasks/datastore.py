@@ -44,6 +44,24 @@ async def _lock_backoff_sleep(attempt: int) -> None:
     await asyncio.sleep(min(0.05 * (2**attempt), 1.5) + random.uniform(0, 0.05))
 
 
+def pick_lead_run(runs: list[TaskSessionRow]) -> TaskSessionRow | None:
+    """The task's REAL lead run — never a commit-race loser.
+
+    ``commit_task`` rejects its OWN lead run when the draft→active CAS flip
+    loses (two concurrent commits), leaving a ``rejected`` lead-kind row next
+    to the winner's. ``list_runs`` orders by sequence and both losers tie at
+    0, so a bare "first lead-kind row" picker can hand inject / resume / the
+    health watchdog a session whose mailbox will never register — the
+    watchdog then flips a HEALTHY active task to blocked. Prefer any
+    non-rejected lead; fall back to whatever exists (legacy rows).
+    """
+    leads = [r for r in runs if r.kind == "lead"]
+    for r in leads:
+        if r.status != "rejected":
+            return r
+    return leads[0] if leads else None
+
+
 class TaskDatastore:
     """CRUD for valuz_task rows."""
 

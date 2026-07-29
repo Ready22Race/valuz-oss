@@ -154,3 +154,23 @@ def test_same_transition_concurrently_is_idempotent(db_factory) -> None:
 
 def test_event_ds_import_is_used() -> None:  # keep TaskEventDatastore import honest
     assert TaskEventDatastore is not None
+
+
+def test_pick_lead_run_skips_commit_race_loser() -> None:
+    """A rejected lead-kind row (commit-race loser) must never be 'the lead'
+    while the winner's row exists — the watchdog would block a healthy task
+    via the dead session's never-registered mailbox."""
+    from types import SimpleNamespace
+
+    from valuz_agent.modules.tasks.datastore import pick_lead_run
+
+    loser = SimpleNamespace(kind="lead", session_id="loser", status="rejected", sequence=0)
+    winner = SimpleNamespace(kind="lead", session_id="winner", status="active", sequence=0)
+    member = SimpleNamespace(kind="subtask", session_id="m1", status="active", sequence=1)
+
+    picked = pick_lead_run([loser, winner, member])  # loser first — rowid order
+    assert picked is not None and picked.session_id == "winner"
+    # Fallback: a lone rejected lead is still returned (legacy/terminal rows).
+    picked = pick_lead_run([loser])
+    assert picked is not None and picked.session_id == "loser"
+    assert pick_lead_run([member]) is None

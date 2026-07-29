@@ -34,6 +34,7 @@ from valuz_agent.modules.tasks.datastore import (
     TaskDatastore,
     TaskEventDatastore,
     TaskSessionDatastore,
+    pick_lead_run,
 )
 from valuz_agent.modules.tasks.live_member_registry import LiveMemberRegistry
 from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
@@ -136,7 +137,7 @@ class RecoveryService:
             if task is None or task.status not in ("active", "paused"):
                 return False
             runs = await run_ds.list_runs(user_id, task_id)
-            lead_run = next((r for r in runs if r.kind == "lead"), None)
+            lead_run = pick_lead_run(runs)
             if lead_run is None:
                 return False
             lead_session_id = lead_run.session_id
@@ -342,9 +343,8 @@ class RecoveryService:
             if task.status not in allowed_from:
                 return False
             runs = await run_ds.list_runs(user_id, task_id)
-            lead_session_id: str | None = next(
-                (r.session_id for r in runs if r.kind == "lead"), None
-            )
+            lead_pick = pick_lead_run(runs)
+            lead_session_id: str | None = lead_pick.session_id if lead_pick else None
             member_sids = [
                 r.session_id for r in runs if r.kind == "subtask" and r.status == "active"
             ]
@@ -492,7 +492,7 @@ class RecoveryService:
             # rows may carry any run status — normalise them the same way.
             if prior_status in ("stopped", "completed", "failed"):
                 runs = await run_ds.list_runs(user_id, task_id)
-                lead_run = next((r for r in runs if r.kind == "lead"), None)
+                lead_run = pick_lead_run(runs)
                 if lead_run is not None and lead_run.status != "active":
                     await run_ds.update_run_by_session(
                         session_id=lead_run.session_id,
@@ -737,7 +737,7 @@ class TaskHealthMonitor:
             candidates: list[tuple[str, str, str, str | None]] = []
             for task in tasks:
                 runs = await run_ds.list_runs(task.user_id, task.id)
-                lead = next((r for r in runs if r.kind == "lead"), None)
+                lead = pick_lead_run(runs)
                 candidates.append(
                     (task.id, task.user_id, task.project_id, lead.session_id if lead else None)
                 )

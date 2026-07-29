@@ -61,7 +61,7 @@ async def test_task_kickoff_leaves_duration_unset_and_titles_summary() -> None:
     )
 
     fake_task = SimpleNamespace(id="task-abc-123")
-    lead_run = SimpleNamespace(kind="lead", session_id="lead-sess-1")
+    lead_run = SimpleNamespace(kind="lead", session_id="lead-sess-1", status="active")
     ts_ds = Mock()
     ts_ds.list_runs = AsyncMock(return_value=[lead_run])
 

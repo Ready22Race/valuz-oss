@@ -22,6 +22,7 @@ from valuz_agent.modules.tasks.datastore import (
     TaskDatastore,
     TaskEventDatastore,
     TaskSessionDatastore,
+    pick_lead_run,
 )
 from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 
@@ -154,7 +155,7 @@ async def inject_into_task(
 
     async with async_unit_of_work(commit=False) as db:
         runs = await TaskSessionDatastore(db).list_runs(user_id, task_id)
-    lead_run = next((r for r in runs if r.kind == "lead"), None)
+    lead_run = pick_lead_run(runs)
     if lead_run is None:
         return {
             "delivered": False,
@@ -223,7 +224,7 @@ async def notify_lead_goal_revised(
 
     async with async_unit_of_work(commit=False) as db:
         runs = await TaskSessionDatastore(db).list_runs(user_id, task_id)
-    lead_run = next((r for r in runs if r.kind == "lead"), None)
+    lead_run = pick_lead_run(runs)
     if lead_run is None:
         return {"delivered": False, "lead_session_id": None, "reason": "NO_LEAD"}
 
