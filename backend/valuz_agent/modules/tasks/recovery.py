@@ -392,7 +392,13 @@ class RecoveryService:
                     payload={"members_paused": len(member_sids)},
                 )
             else:
-                await task_ds.update_task_status(user_id, task_id, "paused")
+                if not await task_ds.update_task_status(user_id, task_id, "paused"):
+                    # Lost the flip (lead finalize landed between our status
+                    # check and the write) — the winner owns the terminal;
+                    # appending "paused" here would put a lying event on a
+                    # completed/blocked task's timeline.
+                    logger.warning("stop_task: pause flip lost a race for %s", task_id)
+                    return False
                 await event_ds.append_event(
                     user_id,
                     project_id,
@@ -469,7 +475,15 @@ class RecoveryService:
             # skip the formal check there.
             if prior_status != "failed":
                 assert_transition(prior_status, "active")
-            await task_ds.update_task_status(user_id, task_id, "active")
+            if not await task_ds.update_task_status(user_id, task_id, "active"):
+                # Lost the flip (e.g. a concurrent stop moved the task under
+                # us) — do NOT append "resumed", normalise runs, or clear the
+                # failure notification off a state we did not create.
+                return {
+                    "ok": False,
+                    "error": "resume_task: task changed concurrently — refresh and retry",
+                    "prior_status": prior_status,
+                }
             # When reviving a stopped OR completed task: finish_task previously
             # marked the lead run as "completed" and broadcast shutdown to
             # members. _recover_one_task respawns the lead unconditionally, but
