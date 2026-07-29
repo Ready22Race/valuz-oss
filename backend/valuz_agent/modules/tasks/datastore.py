@@ -162,6 +162,24 @@ class TaskDatastore:
             stmt = stmt.limit(limit)
         return list((await self._db.execute(stmt)).scalars().all())
 
+    async def list_by_ids(self, user_id: str, task_ids: list[str]) -> list[TaskRow]:
+        """Batch fetch by id — the activity overview's bounded lookup (it used
+        to materialize EVERY task row on every poll; a long-lived install with
+        automations minting tasks pays that each tick)."""
+        if not task_ids:
+            return []
+        return list(
+            (
+                await self._db.execute(
+                    select(TaskRow).where(
+                        TaskRow.id.in_(task_ids), TaskRow.user_id == user_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
     async def list_active(self) -> list[TaskRow]:
         """SYSTEM SWEEP (cross-owner). All ``active`` tasks across every owner —
         startup recovery (VALUZ-RESUME Layer 1) resumes each under its own owner
@@ -449,12 +467,20 @@ class TaskSessionDatastore:
             .all()
         )
 
-    async def list_all(self, user_id: str) -> list[TaskSessionRow]:
-        """The caller's run-index rows across all tasks (activity overview)."""
+    async def list_by_session_ids(
+        self, user_id: str, session_ids: list[str]
+    ) -> list[TaskSessionRow]:
+        """Batch fetch run rows for the given kernel session ids (bounded
+        activity-overview lookup — see TaskDatastore.list_by_ids)."""
+        if not session_ids:
+            return []
         return list(
             (
                 await self._db.execute(
-                    select(TaskSessionRow).where(TaskSessionRow.user_id == user_id)
+                    select(TaskSessionRow).where(
+                        TaskSessionRow.session_id.in_(session_ids),
+                        TaskSessionRow.user_id == user_id,
+                    )
                 )
             )
             .scalars()

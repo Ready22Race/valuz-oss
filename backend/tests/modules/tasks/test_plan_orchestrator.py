@@ -846,11 +846,12 @@ def test_finalize_actor_member_error_sets_rework_not_failed(
     async def _fake_manifest(*_a: object, **_k: object) -> dict[str, str]:
         return {"session_id": "mem-1", "status": "terminated", "summary": "API Error: ECONNRESET"}
 
-    from valuz_agent.modules.tasks import finalization as fin_mod
+    from valuz_agent.modules.tasks import manifest as manifest_mod
 
     monkeypatch.setattr(run_orch, "_finalize_session", _noop)
-    # finalize_actor resolves collect_manifest from the finalization namespace.
-    monkeypatch.setattr(fin_mod, "collect_manifest", _fake_manifest)
+    # collect_manifest_safe wraps the source module's collect_manifest —
+    # patching the source covers every consumer.
+    monkeypatch.setattr(manifest_mod, "collect_manifest", _fake_manifest)
 
     orch = TaskOrchestrator()
     asyncio.run(
@@ -1507,13 +1508,12 @@ def test_heartbeat_pending_synthesizes_terminal_completed(
     monkeypatch.setattr(
         kernel_client_mod, "get_session", _as_async(lambda _uid, sid: sessions.get(sid))
     )
-    # ``_heartbeat_pending`` lives in tasks/coordination.py (ADR-023 Step 3b);
-    # the orchestrator delegates to it, so stub the coordination module's
-    # ``collect_manifest`` binding.
-    from valuz_agent.modules.tasks import coordination as coord_mod
+    from valuz_agent.modules.tasks import manifest as manifest_mod
 
     monkeypatch.setattr(
-        coord_mod, "collect_manifest", lambda *a, **k: {"status": "completed", "summary": "ok"}
+        manifest_mod,
+        "collect_manifest",
+        _as_async(lambda *a, **k: {"status": "completed", "summary": "ok"}),
     )
     orch = TaskOrchestrator()
 
@@ -2420,6 +2420,7 @@ def test_member_report_emits_subtask_reported_with_agent_name(
     payload rather than joining the slug against a racy async members list.
     """
     from valuz_agent.modules.tasks import coordination as coord_mod
+    from valuz_agent.modules.tasks import manifest as manifest_mod
 
     _make_task(db_factory, tmp_path)
     db = db_factory()
@@ -2450,7 +2451,7 @@ def test_member_report_emits_subtask_reported_with_agent_name(
     async def _fake_name(_ws, slug, _uid):
         return f"Name of {slug}"
 
-    monkeypatch.setattr(coord_mod, "collect_manifest", _fake_manifest)
+    monkeypatch.setattr(manifest_mod, "collect_manifest", _fake_manifest)
     monkeypatch.setattr(coord_mod, "resolve_agent_display_name", _fake_name)
 
     orch = TaskOrchestrator()
@@ -2704,7 +2705,7 @@ def test_finalize_actor_skips_parked_member_run(db_factory, tmp_path, monkeypatc
     on resume and the node is re-dispatched as a brand-new session — session
     continuity and record truth both lost."""
     from valuz_agent.modules.sessions import run_orchestrator as run_orch
-    from valuz_agent.modules.tasks import finalization as fin_mod
+    from valuz_agent.modules.tasks import manifest as manifest_mod
 
     _make_task(db_factory, tmp_path)
     _make_member_run(db_factory)
@@ -2721,7 +2722,7 @@ def test_finalize_actor_skips_parked_member_run(db_factory, tmp_path, monkeypatc
         return {"session_id": "mem-1", "status": "idle", "summary": ""}
 
     monkeypatch.setattr(run_orch, "_finalize_session", _noop)
-    monkeypatch.setattr(fin_mod, "collect_manifest", _manifest)
+    monkeypatch.setattr(manifest_mod, "collect_manifest", _manifest)
 
     orch = TaskOrchestrator()
     asyncio.run(

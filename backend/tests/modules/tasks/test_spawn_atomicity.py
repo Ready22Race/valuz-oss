@@ -53,7 +53,7 @@ def test_spawn_actor_is_synchronous() -> None:
     assert not inspect.iscoroutinefunction(launcher.spawn_actor)
 
 
-def testbroadcast_shutdown_is_synchronous() -> None:
+def test_broadcast_shutdown_is_synchronous() -> None:
     """``CoordinationService.broadcast_shutdown`` must never become ``async``.
 
     It pops the whole live set and then delivers to each member. An ``await``

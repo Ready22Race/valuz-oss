@@ -21,11 +21,12 @@ from typing import Any
 
 from valuz_agent.adapters import kernel_client
 from valuz_agent.adapters.agent_resolver import spill_goal_brief_if_too_long
+from valuz_agent.i18n import t
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.lifecycle import is_draining
 from valuz_agent.modules.tasks import planning
 from valuz_agent.modules.tasks.actor_runner import ActorRunner
-from valuz_agent.modules.tasks.manifest import collect_manifest
+from valuz_agent.modules.tasks.manifest import collect_manifest_safe
 from valuz_agent.modules.tasks.coordination import CoordinationService
 from valuz_agent.adapters.agent_resolver import resolve_agent_display_name
 from valuz_agent.modules.tasks import launcher
@@ -158,20 +159,13 @@ class RecoveryService:
                 )
                 manifest: dict[str, Any] | None = None
                 if rec.disposition == "completed":
-                    try:
-                        manifest = await collect_manifest(
-                            run.session_id,
-                            Path(run.run_dir) if run.run_dir else Path(),
-                            "idle",
-                            user_id=user_id,
-                        )
-                    except Exception:  # noqa: BLE001
-                        manifest = {
-                            "session_id": run.session_id,
-                            "status": "completed",
-                            "summary": "",
-                        }
-                    manifest["agent"] = run.agent_slug
+                    manifest = await collect_manifest_safe(
+                        run.session_id,
+                        Path(run.run_dir) if run.run_dir else Path(),
+                        "idle",
+                        agent_slug=run.agent_slug or "",
+                        user_id=user_id,
+                    )
                 if rec.run_status:
                     await run_ds.update_run_by_session(
                         session_id=run.session_id, status=rec.run_status, result_manifest=manifest
@@ -533,6 +527,45 @@ class RecoveryService:
         )
         return {"ok": ok, "prior_status": prior_status, "resumed": ok}
 
+    async def inject_or_revive(
+        self,
+        *,
+        task_id: str,
+        project_id: str,
+        text: str,
+        from_session_id: str,
+        user_id: str,
+    ) -> dict[str, Any]:
+        """Deliver a user instruction to the lead — reviving a halted task.
+
+        The ONE spelling of the "talking to a halted task is resume intent"
+        policy (the :intervene contract promises chat/inject can revive).
+        Both transports (REST :inject, MCP inject_into_task) call this; the
+        policy used to be duplicated in each with drifting result shaping.
+        Returns the messaging result dict, reshaped on the revive path to
+        ``{"delivered", "lead_session_id", "reason"}``.
+        """
+        from valuz_agent.modules.tasks import messaging
+
+        result = await messaging.inject_into_task(
+            task_id=task_id,
+            project_id=project_id,
+            text=text,
+            from_session_id=from_session_id,
+            user_id=user_id,
+        )
+        if result.get("reason") == "TASK_HALTED":
+            revived = await self.resume_task(
+                task_id, project_id, user_id=user_id, instruction=text
+            )
+            ok = bool(revived.get("ok"))
+            return {
+                "delivered": ok,
+                "lead_session_id": None,
+                "reason": "TASK_RESUMED" if ok else "RESUME_FAILED",
+            }
+        return result
+
     async def stop_member(self, session_id: str, user_id: str) -> bool:
         """User-initiated single-member stop (task stays ``active``).
 
@@ -566,7 +599,7 @@ class RecoveryService:
                         ):
                             return False
                         p.update_node(
-                            _key, status="rework", review_feedback="用户手动停止了该子任务"
+                            _key, status="rework", review_feedback=t("task.reworkUserStopped")
                         )
                         return True
 
@@ -605,7 +638,7 @@ class RecoveryService:
                     payload={
                         "agent": agent_slug,
                         "status": "cancelled",
-                        "summary": "用户停止了该子任务",
+                        "summary": t("task.summaryUserStopped"),
                         "artifacts": [],
                     },
                 ),

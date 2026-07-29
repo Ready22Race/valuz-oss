@@ -2461,7 +2461,12 @@
     "goConfirm": "去确认",
     "resumePlaceholder": "补充说明或新的指示，回车恢复任务（可留空直接恢复）",
     "resumeWithInstruction": "发送并恢复",
-    "awaitingUserChip": "等待你确认"
+    "awaitingUserChip": "等待你确认",
+    "blockedLeadEndedIncomplete": "子任务未全部完成，Lead 未收尾",
+    "reworkRunErrored": "上次运行因错误中断，请重试。",
+    "reworkUserInterrupted": "用户中断了该子任务",
+    "reworkUserStopped": "用户手动停止了该子任务",
+    "summaryUserStopped": "用户停止了该子任务"
   },
   "marketplace": {
     "title": "市场",

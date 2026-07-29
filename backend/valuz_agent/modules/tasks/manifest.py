@@ -114,4 +114,27 @@ async def collect_manifest(
     }
 
 
-__all__ = ["collect_manifest", "last_assistant_text"]
+async def collect_manifest_safe(
+    session_id: str,
+    run_dir: Path,
+    status: str,
+    *,
+    agent_slug: str,
+    since_epoch: float = 0.0,
+    user_id: str,
+) -> dict[str, Any]:
+    """``collect_manifest`` that never raises — the terminal-write callers'
+    shape (heartbeat, recovery reconcile, loop-exit settle) spelled once:
+    fall back to an empty-summary manifest and stamp the agent slug."""
+    try:
+        manifest = await collect_manifest(
+            session_id, run_dir, status, since_epoch=since_epoch, user_id=user_id
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("collect_manifest failed for %s", session_id)
+        manifest = {"session_id": session_id, "status": status, "summary": ""}
+    manifest["agent"] = agent_slug
+    return manifest
+
+
+__all__ = ["collect_manifest", "collect_manifest_safe", "last_assistant_text"]

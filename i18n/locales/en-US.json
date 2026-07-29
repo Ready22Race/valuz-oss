@@ -2461,7 +2461,12 @@
     "goConfirm": "Confirm now",
     "resumePlaceholder": "Add guidance for the lead, press Enter to resume (optional)",
     "resumeWithInstruction": "Send & resume",
-    "awaitingUserChip": "Needs your answer"
+    "awaitingUserChip": "Needs your answer",
+    "blockedLeadEndedIncomplete": "Subtasks are not all finished — the lead ended without closing the task",
+    "reworkRunErrored": "The previous run was interrupted by an error — please retry.",
+    "reworkUserInterrupted": "The user interrupted this subtask",
+    "reworkUserStopped": "The user manually stopped this subtask",
+    "summaryUserStopped": "The user stopped this subtask"
   },
   "marketplace": {
     "title": "Marketplace",

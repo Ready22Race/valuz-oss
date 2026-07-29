@@ -421,9 +421,21 @@ async def review_subtask(
                 return {
                     "error": f"task is {task_row.status!r} — review applies to an active task"
                 }
-            node = TaskPlan.from_dict(task_row.plan).get(key)
+            fresh_plan = TaskPlan.from_dict(task_row.plan)
+            node = fresh_plan.get(key)
             if node is None:
                 return {"error": f"no subtask with key {key!r}"}
+            if node.status == "done":
+                # Duplicate approve (double tool call / CAS-race echo): the
+                # first one already announced and settled — re-announcing
+                # appends a second subtask_reviewed/subtask_completed pair.
+                return {
+                    "decision": "approve",
+                    "subtask_key": key,
+                    "already_done": True,
+                    "ready": fresh_plan.ready_keys(),
+                    "all_done": fresh_plan.all_done(),
+                }
 
             def _approve(p: TaskPlan) -> bool:
                 if p.get(key) is None:

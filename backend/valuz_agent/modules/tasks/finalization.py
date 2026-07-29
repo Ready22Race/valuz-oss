@@ -24,6 +24,7 @@ from valuz_agent.adapters import kernel_client
 from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.adapters.agent_resolver import resolve_agent_display_name
 from valuz_agent.infra.db import async_unit_of_work
+from valuz_agent.i18n import t
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.tasks import planning
 from valuz_agent.modules.tasks.actor_runner import ActorRunner
@@ -40,7 +41,7 @@ from valuz_agent.modules.tasks.events import (
     record_subtask_stopped,
 )
 from valuz_agent.modules.tasks.live_member_registry import LiveMemberRegistry
-from valuz_agent.modules.tasks.manifest import collect_manifest, last_assistant_text
+from valuz_agent.modules.tasks.manifest import collect_manifest_safe, last_assistant_text
 from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 from valuz_agent.modules.tasks.models import TaskRow
 from valuz_agent.modules.tasks.plan import PlanError, TaskPlan
@@ -257,7 +258,7 @@ class FinalizationService:
                     event_type="task_blocked",
                     actor=lead_session_id,
                     session_id=lead_session_id,
-                    reason="子任务未全部完成，Lead 未收尾",
+                    reason=t("task.blockedLeadEndedIncomplete"),
                     payload={"reason": "unresolved_subtasks", "pending_subtasks": unresolved},
                 )
                 logger.warning(
@@ -410,14 +411,14 @@ class FinalizationService:
                 agent_slug = run.agent_slug if run else ""
 
                 # Manifest is best-effort — never let it block the terminal write.
-                try:
-                    manifest = await collect_manifest(
-                        session_id, run_dir, final_status, since_epoch=since, user_id=user_id
-                    )
-                except Exception:  # noqa: BLE001
-                    logger.exception("finalize_actor: manifest failed for %s", session_id)
-                    manifest = {"session_id": session_id, "status": final_status, "summary": ""}
-                manifest["agent"] = agent_slug
+                manifest = await collect_manifest_safe(
+                    session_id,
+                    run_dir,
+                    final_status,
+                    agent_slug=agent_slug,
+                    since_epoch=since,
+                    user_id=user_id,
+                )
 
                 ok = final_status not in ("terminated", "error")
                 settled = await run_ds.settle_run_if_active(
@@ -444,7 +445,7 @@ class FinalizationService:
                             user_id, project_id, task_id
                         )
                         if task_row is not None:
-                            feedback = manifest.get("summary") or "上次运行因错误中断,请重试。"
+                            feedback = manifest.get("summary") or t("task.reworkRunErrored")
 
                             def _park(p: TaskPlan, *, _key: str = key or "") -> bool:
                                 n = p.get(_key)
@@ -526,7 +527,11 @@ class FinalizationService:
                             "in_progress", "in_review", "rework", "paused"
                         ):
                             return False
-                        p.update_node(_key, status="rework", review_feedback="用户中断了该子任务")
+                        p.update_node(
+                            _key,
+                            status="rework",
+                            review_feedback=t("task.reworkUserInterrupted"),
+                        )
                         return True
 
                     await planning.persist_plan(
@@ -559,7 +564,7 @@ class FinalizationService:
                     payload={
                         "agent": agent_slug,
                         "status": "cancelled",
-                        "summary": "用户中断了该子任务",
+                        "summary": t("task.reworkUserInterrupted"),
                         "artifacts": [],
                     },
                 ),

@@ -515,28 +515,15 @@ async def _inject_into_task_handler(
         return authorized
     _sess, task = authorized
 
-    result = await messaging.inject_into_task(
+    # Halted-task revive policy lives in ONE place (recovery.inject_or_revive)
+    # — both transports call it.
+    result = await orch.recovery.inject_or_revive(
         task_id=task_id,
         project_id=task.project_id,
         text=text,
         from_session_id=ctx.session_id,
         user_id=ctx.user_id,
     )
-    # Talking to a HALTED task is the user's resume intent (the intervene
-    # contract promises "chat/inject can also revive it"). Deciding that is
-    # orchestration, so it happens here rather than inside the delivery
-    # helper — ``resume_task`` flips the status, reconciles members and
-    # embeds the text in the respawned lead's recovery brief, appending its
-    # own ``resumed`` + ``user_inject`` events.
-    if result.get("reason") == "TASK_HALTED":
-        revived = await orch.recovery.resume_task(
-            task_id, task.project_id, user_id=ctx.user_id, instruction=text
-        )
-        result = {
-            "delivered": bool(revived.get("ok")),
-            "lead_session_id": None,
-            "reason": "TASK_RESUMED" if revived.get("ok") else "RESUME_FAILED",
-        }
     return ToolResult(
         content=json.dumps(result, ensure_ascii=False),
         is_error=not result.get("delivered"),

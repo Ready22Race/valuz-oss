@@ -28,7 +28,7 @@ from valuz_agent.adapters.agent_resolver import resolve_agent_display_name
 from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.tasks import planning
-from valuz_agent.modules.tasks.manifest import collect_manifest
+from valuz_agent.modules.tasks.manifest import collect_manifest_safe
 from valuz_agent.modules.tasks.task_state import NON_REVIEWABLE_DONE
 from valuz_agent.modules.tasks.events import record_subtask_failed
 from valuz_agent.modules.tasks.datastore import (
@@ -66,6 +66,27 @@ _PROBE_EVERY_N_SLICES = 4
 # capability_resolver._INTERNAL_MCP_TOOL_TIMEOUT_SEC). A model-supplied
 # ``timeout_s`` above this is clamped.
 _MAX_AWAIT_WINDOW_S = 600.0
+
+
+def _member_result(
+    subtask_key: str | None,
+    session_id: str,
+    agent: str | None,
+    *,
+    status: str,
+    summary: str = "",
+    artifacts: list[Any] | None = None,
+) -> dict[str, Any]:
+    """The member-result entry shape await_members / heartbeat hand the lead —
+    one spelling, three producers."""
+    return {
+        "subtask_key": subtask_key,
+        "session_id": session_id,
+        "agent": agent or "",
+        "status": status,
+        "summary": summary,
+        "artifacts": artifacts or [],
+    }
 
 
 class CoordinationService:
@@ -279,14 +300,14 @@ class CoordinationService:
                     member_session_id=from_sid,
                     user_id=user_id,
                 )
-            collected[sk] = {
-                "subtask_key": run.subtask_key if (run and run.subtask_key) else None,
-                "session_id": from_sid,
-                "agent": m.get("agent", ""),
-                "status": m.get("status", ""),
-                "summary": m.get("summary", ""),
-                "artifacts": m.get("artifacts", []),
-            }
+            collected[sk] = _member_result(
+                run.subtask_key if (run and run.subtask_key) else None,
+                from_sid,
+                m.get("agent", ""),
+                status=m.get("status", ""),
+                summary=m.get("summary", ""),
+                artifacts=m.get("artifacts", []),
+            )
 
         pending = sorted(target - set(collected.keys())) if target else []
         out: dict[str, Any] = {
@@ -393,32 +414,25 @@ class CoordinationService:
                     getattr(ks, "stop_reason", None) if ks is not None else None,
                 )
                 if disp == "completed":
-                    try:
-                        manifest = await collect_manifest(
-                            run.session_id,
-                            Path(run.run_dir) if run.run_dir else Path(),
-                            "idle",
-                            user_id=user_id,
-                        )
-                    except Exception:  # noqa: BLE001
-                        manifest = {
-                            "session_id": run.session_id,
-                            "status": "completed",
-                            "summary": "",
-                        }
-                    manifest["agent"] = run.agent_slug
+                    manifest = await collect_manifest_safe(
+                        run.session_id,
+                        Path(run.run_dir) if run.run_dir else Path(),
+                        "idle",
+                        agent_slug=run.agent_slug or "",
+                        user_id=user_id,
+                    )
                     await run_ds.update_run_by_session(
                         session_id=run.session_id, status="completed", result_manifest=manifest
                     )
                     mutations.append((key, {"status": "in_review"}, ("in_progress", "rework")))
-                    out[key] = {
-                        "subtask_key": key,
-                        "session_id": run.session_id,
-                        "agent": run.agent_slug,
-                        "status": manifest.get("status", "completed"),
-                        "summary": manifest.get("summary", ""),
-                        "artifacts": manifest.get("artifacts", []),
-                    }
+                    out[key] = _member_result(
+                        key,
+                        run.session_id,
+                        run.agent_slug,
+                        status=manifest.get("status", "completed"),
+                        summary=manifest.get("summary", ""),
+                        artifacts=manifest.get("artifacts", []),
+                    )
                 elif disp == "failed":
                     await run_ds.update_run_by_session(session_id=run.session_id, status="archived")
                     mutations.append(
@@ -448,14 +462,13 @@ class CoordinationService:
                         summary="member session errored",
                         reason="heartbeat_detected",
                     )
-                    out[key] = {
-                        "subtask_key": key,
-                        "session_id": run.session_id,
-                        "agent": run.agent_slug,
-                        "status": "failed",
-                        "summary": "member session errored",
-                        "artifacts": [],
-                    }
+                    out[key] = _member_result(
+                        key,
+                        run.session_id,
+                        run.agent_slug,
+                        status="failed",
+                        summary="member session errored",
+                    )
             if mutations and task is not None:
 
                 def _apply(p: TaskPlan) -> bool:
@@ -581,10 +594,14 @@ class CoordinationService:
             lead_session_id = run.dispatched_by or ""
             run_dir = Path(run.run_dir) if run.run_dir else Path()
             since = self._members.dispatch_started_at(session_id)
-            manifest = await collect_manifest(
-                session_id, run_dir, status, since_epoch=since, user_id=user_id
+            manifest = await collect_manifest_safe(
+                session_id,
+                run_dir,
+                status,
+                agent_slug=run.agent_slug or "",
+                since_epoch=since,
+                user_id=user_id,
             )
-            manifest["agent"] = run.agent_slug
             # Stamp the display name at emit time (established rule): the
             # frontend renders ``payload.agent_name`` directly instead of
             # joining the slug against an async members list, which races the

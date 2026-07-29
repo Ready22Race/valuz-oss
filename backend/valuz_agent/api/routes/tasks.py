@@ -33,7 +33,7 @@ from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.infra.db import async_unit_of_work, get_async_session
 from valuz_agent.infra.sse import shielded
 from valuz_agent.modules.automations.datastore import AutomationDatastore
-from valuz_agent.modules.tasks import messaging, plan_commands
+from valuz_agent.modules.tasks import plan_commands
 from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow
 from valuz_agent.modules.tasks.orchestrator import task_orchestrator
 from valuz_agent.modules.tasks.service import TaskService
@@ -677,27 +677,15 @@ async def inject_into_task(
         raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
     if not payload.text or not payload.text.strip():
         raise HTTPException(status_code=422, detail="text is required")
-    result = await messaging.inject_into_task(
+    # Halted-task revive policy lives in ONE place (recovery.inject_or_revive)
+    # — both transports call it.
+    result = await task_orchestrator.recovery.inject_or_revive(
         task_id=task_id,
         project_id=task.project_id,
         text=payload.text,
         from_session_id=payload.from_session_id,
         user_id=user_id,
     )
-    # A halted task can't be delivered to — its lead loop is gone. Talking to
-    # it IS the user's resume intent (see the :intervene contract), so revive
-    # it here: that decision is orchestration, which is why the delivery helper
-    # reports the state instead of reaching for the orchestrator itself.
-    if result.get("reason") == "TASK_HALTED":
-        revived = await task_orchestrator.recovery.resume_task(
-            task_id, task.project_id, user_id=user_id, instruction=payload.text
-        )
-        ok = bool(revived.get("ok"))
-        return InjectTaskResponse(
-            delivered=ok,
-            lead_session_id=None,
-            reason="TASK_RESUMED" if ok else "RESUME_FAILED",
-        )
     return InjectTaskResponse(
         delivered=bool(result.get("delivered")),
         lead_session_id=result.get("lead_session_id"),

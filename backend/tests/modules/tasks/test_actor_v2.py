@@ -621,7 +621,7 @@ async def test_collect_manifest_attributes_by_mtime(tmp_path: object) -> None:
     assert str(old) in paths_all and str(new) in paths_all
 
 
-def testbroadcast_shutdown_signals_live_members() -> None:
+def test_broadcast_shutdown_signals_live_members() -> None:
     orch = TaskOrchestrator()
     orch._members.set_members("t1", {"m1", "m2"})
     mailbox_registry.register("m1")

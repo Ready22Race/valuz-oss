@@ -1,14 +1,10 @@
-"""LifecycleService — the single owner of the task lifecycle.
+"""LifecycleService — task AUTHORING: kickoff · draft · commit · abandon.
 
-kickoff · draft_task · commit_task · abandon_task · finish_task (the
-authoritative terminal: event + status + lead-mode reset + shutdown broadcast)
-· update_deliverable, plus the actor-loop callbacks: :meth:`finalize_actor`
-(the ``run_actor_loop`` ``finally``) and :meth:`_auto_finalize_lead_task`
-(terminal fallback for a lead that never called finish_task).
-
-This class is the runner's concrete
-:class:`~valuz_agent.modules.tasks.actor_runner.ActorFinalizer`, bound at the
-composition root — the protocol keeps the seam typed.
+The other half of the old single class — everything that ENDS a task
+(finish_task, update_deliverable, the actor-loop finalize callbacks) — lives
+in :mod:`~valuz_agent.modules.tasks.finalization` (``FinalizationService``,
+the runner's concrete ``ActorFinalizer``). Split along that protocol seam so
+authoring changes cannot disturb the terminal invariants.
 """
 
 # ruff: noqa: I001
@@ -50,11 +46,10 @@ logger = logging.getLogger(__name__)
 
 
 class LifecycleService:
-    """Task lifecycle — kickoff / draft / commit / abandon / finish, plus the
-    actor-loop finalize callback.
+    """Task authoring — kickoff / draft / commit / abandon.
 
     Built once at the composition root with the shared registry, ActorRunner
-    and CoordinationService; bound into the runner as its ``ActorFinalizer``.
+    and CoordinationService (terminal writes live in FinalizationService).
     """
 
     def __init__(

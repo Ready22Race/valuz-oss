@@ -279,7 +279,9 @@ async def test_finalize_interrupted_member_records_user_stop(
         assert run_status == "rejected"
         # node → rework with a user-stop note
         assert node["status"] == "rework"
-        assert "用户中断" in (node.get("review_feedback") or "")
+        from valuz_agent.i18n import t
+
+        assert node.get("review_feedback") == t("task.reworkUserInterrupted")
         # timeline shows a stop, NOT a failure (plus the plan snapshot)
         assert "subtask_stopped" in events
         assert "subtask_failed" not in events
