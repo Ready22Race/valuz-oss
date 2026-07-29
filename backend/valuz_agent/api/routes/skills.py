@@ -196,14 +196,12 @@ async def _default_assistant_slug_if_present(user_id: str) -> str | None:
     left the composer with no agent selected and — since a live session
     locks its binding — no way to pick one: a dead conversation.
 
-    Candidates, in order: canonical Valurion, the legacy default assistant,
-    then the ``valuz-helper`` compatibility alias during migration.
+    Candidates, in order: canonical Valurion, then the legacy default
+    assistant. A historical ``valuz-helper`` is an ordinary user Agent and is
+    not treated as the system default.
     """
     from valuz_agent.infra.db import async_unit_of_work
-    from valuz_agent.modules.agents.builtin import (
-        LEGACY_VALUZ_HELPER_SLUG,
-        VALURION_SLUG,
-    )
+    from valuz_agent.modules.agents.builtin import VALURION_SLUG
     from valuz_agent.modules.agents.datastore import AgentDatastore
     from valuz_agent.modules.agents.seed import DEFAULT_ASSISTANT_SLUG
 
@@ -213,7 +211,6 @@ async def _default_assistant_slug_if_present(user_id: str) -> str | None:
             for slug in (
                 VALURION_SLUG,
                 DEFAULT_ASSISTANT_SLUG,
-                LEGACY_VALUZ_HELPER_SLUG,
             ):
                 if await ds.get_agent(user_id, slug) is not None:
                     return slug

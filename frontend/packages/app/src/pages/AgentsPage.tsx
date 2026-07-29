@@ -47,34 +47,37 @@ import { AgentDetailView } from "../components/AgentDetailView";
 import { CreateAgentDialog } from "../components/CreateAgentDialog";
 import { ImportPackDialog } from "../components/ImportPackDialog";
 import { ExportPackDialog } from "../components/ExportPackDialog";
-import { isCloudOnlyAgent, isSystemAgent } from "./agent-list-state";
+import {
+  compareAgentsWithValurionFirst,
+  isCloudOnlyAgent,
+  isSystemAgent,
+} from "./agent-list-state";
 
 /** Keep the always-present built-in agent separate from portable agents. */
 function buildAgentCategories(
   t: ReturnType<typeof useTranslation>["t"],
 ): ResourceCategory<Agent>[] {
-  const byName = (a: Agent, b: Agent) => a.name.localeCompare(b.name);
   return [
     {
       id: "system",
       label: t("agent.groupSystem" as Parameters<typeof t>[0]),
       order: 0,
       filter: isSystemAgent,
-      sort: byName,
+      sort: compareAgentsWithValurionFirst,
     },
     {
       id: "custom",
       label: t("agent.groupCustom" as Parameters<typeof t>[0]),
       order: 1,
       filter: (a: Agent) => !isSystemAgent(a) && a.source !== "official",
-      sort: byName,
+      sort: compareAgentsWithValurionFirst,
     },
     {
       id: "official",
       label: t("agent.groupOfficial" as Parameters<typeof t>[0]),
       order: 2,
       filter: (a: Agent) => !isSystemAgent(a) && a.source === "official",
-      sort: byName,
+      sort: compareAgentsWithValurionFirst,
     },
   ];
 }
@@ -271,7 +274,7 @@ export const AgentsPage = () => {
       .map((project) => ({
         project,
         members: (byProjectId.get(project.id) ?? []).sort((a, b) =>
-          a.agent.name.localeCompare(b.agent.name),
+          compareAgentsWithValurionFirst(a.agent, b.agent),
         ),
       }))
       .filter(({ members }) => members.length > 0);
@@ -281,7 +284,7 @@ export const AgentsPage = () => {
     const deployed = new Set(projectMembers.map((member) => member.sourceSlug));
     return agents
       .filter((agent) => !deployed.has(agent.slug))
-      .sort((a, b) => a.name.localeCompare(b.name));
+      .sort(compareAgentsWithValurionFirst);
   }, [agents, projectMembers]);
 
   // Keep the detail panel stable across tab switches: honour the explicit

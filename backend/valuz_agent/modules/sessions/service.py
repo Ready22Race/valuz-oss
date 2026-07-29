@@ -919,8 +919,6 @@ class SessionService:
                 if _os.path.basename(p) not in own_skill_keys
             )
 
-        from valuz_agent.modules.agents.builtin import canonical_agent_slug
-
         valuz_meta: dict[str, object] = {
             "name": title,
             "origin": origin,
@@ -929,7 +927,7 @@ class SessionService:
             "last_user_message_text": None,
             "locked_provider_id": provider_id,
             "extra_skill_ids": [],
-            "agent_slug": canonical_agent_slug(agent_slug),
+            "agent_slug": agent_slug,
         }
         if prompt_snapshot is not None:
             valuz_meta["global_instructions"] = prompt_snapshot.metadata()

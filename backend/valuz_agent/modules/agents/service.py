@@ -35,12 +35,11 @@ from valuz_agent.modules.agents.datastore import (
     ProjectMemberDatastore,
 )
 from valuz_agent.modules.agents.builtin import (
-    LEGACY_VALUZ_HELPER_SLUG,
     SYSTEM_MANAGED_FIELDS,
+    VALURION_DEFAULT_EFFORT,
     VALURION_DESCRIPTION,
     VALURION_NAME,
     VALURION_SLUG,
-    canonical_agent_slug,
 )
 from valuz_agent.modules.agents.models import AgentRow, ProjectMemberRow
 from valuz_agent.modules.connectors.service import ConnectorService
@@ -258,7 +257,7 @@ class AgentService:
         return await self._agents.list_agents(user_id, source=source)
 
     async def get_agent(self, user_id: str, slug: str) -> AgentRow:
-        row = await self._agents.get_agent(user_id, canonical_agent_slug(slug))
+        row = await self._agents.get_agent(user_id, slug)
         if row is None:
             raise AgentNotFoundError(slug)
         return row
@@ -278,7 +277,7 @@ class AgentService:
                 runtime=factory.default_runtime,
                 model=factory.default_model,
                 provider_id=factory.default_provider_id,
-                effort=factory.default_effort,
+                effort=VALURION_DEFAULT_EFFORT,
                 **SYSTEM_MANAGED_FIELDS,
             )
             try:
@@ -319,7 +318,7 @@ class AgentService:
         if not slug:
             existing = {a.slug for a in await self._agents.list_agents(user_id)}
             slug = ensure_unique_slug(derive_slug(payload["name"]), existing)
-        if slug in {VALURION_SLUG, LEGACY_VALUZ_HELPER_SLUG}:
+        if slug == VALURION_SLUG:
             raise MemberAlreadyExistsError(f"agent slug '{slug}' is reserved")
         if await self._agents.get_agent(user_id, slug) is not None:
             raise MemberAlreadyExistsError(f"agent '{slug}' already exists")
@@ -358,7 +357,6 @@ class AgentService:
         gates updates. Deletion is still restricted by `deletable` in
         `delete_agent` below."""
         # Fetch existing row to surface 404 before mutation.
-        slug = canonical_agent_slug(slug)
         existing = await self._agents.get_agent(user_id, slug)
         if existing is None:
             raise AgentNotFoundError(slug)
@@ -408,7 +406,6 @@ class AgentService:
         # Official and custom agents are equally deletable now — the only block
         # is the live派驻 guard below. seed_official_agents is insert-if-absent,
         # so deleted defaults simply won't come back unless the user wipes DB.
-        slug = canonical_agent_slug(slug)
         existing = await self._agents.get_agent(user_id, slug)
         if existing is None:
             raise AgentNotFoundError(slug)

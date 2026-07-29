@@ -1,17 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { agentsApi, type Agent } from "@valuz/core";
 
-/** The built-in runtime Agent. The legacy slug remains a read-only fallback
- *  while existing local databases are migrated. */
+/** The built-in runtime Agent. */
 export const VALURION_SLUG = "valurion";
-export const LEGACY_VALUZ_HELPER_SLUG = "valuz-helper";
 
 function defaultSystemAgentSlug(agents: Agent[]): string | null {
-  return (
-    agents.find((agent) => agent.slug === VALURION_SLUG)?.slug ??
-    agents.find((agent) => agent.slug === LEGACY_VALUZ_HELPER_SLUG)?.slug ??
-    null
-  );
+  return agents.find((agent) => agent.slug === VALURION_SLUG)?.slug ?? null;
 }
 
 export interface AgentDeployPicker {

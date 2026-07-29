@@ -7,10 +7,15 @@ channel, automation, and project path ultimately relies on these invariants.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from valuz_agent.api.routes.agents import (
+    _agent_to_summary,
+    _localize_agent_mapping,
+)
 from valuz_agent.infra.database import Base
 from valuz_agent.modules.agents.datastore import AgentDatastore
 from valuz_agent.modules.agents.models import AgentRow
@@ -42,6 +47,7 @@ async def test_ensure_builtin_agent_is_idempotent_and_repairs_managed_fields(db)
 
     first = await svc.ensure_builtin_agent(OWNER)
     first_id = first.id
+    assert first.effort == "high"
 
     # Simulate system-field drift from a previous build. User-selectable brain
     # settings remain untouched by the repair.
@@ -171,8 +177,77 @@ async def test_copy_standard_agent_deep_copies_portable_configuration(db) -> Non
     assert copied.knowledge_scope is not original.knowledge_scope
 
 
-async def test_legacy_helper_alias_resolves_to_canonical_valurion(db) -> None:
+async def test_legacy_helper_remains_an_independent_standard_agent(db) -> None:
     svc = AgentService(db)  # type: ignore[arg-type]
-    canonical = await svc.ensure_builtin_agent(OWNER)
+    helper = await svc.create_agent(
+        OWNER,
+        {
+            "slug": "valuz-helper",
+            "name": "My Helper",
+            "instructions": "Keep this workflow.",
+        },
+    )
+    valurion = await svc.ensure_builtin_agent(OWNER)
 
-    assert (await svc.get_agent(OWNER, "valuz-helper")).id == canonical.id
+    loaded = await svc.get_agent(OWNER, "valuz-helper")
+    assert loaded.id == helper.id
+    assert loaded.id != valurion.id
+    assert loaded.kind == "standard"
+    assert loaded.instructions == "Keep this workflow."
+    assert loaded.deletable is True
+
+    updated = await svc.update_agent(
+        OWNER,
+        "valuz-helper",
+        {"instructions": "Updated custom workflow."},
+    )
+    assert updated.instructions == "Updated custom workflow."
+
+
+def test_valurion_name_and_description_follow_request_language() -> None:
+    stored = {
+        "slug": "valurion",
+        "name": "Valurion",
+        "description": (
+            "Your built-in assistant with access to all resources currently available to you."
+        ),
+    }
+
+    zh = _localize_agent_mapping(stored, "zh-CN")
+    en = _localize_agent_mapping(stored, "en-US")
+
+    assert zh["name"] == "小万"
+    assert zh["description"] == "你的内置智能助手，可使用你当前所有可用的资源。"
+    assert en["name"] == "Valurion"
+    assert en["description"] == stored["description"]
+    assert stored["name"] == "Valurion"
+
+    legacy = _localize_agent_mapping(
+        {
+            "slug": "valuz-helper",
+            "name": "My Helper",
+            "description": "Keep this.",
+        },
+        "zh-CN",
+    )
+    assert legacy["name"] == "My Helper"
+    assert legacy["description"] == "Keep this."
+
+
+def test_deployed_valurion_summary_uses_the_request_language() -> None:
+    agent = SimpleNamespace(
+        id="agent:valurion",
+        name="Valurion",
+        model="claude-sonnet-4-6",
+        runtime_provider="claude_agent",
+        instructions="",
+        skills=(),
+        effort="high",
+        metadata={
+            "agent_slug": "valurion",
+            "connector_bindings": [],
+        },
+    )
+
+    assert _agent_to_summary(agent, "zh-CN").name == "小万"
+    assert _agent_to_summary(agent, "en-US").name == "Valurion"

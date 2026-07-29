@@ -2717,12 +2717,10 @@ export const ConversationPage = () => {
   // agent button — hidden until an override happens, so a default chat is clean.
   // Slug → display name, so the header chip shows the agent's full name
   // ("研究分析师") rather than the raw kernel slug.
-  const agentNameBySlug = useMemo(() => {
-    const names = new Map(composerAgents.map((a) => [a.slug, a.name]));
-    const valurionName = names.get("valurion");
-    if (valurionName) names.set("valuz-helper", valurionName);
-    return names;
-  }, [composerAgents]);
+  const agentNameBySlug = useMemo(
+    () => new Map(composerAgents.map((a) => [a.slug, a.name])),
+    [composerAgents],
+  );
 
   // Auto-pick the first available (provider, model) for the current
   // runtime so ``selectedProviderId`` / ``selectedModelId`` are never
@@ -3383,8 +3381,6 @@ export const ConversationPage = () => {
           return lastUsed;
         if (myAgents.some((a) => a.slug === "valurion"))
           return "valurion";
-        if (myAgents.some((a) => a.slug === "valuz-helper"))
-          return "valuz-helper";
         return myAgents[0]?.slug ?? null;
       }
       // A normal new conversation now defaults to NO agent — an agentless quick

@@ -725,6 +725,92 @@ export const AgentDetailView = ({
   const connectorCount = isSystem
     ? (effectiveResources?.counts.connectors ?? 0)
     : agent.connector_types.length;
+  const displayedSkills = isSystem
+    ? (effectiveResources?.skills ?? []).map((resource) => {
+        const reference = resource.slug || resource.id;
+        const meta = skillCatalog.find(
+          (item) =>
+            item.path === reference ||
+            item.slug === reference ||
+            item.id === reference ||
+            item.id === resource.id,
+        );
+        return {
+          key: `${resource.source}:${resource.id}`,
+          reference,
+          name: resource.name,
+          identifier: resource.slug || resource.id,
+          description: meta?.description,
+          catalogId: meta?.id,
+          removable: false,
+        };
+      })
+    : agent.skills.map((reference) => {
+        // Mounted skills are stored as a path (picker) or a slug
+        // (templates) — match either, plus the catalog id, so the
+        // name + description always resolve.
+        const meta = skillCatalog.find(
+          (item) =>
+            item.path === reference ||
+            item.slug === reference ||
+            item.id === reference,
+        );
+        return {
+          key: reference,
+          reference,
+          name: meta?.name ?? skillName(reference),
+          identifier: meta?.slug ?? skillName(reference),
+          description: meta?.description,
+          catalogId: meta?.id,
+          removable: true,
+        };
+      });
+  const displayedConnectors = isSystem
+    ? (effectiveResources?.connectors ?? []).map((resource) => {
+        const connectorSlug = resource.slug || resource.id;
+        const installed = allConnectors.find(
+          (item) => item.slug === connectorSlug,
+        );
+        const meta: ConnectorMeta | undefined = installed
+          ? {
+              display_name: installed.display_name,
+              description: installed.description,
+            }
+          : connectorDir.get(connectorSlug);
+        return {
+          key: `${resource.source}:${resource.id}`,
+          slug: connectorSlug,
+          name: resource.name,
+          description: meta?.description,
+          status: resource.status,
+          navigable: Boolean(meta),
+          removable: false,
+        };
+      })
+    : agent.connector_types.map((connectorSlug) => {
+        // An installed connector resolves its name + status from the full
+        // list; an uninstalled bound slug (a template's unconfigured
+        // wind-mcp, etc.) still resolves its name from the directory and
+        // counts as "not connected".
+        const installed = allConnectors.find(
+          (item) => item.slug === connectorSlug,
+        );
+        const meta: ConnectorMeta | undefined = installed
+          ? {
+              display_name: installed.display_name,
+              description: installed.description,
+            }
+          : connectorDir.get(connectorSlug);
+        return {
+          key: connectorSlug,
+          slug: connectorSlug,
+          name: meta?.display_name ?? connectorSlug,
+          description: meta?.description,
+          status: installed?.status ?? "pending_auth",
+          navigable: Boolean(meta),
+          removable: true,
+        };
+      });
 
   // Red dot on the 连接器 tab when a bound connector isn't connected — the same
   // "needs attention" idea as the Connectors nav dot, scoped to this agent's
@@ -1172,77 +1258,74 @@ export const AgentDetailView = ({
           </TabsContent>
 
           <TabsContent value="skills" className="mt-4">
-            {isSystem ? (
-              <div>
-                <p className="mb-3 text-xs leading-5 text-ink-meta">
-                  {t("agent.allAvailableResourcesHint" as Parameters<typeof t>[0])}
-                </p>
-                <ReadonlyResourceList
-                  items={effectiveResources?.skills ?? []}
-                  emptyText={t("agent.noEffectiveResources" as Parameters<typeof t>[0])}
-                />
-              </div>
-            ) : (
-              <>
             <div className="flex items-center justify-between">
-              <p className="text-xs text-ink-meta">
-                {t("agent.skillsSectionHint" as Parameters<typeof t>[0])}
+              <p className="text-xs leading-5 text-ink-meta">
+                {isSystem
+                  ? t(
+                      "agent.allAvailableResourcesHint" as Parameters<
+                        typeof t
+                      >[0],
+                    )
+                  : t(
+                      "agent.skillsSectionHint" as Parameters<typeof t>[0],
+                    )}
               </p>
-              <Button size="sm" variant="outline" onClick={openSkillPicker}>
-                <Plus className="mr-1 h-3.5 w-3.5" />
-                {t("agent.addSkill" as Parameters<typeof t>[0])}
-              </Button>
+              {!isSystem ? (
+                <Button size="sm" variant="outline" onClick={openSkillPicker}>
+                  <Plus className="mr-1 h-3.5 w-3.5" />
+                  {t("agent.addSkill" as Parameters<typeof t>[0])}
+                </Button>
+              ) : null}
             </div>
             <div className="mt-3 flex flex-col gap-2">
-              {agent.skills.length === 0 ? (
+              {displayedSkills.length === 0 ? (
                 <div className="rounded-[14px] border border-dashed border-surface-border bg-card px-4 py-6 text-center text-xs text-ink-meta">
-                  {t("agent.noSkills")}
+                  {isSystem
+                    ? t(
+                        "agent.noEffectiveResources" as Parameters<
+                          typeof t
+                        >[0],
+                      )
+                    : t("agent.noSkills")}
                 </div>
               ) : (
-                agent.skills.map((s) => {
-                  // Mounted skills are stored as a path (picker) or a slug
-                  // (templates) — match either, plus the catalog id, so the
-                  // name + description always resolve.
-                  const meta = skillCatalog.find(
-                    (x) => x.path === s || x.slug === s || x.id === s,
-                  );
-                  const name = meta?.name ?? skillName(s);
-                  const id = meta?.slug ?? skillName(s);
+                displayedSkills.map((skill) => {
+                  const catalogId = skill.catalogId;
                   const body = (
                     <>
                       <div className="flex items-center gap-1.5">
                         <span className="truncate text-sm font-medium text-ink-heading">
-                          {name}
+                          {skill.name}
                         </span>
                       </div>
-                      {id !== name && (
+                      {skill.identifier !== skill.name && (
                         <div className="mt-0.5 truncate font-mono text-[11px] text-ink-meta">
-                          {id}
+                          {skill.identifier}
                         </div>
                       )}
-                      {meta?.description && (
+                      {skill.description && (
                         <div className="mt-0.5 line-clamp-2 text-xs text-ink-meta">
-                          {meta.description}
+                          {skill.description}
                         </div>
                       )}
                     </>
                   );
                   return (
                     <div
-                      key={s}
+                      key={skill.key}
                       className="flex items-start gap-3 rounded-[14px] bg-card p-3 shadow-[var(--shadow-1)] transition-colors"
                     >
                       <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-surface-soft text-ink-meta">
                         <BookOpen className="h-4 w-4" />
                       </span>
-                      {meta ? (
+                      {catalogId ? (
                         <button
                           type="button"
                           onClick={() =>
                             // Open the skill in the 技能库 (master-detail panel),
                             // not the standalone detail page.
                             navigate(
-                              `/skills?skill=${encodeURIComponent(meta.id)}`,
+                              `/skills?skill=${encodeURIComponent(catalogId)}`,
                             )
                           }
                           className="min-w-0 flex-1 cursor-pointer text-left"
@@ -1252,94 +1335,89 @@ export const AgentDetailView = ({
                       ) : (
                         <div className="min-w-0 flex-1">{body}</div>
                       )}
-                      <button
-                        type="button"
-                        onClick={() => toggleSkill(s)}
-                        aria-label={t("common.delete")}
-                        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-surface-soft hover:text-[#f54b4b]"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
+                      {skill.removable ? (
+                        <button
+                          type="button"
+                          onClick={() => toggleSkill(skill.reference)}
+                          aria-label={t("common.delete")}
+                          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-surface-soft hover:text-[#f54b4b]"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      ) : null}
                     </div>
                   );
                 })
               )}
             </div>
-              </>
-            )}
           </TabsContent>
 
           <TabsContent value="connectors" className="mt-4">
-            {isSystem ? (
-              <div>
-                <p className="mb-3 text-xs leading-5 text-ink-meta">
-                  {t("agent.allAvailableResourcesHint" as Parameters<typeof t>[0])}
-                </p>
-                <ReadonlyResourceList
-                  items={effectiveResources?.connectors ?? []}
-                  emptyText={t("agent.noEffectiveResources" as Parameters<typeof t>[0])}
-                />
-              </div>
-            ) : (
-              <>
             <div className="flex items-center justify-between">
-              <p className="text-xs text-ink-meta">
-                {t("agent.connectorsSectionHint" as Parameters<typeof t>[0])}
+              <p className="text-xs leading-5 text-ink-meta">
+                {isSystem
+                  ? t(
+                      "agent.allAvailableResourcesHint" as Parameters<
+                        typeof t
+                      >[0],
+                    )
+                  : t(
+                      "agent.connectorsSectionHint" as Parameters<typeof t>[0],
+                    )}
               </p>
-              <Button size="sm" variant="outline" onClick={openConnectorPicker}>
-                <Plus className="mr-1 h-3.5 w-3.5" />
-                {t("agent.addConnector" as Parameters<typeof t>[0])}
-              </Button>
+              {!isSystem ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={openConnectorPicker}
+                >
+                  <Plus className="mr-1 h-3.5 w-3.5" />
+                  {t("agent.addConnector" as Parameters<typeof t>[0])}
+                </Button>
+              ) : null}
             </div>
             <div className="mt-3 flex flex-col gap-2">
-              {agent.connector_types.length === 0 ? (
+              {displayedConnectors.length === 0 ? (
                 <div className="rounded-[14px] border border-dashed border-surface-border bg-card px-4 py-6 text-center text-xs text-ink-meta">
-                  {t("agent.noConnectors")}
+                  {isSystem
+                    ? t(
+                        "agent.noEffectiveResources" as Parameters<
+                          typeof t
+                        >[0],
+                      )
+                    : t("agent.noConnectors")}
                 </div>
               ) : (
-                agent.connector_types.map((c) => {
-                  // An installed connector resolves its name + status from the
-                  // full list; an uninstalled bound slug (a template's
-                  // unconfigured wind-mcp, etc.) still resolves its name from the
-                  // directory and counts as "not connected".
-                  const installed = allConnectors.find((x) => x.slug === c);
-                  const meta: ConnectorMeta | undefined = installed
-                    ? {
-                        display_name: installed.display_name,
-                        description: installed.description,
-                      }
-                    : connectorDir.get(c);
-                  const known = Boolean(meta);
-                  const status = installed?.status ?? "pending_auth";
-                  const statusKey = STATUS_LABEL_KEY[status];
+                displayedConnectors.map((connector) => {
+                  const statusKey = STATUS_LABEL_KEY[connector.status];
                   const body = (
                     <>
                       <div className="flex items-center gap-1.5">
                         <span className="truncate text-sm font-medium text-ink-heading">
-                          {meta?.display_name ?? c}
+                          {connector.name}
                         </span>
                       </div>
-                      {(meta?.display_name ?? c) !== c && (
+                      {connector.name !== connector.slug && (
                         <div className="mt-0.5 truncate font-mono text-[11px] text-ink-meta">
-                          {c}
+                          {connector.slug}
                         </div>
                       )}
-                      {meta?.description && (
+                      {connector.description && (
                         <div className="mt-0.5 line-clamp-2 text-xs text-ink-meta">
-                          {meta.description}
+                          {connector.description}
                         </div>
                       )}
                     </>
                   );
                   return (
                     <div
-                      key={c}
+                      key={connector.key}
                       className="flex items-center gap-3 rounded-[14px] bg-card p-3 shadow-[var(--shadow-1)] transition-colors"
                     >
                       <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-surface-soft text-ink-meta">
                         <Plug className="h-4 w-4" />
                       </span>
-                      {known ? (
+                      {connector.navigable ? (
                         <button
                           type="button"
                           onClick={() => navigate("/connectors")}
@@ -1355,27 +1433,29 @@ export const AgentDetailView = ({
                       <div className="flex shrink-0 items-center gap-2.5">
                         {statusKey ? (
                           <StatusPill
-                            status={status}
+                            status={connector.status}
                             label={t(statusKey as Parameters<typeof t>[0])}
                             className="shrink-0 px-1.5 py-0 text-[10px] leading-4"
                           />
                         ) : null}
-                        <button
-                          type="button"
-                          onClick={() => toggleConnector(c)}
-                          aria-label={t("common.delete")}
-                          className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-ink-muted transition-colors hover:bg-surface-soft hover:text-[#f54b4b]"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
+                        {connector.removable ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              toggleConnector(connector.slug)
+                            }
+                            aria-label={t("common.delete")}
+                            className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-ink-muted transition-colors hover:bg-surface-soft hover:text-[#f54b4b]"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        ) : null}
                       </div>
                     </div>
                   );
                 })
               )}
             </div>
-              </>
-            )}
           </TabsContent>
 
           {isSystem ? (

@@ -17,10 +17,7 @@ from typing import Any, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from valuz_agent.modules.agents.builtin import (
-    LEGACY_VALUZ_HELPER_SLUG,
-    VALURION_SLUG,
-)
+from valuz_agent.modules.agents.builtin import VALURION_SLUG
 from valuz_agent.modules.agents.datastore import AgentDatastore
 from valuz_agent.modules.agents.models import AgentRow
 
@@ -35,9 +32,6 @@ _SEED_PATH = Path(__file__).resolve().parent.parent.parent / "resources" / "agen
 # The always-present base agent backing the「新对话」default (09-assistant).
 # Editable, not deletable; its brain mirrors the Settings global model default.
 DEFAULT_ASSISTANT_SLUG = "default-assistant"
-
-# Compatibility exports. New code should import from ``agents.builtin``.
-VALUZ_HELPER_SLUG = LEGACY_VALUZ_HELPER_SLUG
 
 
 def _load_agent_definitions() -> list[dict[str, Any]]:
@@ -102,6 +96,5 @@ async def seed_official_agents(db: AsyncSession, owner: str) -> None:
 __all__ = [
     "DEFAULT_ASSISTANT_SLUG",
     "VALURION_SLUG",
-    "VALUZ_HELPER_SLUG",
     "seed_official_agents",
 ]

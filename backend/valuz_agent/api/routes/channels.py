@@ -14,7 +14,6 @@ from valuz_agent.infra import secret_store
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.integrations.feishu_long_connection import feishu_supervisor
 from valuz_agent.integrations.wecom_aibot_long_connection import wecom_aibot_supervisor
-from valuz_agent.modules.agents.builtin import canonical_agent_slug
 from valuz_agent.modules.channels.adapters import (
     ChannelVerificationError,
     FeishuChannelAdapter,
@@ -102,7 +101,6 @@ async def get_wecom_aibot_binding(
     agent_slug: str,
     user_id: Annotated[str, Depends(get_current_user_id)],
 ) -> WeComAIBotBindingResponse:
-    agent_slug = canonical_agent_slug(agent_slug)
     async with async_unit_of_work() as db:
         binding = await AgentChannelBindingDatastore(db).get(
             user_id=user_id,
@@ -133,8 +131,7 @@ async def update_wecom_aibot_binding(
     body: WeComAIBotBindingUpdate,
     user_id: Annotated[str, Depends(get_current_user_id)],
 ) -> WeComAIBotBindingResponse:
-    agent_slug = canonical_agent_slug(agent_slug)
-    body_agent_slug = canonical_agent_slug(body.agent_slug.strip())
+    body_agent_slug = body.agent_slug.strip()
     if body_agent_slug != agent_slug:
         raise HTTPException(status_code=400, detail="agent_slug mismatch")
     async with async_unit_of_work() as db:
@@ -174,7 +171,6 @@ async def get_feishu_binding(
     agent_slug: str,
     user_id: Annotated[str, Depends(get_current_user_id)],
 ) -> FeishuBindingResponse:
-    agent_slug = canonical_agent_slug(agent_slug)
     async with async_unit_of_work() as db:
         binding = await AgentChannelBindingDatastore(db).get(
             user_id=user_id,
@@ -190,8 +186,7 @@ async def update_feishu_binding(
     body: FeishuBindingUpdate,
     user_id: Annotated[str, Depends(get_current_user_id)],
 ) -> FeishuBindingResponse:
-    agent_slug = canonical_agent_slug(agent_slug)
-    body_agent_slug = canonical_agent_slug(body.agent_slug.strip())
+    body_agent_slug = body.agent_slug.strip()
     if body_agent_slug != agent_slug:
         raise HTTPException(status_code=400, detail="agent_slug mismatch")
 
@@ -281,7 +276,6 @@ async def test_feishu_binding(
 ) -> FeishuBindingTestResponse:
     """One-click health probe: validate the stored app credentials against
     Feishu and report the live long-connection status."""
-    agent_slug = canonical_agent_slug(agent_slug)
     async with async_unit_of_work() as db:
         binding = await AgentChannelBindingDatastore(db).get(
             user_id=user_id,

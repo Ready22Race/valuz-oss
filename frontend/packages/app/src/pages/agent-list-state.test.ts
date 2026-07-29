@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Agent } from "@valuz/core";
 import {
+  compareAgentsWithValurionFirst,
   isCloudOnlyAgent,
   isCloudOnlyResource,
   isSystemAgent,
@@ -63,5 +64,22 @@ describe("isSystemAgent", () => {
         kind: "standard",
       } as Agent),
     ).toBe(false);
+  });
+});
+
+describe("compareAgentsWithValurionFirst", () => {
+  it("pins Valurion ahead of agents that would otherwise sort before it", () => {
+    const valurion = {
+      ...agent,
+      slug: "valurion",
+      name: "Valurion",
+      kind: "system",
+    } as Agent;
+    const alpha = { ...agent, slug: "alpha", name: "Alpha" } as Agent;
+
+    expect([alpha, valurion].sort(compareAgentsWithValurionFirst)).toEqual([
+      valurion,
+      alpha,
+    ]);
   });
 });

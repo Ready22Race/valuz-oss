@@ -1223,11 +1223,9 @@ async def build_member_session(
         agent_config_to_schema,
     )
 
-    from valuz_agent.modules.agents.builtin import canonical_agent_slug
-
     valuz_metadata: dict[str, object] = {
         "project_id": project_id,
-        "agent_slug": canonical_agent_slug(agent_slug),
+        "agent_slug": agent_slug,
         "task_id": task_id,
         "run_kind": run_kind,
         # Composer reads locked_provider_id from valuz metadata to match
