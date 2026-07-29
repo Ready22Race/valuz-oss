@@ -1,0 +1,464 @@
+"""The lead↔member actor loop, end to end, through the REAL machinery.
+
+Every other test in this package exercises one link and stubs the loop:
+dispatch alone, member_done alone, review alone, finalize alone. But the
+invariants that actually broke in production live BETWEEN the links, in the
+loop itself — a member's post-turn notify reaching the lead's inbox, the lead
+waking on it, `lead_idle_with_no_pending` deciding when there is nothing left
+to wait for, the shutdown broadcast landing before a member's next turn, and
+mailbox ownership surviving a teardown that overlaps a respawn. A suite of
+per-link tests can all pass while the chain is broken.
+
+So this drives the real `run_actor_loop`, the real `MailboxRegistry`, the real
+services and a real (tmp-SQLite) database. ONLY the kernel boundary is faked:
+
+  * ``ActorRunner.run_turn`` — a scripted turn. Each entry may run REAL service
+    calls (dispatch / review / finish), exactly as the agent's tool calls
+    would, and returns the turn's final status.
+  * session creation / finalize / manifest / member resolution — the adapter
+    seam, which has its own contract tests.
+
+What that leaves under test is precisely the wiring: who wakes whom, in what
+order, and who writes the terminal state.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+from sqlalchemy import select
+
+from valuz_agent.modules.tasks import planning
+from valuz_agent.modules.tasks.mailbox import mailbox_registry
+from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionRow
+from valuz_agent.modules.tasks.orchestrator import TaskOrchestrator
+from valuz_agent.modules.tasks.plan import TaskPlan
+
+OWNER = "local-test-owner"
+LEAD = "lead-sess"
+PROJECT = "w1"
+TASK = "t1"
+
+
+# ---------------------------------------------------------------------------
+# Harness — the kernel seam, faked once
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def loop_env(db_factory, tmp_path, monkeypatch):
+    """A task with a lead run, plus every kernel-boundary call stubbed.
+
+    Returns a small control object: ``script`` maps session_id → list of turn
+    callables, and each is invoked (awaited) in place of a real agent turn.
+    """
+    from valuz_agent.modules.sessions import run_orchestrator as run_orch
+    from valuz_agent.modules.tasks import dispatcher as dispatcher_mod
+    from valuz_agent.modules.tasks import launcher as launcher_mod
+    from valuz_agent.modules.tasks import manifest as manifest_mod
+    from valuz_agent.modules.tasks import resolution as resolution_mod
+    from valuz_agent.modules.tasks.resolution import ResolvedTaskSession, TaskProjectEnv
+
+    db = db_factory()
+    try:
+        db.add(
+            TaskRow(
+                id=TASK,
+                user_id=OWNER,
+                project_id=PROJECT,
+                file_path=str(tmp_path / "t1.md"),
+                title="T",
+                goal="do it",
+                status="active",
+                lead_agent_slug="lead",
+                current_holder="lead",
+            )
+        )
+        db.add(
+            TaskSessionRow(
+                id="run-lead",
+                user_id=OWNER,
+                project_id=PROJECT,
+                task_id=TASK,
+                session_id=LEAD,
+                agent_slug="lead",
+                sequence=0,
+                kind="lead",
+                status="active",
+                run_dir=str(tmp_path),
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    class _Resolver:
+        """Hands dispatch a ready-to-create member session."""
+
+        async def resolve_project_env(self, _db: Any, **_kw: Any) -> TaskProjectEnv:
+            return TaskProjectEnv(
+                project_row=SimpleNamespace(id=PROJECT), project_cwd=tmp_path,
+                instructions_md=None,
+            )
+
+        async def resolve_member(
+            self, _db: Any, *, agent_slug: str, brief: str, **_kw: Any
+        ) -> ResolvedTaskSession:
+            seq = len(state.members) + 1
+            sid = f"mem-{seq}"
+            state.members.append(sid)
+            return ResolvedTaskSession(
+                session=SimpleNamespace(id=sid),
+                agent_slug=agent_slug,
+                brief=brief,
+                credential_gap=None,
+                agent_name=agent_slug.title(),
+            )
+
+    async def _noop(*_a: Any, **_k: Any) -> None: ...
+
+    async def _manifest(session_id: str, *_a: Any, **_k: Any) -> dict[str, Any]:
+        return {"session_id": session_id, "status": "idle", "summary": f"{session_id} done"}
+
+    # ``from … import task_session_resolver`` binds the name in each consumer,
+    # so patch the source AND the binding dispatch actually reads.
+    fake_resolver = _Resolver()
+    monkeypatch.setattr(resolution_mod, "task_session_resolver", fake_resolver)
+    monkeypatch.setattr(dispatcher_mod, "task_session_resolver", fake_resolver)
+    monkeypatch.setattr(launcher_mod.kernel_client, "create_session", _noop)
+    monkeypatch.setattr(launcher_mod.project_index, "record", _noop)
+    monkeypatch.setattr(run_orch, "_finalize_session", _noop)
+    monkeypatch.setattr(manifest_mod, "collect_manifest", _manifest)
+
+    orch = TaskOrchestrator()
+
+    class _State:
+        def __init__(self) -> None:
+            self.script: dict[str, list[Any]] = {}
+            self.members: list[str] = []
+            self.turns: list[str] = []
+
+    state = _State()
+
+    async def _scripted_turn(_self: Any, session_id: str, content: str, user_id: str) -> str:
+        state.turns.append(session_id)
+        queue = state.script.get(session_id) or []
+        step = queue.pop(0) if queue else "idle"
+        if callable(step):
+            result = step(content)
+            if asyncio.iscoroutine(result):
+                result = await result
+            return str(result or "idle")
+        return str(step)
+
+    monkeypatch.setattr(type(orch.actor), "run_turn", _scripted_turn)
+    yield SimpleNamespace(orch=orch, state=state, tmp_path=tmp_path, db_factory=db_factory)
+
+    for sid in [LEAD, *state.members]:
+        mailbox_registry.unregister(sid)
+
+
+def _plan(db_factory) -> TaskPlan:
+    db = db_factory()
+    try:
+        return TaskPlan.from_dict(db.get(TaskRow, TASK).plan)
+    finally:
+        db.close()
+
+
+def _task_status(db_factory) -> str:
+    db = db_factory()
+    try:
+        return db.get(TaskRow, TASK).status
+    finally:
+        db.close()
+
+
+def _events(db_factory) -> list[str]:
+    db = db_factory()
+    try:
+        return [
+            e.type
+            for e in db.execute(select(TaskEventRow).order_by(TaskEventRow.sequence)).scalars()
+        ]
+    finally:
+        db.close()
+
+
+def _runs(db_factory) -> dict[str, str]:
+    db = db_factory()
+    try:
+        return {
+            r.session_id: r.status
+            for r in db.execute(select(TaskSessionRow)).scalars()
+        }
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# The happy path, whole
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_report_review_finish_through_the_real_loop(loop_env) -> None:
+    """plan → dispatch → member works → member_done wakes the lead → review
+    approves → finish closes the task. Every hop through the real loop.
+
+    This is the chain no other test covers: the member's post-turn
+    ``notify_lead_member_idle`` has to land in the lead's inbox, the lead's
+    park has to wake on it, ``mark_in_review`` has to fire from the loop (not
+    from a test calling it directly), and the terminal write has to happen in
+    ``finalize_actor`` after the loop exits.
+    """
+    orch, state = loop_env.orch, loop_env.state
+
+    asyncio.run(
+        planning.plan_task(
+            task_id=TASK,
+            project_id=PROJECT,
+            user_id=OWNER,
+            lead_session_id=LEAD,
+            subtasks=[{"key": "a", "title": "A", "agent": "worker"}],
+        )
+    )
+
+    async def _lead_turn_1(_prompt: str) -> str:
+        # The lead's first turn dispatches the only subtask, then ends. The
+        # loop must now PARK (a member is live) rather than finalize.
+        res = await orch.dispatcher.dispatch_async(
+            task_id=TASK,
+            project_id=PROJECT,
+            lead_session_id=LEAD,
+            subtask_key="a",
+            user_id=OWNER,
+        )
+        assert res.get("status") == "dispatched", res
+        return "idle"
+
+    async def _lead_turn_2(prompt: str) -> str:
+        # Woken by member_done — the prompt the loop built carries the result.
+        assert "mem-1" in prompt or "done" in prompt, prompt
+        approved = await planning.review_subtask(
+            task_id=TASK,
+            project_id=PROJECT,
+            user_id=OWNER,
+            lead_session_id=LEAD,
+            decision="approve",
+            subtask_key="a",
+        )
+        assert approved.get("decision") == "approve", approved
+        finished = await orch.finalization.finish_task(
+            task_id=TASK,
+            project_id=PROJECT,
+            lead_session_id=LEAD,
+            summary="all done",
+            user_id=OWNER,
+        )
+        assert finished.get("ok") is True, finished
+        return "idle"
+
+    state.script[LEAD] = [_lead_turn_1, _lead_turn_2]
+
+    async def _run() -> None:
+        await asyncio.wait_for(
+            orch.actor.run_actor_loop(
+                session_id=LEAD,
+                initial_prompt="drive the task",
+                role="lead",
+                task_id=TASK,
+                project_id=PROJECT,
+                idle_ttl=2.0,
+                user_id=OWNER,
+            ),
+            timeout=10,
+        )
+        # The member loop was spawned by dispatch as a sibling task; give it
+        # room to finish so its own finalize lands before we assert.
+        for _ in range(50):
+            if _runs(loop_env.db_factory).get("mem-1") in ("completed", "archived"):
+                break
+            await asyncio.sleep(0.02)
+
+    asyncio.run(_run())
+
+    assert state.turns[0] == LEAD
+    assert "mem-1" in state.turns, "the member's own loop must have run a turn"
+
+    node = _plan(loop_env.db_factory).get("a")
+    assert node is not None and node.status == "done", "approve must land through the loop"
+    assert _task_status(loop_env.db_factory) == "completed"
+
+    events = _events(loop_env.db_factory)
+    for expected in (
+        "task_planned",
+        "subtask_spawned",
+        "subtask_reported",  # the member's post-turn report — the wake-up
+        "subtask_reviewed",
+        "subtask_completed",
+        "task_completed",
+    ):
+        assert expected in events, f"{expected} missing from {events}"
+
+    runs = _runs(loop_env.db_factory)
+    assert runs["mem-1"] == "completed"
+    assert runs[LEAD] == "completed"
+    # Both loops released their mailboxes on exit.
+    assert not mailbox_registry.is_registered("mem-1")
+    assert not mailbox_registry.is_registered(LEAD)
+
+
+def test_lead_with_nothing_outstanding_exits_without_waiting(loop_env) -> None:
+    """A lead that satisfies the goal inline (no dispatch) must NOT park for
+    the idle TTL: ``lead_idle_with_no_pending`` breaks the loop and
+    auto-finalize closes the task. Regression for the 30-minute orphan."""
+    orch, state = loop_env.orch, loop_env.state
+    state.script[LEAD] = ["idle"]
+
+    async def _run() -> None:
+        # A 60s TTL would hang the test if the early-exit predicate regressed.
+        await asyncio.wait_for(
+            orch.actor.run_actor_loop(
+                session_id=LEAD,
+                initial_prompt="just answer",
+                role="lead",
+                task_id=TASK,
+                project_id=PROJECT,
+                idle_ttl=60.0,
+                user_id=OWNER,
+            ),
+            timeout=5,
+        )
+
+    asyncio.run(_run())
+
+    assert _task_status(loop_env.db_factory) == "completed"
+    assert "task_completed" in _events(loop_env.db_factory)
+
+
+def test_shutdown_broadcast_ends_the_member_loop_and_leaves_its_run_parked(
+    loop_env,
+) -> None:
+    """stop_task's broadcast must reach a member parked between turns, and the
+    member's own loop exit must NOT overwrite the run stop_task parked.
+
+    Two invariants in one: the shutdown reaches an idle member (its mailbox
+    park wakes on it), and the loop's terminal write respects a run that is no
+    longer ``active`` (settle_run_if_active) — the pair that used to make a
+    paused member invisible to recovery.
+    """
+    orch, state = loop_env.orch, loop_env.state
+
+    asyncio.run(
+        planning.plan_task(
+            task_id=TASK,
+            project_id=PROJECT,
+            user_id=OWNER,
+            lead_session_id=LEAD,
+            subtasks=[{"key": "a", "title": "A", "agent": "worker"}],
+        )
+    )
+
+    async def _run() -> None:
+        res = await orch.dispatcher.dispatch_async(
+            task_id=TASK,
+            project_id=PROJECT,
+            lead_session_id=LEAD,
+            subtask_key="a",
+            user_id=OWNER,
+        )
+        assert res.get("status") == "dispatched", res
+        # Let the member run its first turn and park on its mailbox.
+        for _ in range(50):
+            if "mem-1" in state.turns:
+                break
+            await asyncio.sleep(0.02)
+        await asyncio.sleep(0.05)
+
+        async def _no_interrupt(_sid: str, user_id: str | None = None) -> None: ...
+
+        orch.recovery._interrupt_kernel_session = _no_interrupt  # type: ignore[method-assign]
+        assert await orch.recovery.stop_task(TASK, PROJECT, user_id=OWNER) is True
+
+        # The parked member must exit promptly on the broadcast — no TTL wait.
+        for _ in range(100):
+            if not mailbox_registry.is_registered("mem-1"):
+                break
+            await asyncio.sleep(0.02)
+
+    asyncio.run(_run())
+
+    assert _task_status(loop_env.db_factory) == "paused"
+    assert not mailbox_registry.is_registered("mem-1"), (
+        "the shutdown broadcast must wake a member parked between turns"
+    )
+    assert _runs(loop_env.db_factory)["mem-1"] == "paused", (
+        "the member's loop exit must not overwrite the run stop_task parked — "
+        "recovery only resumes active/paused runs"
+    )
+
+
+def test_member_result_reaches_a_lead_that_is_mid_park(loop_env) -> None:
+    """The wake-up itself: a member finishing while the lead is parked on its
+    mailbox must resume the lead's loop with the report as its prompt."""
+    orch, state = loop_env.orch, loop_env.state
+    woken: list[str] = []
+
+    asyncio.run(
+        planning.plan_task(
+            task_id=TASK,
+            project_id=PROJECT,
+            user_id=OWNER,
+            lead_session_id=LEAD,
+            subtasks=[{"key": "a", "title": "A", "agent": "worker"}],
+        )
+    )
+
+    async def _lead_turn_1(_prompt: str) -> str:
+        await orch.dispatcher.dispatch_async(
+            task_id=TASK,
+            project_id=PROJECT,
+            lead_session_id=LEAD,
+            subtask_key="a",
+            user_id=OWNER,
+        )
+        return "idle"
+
+    async def _lead_turn_2(prompt: str) -> str:
+        woken.append(prompt)
+        await orch.finalization.finish_task(
+            task_id=TASK,
+            project_id=PROJECT,
+            lead_session_id=LEAD,
+            summary="done",
+            status="stopped",  # skip the unresolved-node guard; the wake is the point
+            user_id=OWNER,
+        )
+        return "idle"
+
+    state.script[LEAD] = [_lead_turn_1, _lead_turn_2]
+
+    async def _run() -> None:
+        await asyncio.wait_for(
+            orch.actor.run_actor_loop(
+                session_id=LEAD,
+                initial_prompt="go",
+                role="lead",
+                task_id=TASK,
+                project_id=PROJECT,
+                idle_ttl=5.0,
+                user_id=OWNER,
+            ),
+            timeout=10,
+        )
+
+    asyncio.run(_run())
+
+    assert woken, "the lead never woke on member_done — it parked until the TTL"
+    assert "mem-1 done" in woken[0], woken[0]
+    # The node moved to in_review from the LOOP's mark_in_review, not a test call.
+    node = _plan(loop_env.db_factory).get("a")
+    assert node is not None and node.status in ("in_review", "done"), node.status

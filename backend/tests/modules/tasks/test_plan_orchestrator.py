@@ -1918,8 +1918,6 @@ def test_commit_task_creates_lead_session_with_task_scope(
     dispatched member — c81ab288 originally landed this on the dead copy."""
     from types import SimpleNamespace
 
-    from valuz_agent.modules.tasks import launcher as launcher_mod
-    from valuz_agent.modules.tasks import lifecycle as lc_mod
     from valuz_agent.modules.tasks import resolution as res_mod
 
     # Draft task with a plan (commit refuses empty plans).
@@ -2020,7 +2018,6 @@ def test_commit_task_creates_lead_session_with_task_scope(
 def test_task_lifecycle_event_trace_golden(db_factory, tmp_path, monkeypatch) -> None:
     from types import SimpleNamespace
 
-    from valuz_agent.modules.tasks import launcher as launcher_mod
     from valuz_agent.modules.tasks import lifecycle as lc_mod
     from valuz_agent.modules.tasks import resolution as res_mod
 
@@ -2584,8 +2581,15 @@ def test_plan_update_payload_is_a_self_contained_snapshot(db_factory, tmp_path) 
     )
     payload = _event_payload(db_factory, "task_plan_update")
 
-    assert set(payload) == {"subtasks", "plan_version", "task_status", "title"}
+    assert set(payload) == {
+        "subtasks",
+        "plan_version",
+        "structural",
+        "task_status",
+        "title",
+    }
     assert payload["plan_version"] == 1, "the CAS token is the consumer's dedup key"
+    assert payload["structural"] is True, "plan_task re-specifies the plan document"
     assert payload["task_status"] == "active"
     assert payload["title"] == "T"
     # Nodes carry the resolved display name so the panel never has to join the

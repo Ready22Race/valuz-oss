@@ -183,7 +183,9 @@ export interface PlanSubtask {
   key: string;
   label: string;
   agent: string;
-  /** "planned" | "in_progress" | "in_review" | "rework" | "done" | "failed" */
+  /** Panel vocabulary — what ``to_panel()`` puts on the wire:
+   * pending | active | completed | failed | paused. NOT the internal node
+   * status (planned/in_progress/in_review/rework/done). */
   status: string;
   depends_on: string[];
   parallel_group: string | null;

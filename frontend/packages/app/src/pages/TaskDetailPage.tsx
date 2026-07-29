@@ -232,10 +232,13 @@ const EVENT_META: Record<string, EventMeta> = {
   },
 };
 
+// Unknown / newly-added event types. The label must stay NEUTRAL: this used
+// to be ``task.event.kickoff``, so an ``abandoned`` draft and a DROPPED user
+// instruction both rendered as "任务已发起".
 const FALLBACK_META: EventMeta = {
   icon: MessageSquare,
   node: "bg-ink-meta/10 text-ink-body",
-  labelKey: "task.event.kickoff",
+  labelKey: "task.event.unknown",
 };
 
 function formatEventTime(ms: number): string {
@@ -666,6 +669,27 @@ export const TaskDetailPage = () => {
     openArtifactFile,
     handleOpenFileExternal,
   ]);
+
+  const [draftBusy, setDraftBusy] = useState<"commit" | "abandon" | null>(null);
+  const runDraftAction = useCallback(
+    async (action: "commit" | "abandon") => {
+      setDraftBusy(action);
+      try {
+        const caller = detail?.task.id ?? "";
+        if (action === "commit") {
+          await tasksApi.commit(taskId, { caller_session_id: caller });
+        } else {
+          await tasksApi.abandon(taskId, { caller_session_id: caller });
+        }
+        await loadData();
+      } catch (err) {
+        console.warn(`${action}_task from TaskDetailPage failed`, err);
+      } finally {
+        setDraftBusy(null);
+      }
+    },
+    [taskId, detail, loadData],
+  );
 
   const runIntervene = useCallback(
     async (payload: IntervenePayload, successKey: string): Promise<boolean> => {
@@ -1208,6 +1232,7 @@ export const TaskDetailPage = () => {
                     members={members}
                     leadAgentName={leadAgentName}
                     leadAgentSlug={task.lead_agent_slug}
+                    taskStatus={task.status}
                     t={t}
                     onOpenSession={(sid) =>
                       navigate(
@@ -1875,6 +1900,37 @@ export const TaskDetailPage = () => {
         </div>
       )}
 
+      {/* A draft is neither active nor halted, so neither bar above renders —
+          the page used to be a dead end for the two actions the backend does
+          expose (:commit / :abandon), which only the chat card offered. */}
+      {task.status === "draft" && (
+        <div className="sticky bottom-0 -mx-5 mt-auto overflow-hidden px-5 py-3">
+          <div className="absolute inset-0 bg-card/94 backdrop-blur-3xl" />
+          <div className="relative z-10 mx-auto flex w-full max-w-[760px] items-center justify-end gap-2 px-6">
+            <button
+              type="button"
+              disabled={draftBusy !== null}
+              onClick={() => void runDraftAction("abandon")}
+              className="rounded-md border border-surface-border bg-surface px-3 py-1.5 text-xs font-medium text-ink-body transition-colors hover:border-rose-300 hover:bg-rose-50 hover:text-rose-700 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {draftBusy === "abandon"
+                ? t("common.processing")
+                : t("conversation.taskAbandon")}
+            </button>
+            <button
+              type="button"
+              disabled={draftBusy !== null}
+              onClick={() => void runDraftAction("commit")}
+              className="rounded-md bg-brand px-3.5 py-1.5 text-xs font-medium text-white transition-colors hover:bg-brand-hover disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {draftBusy === "commit"
+                ? t("common.processing")
+                : t("conversation.taskExecute")}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* v30: file preview dialog removed. Artifact preview was a side
           feature of the inline Runs section (now also removed); for the
           MVP, users open the lead conversation to inspect artifacts. */}
@@ -1975,8 +2031,23 @@ function resolveActor(
     type === "kickoff_failed" ||
     type === "task_planned" ||
     type === "plan_revised" ||
-    type === "subtask_reviewed"
+    type === "subtask_reviewed" ||
+    // Host-decided halts: ``paused`` from an auto-finalize kickoff-cancel and
+    // ``abandoned`` from a discarded draft both stamp the session id.
+    type === "paused" ||
+    type === "abandoned"
   ) {
+    return leadAgentName ?? leadAgentSlug;
+  }
+  // A chat inject (delivered or dropped) carries the ORIGINATING chat session
+  // id — that is the user talking, not an agent.
+  if (type === "user_inject" || type === "user_inject_dropped") {
+    return t("task.actorYou");
+  }
+  // Belt-and-braces for every remaining type: a bare 32-hex actor is a session
+  // id, never a name. Rendering it raw is the "看到一串 id" bug; the log is
+  // append-only so old rows keep arriving this way forever.
+  if (/^[0-9a-f]{32}$/.test(actor)) {
     return leadAgentName ?? leadAgentSlug;
   }
   const payloadName = evt.payload?.agent_name;
@@ -2203,6 +2274,7 @@ function GroupedEventCard({
   members,
   leadAgentName,
   leadAgentSlug,
+  taskStatus,
   t,
   onOpenSession,
 }: {
@@ -2213,6 +2285,7 @@ function GroupedEventCard({
   members: MemberWithAgent[];
   leadAgentName: string | null;
   leadAgentSlug: string;
+  taskStatus: string;
   t: Translator;
   onOpenSession: (sid: string) => void;
 }) {
@@ -2231,7 +2304,11 @@ function GroupedEventCard({
           typeof t
         >[0],
       )
-    : t("task.subtaskWaiting" as Parameters<typeof t>[0]);
+    : // No outcome AND the task is halted: those members are gone, so
+      // "等待回执" would promise a receipt that can never arrive.
+      taskStatus === "active"
+      ? t("task.subtaskWaiting" as Parameters<typeof t>[0])
+      : t("task.subtaskHalted" as Parameters<typeof t>[0]);
   const outcomeTime = outcome ? formatEventTime(outcome.created_at) : "";
 
   return (

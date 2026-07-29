@@ -4923,6 +4923,28 @@ components:
           nullable: true
           items: {type: object, additionalProperties: true}
         expected_version: {type: integer, nullable: true, description: "Optimistic-lock token; REQUIRED for PATCH on an active task."}
+    TaskPlanUpdateEvent:
+      type: object
+      description: >-
+        Payload of a ``task_plan_update`` task event — a SELF-CONTAINED
+        snapshot (SSE gives no guarantee the previous one was seen).
+      required: [subtasks, plan_version, structural, task_status, title]
+      properties:
+        subtasks:
+          type: array
+          items: {type: object, additionalProperties: true}
+        plan_version:
+          type: integer
+          description: "Monotonic CAS token; bumped by EVERY plan write. The consumer's dedup/ordering key."
+        structural:
+          type: boolean
+          description: >-
+            True when the plan DOCUMENT changed (plan_task / modify_plan),
+            false for execution progress (a node moving dispatched →
+            in_review → done). Consumers that render plan history spawn a new
+            card per structural revision and update in place otherwise.
+        task_status: {type: string}
+        title: {type: string}
     TaskPlan:
       type: object
       required: [subtasks, ready, current_version]

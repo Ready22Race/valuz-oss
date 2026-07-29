@@ -349,8 +349,10 @@ Protocol:
 4. REVIEW each finished subtask: review_subtask(subtask_key, decision, feedback)
    — judge it against that subtask's `review_criteria` (call get_plan to see
    the criteria). "approve" (optionally with a one-line reason) marks it done
-   and unlocks dependents; "rework" sends it back with feedback (then dispatch
-   that key again). Read result files directly to judge.
+   and unlocks dependents. "rework" sends it back: READ THE REPLY —
+   `delivered_to_live_member: true` means the member is already redoing it
+   (just await_members again); `false` means the node is parked in `rework`,
+   so dispatch(subtask_key=...) to re-run it. Read result files to judge.
 5. LOOP: once a batch is reviewed, dispatch the newly-ready dependent subtasks
    (get_plan() to see them) → await_members → review. Repeat until every
    subtask is done. Use modify_plan(...) to add/patch subtasks mid-flight.
@@ -363,7 +365,7 @@ Protocol:
    first — including a final summary/aggregation node (it becomes ready once
    its deps finish, so dispatch + review it like any other). finish_task with
    status="completed" is REJECTED while any node is still planned/in_progress/
-   in_review/rework; it returns the pending keys — dispatch and review them,
+   in_review/rework/paused; it returns the pending keys — dispatch and review them,
    then finish. Keep orchestrating until the goal is truly achieved; do NOT
    stop just because intermediate results look complete. Then call
    finish_task(summary, artifacts, status="completed") (list key result files
@@ -409,16 +411,20 @@ Protocol:
    the `review_criteria` the user signed off on. The response includes
    `current_version` — remember this for any modify_plan call you make.
 2. DISPATCH INDEPENDENT SUBTASKS IN PARALLEL. For every key whose deps are
-   already satisfied (the `ready` list from get_plan), call dispatch(key)
+   already satisfied (the `ready` list from get_plan), call
+   dispatch(subtask_key=...)
    back-to-back — dispatch is NON-BLOCKING, members run concurrently. Never
    serialize independent work.
 3. COLLECT with await_members(mode="any") in a loop, reviewing each result as
    it arrives. Use await_members(mode="all") only when you genuinely need
    the whole batch at once before continuing.
-4. REVIEW each finished subtask with review_subtask(key, decision, feedback)
-   — judge against the node's `review_criteria`. "approve" marks done and
-   unlocks dependents; "rework" sends it back with feedback (then dispatch
-   that key again). Read result files directly to judge.
+4. REVIEW each finished subtask with
+   review_subtask(subtask_key=..., decision=..., feedback=...) — judge against
+   the node's `review_criteria`. "approve" marks done and unlocks dependents.
+   "rework" sends it back: READ THE REPLY — `delivered_to_live_member: true`
+   means the member is already redoing it (just await_members again); `false`
+   means the node is parked in `rework`, so dispatch(subtask_key=...) to
+   re-run it. Read result files directly to judge.
 5. EXTEND THE PLAN IF NEEDED. If during execution you discover the plan
    needs new nodes (a missed step, a dependency to verify, a follow-up the
    user implicitly wanted), call modify_plan(add=[...], expected_version=N)

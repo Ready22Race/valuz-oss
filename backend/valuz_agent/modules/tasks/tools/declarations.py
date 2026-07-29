@@ -86,7 +86,9 @@ _DISPATCH_PARAMETERS: dict[str, Any] = {
             "type": "string",
             "description": (
                 "The key of a planned subtask (from plan_task/get_plan) to "
-                "dispatch. It must be ready: deps done, status planned/rework."
+                "dispatch. Dispatchable when its deps are done and its status "
+                "is 'planned', 'rework' or 'paused'. NOTE get_plan's `ready` "
+                "list omits 'rework' nodes — dispatch those by key directly."
             ),
         },
         "agent": {
@@ -160,7 +162,7 @@ _SEND_PARAMETERS: dict[str, Any] = {
         "session_id": {
             "type": "string",
             "description": (
-                "The member session id returned by dispatch_async (or seen in a "
+                "The member session id returned by dispatch (or seen in a "
                 "<member-result> block) to send this follow-up to."
             ),
         },
@@ -214,7 +216,15 @@ _LIST_TASKS_PARAMETERS: dict[str, Any] = {
     "properties": {
         "status": {
             "type": "string",
-            "enum": ["draft", "active", "paused", "stopped", "completed", "blocked"],
+            "enum": [
+                "draft",
+                "active",
+                "paused",
+                "stopped",
+                "completed",
+                "blocked",
+                "abandoned",
+            ],
             "description": "Optional filter by task status.",
         },
         "mine_only": {
@@ -382,11 +392,14 @@ _MODIFY_PLAN_PARAMETERS: dict[str, Any] = {
         "expected_version": {
             "type": "integer",
             "description": (
-                "CAS optimistic-lock token (from get_plan response). When passed, "
-                "the call is rejected with PLAN_VERSION_CONFLICT if it does not "
-                "equal the current plan_version. Chat callers (multi-session "
-                "concurrency possible) should always pass it; lead callers "
-                "(single-actor serial) may omit it."
+                "Version token from get_plan's current_version. "
+                "When passed, the call is rejected with PLAN_VERSION_CONFLICT if "
+                "it no longer matches. A lead editing its OWN task is the single "
+                "writer and may omit it; a human/REST editor of a RUNNING task "
+                "must pass it (the request is refused otherwise — the lead is "
+                "writing the same document concurrently). Note every plan write "
+                "bumps the version, including a subtask moving to in_review or "
+                "done, so re-read before retrying."
             ),
         },
     },
@@ -476,11 +489,12 @@ _RESUME_TASK_PARAMETERS: dict[str, Any] = {
         "task_id": {
             "type": "string",
             "description": (
-                "The paused, blocked, or stopped task to revive. The lead "
-                "session is respawned (Layer-2 recovery path) and the task "
-                "flips back to 'active'. Rejected for hard-terminal tasks "
-                "('completed' = goal already met → run a follow-up task; "
-                "'abandoned' = draft was discarded, nothing to revive)."
+                "The task to revive: 'paused', 'blocked', 'stopped', or "
+                "'completed' (reopening a completed task lets you supplement "
+                "or adjust its subtasks). The lead session is respawned and "
+                "the task flips back to 'active'. Rejected for 'abandoned' "
+                "(a discarded draft — nothing to revive) and 'draft' (launch "
+                "it with commit_task)."
             ),
         },
     },
@@ -498,7 +512,10 @@ _REVIEW_SUBTASK_PARAMETERS: dict[str, Any] = {
         "decision": {
             "type": "string",
             "enum": ["approve", "rework"],
-            "description": "approve → mark done (unlocks dependents); rework → send back.",
+            "description": (
+                "approve → mark done (unlocks dependents; only for a subtask "
+                "that ran); rework → send back for another attempt."
+            ),
         },
         "feedback": {
             "type": "string",
@@ -626,9 +643,11 @@ GET_PLAN_TOOL_DECLARATION = ToolDef(
 MODIFY_PLAN_TOOL_DECLARATION = ToolDef(
     name=MODIFY_PLAN_TOOL_NAME,
     description=(
-        "The subtask-level add/update/remove primitive. Revise the plan after "
-        "it exists: add new subtasks, update existing ones (by key), or remove "
-        "them. Validates the DAG (no cycles / dangling deps). In CHAT on a "
+        "The subtask-level add/update primitive. Revise the plan after it "
+        "exists: add new subtasks, or update existing ones by key (goal, "
+        "agent, deps, title). Subtasks are a durable record — there is no "
+        "removal; to retire one, re-scope its goal. Validates the DAG (no "
+        "cycles / dangling deps). In CHAT on a "
         "DRAFT task, call this directly to amend subtasks; on a RUNNING task "
         "the lead owns the plan, so from chat send the change via "
         "inject_into_task and let the lead call modify_plan."
@@ -642,7 +661,10 @@ REVIEW_SUBTASK_TOOL_DECLARATION = ToolDef(
     description=(
         "Review a finished subtask: approve (mark done, unlocking dependents) or "
         "rework (send it back with feedback). Identify it by subtask_key or the "
-        "member's session_id. Call this after a member reports a result."
+        "member's session_id. Call this after a member reports a result — a "
+        "subtask that was never dispatched cannot be approved (dispatch it "
+        "first), and the task itself must still be active. Re-approving an "
+        "already-approved subtask is a no-op that returns already_done=true."
     ),
     parameters=_REVIEW_SUBTASK_PARAMETERS,
     handler=None,
@@ -654,8 +676,9 @@ STOP_SUBTASK_TOOL_DECLARATION = ToolDef(
         "HARD-stop a specific in-flight subtask. Use when a member is misdirected, "
         "stuck, or no longer needed (e.g. plan was revised). Interrupts the "
         "kernel session immediately, flips the plan node to ``rework`` (so you "
-        "can re-dispatch with a corrected goal via dispatch()) or you can "
-        "modify_plan to retire the work, and injects a synthetic "
+        "can re-dispatch it with a corrected goal via "
+        "dispatch(subtask_key=...), or re-scope it first with "
+        "modify_plan(update=[...])), and injects a synthetic "
         "``member_done(status=cancelled)`` into your mailbox so await_members "
         "doesn't hang. Identify the target by ``subtask_key`` OR ``session_id``. "
         "This is different from ``send`` (which just nudges a member that keeps "

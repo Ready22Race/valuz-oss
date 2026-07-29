@@ -2479,7 +2479,11 @@
       "leadWorking": "Lead 正在执行…",
       "userInject": "用户指令",
       "awaitingUser": "等待用户回答",
-      "userAnswered": "用户已回答"
+      "userAnswered": "用户已回答",
+      "unknown": "任务更新",
+      "abandoned": "草稿已丢弃",
+      "userInjectDropped": "指令未送达（Lead 不在线）",
+      "kickoffCancelled": "发起已取消"
     },
     "viewSession": "查看会话 →",
     "needsConfirm": "需要你确认",
@@ -2491,7 +2495,9 @@
     "reworkRunErrored": "上次运行因错误中断，请重试。",
     "reworkUserInterrupted": "用户中断了该子任务",
     "reworkUserStopped": "用户手动停止了该子任务",
-    "summaryUserStopped": "用户停止了该子任务"
+    "summaryUserStopped": "用户停止了该子任务",
+    "statusAbandoned": "已丢弃",
+    "subtaskHalted": "任务中止，未回执"
   },
   "marketplace": {
     "title": "市场",

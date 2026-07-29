@@ -17,6 +17,7 @@ from sqlalchemy.orm import sessionmaker
 
 from valuz_agent.infra.database import Base
 from valuz_agent.modules.agents.models import ProjectMemberRow
+from valuz_agent.modules.notifications.models import NotificationRow
 from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionRow
 
 # Every task test that touches the DB wants the same three tables. Creating all
@@ -33,6 +34,10 @@ _TASK_TABLES = [
     TaskEventRow.__table__,
     TaskSessionRow.__table__,
     ProjectMemberRow.__table__,
+    # ``block_task`` writes a failure notification — a real path out of the
+    # task module (events.block_task → notifications.projectors), so the
+    # table has to exist wherever a task can go blocked.
+    NotificationRow.__table__,
 ]
 
 
