@@ -75,7 +75,7 @@ def check_plan_writer_gate(sess: Any, task: Any) -> Failure | None:
             return None
         return Failure(
             "active task plan is lead-owned; chat sessions must use "
-            "inject_into_task to ask the lead to revise it (D6 strict)"
+            "inject_into_task to ask the lead to revise it"
         )
     if task.status == "paused":
         return Failure(f"task {task.id!r} is paused; resume it before editing the plan")

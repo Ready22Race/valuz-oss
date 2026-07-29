@@ -48,6 +48,7 @@ from valuz_agent.adapters.system_prompt_builder import (
     assemble_session_instructions,
     build_project_system_prompt,
 )
+from valuz_agent.i18n import t
 from valuz_agent.modules.agents.datastore import ProjectMemberDatastore
 from valuz_agent.modules.memory.injection import memory_instructions_block
 from valuz_agent.ports.instructions import global_instructions_preamble
@@ -249,14 +250,22 @@ def assert_goal_brief_length(brief: str, *, limit: int = GOAL_BRIEF_MAX_CHARS) -
 
 
 def _goal_brief_pointer(doc_path: str, *, is_lead: bool) -> str:
-    """Build the short ``/goal`` pointer that stands in for a spilled brief."""
-    noun = "任务" if is_lead else "子任务"
+    """Build the short ``/goal`` pointer that stands in for a spilled brief.
+
+    Localized: this text BECOMES the goal condition for an over-budget brief,
+    so hardcoding one language silently turns another user's task goal into a
+    foreign-language instruction — and the model answers in the language it
+    was prompted in.
+    """
+    params: dict[str, str | int | float] = {
+        "budget": GOAL_BRIEF_MAX_TOKENS,
+        "path": doc_path,
+    }
+    # Literal keys, not a variable — ``t`` is typed on the generated key union.
     return (
-        f"本{noun}的完整目标内容较长(超出 {GOAL_BRIEF_MAX_TOKENS} token 预算),已落地为"
-        f"文档,无法直接作为 goal 条件传入。\n\n"
-        f"请先用文件读取工具完整阅读下面这份文档——它包含本{noun}的完整目标、参考资料"
-        f"与验收标准——然后据此开展工作,直到达成其中描述的目标:\n\n"
-        f"{doc_path}"
+        t("task.brief.goalSpilledLead", params=params)
+        if is_lead
+        else t("task.brief.goalSpilledMember", params=params)
     )
 
 

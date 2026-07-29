@@ -2497,7 +2497,15 @@
     "reworkUserStopped": "The user manually stopped this subtask",
     "summaryUserStopped": "The user stopped this subtask",
     "statusAbandoned": "Abandoned",
-    "subtaskHalted": "Stopped before reporting"
+    "subtaskHalted": "Stopped before reporting",
+    "brief": {
+      "goalSpilledLead": "This task's full goal is too long to pass inline (over the {budget}-token budget) and has been written to a document.\n\nRead the document below IN FULL with a file-read tool first — it holds the task's complete goal, references and acceptance criteria — then work from it until that goal is met:\n\n{path}",
+      "goalSpilledMember": "This subtask's full goal is too long to pass inline (over the {budget}-token budget) and has been written to a document.\n\nRead the document below IN FULL with a file-read tool first — it holds the subtask's complete goal, references and acceptance criteria — then work from it until that goal is met:\n\n{path}",
+      "recoveryLead": "This task has been resumed (app restart or user resume). Subtask reconciliation:\n{summary}\n\nCall get_plan FIRST to align with the current state, then keep orchestrating: dispatch pending subtasks, review the ones in_review, retry the ones in rework. Call finish_task once everything is done.",
+      "recoveryNoMembers": "(no subtasks were in flight)",
+      "recoveryUserInstruction": "The instruction above came with the resume — it is authoritative user intent. Adjust your orchestration accordingly (modify_plan / rework if needed) before continuing.",
+      "memberResumeDefault": "Continue your subtask; report back to the lead when it is done."
+    }
   },
   "marketplace": {
     "title": "Marketplace",

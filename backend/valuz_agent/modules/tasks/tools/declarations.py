@@ -188,7 +188,7 @@ _CREATE_TASK_PARAMETERS: dict[str, Any] = {
             "type": "string",
             "description": "The task goal/brief handed to the spawned lead agent.",
         },
-        "lead_agent": {
+        "lead_agent_slug": {
             "type": "string",
             "description": (
                 "Project-local agent slug to lead the task. Omit to use the "
@@ -542,7 +542,7 @@ _STOP_SUBTASK_PARAMETERS: dict[str, Any] = {
             "type": "string",
             "description": (
                 "Member run session id (alternative to subtask_key). Use this "
-                "when you got the id from a SubtaskResult / await_members reply."
+                "when you got the id from an await_members result entry."
             ),
         },
         "reason": {
@@ -603,7 +603,8 @@ AWAIT_MEMBERS_TOOL_DECLARATION = ToolDef(
     name=AWAIT_MEMBERS_TOOL_NAME,
     description=(
         "Wait for dispatched members to finish and collect their results "
-        "(SubtaskResult[]) — call this ONLY after dispatch(). Use mode='any' in "
+        "(one entry per member: subtask_key, session_id, agent, status, summary, "
+        "artifacts) — call this ONLY after dispatch(). Use mode='any' in "
         "a loop to review members the moment each one completes; mode='all' to "
         "wait for the whole batch. Each returned member then awaits your "
         "review_subtask. Omit 'keys' to wait for all outstanding subtasks. "
@@ -877,7 +878,8 @@ RESUME_TASK_TOOL_DECLARATION = ToolDef(
     description=(
         "Revive a task that is paused, blocked, stopped, OR completed. The "
         "lead session is respawned and the task flips back to 'active'; "
-        "in-flight members are reconciled the same way as Layer-1 startup "
+        "in-flight members are reconciled the same way as they are after an "
+        "app restart "
         "recovery. Use when the user asks to 'continue the task we "
         "stopped/paused', 'restart the blocked task', or — the key new case "
         "— wants to SUPPLEMENT OR ADJUST the subtasks of an already-COMPLETED "

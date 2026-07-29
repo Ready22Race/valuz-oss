@@ -2497,7 +2497,15 @@
     "reworkUserStopped": "用户手动停止了该子任务",
     "summaryUserStopped": "用户停止了该子任务",
     "statusAbandoned": "已丢弃",
-    "subtaskHalted": "任务中止，未回执"
+    "subtaskHalted": "任务中止，未回执",
+    "brief": {
+      "goalSpilledLead": "本任务的完整目标内容较长（超出 {budget} token 预算），已落地为文档，无法直接作为 goal 条件传入。\n\n请先用文件读取工具完整阅读下面这份文档——它包含本任务的完整目标、参考资料与验收标准——然后据此开展工作，直到达成其中描述的目标：\n\n{path}",
+      "goalSpilledMember": "本子任务的完整目标内容较长（超出 {budget} token 预算），已落地为文档，无法直接作为 goal 条件传入。\n\n请先用文件读取工具完整阅读下面这份文档——它包含本子任务的完整目标、参考资料与验收标准——然后据此开展工作，直到达成其中描述的目标：\n\n{path}",
+      "recoveryLead": "本任务已被恢复（系统重启或用户恢复）。子任务对账结果：\n{summary}\n\n请先调用 get_plan 对齐当前状态，然后继续编排：派发未决子任务、审核 in_review、重试 rework；全部完成后调用 finish_task。",
+      "recoveryNoMembers": "(无在途子任务)",
+      "recoveryUserInstruction": "用户在恢复任务时附带了上面的指令——它是权威的用户意图，请优先据此调整编排（必要时 modify_plan / rework）再继续。",
+      "memberResumeDefault": "继续完成你的子任务，完成后会汇报给 lead。"
+    }
   },
   "marketplace": {
     "title": "市场",
