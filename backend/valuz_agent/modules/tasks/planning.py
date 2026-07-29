@@ -115,6 +115,7 @@ async def emit_plan_update(
     session_id: str | None,
     user_id: str,
     plan_version: int | None = None,
+    structural: bool = False,
 ) -> None:
     """Append a ``task_plan_update`` SNAPSHOT — every field is load-bearing.
 
@@ -127,6 +128,14 @@ async def emit_plan_update(
     Pass it explicitly — re-reading the row can pick up a LATER writer's
     version (cas_update_plan refreshes after commit) and stamp it onto this
     older snapshot, making the feed's dedup drop the real newer snapshot.
+
+    ``structural``: True only when the plan DOCUMENT changed (plan_task /
+    modify_plan — nodes added or re-specified), False for execution progress
+    (a node flipping dispatched → in_review → done). The chat plan-card feed
+    spawns a NEW card per structural revision and updates in place otherwise;
+    without the flag, every node flip would append another card to the
+    conversation (every write bumps the version — that is the CAS token's
+    job, not a UI signal).
     """
     panel = plan.to_panel()
     # Stamp each node's member display name so the Todo panel renders it
@@ -153,6 +162,9 @@ async def emit_plan_update(
             "plan_version": (
                 plan_version if plan_version is not None else task_row.plan_version or 0
             ),
+            # Did the plan DOCUMENT change (vs execution progress)? Drives
+            # "new card" vs "update the card" in the chat feed.
+            "structural": structural,
             # Named ``task_status``, not ``status``: a plan snapshot also
             # carries per-node statuses, and an unqualified ``status`` in this
             # payload reads as "the plan's".
@@ -230,6 +242,7 @@ async def plan_task(
             session_id=lead_session_id,
             user_id=user_id,
             plan_version=installed,
+            structural=True,
         )
         render_plan_md(task_row, plan)
         return {
@@ -348,6 +361,7 @@ async def modify_plan(
             session_id=lead_session_id,
             user_id=user_id,
             plan_version=installed,
+            structural=True,
         )
         render_plan_md(task_row, plan)
         return {

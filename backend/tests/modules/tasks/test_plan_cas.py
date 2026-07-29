@@ -247,3 +247,48 @@ def test_snapshot_carries_the_version_this_write_installed(db_factory, monkeypat
         assert snap.payload["plan_version"] == 4, snap.payload["plan_version"]
     finally:
         db.close()
+
+
+def test_execution_progress_is_not_a_structural_revision(db_factory) -> None:
+    """Every plan write bumps the version (the CAS token's job), but only a
+    plan-DOCUMENT change is ``structural``. The chat feed spawns a new plan
+    card per structural revision and updates in place otherwise — without the
+    distinction, each dispatch / in_review / approve would append another card
+    to the conversation."""
+    _seed_task(db_factory, task_id="t-struct")
+
+    async def _run() -> None:
+        await planning.mark_node_dispatched(
+            project_id="w1",
+            task_id="t-struct",
+            subtask_key="a",
+            agent="worker",
+            session_id="m1",
+            user_id=OWNER,
+        )
+        # A real document change for contrast.
+        await planning.modify_plan(
+            task_id="t-struct",
+            project_id="w1",
+            user_id=OWNER,
+            lead_session_id="lead",
+            add=[{"key": "c", "title": "C", "agent": "worker"}],
+        )
+
+    asyncio.run(_run())
+
+    db = db_factory()
+    try:
+        flags = [
+            (e.payload["plan_version"], e.payload["structural"])
+            for e in db.execute(
+                select(TaskEventRow).order_by(TaskEventRow.sequence)
+            ).scalars()
+            if e.type == "task_plan_update"
+        ]
+        assert flags == [(4, False), (5, True)], (
+            "node-status progress must not read as a plan revision "
+            f"(got {flags})"
+        )
+    finally:
+        db.close()

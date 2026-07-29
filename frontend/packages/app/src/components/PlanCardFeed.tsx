@@ -119,6 +119,22 @@ export function PlanCardFeed(props: PlanCardFeedProps): ReactElement | null {
             setCards((prev) => [...prev, entry]);
             recordPlanVersion(entry.taskId, entry.planVersion);
           }}
+          onProgress={(entry) => {
+            // Execution progress refreshes the LATEST card in place. Every
+            // plan write bumps plan_version (it is the CAS token), so
+            // spawning a card per version would append one to the chat for
+            // every dispatch / in_review / approve — a 5-subtask task would
+            // bury the conversation. Only a structural revision earns a card.
+            setCards((prev) =>
+              prev.map((c) =>
+                c.taskId === entry.taskId &&
+                c.planVersion === card.planVersion &&
+                c.receivedAt === card.receivedAt
+                  ? { ...c, ...entry, planVersion: c.planVersion }
+                  : c,
+              ),
+            );
+          }}
         />
       ))}
       {sessionId.length === 0 && null}
@@ -132,14 +148,19 @@ interface SingleWatcherProps {
   isLatest: boolean;
   onNavigate?: (path: string) => void;
   onNewVersion: (entry: PlanCardEntry) => void;
+  onProgress: (entry: PlanCardEntry) => void;
 }
 
 function SinglePlanCardWatcher(props: SingleWatcherProps): ReactElement {
-  const { card, sessionId, isLatest, onNavigate, onNewVersion } = props;
+  const { card, sessionId, isLatest, onNavigate, onNewVersion, onProgress } =
+    props;
 
-  // Subscribe to events for THIS task. New task_plan_update events
-  // spawn fresh cards (immutable history); status-only events update
-  // the existing card's status badge.
+  // Subscribe to events for THIS task. A STRUCTURAL revision (the lead
+  // re-specified the plan) spawns a fresh card — immutable history of what
+  // was planned. Execution progress (a node moving dispatched → in_review →
+  // done) refreshes this card in place: every plan write bumps plan_version
+  // because it is the CAS token, so treating each bump as a new card would
+  // append one per node flip.
   const handleEvent = useCallback(
     (ev: TaskEvent) => {
       if (ev.type === "task_plan_update") {
@@ -148,20 +169,26 @@ function SinglePlanCardWatcher(props: SingleWatcherProps): ReactElement {
           subtasks?: PlanSubtask[];
           title?: string;
           status?: string;
+          task_status?: string;
+          structural?: boolean;
         };
         const version = payload.plan_version ?? 0;
         if (version <= card.planVersion) return;
-        onNewVersion({
+        const next: PlanCardEntry = {
           taskId: card.taskId,
           taskTitle: payload.title ?? card.taskTitle,
-          status: payload.status ?? card.status,
+          status: payload.task_status ?? payload.status ?? card.status,
           planVersion: version,
           subtasks: payload.subtasks ?? card.subtasks,
           receivedAt: ev.created_at,
-        });
+        };
+        // Pre-``structural`` rows carry no flag; those events came only from
+        // plan_task / modify_plan back then, so absent === structural.
+        if (payload.structural ?? true) onNewVersion(next);
+        else onProgress(next);
       }
     },
-    [card, onNewVersion],
+    [card, onNewVersion, onProgress],
   );
 
   // Seed the draft task's origin from its caller session BEFORE the event

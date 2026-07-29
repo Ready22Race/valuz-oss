@@ -2584,8 +2584,15 @@ def test_plan_update_payload_is_a_self_contained_snapshot(db_factory, tmp_path) 
     )
     payload = _event_payload(db_factory, "task_plan_update")
 
-    assert set(payload) == {"subtasks", "plan_version", "task_status", "title"}
+    assert set(payload) == {
+        "subtasks",
+        "plan_version",
+        "structural",
+        "task_status",
+        "title",
+    }
     assert payload["plan_version"] == 1, "the CAS token is the consumer's dedup key"
+    assert payload["structural"] is True, "plan_task re-specifies the plan document"
     assert payload["task_status"] == "active"
     assert payload["title"] == "T"
     # Nodes carry the resolved display name so the panel never has to join the
