@@ -2633,11 +2633,11 @@ export const ConversationPage = () => {
   // display names so the dropdown reads "Claude Agent · mimo-v2.5-pro".
   const composerAgents = useMemo<ComposerAgentItem[]>(() => {
     if (isTempConversation) {
-      // Pin the onboarding-seeded Valuz 小助手 (``valuz-helper``) to the top of
+      // Pin the built-in Valurion to the top of
       // the dropdown; keep the rest of the library in its existing order.
       const ordered = [
-        ...myAgents.filter((a) => a.slug === "valuz-helper"),
-        ...myAgents.filter((a) => a.slug !== "valuz-helper"),
+        ...myAgents.filter((a) => a.slug === "valurion"),
+        ...myAgents.filter((a) => a.slug !== "valurion"),
       ];
       return ordered.map((a) => ({
         slug: a.slug,
@@ -2717,10 +2717,12 @@ export const ConversationPage = () => {
   // agent button — hidden until an override happens, so a default chat is clean.
   // Slug → display name, so the header chip shows the agent's full name
   // ("研究分析师") rather than the raw kernel slug.
-  const agentNameBySlug = useMemo(
-    () => new Map(composerAgents.map((a) => [a.slug, a.name])),
-    [composerAgents],
-  );
+  const agentNameBySlug = useMemo(() => {
+    const names = new Map(composerAgents.map((a) => [a.slug, a.name]));
+    const valurionName = names.get("valurion");
+    if (valurionName) names.set("valuz-helper", valurionName);
+    return names;
+  }, [composerAgents]);
 
   // Auto-pick the first available (provider, model) for the current
   // runtime so ``selectedProviderId`` / ``selectedModelId`` are never
@@ -3374,11 +3376,13 @@ export const ConversationPage = () => {
         return agentParam;
       if (prev && myAgents.some((a) => a.slug === prev)) return prev;
       // Skill-creator still needs an agent (its create flow binds one), so keep
-      // the old defaulting there: last-used → Valuz 小助手 → first library agent.
+      // the old defaulting there: last-used → Valurion → first library agent.
       if (isSkillCreatorMode) {
         const lastUsed = getLastTempAgent();
         if (lastUsed && myAgents.some((a) => a.slug === lastUsed))
           return lastUsed;
+        if (myAgents.some((a) => a.slug === "valurion"))
+          return "valurion";
         if (myAgents.some((a) => a.slug === "valuz-helper"))
           return "valuz-helper";
         return myAgents[0]?.slug ?? null;

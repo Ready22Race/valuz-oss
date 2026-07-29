@@ -22,10 +22,18 @@ export interface Agent {
   model: string;
   skills: string[];
   connector_types: string[];
+  knowledge_scope: string[];
   /** Default model provider for instances; null = unpinned (set per-instance). */
   provider_id: string | null;
   /** Default reasoning-effort budget for instances; null = no override. */
   effort: EffortLevel | null;
+  /** System agents are installed and managed by the runtime. */
+  kind: "system" | "standard";
+  /** Explicit bindings for normal agents; live owner-scoped resources for Valurion. */
+  resource_policy: "explicit" | "all_available";
+  /** Dynamically prepend the current distribution's Valurion instructions. */
+  inherit_global_instructions: boolean;
+  permission_mode: string;
   source: string;
   readonly: boolean;
   deletable: boolean;
@@ -106,6 +114,9 @@ export interface CreateAgentPayload {
   model?: string;
   skills?: string[];
   connector_types?: string[];
+  knowledge_scope?: string[];
+  inherit_global_instructions?: boolean;
+  permission_mode?: string;
   provider_id?: string | null;
   effort?: EffortLevel | null;
   avatar?: string | null;
@@ -119,6 +130,9 @@ export interface UpdateAgentPayload {
   model?: string | null;
   skills?: string[] | null;
   connector_types?: string[] | null;
+  knowledge_scope?: string[] | null;
+  inherit_global_instructions?: boolean | null;
+  permission_mode?: string | null;
   provider_id?: string | null;
   effort?: EffortLevel | null;
   avatar?: string | null;
@@ -129,6 +143,35 @@ export interface ListAgentsOptions {
   baseUrl?: string;
   /** Bypass the shared list cache when the active target or roster changes. */
   fresh?: boolean;
+}
+
+export interface EffectiveAgentResource {
+  id: string;
+  slug: string;
+  name: string;
+  source: string;
+  status: string;
+}
+
+export interface EffectiveAgentResourceWarning {
+  resource_type: string;
+  resource_id: string;
+  code: string;
+  message: string;
+}
+
+export interface EffectiveAgentResources {
+  policy: "all_available";
+  resolved_at: number;
+  counts: {
+    skills: number;
+    connectors: number;
+    knowledge_bases: number;
+  };
+  skills: EffectiveAgentResource[];
+  connectors: EffectiveAgentResource[];
+  knowledge_bases: EffectiveAgentResource[];
+  warnings: EffectiveAgentResourceWarning[];
 }
 
 /** Spec of an agent the user is confirming after the assistant proposed it
@@ -222,6 +265,25 @@ export const agentsApi = {
     );
     invalidateAgents();
     return result;
+  },
+
+  async copyAgent(slug: string, name?: string): Promise<Agent> {
+    const result = await fetchJson<Agent>(
+      `/v1/agents/${encodeURIComponent(slug)}/copy`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(name ? { name } : {}),
+      },
+    );
+    invalidateAgents();
+    return result;
+  },
+
+  getEffectiveResources(slug: string): Promise<EffectiveAgentResources> {
+    return fetchJson(
+      `/v1/agents/${encodeURIComponent(slug)}/effective-resources`,
+    );
   },
 
   /** Delete an agent. ``cascade`` first 解除 every 派驻 the agent has, then

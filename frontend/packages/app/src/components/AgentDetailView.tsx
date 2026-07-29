@@ -52,6 +52,8 @@ import {
   type CatalogEntry,
   type ConnectorItem,
   type EffortLevel,
+  type EffectiveAgentResource,
+  type EffectiveAgentResources,
   type FeishuBinding,
   type SkillView,
   type UpdateAgentPayload,
@@ -86,6 +88,39 @@ const STATUS_LABEL_KEY: Record<string, string> = {
 interface ConnectorMeta {
   display_name: string;
   description: string | null;
+}
+
+function ReadonlyResourceList({
+  items,
+  emptyText,
+}: {
+  items: EffectiveAgentResource[];
+  emptyText: string;
+}) {
+  if (items.length === 0) {
+    return (
+      <div className="rounded-[14px] border border-dashed border-surface-border bg-card px-4 py-6 text-center text-xs text-ink-meta">
+        {emptyText}
+      </div>
+    );
+  }
+  return (
+    <div className="flex flex-col gap-2">
+      {items.map((item) => (
+        <div
+          key={`${item.source}:${item.id}`}
+          className="flex items-center gap-3 rounded-[14px] bg-card p-3 shadow-[var(--shadow-1)]"
+        >
+          <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-heading">
+            {item.name}
+          </span>
+          <span className="shrink-0 text-[11px] text-ink-meta">
+            {item.status}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 /** Flatten the connector directory (groups + standalone) into slug → meta, so
@@ -141,6 +176,8 @@ export const AgentDetailView = ({
   const setContentInnerClassName = outlet?.setContentInnerClassName;
 
   const [agent, setAgent] = useState<Agent | null>(null);
+  const [effectiveResources, setEffectiveResources] =
+    useState<EffectiveAgentResources | null>(null);
   const [projects, setProjects] = useState<ProjectListItem[]>([]);
   const [deployments, setDeployments] = useState<AgentDeployment[]>([]);
   const [loading, setLoading] = useState(true);
@@ -260,15 +297,17 @@ export const AgentDetailView = ({
 
   const loadData = useCallback(async () => {
     try {
-      const [tpl, wsRes, depRes, channelRes, feishuChannelRes] =
+      const [tpl, wsRes, depRes, channelRes, feishuChannelRes, resources] =
         await Promise.all([
           agentsApi.getAgent(slug),
           projectsApi.list(),
           agentsApi.listDeployments(slug),
           channelsApi.getWeComAIBotBinding(slug).catch(() => null),
           channelsApi.getFeishuBinding(slug).catch(() => null),
+          agentsApi.getEffectiveResources(slug).catch(() => null),
         ]);
       setAgent(tpl);
+      setEffectiveResources(resources);
       setProjects(wsRes.projects.filter((w) => w.kind === "project"));
       setDeployments(depRes.deployments);
       setAibotBinding(channelRes);
@@ -425,18 +464,7 @@ export const AgentDetailView = ({
     if (!agent) return;
     setCopyBusy(true);
     try {
-      const copy = await agentsApi.createAgent({
-        name: `${agent.name} (copy)`,
-        description: agent.description,
-        instructions: agent.instructions,
-        runtime: agent.runtime,
-        model: agent.model,
-        skills: agent.skills,
-        connector_types: agent.connector_types,
-        provider_id: agent.provider_id,
-        effort: agent.effort,
-        avatar: agent.avatar,
-      });
+      const copy = await agentsApi.copyAgent(agent.slug);
       setCopyConfirmOpen(false);
       toast.success(t("agent.agentCreated" as Parameters<typeof t>[0]));
       await onChanged?.();
@@ -690,6 +718,14 @@ export const AgentDetailView = ({
     );
   }
 
+  const isSystem = agent.kind === "system";
+  const skillCount = isSystem
+    ? (effectiveResources?.counts.skills ?? 0)
+    : agent.skills.length;
+  const connectorCount = isSystem
+    ? (effectiveResources?.counts.connectors ?? 0)
+    : agent.connector_types.length;
+
   // Red dot on the 连接器 tab when a bound connector isn't connected — the same
   // "needs attention" idea as the Connectors nav dot, scoped to this agent's
   // own connector_types. ``connectorCatalog`` holds the connected connectors,
@@ -697,6 +733,7 @@ export const AgentDetailView = ({
   // "没有链接好的".
   const connectedSlugs = new Set(connectorCatalog.map((c) => c.slug));
   const hasUnconnectedConnector =
+    !isSystem &&
     connectorsLoaded &&
     agent.connector_types.some((slug) => !connectedSlugs.has(slug));
   const aibotBoundToThisAgent =
@@ -798,9 +835,12 @@ export const AgentDetailView = ({
           {editingField !== "avatar" && (
             <button
               type="button"
-              onClick={() => setEditingField("avatar")}
+              onClick={() => {
+                if (!isSystem) setEditingField("avatar");
+              }}
+              disabled={isSystem}
               aria-label={t("agent.avatarLabel" as Parameters<typeof t>[0])}
-              className="group relative flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-surface-soft text-ink-body transition-colors hover:bg-brand/10"
+              className="group relative flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-surface-soft text-ink-body transition-colors enabled:hover:bg-brand/10"
             >
               {agentIcon ? (
                 <AgentIconGlyph icon={agentIcon} className="h-4 w-4" />
@@ -848,10 +888,20 @@ export const AgentDetailView = ({
             ) : (
               <button
                 type="button"
-                onClick={() => setEditingField("name")}
-                className="group block max-w-full rounded px-1 py-0.5 text-left text-base font-medium text-ink-heading transition-colors hover:bg-surface-soft"
+                onClick={() => {
+                  if (!isSystem) setEditingField("name");
+                }}
+                disabled={isSystem}
+                className="group block max-w-full rounded px-1 py-0.5 text-left text-base font-medium text-ink-heading transition-colors enabled:hover:bg-surface-soft"
               >
-                <span className="truncate">{agent.name}</span>
+                <span className="flex items-center gap-2 truncate">
+                  {agent.name}
+                  {isSystem ? (
+                    <span className="inline-flex h-5 shrink-0 items-center rounded-[4px] bg-brand-light px-1.5 text-[10px] font-normal text-brand">
+                      {t("agent.systemBadge" as Parameters<typeof t>[0])}
+                    </span>
+                  ) : null}
+                </span>
               </button>
             )}
             {/* Subtitle (Skills-panel style): plain ``来源 · 模型 ·
@@ -859,7 +909,9 @@ export const AgentDetailView = ({
             {editingField !== "name" && (
               <div className="mt-0.5 truncate px-1 text-xs text-ink-body">
                 {[
-                  agent.source === "official"
+                  isSystem
+                    ? t("agent.groupSystem" as Parameters<typeof t>[0])
+                    : agent.source === "official"
                     ? t("agent.groupOfficial" as Parameters<typeof t>[0])
                     : t("agent.groupCustom" as Parameters<typeof t>[0]),
                   modelLabel(agent.model),
@@ -873,7 +925,8 @@ export const AgentDetailView = ({
               use the same plain ``h-7 w-7`` icon buttons as the Skills
               detail panel; 派驻到项目 is the agent-specific primary CTA. */}
           <div className="flex shrink-0 items-center gap-0.5">
-            <button
+            {!isSystem ? (
+              <button
               type="button"
               onClick={() => setExportOpen(true)}
               title={t("agent.pack.export" as Parameters<typeof t>[0])}
@@ -881,7 +934,8 @@ export const AgentDetailView = ({
               className="flex h-7 w-7 cursor-default items-center justify-center rounded-md text-ink-meta transition-colors hover:bg-surface-soft hover:text-ink-body"
             >
               <Upload className="h-3.5 w-3.5" />
-            </button>
+              </button>
+            ) : null}
             <button
               type="button"
               onClick={() => setCopyConfirmOpen(true)}
@@ -891,7 +945,7 @@ export const AgentDetailView = ({
             >
               <Copy className="h-3.5 w-3.5" />
             </button>
-            {canDelete && (
+            {canDelete && agent.deletable && (
               <button
                 type="button"
                 onClick={() => setDeleteOpen(true)}
@@ -954,8 +1008,11 @@ export const AgentDetailView = ({
           ) : (
             <button
               type="button"
-              onClick={() => setEditingField("description")}
-              className="block w-full rounded px-1 py-0.5 text-left text-sm leading-relaxed text-ink-body transition-colors hover:bg-surface-soft"
+              onClick={() => {
+                if (!isSystem) setEditingField("description");
+              }}
+              disabled={isSystem}
+              className="block w-full rounded px-1 py-0.5 text-left text-sm leading-relaxed text-ink-body transition-colors enabled:hover:bg-surface-soft"
             >
               {agent.description || (
                 <span className="italic text-ink-muted">
@@ -970,11 +1027,11 @@ export const AgentDetailView = ({
             vertical rule separates the deployment status from the slug). */}
         <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink-meta">
           <span>
-            {t("agent.skillsLabel")} {agent.skills.length}
+            {t("agent.skillsLabel")} {skillCount}
           </span>
           <span className="text-ink-muted">·</span>
           <span>
-            {t("agent.tabConnectors")} {agent.connector_types.length}
+            {t("agent.tabConnectors")} {connectorCount}
           </span>
           <span className="text-ink-muted">·</span>
           <span className="font-mono text-2xs">{agent.slug}</span>
@@ -1035,6 +1092,11 @@ export const AgentDetailView = ({
                   ) : null}
                 </span>
               </TabsTrigger>
+              {isSystem ? (
+                <TabsTrigger value="knowledge">
+                  {t("agent.tabKnowledge" as Parameters<typeof t>[0])}
+                </TabsTrigger>
+              ) : null}
               <TabsTrigger value="channels">
                 {t("agent.tabChannels" as Parameters<typeof t>[0])}
               </TabsTrigger>
@@ -1042,36 +1104,86 @@ export const AgentDetailView = ({
           </div>
 
           <TabsContent value="instructions" className="mt-4">
-            <div className="flex flex-col gap-2">
-              <Textarea
-                value={instrDraft}
-                onChange={(e) => setInstrDraft(e.target.value)}
-                rows={24}
-                placeholder={t(
-                  "agent.instructionsPlaceholder" as Parameters<typeof t>[0],
-                )}
-                className="min-h-[480px] text-xs leading-6"
-              />
-              <div className="flex justify-end">
-                <Button
-                  size="sm"
-                  disabled={
-                    savingTab === "instructions" ||
-                    instrDraft === agent.instructions
-                  }
-                  onClick={() =>
-                    saveFields("instructions", {
-                      instructions: instrDraft,
-                    })
-                  }
-                >
-                  {t("agent.save")}
-                </Button>
+            {isSystem ? (
+              <div className="rounded-[14px] border border-surface-border bg-card p-4 text-sm leading-6 text-ink-body">
+                <div className="font-medium text-ink-heading">
+                  {t("agent.valurionInstructionsTitle" as Parameters<typeof t>[0])}
+                </div>
+                <p className="mt-1 text-xs text-ink-meta">
+                  {t("agent.valurionInstructionsHint" as Parameters<typeof t>[0])}
+                </p>
               </div>
-            </div>
+            ) : (
+              <div className="flex flex-col gap-3">
+                <div className="flex items-start justify-between gap-4 rounded-[14px] border border-surface-border bg-card p-4">
+                  <div>
+                    <div className="text-sm font-medium text-ink-heading">
+                      {t(
+                        "agent.inheritValurionInstructions" as Parameters<
+                          typeof t
+                        >[0],
+                      )}
+                    </div>
+                    <p className="mt-1 text-xs leading-5 text-ink-meta">
+                      {t(
+                        "agent.inheritValurionInstructionsHint" as Parameters<
+                          typeof t
+                        >[0],
+                      )}
+                    </p>
+                  </div>
+                  <Switch
+                    checked={agent.inherit_global_instructions}
+                    disabled={savingTab === "inheritance"}
+                    onCheckedChange={(checked) =>
+                      void saveFields("inheritance", {
+                        inherit_global_instructions: checked,
+                      })
+                    }
+                  />
+                </div>
+                <Textarea
+                  value={instrDraft}
+                  onChange={(e) => setInstrDraft(e.target.value)}
+                  rows={24}
+                  placeholder={t(
+                    "agent.instructionsPlaceholder" as Parameters<typeof t>[0],
+                  )}
+                  className="min-h-[480px] text-xs leading-6"
+                />
+                <div className="flex justify-end">
+                  <Button
+                    size="sm"
+                    disabled={
+                      savingTab === "instructions" ||
+                      instrDraft === agent.instructions
+                    }
+                    onClick={() =>
+                      saveFields("instructions", {
+                        instructions: instrDraft,
+                      })
+                    }
+                  >
+                    {t("agent.save")}
+                  </Button>
+                </div>
+              </div>
+            )}
           </TabsContent>
 
           <TabsContent value="skills" className="mt-4">
+            {isSystem ? (
+              <div>
+                <p className="mb-3 text-xs leading-5 text-ink-meta">
+                  {t("agent.allAvailableResourcesHint" as Parameters<typeof t>[0])}
+                </p>
+                <ReadonlyResourceList
+                  items={effectiveResources?.skills ?? []}
+                  emptyText={t("agent.noEffectiveResources" as Parameters<typeof t>[0])}
+                />
+              </div>
+            ) : (
+              <>
             <div className="flex items-center justify-between">
               <p className="text-xs text-ink-meta">
                 {t("agent.skillsSectionHint" as Parameters<typeof t>[0])}
@@ -1153,9 +1265,23 @@ export const AgentDetailView = ({
                 })
               )}
             </div>
+              </>
+            )}
           </TabsContent>
 
           <TabsContent value="connectors" className="mt-4">
+            {isSystem ? (
+              <div>
+                <p className="mb-3 text-xs leading-5 text-ink-meta">
+                  {t("agent.allAvailableResourcesHint" as Parameters<typeof t>[0])}
+                </p>
+                <ReadonlyResourceList
+                  items={effectiveResources?.connectors ?? []}
+                  emptyText={t("agent.noEffectiveResources" as Parameters<typeof t>[0])}
+                />
+              </div>
+            ) : (
+              <>
             <div className="flex items-center justify-between">
               <p className="text-xs text-ink-meta">
                 {t("agent.connectorsSectionHint" as Parameters<typeof t>[0])}
@@ -1248,7 +1374,21 @@ export const AgentDetailView = ({
                 })
               )}
             </div>
+              </>
+            )}
           </TabsContent>
+
+          {isSystem ? (
+            <TabsContent value="knowledge" className="mt-4">
+              <p className="mb-3 text-xs leading-5 text-ink-meta">
+                {t("agent.allAvailableResourcesHint" as Parameters<typeof t>[0])}
+              </p>
+              <ReadonlyResourceList
+                items={effectiveResources?.knowledge_bases ?? []}
+                emptyText={t("agent.noEffectiveResources" as Parameters<typeof t>[0])}
+              />
+            </TabsContent>
+          ) : null}
 
           <TabsContent value="channels" className="mt-4">
             <div className="flex flex-col gap-3">

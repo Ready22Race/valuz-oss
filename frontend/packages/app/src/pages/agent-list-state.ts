@@ -20,3 +20,8 @@ export function isCloudOnlyResource(resource: unknown): boolean {
 export function isCloudOnlyAgent(agent: Agent): boolean {
   return isCloudOnlyResource(agent);
 }
+
+/** Built-in runtime agent whose managed identity and resources are immutable. */
+export function isSystemAgent(agent: Agent): boolean {
+  return agent.kind === "system";
+}
