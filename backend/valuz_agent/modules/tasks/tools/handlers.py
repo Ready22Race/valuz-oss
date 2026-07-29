@@ -176,6 +176,58 @@ async def _check_orchestration_gate(ctx: ExecContext) -> tuple[str, str] | ToolR
     return project_id, agent_slug
 
 
+async def _resolve_task_lead(
+    *,
+    user_id: str,
+    project_id: str,
+    explicit_slug: str | None,
+    conversation_agent_slug: str,
+) -> str:
+    """Who leads a task: explicit > project default > the conversation agent.
+
+    Shared by ``create_task`` and ``draft_task`` on purpose — two launchers
+    disagreeing about the lead is the kind of inconsistency nobody can diagnose
+    from a chat transcript
+    (docs/design/channel-project-binding-and-default-lead.md §4.3).
+
+    The project default is only honoured while it is still a member; a dangling
+    slug (member removed) falls through instead of failing the launch. The
+    conversation agent remains the floor, so a project with no default lead
+    still answers "pull the bot in and ask something".
+    """
+    explicit = (explicit_slug or "").strip()
+    if explicit:
+        return explicit
+
+    from valuz_agent.infra.db import async_unit_of_work
+    from valuz_agent.modules.tasks.resolution import task_session_resolver
+
+    try:
+        async with async_unit_of_work(commit=False) as db:
+            env = await task_session_resolver.resolve_project_env(
+                db, user_id=user_id, project_id=project_id
+            )
+            default_lead = (
+                (getattr(env.project_row, "default_lead_agent_slug", None) or "").strip()
+                if env is not None
+                else ""
+            )
+            if default_lead and await task_session_resolver.member_exists(
+                db,
+                user_id=user_id,
+                project_id=project_id,
+                agent_slug=default_lead,
+            ):
+                return default_lead
+    except Exception:  # noqa: BLE001 — a lookup failure must not block the launch
+        logger.warning(
+            "default lead lookup failed for project %s; using the conversation agent",
+            project_id,
+            exc_info=True,
+        )
+    return (conversation_agent_slug or "").strip()
+
+
 async def _bound_agent_member(sess: Any) -> dict[str, Any] | None:
     """The conversation's own bound agent, shaped like a ``list_members`` row.
 
@@ -395,7 +447,12 @@ async def _draft_task_handler(
     goal: str = (args.get("goal") or "").strip()
     if not goal:
         return ToolResult(content="draft_task: goal is required", is_error=True)
-    lead_agent: str = (args.get("lead_agent_slug") or conversation_agent_slug or "").strip()
+    lead_agent = await _resolve_task_lead(
+        user_id=ctx.user_id,
+        project_id=project_id,
+        explicit_slug=args.get("lead_agent_slug"),
+        conversation_agent_slug=conversation_agent_slug,
+    )
     if not lead_agent:
         return ToolResult(
             content="draft_task: no lead_agent_slug given and conversation has no agent",
@@ -565,7 +622,12 @@ async def _create_task_handler(
     goal: str = (args.get("goal") or "").strip()
     if not goal:
         return ToolResult(content="create_task: goal is required", is_error=True)
-    lead_agent: str = (args.get("lead_agent") or conversation_agent_slug or "").strip()
+    lead_agent = await _resolve_task_lead(
+        user_id=ctx.user_id,
+        project_id=project_id,
+        explicit_slug=args.get("lead_agent"),
+        conversation_agent_slug=conversation_agent_slug,
+    )
     if not lead_agent:
         return ToolResult(
             content="create_task: no lead_agent given and conversation has no agent",

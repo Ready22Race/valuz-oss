@@ -17,6 +17,7 @@ import {
   TabsTrigger,
 } from "@valuz/ui";
 import {
+  BindChatDialog,
   CreateAutomationDialog,
   DeployAgentsDialog,
   ActivityFeedList,
@@ -24,6 +25,7 @@ import {
 } from "@valuz/app/components";
 import { toast } from "sonner";
 import {
+  channelsApi,
   projectsApi,
   ApiError,
   getEntityOrigin,
@@ -251,6 +253,11 @@ export const ProjectDetailPage = () => {
   // "Agents" [+] opens the same dialog the project tasks page uses.
   const [libraryAgents, setLibraryAgents] = useState<Agent[]>([]);
   const [addAgentOpen, setAddAgentOpen] = useState(false);
+  const [bindChatOpen, setBindChatOpen] = useState(false);
+  const [chatDeleteTarget, setChatDeleteTarget] = useState<string | null>(null);
+  const [chatBindings, setChatBindings] = useState<
+    { id: string; name: string }[]
+  >([]);
 
   const loadMembers = useCallback(async () => {
     if (!id) return;
@@ -1053,6 +1060,93 @@ export const ProjectDetailPage = () => {
     void revealInFinder(locateArtifactFile(selectedArtifactPath).absolutePath);
   }, [locateArtifactFile, selectedArtifactPath, revealInFinder]);
 
+  const loadChatBindings = useCallback(async () => {
+    try {
+      const rows = await channelsApi.listChatBindings(id);
+      setChatBindings(
+        rows.map((row) => ({
+          id: row.external_chat_id,
+          name: row.external_chat_name || row.external_chat_id,
+          // Module-level ``t``: putting the hook's ``t`` in this callback's
+          // deps is the pattern that once turned a panel render into a
+          // refetch storm (see .claude/rules/frontend.md).
+          platformLabel:
+            row.platform === "wecom_aibot"
+              ? _t("project.platformWecom" as Parameters<typeof _t>[0])
+              : _t("project.platformFeishu" as Parameters<typeof _t>[0]),
+          createdByValuz: row.created_by_valuz ?? false,
+          needsJoin: row.needs_join ?? false,
+        })),
+      );
+    } catch {
+      // A channel-less install simply has no bindings, and a failed refresh
+      // should leave what is on screen alone — blanking the list made a
+      // transient error look like every binding had vanished.
+      setChatBindings((current) => current);
+    }
+  }, [id]);
+
+  // Keyed on the dialog being shut rather than on a callback from inside it:
+  // every close path (Cancel, the X, Escape, clicking away) lands here, and
+  // unlinking or dissolving a group in there changes the panel too.
+  useEffect(() => {
+    if (!bindChatOpen) void loadChatBindings();
+  }, [bindChatOpen, loadChatBindings]);
+
+  const handleJoinChat = async (externalChatId: string) => {
+    try {
+      const link = await channelsApi.feishuChatLink(externalChatId);
+      if (link) {
+        window.open(link, "_blank", "noreferrer");
+        return;
+      }
+      toast.error(
+        t("project.createChatLinkMissing" as Parameters<typeof t>[0]),
+      );
+    } catch {
+      toast.error(t("project.createChatJoin" as Parameters<typeof t>[0]));
+    }
+  };
+
+  const handleDeleteChat = async (externalChatId: string) => {
+    try {
+      await channelsApi.deleteFeishuChat(externalChatId);
+      toast.success(t("project.deleteChatDone" as Parameters<typeof t>[0]));
+      // Gone the moment the server says so — the reload below reconciles.
+      setChatBindings((prev) => prev.filter((c) => c.id !== externalChatId));
+      await loadChatBindings();
+    } catch {
+      toast.error(t("project.deleteChat" as Parameters<typeof t>[0]));
+    }
+  };
+
+  const handleUnbindChat = async (externalChatId: string) => {
+    try {
+      await channelsApi.unbindChat(externalChatId);
+      toast.success(t("project.chatBindingRemoved" as Parameters<typeof t>[0]));
+      setChatBindings((prev) => prev.filter((c) => c.id !== externalChatId));
+      await loadChatBindings();
+    } catch {
+      toast.error(t("project.saveFailed" as Parameters<typeof t>[0]));
+    }
+  };
+
+  const handleSetDefaultLead = async (slug: string | null) => {
+    const previous = project;
+    // Optimistic: the crown should move the moment it is clicked; a failed
+    // write puts it back rather than leaving the UI ahead of the server.
+    setProject((current) =>
+      current ? { ...current, default_lead_agent_slug: slug } : current,
+    );
+    try {
+      const updated = await projectsApi.setDefaultLead(id, slug);
+      setProject(updated);
+    } catch {
+      setProject(previous);
+      toast.error(t("project.saveFailed" as Parameters<typeof t>[0]));
+    }
+  };
+
   const handleInstructionsChange = async (md: string) => {
     setInstructions(md);
     try {
@@ -1233,6 +1327,13 @@ export const ProjectDetailPage = () => {
         instructions={instructions}
         onInstructionsChange={handleInstructionsChange}
         members={members}
+        defaultLeadSlug={project?.default_lead_agent_slug ?? null}
+        chatBindings={chatBindings}
+        onBindChat={() => setBindChatOpen(true)}
+        onUnbindChat={(chatId) => void handleUnbindChat(chatId)}
+        onJoinChat={(chatId) => void handleJoinChat(chatId)}
+        onDeleteChat={(chatId) => setChatDeleteTarget(chatId)}
+        onSetDefaultLead={(slug) => void handleSetDefaultLead(slug)}
         onAddMember={() => setAddAgentOpen(true)}
         onOpenMember={openMember}
         onRemoveMember={(slug) => setMemberDeleteTarget(slug)}
@@ -1358,6 +1459,7 @@ export const ProjectDetailPage = () => {
     panelSetCollapsed,
     instructions,
     members,
+    chatBindings,
     addedKbTree,
     bindings,
     fileTree,
@@ -1662,6 +1764,29 @@ export const ProjectDetailPage = () => {
               }
             : undefined
         }
+      />
+
+      <DeleteConfirmDialog
+        open={chatDeleteTarget !== null}
+        onOpenChange={(next) => {
+          if (!next) setChatDeleteTarget(null);
+        }}
+        itemName={
+          chatBindings.find((c) => c.id === chatDeleteTarget)?.name ?? undefined
+        }
+        description={t("project.deleteChatDesc" as Parameters<typeof t>[0])}
+        onConfirm={() => {
+          const target = chatDeleteTarget;
+          setChatDeleteTarget(null);
+          if (target) void handleDeleteChat(target);
+        }}
+      />
+
+      <BindChatDialog
+        open={bindChatOpen}
+        onOpenChange={setBindChatOpen}
+        projectId={id}
+        onBound={loadChatBindings}
       />
 
       <DeployAgentsDialog

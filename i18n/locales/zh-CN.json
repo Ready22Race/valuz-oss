@@ -1107,7 +1107,30 @@
     "initialFilesTooLarge": "文件夹过大（超过 {maxFiles} 个文件或 {maxMb}MB），请精简后重试",
     "initialFilesUploading": "正在上传初始文件…",
     "initialFilesUploaded": "初始文件上传完成（{count} 个）",
-    "initialFilesFailed": "初始文件上传失败，可稍后在项目里重新上传"
+    "initialFilesFailed": "初始文件上传失败，可稍后在项目里重新上传",
+    "chatBindingsTitle": "关联群聊",
+    "bindChat": "关联飞书群",
+    "unbindChat": "解除关联",
+    "chatBindingsEmpty": "尚未关联群聊。关联后，群里的对话会进入这个项目。",
+    "bindChatDialogTitle": "关联飞书群",
+    "bindChatDialogDesc": "新建一个群，或选择机器人已加入的群；关联后群里的消息都会进入这个项目。",
+    "bindChatEmpty": "没有可关联的群。请先在飞书中建群并把机器人拉进去。",
+    "bindChatBoundElsewhere": "已关联其它项目",
+    "chatBindingSaved": "已关联",
+    "chatBindingRemoved": "已解除关联",
+    "createChat": "新建群并关联",
+    "createChatName": "群名称",
+    "createChatHint": "机器人会创建群并自动关联到本项目，创建后用下面的链接加入。",
+    "createChatJoin": "加入群",
+    "createChatDone": "群已创建并关联",
+    "createChatLinkMissing": "群已创建，请在飞书中按群名搜索加入。",
+    "platformFeishu": "飞书",
+    "platformWecom": "企业微信",
+    "bindChatExistingTitle": "已有的群",
+    "bindChatShort": "关联",
+    "deleteChat": "解散群",
+    "deleteChatDone": "群已解散",
+    "deleteChatDesc": "该群由 Valuz 创建。解散后群和聊天记录都会消失，且无法恢复。"
   },
   "schedule": {
     "create": "创建定时任务",
@@ -2287,7 +2310,9 @@
       "cancelSelect": "取消",
       "groupDesc": "描述（选填）",
       "groupDescPlaceholder": "这组 agent 是做什么的"
-    }
+    },
+    "setDefaultLead": "设为默认 lead",
+    "clearDefaultLead": "取消默认 lead"
   },
   "task": {
     "triggeredByChat": "由对话触发",

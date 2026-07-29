@@ -15,6 +15,8 @@ import {
   Loader2,
   Paperclip,
   Trash2,
+  Unlink,
+  Crown,
   X,
   Plus,
   MoreHorizontal,
@@ -29,6 +31,8 @@ import {
   AlertTriangle,
   GitBranch,
   Link2,
+  LogIn,
+  MessageSquare,
   MessageSquarePlus,
   Sparkles,
 } from "lucide-react";
@@ -240,6 +244,25 @@ export interface ProjectContextPanelProps {
   onOpenMember?: (slug: string) => void;
   /** Remove a member from the project (undeploy). The host is expected to confirm. */
   onRemoveMember?: (slug: string) => void;
+  /** Member slug that leads tasks when none is named; null/undefined = unset. */
+  defaultLeadSlug?: string | null;
+  /** Set (or clear, with null) the project's default task lead. */
+  onSetDefaultLead?: (slug: string | null) => void;
+  /** IM groups bound to this project ("this group is that project"). */
+  chatBindings?: {
+    id: string;
+    name: string;
+    platformLabel?: string;
+    /** Valuz created it, so the bot owns it and may dissolve it. */
+    createdByValuz?: boolean;
+    /** …and nobody has joined yet, so a join link is the only way in. */
+    needsJoin?: boolean;
+  }[];
+  /** Open the group picker; undefined hides the section entirely. */
+  onBindChat?: () => void;
+  onUnbindChat?: (externalChatId: string) => void;
+  onJoinChat?: (externalChatId: string) => void;
+  onDeleteChat?: (externalChatId: string) => void;
   skills?: ProjectSkill[];
   onAddSkill?: () => void;
   onCreateProjectSkill?: () => void;
@@ -953,6 +976,13 @@ export const ProjectDetailContextPanel = ({
   onAddMember,
   onOpenMember,
   onRemoveMember,
+  defaultLeadSlug,
+  onSetDefaultLead,
+  chatBindings,
+  onBindChat,
+  onUnbindChat,
+  onJoinChat,
+  onDeleteChat,
   skills,
   onAddSkill,
   onRemoveSkill,
@@ -1439,6 +1469,8 @@ export const ProjectDetailContextPanel = ({
               <div>
                 {members.map((member, index) => {
                   const isOrphan = member.orphan === true;
+                  const isDefaultLead =
+                    !!defaultLeadSlug && member.slug === defaultLeadSlug;
                   return (
                     <div key={member.id}>
                       {index > 0 ? (
@@ -1500,6 +1532,53 @@ export const ProjectDetailContextPanel = ({
                               </div>
                             </div>
                           </button>
+                          {onSetDefaultLead && !isOrphan && (
+                            // The current lead stays visible without hovering —
+                            // "who leads this project" should be readable at a
+                            // glance, not discovered by pointing at rows.
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.currentTarget.blur();
+                                onSetDefaultLead(
+                                  isDefaultLead ? null : member.slug,
+                                );
+                              }}
+                              className={`flex h-6 w-6 shrink-0 items-center justify-center rounded transition-opacity ${
+                                isDefaultLead
+                                  ? "text-brand opacity-100"
+                                  : "text-ink-muted opacity-0 hover:text-ink-body group-hover:opacity-100"
+                              }`}
+                              title={
+                                isDefaultLead
+                                  ? t(
+                                      "agent.clearDefaultLead" as Parameters<
+                                        typeof t
+                                      >[0],
+                                    )
+                                  : t(
+                                      "agent.setDefaultLead" as Parameters<
+                                        typeof t
+                                      >[0],
+                                    )
+                              }
+                              aria-label={
+                                isDefaultLead
+                                  ? t(
+                                      "agent.clearDefaultLead" as Parameters<
+                                        typeof t
+                                      >[0],
+                                    )
+                                  : t(
+                                      "agent.setDefaultLead" as Parameters<
+                                        typeof t
+                                      >[0],
+                                    )
+                              }
+                            >
+                              <Crown className="h-3.5 w-3.5" />
+                            </button>
+                          )}
                           {onRemoveMember && (
                             <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
                               <button
@@ -1554,8 +1633,10 @@ export const ProjectDetailContextPanel = ({
         >
           <div className="-mr-3 max-h-[25vh] overflow-y-auto overflow-x-hidden pr-3">
             {worktrees.map((wt, index) => {
-              const verified = wt.dirtyFiles !== null && wt.aheadCommits !== null;
-              const clean = verified && wt.dirtyFiles === 0 && wt.aheadCommits === 0;
+              const verified =
+                wt.dirtyFiles !== null && wt.aheadCommits !== null;
+              const clean =
+                verified && wt.dirtyFiles === 0 && wt.aheadCommits === 0;
               const statusText = !verified
                 ? t("project.worktreeUnknown" as Parameters<typeof t>[0])
                 : clean
@@ -2214,6 +2295,139 @@ export const ProjectDetailContextPanel = ({
                 </p>
               )}
             </>
+          )}
+        </AccordionSection>
+      )}
+      {/* IM groups bound to this project. A group standing for a project is
+          how channel conversations get a project without anyone typing its
+          name; see docs/design/channel-project-binding-and-default-lead.md. */}
+      {chatBindings !== undefined && onBindChat && (
+        <AccordionSection
+          {...sectionState("chatBindings")}
+          title={t("project.chatBindingsTitle" as Parameters<typeof t>[0])}
+          icon={MessageSquare}
+          iconClassName="text-context-icon"
+          count={chatBindings.length || undefined}
+          action={
+            <button
+              type="button"
+              onClick={(event) => {
+                event.currentTarget.blur();
+                onBindChat();
+              }}
+              className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-muted"
+              title={t("project.bindChat" as Parameters<typeof t>[0])}
+            >
+              <Plus className="h-3.5 w-3.5" />
+            </button>
+          }
+        >
+          {chatBindings.length > 0 ? (
+            <div className="flex flex-col">
+              {chatBindings.map((chat) => (
+                <div
+                  key={chat.id}
+                  className="group relative flex items-center gap-2.5 rounded-lg px-2 py-2 hover:bg-[#f7f8fa]"
+                >
+                  <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-brand/8 text-brand">
+                    <MessageSquare className="h-3 w-3" />
+                  </div>
+                  <div className="min-w-0 flex-1 truncate text-xs text-ink-heading">
+                    {chat.platformLabel ? (
+                      <span className="text-ink-meta">
+                        {chat.platformLabel} ·{" "}
+                      </span>
+                    ) : null}
+                    {chat.name}
+                  </div>
+                  {/* Same actions the picker offers, in the same order —
+                      whichever surface you reach a group from behaves alike. */}
+                  <TooltipProvider delayDuration={0}>
+                    <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                      {onJoinChat && chat.needsJoin && (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.currentTarget.blur();
+                                onJoinChat(chat.id);
+                              }}
+                              className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-muted"
+                              aria-label={t(
+                                "project.createChatJoin" as Parameters<
+                                  typeof t
+                                >[0],
+                              )}
+                            >
+                              <LogIn className="h-3.5 w-3.5" />
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            {t(
+                              "project.createChatJoin" as Parameters<
+                                typeof t
+                              >[0],
+                            )}
+                          </TooltipContent>
+                        </Tooltip>
+                      )}
+                      {onUnbindChat && (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.currentTarget.blur();
+                                onUnbindChat(chat.id);
+                              }}
+                              className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-muted"
+                              aria-label={t(
+                                "project.unbindChat" as Parameters<typeof t>[0],
+                              )}
+                            >
+                              <Unlink className="h-3.5 w-3.5" />
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            {t("project.unbindChat" as Parameters<typeof t>[0])}
+                          </TooltipContent>
+                        </Tooltip>
+                      )}
+                      {onDeleteChat && chat.createdByValuz && (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.currentTarget.blur();
+                                onDeleteChat(chat.id);
+                              }}
+                              className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-red-50 hover:text-red-600"
+                              aria-label={t(
+                                "project.deleteChat" as Parameters<typeof t>[0],
+                              )}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            {t("project.deleteChat" as Parameters<typeof t>[0])}
+                          </TooltipContent>
+                        </Tooltip>
+                      )}
+                    </div>
+                  </TooltipProvider>
+                </div>
+              ))}
+            </div>
+          ) : (
+            // Matches the knowledge-base empty state: same type scale, same
+            // flush alignment. Two empty states in one panel should not read
+            // as two different components.
+            <p className="text-2xs text-ink-meta">
+              {t("project.chatBindingsEmpty" as Parameters<typeof t>[0])}
+            </p>
           )}
         </AccordionSection>
       )}

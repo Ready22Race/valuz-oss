@@ -376,3 +376,79 @@ async def test_load_enabled_configs_uses_row_owner_not_local_identity(
     assert configs[0].app_id == "cli_app_1"
     assert configs[0].app_secret == "s3cret"
     assert secret_reads == [("commercial-user-1", "channel/feishu/valuz-helper")]
+
+
+def test_inbound_marks_a_p2p_message_as_a_direct_chat() -> None:
+    """The routing rule that keeps DMs out of projects needs the adapter to
+    say which kind of chat the message came from."""
+    for chat_type, expected in (("p2p", True), ("group", False)):
+        event = P2ImMessageReceiveV1(
+            {
+                "schema": "2.0",
+                "header": {"event_id": "evt-3", "event_type": "im.message.receive_v1"},
+                "event": {
+                    "sender": {"sender_id": {"open_id": "ou-user"}},
+                    "message": {
+                        "message_id": "om-msg-3",
+                        "chat_id": "oc-chat",
+                        "chat_type": chat_type,
+                        "message_type": "text",
+                        "content": json.dumps({"text": "你好"}),
+                    },
+                },
+            }
+        )
+        inbound = inbound_from_sdk_event(
+            event,
+            FeishuLongConnectionConfig(
+                channel_instance_id="feishu-main",
+                owner_user_id="u1",
+                agent_slug="valuz-helper",
+                app_id="cli_app_1",
+                app_secret="app-secret",
+            ),
+        )
+        assert inbound.context.is_direct_chat is expected
+
+
+@pytest.mark.asyncio
+async def test_membership_reads_feishu_string_counts() -> None:
+    """Feishu returns user_count as a string, and ``bool("0")`` is True — which
+    read every empty group as occupied, hiding the join link on exactly the
+    groups that needed it."""
+    from valuz_agent.integrations.feishu_long_connection import (
+        FeishuChat,
+        _with_membership,
+    )
+
+    class _Resp:
+        def __init__(self, count: str) -> None:
+            self.data = SimpleNamespace(user_count=count)
+
+        def success(self) -> bool:
+            return True
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            counts = {"oc-empty": "0", "oc-joined": "2"}
+            self.im = SimpleNamespace(
+                v1=SimpleNamespace(
+                    chat=SimpleNamespace(
+                        aget=lambda req: self._get(req, counts),
+                    )
+                )
+            )
+
+        async def _get(self, req, counts):
+            return _Resp(counts[req.chat_id])
+
+    resolved = await _with_membership(
+        _FakeClient(),
+        [
+            FeishuChat(chat_id="oc-empty", name="空群", bot_owned=True),
+            FeishuChat(chat_id="oc-joined", name="有人", bot_owned=True),
+            FeishuChat(chat_id="oc-theirs", name="别人的", bot_owned=False),
+        ],
+    )
+
+    assert [c.has_people for c in resolved] == [False, True, True]

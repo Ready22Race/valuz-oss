@@ -1107,7 +1107,30 @@
     "initialFilesTooLarge": "Folder too large (over {maxFiles} files or {maxMb}MB) — trim it and retry",
     "initialFilesUploading": "Uploading initial files…",
     "initialFilesUploaded": "Initial files uploaded ({count})",
-    "initialFilesFailed": "Initial file upload failed — you can re-upload from the project later"
+    "initialFilesFailed": "Initial file upload failed — you can re-upload from the project later",
+    "chatBindingsTitle": "Linked groups",
+    "bindChat": "Link a Feishu group",
+    "unbindChat": "Unlink",
+    "chatBindingsEmpty": "No group linked yet. Once linked, conversations there run in this project.",
+    "bindChatDialogTitle": "Link a Feishu group",
+    "bindChatDialogDesc": "Create a group, or pick one the bot has joined; messages there run in this project.",
+    "bindChatEmpty": "No groups available. Create one in Feishu and add the bot first.",
+    "bindChatBoundElsewhere": "Linked to another project",
+    "chatBindingSaved": "Linked",
+    "chatBindingRemoved": "Unlinked",
+    "createChat": "Create and link a group",
+    "createChatName": "Group name",
+    "createChatHint": "The bot creates the group and links it to this project; join with the link below.",
+    "createChatJoin": "Join the group",
+    "createChatDone": "Group created and linked",
+    "createChatLinkMissing": "Group created — search for it by name in Feishu to join.",
+    "platformFeishu": "Feishu",
+    "platformWecom": "WeCom",
+    "bindChatExistingTitle": "Existing groups",
+    "bindChatShort": "Link",
+    "deleteChat": "Delete group",
+    "deleteChatDone": "Group deleted",
+    "deleteChatDesc": "Valuz created this group. Deleting it removes the group and its history for good."
   },
   "schedule": {
     "create": "Create Schedule",
@@ -2287,7 +2310,9 @@
       "cancelSelect": "Cancel",
       "groupDesc": "Description (optional)",
       "groupDescPlaceholder": "What is this group of agents for"
-    }
+    },
+    "setDefaultLead": "Set as default lead",
+    "clearDefaultLead": "Clear default lead"
   },
   "task": {
     "triggeredByChat": "Triggered by a conversation",

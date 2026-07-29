@@ -5,7 +5,7 @@ import shutil
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import uuid4
 
 from valuz_agent.adapters import kernel_client
@@ -114,6 +114,9 @@ class ProjectListItem:
 @dataclass
 class ProjectDetail(ProjectListItem):
     instructions_md: str | None = None
+    # Member slug that leads a task when the caller names none. ``None`` = not
+    # configured (the launcher then falls back to the conversation agent).
+    default_lead_agent_slug: str | None = None
 
 
 @dataclass
@@ -124,7 +127,12 @@ class ProjectDeletePreview:
     skill_config_count: int
 
 
-class ProjectMemberCleanup(Protocol):
+class ProjectMembers(Protocol):
+    """The slice of project membership this module needs — sibling datastores
+    are reached through a protocol, never imported directly."""
+
+    async def get(self, user_id: str, project_id: str, agent_slug: str) -> Any: ...
+
     async def delete_by_project(self, user_id: str, project_id: str) -> int: ...
 
 
@@ -161,6 +169,7 @@ def _row_to_detail(
         icon=row.icon,
         instructions_md=instructions_md,
         cwd=cwd,
+        default_lead_agent_slug=row.default_lead_agent_slug,
     )
 
 
@@ -181,6 +190,26 @@ async def project_cwd_by_id(user_id: str, project_id: str) -> str | None:
     if kind == "project":
         return str(_root_path(user_id, row.root_path)) if row.root_path else None
     return str(fs_registry.project_cwd(user_id, row.id, kind, row.root_path))  # type: ignore[arg-type]
+
+
+async def clear_default_lead_if(user_id: str, project_id: str, agent_slug: str) -> bool:
+    """Clear the project's default lead when it points at ``agent_slug``.
+
+    Module-level (like the other cross-module readers here) so the agents module
+    can call it after undeploying a member without importing this module's
+    datastore. Returns whether anything was cleared.
+    """
+    from valuz_agent.infra.db import async_unit_of_work
+    from valuz_agent.modules.projects.datastore import ProjectDatastore
+
+    async with async_unit_of_work(commit=True) as db:
+        ds = ProjectDatastore(db)
+        row = await ds.get_by_id(user_id, project_id)
+        if row is None or row.default_lead_agent_slug != agent_slug:
+            return False
+        row.default_lead_agent_slug = None
+        await ds.update(row)
+        return True
 
 
 async def project_name_map(user_id: str) -> dict[str, str]:
@@ -227,7 +256,7 @@ class ProjectService:
         automation_datastore: AutomationDatastore | None = None,
         skill_datastore: SkillDatastore | None = None,
         connector_datastore: ConnectorDatastore | None = None,
-        member_datastore: ProjectMemberCleanup | None = None,
+        member_datastore: ProjectMembers | None = None,
     ) -> None:
         self._ds = datastore
         self._bus = event_bus
@@ -425,6 +454,32 @@ class ProjectService:
         row.name = name
         await self._ds.update(row)
         return _row_to_detail(row, cwd=await self.resolve_project_cwd(user_id, row))
+
+    async def set_default_lead(
+        self, user_id: str, project_id: str, agent_slug: str | None
+    ) -> ProjectDetail:
+        """Point the project at the member that leads tasks by default.
+
+        ``None``/empty clears it. The slug must name a current member —
+        accepting a stranger would produce a launcher failure much later, far
+        from the mistake.
+        """
+        row = await self._ds.get_by_id(user_id, project_id)
+        if not row:
+            raise KeyError(project_id)
+        slug = (agent_slug or "").strip() or None
+        if slug is not None:
+            if self._members is None:
+                raise ValueError("project members are unavailable")
+            if await self._members.get(user_id, project_id, slug) is None:
+                raise ValueError(f"'{slug}' is not a member of this project")
+        row.default_lead_agent_slug = slug
+        await self._ds.update(row)
+        return _row_to_detail(
+            row,
+            instructions_md=row.instructions_md,
+            cwd=await self.resolve_project_cwd(user_id, row),
+        )
 
     async def update_instructions(
         self, user_id: str, project_id: str, instructions_md: str
