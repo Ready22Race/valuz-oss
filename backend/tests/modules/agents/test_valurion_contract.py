@@ -79,6 +79,25 @@ async def test_ensure_builtin_agent_is_idempotent_and_repairs_managed_fields(db)
     assert repaired.effort == "high"
 
 
+async def test_agent_reads_lazily_install_valurion_for_empty_legacy_owner(db) -> None:
+    svc = AgentService(db)  # type: ignore[arg-type]
+    datastore = AgentDatastore(db)
+
+    assert await datastore.list_agents(OWNER) == []
+
+    rows = await svc.list_agents(OWNER)
+    assert [row.slug for row in rows] == ["valurion"]
+    assert rows[0].kind == "system"
+    assert rows[0].effort == "high"
+
+    # Repeated list reads remain idempotent, and a direct read also recovers a
+    # different legacy owner whose Agent library has never been initialized.
+    assert [row.slug for row in await svc.list_agents(OWNER)] == ["valurion"]
+    direct = await svc.get_agent("empty-owner", "valurion")
+    assert direct.slug == "valurion"
+    assert len(await datastore.list_agents("empty-owner")) == 1
+
+
 async def test_system_agent_managed_fields_and_resources_cannot_be_edited_or_deleted(db) -> None:
     svc = AgentService(db)  # type: ignore[arg-type]
     await svc.ensure_builtin_agent(OWNER)

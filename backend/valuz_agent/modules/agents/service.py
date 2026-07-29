@@ -254,10 +254,16 @@ class AgentService:
     # ------------------------------------------------------------------
 
     async def list_agents(self, user_id: str, source: str | None = None) -> list[AgentRow]:
+        # Migrations can only discover owners that already have persisted
+        # resources.  Ensure the owner-scoped system Agent on the first Agent
+        # library read as a compatibility path for empty legacy accounts.
+        await self.ensure_builtin_agent(user_id)
         return await self._agents.list_agents(user_id, source=source)
 
     async def get_agent(self, user_id: str, slug: str) -> AgentRow:
         row = await self._agents.get_agent(user_id, slug)
+        if row is None and slug == VALURION_SLUG:
+            row = await self.ensure_builtin_agent(user_id)
         if row is None:
             raise AgentNotFoundError(slug)
         return row
