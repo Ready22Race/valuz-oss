@@ -1,4 +1,4 @@
-"""Migration 0028 protects customized Helper data and rewrites live refs."""
+"""Migration 0028 installs Valurion without mutating the legacy Helper."""
 
 from __future__ import annotations
 
@@ -100,6 +100,7 @@ def _insert_agent(
     instructions: str,
     source: str = "official",
     name: str = "Valuz Helper",
+    user_id: str = "owner-1",
 ) -> None:
     conn.execute(
         text(
@@ -110,7 +111,7 @@ def _insert_agent(
                 :instructions, 'claude_agent', 'model-1',
                 '["valuz-handbook"]', '["valuz-search","valuz-stock"]', '[]',
                 'valuz-channel', 'high', 'standard', 'explicit', 1,
-                'full_access', :source, 0, 1, 'bot', :id, 1, 2, 'owner-1'
+                'full_access', :source, 0, 1, 'bot', :id, 1, 2, :user_id
             )
             """
         ),
@@ -123,16 +124,22 @@ def _insert_agent(
             ),
             "instructions": instructions,
             "source": source,
-            "id": f"id-{slug}",
+            "id": f"id-{user_id}-{slug}",
+            "user_id": user_id,
         },
     )
 
 
-def test_unmodified_helper_migrates_in_place_and_rewrites_live_refs() -> None:
+def test_install_valurion_keeps_legacy_helper_and_live_refs_unchanged() -> None:
     engine = create_engine("sqlite:///:memory:")
     with engine.begin() as conn:
         _create_schema(conn)
-        _insert_agent(conn, slug="valuz-helper", instructions="You are the Valuz Helper.")
+        _insert_agent(
+            conn,
+            slug="valuz-helper",
+            instructions="My carefully customized workflow.",
+            name="My Helper",
+        )
         conn.execute(text("INSERT INTO valuz_project_member VALUES ('member-1', 'valuz-helper')"))
         conn.execute(
             text(
@@ -154,13 +161,15 @@ def test_unmodified_helper_migrates_in_place_and_rewrites_live_refs() -> None:
 
         migration = _load()
         migration.op = _Op(conn)
-        migration._migrate_valuz_helper()
+        migration._install_valurion()
 
         rows = (
             conn.execute(
                 text(
-                    "SELECT id, slug, kind, resource_policy, instructions, skills, "
-                    "source, readonly, deletable FROM valuz_agent"
+                    "SELECT id, slug, name, kind, resource_policy, instructions, "
+                    "runtime, model, provider_id, effort, skills, connector_types, "
+                    "source, readonly, deletable "
+                    "FROM valuz_agent ORDER BY slug"
                 )
             )
             .mappings()
@@ -174,66 +183,35 @@ def test_unmodified_helper_migrates_in_place_and_rewrites_live_refs() -> None:
             text("SELECT agent_slug, secret_ref FROM valuz_agent_channel_binding")
         ).one()
 
-    assert len(rows) == 1
-    assert rows[0]["id"] == "id-valuz-helper"
-    assert rows[0]["slug"] == "valurion"
-    assert rows[0]["kind"] == "system"
-    assert rows[0]["resource_policy"] == "all_available"
-    assert rows[0]["instructions"] == ""
-    assert json.loads(rows[0]["skills"]) == []
-    assert rows[0]["source"] == "builtin"
-    assert bool(rows[0]["readonly"]) is True
-    assert bool(rows[0]["deletable"]) is False
-    assert source_ref == "valurion"
-    assert automation_ref == "valurion"
-    assert binding == ("valurion", "channel/feishu/valuz-helper")
+    assert [row["slug"] for row in rows] == ["valurion", "valuz-helper"]
+    valurion, helper = rows
+    assert valurion["kind"] == "system"
+    assert valurion["resource_policy"] == "all_available"
+    assert valurion["instructions"] == ""
+    assert valurion["runtime"] == "claude_agent"
+    assert valurion["model"] == "claude-sonnet-4-6"
+    assert valurion["provider_id"] is None
+    assert valurion["effort"] == "high"
+    assert json.loads(valurion["skills"]) == []
+    assert valurion["source"] == "builtin"
+    assert bool(valurion["readonly"]) is True
+    assert bool(valurion["deletable"]) is False
+    assert helper["id"] == "id-owner-1-valuz-helper"
+    assert helper["name"] == "My Helper"
+    assert helper["instructions"] == "My carefully customized workflow."
+    assert json.loads(helper["skills"]) == ["valuz-handbook"]
+    assert json.loads(helper["connector_types"]) == ["valuz-search", "valuz-stock"]
+    assert helper["kind"] == "standard"
+    assert helper["resource_policy"] == "explicit"
+    assert helper["source"] == "official"
+    assert bool(helper["readonly"]) is False
+    assert bool(helper["deletable"]) is True
+    assert source_ref == "valuz-helper"
+    assert automation_ref == "valuz-helper"
+    assert binding == ("valuz-helper", "channel/feishu/valuz-helper")
 
 
-def test_customized_helper_is_deep_copied_before_canonical_repair() -> None:
-    engine = create_engine("sqlite:///:memory:")
-    with engine.begin() as conn:
-        _create_schema(conn)
-        _insert_agent(
-            conn,
-            slug="valuz-helper",
-            instructions="My carefully customized workflow.",
-            name="My Helper",
-        )
-
-        migration = _load()
-        migration.op = _Op(conn)
-        migration._migrate_valuz_helper()
-
-        rows = (
-            conn.execute(
-                text(
-                    "SELECT slug, name, instructions, runtime, model, provider_id, "
-                    "effort, skills, connector_types, kind, resource_policy, source "
-                    "FROM valuz_agent ORDER BY slug"
-                )
-            )
-            .mappings()
-            .all()
-        )
-
-    assert [row["slug"] for row in rows] == ["valurion", "valuz-helper-copy"]
-    canonical, copy = rows
-    assert canonical["kind"] == "system"
-    assert canonical["instructions"] == ""
-    assert copy["name"] == "My Helper Copy"
-    assert copy["instructions"] == "My carefully customized workflow."
-    assert copy["runtime"] == "claude_agent"
-    assert copy["model"] == "model-1"
-    assert copy["provider_id"] == "valuz-channel"
-    assert copy["effort"] == "high"
-    assert json.loads(copy["skills"]) == ["valuz-handbook"]
-    assert json.loads(copy["connector_types"]) == ["valuz-search", "valuz-stock"]
-    assert copy["kind"] == "standard"
-    assert copy["resource_policy"] == "explicit"
-    assert copy["source"] == "user"
-
-
-def test_existing_valurion_wins_when_legacy_helper_also_exists() -> None:
+def test_existing_valurion_and_legacy_helper_are_both_left_unchanged() -> None:
     engine = create_engine("sqlite:///:memory:")
     with engine.begin() as conn:
         _create_schema(conn)
@@ -264,7 +242,7 @@ def test_existing_valurion_wins_when_legacy_helper_also_exists() -> None:
 
         migration = _load()
         migration.op = _Op(conn)
-        migration._migrate_valuz_helper()
+        migration._install_valurion()
 
         rows = (
             conn.execute(
@@ -277,14 +255,89 @@ def test_existing_valurion_wins_when_legacy_helper_also_exists() -> None:
             .all()
         )
 
-    assert [row["slug"] for row in rows] == ["valurion", "valuz-helper-copy"]
-    canonical, copy = rows
-    assert canonical["id"] == "id-valurion"
-    assert canonical["instructions"] == ""
-    assert canonical["runtime"] == "codex"
-    assert canonical["model"] == "gpt-existing"
-    assert canonical["provider_id"] == "provider-existing"
-    assert canonical["effort"] == "xhigh"
-    assert canonical["kind"] == "system"
-    assert copy["instructions"] == "My customized legacy workflow."
-    assert copy["kind"] == "standard"
+    assert [row["slug"] for row in rows] == ["valurion", "valuz-helper"]
+    valurion, helper = rows
+    assert valurion["id"] == "id-owner-1-valurion"
+    assert valurion["instructions"] == "Existing Valurion instructions."
+    assert valurion["runtime"] == "codex"
+    assert valurion["model"] == "gpt-existing"
+    assert valurion["provider_id"] == "provider-existing"
+    assert valurion["effort"] == "xhigh"
+    assert valurion["kind"] == "system"
+    assert helper["id"] == "id-owner-1-valuz-helper"
+    assert helper["instructions"] == "My customized legacy workflow."
+    assert helper["kind"] == "standard"
+
+
+def test_install_valurion_is_idempotent() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    with engine.begin() as conn:
+        _create_schema(conn)
+        _insert_agent(conn, slug="valuz-helper", instructions="Keep me.")
+
+        migration = _load()
+        migration.op = _Op(conn)
+        migration._install_valurion()
+        migration._install_valurion()
+
+        slugs = list(conn.execute(text("SELECT slug FROM valuz_agent ORDER BY slug")).scalars())
+
+    assert slugs == ["valurion", "valuz-helper"]
+
+
+def test_uninstall_valurion_only_removes_the_system_builtin_row() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    with engine.begin() as conn:
+        _create_schema(conn)
+        _insert_agent(
+            conn,
+            slug="valuz-helper",
+            instructions="Keep legacy helper.",
+        )
+        _insert_agent(
+            conn,
+            slug="valurion",
+            instructions="Keep user-owned same-slug Agent.",
+            source="custom",
+            user_id="owner-2",
+        )
+
+        migration = _load()
+        migration.op = _Op(conn)
+        migration._install_valurion()
+        conn.execute(
+            text(
+                """
+                UPDATE valuz_agent
+                SET kind = 'system', source = 'builtin', readonly = 1, deletable = 0
+                WHERE user_id = 'owner-1' AND slug = 'valurion'
+                """
+            )
+        )
+        migration._uninstall_valurion()
+
+        rows = (
+            conn.execute(
+                text(
+                    "SELECT user_id, slug, source, instructions "
+                    "FROM valuz_agent ORDER BY user_id, slug"
+                )
+            )
+            .mappings()
+            .all()
+        )
+
+    assert rows == [
+        {
+            "user_id": "owner-1",
+            "slug": "valuz-helper",
+            "source": "official",
+            "instructions": "Keep legacy helper.",
+        },
+        {
+            "user_id": "owner-2",
+            "slug": "valurion",
+            "source": "custom",
+            "instructions": "Keep user-owned same-slug Agent.",
+        },
+    ]

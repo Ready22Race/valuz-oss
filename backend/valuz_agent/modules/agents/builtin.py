@@ -8,12 +8,12 @@ are deliberately not copied into this row.
 from __future__ import annotations
 
 VALURION_SLUG = "valurion"
-LEGACY_VALUZ_HELPER_SLUG = "valuz-helper"
 VALURION_NAME = "Valurion"
 VALURION_DESCRIPTION = (
     "Your built-in assistant with access to all resources currently available to you."
 )
 VALURION_AVATAR = "bot"
+VALURION_DEFAULT_EFFORT = "high"
 
 SYSTEM_MANAGED_FIELDS: dict[str, object] = {
     "slug": VALURION_SLUG,
@@ -33,18 +33,11 @@ SYSTEM_MANAGED_FIELDS: dict[str, object] = {
     "avatar": VALURION_AVATAR,
 }
 
-
-def canonical_agent_slug(slug: str) -> str:
-    """Resolve the compatibility read alias without permitting legacy writes."""
-    return VALURION_SLUG if slug == LEGACY_VALUZ_HELPER_SLUG else slug
-
-
 __all__ = [
-    "LEGACY_VALUZ_HELPER_SLUG",
     "SYSTEM_MANAGED_FIELDS",
     "VALURION_AVATAR",
+    "VALURION_DEFAULT_EFFORT",
     "VALURION_DESCRIPTION",
     "VALURION_NAME",
     "VALURION_SLUG",
-    "canonical_agent_slug",
 ]
