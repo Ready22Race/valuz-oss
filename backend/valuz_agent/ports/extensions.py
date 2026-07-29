@@ -50,10 +50,6 @@ from valuz_agent.ports.runtime_availability import RuntimeAvailabilityPort
 from valuz_agent.ports.sandbox_allocator import BootSingletonAllocator, SandboxAllocatorPort
 from valuz_agent.ports.sandbox_credential import SandboxCredentialVerifierPort
 from valuz_agent.ports.sandbox_policy import AllowAllSandboxPolicy, SandboxPolicyPort
-from valuz_agent.ports.session_observations import (
-    InProcessSessionObservations,
-    SessionObservationsPort,
-)
 from valuz_agent.ports.skill_lifecycle import NoopSkillLifecycleHook, SkillLifecycleHook
 
 
@@ -82,10 +78,6 @@ class Extensions:
         # fail-closed policy. Separate from ``billing`` on purpose — gating is
         # not metering (see commercial ADR-012).
         self.sandbox_policy: SandboxPolicyPort = AllowAllSandboxPolicy()
-        # Host observations injected onto a session's SSE stream (sandbox
-        # boot progress). In-process fan-out is complete for a single-replica
-        # host; a multi-replica overlay rebinds this with its own transport.
-        self.session_observations: SessionObservationsPort = InProcessSessionObservations()
         # Resolve which kernel serves a given owner (② control face). OSS default
         # returns "use the process/global kernel client" for everyone — single
         # in-process / single boot-sandbox behavior unchanged. The commercial
