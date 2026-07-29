@@ -607,6 +607,31 @@ def _translate_kernel_event(
             data,
         )
 
+    if kernel_type == "sandbox_status":
+        # Execution-sandbox lifecycle, emitted by the HOST (a commercial
+        # allocator), not by a runtime. It fills the one window where the
+        # session stream is otherwise silent: ``run_turn`` blocks on the
+        # allocator provisioning a sandbox — tens of seconds on a cold boot —
+        # and until that kernel is up there is no live bus and no persisted
+        # row, so the client sees only heartbeats.
+        #
+        # ``phase`` is ``starting`` (the allocator decided to provision; no
+        # instance id yet) or ``ready`` (the kernel answered health and the
+        # lease is stored). A reuse — the fast path — emits nothing: nothing
+        # started. Live-only (the host emits it via ``emit_live_event``), so it
+        # never appears on history replay; a client that reconnects mid-boot
+        # simply misses it and learns the sandbox is up when the turn's first
+        # real event arrives.
+        return "session.sandbox_status", _with_message_id(
+            {
+                "phase": _stringify(data.get("phase") or ""),
+                "scope": _stringify(data.get("scope") or ""),
+                "instance_id": _stringify(data.get("instance_id") or ""),
+                "elapsed_ms": _stringify(data.get("elapsed_ms") or 0),
+            },
+            data,
+        )
+
     if kernel_type in (
         "bg_task_started",
         "bg_task_progress",
