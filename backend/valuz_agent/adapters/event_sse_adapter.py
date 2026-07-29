@@ -52,6 +52,13 @@ POLL_INTERVAL_SECONDS = 0.3
 # live responsiveness.
 DB_BACKFILL_INTERVAL_SECONDS = 2.0
 IDLE_HEARTBEAT_SECONDS = 15.0
+# How often an attached live tap re-checks that it is still bound to the kernel
+# serving its session (see ``_follow_session_kernel``). This is the ceiling on
+# how long a per-turn instance swap can starve the stream of live-only frames,
+# so it tracks the backfill cadence rather than being cheaper: one peek is a
+# single registry row read, against the durable page this stream already reads
+# on the same interval.
+KERNEL_REBIND_POLL_SECONDS = 2.0
 
 
 # History read-routing. Reads are UNIFIED through the DataService: whenever a
@@ -753,6 +760,52 @@ async def list_events_window(
     return TurnWindow(items=_items_to_frames(window.items), has_more=window.has_more)
 
 
+async def _follow_session_kernel(user_id: str, session_id: str, queue: asyncio.Queue[Any]) -> None:
+    """Drain the session's CURRENT kernel until it stops being the current one.
+
+    A subscription is not self-correcting: ``subscribe_session_events_existing``
+    resolves the kernel ONCE, the kernel's ``events/stream`` is an unbounded
+    loop, and the host's HTTP client sets no read timeout — so the iterator only
+    ends when that sandbox dies. Under per-turn chat allocation the session is
+    handed to a NEW instance between turns while the previous one stays RUNNING
+    (it is reclaimed by its TTL, not stopped at swap time — stopping it would
+    kill the previous turn's tail work, which is exactly what the post-turn
+    bg-linger clamp protects). The old subscription therefore never errors: it
+    just goes silent forever while the new instance streams to nobody, and every
+    live-only frame — ``text_delta`` and the rest, which the DB sink drops — is
+    lost for the rest of the connection. What the client still gets is the 2s
+    durable backfill, i.e. persisted events in batches and no token streaming.
+
+    Racing the drain against an identity watch is what turns "subscribed" back
+    into "subscribed to the RIGHT kernel". Returning hands control to the
+    caller's retry loop, which re-peeks and binds to the new instance.
+    """
+    bound = await kernel_client.current_kernel_id(user_id, session_id)
+    if bound is None:
+        return  # no live kernel — caller backs off and re-peeks
+
+    async def _drain() -> None:
+        async for item in kernel_client.subscribe_session_events_existing(user_id, session_id):
+            await queue.put(item)
+
+    async def _watch_for_rebind() -> None:
+        while True:
+            await asyncio.sleep(KERNEL_REBIND_POLL_SECONDS)
+            if await kernel_client.current_kernel_id(user_id, session_id) != bound:
+                return
+
+    drain = asyncio.create_task(_drain(), name=f"sse-drain-{session_id}")
+    watch = asyncio.create_task(_watch_for_rebind(), name=f"sse-rebind-{session_id}")
+    try:
+        done, _pending = await asyncio.wait({drain, watch}, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            task.result()  # surface a drain failure to the caller's backoff
+    finally:
+        for task in (drain, watch):
+            task.cancel()
+        await asyncio.gather(drain, watch, return_exceptions=True)
+
+
 async def iter_events_sse(
     session_id: str,
     user_id: str,
@@ -816,10 +869,7 @@ async def iter_events_sse(
         # below serves persisted events from the DataService).
         while True:
             try:
-                async for item in kernel_client.subscribe_session_events_existing(
-                    owner_id, session_id
-                ):
-                    await queue.put(item)
+                await _follow_session_kernel(owner_id, session_id, queue)
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 — unreachable sandbox → retry later
