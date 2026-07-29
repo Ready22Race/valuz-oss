@@ -74,3 +74,22 @@ def test_only_step_one_differs() -> None:
     assert "1. PLAN FIRST." in DISPATCH_PLAYBOOK
     assert "1. READ THE PLAN." in COMMITTED_LEAD_PLAYBOOK
     assert "DO NOT call plan_task" in COMMITTED_LEAD_PLAYBOOK
+
+
+def test_chat_playbook_states_the_routing_once() -> None:
+    """It is injected into EVERY project chat session, so its size is a
+    per-conversation tax. It used to state the same status routing three
+    times (Step 0, a "Reviving a … lead" section, and a "Quick rules of
+    thumb" recap that was a strict subset of both) — and the copies
+    disagreed about whether a halted task needs resume_task before inject.
+    """
+    from valuz_agent.adapters.agent_resolver import CHAT_TASK_PLAYBOOK as chat
+
+    assert "Quick rules of thumb" not in chat
+    assert "Reviving a paused/blocked/stopped/completed lead" not in chat
+    # inject_into_task revives a halted task itself (recovery.inject_or_revive)
+    # — prescribing resume-then-inject costs the model an extra call.
+    assert "resume_task`` first, then inject" not in chat
+    assert "TASK_RESUMED" in chat
+    # The one thing inject genuinely cannot do must still be stated.
+    assert "abandoned" in chat

@@ -472,12 +472,11 @@ task the user meant to amend is the #1 failure mode.
      task_id)`` to read its current subtask DAG (keys, agents, statuses).
   b. Route by the task's status — the goal is to touch SUBTASKS of the
      EXISTING task, not spawn a new task:
-       - ``active`` / ``paused`` → ``inject_into_task(task_id, text)`` with
-         a clear instruction ("加一个子任务 X：…" / "把子任务 Y 改成 …" /
-         "删掉子任务 Z"). The running lead turns it into modify_plan +
-         dispatch. (For ``paused``, ``resume_task`` first, then inject.)
-       - ``blocked`` / ``stopped`` → ``resume_task(task_id)`` to revive the
-         lead, then ``inject_into_task`` with the subtask change.
+       - ``active`` / ``paused`` / ``blocked`` / ``stopped`` →
+         ``inject_into_task(task_id, text)`` with a clear instruction
+         ("加一个子任务 X：…" / "把子任务 Y 改成 …"). ONE call: a halted task
+         is revived automatically (the reply says ``reason=TASK_RESUMED``)
+         and the running lead turns the text into modify_plan + dispatch.
        - ``completed`` → **区分场景** (judge the user's intent):
            · SUPPLEMENT / ADJUST subtasks of the SAME goal ("再补一个子任务"
              / "那一步重做一下") → ``resume_task(task_id)`` to REOPEN it
@@ -543,46 +542,12 @@ You may modify the plan of a DRAFT task directly with ``modify_plan``
 6. ABANDON ON USER REQUEST. If the user says "forget it" / "drop it",
    call ``abandon_task(task_id, reason)`` — terminal, no lead starts.
 
-Mid-execution intervention. If the task is already running (you see
-an entry from ``list_tasks(mine_only=true, status="active")``) and the
-user adds an instruction like "also add a competitor analysis":
-
-  → Call ``inject_into_task(task_id, text)`` to push the instruction
-    into the lead's mailbox. DO NOT start a new task. The lead reads
-    the message at its next turn boundary and typically translates it
-    into a ``modify_plan`` + ``dispatch``.
-  → If ``delivered=false`` with ``reason=LEAD_OFFLINE``, the lead has
-    already finished — see "Reviving a stopped lead" below.
-
-Reviving a paused/blocked/stopped/completed lead. If the user wants to
-continue (or reopen) a task whose lead has gone away:
-
-  → Call ``resume_task(task_id)``. This respawns the lead session and
-    flips the task back to ``active``; you can then inject_into_task as
-    normal. Qualifying sources:
-      - ``paused`` — REST /intervene action=pause
-      - ``blocked`` — auto-finalize couldn't close (or lead turn crashed)
-      - ``stopped`` — the user previously stopped it (typical: "停止此任务"
-        then they change their mind).
-      - ``completed`` — REOPEN a finished task to supplement/adjust its
-        subtasks (区分场景: only when the user is amending the SAME goal;
-        a brand-new goal → fresh follow-up draft_task instead).
-  → Only ``abandoned`` CANNOT be resumed — a discarded draft has no plan
-    to revive; if the user wants that plan back, draft_task + plan_task
-    from scratch.
-
-Quick rules of thumb:
-  - The user references an EXISTING task / names a subtask to add/change
-    → Step 0: inject_into_task (active/paused) or resume_task then inject
-    (blocked/stopped/completed). NEVER create a new task for an amendment.
-  - Single-step / one-off answer → answer in chat directly. No task.
-  - Brand-new multi-step goal / "go produce X" → draft_task + plan_task,
-    confirm, then commit_task.
-  - User talks while a task runs → inject_into_task.
-  - User wants to continue/reopen a paused/blocked/stopped/completed task
-    → resume_task (then inject the change).
-  - Genuinely new goal that builds on a finished task → new draft_task
-    with ``refs`` to the old one (follow-up), not a reopen.
+Two edges Step 0 does not cover:
+  - ``abandoned`` CANNOT be revived — a discarded draft has no plan left.
+    If the user wants it back, draft_task + plan_task from scratch.
+  - ``resume_task(task_id)`` exists for reopening WITHOUT a message to
+    deliver; when you have the user's instruction in hand, inject_into_task
+    already does both.
 """
 
 
