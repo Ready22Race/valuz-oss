@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   buildFileRef,
   filesApi,
+  type ApiBaseRef,
   type ArtifactContent,
   type ArtifactDescriptor,
   type PlatformCapabilities,
@@ -23,6 +24,13 @@ interface UseArtifactFileOptions {
   platform: PlatformCapabilities;
   locate: (path: string) => ArtifactFileLocation;
   missingErrorMessage: string;
+  /**
+   * Entity that owns the file, for per-entity backend routing. Pass the id the
+   * surface already routes its own data with (conversation → session, task
+   * detail → task); defaults to the project. Without it a cloud-owned file
+   * would be resolved against the local backend and come back ``forbidden``.
+   */
+  baseRef?: ApiBaseRef;
 }
 
 export interface UseArtifactFileResult {
@@ -49,6 +57,7 @@ export function useArtifactFile({
   platform,
   locate,
   missingErrorMessage,
+  baseRef,
 }: UseArtifactFileOptions): UseArtifactFileResult {
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [artifact, setArtifact] = useState<ArtifactDescriptor | null>(null);
@@ -58,6 +67,32 @@ export function useArtifactFile({
   const [error, setError] = useState<string | null>(null);
   const requestIdRef = useRef(0);
   const controllerRef = useRef<AbortController | null>(null);
+
+  // Depend on the ids, not on the caller's object identity: an inline literal
+  // would otherwise rebuild ``open``/``reload`` on every render.
+  const hasBaseRef = baseRef !== undefined;
+  const {
+    sessionId,
+    projectId: refProjectId,
+    taskId,
+    automationId,
+    kbId,
+  } = baseRef ?? {};
+  const resolveBaseRef: ApiBaseRef = useMemo(
+    () =>
+      hasBaseRef
+        ? { sessionId, projectId: refProjectId, taskId, automationId, kbId }
+        : { projectId: projectId ?? undefined },
+    [
+      hasBaseRef,
+      sessionId,
+      refProjectId,
+      taskId,
+      automationId,
+      kbId,
+      projectId,
+    ],
+  );
 
   const close = useCallback(() => {
     requestIdRef.current += 1;
@@ -92,7 +127,7 @@ export function useArtifactFile({
       try {
         const descriptor = await filesApi.resolveOne(
           buildFileRef(location.absolutePath),
-          { signal: controller.signal },
+          { signal: controller.signal, baseRef: resolveBaseRef },
         );
         if (requestIdRef.current !== requestId) return;
         if (!descriptor || descriptor.error || !descriptor.exists) {
@@ -127,7 +162,7 @@ export function useArtifactFile({
         }
       }
     },
-    [locate, missingErrorMessage, platform, projectId],
+    [locate, missingErrorMessage, platform, projectId, resolveBaseRef],
   );
 
   const reload = useCallback(async () => {

@@ -1433,16 +1433,23 @@ export const ConversationPage = () => {
     },
     [activeProjectRootPath, activeWorktree],
   );
+  const artifactProjectId =
+    selectedProjectId && selectedProjectId !== "chat-default"
+      ? selectedProjectId
+      : null;
   const artifactFile = useArtifactFile({
-    projectId:
-      selectedProjectId && selectedProjectId !== "chat-default"
-        ? selectedProjectId
-        : null,
+    projectId: artifactProjectId,
     platform,
     locate: locateArtifactFile,
     missingErrorMessage: t(
       "task.artifactOpenInFinder" as Parameters<typeof t>[0],
     ),
+    // The file lives on the backend that owns the conversation — route the
+    // resolve with the same ref the rest of this page uses.
+    baseRef: {
+      sessionId: selectedSessionId ?? undefined,
+      projectId: artifactProjectId ?? undefined,
+    },
   });
   const {
     selectedPath: selectedArtifactPath,
