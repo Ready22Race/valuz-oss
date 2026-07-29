@@ -748,15 +748,18 @@ def test_auto_finalize_blocks_on_stop_reason_error_with_empty_plan(
     assert ("t1", "blocked") in published
 
 
-def test_auto_finalize_cancel_with_empty_plan_stays_active(
+def test_auto_finalize_cancel_with_empty_plan_parks_paused(
     db_factory, tmp_path, monkeypatch
 ) -> None:
-    """Carve-out preserved from the 2026-05-29 EnterPlanMode-hang bug: a
-    user/host-driven cancellation (``category='user_interrupt'``) BEFORE any
-    plan node exists has no in-flight work to protect, so locking to
-    ``blocked`` would force a needless ``resume_task`` for what is effectively
-    a fresh kickoff. Stay ``active`` and let the next driver retry. Only a
-    *genuine* failure (other categories) blocks — see the sibling tests."""
+    """Carve-out from the 2026-05-29 EnterPlanMode-hang bug, resolved honestly:
+    a user cancellation (``category='user_interrupt'``) BEFORE any plan node
+    exists has no in-flight work to protect, so ``blocked`` (with its failure
+    notification) would be a lie. But the old "stay active" was a lie too —
+    an active task with no lead loop is a dead zone (inject on it returns
+    LEAD_OFFLINE and drops the message; only halted states auto-revive), and
+    the health watchdog then flipped it blocked anyway with a misleading
+    "lead stopped" alert. ``paused`` is the honest resting state: inject /
+    resume revive it immediately, the watchdog ignores it."""
     from types import SimpleNamespace
 
 
@@ -777,8 +780,18 @@ def test_auto_finalize_cancel_with_empty_plan_stays_active(
             user_id=OWNER,
         )
     )
-    assert _task_status(db_factory) == "active"
+    assert _task_status(db_factory) == "paused"
     assert "task_blocked" not in _events(db_factory)
+    assert "paused" in _events(db_factory)
+
+    # Composed with the watchdog: the parked task is OUT of the sweep set —
+    # no more "lead stopped without finishing" notification 2 minutes after a
+    # deliberate cancel (the contradiction this change resolves).
+    from valuz_agent.modules.tasks.recovery import TaskHealthConfig, TaskHealthMonitor
+
+    mon = TaskHealthMonitor(TaskHealthConfig(confirm_sweeps=1))
+    assert asyncio.run(mon.sweep_once()) == []
+    assert _task_status(db_factory) == "paused"
 
 
 def _make_member_run(db_factory, *, session_id="mem-1", subtask_key="a") -> None:

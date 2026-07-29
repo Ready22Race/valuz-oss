@@ -191,13 +191,31 @@ class FinalizationService:
 
             if error_msg:
                 if error_category in ("user_interrupt", "interrupted") and not unresolved:
-                    # Cancellation BEFORE any plan node exists: nothing half-done
-                    # to protect, so blocking would force a pointless resume
-                    # ceremony on what is still a fresh kickoff. Stay ``active``
-                    # for the next driver (user message / automation fire).
+                    # Cancellation BEFORE any plan node exists: nothing
+                    # half-done to protect, so ``blocked`` (with its failure
+                    # notification) would be a lie. But "stay active" was a
+                    # lie too: an active task with no lead loop is a dead
+                    # zone — inject on an ACTIVE task with an unregistered
+                    # lead returns LEAD_OFFLINE and DROPS the message (revive
+                    # only triggers on halted states), and the health
+                    # watchdog then "corrected" the state to blocked after
+                    # two sweeps with a misleading "lead stopped" alert.
+                    # ``paused`` is the honest state: inject/resume revive it
+                    # immediately and the watchdog ignores it.
+                    if await TaskDatastore(db).update_task_status(
+                        user_id, task_id, "paused"
+                    ):
+                        await TaskEventDatastore(db).append_event(
+                            user_id,
+                            project_id,
+                            task_id,
+                            "paused",
+                            actor=lead_session_id,
+                            payload={"reason": "kickoff_cancelled"},
+                        )
                     logger.warning(
                         "auto-finalize: task %s lead turn cancelled with empty plan "
-                        "(%s) — staying active for next driver",
+                        "(%s) — parking paused for the next driver",
                         task_id,
                         error_msg,
                     )
