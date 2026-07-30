@@ -34,7 +34,12 @@ import {
 } from "./diff-aggregator";
 import { SuggestionList } from "../common/SuggestionList";
 import { LogoShimmer } from "../common/PageLoader";
-import type { ConversationTurn, PrototypeToolCall } from "@valuz/shared";
+import type {
+  CitationBundleV1,
+  ConversationTurn,
+  OpenCitationInput,
+  PrototypeToolCall,
+} from "@valuz/shared";
 import {
   assetUrl,
   summarizeSegmentPhrase,
@@ -202,6 +207,8 @@ type DisplayBlock =
        * answer (header text only, no further work). */
       items: ProcessingItem[];
       elapsedMs?: number;
+      messageId?: string;
+      citationBundle?: CitationBundleV1;
       /** ``true`` when this segment is the LAST assistant in the turn AND
        * has no trailing items — i.e. the actual final answer. The renderer
        * shows the header expanded as full Markdown without any fold UI. */
@@ -380,6 +387,8 @@ const buildDisplayBlocks = (
     header: string | null;
     items: ProcessingItem[];
     elapsedMs: number | undefined;
+    messageId?: string;
+    citationBundle?: CitationBundleV1;
     /** Index into ``blocks`` where this segment's assistant header sits;
      * -1 when the segment opened with thinking/tool before any assistant. */
     headerIdx: number;
@@ -398,6 +407,8 @@ const buildDisplayBlocks = (
       header: cur.header,
       items: cur.items,
       elapsedMs: cur.elapsedMs,
+      messageId: cur.messageId,
+      citationBundle: cur.citationBundle,
       final: false, // patched after the loop, only for the very last segment
     });
     lastFlushedHeaderIdx = cur.headerIdx;
@@ -427,6 +438,8 @@ const buildDisplayBlocks = (
         items: [],
         elapsedMs: undefined,
         headerIdx: i,
+        messageId: block.messageId,
+        citationBundle: block.citationBundle,
       };
       continue;
     }
@@ -633,6 +646,7 @@ interface TurnRowProps {
   /** Predicate + handler for local-path markdown links emitted by an agent. */
   isLocalFileHref?: (href: string) => boolean;
   onLocalFileLinkClick?: (href: string) => void;
+  onCitationClick?: (input: OpenCitationInput) => void;
 }
 
 const TurnRow = memo(
@@ -649,6 +663,7 @@ const TurnRow = memo(
     onRevealFile,
     isLocalFileHref,
     onLocalFileLinkClick,
+    onCitationClick,
   }: TurnRowProps) {
     const { t } = useI18n();
     const inFlight = sending && isLatest;
@@ -921,6 +936,9 @@ const TurnRow = memo(
                       isAnimating={animateHeader}
                       isLocalFileHref={isLocalFileHref}
                       onLocalFileLinkClick={onLocalFileLinkClick}
+                      citationBundle={block.citationBundle}
+                      messageId={block.messageId}
+                      onCitationClick={onCitationClick}
                     />
                   ) : null}
                   {block.items.length > 0 ? (
@@ -1005,6 +1023,8 @@ interface ConversationTurnListProps {
   isLocalFileHref?: (href: string) => boolean;
   /** See ``TurnRowProps.onLocalFileLinkClick``. */
   onLocalFileLinkClick?: (href: string) => void;
+  /** Opens a structured citation in the host document preview. */
+  onCitationClick?: (input: OpenCitationInput) => void;
   emptyTitle?: string;
   emptySuggestions?: string[];
   onEmptySuggestionClick?: (text: string) => void;
@@ -1033,6 +1053,7 @@ export function ConversationTurnList({
   onRevealFile,
   isLocalFileHref,
   onLocalFileLinkClick,
+  onCitationClick,
   emptyTitle,
   emptySuggestions,
   onEmptySuggestionClick,
@@ -1194,6 +1215,7 @@ export function ConversationTurnList({
                     onRevealFile={onRevealFile}
                     isLocalFileHref={isLocalFileHref}
                     onLocalFileLinkClick={onLocalFileLinkClick}
+                    onCitationClick={onCitationClick}
                   />
                 </div>
               </div>

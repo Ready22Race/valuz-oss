@@ -103,6 +103,40 @@ def test_should_propagate_message_id_on_assistant_message_frames():
     assert payload["message_id"] == "msg-3"
 
 
+def test_should_propagate_citation_bundle_on_final_assistant_frames():
+    bundle = {
+        "version": 1,
+        "citations": [
+            {
+                "citationId": "cit_1",
+                "source": {
+                    "sourceId": "doc:1",
+                    "providerId": "docs",
+                    "sourceType": "document",
+                    "title": "Annual report",
+                    "retrievedAt": "2026-07-30T08:00:00Z",
+                },
+                "evidence": {
+                    "kind": "text",
+                    "quote": "Revenue increased.",
+                    "snippet": "Revenue increased.",
+                    "capturedAt": "2026-07-30T08:00:00Z",
+                },
+            }
+        ],
+    }
+
+    result = _translate_kernel_event(
+        "assistant_message",
+        {"text": "Revenue increased. [1](citation://cit_1)", "citation_bundle": bundle},
+    )
+
+    assert result is not None
+    legacy_type, payload = result
+    assert legacy_type == "message.assistant.delta"
+    assert json.loads(payload["citation_bundle"]) == bundle
+
+
 def test_should_translate_thinking_delta_when_kernel_streams_reasoning_chunks():
     # Reasoning content streams in incrementally (V5+streaming) so the
     # frontend can render a live "Thinking..." preview before the full
@@ -322,4 +356,3 @@ def test_should_omit_parent_tool_use_id_when_event_is_top_level():
     assert result is not None
     _, payload = result
     assert "parent_tool_use_id" not in payload
-

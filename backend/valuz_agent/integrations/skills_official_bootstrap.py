@@ -93,7 +93,7 @@ def sync_bundled_official_skills(user_id: str) -> list[str]:
     dest_root.mkdir(parents=True, exist_ok=True)
 
     # Official skills (skill-creator, …) and builtin skills (valuz-project-docs,
-    # browser) land in the SAME per-user root — builtin skills are not given a
+    # citation, browser) land in the SAME per-user root — builtin skills are not given a
     # separate directory. Slugs never collide across the two source trees.
     src_skills = _list_bundled_skill_dirs(_resources_root()) + _list_bundled_skill_dirs(
         _builtin_resources_root()

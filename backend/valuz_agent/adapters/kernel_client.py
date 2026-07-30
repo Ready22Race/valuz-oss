@@ -35,6 +35,7 @@ it to ``/kernel`` (ADR-013; the kernel's own upstream default is ``/api`` — se
 | subscribe_all_events     | SSE    {KERNEL_API_PREFIX}/v1/events/stream                   |
 | usage_rollup             | GET    {KERNEL_API_PREFIX}/v1/usage                            |
 | list_messages            | GET    {KERNEL_API_PREFIX}/v1/sessions/{id}/messages           |
+| get_message              | GET    {KERNEL_API_PREFIX}/v1/messages/{id}                    |
 | submit_action            | POST   {KERNEL_API_PREFIX}/v1/sessions/{id}/actions            |
 | interrupt                | POST   {KERNEL_API_PREFIX}/v1/sessions/{id}/interrupt          |
 | run_turn                 | WS     {KERNEL_API_PREFIX}/v1/sessions/{id}/run                |
@@ -69,6 +70,7 @@ from app.schemas import (  # noqa: E402
     EventPayload,
     EventWindowData,
     FinalizeSessionRequest,
+    ImportMessageRequest,
     MessageData,
     SessionData,
     SetSessionModeRequest,
@@ -221,6 +223,15 @@ class KernelClient(Protocol):
     async def list_messages(
         self, user_id: str, session_id: str, *, limit: int = 50, offset: int = 0
     ) -> list[MessageData]: ...
+
+    async def get_message(self, user_id: str, message_id: str) -> MessageData | None: ...
+
+    async def import_message(
+        self,
+        user_id: str,
+        session_id: str,
+        req: ImportMessageRequest,
+    ) -> MessageData: ...
 
     async def submit_action(
         self, user_id: str, session_id: str, req: SubmitActionRequest
@@ -556,6 +567,37 @@ class InProcessKernelClient:
         try:
             result = await list_session_messages(
                 session_id, self._store(), user_id, limit=limit, offset=offset
+            )
+        except HTTPException as exc:
+            _raise_mapped(exc)
+        return result["data"]
+
+    async def get_message(self, user_id: str, message_id: str) -> MessageData | None:
+        from app.routes.messages import get_message
+
+        try:
+            result = await get_message(message_id, self._store(), user_id)
+        except HTTPException as exc:
+            if exc.status_code == 404:
+                return None
+            _raise_mapped(exc)
+        return result["data"]
+
+    async def import_message(
+        self,
+        user_id: str,
+        session_id: str,
+        req: ImportMessageRequest,
+    ) -> MessageData:
+        from app.routes.messages import import_canonical_message
+
+        try:
+            result = await import_canonical_message(
+                session_id,
+                req,
+                self._store(),
+                _orchestrator(),
+                user_id,
             )
         except HTTPException as exc:
             _raise_mapped(exc)
@@ -1098,6 +1140,18 @@ async def list_messages(
     user_id: str, session_id: str, *, limit: int = 50, offset: int = 0
 ) -> list[MessageData]:
     return await _data_plane().list_messages(user_id, session_id, limit=limit, offset=offset)
+
+
+async def get_message(user_id: str, message_id: str) -> MessageData | None:
+    return await _data_plane().get_message(user_id, message_id)
+
+
+async def import_message(
+    user_id: str,
+    session_id: str,
+    req: ImportMessageRequest,
+) -> MessageData:
+    return await _data_plane().import_message(user_id, session_id, req)
 
 
 async def latest_message_id(user_id: str, session_id: str) -> str | None:

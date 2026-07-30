@@ -150,6 +150,7 @@ class ParserAttempt:
 @dataclass
 class DocumentDetail(DocumentListItem):
     source_path: str | None = None
+    content_hash: str | None = None
     parser_mode: str | None = None
     docs_runtime_id: str | None = None
     last_error_code: str | None = None
@@ -165,6 +166,8 @@ class DocSearchHit:
     snippet: str
     page_ref: str | None = None
     chunk_ref: str | None = None
+    match_line: int | None = None
+    total_lines: int | None = None
 
 
 @dataclass
@@ -308,6 +311,7 @@ def _row_to_detail(row: DocumentRecordRow) -> DocumentDetail:
         relative_path=row.relative_path,
         created_at=row.created_at,
         source_path=row.source_path,
+        content_hash=row.content_hash,
         parser_mode=row.parser_mode,
         docs_runtime_id=row.docs_runtime_id,
         last_error_code=row.last_error_code,
@@ -1179,12 +1183,24 @@ class DocumentLibraryService:
         folder_ids: list[str] | None = None,
         document_ids: list[str] | None = None,
         knowledge_base_ids: list[str] | None = None,
+        authorized_document_ids: list[str] | None = None,
     ) -> list[DocSearchHit]:
-        scope_ids = await self.resolve_doc_scope(
-            user_id,
-            project_id,
-            knowledge_base_ids=knowledge_base_ids,
-        )
+        if authorized_document_ids is not None:
+            # Document-research sessions carry an exact, owner-authorized
+            # server-side scope. Re-authorize every id through this datastore;
+            # do not depend on project bindings and never accept model-supplied
+            # ids as authority.
+            scope_ids = []
+            for doc_id in dict.fromkeys(authorized_document_ids):
+                row = await self._ds.get_by_id(user_id, doc_id)
+                if row is not None and row.status == "ready":
+                    scope_ids.append(doc_id)
+        else:
+            scope_ids = await self.resolve_doc_scope(
+                user_id,
+                project_id,
+                knowledge_base_ids=knowledge_base_ids,
+            )
         if not scope_ids:
             return []
 
@@ -1232,6 +1248,8 @@ class DocumentLibraryService:
                 snippet=r.snippet,
                 page_ref=r.page_ref,
                 chunk_ref=r.chunk_ref,
+                match_line=r.match_line,
+                total_lines=r.total_lines,
             )
             for r in results
         ]

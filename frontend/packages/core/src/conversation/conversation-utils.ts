@@ -1,5 +1,6 @@
 import type { SessionEventDTO } from "../api/sessions-api";
 import type {
+  CitationBundleV1,
   ConversationBlock,
   ConversationTurn,
   ConversationTurnAttachment,
@@ -40,6 +41,92 @@ const parseTurnAttachments = (raw: string): ConversationTurnAttachment[] => {
       size,
     };
   });
+};
+
+const parseCitationBundle = (
+  raw: string | undefined,
+): CitationBundleV1 | undefined => {
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object") return undefined;
+    const candidate = parsed as Record<string, unknown>;
+    if (candidate.version !== 1 || !Array.isArray(candidate.citations)) {
+      return undefined;
+    }
+    const ids = new Set<string>();
+    for (const citation of candidate.citations) {
+      if (!citation || typeof citation !== "object") return undefined;
+      const record = citation as Record<string, unknown>;
+      const id = record.citationId;
+      if (typeof id !== "string" || !id || ids.has(id)) return undefined;
+      if (!isCitationSource(record.source) || !isCitationEvidence(record.evidence)) {
+        return undefined;
+      }
+      ids.add(id);
+    }
+    return parsed as CitationBundleV1;
+  } catch {
+    return undefined;
+  }
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  Boolean(value) && typeof value === "object" && !Array.isArray(value);
+
+const isNonEmptyString = (value: unknown): value is string =>
+  typeof value === "string" && Boolean(value.trim());
+
+const isCitationSource = (value: unknown): boolean => {
+  if (!isRecord(value)) return false;
+  return (
+    isNonEmptyString(value.sourceId) &&
+    isNonEmptyString(value.providerId) &&
+    isNonEmptyString(value.title) &&
+    isNonEmptyString(value.retrievedAt) &&
+    typeof value.sourceType === "string" &&
+    ["document", "web", "dataset", "tool-result", "conversation"].includes(
+      value.sourceType,
+    )
+  );
+};
+
+const isCitationEvidence = (value: unknown): boolean => {
+  if (!isRecord(value)) return false;
+  if (value.kind === "text") {
+    return (
+      typeof value.quote === "string" &&
+      typeof value.snippet === "string" &&
+      isNonEmptyString(value.capturedAt)
+    );
+  }
+  if (value.kind === "structured-data") {
+    return (
+      isNonEmptyString(value.datasetId) &&
+      isNonEmptyString(value.toolName) &&
+      isNonEmptyString(value.field) &&
+      isNonEmptyString(value.capturedAt) &&
+      (value.value === null ||
+        ["string", "number", "boolean"].includes(typeof value.value))
+    );
+  }
+  if (value.kind === "calculation") {
+    return (
+      isNonEmptyString(value.expression) &&
+      Array.isArray(value.inputs) &&
+      value.inputs.length > 0 &&
+      value.inputs.every(
+        (input) =>
+          isRecord(input) &&
+          isNonEmptyString(input.name) &&
+          isNonEmptyString(input.citationId) &&
+          ["string", "number"].includes(typeof input.value),
+      ) &&
+      isNonEmptyString(value.calculatedAt) &&
+      ["string", "number"].includes(typeof value.result)
+    );
+  }
+  return false;
 };
 
 export const resolveToolKind = (name: string): PrototypeToolCall["kind"] => {
@@ -409,6 +496,7 @@ const createTurnsBuilder = () => {
     messageId: string | undefined,
     elapsedMs?: number,
     parentToolUseId?: string,
+    citationBundle?: CitationBundleV1,
   ) => {
     if (!text) return;
     const open = matchesLastUnsealed(turn, kind, messageId, parentToolUseId);
@@ -422,6 +510,9 @@ const createTurnsBuilder = () => {
       if (open.kind === "thinking" && elapsedMs !== undefined) {
         open.elapsedMs = elapsedMs;
       }
+      if (open.kind === "assistant" && citationBundle) {
+        open.citationBundle = citationBundle;
+      }
       return;
     }
     turn.blocks.push(
@@ -434,7 +525,14 @@ const createTurnsBuilder = () => {
             elapsedMs,
             parentToolUseId,
           }
-        : { kind, text, messageId, sealed: messageId != null, parentToolUseId },
+        : {
+            kind,
+            text,
+            messageId,
+            sealed: messageId != null,
+            parentToolUseId,
+            ...(citationBundle ? { citationBundle } : {}),
+          },
     );
   };
 
@@ -598,6 +696,7 @@ const createTurnsBuilder = () => {
           payload.message_id,
           undefined,
           payload.parent_tool_use_id || undefined,
+          parseCitationBundle(payload.citation_bundle),
         );
         continue;
       }

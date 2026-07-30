@@ -61,7 +61,9 @@ describe("DocumentReaderView", () => {
 
     const block = container.querySelector('[data-chunk-id="c2"]');
     expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
-    await waitFor(() => expect(block?.className).toContain("bg-brand-light"));
+    await waitFor(() =>
+      expect(block?.getAttribute("data-citation-block-highlight")).toBe("true"),
+    );
   });
 
   // A stale or hand-edited deep link must land on the document, not on an error.
@@ -72,18 +74,80 @@ describe("DocumentReaderView", () => {
     expect(screen.getByText("Revenue grew.")).toBeTruthy();
   });
 
-  // Segment-level links highlight the whole block: a lit-up sentence inside an
-  // un-lit paragraph reads as a rendering glitch.
-  it("highlights the parent block when a segment is requested", async () => {
+  it("highlights only the requested segment", async () => {
     const { container } = render(
       <DocumentReaderView doc={CHUNKS} location={{ segmentId: "s2" }} />,
     );
 
+    const segment = container.querySelector('[data-segment-id="s2"]');
+    await waitFor(() =>
+      expect(segment?.querySelector("[data-citation-highlight]")).toBeTruthy(),
+    );
+    expect(
+      container.querySelector(
+        '[data-segment-id="s1"] [data-citation-highlight]',
+      ),
+    ).toBeNull();
+  });
+
+  it("does not cross into another chunk when a chunk-scoped segment is stale", () => {
+    const doc: DocumentSource = {
+      ...CHUNKS,
+      render: {
+        kind: "chunks",
+        chunks: [
+          {
+            id: "expected",
+            type: "paragraph",
+            segments: [{ id: "old-segment", text: "Expected block." }],
+          },
+          {
+            id: "other",
+            type: "paragraph",
+            segments: [{ id: "shared-segment", text: "Wrong block." }],
+          },
+        ],
+      },
+    };
+    const { container } = render(
+      <DocumentReaderView
+        doc={doc}
+        location={{
+          chunkId: "expected",
+          segmentId: "shared-segment",
+        }}
+      />,
+    );
+
+    expect(container.querySelector("[data-citation-highlight]")).toBeNull();
+    expect(
+      container
+        .querySelector("[data-locate-status]")
+        ?.getAttribute("data-locate-status"),
+    ).toBe("not-found");
+  });
+
+  it("falls back to an exact quote when a chunk id is stale", async () => {
+    const { container } = render(
+      <DocumentReaderView
+        doc={CHUNKS}
+        location={{
+          chunkId: "old-id",
+          quote: { exact: "Guidance is unchanged." },
+        }}
+      />,
+    );
+
     await waitFor(() =>
       expect(
-        container.querySelector('[data-chunk-id="c3"]')?.className,
-      ).toContain("bg-brand-light"),
+        container.querySelector("[data-citation-highlight]")?.textContent,
+      ).toBe("Guidance is unchanged."),
     );
+    expect(
+      container
+        .querySelector("[data-locate-status]")
+        ?.getAttribute("data-locate-status"),
+    ).toBe("located-fallback");
   });
 
   it("passes the page target through to the PDF renderer", async () => {

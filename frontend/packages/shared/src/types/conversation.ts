@@ -1,3 +1,5 @@
+import type { CitationBundleV1 } from "./citation";
+
 /* ── Tool call types ──────────────────────────────────────── */
 
 export type PrototypeToolCallStatus =
@@ -62,6 +64,8 @@ export type ConversationBlock =
       messageId?: string;
       sealed?: boolean;
       parentToolUseId?: string;
+      /** Present only on the canonical/final assistant block. */
+      citationBundle?: CitationBundleV1;
     }
   | {
       kind: "thinking";

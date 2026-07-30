@@ -19,6 +19,7 @@ is suppressed or reordered, so existing behavior is unchanged:
 # ruff: noqa: I001 — kernel bootstrap side-effect import must precede `from src.*`
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 # Side-effect import: puts the kernel ``src/`` on sys.path before any ``from
@@ -202,3 +203,22 @@ async def test_nested_tool_result_carries_parent_tool_use_id() -> None:
     assert [e.type for e in rt._emitted] == ["tool_result"]
     assert rt._emitted[0].data.get("parent_tool_use_id") == "toolu_agent"
     assert rt._emitted[0].data.get("is_error") is True
+
+
+async def test_structured_tool_result_content_remains_valid_json() -> None:
+    rt = _make_runtime()
+    content = [
+        {
+            "type": "text",
+            "text": '{"_valuz_evidence":{"evidenceHandle":"ev_example_12345678"}}',
+        }
+    ]
+    await rt._handle_message(
+        _session(),
+        SdkUserMessage(
+            content=[ToolResultBlock(tool_use_id="t1", content=content)],
+        ),
+    )
+
+    emitted = json.loads(rt._emitted[0].data["content"])
+    assert emitted == content

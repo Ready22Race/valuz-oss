@@ -1992,6 +1992,15 @@
     "retry": "重试"
   },
   "ui": {
+    "citation": {
+      "ariaLabel": "引用 {index}",
+      "calculationInputs": "计算依据",
+      "documentDialog": "引用文档",
+      "integrityDegraded": "部分引用未能通过验证，请谨慎使用这条回答。",
+      "openSource": "打开原文",
+      "sources": "来源",
+      "unavailable": "引用不可用"
+    },
     "deleteConfirm": {
       "description": "此操作不可撤销，删除后将无法恢复。",
       "loading": "删除中…",
@@ -2066,7 +2075,35 @@
     "reader": {
       "download": "下载",
       "empty": "未选择文档",
-      "openOriginal": "打开原文"
+      "externalOnly": "此来源需要在原始网站中查看。",
+      "askDocument": "向当前文档提问…",
+      "collapseResearch": "收起研究面板",
+      "documentTab": "原文",
+      "expandResearch": "展开研究面板",
+      "lockedScope": "仅限当前文档",
+      "locationDegraded": "文档版本已变化，当前展示最接近的可用位置。",
+      "loadingPdf": "正在加载 PDF",
+      "nextPage": "下一页",
+      "openOriginal": "打开原文",
+      "pdfFallback": "PDF.js 加载失败，已降级为仅定位页码的预览。",
+      "pdfPageText": "第 {page} 页文本",
+      "previousPage": "上一页",
+      "qa": "问答",
+      "qaEmpty": "针对当前文档提问",
+      "researchComing": "摘要与文档问答将复用同一套已验证引用。",
+      "researchTab": "研究",
+      "rotateClockwise": "顺时针旋转",
+      "resizeResearch": "调整研究面板宽度",
+      "sendToMainChat": "发送到主聊天",
+      "sentToMainChat": "已连同引用发送到主聊天。",
+      "summary": "摘要",
+      "summaryBrief": "简要",
+      "summaryDegraded": "摘要中部分内容未能完成引用校验。",
+      "summaryDetailed": "详细",
+      "summaryEmpty": "尚未生成带引用摘要",
+      "summaryStale": "当前显示旧文档版本的摘要，正在生成最新版。",
+      "zoomIn": "放大",
+      "zoomOut": "缩小"
     },
     "artifact": {
       "audioUnsupported": "当前环境不支持音频预览。",

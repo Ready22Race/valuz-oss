@@ -5,6 +5,10 @@ import {
   useState,
   type AnchorHTMLAttributes,
 } from "react";
+import type {
+  CitationBundleV1,
+  OpenCitationInput,
+} from "@valuz/shared";
 import {
   Streamdown,
   defaultUrlTransform,
@@ -15,6 +19,7 @@ import { mermaid } from "@streamdown/mermaid";
 import { math } from "@streamdown/math";
 import { cjk } from "@streamdown/cjk";
 import {
+  AlertTriangle,
   Check,
   Copy,
   Download,
@@ -41,6 +46,13 @@ import {
 } from "../ui/dialog";
 import { Button } from "../ui/button";
 import { useI18n } from "../../hooks/use-i18n";
+import {
+  citationDisplayOrder,
+  citationIdFromHref,
+  CitationPill,
+  CitationSourceCards,
+  rewriteCitationMarkdownLinks,
+} from "./CitationInline";
 
 /** Icon overrides so Streamdown's built-in toolbar buttons (copy /
  * download / fullscreen / etc.) draw from the same lucide set we use
@@ -134,6 +146,9 @@ interface MarkdownContentProps {
   isAnimating?: boolean;
   isLocalFileHref?: (href: string) => boolean;
   onLocalFileLinkClick?: (href: string) => void;
+  citationBundle?: CitationBundleV1;
+  messageId?: string;
+  onCitationClick?: (input: OpenCitationInput) => void;
 }
 
 /**
@@ -577,10 +592,29 @@ export const MarkdownContent = memo(function MarkdownContent({
   isAnimating,
   isLocalFileHref,
   onLocalFileLinkClick,
+  citationBundle,
+  messageId,
+  onCitationClick,
 }: MarkdownContentProps) {
+  const { t } = useI18n();
   const [pendingUrl, setPendingUrl] = useState<string | null>(null);
+  const citationOrder = useMemo(() => citationDisplayOrder(content), [content]);
+  const citationsById = useMemo(
+    () =>
+      new Map(
+        citationBundle?.citations.map((citation) => [
+          citation.citationId,
+          citation,
+        ]) ?? [],
+      ),
+    [citationBundle],
+  );
   const renderedContent = useMemo(
-    () => rewriteLocalFileMarkdownLinks(content, isLocalFileHref),
+    () =>
+      rewriteLocalFileMarkdownLinks(
+        rewriteCitationMarkdownLinks(content),
+        isLocalFileHref,
+      ),
     [content, isLocalFileHref],
   );
   const urlTransform = useCallback<UrlTransform>(
@@ -607,6 +641,19 @@ export const MarkdownContent = memo(function MarkdownContent({
           anchorClassName,
         );
         const localHref = href ? decodeLocalFileHref(href) : href;
+        const citationId = citationIdFromHref(href);
+        if (citationId) {
+          return (
+            <CitationPill
+              citationId={citationId}
+              displayIndex={citationOrder.get(citationId)}
+              citation={citationsById.get(citationId)}
+              citationById={citationsById}
+              messageId={messageId}
+              onCitationClick={onCitationClick}
+            />
+          );
+        }
         if (localHref && isLocalFileHref?.(localHref) && onLocalFileLinkClick) {
           return (
             <a
@@ -646,7 +693,14 @@ export const MarkdownContent = memo(function MarkdownContent({
         );
       },
     }),
-    [isLocalFileHref, onLocalFileLinkClick],
+    [
+      citationOrder,
+      citationsById,
+      isLocalFileHref,
+      messageId,
+      onCitationClick,
+      onLocalFileLinkClick,
+    ],
   );
 
   return (
@@ -674,6 +728,25 @@ export const MarkdownContent = memo(function MarkdownContent({
           {renderedContent}
         </Streamdown>
       </div>
+      {citationBundle?.integrity?.status === "degraded" ? (
+        <div
+          role="status"
+          data-citation-integrity="degraded"
+          className="mt-2 flex items-start gap-1.5 rounded-md border border-warning/30 bg-warning-light px-2.5 py-2 text-xs leading-5 text-warning-text"
+        >
+          <AlertTriangle
+            className="mt-0.5 h-3.5 w-3.5 shrink-0"
+            aria-hidden="true"
+          />
+          <span>{t("ui.citation.integrityDegraded")}</span>
+        </div>
+      ) : null}
+      <CitationSourceCards
+        content={content}
+        citationBundle={citationBundle}
+        messageId={messageId}
+        onCitationClick={onCitationClick}
+      />
       <ExternalLinkConfirmDialog
         url={pendingUrl}
         onClose={() => setPendingUrl(null)}

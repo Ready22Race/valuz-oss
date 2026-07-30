@@ -96,6 +96,13 @@ def browser_skill_dir(user_id: str) -> Path:
     return fs_registry.official_skill_root(user_id=user_id) / "browser"
 
 
+def citation_skill_dir(user_id: str) -> Path:
+    """Absolute path to the materialized always-on citation protocol skill."""
+    from valuz_agent.infra.fs_registry import fs_registry
+
+    return fs_registry.official_skill_root(user_id=user_id) / "citation"
+
+
 @dataclass(frozen=True)
 class ResolvedCapabilities:
     """Inputs the kernel needs to create a session for a valuz project."""
@@ -325,7 +332,7 @@ async def resolve_session_capabilities(
 
 
 def always_on_skill_paths(*, user_id: str) -> list[str]:
-    """Bundled skills every session carries: project-docs + skill-creator (+ browser).
+    """Bundled skills every session carries: docs + citation + skill-creator (+ browser).
 
     These are the skill half of the always-on baseline (the MCP half lives in
     ``always_on_http_mcp_servers``). ``valuz-project-docs`` teaches the
@@ -345,6 +352,7 @@ def always_on_skill_paths(*, user_id: str) -> list[str]:
 
     candidates = [
         project_docs_skill_dir(user_id),
+        citation_skill_dir(user_id),
         fs_registry.official_skill_root(user_id=user_id) / "skill-creator",
     ]
     # The browser skill teaches the ``chrome-devtools`` CLI, which only works

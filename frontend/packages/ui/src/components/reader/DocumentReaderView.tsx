@@ -1,7 +1,25 @@
-import { useMemo } from "react";
-import { Download, ExternalLink, Loader2, RefreshCw, X } from "lucide-react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
+import {
+  BookOpen,
+  Download,
+  ExternalLink,
+  Loader2,
+  PanelRightClose,
+  PanelRightOpen,
+  RefreshCw,
+  Sparkles,
+  X,
+} from "lucide-react";
 
 import { useI18n } from "../../hooks/use-i18n";
+import { usePersistentScroll } from "../../hooks/use-persistent-scroll";
 import { ArtifactRenderer } from "../artifacts/ArtifactViewerShell";
 import type {
   ArtifactContent,
@@ -9,6 +27,8 @@ import type {
   ArtifactPreviewKind,
 } from "../artifacts/artifact-viewer.types";
 import { ChunksRenderer } from "./ChunksRenderer";
+import { HtmlDocumentRenderer } from "./HtmlDocumentRenderer";
+import { PdfDocumentRenderer } from "./PdfDocumentRenderer";
 import type {
   DocumentReaderViewProps,
   DocumentSource,
@@ -91,10 +111,66 @@ export function DocumentReaderView({
   sidePanel,
   onClose,
   onReload,
+  onLoadError,
 }: DocumentReaderViewProps) {
   const { t } = useI18n();
   const bridged = useMemo(() => (doc ? toArtifact(doc) : null), [doc]);
   const published = formatPublished(doc?.publishedAt);
+  const workspaceRef = useRef<HTMLDivElement>(null);
+  const documentScrollRef = useRef<HTMLDivElement>(null);
+  const [researchOpen, setResearchOpen] = useState(true);
+  const [mobilePane, setMobilePane] = useState<"document" | "research">(
+    "document",
+  );
+  const [researchWidth, setResearchWidth] = useState<number | null>(() => {
+    if (typeof window === "undefined") return null;
+    const stored = Number(
+      window.localStorage.getItem("valuz.reader.researchWidth"),
+    );
+    return Number.isFinite(stored) && stored >= 280 ? stored : null;
+  });
+  const locationKey = useMemo(() => JSON.stringify(location ?? null), [location]);
+  usePersistentScroll(
+    documentScrollRef,
+    doc && !location ? `valuz.reader.documentScroll:${doc.id}` : null,
+    Boolean(doc) && !loading && !error,
+  );
+
+  useEffect(() => {
+    if (locationKey !== "null") setMobilePane("document");
+  }, [locationKey]);
+
+  const clampResearchWidth = (value: number): number => {
+    const total = workspaceRef.current?.getBoundingClientRect().width ?? 960;
+    return Math.max(280, Math.min(value, Math.max(320, total * 0.55)));
+  };
+
+  const setAndPersistResearchWidth = (value: number) => {
+    const next = clampResearchWidth(value);
+    setResearchWidth(next);
+    window.localStorage.setItem(
+      "valuz.reader.researchWidth",
+      String(Math.round(next)),
+    );
+  };
+
+  const beginResize = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    const workspace = workspaceRef.current;
+    if (!workspace) return;
+    const right = workspace.getBoundingClientRect().right;
+    const onMove = (moveEvent: PointerEvent) => {
+      setResearchWidth(clampResearchWidth(right - moveEvent.clientX));
+    };
+    const onUp = (upEvent: PointerEvent) => {
+      const next = clampResearchWidth(right - upEvent.clientX);
+      setAndPersistResearchWidth(next);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp, { once: true });
+  };
 
   const body = () => {
     if (loading) {
@@ -134,6 +210,48 @@ export function DocumentReaderView({
     }
     if (doc.render.kind === "chunks") {
       return <ChunksRenderer chunks={doc.render.chunks} location={location} />;
+    }
+    if (doc.render.kind === "html") {
+      return (
+        <HtmlDocumentRenderer
+          html={doc.render.html}
+          title={doc.title}
+          location={location}
+        />
+      );
+    }
+    if (
+      doc.render.kind === "file" &&
+      doc.render.mimeType === "application/pdf" &&
+      location?.kind === "pdf"
+    ) {
+      return (
+        <PdfDocumentRenderer
+          url={doc.render.url}
+          title={doc.title}
+          location={location}
+          onReload={onReload}
+          onLoadError={onLoadError}
+        />
+      );
+    }
+    if (doc.render.kind === "external") {
+      return (
+        <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
+          <p className="text-sm text-ink-body">
+            {t("ui.reader.externalOnly")}
+          </p>
+          <a
+            href={doc.render.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-surface-border px-3 text-xs font-medium text-ink-heading transition hover:bg-surface-muted"
+          >
+            <ExternalLink className="h-3.5 w-3.5" />
+            {t("ui.reader.openOriginal")}
+          </a>
+        </div>
+      );
     }
     if (!bridged) return null;
     return (
@@ -199,6 +317,29 @@ export function DocumentReaderView({
               <Download className="h-3.5 w-3.5" />
             </a>
           ) : null}
+          {sidePanel ? (
+            <button
+              type="button"
+              onClick={() => setResearchOpen((value) => !value)}
+              aria-label={t(
+                researchOpen
+                  ? ("ui.reader.collapseResearch" as Parameters<typeof t>[0])
+                  : ("ui.reader.expandResearch" as Parameters<typeof t>[0]),
+              )}
+              title={t(
+                researchOpen
+                  ? ("ui.reader.collapseResearch" as Parameters<typeof t>[0])
+                  : ("ui.reader.expandResearch" as Parameters<typeof t>[0]),
+              )}
+              className="hidden h-7 w-7 items-center justify-center rounded-md text-ink-meta transition hover:bg-surface-muted hover:text-ink-heading lg:inline-flex"
+            >
+              {researchOpen ? (
+                <PanelRightClose className="h-3.5 w-3.5" />
+              ) : (
+                <PanelRightOpen className="h-3.5 w-3.5" />
+              )}
+            </button>
+          ) : null}
           {onClose ? (
             <button
               type="button"
@@ -212,13 +353,96 @@ export function DocumentReaderView({
         </div>
       </header>
 
-      <div className="flex min-h-0 flex-1">
+      {sidePanel ? (
+        <div className="flex h-10 shrink-0 items-center border-b border-surface-border bg-surface px-2 lg:hidden">
+          <button
+            type="button"
+            aria-pressed={mobilePane === "document"}
+            onClick={() => setMobilePane("document")}
+            className={`inline-flex h-8 flex-1 items-center justify-center gap-1.5 rounded-md text-xs font-medium ${
+              mobilePane === "document"
+                ? "bg-surface-muted text-ink-heading"
+                : "text-ink-meta"
+            }`}
+          >
+            <BookOpen className="h-3.5 w-3.5" />
+            {t("ui.reader.documentTab" as Parameters<typeof t>[0])}
+          </button>
+          <button
+            type="button"
+            aria-pressed={mobilePane === "research"}
+            onClick={() => setMobilePane("research")}
+            className={`inline-flex h-8 flex-1 items-center justify-center gap-1.5 rounded-md text-xs font-medium ${
+              mobilePane === "research"
+                ? "bg-surface-muted text-ink-heading"
+                : "text-ink-meta"
+            }`}
+          >
+            <Sparkles className="h-3.5 w-3.5" />
+            {t("ui.reader.researchTab" as Parameters<typeof t>[0])}
+          </button>
+        </div>
+      ) : null}
+
+      <div ref={workspaceRef} className="flex min-h-0 flex-1">
+        <div
+          ref={documentScrollRef}
+          className={`min-h-0 min-w-0 flex-1 overflow-y-auto ${
+            sidePanel && mobilePane !== "document" ? "hidden lg:block" : ""
+          }`}
+        >
+          {body()}
+        </div>
         {sidePanel ? (
-          <aside className="hidden w-[280px] shrink-0 overflow-y-auto border-r border-surface-border lg:block">
-            {sidePanel}
-          </aside>
+          <>
+            {researchOpen ? (
+              <button
+                type="button"
+                role="separator"
+                aria-orientation="vertical"
+                aria-label={t(
+                  "ui.reader.resizeResearch" as Parameters<typeof t>[0],
+                )}
+                onPointerDown={beginResize}
+                onDoubleClick={() => {
+                  setResearchWidth(null);
+                  window.localStorage.removeItem(
+                    "valuz.reader.researchWidth",
+                  );
+                }}
+                onKeyDown={(event) => {
+                  const current =
+                    researchWidth ??
+                    (workspaceRef.current?.getBoundingClientRect().width ?? 960) *
+                      0.38;
+                  if (event.key === "ArrowLeft") {
+                    event.preventDefault();
+                    setAndPersistResearchWidth(current + 16);
+                  } else if (event.key === "ArrowRight") {
+                    event.preventDefault();
+                    setAndPersistResearchWidth(current - 16);
+                  }
+                }}
+                className="hidden w-1.5 shrink-0 cursor-col-resize border-l border-surface-border bg-transparent outline-none transition hover:bg-accent/15 focus:bg-accent/20 lg:block"
+              />
+            ) : null}
+            <aside
+              className={`min-h-0 shrink-0 overflow-y-auto ${
+                mobilePane === "research" ? "block w-full" : "hidden"
+              } ${
+                researchOpen
+                  ? "lg:block lg:w-[var(--research-width)]"
+                  : "lg:hidden"
+              }`}
+              style={{
+                "--research-width":
+                  researchWidth !== null ? `${researchWidth}px` : "38%",
+              } as CSSProperties}
+            >
+              {sidePanel}
+            </aside>
+          </>
         ) : null}
-        <div className="min-h-0 min-w-0 flex-1 overflow-y-auto">{body()}</div>
       </div>
     </div>
   );

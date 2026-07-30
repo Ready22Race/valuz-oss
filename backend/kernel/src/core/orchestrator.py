@@ -19,10 +19,12 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 from src.core import recovery
 from src.core.agent_config import AgentConfig
+from src.core.citation import CitationGuard, EvidenceRegistry
 from src.core.events import Event, EventSink, GlobalEventTap
 from src.core.prompt_builder import wrap_for_mode
 from src.core.runtime_port import RuntimePort
@@ -165,6 +167,45 @@ class _MessageIdStampSink:
         await self._inner.emit(stamped)
 
 
+def _session_citation_quality_policy(
+    session: Session,
+) -> dict[str, Any] | None:
+    """Read only the host-stamped, JSON-safe policy snapshot."""
+
+    metadata = session.metadata if isinstance(session.metadata, dict) else {}
+    valuz = metadata.get("valuz")
+    if not isinstance(valuz, dict):
+        return None
+    snapshot = valuz.get("citation_quality_policy")
+    if not isinstance(snapshot, dict):
+        return None
+    if snapshot.get("mode") not in {"required-on-evidence", "strict-domain"}:
+        return None
+    if not isinstance(snapshot.get("config"), dict):
+        return None
+    return snapshot
+
+
+def _session_document_scope(session: Session) -> set[str] | None:
+    """Return the host-stamped locked document scope, if present."""
+
+    metadata = session.metadata if isinstance(session.metadata, dict) else {}
+    valuz = metadata.get("valuz")
+    if not isinstance(valuz, dict):
+        return None
+    research = valuz.get("document_research")
+    if (
+        not isinstance(research, dict)
+        or research.get("purpose") != "document-research"
+        or research.get("source_scope") != "locked"
+    ):
+        return None
+    document_ids = research.get("document_ids")
+    if not isinstance(document_ids, list):
+        return set()
+    return {str(item) for item in document_ids if str(item)}
+
+
 class _MessageObserverSink:
     """Forwards events to ``inner`` while accumulating per-Message state.
 
@@ -174,14 +215,41 @@ class _MessageObserverSink:
     these accumulators when finalizing the Message row.
     """
 
-    def __init__(self, inner: EventSink) -> None:
+    def __init__(
+        self,
+        inner: EventSink,
+        *,
+        message_id: str = "message",
+        user_prompt: str = "",
+        citation_policy_available: bool = False,
+        citation_quality_policy: dict[str, Any] | None = None,
+        allowed_document_ids: set[str] | None = None,
+        force_citation_required: bool = False,
+    ) -> None:
         self._inner = inner
         self._assistant_chunks: list[str] = []
         self._assistant_delta_chunks: list[str] = []
+        self._pending_assistant: Event | None = None
+        self._tool_names: dict[str, str] = {}
+        self._evidence_registry = EvidenceRegistry(
+            allowed_document_ids=allowed_document_ids,
+        )
+        self._citation_guard = CitationGuard(
+            self._evidence_registry,
+            message_id=message_id,
+            user_prompt=user_prompt,
+            policy_available=citation_policy_available,
+            quality_policy=citation_quality_policy,
+            force_required=force_citation_required,
+        )
         self.num_turns: int = 0
         self.error_payload: dict[str, Any] | None = None
         self.usage: dict[str, int] | None = None
         self.model_usage: dict[str, Any] | None = None
+        # Canonical citation sidecar from the latest final assistant event.
+        # Runtimes/guards emit it once with the sealed answer; the orchestrator
+        # copies it into Message.metadata during finalization.
+        self.citation_bundle: dict[str, Any] | None = None
         # Last `todo_update` payload observed in this turn. None means the
         # agent did not touch the TODO list. An empty list is a meaningful
         # "all done" signal from the SDK and is preserved.
@@ -197,17 +265,54 @@ class _MessageObserverSink:
         self.runtime_mode_change: Literal["default", "plan", "goal"] | None = None
 
     async def emit(self, event: Event) -> None:
+        is_top_level = event.data.get("parent_tool_use_id") is None
+        if event.type == "assistant_message" and is_top_level:
+            # A runtime can emit multiple canonical text blocks in one turn:
+            # an assistant preamble, then a tool call, then the final answer.
+            # Hold only the latest top-level block until we know whether a
+            # continuation follows.  This lets the Citation Guard seal the one
+            # final block before either persistence or broadcast.
+            if self._pending_assistant is not None:
+                await self._flush_pending_assistant(final=False)
+            self._pending_assistant = event
+            # The canonical block supersedes its already-streamed deltas.
+            self._assistant_delta_chunks.clear()
+            return
+
+        if (
+            self._pending_assistant is not None
+            and is_top_level
+            and event.type in {"text_delta", "tool_use"}
+        ):
+            await self._flush_pending_assistant(final=False)
+
         if event.type == "assistant_message":
+            # Subagent text is an out-of-band flow and must not take ownership
+            # of the lead's pending final block.
             self._record_assistant_message(event)
         elif event.type == "text_delta":
             text = event.data.get("text") or event.data.get("delta") or ""
             if text:
                 self._assistant_delta_chunks.append(str(text))
+        elif event.type == "tool_use":
+            tool_use_id = event.data.get("id")
+            tool_name = event.data.get("name")
+            if isinstance(tool_use_id, str) and isinstance(tool_name, str):
+                self._tool_names[tool_use_id] = tool_name
+        elif event.type == "tool_result":
+            tool_use_id = event.data.get("id")
+            tool_name = self._tool_names.get(tool_use_id) if isinstance(tool_use_id, str) else None
+            self._evidence_registry.register_tool_result(
+                event.data.get("content"),
+                tool_name=tool_name,
+            )
         elif event.type == "session_idle":
             raw = event.data.get("num_turns")
             if isinstance(raw, int) and raw > 0:
                 self.num_turns = raw
             await self.ensure_partial_assistant_message()
+            await self._inner.emit(event)
+            return
         elif event.type == "session_error":
             self.error_payload = {
                 "category": "execution_error",
@@ -238,12 +343,66 @@ class _MessageObserverSink:
         if text:
             self._assistant_chunks.append(str(text))
             self._assistant_delta_chunks.clear()
+        citation_bundle = event.data.get("citation_bundle")
+        if isinstance(citation_bundle, dict):
+            # Copy the shallow top-level container so later runtime mutations
+            # cannot replace the canonical sidecar after the event was emitted.
+            self.citation_bundle = dict(citation_bundle)
 
     async def ensure_partial_assistant_message(self) -> None:
+        if self._pending_assistant is not None:
+            await self._flush_pending_assistant(final=True)
+            return
         text = self.partial_assistant_text
         if not text:
             return
-        event = Event(type="assistant_message", data={"text": text})
+        result = self._citation_guard.finalize(text)
+        data: dict[str, Any] = {"text": result.text}
+        if result.bundle is not None:
+            data["citation_bundle"] = result.bundle
+        event = Event(type="assistant_message", data=data)
+        self._record_assistant_message(event)
+        await self._inner.emit(event)
+
+    async def _flush_pending_assistant(self, *, final: bool) -> None:
+        pending = self._pending_assistant
+        if pending is None:
+            return
+        self._pending_assistant = None
+        raw_text = pending.data.get("text") or pending.data.get("content") or ""
+        data = {
+            key: value
+            for key, value in pending.data.items()
+            if key not in {"text", "content", "citation_bundle"}
+        }
+        data["text"] = str(raw_text)
+        if final:
+            result = self._citation_guard.finalize(str(raw_text))
+            data["text"] = result.text
+            if result.bundle is not None:
+                data["citation_bundle"] = result.bundle
+                integrity = result.bundle.get("integrity") or {}
+                logger.info(
+                    "citation_guard sealed message status=%s citations=%d unknown=%d",
+                    integrity.get("status"),
+                    len(result.bundle.get("citations") or []),
+                    len(integrity.get("unknownCitationIds") or []),
+                )
+                quality = result.bundle.get("quality")
+                if isinstance(quality, dict):
+                    metrics = quality.get("metrics")
+                    metrics = metrics if isinstance(metrics, dict) else {}
+                    logger.info(
+                        "citation_quality policy=%s revision=%s status=%s "
+                        "citations=%s unsourced=%s unverified=%s",
+                        quality.get("policyId"),
+                        quality.get("policyRevision"),
+                        quality.get("status"),
+                        metrics.get("citationCount", 0),
+                        metrics.get("unsourcedClaimCount", 0),
+                        metrics.get("unverifiedClaimCount", 0),
+                    )
+        event = Event(type="assistant_message", data=data, timestamp=pending.timestamp)
         self._record_assistant_message(event)
         await self._inner.emit(event)
 
@@ -572,7 +731,16 @@ class SessionOrchestrator:
         # count without changing the canonical assistant_message/thinking
         # record.
         coalesced: EventSink = DeltaCoalescingSink(persist_then_live)
-        observer = _MessageObserverSink(coalesced)
+        document_scope = _session_document_scope(session)
+        observer = _MessageObserverSink(
+            coalesced,
+            message_id=message.id,
+            user_prompt=user_message.text,
+            citation_policy_available=any(Path(path).name == "citation" for path in session.skills),
+            citation_quality_policy=_session_citation_quality_policy(session),
+            allowed_document_ids=document_scope,
+            force_citation_required=document_scope is not None,
+        )
 
         # Sessions are self-sufficient: ``session.cwd`` is required at
         # creation. Seed the workspace stub lazily (idempotent, one stat on
@@ -685,6 +853,11 @@ class SessionOrchestrator:
     ) -> None:
         message.ended_at = now_ms()
         message.assistant_message = observer.assistant_text
+        if observer.citation_bundle is not None:
+            message.metadata = {
+                **message.metadata,
+                "citation_bundle": observer.citation_bundle,
+            }
         message.total_turns = observer.num_turns or 1
         message.stop_reason = session.stop_reason
         if observer.usage is not None:

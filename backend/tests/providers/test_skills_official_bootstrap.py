@@ -32,25 +32,35 @@ def test_sync_installs_bundled_skill_creator_on_first_run(_isolated_official_dir
 
 
 def test_sync_installs_builtin_skills_alongside_official(_isolated_official_dir: Path) -> None:
-    """Builtin skills (valuz-project-docs, browser) land in the SAME per-user
+    """Builtin skills (valuz-project-docs, citation, browser) land in the SAME per-user
     official-skills dir — no separate directory — so a remote sandbox kernel can
     resolve their absolute source paths from the mounted official-skills subtree.
     """
-    from valuz_agent.adapters.capability_resolver import browser_skill_dir, project_docs_skill_dir
+    from valuz_agent.adapters.capability_resolver import (
+        browser_skill_dir,
+        citation_skill_dir,
+        project_docs_skill_dir,
+    )
 
     installed = bootstrap.sync_bundled_official_skills(USER)
 
     assert "valuz-project-docs" in installed
+    assert "citation" in installed
     assert "browser" in installed
     docs_dir = _isolated_official_dir / "valuz-project-docs"
     assert (docs_dir / "SKILL.md").is_file()
     assert (docs_dir / ".bundled-version").is_file()
     assert (_isolated_official_dir / "browser" / "SKILL.md").is_file()
+    assert (_isolated_official_dir / "citation" / "SKILL.md").is_file()
+    assert (_isolated_official_dir / "citation" / "references" / "protocol.md").is_file()
 
     # The capability_resolver accessors point at exactly these materialized dirs.
     assert project_docs_skill_dir(USER).resolve(strict=False) == docs_dir.resolve(strict=False)
     assert browser_skill_dir(USER).resolve(strict=False) == (
         _isolated_official_dir / "browser"
+    ).resolve(strict=False)
+    assert citation_skill_dir(USER).resolve(strict=False) == (
+        _isolated_official_dir / "citation"
     ).resolve(strict=False)
 
 

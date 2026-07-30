@@ -141,6 +141,7 @@ import {
   computePlanAnchors,
   extractToolOutputJson,
 } from "./conversation-plan-anchors";
+import { useCitationDocumentPreview } from "../components/CitationDocumentPreviewProvider";
 import {
   deriveTurnActive,
   shouldApplySessionStatus,
@@ -612,6 +613,7 @@ function automationTriggerSummary(
 
 export const ConversationPage = () => {
   const { t } = useTranslation();
+  const { openCitation } = useCitationDocumentPreview();
   const platform = usePlatform();
   const { revealInFinder } = platform;
   const { id = NEW_SESSION_ID } = useParams<{ id: string }>();
@@ -5967,6 +5969,14 @@ export const ConversationPage = () => {
                 onRevealFile={revealInFinder}
                 isLocalFileHref={localFileLinks.isLocalFileHref}
                 onLocalFileLinkClick={localFileLinks.openLocalFileHref}
+                onCitationClick={({ messageId, citationId }) => {
+                  if (!selectedSessionId || !messageId) return;
+                  openCitation({
+                    sessionId: selectedSessionId,
+                    messageId,
+                    citationId,
+                  });
+                }}
                 emptySuggestions={[
                   t(
                     "conversation.newChatSuggestion1" as Parameters<

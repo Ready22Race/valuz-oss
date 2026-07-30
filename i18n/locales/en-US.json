@@ -1992,6 +1992,15 @@
     "retry": "Retry"
   },
   "ui": {
+    "citation": {
+      "ariaLabel": "Citation {index}",
+      "calculationInputs": "Calculation inputs",
+      "documentDialog": "Citation document",
+      "integrityDegraded": "Some citations could not be verified. Treat this answer with caution.",
+      "openSource": "Open source",
+      "sources": "Sources",
+      "unavailable": "Citation unavailable"
+    },
     "deleteConfirm": {
       "description": "This action cannot be undone.",
       "loading": "Deleting...",
@@ -2066,7 +2075,35 @@
     "reader": {
       "download": "Download",
       "empty": "No document selected",
-      "openOriginal": "Open original"
+      "externalOnly": "This source is available on its original site.",
+      "askDocument": "Ask this document…",
+      "collapseResearch": "Collapse research panel",
+      "documentTab": "Document",
+      "expandResearch": "Expand research panel",
+      "lockedScope": "Current document only",
+      "locationDegraded": "The document changed, so the closest available location is shown.",
+      "loadingPdf": "Loading PDF",
+      "nextPage": "Next page",
+      "openOriginal": "Open original",
+      "pdfFallback": "PDF.js failed; using page-only preview.",
+      "pdfPageText": "Page {page} text",
+      "previousPage": "Previous page",
+      "qa": "Ask",
+      "qaEmpty": "Ask about this document",
+      "researchComing": "Summary and document Q&A will use the same verified citations.",
+      "researchTab": "Research",
+      "rotateClockwise": "Rotate clockwise",
+      "resizeResearch": "Resize research panel",
+      "sendToMainChat": "Send to main chat",
+      "sentToMainChat": "Sent to the main chat with citations.",
+      "summary": "Summary",
+      "summaryBrief": "Brief",
+      "summaryDegraded": "Some summary claims could not be fully verified.",
+      "summaryDetailed": "Detailed",
+      "summaryEmpty": "No cited summary yet",
+      "summaryStale": "This summary is from an older document version while a current one is generated.",
+      "zoomIn": "Zoom in",
+      "zoomOut": "Zoom out"
     },
     "artifact": {
       "audioUnsupported": "Audio preview is not supported in this environment.",

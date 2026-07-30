@@ -2617,9 +2617,7 @@ class ClaudeAgentRuntime:
                             # Matching TodoWrite result — suppress (todo_update
                             # already carried the structured payload).
                             continue
-                        result_content = (
-                            block.content if isinstance(block.content, str) else str(block.content)
-                        )
+                        result_content = _stringify_tool_result_content(block.content)
                         await self.event_sink.emit(
                             Event(
                                 type="tool_result",
@@ -2787,6 +2785,24 @@ def _stop_reason_to_dict(reason: Any) -> dict[str, Any]:
     from dataclasses import asdict
 
     return asdict(reason)
+
+
+def _stringify_tool_result_content(content: Any) -> str:
+    """Preserve structured MCP content blocks as valid JSON text."""
+
+    if isinstance(content, str):
+        return content
+
+    def default(value: Any) -> Any:
+        model_dump = getattr(value, "model_dump", None)
+        if callable(model_dump):
+            return model_dump(mode="json")
+        return str(value)
+
+    try:
+        return json.dumps(content, ensure_ascii=False, default=default)
+    except (TypeError, ValueError):
+        return str(content)
 
 
 def _normalize_anthropic_usage(raw: Any) -> dict[str, int]:
