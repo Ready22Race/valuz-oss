@@ -263,6 +263,7 @@ const GENERATIVE_UI_LAYOUT_CSS = `
   ${OPENUI_SCOPE_SELECTOR} {
     min-width: 0;
     max-width: 100%;
+    container-type: inline-size;
   }
 
   ${OPENUI_SCOPE_SELECTOR} * {
@@ -272,6 +273,73 @@ const GENERATIVE_UI_LAYOUT_CSS = `
 
   ${OPENUI_SCOPE_SELECTOR} :where([class^="openui-"], [class*=" openui-"]) {
     max-width: 100%;
+  }
+
+  /* OpenUI rows are inline-style flex containers. A real flex basis gives
+     sibling cards equal columns and, unlike min-width: 0 alone, a wrap point. */
+  ${OPENUI_SCOPE_SELECTOR} .openui-card {
+    flex-basis: min(100%, 15rem) !important;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} .openui-card-card,
+  ${OPENUI_SCOPE_SELECTOR} .openui-card-sunk,
+  ${OPENUI_SCOPE_SELECTOR} .openui-card-clear {
+    border-color: transparent;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  /* A compact row of three or more cards is the KPI strip. Keep headings and
+     larger content sections unframed, and give only these metrics a soft tile. */
+  ${OPENUI_SCOPE_SELECTOR}
+    :has(> .openui-card:nth-child(3)) > .openui-card {
+    border-color: transparent;
+    background: var(--color-surface-soft);
+    border-radius: 8px;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR}
+    :has(> .openui-card:nth-child(3)) > .openui-card .openui-tag {
+    min-height: 0;
+    width: fit-content;
+    padding: 0;
+    gap: 4px;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR}
+    :has(> .openui-card:nth-child(3)) > .openui-card
+    .openui-tag-success,
+  ${OPENUI_SCOPE_SELECTOR}
+    :has(> .openui-card:nth-child(3)) > .openui-card
+    .openui-tag-success .openui-tag-text {
+    color: var(--error-text);
+  }
+
+  ${OPENUI_SCOPE_SELECTOR}
+    :has(> .openui-card:nth-child(3)) > .openui-card
+    .openui-tag-danger,
+  ${OPENUI_SCOPE_SELECTOR}
+    :has(> .openui-card:nth-child(3)) > .openui-card
+    .openui-tag-danger .openui-tag-text {
+    color: var(--success-text);
+  }
+
+  /* Dashboard tables behave like report sections: column labels and row rules
+     provide structure without adding another rounded container. */
+  ${OPENUI_SCOPE_SELECTOR} .openui-table-container {
+    border: 0;
+    border-radius: 0;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} .openui-table-row:nth-child(even) {
+    background: transparent;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} :where(.openui-table-head, .openui-table-cell) {
+    padding-inline: 0;
   }
 
   ${OPENUI_SCOPE_SELECTOR} :where(p, span, div, td, th) {
@@ -288,6 +356,16 @@ const GENERATIVE_UI_LAYOUT_CSS = `
     .openui-horizontal-bar-chart-main-container {
     height: auto;
     overflow-y: visible;
+  }
+
+  @container (max-width: 34rem) {
+    ${OPENUI_SCOPE_SELECTOR} .openui-card {
+      flex-basis: 100% !important;
+    }
+
+    ${OPENUI_SCOPE_SELECTOR} .openui-card-clear {
+      padding-inline: 0;
+    }
   }
 `;
 

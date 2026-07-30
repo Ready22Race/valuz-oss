@@ -48,7 +48,21 @@ GENERATIVE_UI_INSTRUCTIONS = (
     "one per row at full available width. Never place two or more charts side by "
     "side; use Tabs to switch between multiple chart views. Never use fixed pixel "
     "widths. Keep chart labels concise and limit a chart to the most useful six "
-    "categories, grouping the remainder as Other."
+    "categories, grouping the remainder as Other. "
+    "Use this adaptive dashboard template unless the request calls for a more "
+    "specific arrangement: (1) a compact, unframed header with title, status, "
+    "time range, and actions only when requested; (2) one Stack row with "
+    "wrap=true for the primary KPI metrics; (3) one full-width primary trend, "
+    "chart, or summary section; and (4) one Stack row with wrap=true for two or "
+    "more peer detail sections such as rankings, tables, lists, or breakdowns. "
+    "On wide containers, peer KPI and detail sections should share the row with "
+    "balanced visual weight. On narrow containers, every peer section must wrap "
+    "into a readable single-column flow without horizontal scrolling, clipped "
+    "content, fixed widths, or compressed labels. Keep charts full width at all "
+    "sizes, allow tables to scroll only when their columns cannot remain readable, "
+    "and omit template regions for which the request or supplied data has no "
+    "content. Never invent, duplicate, or repeat metrics merely to fill the "
+    "template."
 )
 
 

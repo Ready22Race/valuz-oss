@@ -58,6 +58,28 @@ describe("GenerativeUICard", () => {
     expect(styles).toContain("overflow-y: visible");
   });
 
+  it("gives peer cards stable columns that collapse in narrow containers", () => {
+    const { container } = render(<GenerativeUICard openui={"Card"} />);
+    const styles = Array.from(container.querySelectorAll("style"))
+      .map((style) => style.textContent)
+      .join("\n");
+
+    expect(styles).toContain("container-type: inline-size");
+    expect(styles).toContain("flex-basis: min(100%, 15rem) !important");
+    expect(styles).toContain("@container (max-width: 34rem)");
+    expect(styles).toContain("flex-basis: 100% !important");
+    expect(styles).toContain(":has(> .openui-card:nth-child(3)) > .openui-card");
+    expect(styles).toContain("background: var(--color-surface-soft)");
+    expect(styles).toContain("background: transparent");
+    expect(styles).toContain(".openui-table-container");
+    expect(styles).toContain("border-radius: 0");
+    expect(styles).toContain(".openui-table-row:nth-child(even)");
+    expect(styles).not.toContain(".openui-tag-success::before");
+    expect(styles).not.toContain(".openui-tag-danger::before");
+    expect(styles).toContain("color: var(--error-text)");
+    expect(styles).toContain("color: var(--success-text)");
+  });
+
   it("unwraps a JSON content-block envelope before rendering", () => {
     // The kernel JSON-stringifies MCP TextContent at the SSE boundary — the
     // tool output arrives as [{"type":"text","text":"<OpenUI Lang>"}], not raw.
