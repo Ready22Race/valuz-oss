@@ -1,5 +1,7 @@
 import { createContext, useCallback, useContext } from "react";
 import { parseFileRef } from "@valuz/shared";
+
+import { isAbsolutePath, toProjectRelativePath } from "../lib/project-paths";
 import type { ArtifactOpenTarget } from "@valuz/ui";
 
 export interface ConversationLocalFileLinkOptions {
@@ -148,7 +150,7 @@ export function resolveDefaultLocalFileHref(
     return null;
   }
 
-  const relative = toProjectRelativePath(path, projectRootPath);
+  const relative = toGuardedProjectRelativePath(path, projectRootPath);
   if (relative) {
     return target
       ? { kind: "preview", path: relative, target }
@@ -262,22 +264,16 @@ function stripMarkdownLineSuffix(path: string): string {
   return path.replace(/:(\d+)(?::\d+)?$/, "");
 }
 
-function toProjectRelativePath(path: string, rootPath: string): string | null {
-  const normalizedPath = path.replace(/\\/g, "/").replace(/^\.\//, "");
-  if (!normalizedPath || normalizedPath.startsWith("../")) return null;
-
-  if (!isAbsolutePath(normalizedPath)) {
-    return normalizedPath.replace(/^\/+/, "");
-  }
-
-  const normalizedRoot = rootPath.replace(/\\/g, "/").replace(/\/+$/, "");
-  if (!normalizedRoot) return null;
-  if (!normalizedPath.startsWith(`${normalizedRoot}/`)) return null;
-
-  const relative = normalizedPath.slice(normalizedRoot.length + 1);
+/**
+ * The shared root arithmetic plus this surface's traversal guards: a prose
+ * link that walks out of the project (``../``) must not resolve to a preview.
+ */
+function toGuardedProjectRelativePath(
+  path: string,
+  rootPath: string,
+): string | null {
+  const normalized = path.replace(/\\/g, "/").replace(/^\.\//, "");
+  if (!normalized || normalized.startsWith("../")) return null;
+  const relative = toProjectRelativePath(normalized, rootPath);
   return relative && !relative.startsWith("../") ? relative : null;
-}
-
-function isAbsolutePath(path: string): boolean {
-  return path.startsWith("/") || /^[a-zA-Z]:\//.test(path);
 }

@@ -160,6 +160,7 @@ import {
 } from "../lib/agent-skill-items";
 import { getLastTempAgent, setLastTempAgent } from "../lib/last-temp-agent";
 import { useArtifactFile } from "../hooks/use-artifact-file";
+import { toAbsoluteProjectPath, toProjectRelativePath } from "../lib/project-paths";
 
 /** True while a workflow snapshot's status denotes an in-flight run (vs a
  *  terminal ``completed`` / ``killed`` / ``failed`` verb). Used to decide
@@ -183,33 +184,6 @@ function toFileTree(nodes: ProjectFileNode[], prefix = ""): FileTreeNode[] {
   });
 }
 
-function resolveConversationArtifactPath(
-  path: string,
-  rootPath: string,
-): string {
-  if (!path) return path;
-  if (path.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(path)) return path;
-  if (!rootPath) return path;
-  const sep = rootPath.includes("\\") ? "\\" : "/";
-  const trimmed = rootPath.endsWith(sep) ? rootPath.slice(0, -1) : rootPath;
-  return `${trimmed}${sep}${path}`;
-}
-
-function toConversationRelativeArtifactPath(
-  path: string,
-  rootPath: string,
-): string | null {
-  if (!path) return null;
-  const normalizedPath = path.replace(/\\/g, "/");
-  if (!normalizedPath.startsWith("/") && !/^[a-zA-Z]:\//.test(normalizedPath)) {
-    return normalizedPath.replace(/^\/+/, "");
-  }
-  if (!rootPath) return null;
-  const normalizedRoot = rootPath.replace(/\\/g, "/").replace(/\/+$/, "");
-  if (normalizedPath === normalizedRoot) return null;
-  if (!normalizedPath.startsWith(`${normalizedRoot}/`)) return null;
-  return normalizedPath.slice(normalizedRoot.length + 1);
-}
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -1427,8 +1401,8 @@ export const ConversationPage = () => {
       // Session cwd = the worktree checkout when present, else the project cwd.
       const root = activeWorktree?.path ?? activeProjectRootPath;
       return {
-        absolutePath: resolveConversationArtifactPath(path, root),
-        relativePath: toConversationRelativeArtifactPath(path, root) ?? path,
+        absolutePath: toAbsoluteProjectPath(path, root),
+        relativePath: toProjectRelativePath(path, root) ?? path,
       };
     },
     [activeProjectRootPath, activeWorktree],
@@ -5568,7 +5542,7 @@ export const ConversationPage = () => {
         }}
         onOpenInSystem={(relPath) => {
           void revealInFinder(
-            resolveConversationArtifactPath(relPath, activeProjectRootPath),
+            toAbsoluteProjectPath(relPath, activeProjectRootPath),
           );
         }}
         onRefreshFiles={refreshFileTree}

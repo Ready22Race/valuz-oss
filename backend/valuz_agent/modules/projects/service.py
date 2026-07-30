@@ -658,7 +658,7 @@ class ProjectService:
 
         Returns the resolved relative posix path. Rejects absolute paths,
         parent-traversal, and anything escaping the project root — but,
-        unlike ``_resolve_project_file``, does NOT require the target to
+        unlike the resolve endpoint's ``assert_owned``, does NOT require the target to
         exist (it is a write). Powers ``POST /v1/projects/{id}/files`` so a
         cloud-managed project can receive files without a caller-supplied
         local directory.
@@ -695,12 +695,6 @@ def _normalize_explicit_root(root_path: str) -> str:
     path = Path(value).expanduser()
     return str(path.resolve()) if path.is_absolute() else value.strip("/")
 
-
-def _display_cwd(root_path: str | None) -> str | None:
-    if not root_path:
-        return None
-    path = Path(root_path).expanduser()
-    return str(path.resolve()) if path.is_absolute() else None
 
 
 def _root_path(user_id: str, root_path: str) -> Path:
@@ -772,21 +766,6 @@ def _project_root(user_id: str, row: ProjectRow, project_id: str) -> Path:
         return _root_path(user_id, row.root_path)
     return fs_registry.project_cwd(user_id, project_id, "chat").resolve()
 
-
-def _resolve_project_file(root: Path, file_path: str) -> Path:
-    relative = Path(file_path)
-    if relative.is_absolute():
-        raise ValueError("Absolute paths are not allowed")
-    if any(part in {"", ".", ".."} for part in relative.parts):
-        raise ValueError("Invalid file path")
-    if any(part in HIDDEN_NAMES or part.startswith(".") for part in relative.parts):
-        raise PermissionError("Hidden files are not previewable")
-    target = (root / relative).resolve()
-    if root != target and root not in target.parents:
-        raise ValueError("File path escapes project root")
-    if not target.exists() or not target.is_file():
-        raise FileNotFoundError(file_path)
-    return target
 
 
 def _extension(name: str) -> str:

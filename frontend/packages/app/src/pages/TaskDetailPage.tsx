@@ -76,6 +76,7 @@ import {
 import { deriveDeliverable } from "./task-detail/deliverable";
 import { useArtifactFile } from "../hooks/use-artifact-file";
 import { eventDetail } from "../lib/task-event-detail";
+import { toAbsoluteProjectPath, toProjectRelativePath } from "../lib/project-paths";
 
 interface EventMeta {
   icon: ComponentType<{ className?: string }>;
@@ -257,35 +258,6 @@ type Translator = (
   params?: Record<string, string | number>,
 ) => string;
 
-/** Resolve an artifact path to an absolute filesystem location. Agents
- *  typically pass project-relative paths to ``finish_task`` (e.g.
- *  ``"reports/desktop.md"``), but some pass absolute paths too. Join
- *  with the project cwd when relative, leave alone when absolute or
- *  cwd is unknown. */
-function resolveArtifactPath(path: string, rootPath: string): string {
-  if (!path) return path;
-  if (path.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(path)) return path;
-  if (!rootPath) return path;
-  const sep = rootPath.includes("\\") ? "\\" : "/";
-  const trimmed = rootPath.endsWith(sep) ? rootPath.slice(0, -1) : rootPath;
-  return `${trimmed}${sep}${path}`;
-}
-
-function toProjectRelativeArtifactPath(
-  path: string,
-  rootPath: string,
-): string | null {
-  if (!path) return null;
-  const normalizedPath = path.replace(/\\/g, "/");
-  if (!normalizedPath.startsWith("/") && !/^[a-zA-Z]:\//.test(normalizedPath)) {
-    return normalizedPath.replace(/^\/+/, "");
-  }
-  if (!rootPath) return null;
-  const normalizedRoot = rootPath.replace(/\\/g, "/").replace(/\/+$/, "");
-  if (normalizedPath === normalizedRoot) return null;
-  if (!normalizedPath.startsWith(`${normalizedRoot}/`)) return null;
-  return normalizedPath.slice(normalizedRoot.length + 1);
-}
 
 function artifactIconClassName(filename: string): string {
   const extension = filename.split(".").pop()?.toLowerCase();
@@ -494,8 +466,8 @@ export const TaskDetailPage = () => {
 
   const locateArtifactFile = useCallback(
     (path: string) => ({
-      absolutePath: resolveArtifactPath(path, rootPath),
-      relativePath: toProjectRelativeArtifactPath(path, rootPath) ?? path,
+      absolutePath: toAbsoluteProjectPath(path, rootPath),
+      relativePath: toProjectRelativePath(path, rootPath) ?? path,
     }),
     [rootPath],
   );
@@ -523,7 +495,7 @@ export const TaskDetailPage = () => {
   const openArtifactFile = useCallback(
     async (relPath: string, options?: { syncUrl?: boolean }) => {
       if (!projectId) return;
-      const normalized = toProjectRelativeArtifactPath(relPath, rootPath);
+      const normalized = toProjectRelativePath(relPath, rootPath);
       if (
         options?.syncUrl !== false &&
         normalized &&
@@ -614,7 +586,7 @@ export const TaskDetailPage = () => {
     (relPath: string) => {
       if (!rootPath) return;
       void openArtifact(
-        resolveArtifactPath(relPath, rootPath),
+        toAbsoluteProjectPath(relPath, rootPath),
         t as Translator,
       );
     },
@@ -1533,7 +1505,7 @@ export const TaskDetailPage = () => {
                   <ul className="flex max-h-[280px] flex-col overflow-y-auto">
                     {completionInfo.artifacts.map((path) => {
                       const basename = path.split(/[\\/]/).pop() || path;
-                      const absolute = resolveArtifactPath(path, rootPath);
+                      const absolute = toAbsoluteProjectPath(path, rootPath);
                       return (
                         <li key={path}>
                           <button
