@@ -35,6 +35,13 @@ def test_constants_are_set():
     assert "Peer modules may share wrapping rows or responsive grids" in GENERATIVE_UI_INSTRUCTIONS
     assert "avoid narrow sidebars" in GENERATIVE_UI_INSTRUCTIONS
     assert "must wrap before they overflow" in GENERATIVE_UI_INSTRUCTIONS
+    assert "Use this adaptive dashboard template" in GENERATIVE_UI_INSTRUCTIONS
+    assert "compact, unframed header" in GENERATIVE_UI_INSTRUCTIONS
+    assert "primary KPI metrics" in GENERATIVE_UI_INSTRUCTIONS
+    assert "full-width primary trend" in GENERATIVE_UI_INSTRUCTIONS
+    assert "balanced visual weight" in GENERATIVE_UI_INSTRUCTIONS
+    assert "readable single-column flow" in GENERATIVE_UI_INSTRUCTIONS
+    assert "Never invent, duplicate, or repeat metrics" in GENERATIVE_UI_INSTRUCTIONS
     assert "stack all major sections top-to-bottom" not in GENERATIVE_UI_INSTRUCTIONS
     assert (
         "Row layouts are allowed only for compact KPI chips/cards"
