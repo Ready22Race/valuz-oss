@@ -103,27 +103,30 @@ describe("useComposerProviderChannels", () => {
 
   it("returns loading immediately when the execution target changes", async () => {
     const localProvider = provider({ id: "local", name: "Local" });
-    let resolveCloud!: (value: Response) => void;
-    let resolveLocalRefresh!: (value: Response) => void;
-    const cloudRequest = new Promise<Response>((resolve) => {
-      resolveCloud = resolve;
-    });
-    const localRefreshRequest = new Promise<Response>((resolve) => {
+    let resolveCloud!: (value: { providers: LLMChannelDetail[] }) => void;
+    let resolveLocalRefresh!: (value: {
+      providers: LLMChannelDetail[];
+    }) => void;
+    const cloudRequest = new Promise<{ providers: LLMChannelDetail[] }>(
+      (resolve) => {
+        resolveCloud = resolve;
+      },
+    );
+    const localRefreshRequest = new Promise<{
+      providers: LLMChannelDetail[];
+    }>((resolve) => {
       resolveLocalRefresh = resolve;
     });
-    vi.stubGlobal(
-      "fetch",
-      vi
-        .fn()
-        .mockResolvedValueOnce(
-          new Response(JSON.stringify({ providers: [localProvider] }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          }),
-        )
-        .mockReturnValueOnce(cloudRequest)
-        .mockReturnValueOnce(localRefreshRequest),
-    );
+    const listProviderChannels = vi
+      .fn()
+      .mockResolvedValueOnce({ providers: [localProvider] })
+      .mockReturnValueOnce(cloudRequest)
+      .mockReturnValueOnce(localRefreshRequest);
+    setComposerCatalogAdapter({
+      getScopeKey: ({ targetId }) => `test:${targetId ?? "default"}`,
+      listAgents: vi.fn(),
+      listProviderChannels,
+    });
 
     const { result, rerender } = renderHook(
       ({ baseUrl }) => useComposerProviderChannelState(baseUrl),
@@ -137,23 +140,13 @@ describe("useComposerProviderChannels", () => {
     expect(result.current).toEqual({ providers: [], status: "loading" });
 
     await act(async () => {
-      resolveCloud(
-        new Response(JSON.stringify({ providers: [] }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      );
+      resolveCloud({ providers: [] });
       await cloudRequest;
     });
     expect(result.current).toEqual({ providers: [], status: "loading" });
 
     await act(async () => {
-      resolveLocalRefresh(
-        new Response(JSON.stringify({ providers: [localProvider] }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      );
+      resolveLocalRefresh({ providers: [localProvider] });
       await localRefreshRequest;
     });
     await waitFor(() =>
