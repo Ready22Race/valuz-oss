@@ -47,31 +47,37 @@ import { AgentDetailView } from "../components/AgentDetailView";
 import { CreateAgentDialog } from "../components/CreateAgentDialog";
 import { ImportPackDialog } from "../components/ImportPackDialog";
 import { ExportPackDialog } from "../components/ExportPackDialog";
-import { isCloudOnlyAgent } from "./agent-list-state";
+import {
+  compareAgentsWithValurionFirst,
+  isCloudOnlyAgent,
+  isSystemAgent,
+} from "./agent-list-state";
 
-/** Group agents into 自定义 (user-created, ``source !== "official"``) then
- * 官方 (built-in, ``source === "official"``). Mirrors the Skills /
- * Connectors category model — same ``groupCustom`` / ``groupOfficial``
- * labels — so ``CategorizedList`` renders identical collapsible group
- * headers. Custom is listed first — it's the user's own work. */
+/** Keep the always-present built-in agent separate from portable agents. */
 function buildAgentCategories(
   t: ReturnType<typeof useTranslation>["t"],
 ): ResourceCategory<Agent>[] {
-  const byName = (a: Agent, b: Agent) => a.name.localeCompare(b.name);
   return [
+    {
+      id: "system",
+      label: t("agent.groupSystem" as Parameters<typeof t>[0]),
+      order: 0,
+      filter: isSystemAgent,
+      sort: compareAgentsWithValurionFirst,
+    },
     {
       id: "custom",
       label: t("agent.groupCustom" as Parameters<typeof t>[0]),
-      order: 0,
-      filter: (a: Agent) => a.source !== "official",
-      sort: byName,
+      order: 1,
+      filter: (a: Agent) => !isSystemAgent(a) && a.source !== "official",
+      sort: compareAgentsWithValurionFirst,
     },
     {
       id: "official",
       label: t("agent.groupOfficial" as Parameters<typeof t>[0]),
-      order: 1,
-      filter: (a: Agent) => a.source === "official",
-      sort: byName,
+      order: 2,
+      filter: (a: Agent) => !isSystemAgent(a) && a.source === "official",
+      sort: compareAgentsWithValurionFirst,
     },
   ];
 }
@@ -268,7 +274,7 @@ export const AgentsPage = () => {
       .map((project) => ({
         project,
         members: (byProjectId.get(project.id) ?? []).sort((a, b) =>
-          a.agent.name.localeCompare(b.agent.name),
+          compareAgentsWithValurionFirst(a.agent, b.agent),
         ),
       }))
       .filter(({ members }) => members.length > 0);
@@ -278,7 +284,7 @@ export const AgentsPage = () => {
     const deployed = new Set(projectMembers.map((member) => member.sourceSlug));
     return agents
       .filter((agent) => !deployed.has(agent.slug))
-      .sort((a, b) => a.name.localeCompare(b.name));
+      .sort(compareAgentsWithValurionFirst);
   }, [agents, projectMembers]);
 
   // Keep the detail panel stable across tab switches: honour the explicit
@@ -357,7 +363,7 @@ export const AgentsPage = () => {
               : "hover:bg-surface-soft/60"
           }`}
         >
-          {selecting && !cloudOnly && (
+          {selecting && !cloudOnly && !isSystemAgent(agent) && (
             <span
               className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors ${
                 isChecked
@@ -376,6 +382,11 @@ export const AgentsPage = () => {
               <div className="truncate text-sm text-ink-heading">
                 {agent.name}
               </div>
+              {isSystemAgent(agent) && (
+                <span className="inline-flex h-5 shrink-0 items-center rounded-[4px] bg-brand-light px-1.5 py-0 text-[10px] leading-none text-brand">
+                  {t("agent.systemBadge" as Parameters<typeof t>[0])}
+                </span>
+              )}
               {deploymentCount > 0 && (
                 <span className="inline-flex h-5 shrink-0 items-center rounded-[4px] bg-surface-soft px-1.5 py-0 text-[10px] leading-none text-ink-meta">
                   {t("agent.deployedInProjects" as Parameters<typeof t>[0], {
@@ -592,7 +603,9 @@ export const AgentsPage = () => {
                                 key={member.key}
                                 onClick={() => {
                                   if (selecting) {
-                                    toggleChecked(member.agent.slug);
+                                    if (!isSystemAgent(member.agent)) {
+                                      toggleChecked(member.agent.slug);
+                                    }
                                     return;
                                   }
                                   setActiveSlug(member.agent.slug);
@@ -636,22 +649,24 @@ export const AgentsPage = () => {
                       {!collapsedProjectGroups.has("_unassigned") && (
                         <div className="flex flex-col gap-3">
                           {unassignedAgents.map((agent) => (
-                              <div
-                                key={agent.slug}
-                                onClick={() => {
-                                  if (isCloudOnlyAgent(agent)) return;
-                                  if (selecting) {
-                                  toggleChecked(agent.slug);
+                            <div
+                              key={agent.slug}
+                              onClick={() => {
+                                if (isCloudOnlyAgent(agent)) return;
+                                if (selecting) {
+                                  if (!isSystemAgent(agent)) {
+                                    toggleChecked(agent.slug);
+                                  }
                                   return;
                                 }
                                 setActiveSlug(agent.slug);
                                 setActiveProjectMemberKey(null);
                               }}
-                                className={
-                                  isCloudOnlyAgent(agent)
-                                    ? "cursor-default"
-                                    : "cursor-pointer"
-                                }
+                              className={
+                                isCloudOnlyAgent(agent)
+                                  ? "cursor-default"
+                                  : "cursor-pointer"
+                              }
                             >
                               {renderAgentRow(
                                 agent,
@@ -676,7 +691,7 @@ export const AgentsPage = () => {
                 onSelect={(a: Agent) => {
                   if (isCloudOnlyAgent(a)) return;
                   if (selecting) {
-                    toggleChecked(a.slug);
+                    if (!isSystemAgent(a)) toggleChecked(a.slug);
                     return;
                   }
                   setActiveSlug(a.slug);

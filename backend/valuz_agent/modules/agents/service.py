@@ -23,6 +23,7 @@ import logging
 from dataclasses import replace
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import valuz_agent.boot.kernel  # noqa: F401 — ensures sys.path has kernel root
@@ -32,6 +33,13 @@ from src.core import AgentConfig
 from valuz_agent.modules.agents.datastore import (
     AgentDatastore,
     ProjectMemberDatastore,
+)
+from valuz_agent.modules.agents.builtin import (
+    SYSTEM_MANAGED_FIELDS,
+    VALURION_DEFAULT_EFFORT,
+    VALURION_DESCRIPTION,
+    VALURION_NAME,
+    VALURION_SLUG,
 )
 from valuz_agent.modules.agents.models import AgentRow, ProjectMemberRow
 from valuz_agent.modules.connectors.service import ConnectorService
@@ -102,6 +110,15 @@ class AgentNotDeletableError(Exception):
     def __init__(self, slug: str) -> None:
         self.slug = slug
         super().__init__(f"agent '{slug}' is protected and cannot be deleted")
+
+
+class AgentManagedFieldError(Exception):
+    """Raised when a caller tries to mutate system-managed Agent state."""
+
+    def __init__(self, slug: str, fields: set[str]) -> None:
+        self.slug = slug
+        self.fields = tuple(sorted(fields))
+        super().__init__(f"agent '{slug}' has system-managed field(s): {', '.join(self.fields)}")
 
 
 async def _after_agent_saved_hook(
@@ -214,6 +231,10 @@ class AgentService:
             metadata["connector_bindings"] = connector_bindings
         if row.provider_id:
             metadata["provider_id"] = row.provider_id
+        metadata["agent_slug"] = row.slug
+        metadata["agent_kind"] = row.kind
+        metadata["resource_policy"] = row.resource_policy
+        metadata["inherit_global_instructions"] = row.inherit_global_instructions
         agent = AgentConfig(
             id=kernel_agent_id,
             name=row.name,
@@ -222,7 +243,7 @@ class AgentService:
             instructions=row.instructions,
             skills=tuple(row.skills or []),
             mcp_servers=await self._resolve_mcp_servers(connector_bindings, user_id=owner_user_id),
-            permission_mode="full_access",
+            permission_mode=row.permission_mode or "full_access",
             effort=row.effort or None,
             metadata=metadata,
         )
@@ -233,13 +254,61 @@ class AgentService:
     # ------------------------------------------------------------------
 
     async def list_agents(self, user_id: str, source: str | None = None) -> list[AgentRow]:
+        # Migrations can only discover owners that already have persisted
+        # resources.  Ensure the owner-scoped system Agent on the first Agent
+        # library read as a compatibility path for empty legacy accounts.
+        await self.ensure_builtin_agent(user_id)
         return await self._agents.list_agents(user_id, source=source)
 
     async def get_agent(self, user_id: str, slug: str) -> AgentRow:
         row = await self._agents.get_agent(user_id, slug)
+        if row is None and slug == VALURION_SLUG:
+            row = await self.ensure_builtin_agent(user_id)
         if row is None:
             raise AgentNotFoundError(slug)
         return row
+
+    async def ensure_builtin_agent(self, user_id: str) -> AgentRow:
+        """Create or repair the owner's canonical Valurion row.
+
+        The unique ``(user_id, slug)`` constraint is the concurrency arbiter.
+        Only system-managed fields are repaired; runtime/model/provider/effort
+        preferences survive an idempotent ensure.
+        """
+        existing = await self._agents.get_agent(user_id, VALURION_SLUG)
+        if existing is None:
+            factory = await _factory_model_defaults(user_id)
+            row = AgentRow(
+                user_id=user_id,
+                runtime=factory.default_runtime,
+                model=factory.default_model,
+                provider_id=factory.default_provider_id,
+                effort=VALURION_DEFAULT_EFFORT,
+                **SYSTEM_MANAGED_FIELDS,
+            )
+            try:
+                created = await self._agents.create(user_id, row)
+            except IntegrityError:
+                await self._db.rollback()
+                created = await self._agents.get_agent(user_id, VALURION_SLUG)
+                if created is None:
+                    raise
+            else:
+                await _after_agent_saved_hook(self._db, user_id, created, "created")
+            existing = created
+
+        drift = {
+            field: value
+            for field, value in SYSTEM_MANAGED_FIELDS.items()
+            if getattr(existing, field) != value
+        }
+        if drift:
+            repaired = await self._agents.update_fields(user_id, VALURION_SLUG, drift)
+            if repaired is None:
+                raise AgentNotFoundError(VALURION_SLUG)
+            existing = repaired
+            await _after_agent_saved_hook(self._db, user_id, existing, "updated")
+        return existing
 
     async def create_agent(self, user_id: str, payload: dict[str, Any]) -> AgentRow:
         """Create a user-defined agent (source='custom').
@@ -255,6 +324,8 @@ class AgentService:
         if not slug:
             existing = {a.slug for a in await self._agents.list_agents(user_id)}
             slug = ensure_unique_slug(derive_slug(payload["name"]), existing)
+        if slug == VALURION_SLUG:
+            raise MemberAlreadyExistsError(f"agent slug '{slug}' is reserved")
         if await self._agents.get_agent(user_id, slug) is not None:
             raise MemberAlreadyExistsError(f"agent '{slug}' already exists")
         factory = await _factory_model_defaults(user_id)
@@ -267,10 +338,18 @@ class AgentService:
             model=payload.get("model") or factory.default_model,
             skills=payload.get("skills", []),
             connector_types=payload.get("connector_types", []),
+            knowledge_scope=payload.get("knowledge_scope", []),
             provider_id=payload.get("provider_id") or None,
             effort=payload.get("effort") or None,
+            kind="standard",
+            resource_policy="explicit",
+            inherit_global_instructions=payload.get("inherit_global_instructions", True),
+            permission_mode=payload.get("permission_mode") or "full_access",
             avatar=payload.get("avatar") or None,
-            source="custom",
+            # Preserve the established ``custom`` provenance for direct
+            # creates/imports. Copy explicitly requests the newer ``user``
+            # provenance below; neither value grants system identity.
+            source=payload.get("_source") or "custom",
         )
         # Live-reference: sessions snapshot the row at creation time, so a
         # fresh agent needs no extra materialization step.
@@ -288,7 +367,7 @@ class AgentService:
         if existing is None:
             raise AgentNotFoundError(slug)
 
-        allowed = {
+        standard_allowed = {
             "name",
             "description",
             "instructions",
@@ -296,18 +375,29 @@ class AgentService:
             "model",
             "skills",
             "connector_types",
+            "knowledge_scope",
+            "inherit_global_instructions",
+            "permission_mode",
+            "provider_id",
+            "effort",
+            "avatar",
         }
+        system_allowed = {"runtime", "model", "provider_id", "effort"}
+        allowed = system_allowed if existing.kind == "system" else standard_allowed
+        attempted = {key for key in patch if key not in allowed}
+        if existing.kind == "system" and attempted:
+            raise AgentManagedFieldError(slug, attempted)
         fields = {k: v for k, v in patch.items() if k in allowed and v is not None}
         # provider_id is nullable and clearable: when explicitly present in the
         # patch (even as None/""), apply it — None unbinds the default provider.
-        if "provider_id" in patch:
+        if "provider_id" in patch and "provider_id" in allowed:
             fields["provider_id"] = patch["provider_id"] or None
         # effort is nullable and clearable the same way — None means "no
         # override" (the runtime falls through to its SDK default).
-        if "effort" in patch:
+        if "effort" in patch and "effort" in allowed:
             fields["effort"] = patch["effort"] or None
         # avatar is nullable and clearable — None / "" unsets the avatar.
-        if "avatar" in patch:
+        if "avatar" in patch and "avatar" in allowed:
             fields["avatar"] = patch["avatar"] or None
         row = await self._agents.update_fields(user_id, slug, fields)
         if row is None:
@@ -344,6 +434,72 @@ class AgentService:
         if not await self._agents.delete(user_id, slug):
             raise AgentNotFoundError(slug)
         await self._cleanup_marketplace_install(user_id, slug)
+
+    async def copy_agent(
+        self,
+        user_id: str,
+        slug: str,
+        *,
+        name: str | None = None,
+    ) -> AgentRow:
+        """Copy one Agent without copying identity, ownership, or secrets."""
+        source = await self.get_agent(user_id, slug)
+        is_valurion = source.kind == "system" and source.slug == VALURION_SLUG
+        if is_valurion:
+            payload: dict[str, Any] = {
+                "name": name or f"{VALURION_NAME} Copy",
+                "description": VALURION_DESCRIPTION,
+                "instructions": "",
+                "runtime": source.runtime,
+                "model": source.model,
+                "effort": source.effort,
+                "provider_id": None,
+                "skills": [],
+                "connector_types": [],
+                "knowledge_scope": [],
+                "inherit_global_instructions": True,
+                "permission_mode": source.permission_mode,
+                "avatar": source.avatar,
+                "_source": "user",
+            }
+        else:
+            payload = {
+                "name": name or f"{source.name} Copy",
+                "description": source.description,
+                "instructions": source.instructions,
+                "runtime": source.runtime,
+                "model": source.model,
+                "provider_id": source.provider_id,
+                "effort": source.effort,
+                "skills": list(source.skills or []),
+                "connector_types": list(source.connector_types or []),
+                "knowledge_scope": list(source.knowledge_scope or []),
+                "inherit_global_instructions": source.inherit_global_instructions,
+                "permission_mode": source.permission_mode,
+                "avatar": source.avatar,
+                "_source": "user",
+            }
+        return await self.create_agent(user_id, payload)
+
+    async def resolve_effective_resources(
+        self,
+        user_id: str,
+        slug: str,
+    ) -> Any:
+        """Resolve Valurion's current read-only resource view."""
+        row = await self.get_agent(user_id, slug)
+        if row.resource_policy != "all_available":
+            raise ValueError(f"agent '{row.slug}' uses explicit resources, not all_available")
+        from valuz_agent.modules.agents.effective_resources import (
+            EffectiveResourceResolver,
+            current_execution_supports_stdio,
+        )
+
+        return await EffectiveResourceResolver.from_session(self._db).resolve(
+            user_id,
+            runtime=row.runtime,
+            supports_stdio=current_execution_supports_stdio(),
+        )
 
     async def _cleanup_marketplace_install(self, user_id: str, slug: str) -> None:
         """Best-effort marketplace provenance cleanup for a deleted agent —

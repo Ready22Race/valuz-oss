@@ -21,6 +21,7 @@ export function PdfRenderer({
   content,
   target,
   onOpenExternal,
+  onReload,
 }: ArtifactRendererProps) {
   const [loadState, setLoadState] = useState<PdfLoadState>("loading");
   const [frameKey, setFrameKey] = useState(0);
@@ -74,6 +75,10 @@ export function PdfRenderer({
 
   const retry = () => {
     setLoadState("loading");
+    // Re-resolve first: a remote ``openUrl`` is a short-lived presigned URL, so
+    // remounting the iframe with the SAME url after expiry just fails again.
+    // A local file re-resolves to the same address, where the remount IS the fix.
+    onReload?.();
     setFrameKey((current) => current + 1);
   };
 

@@ -51,7 +51,10 @@ from valuz_agent.adapters.system_prompt_builder import (
 from valuz_agent.i18n import t
 from valuz_agent.modules.agents.datastore import ProjectMemberDatastore
 from valuz_agent.modules.memory.injection import memory_instructions_block
-from valuz_agent.ports.instructions import global_instructions_preamble
+from valuz_agent.ports.instructions import (
+    agent_inherits_global_instructions,
+    resolve_global_instructions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -962,6 +965,28 @@ async def build_member_session(
         )
         return None
 
+    agent_meta = agent.metadata or {}
+    all_available_manifest = None
+    if agent_meta.get("resource_policy") == "all_available":
+        from valuz_agent.modules.agents.effective_resources import (
+            EffectiveResourceResolver,
+            current_execution_supports_stdio,
+        )
+        from valuz_agent.modules.connectors.datastore import ConnectorDatastore
+        from valuz_agent.modules.docs.datastore import DocumentDatastore
+        from valuz_agent.modules.skills.datastore import SkillDatastore
+
+        db = members._db  # noqa: SLF001 — same owner-scoped unit of work
+        all_available_manifest = await EffectiveResourceResolver(
+            skills=SkillDatastore(db),
+            connectors=ConnectorDatastore(db),
+            docs=DocumentDatastore(db),
+        ).resolve(
+            user_id,
+            runtime=str(agent.runtime_provider),
+            supports_stdio=current_execution_supports_stdio(),
+        )
+
     # Goal-mode payload fence (see ``spill_goal_brief_if_too_long``). Only the
     # runtimes whose kernel wrap_for_mode prepends ``/goal `` (claude_agent +
     # codex) are capped; deepagents bypasses the slash wrap so a long brief is
@@ -1011,11 +1036,19 @@ async def build_member_session(
     # resolver, so inject the same set here. Dedupe against the agent's own
     # skills by basename so an agent that explicitly lists one isn't doubled.
     baseline_skill_paths = always_on_skill_paths(user_id=user_id)
-    own_skill_names = [(s.name if hasattr(s, "name") else str(s)) for s in (agent.skills or [])]
+    own_skill_names = (
+        [item.slug for item in all_available_manifest.skills]
+        if all_available_manifest is not None
+        else [(s.name if hasattr(s, "name") else str(s)) for s in (agent.skills or [])]
+    )
     # Resolve the agent's skill slugs → absolute source dirs (the kernel
     # materializer needs paths, not slugs); display names stay as the slugs.
     # Shared chokepoint — same resolver the chat path uses.
-    own_skill_paths = await resolve_skill_slugs_to_paths(agent.skills, run_dir, user_id=user_id)
+    own_skill_paths = (
+        all_available_manifest.skill_paths
+        if all_available_manifest is not None
+        else await resolve_skill_slugs_to_paths(agent.skills, run_dir, user_id=user_id)
+    )
     baseline_skill_names = [os.path.basename(p) for p in baseline_skill_paths]
     extra_skill_paths = tuple(
         p for p in baseline_skill_paths if os.path.basename(p) not in set(own_skill_names)
@@ -1050,9 +1083,17 @@ async def build_member_session(
     # Wrap each block in an XML tag (shared chokepoint with the chat/project
     # path) so the agent / task guidance / project instructions / roster /
     # skills / brief are delineated instead of one undelimited blob.
+    inherits_global = agent_inherits_global_instructions(
+        kind=agent_meta.get("agent_kind", "standard"),
+        inherit_global_instructions=agent_meta.get("inherit_global_instructions", True),
+    )
+    prompt_snapshot = await resolve_global_instructions(user_id) if inherits_global else None
     instructions = assemble_session_instructions(
         [
-            ("global-instructions", await global_instructions_preamble()),
+            (
+                "global-instructions",
+                prompt_snapshot.content if prompt_snapshot is not None else "",
+            ),
             ("agent-instructions", agent.instructions or ""),
             ("project-instructions", project_prompt),
             ("memory", mem_block),
@@ -1085,7 +1126,7 @@ async def build_member_session(
     # Surface the agent's pinned provider id as the session's locked provider
     # so the conversation composer can match (provider, model) and display the
     # agent's actual configuration instead of falling back to a default.
-    pinned_provider_id = (agent.metadata or {}).get("provider_id")
+    pinned_provider_id = agent_meta.get("provider_id")
 
     # Agent-level reasoning-effort budget flows into the session here (effort
     # is configured on the agent, not per-conversation). ``None`` leaves
@@ -1127,16 +1168,48 @@ async def build_member_session(
     )
     # De-dupe by name in case the agent's own mcp_servers already carry a
     # reserved ``valuz_*`` name (shouldn't, but keep injection idempotent).
-    existing_names = {getattr(m, "name", None) for m in (agent.mcp_servers or ())}
+    external_mcp = []
+    if all_available_manifest is not None:
+        from valuz_agent.adapters.mcp_resolver import resolve_mcp_servers
+        from valuz_agent.modules.connectors.datastore import ConnectorDatastore
+
+        external_mcp = await resolve_mcp_servers(
+            enabled_slugs=all_available_manifest.connector_slugs,
+            connectors=ConnectorDatastore(members._db),  # noqa: SLF001
+            user_id=user_id,
+        )
+    existing_names = {
+        getattr(m, "name", None)
+        for m in (external_mcp if all_available_manifest is not None else (agent.mcp_servers or ()))
+    }
     from app.serializers import mcp_to_schema as _mcp_to_schema
 
-    mcp_servers = [_mcp_to_schema(m) for m in (agent.mcp_servers or ())] + [
-        m for m in builtin_mcp if m.name not in existing_names
-    ]
+    mcp_servers = (
+        list(external_mcp)
+        if all_available_manifest is not None
+        else [_mcp_to_schema(m) for m in (agent.mcp_servers or ())]
+    ) + [m for m in builtin_mcp if m.name not in existing_names]
 
     from app.serializers import (
         agent_config_to_schema,
     )
+
+    valuz_metadata: dict[str, object] = {
+        "project_id": project_id,
+        "agent_slug": agent_slug,
+        "task_id": task_id,
+        "run_kind": run_kind,
+        # Composer reads locked_provider_id from valuz metadata to match
+        # the session's locked (provider, model) pair.
+        **({"locked_provider_id": pinned_provider_id} if pinned_provider_id else {}),
+        # v2 actor dispatch: members carry their lead's session id so
+        # member_done notifications can be routed back (M10 附录 B).
+        **({"lead_session_id": lead_session_id} if lead_session_id else {}),
+    }
+    if prompt_snapshot is not None:
+        valuz_metadata["global_instructions"] = prompt_snapshot.metadata()
+    if all_available_manifest is not None:
+        valuz_metadata["capability_manifest"] = all_available_manifest.session_metadata()
 
     session = CreateSessionRequest(
         id=session_id,
@@ -1151,19 +1224,6 @@ async def build_member_session(
         skills=list(session_skills),
         mcp_servers=list(mcp_servers),
         permission_mode=agent.permission_mode,
-        metadata={
-            "valuz": {
-                "project_id": project_id,
-                "agent_slug": agent_slug,
-                "task_id": task_id,
-                "run_kind": run_kind,
-                # Composer reads locked_provider_id from valuz metadata to match
-                # the session's locked (provider, model) pair.
-                **({"locked_provider_id": pinned_provider_id} if pinned_provider_id else {}),
-                # v2 actor dispatch: members carry their lead's session id so
-                # member_done notifications can be routed back (M10 附录 B).
-                **({"lead_session_id": lead_session_id} if lead_session_id else {}),
-            }
-        },
+        metadata={"valuz": valuz_metadata},
     )
     return session

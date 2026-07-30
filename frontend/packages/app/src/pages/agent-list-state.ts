@@ -20,3 +20,15 @@ export function isCloudOnlyResource(resource: unknown): boolean {
 export function isCloudOnlyAgent(agent: Agent): boolean {
   return isCloudOnlyResource(agent);
 }
+
+/** Built-in runtime agent whose managed identity and resources are immutable. */
+export function isSystemAgent(agent: Agent): boolean {
+  return agent.kind === "system";
+}
+
+/** Keep the canonical system Agent ahead of every portable Agent. */
+export function compareAgentsWithValurionFirst(a: Agent, b: Agent): number {
+  const valurionPriority =
+    Number(b.slug === "valurion") - Number(a.slug === "valurion");
+  return valurionPriority || a.name.localeCompare(b.name);
+}

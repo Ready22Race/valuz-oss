@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { Agent } from "@valuz/core";
 import {
+  compareAgentsWithValurionFirst,
   isCloudOnlyAgent,
   isCloudOnlyResource,
+  isSystemAgent,
 } from "./agent-list-state";
 
 const agent = {
@@ -49,5 +51,35 @@ describe("isCloudOnlyResource", () => {
         },
       }),
     ).toBe(true);
+  });
+});
+
+describe("isSystemAgent", () => {
+  it("uses the backend kind instead of a display slug or source heuristic", () => {
+    expect(isSystemAgent({ ...agent, kind: "system" } as Agent)).toBe(true);
+    expect(
+      isSystemAgent({
+        ...agent,
+        slug: "valurion",
+        kind: "standard",
+      } as Agent),
+    ).toBe(false);
+  });
+});
+
+describe("compareAgentsWithValurionFirst", () => {
+  it("pins Valurion ahead of agents that would otherwise sort before it", () => {
+    const valurion = {
+      ...agent,
+      slug: "valurion",
+      name: "Valurion",
+      kind: "system",
+    } as Agent;
+    const alpha = { ...agent, slug: "alpha", name: "Alpha" } as Agent;
+
+    expect([alpha, valurion].sort(compareAgentsWithValurionFirst)).toEqual([
+      valurion,
+      alpha,
+    ]);
   });
 });

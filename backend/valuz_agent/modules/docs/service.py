@@ -1178,8 +1178,13 @@ class DocumentLibraryService:
         top_k: int = 5,
         folder_ids: list[str] | None = None,
         document_ids: list[str] | None = None,
+        knowledge_base_ids: list[str] | None = None,
     ) -> list[DocSearchHit]:
-        scope_ids = await self.resolve_doc_scope(user_id, project_id)
+        scope_ids = await self.resolve_doc_scope(
+            user_id,
+            project_id,
+            knowledge_base_ids=knowledge_base_ids,
+        )
         if not scope_ids:
             return []
 
@@ -1265,7 +1270,22 @@ class DocumentLibraryService:
 
     # ── Scope resolution ──────────────────────────────────────────────
 
-    async def resolve_doc_scope(self, user_id: str, project_id: str) -> list[str]:
+    async def resolve_doc_scope(
+        self,
+        user_id: str,
+        project_id: str,
+        knowledge_base_ids: list[str] | None = None,
+    ) -> list[str]:
+        if knowledge_base_ids is not None:
+            doc_ids: set[str] = set()
+            for kb_id in knowledge_base_ids:
+                # Re-authorize at use time: a deleted/revoked KB immediately
+                # falls out even when an older session snapshot names it.
+                if await self._ds.get_kb(user_id, kb_id) is None:
+                    continue
+                doc_ids.update(await self._ds.list_doc_ids_by_kb(user_id, kb_id, status="ready"))
+            return list(doc_ids)
+
         bindings = await self._ds.list_bindings(user_id, project_id)
         doc_ids: set[str] = set()
         for b in bindings:
@@ -1296,8 +1316,25 @@ class DocumentLibraryService:
                     result[did] = str(local)
         return result
 
-    async def build_doc_scope_tree(self, user_id: str, project_id: str) -> DocScopeTreeView:
-        bindings = await self._ds.list_bindings(user_id, project_id)
+    async def build_doc_scope_tree(
+        self,
+        user_id: str,
+        project_id: str,
+        knowledge_base_ids: list[str] | None = None,
+    ) -> DocScopeTreeView:
+        if knowledge_base_ids is None:
+            bindings = await self._ds.list_bindings(user_id, project_id)
+        else:
+            bindings = [
+                ProjectKbBindingRow(
+                    user_id=user_id,
+                    project_id=project_id,
+                    binding_kind="kb",
+                    target_id=kb_id,
+                )
+                for kb_id in knowledge_base_ids
+                if await self._ds.get_kb(user_id, kb_id) is not None
+            ]
         if not bindings:
             return DocScopeTreeView(knowledge_bases=(), total_documents=0)
 

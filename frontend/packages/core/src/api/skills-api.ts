@@ -609,9 +609,9 @@ export interface SkillCreationContext {
 export interface SkillCreateStartRequest {
   context: SkillCreationContext;
   /** Agent to bind the authoring conversation to. Omit to let the
-   *  backend pick the default assistant (seeded ``default-assistant``,
-   *  then the onboarding-created ``valuz-helper``). The draft-first
-   *  entry passes the composer's picked agent so the skill-creator
+   *  backend prefer the built-in ``valurion`` agent, then the legacy default
+   *  assistant. Historical Helpers are ordinary Agents, not aliases. The
+   *  draft-first entry passes the composer's picked agent so the skill-creator
    *  chat behaves exactly like 新对话. */
   agent_slug?: string | null;
   model_id?: string | null;

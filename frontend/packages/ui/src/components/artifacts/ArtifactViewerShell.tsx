@@ -253,7 +253,7 @@ function TextRenderer({
   );
 }
 
-function ImageRenderer({ artifact, content }: ArtifactRendererProps) {
+function ImageRenderer({ artifact, content, onReload }: ArtifactRendererProps) {
   const [zoom, setZoom] = useState<number | "fit">("fit");
   const [loadState, setLoadState] = useState<"loading" | "ready" | "error">(
     "loading",
@@ -353,10 +353,25 @@ function ImageRenderer({ artifact, content }: ArtifactRendererProps) {
           ) : null}
           {loadState === "error" ? (
             <div
-              className="absolute inset-0 z-10 flex items-center justify-center bg-surface-base px-6 text-sm text-error-text"
+              className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-surface-base px-6 text-sm text-error-text"
               role="alert"
             >
               无法加载图片
+              {/* Re-resolve, don't re-request: the address may be an expired
+                  presigned URL, which would just fail again. */}
+              {onReload ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLoadState("loading");
+                    onReload();
+                  }}
+                  className="inline-flex h-7 items-center gap-1.5 rounded-md border border-error-text/20 bg-surface px-2.5 text-xs font-medium text-error-text transition hover:bg-surface-soft"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  重试
+                </button>
+              ) : null}
             </div>
           ) : null}
           <div className="flex min-h-full min-w-full items-center justify-center">
@@ -383,7 +398,7 @@ function ImageRenderer({ artifact, content }: ArtifactRendererProps) {
   return <UnsupportedRenderer artifact={artifact} content={content} />;
 }
 
-function MediaRenderer({ artifact, content }: ArtifactRendererProps) {
+function MediaRenderer({ artifact, content, onReload }: ArtifactRendererProps) {
   const [loadState, setLoadState] = useState<"loading" | "ready" | "error">(
     "loading",
   );
@@ -408,10 +423,25 @@ function MediaRenderer({ artifact, content }: ArtifactRendererProps) {
       </div>
     ) : loadState === "error" ? (
       <div
-        className="absolute inset-0 z-10 flex items-center justify-center bg-surface-base px-6 text-sm text-error-text"
+        className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-surface-base px-6 text-sm text-error-text"
         role="alert"
       >
         无法加载媒体文件
+        {/* Re-resolve, don't re-request: the address may be an expired
+            presigned URL, which would just fail again. */}
+        {onReload ? (
+          <button
+            type="button"
+            onClick={() => {
+              setLoadState("loading");
+              onReload();
+            }}
+            className="inline-flex h-7 items-center gap-1.5 rounded-md border border-error-text/20 bg-surface px-2.5 text-xs font-medium text-error-text transition hover:bg-surface-soft"
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+            重试
+          </button>
+        ) : null}
       </div>
     ) : null;
 
@@ -634,6 +664,7 @@ export function ArtifactRenderer({
   content,
   target,
   onOpenExternal,
+  onReload,
 }: ArtifactRendererProps) {
   const Renderer = ARTIFACT_RENDERERS[artifact.previewKind] ?? UnsupportedRenderer;
   return (
@@ -653,6 +684,7 @@ export function ArtifactRenderer({
         content={content}
         target={target}
         onOpenExternal={onOpenExternal}
+        onReload={onReload}
       />
     </Suspense>
   );
@@ -876,6 +908,7 @@ export function ArtifactViewerShell({
             content={content}
             target={target}
             onOpenExternal={onOpenExternal}
+            onReload={onReload}
           />
         ) : null}
       </div>

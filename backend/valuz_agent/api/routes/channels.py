@@ -287,9 +287,7 @@ async def test_feishu_binding(
     secret = _read_feishu_secret(user_id=user_id, secret_ref=binding.secret_ref)
     if not secret.app_secret:
         raise HTTPException(status_code=422, detail="App Secret is required")
-    credential_ok, error = await _check_feishu_credentials(
-        binding.bot_id, secret.app_secret
-    )
+    credential_ok, error = await _check_feishu_credentials(binding.bot_id, secret.app_secret)
     runtime = feishu_supervisor.status_for(agent_slug)
     return FeishuBindingTestResponse(
         credential_ok=credential_ok,
@@ -695,11 +693,7 @@ def _platform_of(channel_instance_id: str) -> str:
     ("feishu-main" / "wecom-aibot-main"). Storing it would mean a column whose
     only reader is a UI label, and a migration for existing rows.
     """
-    return (
-        WECOM_AIBOT_PLATFORM
-        if channel_instance_id.startswith("wecom")
-        else FEISHU_PLATFORM
-    )
+    return WECOM_AIBOT_PLATFORM if channel_instance_id.startswith("wecom") else FEISHU_PLATFORM
 
 
 def _wecom_aibot_binding_response(
@@ -710,9 +704,7 @@ def _wecom_aibot_binding_response(
 ) -> WeComAIBotBindingResponse:
     runtime = wecom_aibot_supervisor.status_for(agent_slug)
     has_secret = bool(
-        binding is not None
-        and binding.secret_ref
-        and secret_store.get(user_id, binding.secret_ref)
+        binding is not None and binding.secret_ref and secret_store.get(user_id, binding.secret_ref)
     )
     return WeComAIBotBindingResponse(
         enabled=binding.enabled if binding is not None else False,
@@ -904,9 +896,7 @@ async def _load_feishu_callback_config(
             channel_instance_id=channel_instance_id,
         )
     if binding is None:
-        raise ChannelConfigError(
-            f"Feishu channel instance '{channel_instance_id}' is not bound"
-        )
+        raise ChannelConfigError(f"Feishu channel instance '{channel_instance_id}' is not bound")
     secret = _read_feishu_secret(
         user_id=binding.owner_user_id,
         secret_ref=binding.secret_ref,

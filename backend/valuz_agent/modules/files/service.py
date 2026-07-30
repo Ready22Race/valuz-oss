@@ -9,6 +9,7 @@ turns the owned absolute path into an access address. See
 from __future__ import annotations
 
 import mimetypes
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -78,8 +79,15 @@ def stat_meta(abs_path: Path) -> FileMeta:
     rather than raising (the click surfaces a toast, rendering isn't blocked)."""
     name = abs_path.name
     mime_type, _ = mimetypes.guess_type(name)
-    exists = abs_path.is_file()
-    size = abs_path.stat().st_size if exists else None
+    # ONE stat, not is_file() + stat(): a file deleted between the two calls
+    # (agent overwrite, cleanup job) raised FileNotFoundError out of here and
+    # failed the WHOLE resolve batch — the opposite of this function's contract.
+    try:
+        st = abs_path.stat()
+    except OSError:
+        st = None
+    exists = st is not None and stat.S_ISREG(st.st_mode)
+    size = st.st_size if exists else None
     return FileMeta(
         name=name,
         mime_type=mime_type,

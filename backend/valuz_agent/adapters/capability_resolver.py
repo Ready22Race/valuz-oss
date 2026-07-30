@@ -119,6 +119,7 @@ async def resolve_session_capabilities(
     docs: DocumentDatastore | None = None,
     session_id: str | None = None,
     user_id: str | None = None,
+    all_available_skill_paths: list[str] | None = None,
 ) -> ResolvedCapabilities:
     if user_id is None:
         raise ValueError("user_id is required")
@@ -138,13 +139,23 @@ async def resolve_session_capabilities(
     skill_paths: list[str] = []
     warnings: list[str] = []
     seen: set[str] = set()
+    all_available = all_available_skill_paths is not None
+    for path in all_available_skill_paths or []:
+        absolute = str(Path(path).expanduser().resolve(strict=False))
+        if absolute in seen:
+            continue
+        if not Path(absolute).is_dir():
+            warnings.append(f"all-available skill path does not exist: {absolute!r}")
+            continue
+        seen.add(absolute)
+        skill_paths.append(absolute)
 
     # 1) Project-enabled skills — read from the filesystem-based
     #    ``project-config.json`` which is the canonical source of truth
     #    for which skills are enabled for a project.  The DB-backed
     #    ``ProjectSkillConfigRow`` table is not currently populated by the
     #    UI's ``set_skill_enabled`` flow; it writes to JSON instead.
-    enabled_paths = skills.enabled_skill_paths(project)
+    enabled_paths = [] if all_available else skills.enabled_skill_paths(project)
     for path in enabled_paths:
         absolute = _resolve_to_absolute(path, project.root_path)
         if absolute is None:
@@ -167,7 +178,11 @@ async def resolve_session_capabilities(
     #     for chat (datastore.list_project_skills sets ``enabled=True`` for
     #     project.kind == "chat") and there is no per-project toggle to
     #     opt out, so the resolver must mirror that for the runtime.
-    if project.kind != "project" and (skill_source is not None or extra_skill_sources):
+    if (
+        not all_available
+        and project.kind != "project"
+        and (skill_source is not None or extra_skill_sources)
+    ):
         ctx = RuntimeContext(
             user_id=user_id,
             project=ProjectRef(
@@ -285,9 +300,7 @@ async def resolve_session_capabilities(
     #      inject the same set — task lead/member sessions don't flow through
     #      this resolver but must still carry these built-in tools.
     if session_id:
-        mcp_configs_list.extend(
-            await always_on_http_mcp_servers(session_id, owner_user_id=user_id)
-        )
+        mcp_configs_list.extend(await always_on_http_mcp_servers(session_id, owner_user_id=user_id))
     else:
         logger.warning(
             "session_id not provided — skipping always-on HTTP MCP injection "
@@ -417,9 +430,7 @@ async def always_on_http_mcp_servers(
     from valuz_agent.ports.sandbox_credential import get_sandbox_credential_verifier
 
     headers = {
-        "X-Valuz-Internal": await get_sandbox_credential_verifier().credential_for(
-            owner_user_id
-        ),
+        "X-Valuz-Internal": await get_sandbox_credential_verifier().credential_for(owner_user_id),
         "X-Valuz-Session-Id": session_id,
     }
     base = _settings.backend_base_url

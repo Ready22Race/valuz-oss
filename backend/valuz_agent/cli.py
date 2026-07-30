@@ -133,7 +133,7 @@ def cleanup_seed_agents_cmd() -> None:
     fs_registry.data_dir(resolve_local_user_id())  # ensure the data root exists
     run_host_migrations()
 
-    keep = {"default-assistant"}
+    keep = {"default-assistant", "valurion", "valuz-helper"}
 
     async def _run() -> tuple[list[str], list[tuple[str, str]]]:
         from valuz_agent.infra.local_identity import resolve_local_user_id

@@ -1,3 +1,4 @@
+import { resolveApiBase } from "./base-resolver";
 import { createFetchJson } from "./fetch-json";
 
 let _apiBase =
@@ -91,6 +92,14 @@ export interface FeishuBindingTestResult {
 
 const fetchJson = createFetchJson(() => _apiBase);
 
+// A chat binding belongs to a project, and a project lives on exactly one
+// backend — so these calls have to follow it, the way projects-api and
+// sessions-api do. Without the project id they fall back to the module
+// default, which on a multi-target edition means a cloud project's bindings
+// are read from (and written to) the local backend.
+const chatBase = (projectId?: string): string =>
+  resolveApiBase({ projectId }, _apiBase);
+
 export const channelsApi = {
   getWeComAIBotBinding(agentSlug: string): Promise<WeComAIBotBinding> {
     return fetchJson(
@@ -157,11 +166,17 @@ export const channelsApi = {
   },
 
   /** Groups the bot is already a member of — the project page's picker. */
-  listFeishuChats(agentSlug?: string): Promise<ChannelChatItem[]> {
+  listFeishuChats(
+    agentSlug?: string,
+    projectId?: string,
+  ): Promise<ChannelChatItem[]> {
     const qs = new URLSearchParams();
     if (agentSlug) qs.set("agent_slug", agentSlug);
     const suffix = qs.toString() ? `?${qs}` : "";
-    return fetchJson(`/v1/channels/feishu/chats${suffix}`, { cache: "no-store" });
+    return fetchJson(`/v1/channels/feishu/chats${suffix}`, {
+      baseUrl: chatBase(projectId),
+      cache: "no-store",
+    });
   },
 
   /** Create a Feishu group with the bot already in it, bound to a project. */
@@ -171,6 +186,7 @@ export const channelsApi = {
     channel_instance_id?: string;
   }): Promise<CreatedChat> {
     return fetchJson("/v1/channels/feishu/chats", {
+      baseUrl: chatBase(payload.project_id),
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -182,19 +198,25 @@ export const channelsApi = {
   },
 
   /** A join link for a group the bot is in, generated on demand. */
-  async feishuChatLink(externalChatId: string): Promise<string | null> {
+  async feishuChatLink(
+    externalChatId: string,
+    projectId?: string,
+  ): Promise<string | null> {
     const result = await fetchJson<{ share_link: string | null }>(
       `/v1/channels/feishu/chats/${encodeURIComponent(externalChatId)}/link`,
-      { cache: "no-store" },
+      { baseUrl: chatBase(projectId), cache: "no-store" },
     );
     return result.share_link ?? null;
   },
 
   /** Dissolve a group Valuz created (and drop its binding). */
-  async deleteFeishuChat(externalChatId: string): Promise<void> {
+  async deleteFeishuChat(
+    externalChatId: string,
+    projectId?: string,
+  ): Promise<void> {
     await fetchJson(
       `/v1/channels/feishu/chats/${encodeURIComponent(externalChatId)}`,
-      { method: "DELETE" },
+      { baseUrl: chatBase(projectId), method: "DELETE" },
     );
   },
 
@@ -205,7 +227,10 @@ export const channelsApi = {
     // ``no-store``: this is read right after linking, unlinking or dissolving
     // a group, and a browser-cached copy would show the state before the
     // change — indistinguishable from "the panel never refreshed".
-    return fetchJson(`/v1/channels/chat-bindings${suffix}`, { cache: "no-store" });
+    return fetchJson(`/v1/channels/chat-bindings${suffix}`, {
+      baseUrl: chatBase(projectId),
+      cache: "no-store",
+    });
   },
 
   bindChatToProject(payload: {
@@ -216,6 +241,7 @@ export const channelsApi = {
     default_agent_slug?: string | null;
   }): Promise<ChatProjectBinding> {
     return fetchJson("/v1/channels/chat-bindings", {
+      baseUrl: chatBase(payload.project_id),
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -231,12 +257,16 @@ export const channelsApi = {
   async unbindChat(
     externalChatId: string,
     channelInstanceId = "feishu-main",
+    projectId?: string,
   ): Promise<void> {
     const qs = new URLSearchParams({
       external_chat_id: externalChatId,
       channel_instance_id: channelInstanceId,
     });
-    await fetchJson(`/v1/channels/chat-bindings?${qs}`, { method: "DELETE" });
+    await fetchJson(`/v1/channels/chat-bindings?${qs}`, {
+      baseUrl: chatBase(projectId),
+      method: "DELETE",
+    });
   },
 
   testFeishuBinding(agentSlug: string): Promise<FeishuBindingTestResult> {
