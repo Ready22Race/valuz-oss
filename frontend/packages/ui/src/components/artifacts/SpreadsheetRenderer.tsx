@@ -12,6 +12,7 @@ import type {
   ArtifactRendererProps,
 } from "./artifact-viewer.types";
 import {
+
   SPREADSHEET_COLUMN_WIDTH,
   SPREADSHEET_ROW_HEIGHT,
   type SpreadsheetCellRef,
@@ -21,6 +22,9 @@ import {
   type SpreadsheetWorkerRequest,
   type SpreadsheetWorkerResponse,
 } from "./spreadsheet-parser.types";
+
+import { t as _t } from "@valuz/shared/i18n";
+import { useI18n } from "../../hooks/use-i18n";
 
 type SpreadsheetSheet = Omit<SpreadsheetSheetData, "cellStyles"> & {
   cellStyles: Map<string, SpreadsheetCellStyle>;
@@ -132,10 +136,13 @@ function hydrateSheet(data: SpreadsheetSheetData): SpreadsheetSheet {
 }
 
 function SpreadsheetUnavailable({ artifact }: { artifact: ArtifactDescriptor }) {
+  const { t } = useI18n();
   return (
     <div className="flex h-full items-center justify-center px-6 py-16">
       <div className="max-w-[420px] rounded-lg border border-surface-border bg-surface-soft px-5 py-4">
-        <div className="text-sm font-medium text-ink-heading">无法读取表格</div>
+        <div className="text-sm font-medium text-ink-heading">
+          {t("ui.artifact.sheetReadFailed")}
+        </div>
         <p className="mt-1 text-xs leading-5 text-ink-body">{artifact.name}</p>
       </div>
     </div>
@@ -146,6 +153,7 @@ export function SpreadsheetRenderer({
   artifact,
   content,
 }: ArtifactRendererProps) {
+  const { t } = useI18n();
   const [sheets, setSheets] = useState<SpreadsheetSheet[]>([]);
   const [sheetNames, setSheetNames] = useState<string[]>([]);
   const [activeSheetName, setActiveSheetName] = useState<string | null>(null);
@@ -204,7 +212,7 @@ export function SpreadsheetRenderer({
     };
     worker.onerror = () => {
       if (controller.signal.aborted) return;
-      setError("无法启动表格解析器。");
+      setError(_t("ui.artifact.sheetParserFailed"));
       setLoading(false);
     };
 
@@ -213,13 +221,18 @@ export function SpreadsheetRenderer({
         const response = await fetch(workbookUrl, {
           signal: controller.signal,
         });
-        if (!response.ok) throw new Error(`读取失败：HTTP ${response.status}`);
+        if (!response.ok)
+          throw new Error(
+            _t("ui.artifact.httpReadFailed", { status: response.status }),
+          );
         const buffer = await response.arrayBuffer();
         const message: SpreadsheetWorkerRequest = { type: "load", buffer };
         worker.postMessage(message, [buffer]);
       } catch (cause) {
         if (controller.signal.aborted) return;
-        setError(cause instanceof Error ? cause.message : "无法解析表格文件。");
+        setError(
+          cause instanceof Error ? cause.message : _t("ui.artifact.sheetParseError"),
+        );
         setLoading(false);
       }
     }
@@ -289,7 +302,7 @@ export function SpreadsheetRenderer({
   const copySelection = async () => {
     if (!activeSheet || !selection) return;
     await navigator.clipboard.writeText(selectionToText(activeSheet, selection));
-    setCopyStatus("已复制");
+    setCopyStatus(_t("ui.artifact.copied"));
     window.setTimeout(() => setCopyStatus(null), 1400);
   };
 
@@ -337,7 +350,7 @@ export function SpreadsheetRenderer({
     return (
       <div className="flex h-full items-center justify-center text-sm text-ink-meta" role="status">
         <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-        正在解析表格
+        {t("ui.artifact.sheetParsing")}
       </div>
     );
   }
@@ -346,7 +359,7 @@ export function SpreadsheetRenderer({
     return (
       <div className="flex h-full items-center justify-center px-6 py-16">
         <div className="max-w-[420px] rounded-[10px] border border-error-light bg-error-light px-5 py-4 text-error-text" role="alert">
-          <div className="text-sm font-medium">无法预览表格</div>
+          <div className="text-sm font-medium">{t("ui.artifact.sheetPreviewFailed")}</div>
           <p className="mt-1 text-xs leading-5">{error}</p>
         </div>
       </div>
@@ -381,8 +394,8 @@ export function SpreadsheetRenderer({
             <input
               value={searchQuery}
               onChange={(event) => setSearchQuery(event.target.value)}
-              placeholder="搜索单元格"
-              aria-label="搜索单元格"
+              placeholder={t("ui.artifact.searchCells")}
+              aria-label={t("ui.artifact.searchCells")}
               className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-ink-meta"
             />
           </label>
@@ -404,7 +417,7 @@ export function SpreadsheetRenderer({
                 disabled={!searchMatches.length}
                 className="rounded px-1.5 py-0.5 hover:bg-surface-muted disabled:opacity-40"
               >
-                上一个
+                {t("ui.artifact.prevMatch")}
               </button>
               <button
                 type="button"
@@ -416,7 +429,7 @@ export function SpreadsheetRenderer({
                 disabled={!searchMatches.length}
                 className="rounded px-1.5 py-0.5 hover:bg-surface-muted disabled:opacity-40"
               >
-                下一个
+                {t("ui.artifact.nextMatch")}
               </button>
             </div>
           ) : null}
@@ -426,7 +439,7 @@ export function SpreadsheetRenderer({
             disabled={!selection}
             className="h-7 rounded-md px-2 text-xs text-ink-body transition hover:bg-surface-muted hover:text-ink-heading disabled:pointer-events-none disabled:opacity-40"
           >
-            {copyStatus ?? "复制"}
+            {copyStatus ?? t("ui.artifact.copy")}
           </button>
           <div className="shrink-0 text-xs text-ink-meta">
             {activeSheet.totalRows} rows · {activeSheet.totalColumns} cols

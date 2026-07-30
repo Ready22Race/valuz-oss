@@ -3,6 +3,8 @@ import { useEffect, useState } from "react";
 
 import type { ArtifactRendererProps } from "./artifact-viewer.types";
 
+import { useI18n } from "../../hooks/use-i18n";
+
 type PdfLoadState = "loading" | "ready" | "error";
 export const PDF_LOAD_TIMEOUT_MS = 15_000;
 
@@ -23,6 +25,7 @@ export function PdfRenderer({
   onOpenExternal,
   onReload,
 }: ArtifactRendererProps) {
+  const { t } = useI18n();
   const [loadState, setLoadState] = useState<PdfLoadState>("loading");
   const [frameKey, setFrameKey] = useState(0);
   const basePdfUrl =
@@ -54,9 +57,11 @@ export function PdfRenderer({
           className="max-w-md rounded-lg border border-error-light bg-error-light px-5 py-4 text-error-text"
           role="alert"
         >
-          <div className="text-sm font-medium">无法预览 PDF</div>
+          <div className="text-sm font-medium">
+            {t("ui.artifact.pdfPreviewUnavailable")}
+          </div>
           <p className="mt-1 text-xs leading-5">
-            当前文件没有可用的 PDF 访问地址。
+            {t("ui.artifact.pdfNoAddress")}
           </p>
           {onOpenExternal ? (
             <button
@@ -65,7 +70,7 @@ export function PdfRenderer({
               className="mt-3 inline-flex h-8 items-center gap-1.5 rounded-md border border-error-text/20 bg-surface px-3 text-xs font-medium text-error-text transition hover:bg-surface-soft"
             >
               <ExternalLink className="h-3.5 w-3.5" />
-              外部打开
+              {t("ui.artifact.openExternal")}
             </button>
           ) : null}
         </div>
@@ -91,7 +96,7 @@ export function PdfRenderer({
           aria-live="polite"
         >
           <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-          正在加载 PDF
+          {t("ui.artifact.loadingPdf")}
         </div>
       ) : null}
       {loadState === "error" ? (
@@ -100,9 +105,9 @@ export function PdfRenderer({
             className="max-w-md rounded-lg border border-error-light bg-error-light px-5 py-4 text-error-text"
             role="alert"
           >
-            <div className="text-sm font-medium">无法加载 PDF</div>
+            <div className="text-sm font-medium">{t("ui.artifact.pdfLoadFailed")}</div>
             <p className="mt-1 text-xs leading-5">
-              请重试，或使用系统应用打开 {artifact.name}。
+              {t("ui.artifact.pdfRetryHint", { name: artifact.name })}
             </p>
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <button
@@ -111,7 +116,7 @@ export function PdfRenderer({
                 className="inline-flex h-8 items-center gap-1.5 rounded-md border border-error-text/20 bg-surface px-3 text-xs font-medium text-error-text transition hover:bg-surface-soft"
               >
                 <RefreshCw className="h-3.5 w-3.5" />
-                重试
+                {t("ui.artifact.retry")}
               </button>
               {onOpenExternal ? (
                 <button
@@ -120,7 +125,7 @@ export function PdfRenderer({
                   className="inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-xs font-medium text-error-text transition hover:bg-surface-soft"
                 >
                   <ExternalLink className="h-3.5 w-3.5" />
-                  外部打开
+                  {t("ui.artifact.openExternal")}
                 </button>
               ) : null}
             </div>

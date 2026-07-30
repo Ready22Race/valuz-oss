@@ -5,6 +5,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { ArtifactRendererProps } from "./artifact-viewer.types";
 
+import { useI18n } from "../../hooks/use-i18n";
+
 async function languageForPath(path: string): Promise<Extension[]> {
   const extension = path.split(".").pop()?.toLowerCase() ?? "";
   switch (extension) {
@@ -65,6 +67,7 @@ export function CodeMirrorRenderer({
   artifact,
   content,
 }: ArtifactRendererProps) {
+  const { t } = useI18n();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [languageExtensions, setLanguageExtensions] = useState<Extension[]>([]);
   const sourcePath = artifact.path ?? artifact.name;
@@ -143,7 +146,7 @@ export function CodeMirrorRenderer({
   if (content?.kind !== "text") {
     return (
       <div className="flex h-full items-center justify-center text-sm text-ink-meta">
-        无法读取文本内容
+        {t("ui.artifact.textReadFailed")}
       </div>
     );
   }
@@ -153,7 +156,7 @@ export function CodeMirrorRenderer({
       <div ref={containerRef} className="min-h-0 flex-1 overflow-hidden" />
       {content.truncated ? (
         <div className="border-t border-surface-border bg-warning-light px-4 py-2 text-xs text-warning-text">
-          文件较大，当前仅显示前 5 MiB。
+          {t("ui.artifact.truncated")}
         </div>
       ) : null}
     </div>
