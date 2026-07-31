@@ -1,5 +1,6 @@
 /** @vitest-environment jsdom */
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
 vi.mock("../conversation/MarkdownContent", () => ({
@@ -56,6 +57,25 @@ describe("SkillDetailPanel", () => {
     );
 
     expect(screen.getByRole("button", { name: "Publish" })).toBeTruthy();
+  });
+
+  it("keeps native copy as the first menu action when editions contribute", async () => {
+    const onCopy = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <SkillDetailPanel
+        skill={skill("Shared")}
+        files={[]}
+        onCopy={onCopy}
+        copyMenuItems={<div role="menuitem">Copy to organizations</div>}
+      />,
+    );
+
+    await user.click(screen.getByRole("button"));
+    const items = screen.getAllByRole("menuitem");
+    expect(items[1]?.textContent).toContain("Copy to organizations");
+    fireEvent.click(items[0]);
+    expect(onCopy).toHaveBeenCalledTimes(1);
   });
 
   it("clears previous SKILL.md content while the next skill loads", async () => {

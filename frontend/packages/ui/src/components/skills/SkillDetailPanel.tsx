@@ -17,6 +17,12 @@ import {
 import { cn } from "../../lib/cn";
 import { useI18n } from "../../hooks/use-i18n";
 import { Badge } from "../ui/badge";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "../ui/dropdown-menu";
 import { MarkdownContent } from "../conversation/MarkdownContent";
 import { ProjectFileTree, type FileTreeNode } from "../project/ProjectFileTree";
 import { getSkillIconStyle } from "./skill-icon-style";
@@ -82,6 +88,8 @@ export interface SkillDetailPanelProps {
   onLoadFile?: (path: string) => Promise<string>;
   onDelete?: () => void;
   onCopy?: () => void;
+  /** Edition-provided items appended after the native Copy action. */
+  copyMenuItems?: ReactNode;
   /** Edition/overlay-provided actions rendered before the native controls. */
   headerActions?: ReactNode;
   /** Reveal the skill directory in the OS file manager (Finder on macOS,
@@ -305,6 +313,7 @@ export const SkillDetailPanel = ({
   onLoadFile,
   onDelete,
   onCopy,
+  copyMenuItems,
   headerActions,
   onOpenInFinder,
 }: SkillDetailPanelProps) => {
@@ -529,7 +538,26 @@ export const SkillDetailPanel = ({
           <TooltipProvider delayDuration={150}>
             <div className="flex shrink-0 items-center gap-0.5">
               {headerActions}
-              {onCopy ? (
+              {onCopy && copyMenuItems ? (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <button
+                      type="button"
+                      aria-label={t("skill.copyAsCustom")}
+                      className="flex h-7 w-7 cursor-default items-center justify-center rounded-md text-ink-meta transition-colors hover:bg-surface-soft hover:text-ink-body"
+                    >
+                      <Copy className="h-3.5 w-3.5" />
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" forceMount>
+                    <DropdownMenuItem onSelect={onCopy}>
+                      <Copy className="h-3.5 w-3.5" />
+                      {t("skill.copyAsCustom")}
+                    </DropdownMenuItem>
+                    {copyMenuItems}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              ) : onCopy ? (
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <button
