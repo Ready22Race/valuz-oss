@@ -1200,11 +1200,30 @@ export const ProjectDetailPage = () => {
     try {
       const session = await ensureChatSession();
       markPendingConsumed();
-      // ``text`` already contains any ``/slug`` tokens because Composer
-      // serializes inline skill chips into its controlled value.
-      await sessionsApi.sendMessage(session.id, text);
       setComposerValue("");
-      navigate(`/conversation/${session.id}`);
+      // Navigate the MOMENT there is an id to navigate to — before the send
+      // round-trip, not after it.
+      //
+      // Minting the session has to happen here: this page owns the worktree /
+      // permission / agent picks that ``ensureChatSession`` freezes into it.
+      // Everything after that belongs to the conversation page, which can show
+      // the message and the runtime-startup progress while it happens.
+      // Awaiting the send first left the user on a composer that looked frozen
+      // for the whole cloud round-trip and then dropped them into a blank
+      // conversation, because the kernel had not echoed ``message.user`` yet.
+      //
+      // ``handoff`` seeds that page's optimistic turn. It deliberately does
+      // NOT ask it to send: the conversation page's own send path runs through
+      // its ``ensureSession``, which mints a SECOND session whenever the
+      // freshly-navigated page has not fetched this one yet.
+      navigate(`/conversation/${session.id}`, {
+        state: { handoff: { text, sentAt: Date.now() } },
+      });
+      // ``text`` already contains any ``/slug`` tokens because Composer
+      // serializes inline skill chips into its controlled value. This page is
+      // unmounting behind the navigation; the failure toast below is global,
+      // and the conversation page simply never gets its turn.
+      await sessionsApi.sendMessage(session.id, text);
     } catch (cause) {
       // A billing rejection (402) carries an i18n key the client renders;
       // otherwise fall back to the generic save-failed copy.
