@@ -34,6 +34,14 @@ import type {
   DocumentSource,
 } from "./document-reader.types";
 
+const RESEARCH_WIDTH_STORAGE_KEY = "valuz.reader.researchWidth.v6";
+const RESEARCH_MIN_WIDTH = 360;
+// PDF pages fit the available document pane, so the standard 60/40 split no
+// longer needs to reserve the fixed width of an A4 page rendered at 125%.
+const DOCUMENT_MIN_WIDTH = 480;
+const SPLITTER_WIDTH = 8;
+const DEFAULT_RESEARCH_RATIO = 0.4;
+
 function formatPublished(value?: number): string | null {
   if (!value) return null;
   const date = new Date(value);
@@ -107,6 +115,7 @@ export function DocumentReaderView({
   doc,
   loading,
   error,
+  framed = true,
   location,
   sidePanel,
   onClose,
@@ -125,9 +134,11 @@ export function DocumentReaderView({
   const [researchWidth, setResearchWidth] = useState<number | null>(() => {
     if (typeof window === "undefined") return null;
     const stored = Number(
-      window.localStorage.getItem("valuz.reader.researchWidth"),
+      window.localStorage.getItem(RESEARCH_WIDTH_STORAGE_KEY),
     );
-    return Number.isFinite(stored) && stored >= 280 ? stored : null;
+    return Number.isFinite(stored) && stored >= RESEARCH_MIN_WIDTH
+      ? stored
+      : null;
   });
   const locationKey = useMemo(() => JSON.stringify(location ?? null), [location]);
   usePersistentScroll(
@@ -142,14 +153,18 @@ export function DocumentReaderView({
 
   const clampResearchWidth = (value: number): number => {
     const total = workspaceRef.current?.getBoundingClientRect().width ?? 960;
-    return Math.max(280, Math.min(value, Math.max(320, total * 0.55)));
+    const maximum = Math.max(
+      RESEARCH_MIN_WIDTH,
+      total - DOCUMENT_MIN_WIDTH - SPLITTER_WIDTH,
+    );
+    return Math.max(RESEARCH_MIN_WIDTH, Math.min(value, maximum));
   };
 
   const setAndPersistResearchWidth = (value: number) => {
     const next = clampResearchWidth(value);
     setResearchWidth(next);
     window.localStorage.setItem(
-      "valuz.reader.researchWidth",
+      RESEARCH_WIDTH_STORAGE_KEY,
       String(Math.round(next)),
     );
   };
@@ -222,8 +237,7 @@ export function DocumentReaderView({
     }
     if (
       doc.render.kind === "file" &&
-      doc.render.mimeType === "application/pdf" &&
-      location?.kind === "pdf"
+      doc.render.mimeType === "application/pdf"
     ) {
       return (
         <PdfDocumentRenderer
@@ -270,7 +284,11 @@ export function DocumentReaderView({
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div
+      className={`flex h-full min-h-0 flex-col overflow-hidden bg-surface ${
+        framed ? "rounded-[14px] border border-surface-border" : ""
+      }`}
+    >
       <header className="flex shrink-0 items-start gap-3 border-b border-surface-border px-5 py-3">
         <div className="min-w-0 flex-1">
           <h1 className="truncate text-sm font-medium text-ink-heading">
@@ -387,7 +405,7 @@ export function DocumentReaderView({
       <div ref={workspaceRef} className="flex min-h-0 flex-1">
         <div
           ref={documentScrollRef}
-          className={`min-h-0 min-w-0 flex-1 overflow-y-auto ${
+          className={`min-h-0 min-w-0 flex-1 overflow-y-auto bg-surface ${
             sidePanel && mobilePane !== "document" ? "hidden lg:block" : ""
           }`}
         >
@@ -406,15 +424,14 @@ export function DocumentReaderView({
                 onPointerDown={beginResize}
                 onDoubleClick={() => {
                   setResearchWidth(null);
-                  window.localStorage.removeItem(
-                    "valuz.reader.researchWidth",
-                  );
+                  window.localStorage.removeItem(RESEARCH_WIDTH_STORAGE_KEY);
                 }}
                 onKeyDown={(event) => {
                   const current =
                     researchWidth ??
-                    (workspaceRef.current?.getBoundingClientRect().width ?? 960) *
-                      0.38;
+                    (workspaceRef.current?.getBoundingClientRect().width ??
+                      960) *
+                      DEFAULT_RESEARCH_RATIO;
                   if (event.key === "ArrowLeft") {
                     event.preventDefault();
                     setAndPersistResearchWidth(current + 16);
@@ -423,11 +440,11 @@ export function DocumentReaderView({
                     setAndPersistResearchWidth(current - 16);
                   }
                 }}
-                className="hidden w-1.5 shrink-0 cursor-col-resize border-l border-surface-border bg-transparent outline-none transition hover:bg-accent/15 focus:bg-accent/20 lg:block"
+                className="relative hidden w-2 shrink-0 cursor-col-resize bg-transparent outline-none transition before:absolute before:inset-y-6 before:left-1/2 before:w-px before:-translate-x-1/2 before:bg-surface-border/60 hover:bg-accent/5 focus:bg-accent/10 lg:block"
               />
             ) : null}
             <aside
-              className={`min-h-0 shrink-0 overflow-y-auto ${
+              className={`min-h-0 shrink-0 overflow-y-auto bg-surface ${
                 mobilePane === "research" ? "block w-full" : "hidden"
               } ${
                 researchOpen
@@ -436,7 +453,9 @@ export function DocumentReaderView({
               }`}
               style={{
                 "--research-width":
-                  researchWidth !== null ? `${researchWidth}px` : "38%",
+                  researchWidth !== null
+                    ? `clamp(${RESEARCH_MIN_WIDTH}px, ${researchWidth}px, calc(100% - ${DOCUMENT_MIN_WIDTH + SPLITTER_WIDTH}px))`
+                    : `clamp(${RESEARCH_MIN_WIDTH}px, ${DEFAULT_RESEARCH_RATIO * 100}%, calc(100% - ${DOCUMENT_MIN_WIDTH + SPLITTER_WIDTH}px))`,
               } as CSSProperties}
             >
               {sidePanel}

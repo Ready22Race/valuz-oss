@@ -1,8 +1,16 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DocumentReaderView } from "./DocumentReaderView";
 import type { DocumentSource } from "./document-reader.types";
+
+const pdfjsMock = vi.hoisted(() => ({ getDocument: vi.fn() }));
+
+vi.mock("pdfjs-dist/legacy/build/pdf.mjs", () => ({
+  GlobalWorkerOptions: { workerSrc: "" },
+  getDocument: pdfjsMock.getDocument,
+}));
 
 const CHUNKS: DocumentSource = {
   id: "doc-1",
@@ -31,16 +39,50 @@ const CHUNKS: DocumentSource = {
 beforeEach(() => {
   // jsdom has no layout, so scrollIntoView is not implemented.
   Element.prototype.scrollIntoView = vi.fn();
+  pdfjsMock.getDocument.mockReset().mockReturnValue({
+    promise: new Promise(() => undefined),
+    destroy: vi.fn(),
+  });
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 describe("DocumentReaderView", () => {
+  it("keeps a panel frame around the document workspace", () => {
+    const { container } = render(<DocumentReaderView doc={CHUNKS} />);
+    const frame = container.firstElementChild;
+
+    expect(frame?.classList.contains("overflow-hidden")).toBe(true);
+    expect(frame?.classList.contains("bg-surface")).toBe(true);
+    expect(frame?.classList.contains("rounded-[14px]")).toBe(true);
+    expect(frame?.classList.contains("border")).toBe(true);
+    expect(frame?.classList.contains("border-surface-border")).toBe(true);
+    expect(frame?.classList.contains("shadow-sm")).toBe(false);
+  });
+
+  it("does not draw a second frame when embedded in a panel", () => {
+    const { container } = render(
+      <DocumentReaderView doc={CHUNKS} framed={false} />,
+    );
+    const frame = container.firstElementChild;
+
+    expect(frame?.classList.contains("overflow-hidden")).toBe(true);
+    expect(frame?.classList.contains("border")).toBe(false);
+    expect(frame?.classList.contains("rounded-[14px]")).toBe(false);
+  });
+
   it("renders the document header with source and publish time", () => {
-    render(<DocumentReaderView doc={CHUNKS} />);
+    const { container } = render(<DocumentReaderView doc={CHUNKS} />);
 
     expect(
       screen.getByRole("heading", { name: "Q2 earnings call" }),
     ).toBeTruthy();
     expect(screen.getByText("Acme Research")).toBeTruthy();
+    const header = container.querySelector("header");
+    expect(header?.classList.contains("border-b")).toBe(true);
+    expect(header?.classList.contains("border-surface-border")).toBe(true);
   });
 
   it("anchors every chunk so hosts can deep-link to a block", () => {
@@ -150,7 +192,46 @@ describe("DocumentReaderView", () => {
     ).toBe("located-fallback");
   });
 
-  it("passes the page target through to the PDF renderer", async () => {
+  it("renders every PDF with PDF.js even without a citation locator", async () => {
+    const user = userEvent.setup();
+    const observers: Array<{
+      callback: IntersectionObserverCallback;
+      nodes: Set<Element>;
+      observer: IntersectionObserver;
+    }> = [];
+    class MockIntersectionObserver {
+      readonly root = null;
+      readonly rootMargin = "0px";
+      readonly thresholds = [0];
+      readonly nodes = new Set<Element>();
+      readonly callback: IntersectionObserverCallback;
+
+      constructor(callback: IntersectionObserverCallback) {
+        this.callback = callback;
+        observers.push({
+          callback,
+          nodes: this.nodes,
+          observer: this as unknown as IntersectionObserver,
+        });
+      }
+
+      observe = (node: Element) => this.nodes.add(node);
+      unobserve = (node: Element) => this.nodes.delete(node);
+      disconnect = () => this.nodes.clear();
+      takeRecords = () => [];
+    }
+    vi.stubGlobal("IntersectionObserver", MockIntersectionObserver);
+    const getPage = vi.fn((pageNumber: number) => {
+      void pageNumber;
+      return new Promise(() => undefined);
+    });
+    pdfjsMock.getDocument.mockReturnValue({
+      promise: Promise.resolve({
+        numPages: 4,
+        getPage,
+      }),
+      destroy: vi.fn(),
+    });
     const { container } = render(
       <DocumentReaderView
         doc={{
@@ -162,14 +243,148 @@ describe("DocumentReaderView", () => {
             mimeType: "application/pdf",
           },
         }}
-        location={{ page: 4 }}
       />,
     );
 
-    await waitFor(() => {
-      const frame = container.querySelector("iframe");
-      expect(frame?.getAttribute("src")).toContain("page=4");
+    expect(container.querySelector("[data-pdfjs-document]")).toBeTruthy();
+    expect(container.querySelector("iframe")).toBeNull();
+    await waitFor(() =>
+      expect(
+        Array.from(container.querySelectorAll("[data-pdf-page]")).map((page) =>
+          page.getAttribute("data-pdf-page"),
+        ),
+      ).toEqual(["1", "2", "3", "4"]),
+    );
+    await waitFor(() =>
+      expect(
+        Array.from(new Set(getPage.mock.calls.map(([page]) => page))),
+      ).toEqual([1]),
+    );
+
+    const pageThreeObserver = observers.find(({ nodes }) =>
+      Array.from(nodes).some(
+        (node) => node.getAttribute("data-pdf-page") === "3",
+      ),
+    );
+    const pageThree = Array.from(pageThreeObserver?.nodes ?? []).find(
+      (node) => node.getAttribute("data-pdf-page") === "3",
+    );
+    expect(pageThreeObserver).toBeTruthy();
+    expect(pageThree).toBeTruthy();
+    act(() => {
+      pageThreeObserver?.callback(
+        [
+          {
+            target: pageThree,
+            isIntersecting: true,
+          } as IntersectionObserverEntry,
+        ],
+        pageThreeObserver.observer,
+      );
     });
+    await waitFor(() =>
+      expect(
+        Array.from(new Set(getPage.mock.calls.map(([page]) => page))),
+      ).toEqual([1, 3]),
+    );
+    expect(
+      container
+        .querySelector("[data-pdfjs-document]")
+        ?.getAttribute("data-pdf-zoom-mode"),
+    ).toBe("fit-width");
+    expect(screen.queryByRole("menuitemradio")).toBeNull();
+
+    await user.click(
+      screen.getByRole("button", { name: "缩放 适合宽度" }),
+    );
+    await user.click(screen.getByRole("menuitemradio", { name: "适合整页" }));
+    expect(
+      container
+        .querySelector("[data-pdfjs-document]")
+        ?.getAttribute("data-pdf-zoom-mode"),
+    ).toBe("fit-page");
+    expect(
+      screen.getByRole("button", { name: "缩放 适合整页" }),
+    ).toBeTruthy();
+    await user.click(
+      screen.getByRole("button", { name: "缩放 适合整页" }),
+    );
+    expect(
+      screen
+        .getByRole("menuitemradio", { name: "适合整页" })
+        .querySelector(".lucide-check"),
+    ).toBeTruthy();
+    expect(
+      screen
+        .getByRole("menuitemradio", { name: "适合宽度" })
+        .querySelector(".lucide-check"),
+    ).toBeNull();
+    await user.keyboard("{Escape}");
+
+    fireEvent.click(screen.getByRole("button", { name: "放大" }));
+    expect(
+      container
+        .querySelector("[data-pdfjs-document]")
+        ?.getAttribute("data-pdf-zoom-mode"),
+    ).toBe("custom");
+    expect(
+      screen.getByRole("button", { name: "缩放 150%" }),
+    ).toBeTruthy();
+    const firstPageBeforePreset = container.querySelector(
+      '[data-pdf-page="1"]',
+    );
+    await user.click(screen.getByRole("button", { name: "缩放 150%" }));
+    expect(
+      screen
+        .getByRole("menuitemradio", { name: "150%" })
+        .querySelector(".lucide-check"),
+    ).toBeTruthy();
+    expect(
+      [
+        "25%",
+        "50%",
+        "75%",
+        "100%",
+        "125%",
+        "150%",
+        "200%",
+        "300%",
+        "400%",
+      ].every((label) =>
+        Boolean(screen.getByRole("menuitemradio", { name: label })),
+      ),
+    ).toBe(true);
+    await user.click(screen.getByRole("menuitemradio", { name: "100%" }));
+    expect(
+      container
+        .querySelector("[data-pdfjs-document]")
+        ?.getAttribute("data-pdf-zoom-mode"),
+    ).toBe("custom");
+    expect(
+      screen.getByRole("button", { name: "缩放 100%" }),
+    ).toBeTruthy();
+    expect(container.querySelector('[data-pdf-page="1"]')).toBe(
+      firstPageBeforePreset,
+    );
+
+    const pageInput = screen.getByRole("textbox", { name: "页码" });
+    await user.clear(pageInput);
+    await user.type(pageInput, "3{Enter}");
+    expect((pageInput as HTMLInputElement).value).toBe("3");
+    expect(Element.prototype.scrollIntoView).toHaveBeenLastCalledWith({
+      block: "start",
+    });
+
+    await user.clear(pageInput);
+    await user.type(pageInput, "99{Enter}");
+    expect((pageInput as HTMLInputElement).value).toBe("4");
+    expect(
+      screen.getByRole("button", { name: "下一页" }).hasAttribute("disabled"),
+    ).toBe(true);
+
+    await user.clear(pageInput);
+    fireEvent.blur(pageInput);
+    expect((pageInput as HTMLInputElement).value).toBe("4");
   });
 
   it("renders the side panel slot only when supplied", () => {
@@ -178,6 +393,12 @@ describe("DocumentReaderView", () => {
 
     rerender(<DocumentReaderView doc={CHUNKS} sidePanel={<div>panel</div>} />);
     expect(screen.getByText("panel")).toBeTruthy();
+    expect(
+      screen
+        .getByText("panel")
+        .closest("aside")
+        ?.style.getPropertyValue("--research-width"),
+    ).toBe("clamp(360px, 40%, calc(100% - 488px))");
   });
 
   it("surfaces load failures with a retry action", () => {

@@ -79,6 +79,7 @@ def evaluate_citation_quality(
         layer: str,
         *,
         citation_ids: list[str] | None = None,
+        claim: str | None = None,
         severity: str = "degraded",
     ) -> None:
         entry: dict[str, Any] = {
@@ -88,6 +89,8 @@ def evaluate_citation_quality(
         }
         if citation_ids:
             entry["citationIds"] = list(dict.fromkeys(citation_ids))
+        if claim and claim.strip():
+            entry["claim"] = {"exact": claim.strip()}
         issues.append(entry)
         layer_issues[layer] += 1
 
@@ -332,16 +335,17 @@ def evaluate_citation_quality(
         )
         else []
     )
-    if uncited_numeric_claims:
-        issue("numeric_claim_without_citation", "L4")
+    for claim in uncited_numeric_claims:
+        issue("numeric_claim_without_citation", "L4", claim=claim)
     unsourced_count = unsourced_marker_count + len(uncited_numeric_claims)
     unverified_count = len(_UNVERIFIED_RE.findall(answer))
-    if unsourced_count:
-        issue("answer_contains_unsourced_marker", "L5")
-    if unverified_count:
+    for claim in _claims_with_marker(answer, _UNSOURCED_RE):
+        issue("answer_contains_unsourced_marker", "L5", claim=claim)
+    for claim in _claims_with_marker(answer, _UNVERIFIED_RE):
         issue(
             "answer_contains_unverified_marker",
             "L5",
+            claim=claim,
             severity="unverified",
         )
 
@@ -807,6 +811,10 @@ def _uncited_numeric_claims(answer: str) -> list[str]:
         ):
             claims.append(segment)
     return claims
+
+
+def _claims_with_marker(answer: str, marker: re.Pattern[str]) -> list[str]:
+    return [segment for segment in _CLAIM_BOUNDARY_RE.split(answer) if marker.search(segment)]
 
 
 def _citation_context(

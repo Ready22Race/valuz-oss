@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -18,7 +19,14 @@ from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.agents.builtin import VALURION_SLUG
 from valuz_agent.modules.citations.datastore import DocumentResearchDatastore
 from valuz_agent.modules.citations.models import DocumentSummaryArtifactRow
+from valuz_agent.modules.docs.errors import DocumentNotFound
 from valuz_agent.modules.docs.service import DocumentDetail, DocumentLibraryService
+from valuz_agent.ports.document_research import (
+    DocumentResearchProviderPort,
+    ResolvedResearchDocument,
+    ResolvedResearchSummary,
+)
+from valuz_agent.ports.extensions import ext
 
 if TYPE_CHECKING:
     from valuz_agent.modules.sessions.service import SessionService
@@ -82,6 +90,41 @@ class DocumentResearchService:
         self._sessions = sessions
         self._datastore = datastore
 
+    async def _resolve_document(
+        self,
+        user_id: str,
+        document_id: str,
+    ) -> tuple[
+        ResolvedResearchDocument,
+        DocumentDetail | None,
+        DocumentResearchProviderPort | None,
+    ]:
+        try:
+            detail = await self._documents.get_document(user_id, document_id)
+        except DocumentNotFound:
+            provider = ext.document_research_provider
+            if provider is None:
+                raise
+            resolved = await provider.resolve_document(
+                owner_user_id=user_id,
+                document_id=document_id,
+            )
+            if resolved is None:
+                raise
+            return resolved, None, provider
+        return (
+            ResolvedResearchDocument(
+                id=detail.id,
+                title=detail.title or detail.filename,
+                filename=detail.filename,
+                document_version=_document_version(detail),
+                provider_id="docs",
+                mcp_server_names=("valuz_docs",),
+            ),
+            detail,
+            None,
+        )
+
     async def get_or_create_session(
         self,
         user_id: str,
@@ -90,16 +133,18 @@ class DocumentResearchService:
         origin_session_id: str | None = None,
         origin_message_id: str | None = None,
     ) -> DocumentResearchSession:
-        detail = await self._documents.get_document(user_id, document_id)
-        version = _document_version(detail)
+        document, _, _ = await self._resolve_document(user_id, document_id)
 
-        existing = await self._find_latest_research_session(user_id, document_id)
+        existing = await self._find_latest_research_session(
+            user_id,
+            document_id,
+            provider_id=document.provider_id,
+        )
         if existing is not None:
             await self._stamp_locked_scope(
                 user_id,
                 existing,
-                document_id=document_id,
-                document_version=version,
+                document=document,
                 origin_session_id=origin_session_id,
                 origin_message_id=origin_message_id,
             )
@@ -126,7 +171,7 @@ class DocumentResearchService:
             created = await self._sessions.create_session(
                 project_id,
                 origin="document-research",
-                title=f"Research · {detail.title or detail.filename}",
+                title=f"Research · {document.title}",
                 model_id=origin.model or None,
                 provider_id=(
                     str(valuz_meta["locked_provider_id"])
@@ -148,7 +193,7 @@ class DocumentResearchService:
             created = await self._sessions.create_session(
                 "chat-default",
                 origin="document-research",
-                title=f"Research · {detail.title or detail.filename}",
+                title=f"Research · {document.title}",
                 agent_slug=VALURION_SLUG,
                 creation_context={"kind": "document-research"},
                 user_id=user_id,
@@ -160,8 +205,7 @@ class DocumentResearchService:
         await self._stamp_locked_scope(
             user_id,
             kernel_session,
-            document_id=document_id,
-            document_version=version,
+            document=document,
             origin_session_id=origin_session_id,
             origin_message_id=origin_message_id,
         )
@@ -177,8 +221,23 @@ class DocumentResearchService:
         document_id: str,
         profile: str,
     ) -> DocumentSummaryArtifact | None:
-        detail = await self._documents.get_document(user_id, document_id)
-        current_version = _document_version(detail)
+        document, _, provider = await self._resolve_document(user_id, document_id)
+        if provider is not None:
+            summary = await provider.get_summary(
+                owner_user_id=user_id,
+                document=document,
+                profile=profile,
+            )
+            return (
+                _provider_summary_artifact(
+                    document,
+                    profile=profile,
+                    summary=summary,
+                )
+                if summary
+                else None
+            )
+        current_version = document.document_version
         exact = await self._datastore.get_summary(
             user_id,
             document_id=document_id,
@@ -206,8 +265,24 @@ class DocumentResearchService:
         origin_message_id: str | None = None,
         force: bool = False,
     ) -> DocumentSummaryArtifact:
-        detail = await self._documents.get_document(user_id, document_id)
-        document_version = _document_version(detail)
+        document, detail, provider = await self._resolve_document(user_id, document_id)
+        if provider is not None:
+            summary = await provider.get_summary(
+                owner_user_id=user_id,
+                document=document,
+                profile=profile,
+            )
+            return _provider_summary_artifact(
+                document,
+                profile=profile,
+                summary=summary,
+                error_message=(
+                    None if summary is not None else "provider_summary_unavailable"
+                ),
+            )
+        if detail is None:
+            raise DocumentNotFound()
+        document_version = document.document_version
         cached = await self._datastore.get_summary(
             user_id,
             document_id=document_id,
@@ -381,6 +456,8 @@ class DocumentResearchService:
         self,
         user_id: str,
         document_id: str,
+        *,
+        provider_id: str,
     ) -> Any | None:
         sessions = await kernel_client.list_sessions(user_id, limit=500)
         matches = []
@@ -390,6 +467,13 @@ class DocumentResearchService:
                 context.get("purpose") == "document-research"
                 and context.get("source_scope") == "locked"
                 and context.get("document_ids") == [document_id]
+                and (
+                    context.get("provider_id") == provider_id
+                    or (
+                        provider_id == "docs"
+                        and context.get("provider_id") is None
+                    )
+                )
                 and session.status != "terminated"
             ):
                 matches.append(session)
@@ -400,8 +484,7 @@ class DocumentResearchService:
         user_id: str,
         session: Any,
         *,
-        document_id: str,
-        document_version: str,
+        document: ResolvedResearchDocument,
         origin_session_id: str | None,
         origin_message_id: str | None,
     ) -> None:
@@ -411,9 +494,10 @@ class DocumentResearchService:
         old_context = dict(existing) if isinstance(existing, dict) else {}
         context = {
             "purpose": "document-research",
-            "document_ids": [document_id],
-            "document_versions": [document_version],
+            "document_ids": [document.id],
+            "document_versions": [document.document_version],
             "source_scope": "locked",
+            "provider_id": document.provider_id,
             "origin_session_id": origin_session_id or old_context.get("origin_session_id"),
             "origin_message_id": origin_message_id or old_context.get("origin_message_id"),
         }
@@ -421,8 +505,7 @@ class DocumentResearchService:
         metadata["valuz"] = valuz
         instructions = _ensure_document_scope_instructions(
             session.instructions or "",
-            document_id=document_id,
-            document_version=document_version,
+            document=document,
         )
         skills = [
             path
@@ -432,7 +515,7 @@ class DocumentResearchService:
         mcp_servers = [
             server
             for server in (session.mcp_servers or [])
-            if getattr(server, "name", None) == "valuz_docs"
+            if getattr(server, "name", None) in document.mcp_server_names
         ]
         if (
             metadata == (session.metadata or {})
@@ -585,18 +668,29 @@ def _summary_prompt(detail: DocumentDetail, *, profile: str) -> str:
 def _ensure_document_scope_instructions(
     instructions: str,
     *,
-    document_id: str,
-    document_version: str,
+    document: ResolvedResearchDocument,
 ) -> str:
     base = _SCOPE_BLOCK_RE.sub("\n\n", instructions or "").strip()
+    if document.provider_id == "docs":
+        access = (
+            "Use only the built-in document library search tools for this "
+            "document."
+        )
+    else:
+        servers = ", ".join(f"`{name}`" for name in document.mcp_server_names)
+        access = (
+            f"Use only connector {servers}. Read the document with "
+            f'`document_fetch(doc_id="{document.id}")` before answering.'
+        )
     block = (
         "<document-research-scope>\n"
         "This is a document-research child session with a server-enforced locked "
-        f"source scope. Use only document `{document_id}` at version "
-        f"`{document_version}`. Do not use web, connectors, other knowledge-base "
-        "documents, workspace files, or training knowledge for factual answers. "
-        "Every factual answer and summary must use registered evidence handles "
-        "from the locked document. If it does not support the answer, say so.\n"
+        f"source scope. Use only document `{document.id}` at version "
+        f"`{document.document_version}`. {access} Do not use web, other connectors, "
+        "other knowledge-base documents, workspace files, or training knowledge "
+        "for factual answers. Every factual answer and summary must use registered "
+        "evidence handles from the locked document. If it does not support the "
+        "answer, say so.\n"
         "</document-research-scope>"
     )
     return f"{base}\n\n{block}" if base else block
@@ -670,6 +764,49 @@ def _summary_from_row(
         research_session_id=row.research_session_id,
         message_id=row.message_id,
         error_message=row.error_message,
+    )
+
+
+def _provider_summary_artifact(
+    document: ResolvedResearchDocument,
+    *,
+    profile: str,
+    summary: ResolvedResearchSummary | None,
+    error_message: str | None = None,
+) -> DocumentSummaryArtifact:
+    """Adapt a provider-native summary to the shared reader artifact."""
+
+    identity = "|".join(
+        (
+            document.provider_id,
+            document.id,
+            document.document_version,
+            profile,
+        )
+    )
+    summary_id = f"provider:{hashlib.sha256(identity.encode()).hexdigest()[:24]}"
+    generated_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    content = summary.content if summary is not None else ""
+    return DocumentSummaryArtifact(
+        version=1,
+        summary_id=summary_id,
+        document_id=document.id,
+        document_version=document.document_version,
+        status="ready" if content else "failed",
+        profile=profile,
+        content=content,
+        citation_bundle=(
+            summary.citation_bundle
+            if summary is not None
+            else {"version": 1, "citations": []}
+        ),
+        generated_at=generated_at,
+        model_id=document.provider_id,
+        prompt_revision=f"{document.provider_id}-summary-v1",
+        policy_revision=CITATION_POLICY_REVISION,
+        research_session_id=None,
+        message_id=None,
+        error_message=error_message,
     )
 
 

@@ -14,12 +14,14 @@ and BEFORE the runtime runs, and the terminal frame still closes the turn.
 # ruff: noqa: I001 — kernel bootstrap side-effect import must precede src.*
 from __future__ import annotations
 
+import json
+
 import valuz_agent.boot.kernel  # noqa: F401 — sets sys.path for ``src`` / ``app``
 
 from src.core.agent_config import AgentConfig
 from src.core.events import Event
 from src.core.orchestrator import SessionOrchestrator
-from src.core.types import Session, UserMessage
+from src.core.types import EndTurn, Session, UserMessage
 
 
 class _FakeStore:
@@ -108,3 +110,107 @@ async def test_run_turn_emits_running_session_update_before_runtime(
     terminal = store.appended[-1]
     assert terminal.type == "session_update"
     assert terminal.data["status"] == "idle"
+
+
+class _CitationRepairRuntime:
+    def __init__(self, sink: object) -> None:
+        self.sink = sink
+        self.prompts: list[str] = []
+        self.has_live_background_tasks = False
+
+    @property
+    def approval_rule_matcher(self) -> object:
+        return object()
+
+    def update_sink(self, sink: object) -> None:
+        self.sink = sink
+
+    async def run(self, session: Session, user_message: UserMessage) -> None:
+        self.prompts.append(user_message.text)
+        if len(self.prompts) == 1:
+            evidence = {
+                "_valuz_evidence": {
+                    "evidenceHandle": "ev_repair_12345678",
+                    "source": {
+                        "sourceId": "doc-1",
+                        "providerId": "docs",
+                        "documentId": "doc-1",
+                        "sourceType": "document",
+                        "title": "Report",
+                        "retrievedAt": "2026-07-30T10:00:00Z",
+                    },
+                    "evidence": {
+                        "kind": "text",
+                        "quote": "Revenue increased.",
+                        "snippet": "Revenue increased.",
+                        "capturedAt": "2026-07-30T10:00:00Z",
+                    },
+                    "locator": {"kind": "pdf", "page": 1},
+                }
+            }
+            await self.sink.emit(
+                Event(type="tool_use", data={"id": "tool-1", "name": "doc_search"})
+            )
+            await self.sink.emit(
+                Event(
+                    type="tool_result",
+                    data={"id": "tool-1", "content": json.dumps(evidence)},
+                )
+            )
+            answer = "Revenue increased."
+        else:
+            answer = "Revenue increased [1](evidence://ev_repair_12345678)."
+        await self.sink.emit(Event(type="assistant_message", data={"text": answer}))
+        session.status = "idle"
+        session.stop_reason = EndTurn()
+        await self.sink.emit(
+            Event(
+                type="session_idle",
+                data={"stop_reason": {"type": "end_turn"}, "num_turns": 1},
+            )
+        )
+
+    async def interrupt(self) -> None:  # pragma: no cover
+        pass
+
+    async def close(self) -> None:
+        pass
+
+
+async def test_run_turn_performs_one_hidden_citation_repair(
+    tmp_path, monkeypatch
+) -> None:
+    agent = AgentConfig(id="agent-1", name="tester")
+    session = Session(
+        id="sess-1",
+        agent_config=agent,
+        cwd=str(tmp_path),
+        user_id="owner-1",
+        status="created",
+        skills=("/bundled/skills/citation",),
+    )
+    store = _FakeStore(session)
+    orch = SessionOrchestrator(store)  # type: ignore[arg-type]
+    runtimes: list[_CitationRepairRuntime] = []
+
+    def create_runtime(*args, **kwargs) -> _CitationRepairRuntime:  # noqa: ANN002, ANN003
+        runtime = _CitationRepairRuntime(args[2])
+        runtimes.append(runtime)
+        return runtime
+
+    monkeypatch.setattr("src.runtimes.factory.create_runtime", create_runtime)
+
+    message = await orch.run_turn(
+        "owner-1",
+        "sess-1",
+        UserMessage(text="Answer with citations"),
+    )
+
+    assert len(runtimes) == 1
+    assert len(runtimes[0].prompts) == 2
+    assert runtimes[0].prompts[0] == "Answer with citations"
+    assert "previous draft was withheld" in runtimes[0].prompts[1]
+    assert message.assistant_message is not None
+    assert "citation://cit_" in message.assistant_message
+    assert [event.type for event in store.appended].count("assistant_message") == 1
+    assert [event.type for event in store.appended].count("session_idle") == 1

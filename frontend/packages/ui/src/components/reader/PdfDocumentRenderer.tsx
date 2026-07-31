@@ -1,4 +1,5 @@
 import {
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Loader2,
@@ -12,6 +13,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type RefObject,
 } from "react";
 import type {
   PDFDocumentLoadingTask,
@@ -22,11 +24,25 @@ import type {
   NormalizedRectV1,
   TextQuoteSelectorV1,
 } from "@valuz/shared";
-import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.min.mjs?url";
 
 import { useI18n } from "../../hooks/use-i18n";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "../ui/dropdown-menu";
 import type { DocumentLocation } from "./document-reader.types";
 import { findBestTextQuote } from "./text-quote";
+import {
+  calculatePdfScale,
+  clampPdfCustomScale,
+  type PdfViewportSize,
+  type PdfZoomMode,
+} from "./pdf-zoom";
 import "./PdfDocumentRenderer.css";
 
 type LocateStatus =
@@ -35,6 +51,20 @@ type LocateStatus =
   | "page-only"
   | "not-found";
 type PdfTextContent = Awaited<ReturnType<PDFPageProxy["getTextContent"]>>;
+
+const DEFAULT_PDF_SCALE = 1.25;
+const PDF_SCALE_STEP = 0.25;
+const PDF_SCALE_PRESETS = [
+  0.25,
+  0.5,
+  0.75,
+  1,
+  1.25,
+  1.5,
+  2,
+  3,
+  4,
+] as const;
 
 interface PixelRect {
   left: number;
@@ -171,6 +201,9 @@ function PdfPage({
   scale,
   rotation,
   location,
+  scrollRootRef,
+  estimatedSize,
+  eager,
   onLocated,
 }: {
   pdf: PDFDocumentProxy;
@@ -178,6 +211,9 @@ function PdfPage({
   scale: number;
   rotation: number;
   location?: DocumentLocation;
+  scrollRootRef: RefObject<HTMLDivElement | null>;
+  estimatedSize: PdfViewportSize;
+  eager: boolean;
   onLocated: (page: number, status: LocateStatus) => void;
 }) {
   const { t } = useI18n();
@@ -189,8 +225,38 @@ function PdfPage({
   const [highlightRects, setHighlightRects] = useState<PixelRect[]>([]);
   const [locateStatus, setLocateStatus] =
     useState<LocateStatus>("page-only");
+  const [nearViewport, setNearViewport] = useState(false);
+  const shouldRender = eager || nearViewport;
 
   useEffect(() => {
+    setSize({ width: 0, height: 0 });
+  }, [pdf, rotation, scale]);
+
+  useEffect(() => {
+    const element = pageRef.current;
+    if (!element) return;
+    if (typeof IntersectionObserver === "undefined") {
+      setNearViewport(true);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      ([entry]) => setNearViewport(Boolean(entry?.isIntersecting)),
+      {
+        root: scrollRootRef.current,
+        // Keep roughly one desktop viewport rendered above and below the
+        // visible page without painting the whole document into memory.
+        rootMargin: "1200px 0px",
+      },
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [scrollRootRef]);
+
+  useEffect(() => {
+    if (!shouldRender) {
+      setPage(null);
+      return;
+    }
     let cancelled = false;
     void pdf.getPage(pageNumber).then((next) => {
       if (!cancelled) setPage(next);
@@ -199,24 +265,25 @@ function PdfPage({
       cancelled = true;
       setPage(null);
     };
-  }, [pageNumber, pdf]);
+  }, [pageNumber, pdf, shouldRender]);
 
   useEffect(() => {
     if (!page || !canvasRef.current || !textLayerRef.current) return;
+    const canvas = canvasRef.current;
+    const textContainer = textLayerRef.current;
     let disposed = false;
     let renderTask: ReturnType<PDFPageProxy["render"]> | null = null;
     let textLayer: { cancel(): void } | null = null;
 
     const render = async () => {
-      const pdfjs = await import("pdfjs-dist");
+      const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
       const viewport = page.getViewport({
         scale,
         rotation: (page.rotate + rotation) % 360,
       });
-      if (disposed || !canvasRef.current || !textLayerRef.current) return;
+      if (disposed) return;
       setSize({ width: viewport.width, height: viewport.height });
 
-      const canvas = canvasRef.current;
       const outputScale = Math.max(window.devicePixelRatio || 1, 1);
       canvas.width = Math.floor(viewport.width * outputScale);
       canvas.height = Math.floor(viewport.height * outputScale);
@@ -235,7 +302,6 @@ function PdfPage({
 
       const textContent = await page.getTextContent();
       if (disposed) return;
-      const textContainer = textLayerRef.current;
       textContainer.replaceChildren();
       textContainer.style.setProperty(
         "--total-scale-factor",
@@ -278,20 +344,23 @@ function PdfPage({
       }
       setHighlightRects(rects);
       setLocateStatus(status);
-      onLocated(pageNumber, status);
+      if (location) onLocated(pageNumber, status);
     };
 
     void render().catch(() => {
       if (!disposed) {
         setHighlightRects([]);
         setLocateStatus("page-only");
-        onLocated(pageNumber, "page-only");
+        if (location) onLocated(pageNumber, "page-only");
       }
     });
     return () => {
       disposed = true;
       renderTask?.cancel();
       textLayer?.cancel();
+      canvas.width = 0;
+      canvas.height = 0;
+      textContainer.replaceChildren();
       setHighlightRects([]);
     };
   }, [location, onLocated, page, pageNumber, rotation, scale]);
@@ -301,10 +370,13 @@ function PdfPage({
       ref={pageRef}
       data-pdf-page={pageNumber}
       data-locate-status={locateStatus}
-      className="relative mx-auto shrink-0 overflow-hidden bg-white shadow-sm"
-      style={{ width: size.width || 612, height: size.height || 792 }}
+      className="relative mx-auto shrink-0 overflow-hidden bg-white"
+      style={{
+        width: size.width || estimatedSize.width,
+        height: size.height || estimatedSize.height,
+      }}
     >
-      {!page ? (
+      {shouldRender && !page ? (
         <div className="absolute inset-0 flex items-center justify-center text-ink-meta">
           <Loader2 className="h-4 w-4 animate-spin" />
         </div>
@@ -317,12 +389,6 @@ function PdfPage({
       />
       <HighlightLayer rects={highlightRects} status={locateStatus} />
     </section>
-  );
-}
-
-function pageWindow(current: number, total: number): number[] {
-  return [current - 1, current, current + 1].filter(
-    (page) => page >= 1 && page <= total,
   );
 }
 
@@ -342,23 +408,62 @@ export function PdfDocumentRenderer({
   const { t } = useI18n();
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [scale, setScale] = useState(1.25);
+  const [zoomMode, setZoomMode] = useState<PdfZoomMode>("fit-width");
+  const [customScale, setCustomScale] = useState(DEFAULT_PDF_SCALE);
+  const [pageSize, setPageSize] = useState<PdfViewportSize | null>(null);
+  const [viewportSize, setViewportSize] = useState<PdfViewportSize>({
+    width: 0,
+    height: 0,
+  });
   const [rotation, setRotation] = useState(0);
   const [currentPage, setCurrentPage] = useState(
     Math.max(1, location?.page ?? 1),
   );
+  const [pageInput, setPageInput] = useState(
+    String(Math.max(1, location?.page ?? 1)),
+  );
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const scrollFrameRef = useRef<number | null>(null);
+
+  const scale = useMemo(
+    () =>
+      calculatePdfScale({
+        mode: zoomMode,
+        page: pageSize,
+        viewport: viewportSize,
+        customScale,
+      }),
+    [customScale, pageSize, viewportSize, zoomMode],
+  );
+  const zoomTriggerLabel =
+    zoomMode === "fit-width"
+      ? t("ui.reader.fitWidth")
+      : zoomMode === "fit-page"
+        ? t("ui.reader.fitPage")
+        : `${Math.round(scale * 100)}%`;
+  const zoomMenuValue =
+    zoomMode === "custom" ? `scale-${customScale}` : zoomMode;
 
   useEffect(() => {
     setCurrentPage(Math.max(1, location?.page ?? 1));
   }, [location?.page]);
 
   useEffect(() => {
+    setPageInput(String(currentPage));
+  }, [currentPage]);
+
+  useEffect(() => {
     let task: PDFDocumentLoadingTask | null = null;
     let cancelled = false;
     setPdf(null);
     setError(null);
-    void import("pdfjs-dist")
+    setZoomMode("fit-width");
+    setCustomScale(DEFAULT_PDF_SCALE);
+    setRotation(0);
+    // The generic PDF.js 6 worker requires newer typed-array APIs than the
+    // Electron Chromium runtime guarantees. The official legacy build carries
+    // those worker-side compatibility shims while keeping the same public API.
+    void import("pdfjs-dist/legacy/build/pdf.mjs")
       .then((pdfjs) => {
         pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
         task = pdfjs.getDocument({ url });
@@ -379,6 +484,56 @@ export function PdfDocumentRenderer({
       void task?.destroy();
     };
   }, [url]);
+
+  useEffect(() => {
+    const viewport = scrollRef.current;
+    if (!viewport) return;
+
+    const measure = () => {
+      const styles = window.getComputedStyle(viewport);
+      const horizontalPadding =
+        (Number.parseFloat(styles.paddingLeft) || 0) +
+        (Number.parseFloat(styles.paddingRight) || 0);
+      const verticalPadding =
+        (Number.parseFloat(styles.paddingTop) || 0) +
+        (Number.parseFloat(styles.paddingBottom) || 0);
+      const next = {
+        width: Math.max(0, viewport.clientWidth - horizontalPadding),
+        height: Math.max(0, viewport.clientHeight - verticalPadding),
+      };
+      setViewportSize((current) =>
+        current.width === next.width && current.height === next.height
+          ? current
+          : next,
+      );
+    };
+
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!pdf) {
+      setPageSize(null);
+      return;
+    }
+    let cancelled = false;
+    setPageSize(null);
+    void pdf.getPage(currentPage).then((page) => {
+      if (cancelled) return;
+      const viewport = page.getViewport({
+        scale: 1,
+        rotation: (page.rotate + rotation) % 360,
+      });
+      setPageSize({ width: viewport.width, height: viewport.height });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentPage, pdf, rotation]);
 
   useEffect(() => {
     if (error) onLoadError?.();
@@ -403,75 +558,224 @@ export function PdfDocumentRenderer({
   );
 
   const pages = useMemo(
-    () => (pdf ? pageWindow(currentPage, pdf.numPages) : []),
-    [currentPage, pdf],
+    () =>
+      pdf
+        ? Array.from({ length: pdf.numPages }, (_, index) => index + 1)
+        : [],
+    [pdf],
+  );
+  const estimatedPageSize = useMemo(
+    () => ({
+      width: (pageSize?.width ?? 612) * scale,
+      height: (pageSize?.height ?? 792) * scale,
+    }),
+    [pageSize, scale],
   );
 
+  const syncCurrentPageFromScroll = useCallback(() => {
+    if (scrollFrameRef.current !== null) return;
+    scrollFrameRef.current = window.requestAnimationFrame(() => {
+      scrollFrameRef.current = null;
+      const root = scrollRef.current;
+      if (!root) return;
+      const rootBox = root.getBoundingClientRect();
+      const viewportCenter = rootBox.top + root.clientHeight / 2;
+      let closestPage = currentPage;
+      let closestDistance = Number.POSITIVE_INFINITY;
+      root.querySelectorAll<HTMLElement>("[data-pdf-page]").forEach((node) => {
+        const page = Number(node.dataset.pdfPage);
+        if (!Number.isInteger(page)) return;
+        const box = node.getBoundingClientRect();
+        const distance =
+          viewportCenter < box.top
+            ? box.top - viewportCenter
+            : viewportCenter > box.bottom
+              ? viewportCenter - box.bottom
+              : 0;
+        if (distance < closestDistance) {
+          closestPage = page;
+          closestDistance = distance;
+        }
+      });
+      setCurrentPage((page) => (page === closestPage ? page : closestPage));
+    });
+  }, [currentPage]);
+
+  useEffect(
+    () => () => {
+      if (scrollFrameRef.current !== null) {
+        window.cancelAnimationFrame(scrollFrameRef.current);
+      }
+    },
+    [],
+  );
+
+  const navigateToPage = useCallback(
+    (nextPage: number) => {
+      if (!pdf) return;
+      const page = Math.min(pdf.numPages, Math.max(1, nextPage));
+      setCurrentPage(page);
+      setPageInput(String(page));
+      scrollRef.current
+        ?.querySelector<HTMLElement>(`[data-pdf-page="${page}"]`)
+        ?.scrollIntoView({ block: "start" });
+    },
+    [pdf],
+  );
+
+  const commitPageInput = useCallback(() => {
+    if (!pdf || !/^\d+$/.test(pageInput)) {
+      setPageInput(String(currentPage));
+      return;
+    }
+    navigateToPage(Number(pageInput));
+  }, [currentPage, navigateToPage, pageInput, pdf]);
+
+  const adjustCustomScale = (delta: number) => {
+    setCustomScale(clampPdfCustomScale(scale + delta));
+    setZoomMode("custom");
+  };
+
   if (error) {
-    const hash = location?.page ? `#page=${location.page}` : "";
     return (
-      <div className="flex h-full min-h-0 flex-col">
-        <div className="flex shrink-0 items-center justify-between border-b border-surface-border bg-warning-light px-3 py-2 text-xs text-warning-text">
-          <span>{t("ui.reader.pdfFallback")}</span>
+      <div
+        className="flex h-full min-h-0 items-center justify-center px-6 text-center"
+        data-pdfjs-document
+      >
+        <div role="alert">
+          <p className="text-sm text-ink-body">
+            {t("ui.artifact.pdfLoadFailed")}
+          </p>
           {onReload ? (
-            <button type="button" onClick={onReload} className="font-medium">
+            <button
+              type="button"
+              onClick={onReload}
+              className="mt-3 inline-flex h-8 items-center rounded-md border border-surface-border px-3 text-xs font-medium text-ink-heading transition hover:bg-surface-muted"
+            >
               {t("common.retry")}
             </button>
           ) : null}
         </div>
-        <iframe
-          src={`${url}${hash}`}
-          title={title}
-          className="min-h-0 flex-1 border-0"
-        />
       </div>
     );
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-surface-soft">
-      <div className="flex h-10 shrink-0 items-center justify-center gap-1 border-b border-surface-border bg-surface px-2">
+    <div
+      className="flex h-full min-h-0 flex-col bg-surface"
+      data-pdfjs-document
+      data-pdf-zoom-mode={zoomMode}
+      data-pdf-scale={scale.toFixed(4)}
+      aria-label={title}
+    >
+      <div className="flex h-10 shrink-0 items-center justify-center gap-1 bg-surface px-2">
         <button
           type="button"
           aria-label={t("ui.reader.previousPage")}
           disabled={!pdf || currentPage <= 1}
-          onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+          onClick={() => navigateToPage(currentPage - 1)}
           className="rounded p-1.5 hover:bg-surface-muted disabled:opacity-40"
         >
           <ChevronLeft className="h-3.5 w-3.5" />
         </button>
-        <span className="min-w-16 text-center text-xs tabular-nums text-ink-body">
-          {currentPage} / {pdf?.numPages ?? "…"}
-        </span>
+        <div className="flex min-w-16 items-center justify-center gap-1 text-xs tabular-nums text-ink-body">
+          <input
+            type="text"
+            inputMode="numeric"
+            aria-label={t("ui.reader.pageNumber")}
+            disabled={!pdf}
+            value={pageInput}
+            onChange={(event) => {
+              if (/^\d*$/.test(event.target.value)) {
+                setPageInput(event.target.value);
+              }
+            }}
+            onFocus={(event) => event.currentTarget.select()}
+            onBlur={commitPageInput}
+            onKeyDown={(event) => {
+              event.stopPropagation();
+              if (event.key === "Enter") {
+                commitPageInput();
+                event.currentTarget.select();
+              } else if (event.key === "Escape") {
+                setPageInput(String(currentPage));
+                event.currentTarget.select();
+              }
+            }}
+            className="h-6 w-9 rounded border border-surface-border bg-surface px-1 text-center text-xs tabular-nums text-ink-heading outline-none transition focus:border-accent focus:ring-1 focus:ring-accent/20 disabled:opacity-50"
+          />
+          <span>/ {pdf?.numPages ?? "…"}</span>
+        </div>
         <button
           type="button"
           aria-label={t("ui.reader.nextPage")}
           disabled={!pdf || currentPage >= pdf.numPages}
-          onClick={() =>
-            setCurrentPage((page) =>
-              pdf ? Math.min(pdf.numPages, page + 1) : page,
-            )
-          }
+          onClick={() => navigateToPage(currentPage + 1)}
           className="rounded p-1.5 hover:bg-surface-muted disabled:opacity-40"
         >
           <ChevronRight className="h-3.5 w-3.5" />
         </button>
-        <span className="mx-1 h-5 w-px bg-surface-border" />
+        <span className="mx-1" />
         <button
           type="button"
           aria-label={t("ui.reader.zoomOut")}
-          onClick={() => setScale((value) => Math.max(0.6, value - 0.15))}
+          onClick={() => adjustCustomScale(-PDF_SCALE_STEP)}
           className="rounded p-1.5 hover:bg-surface-muted"
         >
           <Minus className="h-3.5 w-3.5" />
         </button>
-        <span className="min-w-10 text-center text-xs tabular-nums text-ink-meta">
-          {Math.round(scale * 100)}%
-        </span>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              aria-label={`${t("menu.zoom")} ${zoomTriggerLabel}`}
+              title={`${t("menu.zoom")}: ${zoomTriggerLabel}`}
+              className="inline-flex h-7 min-w-[76px] items-center justify-center gap-0.5 rounded-md px-1.5 text-xs tabular-nums text-ink-meta transition hover:bg-surface-muted hover:text-ink-heading data-[state=open]:bg-surface-muted data-[state=open]:text-ink-heading"
+            >
+              <span>{zoomTriggerLabel}</span>
+              <ChevronDown className="h-3 w-3" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="center" sideOffset={6} className="min-w-32">
+            <DropdownMenuRadioGroup
+              value={zoomMenuValue}
+              onValueChange={(value) => {
+                if (value === "fit-width" || value === "fit-page") {
+                  setZoomMode(value);
+                  return;
+                }
+                if (value.startsWith("scale-")) {
+                  const preset = Number(value.slice("scale-".length));
+                  if (Number.isFinite(preset)) {
+                    setCustomScale(clampPdfCustomScale(preset));
+                    setZoomMode("custom");
+                  }
+                }
+              }}
+            >
+              <DropdownMenuRadioItem value="fit-width" indicator="check">
+                {t("ui.reader.fitWidth")}
+              </DropdownMenuRadioItem>
+              <DropdownMenuRadioItem value="fit-page" indicator="check">
+                {t("ui.reader.fitPage")}
+              </DropdownMenuRadioItem>
+              <DropdownMenuSeparator />
+              {PDF_SCALE_PRESETS.map((preset) => (
+                <DropdownMenuRadioItem
+                  key={preset}
+                  value={`scale-${preset}`}
+                  indicator="check"
+                >
+                  {Math.round(preset * 100)}%
+                </DropdownMenuRadioItem>
+              ))}
+            </DropdownMenuRadioGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
         <button
           type="button"
           aria-label={t("ui.reader.zoomIn")}
-          onClick={() => setScale((value) => Math.min(3, value + 0.15))}
+          onClick={() => adjustCustomScale(PDF_SCALE_STEP)}
           className="rounded p-1.5 hover:bg-surface-muted"
         >
           <Plus className="h-3.5 w-3.5" />
@@ -488,16 +792,15 @@ export function PdfDocumentRenderer({
       <div
         ref={scrollRef}
         className="min-h-0 flex-1 space-y-4 overflow-auto p-4"
+        onScroll={syncCurrentPageFromScroll}
         onKeyDown={(event) => {
           if (event.key === "PageDown" || event.key === "ArrowRight") {
-            setCurrentPage((page) =>
-              pdf ? Math.min(pdf.numPages, page + 1) : page,
-            );
+            navigateToPage(currentPage + 1);
           } else if (
             event.key === "PageUp" ||
             event.key === "ArrowLeft"
           ) {
-            setCurrentPage((page) => Math.max(1, page - 1));
+            navigateToPage(currentPage - 1);
           }
         }}
         tabIndex={0}
@@ -510,11 +813,14 @@ export function PdfDocumentRenderer({
         ) : (
           pages.map((pageNumber) => (
             <PdfPage
-              key={`${pageNumber}:${scale}:${rotation}`}
+              key={pageNumber}
               pdf={pdf}
               pageNumber={pageNumber}
               scale={scale}
               rotation={rotation}
+              scrollRootRef={scrollRef}
+              estimatedSize={estimatedPageSize}
+              eager={pageNumber === currentPage || pageNumber === location?.page}
               location={
                 pageNumber === location?.page ? location : undefined
               }

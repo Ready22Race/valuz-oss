@@ -1,5 +1,6 @@
 import type { ResolveCitationResult } from "@valuz/shared";
 
+import { resolveApiBase } from "./base-resolver";
 import { createFetchJson, type RequestOptions } from "./fetch-json";
 
 let _apiBase =
@@ -12,6 +13,9 @@ export const setCitationsApiBase = (url: string): void => {
 
 const fetchJson = createFetchJson(() => _apiBase);
 
+export const getCitationApiBase = (sessionId?: string): string =>
+  resolveApiBase({ sessionId }, _apiBase);
+
 export const citationsApi = {
   resolve(
     input: {
@@ -23,6 +27,7 @@ export const citationsApi = {
   ): Promise<ResolveCitationResult> {
     return fetchJson("/v1/citations/resolve", {
       ...options,
+      baseUrl: getCitationApiBase(input.sessionId),
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

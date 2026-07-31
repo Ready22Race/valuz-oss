@@ -7,6 +7,7 @@ import {
 } from "react";
 import type {
   CitationBundleV1,
+  CitationQualityIssueV1,
   OpenCitationInput,
 } from "@valuz/shared";
 import {
@@ -24,6 +25,7 @@ import {
   Copy,
   Download,
   ExternalLink,
+  Info,
   Loader2,
   Maximize,
   RotateCcw,
@@ -52,6 +54,7 @@ import {
   CitationPill,
   CitationSourceCards,
   rewriteCitationMarkdownLinks,
+  type CitationQualityDisplayIssue,
 } from "./CitationInline";
 
 /** Icon overrides so Streamdown's built-in toolbar buttons (copy /
@@ -74,6 +77,37 @@ const STREAMDOWN_ICONS = {
 };
 
 const LOCAL_FILE_HREF_PREFIX = "https://valuz.local-file.invalid/";
+const QUALITY_CLAIM_HREF_PREFIX = "https://valuz.quality-claim.invalid/";
+
+interface LocalizedClaimQualityEntry {
+  targetId: string;
+  exact: string;
+  issues: CitationQualityDisplayIssue[];
+}
+
+function qualityClaimIdFromHref(href?: string): string | null {
+  if (!href?.startsWith(QUALITY_CLAIM_HREF_PREFIX)) return null;
+  try {
+    return decodeURIComponent(href.slice(QUALITY_CLAIM_HREF_PREFIX.length));
+  } catch {
+    return null;
+  }
+}
+
+function injectQualityClaimMarkers(
+  content: string,
+  entries: LocalizedClaimQualityEntry[],
+): string {
+  let result = content;
+  for (const entry of entries) {
+    const start = result.indexOf(entry.exact);
+    if (start < 0) continue;
+    const insertAt = start + entry.exact.length;
+    const marker = ` [!](<${QUALITY_CLAIM_HREF_PREFIX}${encodeURIComponent(entry.targetId)}>)`;
+    result = `${result.slice(0, insertAt)}${marker}${result.slice(insertAt)}`;
+  }
+  return result;
+}
 
 function encodeLocalFileHref(href: string): string {
   return `${LOCAL_FILE_HREF_PREFIX}${encodeURIComponent(href)}`;
@@ -609,13 +643,160 @@ export const MarkdownContent = memo(function MarkdownContent({
       ),
     [citationBundle],
   );
+  const qualityIssueLabel = useCallback(
+    (issue: CitationQualityIssueV1): string => {
+      const code = issue.code;
+      if (
+        code.includes("conflict") ||
+        code === "low_tier_without_cross_check"
+      ) {
+        return t("ui.citation.qualityIssueCrossCheck");
+      }
+      if (
+        code.startsWith("calculation_") ||
+        code.startsWith("numeric_") ||
+        code === "derived_claim_without_calculation_evidence"
+      ) {
+        return t("ui.citation.qualityIssueNumeric");
+      }
+      if (
+        code.includes("coverage") ||
+        code === "evidence_before_coverage" ||
+        code === "evidence_after_coverage"
+      ) {
+        return t("ui.citation.qualityIssueFreshness");
+      }
+      if (code === "source_tier_unmatched") {
+        return t("ui.citation.qualityIssueSource");
+      }
+      if (
+        code.startsWith("evidence_") ||
+        code === "text_quote_missing" ||
+        code === "structured_value_missing"
+      ) {
+        return t("ui.citation.qualityIssueEvidence");
+      }
+      const keyByLayer: Record<string, string> = {
+        L0: "ui.citation.qualityIssueIntegrity",
+        L1: "ui.citation.qualityIssueEvidence",
+        L2: "ui.citation.qualityIssueSource",
+        L3: "ui.citation.qualityIssueCrossCheck",
+        L4: "ui.citation.qualityIssueNumeric",
+        L5: "ui.citation.qualityIssueFreshness",
+      };
+      return t(keyByLayer[issue.layer] ?? "ui.citation.qualityIssueGeneric");
+    },
+    [t],
+  );
+  const qualityIssuePlacement = useMemo(() => {
+    const byCitationId = new Map<string, CitationQualityDisplayIssue[]>();
+    const claimsByExact = new Map<string, LocalizedClaimQualityEntry>();
+    const unlocalized: CitationQualityIssueV1[] = [];
+    const issues = citationBundle?.quality?.issues ?? [];
+    for (const [issueIndex, issue] of issues.entries()) {
+      const localIds = Array.from(new Set(issue.citationIds ?? [])).filter(
+        (citationId) =>
+          citationsById.has(citationId) && citationOrder.has(citationId),
+      );
+      const displayIssue = {
+        label: qualityIssueLabel(issue),
+        severity: issue.severity,
+      };
+      if (!localIds.length) {
+        const exact = issue.claim?.exact?.trim();
+        if (
+          exact &&
+          !exact.includes("\n") &&
+          !exact.includes("|") &&
+          content.includes(exact)
+        ) {
+          const entry = claimsByExact.get(exact) ?? {
+            targetId: `quality-claim-${issueIndex + 1}`,
+            exact,
+            issues: [],
+          };
+          if (
+            !entry.issues.some(
+              (item) =>
+                item.label === displayIssue.label &&
+                item.severity === displayIssue.severity,
+            )
+          ) {
+            entry.issues.push(displayIssue);
+          }
+          claimsByExact.set(exact, entry);
+          continue;
+        }
+        unlocalized.push(issue);
+        continue;
+      }
+      for (const citationId of localIds) {
+        const current = byCitationId.get(citationId) ?? [];
+        if (
+          !current.some(
+            (item) =>
+              item.label === displayIssue.label &&
+              item.severity === displayIssue.severity,
+          )
+        ) {
+          current.push(displayIssue);
+        }
+        byCitationId.set(citationId, current);
+      }
+    }
+    return {
+      byCitationId,
+      claimEntries: Array.from(claimsByExact.values()),
+      unlocalized,
+    };
+  }, [
+    citationBundle?.quality?.issues,
+    citationOrder,
+    citationsById,
+    content,
+    qualityIssueLabel,
+  ]);
+  const hasLocalizedQualityIssues =
+    qualityIssuePlacement.byCitationId.size > 0 ||
+    qualityIssuePlacement.claimEntries.length > 0;
+  const unlocalizedQualityStatus = useMemo(() => {
+    const quality = citationBundle?.quality;
+    if (hasLocalizedQualityIssues) return null;
+    if (!quality || quality.status === "passed") return null;
+    if (!quality.issues?.length) return quality.status;
+    if (!qualityIssuePlacement.unlocalized.length) return null;
+    return qualityIssuePlacement.unlocalized.every(
+      (issue) => issue.severity === "unverified",
+    )
+      ? "unverified"
+      : "degraded";
+  }, [
+    citationBundle?.quality,
+    hasLocalizedQualityIssues,
+    qualityIssuePlacement.unlocalized,
+  ]);
+  const claimQualityById = useMemo(
+    () =>
+      new Map(
+        qualityIssuePlacement.claimEntries.map((entry) => [
+          entry.targetId,
+          entry,
+        ]),
+      ),
+    [qualityIssuePlacement.claimEntries],
+  );
   const renderedContent = useMemo(
     () =>
       rewriteLocalFileMarkdownLinks(
-        rewriteCitationMarkdownLinks(content),
+        rewriteCitationMarkdownLinks(
+          injectQualityClaimMarkers(
+            content,
+            qualityIssuePlacement.claimEntries,
+          ),
+        ),
         isLocalFileHref,
       ),
-    [content, isLocalFileHref],
+    [content, isLocalFileHref, qualityIssuePlacement.claimEntries],
   );
   const urlTransform = useCallback<UrlTransform>(
     (url, key, node) => {
@@ -641,6 +822,24 @@ export const MarkdownContent = memo(function MarkdownContent({
           anchorClassName,
         );
         const localHref = href ? decodeLocalFileHref(href) : href;
+        const qualityClaimId = qualityClaimIdFromHref(href);
+        if (qualityClaimId) {
+          const entry = claimQualityById.get(qualityClaimId);
+          if (!entry) return null;
+          const label = entry.issues.map((issue) => issue.label).join("；");
+          return (
+            <button
+              type="button"
+              data-citation-claim-quality
+              data-quality-claim-id={entry.targetId}
+              aria-label={`${t("ui.citation.qualityNeedsReview")} · ${label}`}
+              title={label}
+              className="relative -top-px mx-0.5 inline-flex h-4 w-4 align-middle items-center justify-center rounded-full border border-warning/50 bg-warning-light/70 text-warning-text no-underline transition hover:bg-warning-light focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warning/20"
+            >
+              <AlertTriangle className="h-2.5 w-2.5" aria-hidden="true" />
+            </button>
+          );
+        }
         const citationId = citationIdFromHref(href);
         if (citationId) {
           return (
@@ -649,6 +848,7 @@ export const MarkdownContent = memo(function MarkdownContent({
               displayIndex={citationOrder.get(citationId)}
               citation={citationsById.get(citationId)}
               citationById={citationsById}
+              qualityIssues={qualityIssuePlacement.byCitationId.get(citationId)}
               messageId={messageId}
               onCitationClick={onCitationClick}
             />
@@ -696,10 +896,13 @@ export const MarkdownContent = memo(function MarkdownContent({
     [
       citationOrder,
       citationsById,
+      claimQualityById,
       isLocalFileHref,
       messageId,
       onCitationClick,
       onLocalFileLinkClick,
+      qualityIssuePlacement.byCitationId,
+      t,
     ],
   );
 
@@ -728,34 +931,35 @@ export const MarkdownContent = memo(function MarkdownContent({
           {renderedContent}
         </Streamdown>
       </div>
-      {citationBundle?.integrity?.status === "degraded" ? (
+      {!hasLocalizedQualityIssues &&
+      citationBundle?.integrity?.status === "degraded" ? (
         <div
           role="status"
           data-citation-integrity="degraded"
-          className="mt-2 flex items-start gap-1.5 rounded-md border border-warning/30 bg-warning-light px-2.5 py-2 text-xs leading-5 text-warning-text"
+          className="mt-2 flex items-center gap-1.5 text-xs leading-5 text-ink-meta"
         >
-          <AlertTriangle
-            className="mt-0.5 h-3.5 w-3.5 shrink-0"
+          <Info
+            className="relative top-px h-3.5 w-3.5 shrink-0 text-ink-muted"
             aria-hidden="true"
           />
           <span>{t("ui.citation.integrityDegraded")}</span>
         </div>
       ) : null}
-      {citationBundle?.integrity?.status !== "degraded" &&
-      citationBundle?.quality?.status !== undefined &&
-      citationBundle.quality.status !== "passed" ? (
+      {!hasLocalizedQualityIssues &&
+      citationBundle?.integrity?.status !== "degraded" &&
+      unlocalizedQualityStatus ? (
         <div
           role="status"
-          data-citation-quality-warning={citationBundle.quality.status}
-          className="mt-2 flex items-start gap-1.5 rounded-md border border-warning/30 bg-warning-light px-2.5 py-2 text-xs leading-5 text-warning-text"
+          data-citation-quality-warning={unlocalizedQualityStatus}
+          className="mt-2 flex items-center gap-1.5 text-xs leading-5 text-ink-meta"
         >
-          <AlertTriangle
-            className="mt-0.5 h-3.5 w-3.5 shrink-0"
+          <Info
+            className="relative top-px h-3.5 w-3.5 shrink-0 text-ink-muted"
             aria-hidden="true"
           />
           <span>
             {t(
-              citationBundle.quality.status === "unverified"
+              unlocalizedQualityStatus === "unverified"
                 ? "ui.citation.qualityUnverified"
                 : "ui.citation.qualityDegraded",
             )}

@@ -234,12 +234,52 @@ def test_guard_repairs_bare_numbered_claims_from_trusted_source_list() -> None:
     citation_id = result.bundle["citations"][0]["citationId"]
     assert f"100 USD [1](citation://{citation_id})" in result.text
     assert f"20 USD [1](citation://{citation_id})" in result.text
-    assert (
-        f"[1] [Annual Report](citation://{citation_id})"
-        in result.text
-    )
+    assert "Sources:" not in result.text
+    assert result.text.count(f"citation://{citation_id}") == 2
     assert result.bundle["integrity"]["status"] == "repaired"
     assert result.bundle["integrity"]["repairAttempts"] == 1
+
+
+def test_guard_removes_redundant_chinese_source_section_and_divider() -> None:
+    registry = _registry(_item(locator={"kind": "chunk", "chunkId": "chunk-1"}))
+    guard = CitationGuard(
+        registry,
+        message_id="msg-1",
+        user_prompt="请使用引用",
+        policy_available=True,
+    )
+
+    result = guard.finalize(
+        "营收增长 [年报](evidence://ev_revenue_2025)。\n\n"
+        "---\n\n"
+        "**来源：**\n\n"
+        "[1] [年报](evidence://ev_revenue_2025)"
+    )
+
+    assert result.bundle is not None
+    assert "来源" not in result.text
+    assert "\n---" not in result.text
+    assert result.text.count("citation://") == 1
+
+
+def test_guard_preserves_partial_source_section_with_external_links() -> None:
+    registry = _registry(_item(locator={"kind": "chunk", "chunkId": "chunk-1"}))
+    guard = CitationGuard(
+        registry,
+        message_id="msg-1",
+        user_prompt="请使用引用",
+        policy_available=True,
+    )
+
+    result = guard.finalize(
+        "营收增长 [1]，渠道占比下降 [2]。\n\n"
+        "**来源：**\n"
+        "[1] [年报](evidence://ev_revenue_2025)\n"
+        "[2] [研报](https://example.com/report)"
+    )
+
+    assert "来源" in result.text
+    assert "https://example.com/report" in result.text
 
 
 def test_guard_does_not_guess_ambiguous_numbered_source_bindings() -> None:

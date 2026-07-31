@@ -72,6 +72,8 @@ export interface DocumentReaderViewProps {
   doc: DocumentSource | null;
   loading?: boolean;
   error?: string | null;
+  /** Draw the reader's own panel frame. Disable when the host already owns it. */
+  framed?: boolean;
   /** Re-locates whenever the value changes. */
   location?: DocumentLocation;
   /** Right research slot (AI summary, document Q&A, …). */

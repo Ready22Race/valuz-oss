@@ -46,6 +46,15 @@ _NUMBERED_EVIDENCE_SOURCE_RE = re.compile(
 _BARE_NUMBERED_MARKER_RE = re.compile(
     r"(?<![\\\w])\[(\d{1,3})\](?!\()"
 )
+_SOURCE_SECTION_HEADING_RE = re.compile(
+    r"(?im)^[ \t]*(?:#{1,6}[ \t]+)?(?:\*\*|__)?[ \t]*"
+    r"(?:sources?|references?|citations?|来源|参考来源|引用来源|参考资料)"
+    r"[ \t]*[:：]?[ \t]*(?:\*\*|__)?[ \t]*$"
+)
+_CANONICAL_CITATION_URI_RE = re.compile(
+    r"citation://([A-Za-z0-9_-]{1,160})"
+)
+_MARKDOWN_DESTINATION_RE = re.compile(r"\]\(([^)\n]+)\)")
 _EXPLICIT_CITATION_RE = re.compile(
     r"(?:引用|引文|出处|来源|根据.{0,12}(?:文档|资料)|核验|"
     r"总结.{0,12}(?:文档|文件)|citation|citations|cite|source(?:s)?\b|"
@@ -342,6 +351,7 @@ class CitationGuard:
             replace_bare_number,
             linked_text,
         )
+        canonical_text = _strip_redundant_source_section(canonical_text)
 
         all_citation_ids = [self._citation_id(record.handle) for record in self._registry.values()]
         used_citation_ids = {self._citation_id(handle) for handle in cited_handles}
@@ -408,6 +418,47 @@ def _numbered_evidence_bindings(text: str) -> dict[str, str]:
         for label, handles in candidates.items()
         if len(handles) == 1
     }
+
+
+def _strip_redundant_source_section(text: str) -> str:
+    """Drop a trailing model bibliography already represented by body links.
+
+    The canonical client renders one source list from ``CitationBundleV1``.
+    Models nevertheless sometimes append their own ``Sources``/``来源``
+    section.  Remove that section only when every Markdown destination in it
+    is a canonical citation and every cited id already occurs in the answer
+    body.  External or partially bound bibliographies are preserved so this
+    cleanup can never hide the only copy of an unregistered source.
+    """
+
+    matches = list(_SOURCE_SECTION_HEADING_RE.finditer(text))
+    if not matches:
+        return text
+    heading = matches[-1]
+    body = text[: heading.start()]
+    bibliography = text[heading.end() :]
+    bibliography_ids = set(_CANONICAL_CITATION_URI_RE.findall(bibliography))
+    if not bibliography_ids:
+        return text
+    destinations = _MARKDOWN_DESTINATION_RE.findall(bibliography)
+    if not destinations or any(
+        not destination.startswith("citation://") for destination in destinations
+    ):
+        return text
+    body_ids = set(_CANONICAL_CITATION_URI_RE.findall(body))
+    if not bibliography_ids.issubset(body_ids):
+        return text
+
+    # A horizontal rule immediately before the generated bibliography belongs
+    # to that block as well; retaining it would leave an unexplained divider
+    # before the runtime-rendered source cards.
+    body = body.rstrip()
+    body = re.sub(
+        r"(?:^|\r?\n)[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*$",
+        "",
+        body,
+    )
+    return body.rstrip()
 
 
 def _decode_json_payload(content: Any, *, max_chars: int) -> Any | None:

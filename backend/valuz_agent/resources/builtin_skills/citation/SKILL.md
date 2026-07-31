@@ -33,6 +33,10 @@ The runtime converts valid `evidence://` links into the visible numbered
 `[n]` citations and attaches the trusted source snapshot. Never write a
 `citation://` link yourself.
 
+Do not add a manually authored `Sources`, `References`, `Citations`, `来源`, or
+`参考资料` section to the answer. The client builds that list from the same
+trusted citation bundle, so a model-authored bibliography would be duplicated.
+
 ## Trust boundary
 
 - Never invent or modify a URL, document id, document version, chunk id, page,

@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -10,8 +11,10 @@ import {
 } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import {
+  buildApiUrl,
   buildLocalFileUrl,
   citationsApi,
+  getCitationApiBase,
   type PlatformCapabilities,
   useTranslation,
 } from "@valuz/core";
@@ -38,10 +41,28 @@ interface CitationOpenTarget {
   citationId: string;
 }
 
+interface PreviewBox {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+export interface OpenDocumentPreviewInput {
+  document: DocumentSource | null;
+  location?: DocumentLocation;
+  loading?: boolean;
+  error?: string | null;
+  onClose?: () => void;
+  onReload?: () => void;
+}
+
 interface CitationDocumentPreviewContextValue {
   openCitation: (
     input: OpenCitationInput & { sessionId: string },
   ) => void;
+  openDocument: (input: OpenDocumentPreviewInput) => void;
+  dismissDocument: () => void;
   closeCitation: () => void;
 }
 
@@ -117,10 +138,13 @@ export function decodeCitationOpenRef(value: string): CitationOpenTarget | null 
 function addressUrl(
   source: ResolvedCitationDocumentSource,
   platform: PlatformCapabilities,
+  apiBaseUrl: string,
 ): string | null {
   if (source.render.kind !== "file") return null;
   const { address } = source.render;
-  if (address.kind === "remote") return address.url;
+  if (address.kind === "remote" && address.url) {
+    return buildApiUrl(apiBaseUrl, address.url);
+  }
   if (address.kind === "local" && address.absPath && platform.isElectron) {
     return buildLocalFileUrl(address.absPath);
   }
@@ -145,6 +169,7 @@ export async function materializeCitationDocument(
   source: ResolvedCitationDocumentSource,
   platform: PlatformCapabilities,
   signal?: AbortSignal,
+  apiBaseUrl = "",
 ): Promise<DocumentSource> {
   const common = {
     id: source.id,
@@ -187,7 +212,9 @@ export async function materializeCitationDocument(
   if (mimeType === "text/html") {
     let html: string | null = null;
     if (address.kind === "remote" && address.url) {
-      const response = await fetch(address.url, { signal });
+      const response = await fetch(buildApiUrl(apiBaseUrl, address.url), {
+        signal,
+      });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       html = await response.text();
     } else if (
@@ -210,7 +237,7 @@ export async function materializeCitationDocument(
     };
   }
 
-  const url = addressUrl(source, platform);
+  const url = addressUrl(source, platform, apiBaseUrl);
   if (!url) throw new Error("document_address_unavailable");
   return { ...common, render: { kind: "file", url, mimeType } };
 }
@@ -268,14 +295,26 @@ export function CitationDocumentPreviewProvider({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [resolutionNotice, setResolutionNotice] = useState<string | null>(null);
+  const [directDocumentOpen, setDirectDocumentOpen] = useState(false);
+  const [previewBox, setPreviewBox] = useState<PreviewBox | null>(null);
   const openerRef = useRef<HTMLElement | null>(null);
   const dialogRef = useRef<HTMLDivElement | null>(null);
+  const directDocumentOpenRef = useRef(false);
+  const directDocumentControlsRef = useRef<{
+    onClose?: () => void;
+    onReload?: () => void;
+  } | null>(null);
   const automaticRefreshesRef = useRef(new Set<string>());
+  const pendingCitationQueryRef = useRef<string | null | undefined>(
+    undefined,
+  );
 
   const setCitationQuery = useCallback(
     (next: CitationOpenTarget | null) => {
       const params = new URLSearchParams(location.search);
-      if (next) params.set("citation", encodeCitationOpenRef(next));
+      const nextEncoded = next ? encodeCitationOpenRef(next) : null;
+      pendingCitationQueryRef.current = nextEncoded;
+      if (nextEncoded) params.set("citation", nextEncoded);
       else params.delete("citation");
       const search = params.toString();
       navigate(
@@ -297,6 +336,8 @@ export function CitationDocumentPreviewProvider({
         window.document.activeElement instanceof HTMLElement
           ? window.document.activeElement
           : null;
+      directDocumentOpenRef.current = false;
+      setDirectDocumentOpen(false);
       const next = {
         sessionId: input.sessionId,
         messageId: input.messageId,
@@ -309,7 +350,48 @@ export function CitationDocumentPreviewProvider({
     [setCitationQuery],
   );
 
+  const openDocument = useCallback((input: OpenDocumentPreviewInput) => {
+    if (!directDocumentControlsRef.current) {
+      openerRef.current =
+        window.document.activeElement instanceof HTMLElement
+          ? window.document.activeElement
+          : null;
+    }
+    directDocumentControlsRef.current = {
+      onClose: input.onClose,
+      onReload: input.onReload,
+    };
+    directDocumentOpenRef.current = true;
+    setTarget(null);
+    setOriginTarget(null);
+    setDirectDocumentOpen(true);
+    setResolvedDocument(input.document);
+    setDocumentLocation(input.location);
+    setLoading(input.loading ?? false);
+    setError(input.error ?? null);
+    setResolutionNotice(null);
+    automaticRefreshesRef.current.clear();
+  }, []);
+
+  const dismissDocument = useCallback(() => {
+    if (!directDocumentOpenRef.current) return;
+    directDocumentOpenRef.current = false;
+    directDocumentControlsRef.current = null;
+    setDirectDocumentOpen(false);
+    setResolvedDocument(null);
+    setDocumentLocation(undefined);
+    setLoading(false);
+    setError(null);
+    setResolutionNotice(null);
+    automaticRefreshesRef.current.clear();
+  }, []);
+
   const closeCitation = useCallback(() => {
+    const closingDirectDocument = directDocumentOpenRef.current;
+    const onDirectClose = directDocumentControlsRef.current?.onClose;
+    directDocumentOpenRef.current = false;
+    directDocumentControlsRef.current = null;
+    setDirectDocumentOpen(false);
     setTarget(null);
     setOriginTarget(null);
     setResolvedDocument(null);
@@ -317,13 +399,34 @@ export function CitationDocumentPreviewProvider({
     setError(null);
     setResolutionNotice(null);
     automaticRefreshesRef.current.clear();
-    setCitationQuery(null);
+    if (!closingDirectDocument) setCitationQuery(null);
+    if (closingDirectDocument) onDirectClose?.();
     window.requestAnimationFrame(() => openerRef.current?.focus());
   }, [setCitationQuery]);
 
   useEffect(() => {
     const encoded = new URLSearchParams(location.search).get("citation");
-    if (!encoded) return;
+    const pending = pendingCitationQueryRef.current;
+    if (pending !== undefined) {
+      // State is updated immediately so the preview feels responsive, while
+      // react-router publishes the replacement location on a later render.
+      // Ignore that stale location or a close would decode the old query and
+      // reopen the preview underneath the layer being dismissed.
+      if (encoded !== pending) return;
+      pendingCitationQueryRef.current = undefined;
+    }
+    if (!encoded) {
+      if (target) {
+        setTarget(null);
+        setOriginTarget(null);
+        setResolvedDocument(null);
+        setDocumentLocation(undefined);
+        setError(null);
+        setResolutionNotice(null);
+        automaticRefreshesRef.current.clear();
+      }
+      return;
+    }
     const decoded = decodeCitationOpenRef(encoded);
     if (!decoded) return;
     if (
@@ -353,6 +456,7 @@ export function CitationDocumentPreviewProvider({
           result.document,
           platform,
           signal,
+          getCitationApiBase(active.sessionId),
         );
         if (signal.aborted) return;
         setResolvedDocument(resolved);
@@ -400,31 +504,121 @@ export function CitationDocumentPreviewProvider({
   }, [load, target]);
 
   useEffect(() => {
-    if (!target) return;
+    if (!target && !directDocumentOpen) return;
     dialogRef.current?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") closeCitation();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [closeCitation, target]);
+  }, [closeCitation, directDocumentOpen, target]);
 
   const context = useMemo(
-    () => ({ openCitation, closeCitation }),
-    [closeCitation, openCitation],
+    () => ({
+      openCitation,
+      openDocument,
+      dismissDocument,
+      closeCitation,
+    }),
+    [closeCitation, dismissDocument, openCitation, openDocument],
   );
+  const previewOpen = Boolean(target || directDocumentOpen);
+
+  useLayoutEffect(() => {
+    if (!previewOpen) {
+      setPreviewBox(null);
+      return;
+    }
+    let host: HTMLElement | null = null;
+    let resizeObserver: ResizeObserver | null = null;
+    let hostObserver: MutationObserver | null = null;
+    let retryFrame: number | null = null;
+
+    const findHost = () =>
+      openerRef.current?.closest("main")?.parentElement ??
+      document.querySelector("main")?.parentElement ??
+      null;
+    const measure = () => {
+      if (!host) return;
+      const rect = host.getBoundingClientRect();
+      const styles = getComputedStyle(host);
+      const paddingLeft = Number.parseFloat(styles.paddingLeft) || 0;
+      const paddingRight = Number.parseFloat(styles.paddingRight) || 0;
+      const paddingTop = Number.parseFloat(styles.paddingTop) || 0;
+      const paddingBottom = Number.parseFloat(styles.paddingBottom) || 0;
+      const next = {
+        left: rect.left + paddingLeft,
+        top: rect.top + paddingTop,
+        width: Math.max(0, rect.width - paddingLeft - paddingRight),
+        height: Math.max(0, rect.height - paddingTop - paddingBottom),
+      };
+      setPreviewBox((current) =>
+        current &&
+        current.left === next.left &&
+        current.top === next.top &&
+        current.width === next.width &&
+        current.height === next.height
+          ? current
+          : next,
+      );
+    };
+    const bindHost = (nextHost: HTMLElement) => {
+      host = nextHost;
+      measure();
+      if (typeof ResizeObserver !== "undefined") {
+        resizeObserver = new ResizeObserver(measure);
+        resizeObserver.observe(nextHost);
+      }
+    };
+    const waitForHost = () => {
+      const nextHost = findHost();
+      if (nextHost) {
+        hostObserver?.disconnect();
+        hostObserver = null;
+        if (retryFrame !== null) {
+          window.cancelAnimationFrame(retryFrame);
+          retryFrame = null;
+        }
+        bindHost(nextHost);
+        return;
+      }
+      setPreviewBox(null);
+      if (
+        typeof MutationObserver !== "undefined" &&
+        hostObserver === null
+      ) {
+        hostObserver = new MutationObserver(waitForHost);
+        hostObserver.observe(document.body, {
+          childList: true,
+          subtree: true,
+        });
+      } else {
+        retryFrame = window.requestAnimationFrame(waitForHost);
+      }
+    };
+
+    waitForHost();
+    window.addEventListener("resize", measure);
+    return () => {
+      resizeObserver?.disconnect();
+      hostObserver?.disconnect();
+      if (retryFrame !== null) window.cancelAnimationFrame(retryFrame);
+      window.removeEventListener("resize", measure);
+    };
+  }, [previewOpen]);
 
   return (
     <CitationDocumentPreviewContext.Provider value={context}>
       {children}
-      {target ? (
+      {previewOpen && previewBox ? (
         <div
           ref={dialogRef}
           role="dialog"
           aria-modal="true"
           aria-label={t("ui.citation.documentDialog")}
           tabIndex={-1}
-          className="fixed inset-0 z-[80] overflow-hidden bg-surface p-2 outline-none sm:p-3"
+          className="fixed z-40 overflow-hidden bg-surface-base outline-none"
+          style={previewBox}
           onWheel={(event) => event.stopPropagation()}
           onTouchMove={(event) => event.stopPropagation()}
         >
@@ -434,11 +628,18 @@ export function CitationDocumentPreviewProvider({
             loading={loading}
             error={error}
             onReload={() => {
-              if (!target) return;
-              const controller = new AbortController();
-              void load(target, controller.signal);
+              if (target) {
+                const controller = new AbortController();
+                void load(target, controller.signal);
+                return;
+              }
+              directDocumentControlsRef.current?.onReload?.();
             }}
-            onLoadError={refreshExpiredAddress}
+            onLoadError={
+              target
+                ? refreshExpiredAddress
+                : undefined
+            }
             onClose={closeCitation}
             sidePanel={
               <DocumentResearchPanel
@@ -446,6 +647,16 @@ export function CitationDocumentPreviewProvider({
                 resolutionNotice={resolutionNotice}
                 originSessionId={originTarget?.sessionId}
                 originMessageId={originTarget?.messageId}
+                onDocumentCitationClick={(citation) => {
+                  if (
+                    citation.source.documentId !== resolvedDocument?.id
+                  ) {
+                    return;
+                  }
+                  setDocumentLocation(
+                    locatorToDocumentLocation(citation.locator ?? null),
+                  );
+                }}
                 onCitationClick={(sessionId, input) => {
                   if (!input.messageId) return;
                   const next = {

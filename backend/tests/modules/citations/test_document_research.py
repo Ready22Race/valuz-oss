@@ -11,6 +11,12 @@ from valuz_agent.modules.citations.research import (
     validate_document_summary,
     validate_research_share_bundle,
 )
+from valuz_agent.modules.docs.errors import DocumentNotFound
+from valuz_agent.ports.document_research import (
+    ResolvedResearchDocument,
+    ResolvedResearchSummary,
+)
+from valuz_agent.ports.extensions import ext
 
 
 def _detail(*, content_hash: str = "abc") -> SimpleNamespace:
@@ -64,6 +70,44 @@ class _Documents:
         assert user_id == "owner"
         assert document_id == "doc-1"
         return self.detail
+
+
+class _MissingDocuments:
+    async def get_document(self, user_id: str, document_id: str) -> object:
+        raise DocumentNotFound()
+
+
+class _ExternalResearchProvider:
+    async def resolve_document(
+        self,
+        *,
+        owner_user_id: str,
+        document_id: str,
+    ) -> ResolvedResearchDocument | None:
+        assert owner_user_id == "owner"
+        return ResolvedResearchDocument(
+            id=document_id,
+            title="Reportify Annual Report",
+            filename="Reportify Annual Report",
+            document_version="reportify-v1",
+            provider_id="valuz-search",
+            mcp_server_names=("valuz-search",),
+        )
+
+    async def get_summary(
+        self,
+        *,
+        owner_user_id: str,
+        document: ResolvedResearchDocument,
+        profile: str,
+    ) -> ResolvedResearchSummary | None:
+        assert owner_user_id == "owner"
+        assert document.id == "reportify-1"
+        assert profile == "brief"
+        return ResolvedResearchSummary(
+            content="Reportify canonical summary",
+            citation_bundle={"version": 1, "citations": []},
+        )
 
 
 class _Sessions:
@@ -198,6 +242,68 @@ async def test_independent_research_session_uses_valurion_and_locks_capabilities
     assert updates[0].skills == ["/tmp/citation", "/tmp/valuz-project-docs"]
     assert [item.name for item in updates[0].mcp_servers] == ["valuz_docs"]
     assert "server-enforced locked source scope" in updates[0].instructions
+
+
+async def test_connector_document_uses_provider_summary_and_locks_qa_to_connector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions = _Sessions()
+    kernel_session = _kernel_session()
+    kernel_session.mcp_servers = (
+        McpHttpServerConfigSchema(
+            name="valuz-search",
+            url="http://localhost/search",
+            transport="http",
+        ),
+        McpHttpServerConfigSchema(
+            name="valuz-stock",
+            url="http://localhost/stock",
+            transport="http",
+        ),
+    )
+    updates: list[object] = []
+
+    async def list_sessions(*args: object, **kwargs: object) -> list:
+        return []
+
+    async def get_session(*args: object, **kwargs: object) -> object:
+        return kernel_session
+
+    async def update_session(user_id: str, session_id: str, body: object) -> object:
+        updates.append(body)
+        kernel_session.metadata = body.metadata
+        kernel_session.instructions = body.instructions
+        kernel_session.skills = tuple(body.skills)
+        kernel_session.mcp_servers = tuple(body.mcp_servers)
+        return kernel_session
+
+    monkeypatch.setattr(ext, "document_research_provider", _ExternalResearchProvider())
+    monkeypatch.setattr(research_module.kernel_client, "list_sessions", list_sessions)
+    monkeypatch.setattr(research_module.kernel_client, "get_session", get_session)
+    monkeypatch.setattr(research_module.kernel_client, "update_session", update_session)
+    service = DocumentResearchService(
+        documents=_MissingDocuments(),
+        sessions=sessions,
+        datastore=_Store(),
+    )
+
+    summary = await service.get_summary(
+        "owner",
+        document_id="reportify-1",
+        profile="brief",
+    )
+    research = await service.get_or_create_session(
+        "owner",
+        document_id="reportify-1",
+    )
+
+    assert summary is not None
+    assert summary.status == "ready"
+    assert summary.content == "Reportify canonical summary"
+    assert summary.model_id == "valuz-search"
+    assert research.document_versions == ["reportify-v1"]
+    assert [item.name for item in updates[0].mcp_servers] == ["valuz-search"]
+    assert 'document_fetch(doc_id="reportify-1")' in updates[0].instructions
 
 
 async def test_reuses_latest_document_session_and_updates_version(

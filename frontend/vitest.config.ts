@@ -8,6 +8,22 @@ export default defineConfig({
   plugins: [
     react(),
     {
+      // PDF.js exposes its worker through Vite's `?url` loader. The commercial
+      // workspace may resolve that package from a parent pnpm store outside
+      // this config's root, which Vite correctly blocks during tests. Tests do
+      // not execute the worker, so keep collection portable with a virtual URL.
+      name: "pdf-worker-url-stub",
+      enforce: "pre",
+      resolveId(id) {
+        if (id === "pdfjs-dist/legacy/build/pdf.worker.min.mjs?url")
+          return "\0pdf-worker-url-stub";
+      },
+      load(id) {
+        if (id === "\0pdf-worker-url-stub")
+          return 'export default "/pdf.worker.min.mjs";';
+      },
+    },
+    {
       name: "virtual-edition-overlay-stub",
       resolveId(id) {
         if (id === "virtual:edition-overlay")

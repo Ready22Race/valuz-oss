@@ -175,6 +175,12 @@ def test_policy_detects_uncited_financial_number_and_missing_coverage() -> None:
     codes = {issue["code"] for issue in result["quality"]["issues"]}
     assert "numeric_claim_without_citation" in codes
     assert "evidence_coverage_missing" in codes
+    numeric_issue = next(
+        issue
+        for issue in result["quality"]["issues"]
+        if issue["code"] == "numeric_claim_without_citation"
+    )
+    assert numeric_issue["claim"] == {"exact": "Margin was 23.5%."}
     assert result["quality"]["metrics"]["unsourcedClaimCount"] == 1
 
 

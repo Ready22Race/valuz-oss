@@ -7,7 +7,11 @@ import { selectBestNormalizedMatch } from "./text-quote";
 const STYLE = `
   <style>
     :root { color-scheme: light; }
-    html { scroll-behavior: smooth; }
+    html { scroll-behavior: smooth; scrollbar-width: thin; scrollbar-color: rgba(137, 143, 156, 0.12) transparent; }
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(137, 143, 156, 0.12); border-radius: 9999px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(137, 143, 156, 0.28); }
     body { box-sizing: border-box; margin: 0 auto; max-width: 860px; padding: 24px; color: rgb(36 39 45); font: 14px/1.75 system-ui, sans-serif; }
     *, *::before, *::after { box-sizing: inherit; }
     img, video, canvas, svg, table { max-width: 100%; }

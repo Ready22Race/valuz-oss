@@ -1497,13 +1497,14 @@ export const ProjectDetailPage = () => {
   return (
     <div className="flex h-full flex-col">
       {selectedArtifactPath || artifactLoading || artifactError ? (
-        <div className="min-h-0 flex-1 p-3">
+        <div className="min-h-0 flex-1">
           <ArtifactViewerShell
             artifact={artifact}
             content={artifactContent}
             target={artifactTarget}
             loading={artifactLoading}
             error={artifactError}
+            framed={false}
             onReload={handleArtifactReload}
             onClose={handleArtifactClose}
             onCopyContent={handleArtifactCopy}

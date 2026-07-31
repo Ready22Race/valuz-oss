@@ -162,6 +162,7 @@ export interface CitationQualityIssueV1 {
   layer: "L0" | "L1" | "L2" | "L3" | "L4" | "L5" | string;
   severity: "degraded" | "unverified" | string;
   citationIds?: string[];
+  claim?: TextQuoteSelectorV1;
 }
 
 export interface CitationQualityResultV1 {

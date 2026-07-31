@@ -7,9 +7,7 @@ import {
 } from "react";
 import {
   AlertTriangle,
-  FileText,
   Loader2,
-  MessageSquareText,
   RefreshCw,
   Send,
   Share2,
@@ -20,6 +18,7 @@ import {
   useTranslation,
 } from "@valuz/core";
 import type {
+  CitationRefV1,
   DocumentResearchSessionV1,
   DocumentSummaryArtifactV1,
   OpenCitationInput,
@@ -27,6 +26,10 @@ import type {
 import {
   Button,
   MarkdownContent,
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
   type DocumentSource,
   cn,
   usePersistentScroll,
@@ -35,6 +38,7 @@ import {
 import { SessionStreamView } from "./SessionStreamView";
 
 type ResearchTab = "summary" | "qa";
+const SUMMARY_PROFILE = "brief" as const;
 
 export interface DocumentResearchPanelProps {
   document: DocumentSource | null;
@@ -45,6 +49,7 @@ export interface DocumentResearchPanelProps {
     sessionId: string,
     input: OpenCitationInput,
   ) => void;
+  onDocumentCitationClick?: (citation: CitationRefV1) => void;
 }
 
 const wait = (ms: number, signal: AbortSignal): Promise<void> =>
@@ -66,10 +71,10 @@ export function DocumentResearchPanel({
   originSessionId,
   originMessageId,
   onCitationClick,
+  onDocumentCitationClick,
 }: DocumentResearchPanelProps) {
   const { t } = useTranslation();
   const [tab, setTab] = useState<ResearchTab>("summary");
-  const [profile, setProfile] = useState<"brief" | "detailed">("brief");
   const [summary, setSummary] =
     useState<DocumentSummaryArtifactV1 | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
@@ -91,7 +96,7 @@ export function DocumentResearchPanel({
   usePersistentScroll(
     summaryScrollRef,
     document
-      ? `valuz.reader.summaryScroll:${document.id}:${profile}`
+      ? `valuz.reader.summaryScroll:${document.id}:${SUMMARY_PROFILE}`
       : null,
     Boolean(summary) && !summaryLoading,
   );
@@ -146,7 +151,7 @@ export function DocumentResearchPanel({
       try {
         let value = await documentResearchApi.getSummary(
           document.id,
-          profile,
+          SUMMARY_PROFILE,
           { signal: controller.signal },
         );
         if (controller.signal.aborted) return;
@@ -169,7 +174,7 @@ export function DocumentResearchPanel({
           value = await documentResearchApi.generateSummary(
             document.id,
             {
-              profile,
+              profile: SUMMARY_PROFILE,
               force: value?.status === "failed",
               originSessionId,
               originMessageId,
@@ -187,7 +192,7 @@ export function DocumentResearchPanel({
           await wait(1000, controller.signal);
           value = await documentResearchApi.getSummary(
             document.id,
-            profile,
+            SUMMARY_PROFILE,
             { signal: controller.signal },
           );
           if (value) setSummary(value);
@@ -208,7 +213,6 @@ export function DocumentResearchPanel({
     document,
     originMessageId,
     originSessionId,
-    profile,
     summaryAttempt,
   ]);
 
@@ -324,8 +328,14 @@ export function DocumentResearchPanel({
           citationBundle={bundle}
           messageId={summary.message_id ?? undefined}
           onCitationClick={(input) => {
-            if (!summary.research_session_id) return;
-            onCitationClick?.(summary.research_session_id, input);
+            if (summary.research_session_id) {
+              onCitationClick?.(summary.research_session_id, input);
+              return;
+            }
+            const citation = bundle?.citations.find(
+              (item) => item.citationId === input.citationId,
+            );
+            if (citation) onDocumentCitationClick?.(citation);
           }}
           className="text-sm"
         />
@@ -367,7 +377,7 @@ export function DocumentResearchPanel({
       </div>
       <form
         onSubmit={submitQuestion}
-        className="shrink-0 border-t border-surface-border bg-surface p-3"
+        className="shrink-0 bg-surface p-3"
       >
         <div className="flex items-end gap-2 rounded-lg border border-surface-border bg-surface px-2 py-1.5 focus-within:border-accent">
           <textarea
@@ -406,116 +416,89 @@ export function DocumentResearchPanel({
   );
 
   return (
-    <section className="flex h-full min-h-0 flex-col bg-surface-soft">
-      <div className="flex h-11 shrink-0 items-center gap-1 border-b border-surface-border px-2">
-        {(["summary", "qa"] as const).map((value) => (
-          <button
-            key={value}
-            type="button"
-            aria-pressed={tab === value}
-            onClick={() => setTab(value)}
-            className={cn(
-              "inline-flex h-8 flex-1 items-center justify-center gap-1.5 rounded-md text-xs font-medium transition",
-              tab === value
-                ? "bg-surface text-ink-heading shadow-xs"
-                : "text-ink-meta hover:text-ink-heading",
-            )}
+    <section className="flex h-full min-h-0 flex-col bg-surface">
+      <Tabs
+        value={tab}
+        onValueChange={(value) => {
+          if (value === "summary" || value === "qa") setTab(value);
+        }}
+        className="h-full min-h-0 gap-0"
+      >
+        <div className="flex h-11 shrink-0 items-center bg-surface px-2">
+          <TabsList
+            variant="line"
+            className="min-w-0 flex-1 border-b-0"
           >
-            {value === "summary" ? (
-              <FileText className="h-3.5 w-3.5" />
-            ) : (
-              <MessageSquareText className="h-3.5 w-3.5" />
-            )}
-            {t(
-              value === "summary"
-                ? ("ui.reader.summary" as Parameters<typeof t>[0])
-                : ("ui.reader.qa" as Parameters<typeof t>[0]),
-            )}
-          </button>
-        ))}
-        {originSessionId ? (
-          <button
-            type="button"
-            onClick={() => void shareToOrigin()}
-            disabled={
-              sharing ||
-              (tab === "summary"
-                ? !summary?.message_id || !summary.research_session_id
-                : !researchSession || streamActive || sending)
-            }
-            aria-label={t(
-              "ui.reader.sendToMainChat" as Parameters<typeof t>[0],
-            )}
-            title={t(
-              "ui.reader.sendToMainChat" as Parameters<typeof t>[0],
-            )}
-            className={cn(
-              "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition",
-              shareComplete
-                ? "text-success"
-                : "text-ink-meta hover:bg-surface hover:text-ink-heading",
-              "disabled:cursor-not-allowed disabled:opacity-40",
-            )}
+            <TabsTrigger value="summary">
+              {t("ui.reader.summary" as Parameters<typeof t>[0])}
+            </TabsTrigger>
+            <TabsTrigger value="qa">
+              {t("ui.reader.qa" as Parameters<typeof t>[0])}
+            </TabsTrigger>
+          </TabsList>
+          {originSessionId ? (
+            <button
+              type="button"
+              onClick={() => void shareToOrigin()}
+              disabled={
+                sharing ||
+                (tab === "summary"
+                  ? !summary?.message_id || !summary.research_session_id
+                  : !researchSession || streamActive || sending)
+              }
+              aria-label={t(
+                "ui.reader.sendToMainChat" as Parameters<typeof t>[0],
+              )}
+              title={t(
+                "ui.reader.sendToMainChat" as Parameters<typeof t>[0],
+              )}
+              className={cn(
+                "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition",
+                shareComplete
+                  ? "text-success"
+                  : "text-ink-meta hover:bg-surface-muted hover:text-ink-heading",
+                "disabled:cursor-not-allowed disabled:opacity-40",
+              )}
+            >
+              {sharing ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Share2 className="h-3.5 w-3.5" />
+              )}
+            </button>
+          ) : null}
+        </div>
+        {shareComplete ? (
+          <div
+            role="status"
+            className="border-b border-success/30 bg-success-light px-3 py-2 text-xs text-success"
           >
-            {sharing ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <Share2 className="h-3.5 w-3.5" />
-            )}
-          </button>
-        ) : null}
-      </div>
-      {shareComplete ? (
-        <div
-          role="status"
-          className="border-b border-success/30 bg-success-light px-3 py-2 text-xs text-success"
-        >
-          {t("ui.reader.sentToMainChat" as Parameters<typeof t>[0])}
-        </div>
-      ) : null}
-      {shareError ? (
-        <div
-          role="alert"
-          className="border-b border-danger/30 bg-danger-light px-3 py-2 text-xs text-danger-text"
-        >
-          {shareError}
-        </div>
-      ) : null}
-      {tab === "summary" ? (
-        <div className="flex h-9 shrink-0 items-center justify-between border-b border-surface-border px-3">
-          <span className="text-2xs text-ink-meta">
-            {t("ui.reader.lockedScope" as Parameters<typeof t>[0])}
-          </span>
-          <div className="flex rounded-md bg-surface-muted p-0.5">
-            {(["brief", "detailed"] as const).map((value) => (
-              <button
-                key={value}
-                type="button"
-                aria-pressed={profile === value}
-                onClick={() => setProfile(value)}
-                className={cn(
-                  "rounded px-2 py-1 text-2xs",
-                  profile === value
-                    ? "bg-surface text-ink-heading shadow-xs"
-                    : "text-ink-meta",
-                )}
-              >
-                {t(
-                  value === "brief"
-                    ? ("ui.reader.summaryBrief" as Parameters<typeof t>[0])
-                    : ("ui.reader.summaryDetailed" as Parameters<typeof t>[0]),
-                )}
-              </button>
-            ))}
+            {t("ui.reader.sentToMainChat" as Parameters<typeof t>[0])}
           </div>
-        </div>
-      ) : null}
-      {resolutionNotice ? (
-        <div className="border-b border-warning/30 bg-warning-light px-3 py-2 text-xs text-warning-text">
-          {resolutionNotice}
-        </div>
-      ) : null}
-      {tab === "summary" ? renderSummary() : renderQa()}
+        ) : null}
+        {shareError ? (
+          <div
+            role="alert"
+            className="border-b border-danger/30 bg-danger-light px-3 py-2 text-xs text-danger-text"
+          >
+            {shareError}
+          </div>
+        ) : null}
+        {resolutionNotice ? (
+          <div className="border-b border-warning/30 bg-warning-light px-3 py-2 text-xs text-warning-text">
+            {resolutionNotice}
+          </div>
+        ) : null}
+        <TabsContent
+          value="summary"
+          className="flex min-h-0 flex-1 flex-col"
+        >
+          {renderSummary()}
+        </TabsContent>
+        <TabsContent value="qa" className="flex min-h-0 flex-1 flex-col">
+          {renderQa()}
+        </TabsContent>
+      </Tabs>
     </section>
   );
 }

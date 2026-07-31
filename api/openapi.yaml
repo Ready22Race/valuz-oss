@@ -7123,6 +7123,8 @@ components:
         citationIds:
           type: array
           items: {type: string}
+        claim:
+          $ref: "#/components/schemas/TextQuoteSelectorV1"
 
     CitationQualityResultV1:
       type: object

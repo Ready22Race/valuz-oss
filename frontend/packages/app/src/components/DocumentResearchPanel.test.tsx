@@ -87,6 +87,35 @@ afterEach(() => {
 });
 
 describe("DocumentResearchPanel", () => {
+  it("opens provider-summary citations directly in the current document", async () => {
+    vi.spyOn(documentResearchApi, "getSummary").mockResolvedValue({
+      ...SUMMARY,
+      research_session_id: null,
+      message_id: null,
+    });
+    const onDocumentCitationClick = vi.fn();
+
+    render(
+      <DocumentResearchPanel
+        document={DOCUMENT}
+        onDocumentCitationClick={onDocumentCitationClick}
+      />,
+    );
+
+    expect(screen.getByRole("tab", { name: "Summary" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Ask" })).toBeTruthy();
+    expect(screen.queryByText("Current document only")).toBeNull();
+    expect(screen.queryByText("Brief")).toBeNull();
+    expect(screen.queryByText("Detailed")).toBeNull();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Citation 1/i }),
+    );
+    expect(onDocumentCitationClick).toHaveBeenCalledWith(
+      SUMMARY.citation_bundle.citations[0],
+    );
+  });
+
   it("generates a missing summary and opens its canonical citation", async () => {
     vi.spyOn(documentResearchApi, "getSummary").mockResolvedValue(null);
     vi.spyOn(documentResearchApi, "generateSummary").mockResolvedValue(SUMMARY);
@@ -164,7 +193,10 @@ describe("DocumentResearchPanel", () => {
       />,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Ask" }));
+    fireEvent.mouseDown(await screen.findByRole("tab", { name: "Ask" }), {
+      button: 0,
+      ctrlKey: false,
+    });
     await screen.findByTestId("research-stream");
     fireEvent.change(screen.getByLabelText("Ask this document…"), {
       target: { value: "What changed?" },

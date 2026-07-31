@@ -1,5 +1,7 @@
 import {
+  Code2,
   Copy,
+  Eye,
   ExternalLink,
   File,
   FileCode2,
@@ -15,9 +17,11 @@ import {
   ZoomOut,
 } from "lucide-react";
 import {
+  createContext,
   lazy,
   Suspense,
   useCallback,
+  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -65,6 +69,31 @@ const SpreadsheetRenderer = lazy(() =>
 
 type ArtifactRendererComponent = ComponentType<ArtifactRendererProps>;
 type PreviewSourceMode = "preview" | "source";
+type ImageZoom = number | "fit";
+
+interface ArtifactViewModeContextValue {
+  mode: PreviewSourceMode;
+  onModeChange: (mode: PreviewSourceMode) => void;
+}
+
+const ArtifactViewModeContext =
+  createContext<ArtifactViewModeContextValue | null>(null);
+
+interface ArtifactImageZoomContextValue {
+  zoom: ImageZoom;
+  onZoomChange: (zoom: ImageZoom) => void;
+}
+
+const ArtifactImageZoomContext =
+  createContext<ArtifactImageZoomContextValue | null>(null);
+
+function clampImageZoom(value: number): number {
+  return Math.min(Math.max(value, 0.25), 4);
+}
+
+function numericImageZoom(zoom: ImageZoom): number {
+  return zoom === "fit" ? 1 : zoom;
+}
 
 const PREVIEW_LABELS: Record<ArtifactPreviewKind, string> = {
   markdown: "Markdown",
@@ -211,8 +240,10 @@ function TextRenderer({
   content,
 }: ArtifactRendererProps) {
   const { t } = useI18n();
-  const [markdownMode, setMarkdownMode] =
-    useState<PreviewSourceMode>("preview");
+  const shellViewMode = useContext(ArtifactViewModeContext);
+  const [localMode, setLocalMode] = useState<PreviewSourceMode>("preview");
+  const markdownMode = shellViewMode?.mode ?? localMode;
+  const setMarkdownMode = shellViewMode?.onModeChange ?? setLocalMode;
   if (!content || content.kind !== "text") {
     return <UnsupportedRenderer artifact={artifact} content={content} />;
   }
@@ -220,10 +251,15 @@ function TextRenderer({
   if (artifact.previewKind === "markdown" && markdownMode === "preview") {
     return (
       <div className="flex h-full min-h-0 flex-col">
-        <div className="flex h-10 shrink-0 items-center justify-between border-b border-surface-border bg-surface-soft px-4">
-          <span className="text-xs text-ink-body">Markdown</span>
-          <PreviewSourceToggle mode={markdownMode} onModeChange={setMarkdownMode} />
-        </div>
+        {!shellViewMode ? (
+          <div className="flex h-10 shrink-0 items-center justify-between border-b border-surface-border bg-surface-soft px-4">
+            <span className="text-xs text-ink-body">Markdown</span>
+            <PreviewSourceToggle
+              mode={markdownMode}
+              onModeChange={setMarkdownMode}
+            />
+          </div>
+        ) : null}
         <div className="min-h-0 flex-1 overflow-y-auto px-8 py-7">
           <div className="mx-auto max-w-[820px]">
             {content.truncated ? (
@@ -240,27 +276,32 @@ function TextRenderer({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {artifact.previewKind === "markdown" ? (
+      {artifact.previewKind === "markdown" && !shellViewMode ? (
         <div className="flex h-10 shrink-0 items-center justify-between border-b border-surface-border bg-surface-soft px-4">
           <span className="text-xs text-ink-body">Markdown</span>
-          <PreviewSourceToggle mode={markdownMode} onModeChange={setMarkdownMode} />
+          <PreviewSourceToggle
+            mode={markdownMode}
+            onModeChange={setMarkdownMode}
+          />
         </div>
       ) : null}
-      <pre className="min-h-0 flex-1 overflow-auto bg-surface-base p-4 font-mono text-xs leading-6 text-ink-heading">
-        {content.content}
-      </pre>
-      {content.truncated ? (
-        <div className="border-t border-surface-border bg-warning-light px-4 py-2 text-xs text-warning-text">
-          {t("ui.artifact.truncated")}
-        </div>
-      ) : null}
+      <div className="min-h-0 flex-1">
+        <CodeMirrorRenderer
+          artifact={artifact}
+          content={content}
+          wrapLines={artifact.previewKind === "markdown"}
+        />
+      </div>
     </div>
   );
 }
 
 function ImageRenderer({ artifact, content, onReload }: ArtifactRendererProps) {
   const { t } = useI18n();
-  const [zoom, setZoom] = useState<number | "fit">("fit");
+  const shellImageZoom = useContext(ArtifactImageZoomContext);
+  const [localZoom, setLocalZoom] = useState<ImageZoom>("fit");
+  const zoom = shellImageZoom?.zoom ?? localZoom;
+  const setZoom = shellImageZoom?.onZoomChange ?? setLocalZoom;
   const [loadState, setLoadState] = useState<"loading" | "ready" | "error">(
     "loading",
   );
@@ -280,9 +321,9 @@ function ImageRenderer({ artifact, content, onReload }: ArtifactRendererProps) {
     setLoadState("loading");
   }, [imageUrl]);
 
-  const zoomValue = zoom === "fit" ? 1 : zoom;
+  const zoomValue = numericImageZoom(zoom);
   const updateZoom = (nextZoom: number) => {
-    setZoom(Math.min(Math.max(nextZoom, 0.25), 4));
+    setZoom(clampImageZoom(nextZoom));
   };
 
   const handleDragStart = (event: MouseEvent<HTMLDivElement>) => {
@@ -304,40 +345,43 @@ function ImageRenderer({ artifact, content, onReload }: ArtifactRendererProps) {
   if (imageUrl) {
     return (
       <div className="flex h-full min-h-0 flex-col bg-surface-base">
-        <div className="flex h-10 shrink-0 items-center justify-between border-b border-surface-border bg-surface-soft px-4">
-          <span className="text-xs text-ink-body">Image</span>
-          <div className="flex items-center gap-1">
-            <button
-              type="button"
-              onClick={() => updateZoom(zoomValue - 0.25)}
-              className="flex h-7 w-7 items-center justify-center rounded-md text-ink-body transition hover:bg-surface-muted hover:text-ink-heading disabled:opacity-40"
-              disabled={zoom !== "fit" && zoom <= 0.25}
-              aria-label={t("ui.artifact.zoomOutLabel")}
-              title={t("ui.artifact.zoomOut")}
-            >
-              <ZoomOut className="h-3.5 w-3.5" />
-            </button>
-            <button
-              type="button"
-              onClick={() => setZoom("fit")}
-              aria-label={t("ui.artifact.fitWindowLabel")}
-              className="h-7 min-w-12 rounded-md px-2 text-xs text-ink-body transition hover:bg-surface-muted hover:text-ink-heading"
-              title={t("ui.artifact.fitWindow")}
-            >
-              {zoom === "fit" ? "Fit" : `${Math.round(zoom * 100)}%`}
-            </button>
-            <button
-              type="button"
-              onClick={() => updateZoom(zoomValue + 0.25)}
-              className="flex h-7 w-7 items-center justify-center rounded-md text-ink-body transition hover:bg-surface-muted hover:text-ink-heading disabled:opacity-40"
-              disabled={zoom !== "fit" && zoom >= 4}
-              aria-label={t("ui.artifact.zoomInLabel")}
-              title={t("ui.artifact.zoomIn")}
-            >
-              <ZoomIn className="h-3.5 w-3.5" />
-            </button>
+        {!shellImageZoom ? (
+          <div className="flex h-10 shrink-0 items-center justify-end border-b border-surface-border bg-surface px-4">
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => updateZoom(zoomValue - 0.25)}
+                className="flex h-7 w-7 items-center justify-center rounded-md text-ink-body transition hover:bg-surface-muted hover:text-ink-heading disabled:opacity-40"
+                disabled={zoom !== "fit" && zoom <= 0.25}
+                aria-label={t("ui.artifact.zoomOutLabel")}
+                title={t("ui.artifact.zoomOut")}
+              >
+                <ZoomOut className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setZoom("fit")}
+                aria-label={t("ui.artifact.fitWindowLabel")}
+                className="h-7 min-w-12 rounded-md px-2 text-xs text-ink-body transition hover:bg-surface-muted hover:text-ink-heading"
+                title={t("ui.artifact.fitWindow")}
+              >
+                {zoom === "fit"
+                  ? t("ui.artifact.fitWindow")
+                  : `${Math.round(zoom * 100)}%`}
+              </button>
+              <button
+                type="button"
+                onClick={() => updateZoom(zoomValue + 0.25)}
+                className="flex h-7 w-7 items-center justify-center rounded-md text-ink-body transition hover:bg-surface-muted hover:text-ink-heading disabled:opacity-40"
+                disabled={zoom !== "fit" && zoom >= 4}
+                aria-label={t("ui.artifact.zoomInLabel")}
+                title={t("ui.artifact.zoomIn")}
+              >
+                <ZoomIn className="h-3.5 w-3.5" />
+              </button>
+            </div>
           </div>
-        </div>
+        ) : null}
         <div
           ref={viewportRef}
           onMouseDown={handleDragStart}
@@ -544,7 +588,10 @@ function htmlPreviewSrcDoc(source: string): string {
 
 function HtmlRenderer({ artifact, content }: ArtifactRendererProps) {
   const { t } = useI18n();
-  const [mode, setMode] = useState<PreviewSourceMode>("preview");
+  const shellViewMode = useContext(ArtifactViewModeContext);
+  const [localMode, setLocalMode] = useState<PreviewSourceMode>("preview");
+  const mode = shellViewMode?.mode ?? localMode;
+  const setMode = shellViewMode?.onModeChange ?? setLocalMode;
   const htmlSource = content?.kind === "text" ? content.content : null;
   const previewHostRef = useRef<HTMLDivElement | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
@@ -606,12 +653,18 @@ function HtmlRenderer({ artifact, content }: ArtifactRendererProps) {
   if (mode === "source") {
     return (
       <div className="flex h-full min-h-0 flex-col">
-        <div className="flex h-10 shrink-0 items-center justify-between border-b border-surface-border bg-surface-soft px-4">
-          <span className="text-xs text-ink-body">HTML</span>
-          <PreviewSourceToggle mode={mode} onModeChange={setMode} />
-        </div>
+        {!shellViewMode ? (
+          <div className="flex h-10 shrink-0 items-center justify-between border-b border-surface-border bg-surface-soft px-4">
+            <span className="text-xs text-ink-body">HTML</span>
+            <PreviewSourceToggle mode={mode} onModeChange={setMode} />
+          </div>
+        ) : null}
         <div className="min-h-0 flex-1">
-          <CodeMirrorRenderer artifact={artifact} content={content} />
+          <CodeMirrorRenderer
+            artifact={artifact}
+            content={content}
+            wrapLines
+          />
         </div>
       </div>
     );
@@ -619,10 +672,12 @@ function HtmlRenderer({ artifact, content }: ArtifactRendererProps) {
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-surface-base">
-      <div className="flex h-10 shrink-0 items-center justify-between border-b border-surface-border bg-surface-soft px-4">
-        <span className="text-xs text-ink-body">HTML</span>
-        <PreviewSourceToggle mode={mode} onModeChange={setMode} />
-      </div>
+      {!shellViewMode ? (
+        <div className="flex h-10 shrink-0 items-center justify-between border-b border-surface-border bg-surface-soft px-4">
+          <span className="text-xs text-ink-body">HTML</span>
+          <PreviewSourceToggle mode={mode} onModeChange={setMode} />
+        </div>
+      ) : null}
       <div
         ref={previewHostRef}
         className="min-h-0 flex-1 overflow-auto bg-surface-base p-4"
@@ -705,6 +760,7 @@ export function ArtifactViewerShell({
   target = null,
   loading = false,
   error = null,
+  framed = true,
   onReload,
   onClose,
   onCopyContent,
@@ -713,6 +769,34 @@ export function ArtifactViewerShell({
   const { t } = useI18n();
   const shellRef = useRef<HTMLElement | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [viewModeState, setViewModeState] = useState<{
+    artifactId: string | null;
+    mode: PreviewSourceMode;
+  }>({ artifactId: artifact?.id ?? null, mode: "preview" });
+  const viewMode =
+    viewModeState.artifactId === (artifact?.id ?? null)
+      ? viewModeState.mode
+      : "preview";
+  const setViewMode = useCallback(
+    (mode: PreviewSourceMode) => {
+      setViewModeState({ artifactId: artifact?.id ?? null, mode });
+    },
+    [artifact?.id],
+  );
+  const [imageZoomState, setImageZoomState] = useState<{
+    artifactId: string | null;
+    zoom: ImageZoom;
+  }>({ artifactId: artifact?.id ?? null, zoom: "fit" });
+  const imageZoom =
+    imageZoomState.artifactId === (artifact?.id ?? null)
+      ? imageZoomState.zoom
+      : "fit";
+  const setImageZoom = useCallback(
+    (zoom: ImageZoom) => {
+      setImageZoomState({ artifactId: artifact?.id ?? null, zoom });
+    },
+    [artifact?.id],
+  );
   const fullscreenSupported =
     typeof Element !== "undefined" &&
     typeof Element.prototype.requestFullscreen === "function";
@@ -783,7 +867,11 @@ export function ArtifactViewerShell({
   return (
     <article
       ref={shellRef}
-      className="flex h-full min-h-0 flex-col overflow-hidden rounded-[14px] border border-surface-border bg-surface shadow-sm outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
+      className={`flex h-full min-h-0 flex-col overflow-hidden bg-surface outline-none ${
+        framed
+          ? "rounded-[14px] border border-surface-border shadow-sm focus-visible:ring-2 focus-visible:ring-primary/30"
+          : ""
+      }`}
       tabIndex={0}
       aria-busy={loading}
       onKeyDown={handleKeyDown}
@@ -813,6 +901,83 @@ export function ArtifactViewerShell({
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1">
+            {artifact?.previewKind === "image" ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setImageZoom(
+                      clampImageZoom(numericImageZoom(imageZoom) - 0.25),
+                    )
+                  }
+                  disabled={imageZoom !== "fit" && imageZoom <= 0.25}
+                  aria-label={t("ui.artifact.zoomOutLabel")}
+                  className="flex h-9 w-9 items-center justify-center rounded-md text-ink-body transition hover:bg-surface-soft hover:text-ink-heading disabled:opacity-40"
+                  title={t("ui.artifact.zoomOut")}
+                >
+                  <ZoomOut className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setImageZoom("fit")}
+                  aria-label={t("ui.artifact.fitWindowLabel")}
+                  className="h-9 min-w-12 rounded-md px-2 text-xs text-ink-body transition hover:bg-surface-soft hover:text-ink-heading"
+                  title={t("ui.artifact.fitWindow")}
+                >
+                  {imageZoom === "fit"
+                    ? t("ui.artifact.fitWindow")
+                    : `${Math.round(imageZoom * 100)}%`}
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setImageZoom(
+                      clampImageZoom(numericImageZoom(imageZoom) + 0.25),
+                    )
+                  }
+                  disabled={imageZoom !== "fit" && imageZoom >= 4}
+                  aria-label={t("ui.artifact.zoomInLabel")}
+                  className="flex h-9 w-9 items-center justify-center rounded-md text-ink-body transition hover:bg-surface-soft hover:text-ink-heading disabled:opacity-40"
+                  title={t("ui.artifact.zoomIn")}
+                >
+                  <ZoomIn className="h-3.5 w-3.5" />
+                </button>
+              </>
+            ) : null}
+            {artifact &&
+            (artifact.previewKind === "markdown" ||
+              artifact.previewKind === "html") ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setViewMode("preview")}
+                  aria-label={t("ui.artifact.preview")}
+                  aria-pressed={viewMode === "preview"}
+                  className={`flex h-9 w-9 items-center justify-center rounded-md transition ${
+                    viewMode === "preview"
+                      ? "bg-surface-soft text-ink-heading"
+                      : "text-ink-body hover:bg-surface-soft hover:text-ink-heading"
+                  }`}
+                  title={t("ui.artifact.preview")}
+                >
+                  <Eye className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setViewMode("source")}
+                  aria-label={t("ui.artifact.sourceCode")}
+                  aria-pressed={viewMode === "source"}
+                  className={`flex h-9 w-9 items-center justify-center rounded-md transition ${
+                    viewMode === "source"
+                      ? "bg-surface-soft text-ink-heading"
+                      : "text-ink-body hover:bg-surface-soft hover:text-ink-heading"
+                  }`}
+                  title={t("ui.artifact.sourceCode")}
+                >
+                  <Code2 className="h-3.5 w-3.5" />
+                </button>
+              </>
+            ) : null}
             {artifact?.previewKind === "pdf" && fullscreenSupported ? (
               <button
                 type="button"
@@ -921,13 +1086,21 @@ export function ArtifactViewerShell({
             </div>
           </div>
         ) : artifact ? (
-          <ArtifactRenderer
-            artifact={artifact}
-            content={content}
-            target={target}
-            onOpenExternal={onOpenExternal}
-            onReload={onReload}
-          />
+          <ArtifactImageZoomContext.Provider
+            value={{ zoom: imageZoom, onZoomChange: setImageZoom }}
+          >
+            <ArtifactViewModeContext.Provider
+              value={{ mode: viewMode, onModeChange: setViewMode }}
+            >
+              <ArtifactRenderer
+                artifact={artifact}
+                content={content}
+                target={target}
+                onOpenExternal={onOpenExternal}
+                onReload={onReload}
+              />
+            </ArtifactViewModeContext.Provider>
+          </ArtifactImageZoomContext.Provider>
         ) : null}
       </div>
     </article>

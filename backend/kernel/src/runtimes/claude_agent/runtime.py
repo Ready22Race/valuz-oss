@@ -15,6 +15,7 @@ import re
 import uuid
 from collections import deque
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, Literal
 
 from claude_agent_sdk import (
@@ -119,6 +120,18 @@ logger = logging.getLogger(__name__)
 # stderr stream. 40 lines is enough for a typical Rust / node panic
 # trace without flooding event payloads.
 _STDERR_TAIL_LINES: int = 40
+
+# Claude CLI replaces large tool results with a small ``<persisted-output>``
+# notice and stores the original payload under its private project journal.
+# The model can still read that file, so citation handles inside it must also
+# reach the host-side EvidenceRegistry.  Keep this ceiling aligned with the
+# registry's tool-result limit; oversized files stay unavailable to citation
+# binding rather than being read unboundedly from a path supplied in text.
+_MAX_PERSISTED_CITATION_CONTENT_BYTES: int = 2_000_000
+_PERSISTED_OUTPUT_PATH_RE = re.compile(
+    r"\A<persisted-output>\s*\n"
+    r"Output too large \([^)]+\)\. Full output saved to: ([^\r\n]+)"
+)
 
 
 # The Claude Agent SDK buffers the CLI's stdout into a single JSON message whose
@@ -2618,6 +2631,15 @@ class ClaudeAgentRuntime:
                             # already carried the structured payload).
                             continue
                         result_content = _stringify_tool_result_content(block.content)
+                        citation_content = _load_persisted_tool_result_content(
+                            result_content,
+                            tool_use_id=block.tool_use_id,
+                        )
+                        citation_extra = (
+                            {"_citation_content": citation_content}
+                            if citation_content is not None
+                            else {}
+                        )
                         await self.event_sink.emit(
                             Event(
                                 type="tool_result",
@@ -2625,6 +2647,7 @@ class ClaudeAgentRuntime:
                                     "id": block.tool_use_id,
                                     "content": result_content,
                                     "is_error": bool(block.is_error),
+                                    **citation_extra,
                                     **parent_extra,
                                 },
                             )
@@ -2803,6 +2826,45 @@ def _stringify_tool_result_content(content: Any) -> str:
         return json.dumps(content, ensure_ascii=False, default=default)
     except (TypeError, ValueError):
         return str(content)
+
+
+def _load_persisted_tool_result_content(
+    content: str,
+    *,
+    tool_use_id: str,
+    projects_root: Path | None = None,
+) -> str | None:
+    """Read a Claude-owned large tool result for citation registration only.
+
+    A tool can print arbitrary text, including a forged persisted-output
+    notice.  Treat the embedded path as untrusted and accept it only when it
+    resolves to the exact ``tool-results/<tool_use_id>.txt`` file beneath
+    Claude's own projects directory.  Symlinks, non-files and oversized
+    payloads fail closed.
+    """
+
+    match = _PERSISTED_OUTPUT_PATH_RE.match(content)
+    if match is None or not tool_use_id:
+        return None
+
+    root = (projects_root or (Path.home() / ".claude" / "projects")).resolve()
+    candidate = Path(match.group(1).strip())
+    if candidate.name != f"{tool_use_id}.txt" or candidate.parent.name != "tool-results":
+        return None
+    try:
+        if candidate.is_symlink():
+            return None
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(root)
+        stat = resolved.stat()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if not resolved.is_file() or stat.st_size > _MAX_PERSISTED_CITATION_CONTENT_BYTES:
+        return None
+    try:
+        return resolved.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
 
 
 def _normalize_anthropic_usage(raw: Any) -> dict[str, int]:

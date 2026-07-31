@@ -63,6 +63,8 @@ export interface ArtifactViewerShellProps {
   target?: ArtifactOpenTarget | null;
   loading?: boolean;
   error?: string | null;
+  /** Draw the viewer's own panel frame. Disable when embedded in a framed host. */
+  framed?: boolean;
   onReload?: () => void;
   onClose?: () => void;
   onCopyContent?: () => void;
@@ -73,6 +75,8 @@ export interface ArtifactRendererProps {
   artifact: ArtifactDescriptor;
   content: ArtifactContent | null;
   target?: ArtifactOpenTarget | null;
+  /** Wrap long source lines instead of requiring horizontal scrolling. */
+  wrapLines?: boolean;
   onOpenExternal?: () => void;
   /**
    * Re-resolve the file and rebuild ``content``. Renderers that fetch from

@@ -36,7 +36,10 @@ from claude_agent_sdk import (
 from claude_agent_sdk import UserMessage as SdkUserMessage
 from claude_agent_sdk.types import StreamEvent
 
-from src.runtimes.claude_agent.runtime import ClaudeAgentRuntime
+from src.runtimes.claude_agent.runtime import (
+    ClaudeAgentRuntime,
+    _load_persisted_tool_result_content,
+)
 
 
 def _make_runtime() -> ClaudeAgentRuntime:
@@ -222,3 +225,56 @@ async def test_structured_tool_result_content_remains_valid_json() -> None:
 
     emitted = json.loads(rt._emitted[0].data["content"])
     assert emitted == content
+
+
+def test_persisted_tool_result_is_loaded_only_from_matching_claude_tool_path(tmp_path) -> None:
+    projects_root = tmp_path / "projects"
+    result_path = projects_root / "project-a" / "session-a" / "tool-results" / "tool-1.txt"
+    result_path.parent.mkdir(parents=True)
+    result_path.write_text(
+        '{"_valuz_evidence":{"evidenceHandle":"ev_example_12345678"}}',
+        encoding="utf-8",
+    )
+    notice = (
+        "<persisted-output>\n"
+        f"Output too large (250KB). Full output saved to: {result_path}\n"
+    )
+
+    assert (
+        _load_persisted_tool_result_content(
+            notice,
+            tool_use_id="tool-1",
+            projects_root=projects_root,
+        )
+        == result_path.read_text(encoding="utf-8")
+    )
+    assert (
+        _load_persisted_tool_result_content(
+            notice,
+            tool_use_id="another-tool",
+            projects_root=projects_root,
+        )
+        is None
+    )
+
+
+def test_persisted_tool_result_rejects_symlink(tmp_path) -> None:
+    projects_root = tmp_path / "projects"
+    target = tmp_path / "outside.txt"
+    target.write_text("secret", encoding="utf-8")
+    result_path = projects_root / "project-a" / "session-a" / "tool-results" / "tool-1.txt"
+    result_path.parent.mkdir(parents=True)
+    result_path.symlink_to(target)
+    notice = (
+        "<persisted-output>\n"
+        f"Output too large (250KB). Full output saved to: {result_path}\n"
+    )
+
+    assert (
+        _load_persisted_tool_result_content(
+            notice,
+            tool_use_id="tool-1",
+            projects_root=projects_root,
+        )
+        is None
+    )

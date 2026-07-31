@@ -6410,7 +6410,7 @@ export const ConversationPage = () => {
         </div>
         {artifactViewerOpen ? (
           <div
-            className="absolute inset-0 z-30 overflow-hidden overscroll-contain bg-surface p-3"
+            className="absolute inset-0 z-30 overflow-hidden overscroll-contain bg-surface"
             onWheel={(event) => event.stopPropagation()}
             onTouchMove={(event) => event.stopPropagation()}
           >
@@ -6420,6 +6420,7 @@ export const ConversationPage = () => {
               target={artifactTarget}
               loading={artifactLoading}
               error={artifactError}
+              framed={false}
               onReload={handleArtifactReload}
               onClose={handleArtifactClose}
               onCopyContent={handleArtifactCopy}
