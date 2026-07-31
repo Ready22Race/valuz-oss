@@ -1383,6 +1383,8 @@ export const ConversationPage = () => {
   // ``history.state`` across a reload, so without the seen-set a refresh would
   // resurrect a bubble for a turn that has long since landed in history.
   const consumedHandoffSessionIdsRef = useRef<Set<string>>(new Set());
+  /** Oldest a ``handoff`` may be and still be the live one. See its use. */
+  const HANDOFF_MAX_AGE_MS = 30_000;
   // Set while a handed-over pending is live, and read by ``refreshEventsInner``
   // so its unconditional "switching sessions invalidates the pending" clear
   // does not wipe a pending that belongs to the session being loaded. Bootstrap
@@ -1397,9 +1399,18 @@ export const ConversationPage = () => {
     const text = handoff?.text?.trim();
     if (!text || id === NEW_SESSION_ID) return;
     if (consumedHandoffSessionIdsRef.current.has(id)) return;
+    const sentAt = handoff?.sentAt ?? Date.now();
+    // A reload restores ``history.state``, and the seen-set is a ref — it
+    // resets with the page, so it cannot be what stops a replay. The state is
+    // dropped from history below the moment it is consumed; this age check is
+    // the belt to that braces, covering a restore that happens before the
+    // replace lands. A genuine handoff is consumed within a frame or two of
+    // the navigation, so anything older is a replay: re-seeding it re-showed
+    // the startup label and re-armed ``sending`` on a turn that had long since
+    // finished, leaving the stop button up on a settled session.
+    if (Date.now() - sentAt > HANDOFF_MAX_AGE_MS) return;
     consumedHandoffSessionIdsRef.current.add(id);
     handoffSessionIdRef.current = id;
-    const sentAt = handoff?.sentAt ?? Date.now();
     setPendingUserMessage({
       text,
       attachments: [],
@@ -1410,7 +1421,14 @@ export const ConversationPage = () => {
     // The turn is genuinely in flight — the handing-over page has already
     // posted it. Released by the ``message.user`` echo like any other send.
     setSending(true);
-  }, [id, location.state]);
+    // Consume the state out of history so a reload cannot replay it. Only the
+    // handing-over navigation sets ``handoff`` and it carries nothing else, so
+    // clearing the whole entry is safe here.
+    navigate(location.pathname + location.search, {
+      replace: true,
+      state: null,
+    });
+  }, [id, location.state, location.pathname, location.search, navigate]);
 
   const [availableSkills, setAvailableSkills] = useState<SkillView[]>([]);
   const [selectedComposerSkill, setSelectedComposerSkill] =
