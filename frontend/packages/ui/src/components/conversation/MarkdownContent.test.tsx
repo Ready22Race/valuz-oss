@@ -116,6 +116,65 @@ describe("MarkdownContent citations", () => {
     expect(
       screen.getAllByRole("button", { name: /(?:citation|引用) 2/i }),
     ).toHaveLength(1);
+    expect(
+      screen
+        .getAllByRole("button", { name: /(?:citation|引用) 1/i })
+        .every((pill) => pill.textContent === "1"),
+    ).toBe(true);
+  });
+
+  it("renders citation numbers without visual brackets in pills, hover cards, and sources", () => {
+    render(
+      <MarkdownContent
+        content={"Revenue [source](citation://cit_first)."}
+        citationBundle={CITATIONS}
+      />,
+    );
+
+    const pill = screen.getByRole("button", {
+      name: /(?:citation|引用) 1/i,
+    });
+    expect(pill.textContent).toBe("1");
+
+    fireEvent.mouseEnter(pill);
+    expect(screen.getByText("1 Annual report")).not.toBeNull();
+    expect(
+      screen.getByRole("button", { name: /^1Annual report$/i }),
+    ).not.toBeNull();
+  });
+
+  it("uses neutral circular inline controls and stacks sources one per row", () => {
+    render(
+      <MarkdownContent
+        content={
+          "Revenue [source](citation://cit_first), margin [source](citation://cit_second)."
+        }
+        citationBundle={CITATIONS}
+      />,
+    );
+
+    const pill = screen.getByRole("button", {
+      name: /(?:citation|引用) 1/i,
+    });
+    expect(pill.className).toContain("h-4");
+    expect(pill.className).toContain("w-4");
+    expect(pill.className).toContain("rounded-full");
+    expect(pill.className).toContain("bg-surface-muted");
+    expect(pill.parentElement?.className).toContain("align-middle");
+    expect(pill.parentElement?.className).toContain("-top-px");
+
+    const firstSource = screen.getByRole("button", {
+      name: /^1Annual report$/i,
+    });
+    const secondSource = screen.getByRole("button", {
+      name: /^2Earnings release$/i,
+    });
+    expect(firstSource.parentElement).toBe(secondSource.parentElement);
+    expect(firstSource.parentElement?.className).toContain("flex-col");
+    expect(firstSource.className).toContain("w-full");
+    expect(secondSource.className).toContain("w-full");
+    expect(firstSource.className).not.toContain("border");
+    expect(secondSource.className).not.toContain("border");
   });
 
   it("shows the evidence snapshot on hover without fetching", () => {
@@ -278,7 +337,7 @@ describe("MarkdownContent citations", () => {
       name: /(?:citation unavailable|引用不可用)/i,
     });
     expect(unavailable.getAttribute("aria-disabled")).toBe("true");
-    expect(unavailable.textContent).toBe("[2]");
+    expect(unavailable.textContent).toBe("2");
   });
 
   it("keeps body-derived numbering when the citation bundle is unavailable", () => {
@@ -291,7 +350,7 @@ describe("MarkdownContent citations", () => {
     const unavailable = screen.getByRole("button", {
       name: /(?:citation unavailable|引用不可用)/i,
     });
-    expect(unavailable.textContent).toBe("[1]");
+    expect(unavailable.textContent).toBe("1");
     expect(unavailable.getAttribute("aria-disabled")).toBe("true");
   });
 

@@ -135,7 +135,7 @@ function CitationHoverCard({
       <span className="flex items-start gap-2">
         <span className="min-w-0 flex-1">
           <span className="block font-medium text-ink-heading">
-            [{displayIndex}] {citation.source.title}
+            {displayIndex} {citation.source.title}
           </span>
           <span className="mt-0.5 block text-ink-meta">
             {[attribution, detail.time].filter(Boolean).join(" · ")}
@@ -246,7 +246,7 @@ export function CitationPill({
     citation?.resolutionStatus !== "missing" &&
     Boolean(onCitationClick);
   // Numbering belongs to the message body, not the sidecar.  A newer/missing
-  // bundle must still render a stable, non-interactive [n] marker instead of
+  // bundle must still render a stable, non-interactive number instead of
   // replacing the user's citation position with an ambiguous question mark.
   const indexLabel = displayIndex ? String(displayIndex) : "?";
   const open = () => {
@@ -260,7 +260,7 @@ export function CitationPill({
 
   return (
     <span
-      className="relative mx-0.5 inline-flex align-super leading-none"
+      className="relative -top-px mx-0.5 inline-flex align-middle leading-none"
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       onFocusCapture={() => setHovered(true)}
@@ -282,14 +282,14 @@ export function CitationPill({
         }
         aria-disabled={!canOpen}
         className={cn(
-          "inline-flex h-[18px] min-w-[22px] items-center justify-center rounded-full border px-1 text-2xs font-semibold tabular-nums no-underline transition",
+          "inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border p-0 text-2xs font-medium tabular-nums no-underline transition-colors",
           citation
-            ? "border-primary/30 bg-primary/10 text-primary hover:bg-primary/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
+            ? "border-surface-border bg-surface-muted text-ink-body hover:text-ink-heading focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
             : "cursor-default border-surface-border bg-surface-muted text-ink-meta",
         )}
         onClick={open}
       >
-        [{indexLabel}]
+        {indexLabel}
       </button>
       {hovered && citation && displayIndex ? (
         <CitationHoverCard
@@ -328,7 +328,7 @@ export function CitationSourceCards({
       <h3 className="text-xs font-medium text-ink-meta">
         {t("ui.citation.sources", "Sources")}
       </h3>
-      <div className="mt-1.5 flex flex-wrap gap-1.5">
+      <div className="mt-1.5 flex flex-col gap-1.5">
         {used.map(({ displayIndex, citation }) => {
           const disabled =
             !onCitationClick ||
@@ -346,10 +346,10 @@ export function CitationSourceCards({
                   citationId: citation.citationId,
                 })
               }
-              className="max-w-full truncate rounded-md border border-surface-border bg-surface px-2 py-1 text-left text-xs text-ink-body transition enabled:hover:bg-surface-muted disabled:cursor-default disabled:opacity-60"
+              className="w-full max-w-full truncate rounded-md bg-transparent px-2 py-1 text-left text-xs text-ink-body transition enabled:hover:bg-surface-muted disabled:cursor-default disabled:opacity-60"
             >
               <span className="mr-1 font-semibold text-primary">
-                [{displayIndex}]
+                {displayIndex}
               </span>
               {citation.source.title}
               {quality ? (
