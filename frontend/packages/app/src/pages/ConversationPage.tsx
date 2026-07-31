@@ -152,6 +152,7 @@ import {
   shouldShowNoModelEmptyState,
 } from "./conversation-loading";
 import { createConversationBootstrapGuard } from "./conversation-bootstrap";
+import { canSendProjectHandoff } from "./conversation-project-handoff";
 import { LiveTaskCard } from "../components/LiveTaskCard";
 import { QueuedInputsBar } from "../components/QueuedInputsBar";
 import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
@@ -4829,6 +4830,28 @@ export const ConversationPage = () => {
     // state is dropped from history below; this bounds the window before that
     // lands, so a reload can never re-fire the send.
     if (Date.now() - (send?.sentAt ?? 0) > HANDOFF_MAX_AGE_MS) return;
+    // WAIT for bootstrap to bind the project before sending.
+    //
+    // ``?project=`` is only turned into ``selectedProjectId`` after bootstrap
+    // has fetched the project list and validated it, and ``ensureSession``
+    // reads that state — not the URL. Firing the moment the route state
+    // arrives therefore raced bootstrap and lost: ``selectedProjectId`` was
+    // still null, so ``sessionProjectId`` fell back to ``"chat-default"``,
+    // ``isChat`` went true, and the session was minted as a QUICK CHAT — not
+    // bound to the project, and routed by the chat target picker (i.e. local)
+    // rather than the project's own execution origin. Carrying the origin
+    // observation could not help, because the lookup was keyed on
+    // ``"chat-default"``.
+    //
+    // The ref is set below, at the point of no return, so an early bail here
+    // leaves the handoff intact for the re-run that bootstrap triggers.
+    if (
+      !canSendProjectHandoff({
+        projectParam: searchParams.get("project"),
+        selectedProjectId,
+      })
+    )
+      return;
     consumedProjectSendRef.current = true;
     projectSendHandoffRef.current = {
       ...(send?.worktree ? { worktree: send.worktree } : {}),
@@ -4854,7 +4877,15 @@ export const ConversationPage = () => {
     // already makes re-entry impossible, and the effect only ever needs the
     // definition current at the moment the handoff lands.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, location.state, location.pathname, location.search, navigate]);
+  }, [
+    id,
+    location.state,
+    location.pathname,
+    location.search,
+    navigate,
+    searchParams,
+    selectedProjectId,
+  ]);
 
   const handleInterrupt = async () => {
     const sessionId = selectedSessionId;
