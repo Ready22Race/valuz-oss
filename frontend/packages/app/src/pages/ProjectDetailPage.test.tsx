@@ -11,6 +11,8 @@ import type { SessionListItem } from "@valuz/shared";
 const h = vi.hoisted(() => ({
   currentId: "A",
   currentSearch: "",
+  // Ordered log of "navigate" / "send" so a test can pin which happens first.
+  sendOrder: [] as string[],
   tasksByProject: new Map<string, unknown[]>(),
   sessions: [] as unknown[],
   members: [] as unknown[],
@@ -39,7 +41,9 @@ const h = vi.hoisted(() => ({
   },
 }));
 
-const navigate = vi.fn();
+const navigate = vi.fn(() => {
+  h.sendOrder.push("navigate");
+});
 
 vi.mock("react-router-dom", async (orig) => {
   const actual = await orig<typeof import("react-router-dom")>();
@@ -145,8 +149,20 @@ vi.mock("@valuz/ui", async (orig) => {
   const actual = await orig<typeof import("@valuz/ui")>();
   return {
     ...actual,
-    Composer: (props: { selectedAgentSlug?: string | null }) => (
-      <div data-testid="composer" data-agent={props.selectedAgentSlug ?? ""} />
+    Composer: (props: {
+      selectedAgentSlug?: string | null;
+      value?: string;
+      onChange?: (v: string) => void;
+      onSend?: () => void;
+    }) => (
+      <div data-testid="composer" data-agent={props.selectedAgentSlug ?? ""}>
+        <input
+          data-testid="composer-input"
+          value={props.value ?? ""}
+          onChange={(e) => props.onChange?.(e.target.value)}
+        />
+        <button data-testid="composer-send" onClick={() => props.onSend?.()} />
+      </div>
     ),
   };
 });
@@ -178,6 +194,11 @@ vi.mock("../../../core/src/api/sessions-api", async (orig) => {
           (s) => (s as SessionListItem).project_id === pid,
         ),
       })),
+      create: vi.fn(async () => ({ id: "new-session" })),
+      sendMessage: vi.fn(async () => {
+        h.sendOrder.push("send");
+        return undefined;
+      }),
     },
   };
 });
@@ -534,6 +555,59 @@ describe("ProjectDetailPage auto-refresh wiring", () => {
         "lead-agent",
       ),
     );
+  });
+
+  it("navigates as soon as the session exists, before the send round-trip", async () => {
+    // The cloud round-trip used to run BEFORE the navigation, so the user sat
+    // on a composer that looked frozen for its whole duration and then landed
+    // on a blank conversation (the kernel had not echoed ``message.user``
+    // yet). Session creation still has to happen here — this page owns the
+    // worktree / permission / agent picks — but nothing after it does.
+    h.sendOrder = [];
+    h.members = [
+      {
+        member: {
+          id: "pm-lead",
+          project_id: "A",
+          agent_slug: "lead-agent",
+          source_agent_slug: "lead-agent",
+        },
+        agent: {
+          id: "a-lead",
+          name: "Lead Agent",
+          model: "claude-sonnet-4",
+          runtime_provider: "claude_agent",
+          instructions: "",
+          skills: [],
+          connectors: [],
+          provider_id: null,
+          effort: null,
+        },
+      },
+    ];
+
+    renderPage("/projects/A?agent=lead-agent");
+    await waitFor(() =>
+      expect(screen.getByTestId("composer").getAttribute("data-agent")).toBe(
+        "lead-agent",
+      ),
+    );
+
+    fireEvent.change(screen.getByTestId("composer-input"), {
+      target: { value: "你好" },
+    });
+    fireEvent.click(screen.getByTestId("composer-send"));
+
+    await waitFor(() => expect(h.sendOrder).toContain("send"));
+    expect(h.sendOrder).toEqual(["navigate", "send"]);
+
+    // …and the draft rides along so the conversation page can show the turn
+    // immediately instead of waiting for the echo.
+    const [, options] = navigate.mock.calls.at(-1) as [
+      string,
+      { state?: { handoff?: { text?: string } } },
+    ];
+    expect(options?.state?.handoff?.text).toBe("你好");
   });
 
   it("auto-refresh adds a newly-appearing task without duplicating existing rows", async () => {

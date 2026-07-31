@@ -1371,6 +1371,47 @@ export const ConversationPage = () => {
     useSessionArtifacts(selectedSessionId);
   const navigate = useNavigate();
 
+  // Optimistic turn handed over by a page that minted the session itself (the
+  // project-detail composer). That page navigates here the moment it has an id
+  // and fires the send from its own closure, so all this does is SHOW the
+  // message: it sets the same ``pendingUserMessage`` / ``turnStartAnchor``
+  // pair a local send sets, which buys the bubble, the runtime-startup header
+  // and the echo dedup for free. It must not send — see the note on
+  // ``handoff`` in ProjectDetailPage.
+  //
+  // Consumed exactly once per session. The hash router restores
+  // ``history.state`` across a reload, so without the seen-set a refresh would
+  // resurrect a bubble for a turn that has long since landed in history.
+  const consumedHandoffSessionIdsRef = useRef<Set<string>>(new Set());
+  // Set while a handed-over pending is live, and read by ``refreshEventsInner``
+  // so its unconditional "switching sessions invalidates the pending" clear
+  // does not wipe a pending that belongs to the session being loaded. Bootstrap
+  // runs that refresh on landing, i.e. always right after this seeds.
+  const handoffSessionIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const handoff = (
+      location.state as {
+        handoff?: { text?: string; sentAt?: number };
+      } | null
+    )?.handoff;
+    const text = handoff?.text?.trim();
+    if (!text || id === NEW_SESSION_ID) return;
+    if (consumedHandoffSessionIdsRef.current.has(id)) return;
+    consumedHandoffSessionIdsRef.current.add(id);
+    handoffSessionIdRef.current = id;
+    const sentAt = handoff?.sentAt ?? Date.now();
+    setPendingUserMessage({
+      text,
+      attachments: [],
+      fromSeq: historyCursorRef.current,
+      sentAt,
+    });
+    setTurnStartAnchor({ text, fromSeq: historyCursorRef.current, sentAt });
+    // The turn is genuinely in flight — the handing-over page has already
+    // posted it. Released by the ``message.user`` echo like any other send.
+    setSending(true);
+  }, [id, location.state]);
+
   const [availableSkills, setAvailableSkills] = useState<SkillView[]>([]);
   const [selectedComposerSkill, setSelectedComposerSkill] =
     useState<SkillView | null>(null);
@@ -2867,8 +2908,16 @@ export const ConversationPage = () => {
     // it belongs to whatever session was active before, not this one. Same
     // for the send anchor: another session's turn must not inherit this
     // session's send time.
-    setPendingUserMessage(null);
-    setTurnStartAnchor(null);
+    //
+    // Exception: a pending handed over WITH this navigation belongs to the
+    // session being loaded, not the previous one. Bootstrap calls this on
+    // landing, so without the guard the handoff would be seeded and then wiped
+    // a beat later, and the project-detail send would still land on a blank
+    // conversation.
+    if (sessionId === null || handoffSessionIdRef.current !== sessionId) {
+      setPendingUserMessage(null);
+      setTurnStartAnchor(null);
+    }
     // CRITICAL: clear ``events`` synchronously BEFORE awaiting the
     // network fetch. The URL-change handler updates ``selectedSessionId``
     // and then calls this function, but ``selectedSessionId`` and
@@ -3758,6 +3807,9 @@ export const ConversationPage = () => {
         // double-render the same text.
         if (event.event.event_type === "message.user") {
           setPendingUserMessage(null);
+          // The handed-over pending has served its purpose; drop the guard so
+          // a later switch back to this session clears normally.
+          handoffSessionIdRef.current = null;
         }
         // Live TODO panel update — kernel V5+messages emits
         // ``session.todos.update`` whenever the agent calls
