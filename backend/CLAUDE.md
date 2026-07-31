@@ -321,6 +321,12 @@ logs land under `.ai/dev/{backend,frontend}.log`.
 - **ruff**: line-length 100, target `py312`. **mypy**: the kernel is on
   `mypy_path` but `src.*` / `kernel.*` use `follow_imports = "skip"`, so host
   mypy never type-checks kernel internals — keep host code self-contained.
+- **Login-shell PATH**: at boot the host merges the user's login-shell PATH
+  into `os.environ["PATH"]` (`boot/login_path.py`; append-only, fail-open,
+  opt out with `VALUZ_DISABLE_LOGIN_PATH=1`). A Finder/launchd-launched
+  backend otherwise only sees launchd's minimal PATH and can't resolve
+  user-installed tools (nvm `npx`, `uv`, homebrew) needed by stdio MCP
+  connectors, the CLI login probe, and the browser dev fallback.
 - **`rg`** (ripgrep) is a runtime helper for `integrations/docs_embedded`,
   located via the `VALUZ_RG_PATH` env the Electron sidecar sets to the packaged
   `libexec/rg`. The binary is vendored per platform at

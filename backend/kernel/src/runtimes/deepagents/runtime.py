@@ -29,6 +29,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict
@@ -1212,6 +1213,17 @@ class DeepAgentsRuntime:
         spec: dict[str, dict[str, Any]] = {}
         for cfg in session.mcp_servers:
             if isinstance(cfg, McpStdioServerConfig):
+                # A stdio child is spawned by THIS process, so a which() miss
+                # here is definitive — spawning anyway would surface as a bare
+                # ``FileNotFoundError: [Errno 2]`` from deep inside anyio with
+                # no hint of which server or command was at fault.
+                if shutil.which(cfg.command) is None:
+                    logger.warning(
+                        "mcp server %r skipped: stdio command %r not found on PATH",
+                        cfg.name,
+                        cfg.command,
+                    )
+                    continue
                 # LangChain StdioConnection requires args even when empty;
                 # env_vars resolution happens harness-side via the shared
                 # resolver so the SDK only sees a flat env dict. Omit
@@ -1236,8 +1248,30 @@ class DeepAgentsRuntime:
                 entry["headers"] = dict(cfg.headers)
             spec[cfg.name] = entry
 
+        if not spec:
+            return []
         client = MultiServerMCPClient(spec)  # type: ignore[arg-type]
-        return list(await client.get_tools())
+        # Load per server instead of one ``get_tools()`` over everything: the
+        # aggregate call fails the WHOLE turn when any single server is
+        # unreachable. The CLI runtimes degrade to "server unavailable, tools
+        # absent" — match that here. ``gather`` keeps the adapter's previous
+        # concurrent-connect behavior.
+        names = list(spec)
+        results = await asyncio.gather(
+            *(client.get_tools(server_name=name) for name in names),
+            return_exceptions=True,
+        )
+        tools: list[Any] = []
+        for name, result in zip(names, results):
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+            if isinstance(result, BaseException):
+                logger.warning(
+                    "mcp server %r unavailable — skipping its tools: %s", name, result
+                )
+                continue
+            tools.extend(result)
+        return tools
 
     # -- Tool conversion --
 

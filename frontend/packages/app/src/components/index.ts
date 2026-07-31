@@ -27,6 +27,7 @@ export type { AgentEditFormProps, AgentEditValue } from "./AgentEditForm";
 export {
   ResourceActionSlot,
   ResourceDetailActionSlot,
+  ResourceCopyMenuItemSlot,
 } from "./ResourceActionSlot";
 export { useCliLoginFlow } from "./CliLoginFlow";
 export type { CliTool, CliLoginState, CliLoginStatus } from "./CliLoginFlow";

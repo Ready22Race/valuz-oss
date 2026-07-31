@@ -11,6 +11,8 @@ import type { SessionListItem } from "@valuz/shared";
 const h = vi.hoisted(() => ({
   currentId: "A",
   currentSearch: "",
+  // Ordered log of "navigate" / "send" so a test can pin which happens first.
+  sendOrder: [] as string[],
   tasksByProject: new Map<string, unknown[]>(),
   sessions: [] as unknown[],
   members: [] as unknown[],
@@ -39,7 +41,9 @@ const h = vi.hoisted(() => ({
   },
 }));
 
-const navigate = vi.fn();
+const navigate = vi.fn(() => {
+  h.sendOrder.push("navigate");
+});
 
 vi.mock("react-router-dom", async (orig) => {
   const actual = await orig<typeof import("react-router-dom")>();
@@ -145,8 +149,20 @@ vi.mock("@valuz/ui", async (orig) => {
   const actual = await orig<typeof import("@valuz/ui")>();
   return {
     ...actual,
-    Composer: (props: { selectedAgentSlug?: string | null }) => (
-      <div data-testid="composer" data-agent={props.selectedAgentSlug ?? ""} />
+    Composer: (props: {
+      selectedAgentSlug?: string | null;
+      value?: string;
+      onChange?: (v: string) => void;
+      onSend?: () => void;
+    }) => (
+      <div data-testid="composer" data-agent={props.selectedAgentSlug ?? ""}>
+        <input
+          data-testid="composer-input"
+          value={props.value ?? ""}
+          onChange={(e) => props.onChange?.(e.target.value)}
+        />
+        <button data-testid="composer-send" onClick={() => props.onSend?.()} />
+      </div>
     ),
   };
 });
@@ -178,6 +194,11 @@ vi.mock("../../../core/src/api/sessions-api", async (orig) => {
           (s) => (s as SessionListItem).project_id === pid,
         ),
       })),
+      create: vi.fn(async () => ({ id: "new-session" })),
+      sendMessage: vi.fn(async () => {
+        h.sendOrder.push("send");
+        return undefined;
+      }),
     },
   };
 });
@@ -534,6 +555,72 @@ describe("ProjectDetailPage auto-refresh wiring", () => {
         "lead-agent",
       ),
     );
+  });
+
+  it("hands the draft to /conversation/new without minting a session first", async () => {
+    // The composer used to await ``sessionsApi.create`` before it could
+    // navigate, so a cloud project froze for the whole round trip. 新对话
+    // never had that problem because the user is already on the conversation
+    // page, which paints the optimistic turn before minting. Both entries now
+    // take that same path, so nothing is awaited here at all.
+    h.sendOrder = [];
+    h.members = [
+      {
+        member: {
+          id: "pm-lead",
+          project_id: "A",
+          agent_slug: "lead-agent",
+          source_agent_slug: "lead-agent",
+        },
+        agent: {
+          id: "a-lead",
+          name: "Lead Agent",
+          model: "claude-sonnet-4",
+          runtime_provider: "claude_agent",
+          instructions: "",
+          skills: [],
+          connectors: [],
+          provider_id: null,
+          effort: null,
+        },
+      },
+    ];
+
+    renderPage("/projects/A?agent=lead-agent");
+    await waitFor(() =>
+      expect(screen.getByTestId("composer").getAttribute("data-agent")).toBe(
+        "lead-agent",
+      ),
+    );
+
+    fireEvent.change(screen.getByTestId("composer-input"), {
+      target: { value: "你好" },
+    });
+    fireEvent.click(screen.getByTestId("composer-send"));
+
+    await waitFor(() => expect(h.sendOrder).toContain("navigate"));
+    // No session was created and no message was posted from this page.
+    expect(h.sendOrder).toEqual(["navigate"]);
+
+    const [path, options] = navigate.mock.calls.at(-1) as unknown as [
+      string,
+      { state?: { projectSend?: Record<string, unknown> } },
+    ];
+    expect(path).toContain("/conversation/new");
+    expect(path).toContain("project=A");
+    expect(path).toContain("agent=lead-agent");
+    expect(options?.state?.projectSend?.text).toBe("你好");
+    // Everything else the composer holds must ride along. The conversation
+    // page has its own state under most of these names, so an omission is
+    // silent: it mints the session with that page's defaults instead of what
+    // the user picked here. Execution location travels as an origin
+    // observation because that is what routes the create.
+    const sent = options?.state?.projectSend as Record<string, unknown>;
+    expect(sent.projectId).toBe("A");
+    expect(sent.execOrigin).toBeDefined();
+    expect("permissionMode" in sent).toBe(true);
+    expect("providerId" in sent).toBe(true);
+    expect("modelId" in sent).toBe(true);
   });
 
   it("auto-refresh adds a newly-appearing task without duplicating existing rows", async () => {

@@ -1196,15 +1196,75 @@ export const ProjectDetailPage = () => {
   const performChatSend = async () => {
     const text = composerValue.trim();
     if (!text || sending) return;
+    // Draft-first: with no session minted yet there is nothing to wait for.
+    // Hand the draft to /conversation/new and let that page paint the
+    // optimistic turn and mint the session behind it, exactly as 新对话 does.
+    // Awaiting ``ensureChatSession`` here is what still froze this composer
+    // for a whole cloud round trip after the send itself was moved off it.
+    //
+    // Worktree rides along because ``ensureSession`` on that page has no other
+    // way to know about it; agent and project go in the URL, which is the
+    // shape /conversation/new already accepts.
+    if (!chatSessionId) {
+      setComposerValue("");
+      markPendingConsumed();
+      const params = new URLSearchParams({ project: id });
+      if (selectedAgentSlug) params.set("agent", selectedAgentSlug);
+      navigate(`/conversation/new?${params.toString()}`, {
+        state: {
+          projectSend: {
+            text,
+            sentAt: Date.now(),
+            // Every choice this composer holds. The conversation page has its
+            // own state under most of these names, so anything omitted here is
+            // not an error — it silently mints the session with that page's
+            // defaults instead of what the user picked.
+            permissionMode: selectedPermissionMode,
+            providerId: selectedProviderId,
+            modelId: selectedModelId,
+            // Execution location (本地 / 云端服务): carried as an origin
+            // observation because that is what routes the create.
+            projectId: id,
+            execOrigin: project?.exec_origin ?? "local",
+            ...(worktreeEnabled
+              ? { worktree: worktreeName ? { name: worktreeName } : {} }
+              : {}),
+          },
+        },
+      });
+      return;
+    }
+    // A session already exists — attachments were uploaded, which mints it
+    // early. Send into it from here and hand the conversation page only the
+    // optimistic turn.
     setSending(true);
     try {
       const session = await ensureChatSession();
       markPendingConsumed();
-      // ``text`` already contains any ``/slug`` tokens because Composer
-      // serializes inline skill chips into its controlled value.
-      await sessionsApi.sendMessage(session.id, text);
       setComposerValue("");
-      navigate(`/conversation/${session.id}`);
+      // Navigate the MOMENT there is an id to navigate to — before the send
+      // round-trip, not after it.
+      //
+      // Minting the session has to happen here: this page owns the worktree /
+      // permission / agent picks that ``ensureChatSession`` freezes into it.
+      // Everything after that belongs to the conversation page, which can show
+      // the message and the runtime-startup progress while it happens.
+      // Awaiting the send first left the user on a composer that looked frozen
+      // for the whole cloud round-trip and then dropped them into a blank
+      // conversation, because the kernel had not echoed ``message.user`` yet.
+      //
+      // ``handoff`` seeds that page's optimistic turn. It deliberately does
+      // NOT ask it to send: the conversation page's own send path runs through
+      // its ``ensureSession``, which mints a SECOND session whenever the
+      // freshly-navigated page has not fetched this one yet.
+      navigate(`/conversation/${session.id}`, {
+        state: { handoff: { text, sentAt: Date.now() } },
+      });
+      // ``text`` already contains any ``/slug`` tokens because Composer
+      // serializes inline skill chips into its controlled value. This page is
+      // unmounting behind the navigation; the failure toast below is global,
+      // and the conversation page simply never gets its turn.
+      await sessionsApi.sendMessage(session.id, text);
     } catch (cause) {
       // A billing rejection (402) carries an i18n key the client renders;
       // otherwise fall back to the generic save-failed copy.

@@ -44,6 +44,7 @@ import {
   PageLoader,
   Textarea,
   cn,
+  type RuntimeStartLocation,
 } from "@valuz/ui";
 import {
   agentsApi,
@@ -57,6 +58,7 @@ import {
   type TaskDetail,
   type TaskEvent,
   recordEntityOrigin,
+  useEntityOrigin,
 } from "@valuz/core";
 import type { FileTreeNode } from "@valuz/ui";
 import { useProjectOutlet } from "@valuz/app/layout";
@@ -712,6 +714,17 @@ export const TaskDetailPage = () => {
     leadSessionId: isCompleted ? leadSessionId : null,
     sinceTs: completionInfo?.completedAt ?? null,
   });
+  // Startup phase for the follow-up turn header, mirroring the conversation
+  // page: while the lead's runtime is coming up the header names that rather
+  // than claiming to process. OSS registers no execution targets, so the
+  // origin is undefined there and this always reads "local".
+  const leadExecOrigin = useEntityOrigin(leadSessionId, "session");
+  const followUpStartingRuntime: RuntimeStartLocation | null =
+    followUp.awaitingRuntime
+      ? leadExecOrigin === "cloud"
+        ? "cloud"
+        : "local"
+      : null;
   // Render the Lead's ``AskUserQuestion`` tool as the interactive question card
   // (matching the main chat), driven by the follow-up event stream.
   const askCards = useAskUserQuestionCards({
@@ -1610,6 +1623,7 @@ export const TaskDetailPage = () => {
                   loading={false}
                   error={null}
                   renderToolCall={renderFollowUpToolCall}
+                  startingRuntime={followUpStartingRuntime}
                 />
               )}
             </div>

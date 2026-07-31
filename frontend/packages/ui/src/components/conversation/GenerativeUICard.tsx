@@ -275,17 +275,24 @@ const GENERATIVE_UI_LAYOUT_CSS = `
     max-width: 100%;
   }
 
-  /* OpenUI rows are inline-style flex containers. A real flex basis gives
-     sibling cards equal columns and, unlike min-width: 0 alone, a wrap point. */
+  /* OpenUI rows are inline-style flex containers. Size peer cards from their
+     content so compact KPIs can share a row while dense modules naturally take
+     more room. flex-grow distributes any remaining space without forcing every
+     module to start from the same fixed width. */
   ${OPENUI_SCOPE_SELECTOR} .openui-card {
-    flex-basis: min(100%, 15rem) !important;
+    flex-basis: max-content !important;
   }
 
   ${OPENUI_SCOPE_SELECTOR} .openui-card-card,
-  ${OPENUI_SCOPE_SELECTOR} .openui-card-sunk,
   ${OPENUI_SCOPE_SELECTOR} .openui-card-clear {
     border-color: transparent;
     background: transparent;
+    box-shadow: none;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} .openui-card-sunk {
+    border-color: transparent;
+    background: var(--color-surface-soft);
     box-shadow: none;
   }
 
@@ -293,13 +300,31 @@ const GENERATIVE_UI_LAYOUT_CSS = `
      larger content sections unframed, and give only these metrics a soft tile. */
   ${OPENUI_SCOPE_SELECTOR}
     :has(> .openui-card:nth-child(3)) > .openui-card {
+    flex: 1 1 15rem !important;
     border-color: transparent;
     background: var(--color-surface-soft);
     border-radius: 8px;
+    padding: var(--openui-space-l);
+  }
+
+  /* Older generated dashboards sometimes express KPI tiles as anonymous Stack
+     children instead of Cards. Match their title/value/tag signature so saved
+     conversations receive the same stable surface without changing their data. */
+  ${OPENUI_SCOPE_SELECTOR}
+    :has(> :nth-child(3))
+    > :not([class]):has(> .openui-tag):has(> :nth-child(2) .openui-markdown-renderer) {
+    flex: 1 1 15rem;
+    background: var(--color-surface-soft);
+    border-radius: 8px;
+    padding: var(--openui-space-l);
   }
 
   ${OPENUI_SCOPE_SELECTOR}
-    :has(> .openui-card:nth-child(3)) > .openui-card .openui-tag {
+    :has(> .openui-card:nth-child(3)) > .openui-card .openui-tag,
+  ${OPENUI_SCOPE_SELECTOR}
+    :has(> :nth-child(3))
+    > :not([class]):has(> .openui-tag):has(> :nth-child(2) .openui-markdown-renderer)
+    > .openui-tag {
     min-height: 0;
     width: fit-content;
     padding: 0;
@@ -319,6 +344,17 @@ const GENERATIVE_UI_LAYOUT_CSS = `
   }
 
   ${OPENUI_SCOPE_SELECTOR}
+    :has(> :nth-child(3))
+    > :not([class]):has(> .openui-tag):has(> :nth-child(2) .openui-markdown-renderer)
+    > .openui-tag-success,
+  ${OPENUI_SCOPE_SELECTOR}
+    :has(> :nth-child(3))
+    > :not([class]):has(> .openui-tag):has(> :nth-child(2) .openui-markdown-renderer)
+    > .openui-tag-success .openui-tag-text {
+    color: var(--error-text);
+  }
+
+  ${OPENUI_SCOPE_SELECTOR}
     :has(> .openui-card:nth-child(3)) > .openui-card
     .openui-tag-danger,
   ${OPENUI_SCOPE_SELECTOR}
@@ -327,11 +363,35 @@ const GENERATIVE_UI_LAYOUT_CSS = `
     color: var(--success-text);
   }
 
+  ${OPENUI_SCOPE_SELECTOR}
+    :has(> :nth-child(3))
+    > :not([class]):has(> .openui-tag):has(> :nth-child(2) .openui-markdown-renderer)
+    > .openui-tag-danger,
+  ${OPENUI_SCOPE_SELECTOR}
+    :has(> :nth-child(3))
+    > :not([class]):has(> .openui-tag):has(> :nth-child(2) .openui-markdown-renderer)
+    > .openui-tag-danger .openui-tag-text {
+    color: var(--success-text);
+  }
+
   /* Dashboard tables behave like report sections: column labels and row rules
      provide structure without adding another rounded container. */
   ${OPENUI_SCOPE_SELECTOR} .openui-table-container {
+    width: 100%;
     border: 0;
     border-radius: 0;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} :has(> .openui-scrollable-table-wrapper),
+  ${OPENUI_SCOPE_SELECTOR} :has(> .openui-table-container),
+  ${OPENUI_SCOPE_SELECTOR} .openui-scrollable-table-wrapper {
+    width: 100%;
+    flex: 1 1 100%;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} .openui-table {
+    width: max-content;
+    min-width: 100%;
   }
 
   ${OPENUI_SCOPE_SELECTOR} .openui-table-row:nth-child(even) {
@@ -339,11 +399,77 @@ const GENERATIVE_UI_LAYOUT_CSS = `
   }
 
   ${OPENUI_SCOPE_SELECTOR} :where(.openui-table-head, .openui-table-cell) {
-    padding-inline: 0;
+    padding-inline: var(--openui-space-s, 8px);
+    white-space: nowrap;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} :where(
+    .openui-table-head:first-child,
+    .openui-table-cell:first-child
+  ) {
+    padding-left: 0;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} :where(
+    .openui-table-head:last-child,
+    .openui-table-cell:last-child
+  ) {
+    padding-right: 0;
   }
 
   ${OPENUI_SCOPE_SELECTOR} :where(p, span, div, td, th) {
     overflow-wrap: anywhere;
+  }
+
+  /* OpenUI chart roots sit inside anonymous flex wrappers that otherwise shrink
+     to their intrinsic plot width. Cover every chart component exposed by the
+     library and let Cartesian plots consume the space left after the Y axis. */
+  ${OPENUI_SCOPE_SELECTOR} :has(> :where(
+    .openui-bar-chart-container,
+    .openui-bar-chart-condensed-container,
+    .openui-line-chart-container,
+    .openui-line-chart-condensed-container,
+    .openui-area-chart-container,
+    .openui-area-chart-condensed-container,
+    .openui-horizontal-bar-chart-container,
+    .openui-scatter-chart-container,
+    .openui-radar-chart-container-wrapper,
+    .openui-pie-chart-container-wrapper,
+    .openui-radial-chart-container-wrapper,
+    .openui-single-stacked-bar-chart-container
+  )) {
+    width: 100%;
+    flex: 1 1 100%;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} :where(
+    .openui-bar-chart-container,
+    .openui-bar-chart-condensed-container,
+    .openui-line-chart-container,
+    .openui-line-chart-condensed-container,
+    .openui-area-chart-container,
+    .openui-area-chart-condensed-container,
+    .openui-horizontal-bar-chart-container,
+    .openui-scatter-chart-container,
+    .openui-radar-chart-container-wrapper,
+    .openui-pie-chart-container-wrapper,
+    .openui-radial-chart-container-wrapper,
+    .openui-single-stacked-bar-chart-container,
+    [class$="-chart-condensed-container-inner"]
+  ) {
+    width: 100% !important;
+    flex: 1 1 100% !important;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} :where(
+    .openui-bar-chart-condensed,
+    .openui-line-chart-condensed,
+    .openui-area-chart-condensed,
+    .openui-chart-container,
+    .recharts-responsive-container
+  ) {
+    width: 100% !important;
+    flex: 1 1 0 !important;
   }
 
   ${OPENUI_SCOPE_SELECTOR}

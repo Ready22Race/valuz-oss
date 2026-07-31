@@ -150,6 +150,62 @@ const formatTurnElapsed = (elapsedMs: number | undefined): string => {
       });
 };
 
+/** Bare duration, no leading verb — the ``{elapsed}`` slot of the
+ * runtime-startup labels. Same M/S rounding as {@link formatTurnElapsed} so
+ * the number doesn't change shape when the header flips phase. */
+const formatDuration = (elapsedMs: number | undefined): string => {
+  const totalSec = Math.max(0, Math.round((elapsedMs ?? 0) / 1000));
+  if (totalSec < 60)
+    return _t("conversation.durationSeconds" as Parameters<typeof _t>[0], {
+      count: String(totalSec),
+    });
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return s === 0
+    ? _t("conversation.durationMinutes" as Parameters<typeof _t>[0], {
+        m: String(m),
+      })
+    : _t("conversation.durationMinutesSeconds" as Parameters<typeof _t>[0], {
+        m: String(m),
+        s: String(s),
+      });
+};
+
+/** Where the agent runtime for this turn is coming up — the renderer only
+ * picks a string; the host page decides.
+ *
+ * ``"cloud"`` is unreachable in a plain OSS build: it is derived from the
+ * session's execution origin, and origin comes from the ``entity-origin``
+ * edition seam, which OSS leaves unregistered (see
+ * ``core/src/edition/entity-origin.ts``). Single-backend OSS therefore always
+ * reads ``"local"``; a multi-target edition registers the adapter and this
+ * turns two-valued. The value name matches the target id it comes from
+ * (``"cloud"``), so there is one word for the concept end to end. */
+export type RuntimeStartLocation = "local" | "cloud";
+
+/** Header text for the pre-run phase: the message is sent but the runtime is
+ * still coming up, so "已处理" would be a lie. The counter itself keeps
+ * running — only the verb changes when the runtime reports in. */
+const formatRuntimeStarting = (
+  location: RuntimeStartLocation,
+  elapsedMs: number | undefined,
+): string =>
+  _t(
+    (location === "cloud"
+      ? "conversation.startingCloudRuntime"
+      : "conversation.startingLocalRuntime") as Parameters<typeof _t>[0],
+    { elapsed: formatDuration(elapsedMs) },
+  );
+
+/** How long a turn must stay in flight before its header appears at all.
+ *
+ * A local OSS runtime usually has the session created and the turn started
+ * well inside this window, so without the delay the startup label renders for
+ * a few frames and vanishes — worse than never showing it. Anything the user
+ * can actually read takes longer than this; below it the composer's own
+ * loading state is the feedback. */
+const HEADER_REVEAL_DELAY_MS = 500;
+
 const ICON_BY_CATEGORY: Record<ToolCategory, LucideIcon> = {
   search: Globe,
   fetch: Globe,
@@ -647,6 +703,8 @@ interface TurnRowProps {
   isLocalFileHref?: (href: string) => boolean;
   onLocalFileLinkClick?: (href: string) => void;
   onCitationClick?: (input: OpenCitationInput) => void;
+  /** See ``ConversationTurnListProps.startingRuntime``. */
+  startingRuntime?: RuntimeStartLocation | null;
 }
 
 const TurnRow = memo(
@@ -664,6 +722,7 @@ const TurnRow = memo(
     isLocalFileHref,
     onLocalFileLinkClick,
     onCitationClick,
+    startingRuntime,
   }: TurnRowProps) {
     const { t } = useI18n();
     const inFlight = sending && isLatest;
@@ -777,13 +836,10 @@ const TurnRow = memo(
     }, [inFlight]);
     const headerFoldable = !inFlight && hasProcess;
 
-    // While streaming, tick a 1Hz wall-clock interval so "已处理 X 秒"
-    // advances every second even between SSE event arrivals (otherwise
-    // the displayed elapsed only updates when a new tool/thinking block
-    // lands, which feels stuck during e.g. a long Bash run). Computes
-    // ``Date.now() - turn.userTimestamp`` so the displayed value tracks
-    // real time, not the latest block's stamp. Once the turn settles we
-    // freeze on ``totalElapsedMs`` (the canonical max from blocks).
+    // While streaming, tick a 1Hz wall-clock interval so the header advances
+    // every second even between SSE event arrivals (otherwise the displayed
+    // elapsed only updates when a new tool/thinking block lands, which feels
+    // stuck during e.g. a long Bash run).
     const [tick, setTick] = useState(0);
     useEffect(() => {
       if (!inFlight) return;
@@ -792,20 +848,70 @@ const TurnRow = memo(
       }, 1000);
       return () => window.clearInterval(interval);
     }, [inFlight]);
-    const displayedElapsedMs = useMemo(() => {
-      // ``tick`` only matters when streaming — referenced so React
-      // re-evaluates this memo each second while inFlight.
+
+    // TWO counters, deliberately not one.
+    //
+    // The startup phase is measured on the CLIENT clock (Send → now) and the
+    // processing phase on the SERVER one (the kernel's ``message.user`` stamp
+    // → now). Splitting them is what keeps a live turn and a reloaded one
+    // agreeing: ``clientSentAtMs`` is React state, so it is gone after a
+    // refresh, and a single counter spanning both phases would therefore show
+    // the startup window before a refresh and hide it after — a gap of tens of
+    // seconds on a cold sandbox. Restarting at zero when the runtime reports
+    // in also makes "已处理" mean what it says, and it removes the only place
+    // the two clocks were ever subtracted from each other.
+    const startupElapsedMs = useMemo(() => {
       void tick;
-      if (!inFlight) return totalElapsedMs;
-      if (!turn.userTimestamp) return totalElapsedMs;
+      if (turn.clientSentAtMs === undefined) return 0;
+      return Math.max(0, Date.now() - turn.clientSentAtMs);
+    }, [tick, turn.clientSentAtMs]);
+    const processedElapsedMs = useMemo(() => {
+      void tick;
+      if (!inFlight || !turn.userTimestamp) return totalElapsedMs;
       const startMs = new Date(turn.userTimestamp).getTime();
       if (Number.isNaN(startMs)) return totalElapsedMs;
-      const live = Date.now() - startMs;
-      // Guard against clock skew: never go backwards from the
-      // canonical block-derived elapsed. If for some reason ``Date.now``
-      // < block stamp (rare wall-clock skew), keep the higher number.
-      return Math.max(live, totalElapsedMs);
+      // Never go backwards from the canonical block-derived elapsed: on rare
+      // wall-clock skew ``Date.now()`` can sit below the latest block stamp.
+      return Math.max(Date.now() - startMs, totalElapsedMs);
     }, [tick, inFlight, turn.userTimestamp, totalElapsedMs]);
+
+    // Hold the header back for the first {@link HEADER_REVEAL_DELAY_MS} of a
+    // turn so a fast local runtime doesn't flash "正在启动本地运行环境" for a
+    // few frames on its way to "已处理". The composer's own loading state
+    // covers the gap. Only in-flight turns the host page stamped are held —
+    // history has no Send time and renders immediately.
+    const [headerRevealed, setHeaderRevealed] = useState(
+      () => turn.clientSentAtMs === undefined,
+    );
+    useEffect(() => {
+      if (!inFlight || turn.clientSentAtMs === undefined) {
+        setHeaderRevealed(true);
+        return;
+      }
+      const remaining =
+        HEADER_REVEAL_DELAY_MS - (Date.now() - turn.clientSentAtMs);
+      if (remaining <= 0) {
+        setHeaderRevealed(true);
+        return;
+      }
+      const handle = window.setTimeout(
+        () => setHeaderRevealed(true),
+        remaining,
+      );
+      return () => window.clearTimeout(handle);
+    }, [inFlight, turn.clientSentAtMs]);
+
+    // Phase copy. Before the runtime reports in there is nothing being
+    // "processed" yet, so the header names what IS happening (a local or cloud
+    // runtime coming up) on its own counter. ``startingRuntime`` is
+    // null/undefined once the host page sees the kernel's ``message.user``
+    // echo — and for every settled turn.
+    const isStartingUp = inFlight && startingRuntime != null;
+    const headerLabel = !headerRevealed
+      ? null
+      : isStartingUp
+        ? formatRuntimeStarting(startingRuntime, startupElapsedMs)
+        : formatTurnElapsed(processedElapsedMs);
     return (
       <div data-conversation-turn className="space-y-[26px]">
         {turn.userText || (turn.attachments && turn.attachments.length > 0) ? (
@@ -846,28 +952,34 @@ const TurnRow = memo(
                 Divider line removed: it visually competed with the ``<hr>``
                 markdown the agent often emits at the top of the final
                 answer. The grey chevron strip alone is enough boundary. */}
-            <div className="font-sans text-[13px] leading-[1.6] text-[#6e7481]">
-              {headerFoldable ? (
-                <button
-                  type="button"
-                  onClick={() => setTurnFolded((value) => !value)}
-                  className="inline-flex items-center py-1 text-left text-[13px] font-normal text-[#6e7481] transition-colors hover:text-[#525860]"
-                  aria-expanded={!turnFolded}
-                >
-                  <span>{formatTurnElapsed(displayedElapsedMs)}</span>
-                  <ChevronRight
-                    className={`ml-1 h-3.5 w-3.5 shrink-0 transition-transform ${
-                      !turnFolded ? "rotate-90" : ""
-                    }`}
-                    aria-hidden="true"
-                  />
-                </button>
-              ) : (
-                <div className="inline-flex items-center py-1 text-[13px] font-normal text-[#6e7481]">
-                  <span>{formatTurnElapsed(displayedElapsedMs)}</span>
-                </div>
-              )}
-            </div>
+            {/* Omitted entirely (not rendered empty) for the first
+                ``HEADER_REVEAL_DELAY_MS`` of a turn: an empty wrapper would
+                still take a ``space-y-3`` gap and the row would visibly shift
+                when the label appeared. */}
+            {headerLabel === null ? null : (
+              <div className="font-sans text-[13px] leading-[1.6] text-[#6e7481]">
+                {headerFoldable ? (
+                  <button
+                    type="button"
+                    onClick={() => setTurnFolded((value) => !value)}
+                    className="inline-flex items-center py-1 text-left text-[13px] font-normal text-[#6e7481] transition-colors hover:text-[#525860]"
+                    aria-expanded={!turnFolded}
+                  >
+                    <span>{headerLabel}</span>
+                    <ChevronRight
+                      className={`ml-1 h-3.5 w-3.5 shrink-0 transition-transform ${
+                        !turnFolded ? "rotate-90" : ""
+                      }`}
+                      aria-hidden="true"
+                    />
+                  </button>
+                ) : (
+                  <div className="inline-flex items-center py-1 text-[13px] font-normal text-[#6e7481]">
+                    <span>{headerLabel}</span>
+                  </div>
+                )}
+              </div>
+            )}
 
             {displayBlocks.map((block, blockIndex) => {
               const isLastBlock = blockIndex === displayBlocks.length - 1;
@@ -1034,6 +1146,14 @@ interface ConversationTurnListProps {
    *  must NOT flash the welcome before its history lands. The error card renders
    *  regardless. */
   showWelcome?: boolean;
+  /** Non-null while the message has been sent but the agent runtime has not
+   * reported in yet — the window in which the host is creating the session,
+   * warming the local kernel or booting a remote sandbox. The latest turn's
+   * header then names that instead of claiming to be processing, while the
+   * elapsed counter runs on unbroken. The host page clears it when the
+   * kernel's ``message.user`` echo lands; the value says WHERE the runtime is
+   * coming up (OSS is single-target and always ``"local"``). */
+  startingRuntime?: RuntimeStartLocation | null;
 }
 
 export function ConversationTurnList({
@@ -1058,6 +1178,7 @@ export function ConversationTurnList({
   emptySuggestions,
   onEmptySuggestionClick,
   showWelcome,
+  startingRuntime,
 }: ConversationTurnListProps) {
   const { t } = useI18n();
   const rowVirtualizer = useVirtualizer({
@@ -1216,6 +1337,7 @@ export function ConversationTurnList({
                     isLocalFileHref={isLocalFileHref}
                     onLocalFileLinkClick={onLocalFileLinkClick}
                     onCitationClick={onCitationClick}
+                    startingRuntime={startingRuntime}
                   />
                 </div>
               </div>

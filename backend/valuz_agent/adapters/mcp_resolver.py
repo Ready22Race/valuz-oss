@@ -192,6 +192,7 @@ def expand_mcp_dir(value: str) -> str:
 
 def _build_stdio_config(row) -> list[McpServerConfig] | None:
     import shlex
+    import shutil
 
     if not row.command:
         logger.info("mcp resolver: stdio connector %s has no command", row.slug)
@@ -206,6 +207,23 @@ def _build_stdio_config(row) -> list[McpServerConfig] | None:
         parts = shlex.split(raw_command)
         raw_command = parts[0]
         extra_args = tuple(parts[1:])
+
+    # Pre-flight the executable. The stdio child is spawned kernel-side; with
+    # the default in-process kernel that is THIS process, so a which() miss is
+    # definitive — drop the server with an attributable log line instead of
+    # every runtime failing (or silently degrading) at turn time with a bare
+    # ``[Errno 2] No such file or directory``. A split kernel
+    # (``VALUZ_KERNEL_MODE=http``) spawns against ITS own environment, so keep
+    # the server there and leave availability to the runtime.
+    from valuz_agent.infra.config import settings
+
+    if not settings.is_http_kernel and shutil.which(raw_command) is None:
+        logger.warning(
+            "mcp resolver: stdio connector %s dropped — command %r not found on PATH",
+            row.slug,
+            raw_command,
+        )
+        return None
 
     args: tuple[str, ...] = extra_args
     if row.args:

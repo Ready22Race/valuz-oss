@@ -125,7 +125,11 @@ import {
   useIncrementalTurns,
   type PlanSubtask,
 } from "@valuz/core";
-import { BackgroundTaskStrip, ConversationTurnList } from "@valuz/ui";
+import {
+  BackgroundTaskStrip,
+  ConversationTurnList,
+  type RuntimeStartLocation,
+} from "@valuz/ui";
 import { usePlatform } from "@valuz/app/platform";
 import {
   useHasUsableChannel,
@@ -149,6 +153,7 @@ import {
   shouldShowNoModelEmptyState,
 } from "./conversation-loading";
 import { createConversationBootstrapGuard } from "./conversation-bootstrap";
+import { canSendProjectHandoff } from "./conversation-project-handoff";
 import { LiveTaskCard } from "../components/LiveTaskCard";
 import { QueuedInputsBar } from "../components/QueuedInputsBar";
 import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
@@ -885,6 +890,21 @@ export const ConversationPage = () => {
      */
     sentAt: number; // Unix epoch ms (UTC)
   } | null>(null);
+  // Wall-clock anchor for the latest send, deliberately OUTLIVING
+  // ``pendingUserMessage``: that one is cleared by the kernel's
+  // ``message.user`` echo, and the echo is exactly the moment the anchor
+  // becomes load-bearing. The real turn's ``userTimestamp`` is stamped when
+  // the RUNTIME started — after local kernel warm-up or, in sandboxed / cloud
+  // execution, after the whole instance boots — so handing the turn header
+  // that stamp restarts its "已处理 X 秒" counter from zero mid-turn. Carrying
+  // the send time onto the real turn as ``clientSentAtMs`` keeps ONE counter
+  // across the optimistic → real handover. Cleared only where the send is
+  // genuinely void: a failed send, or a session switch.
+  const [turnStartAnchor, setTurnStartAnchor] = useState<{
+    text: string;
+    fromSeq: number;
+    sentAt: number; // Unix epoch ms (UTC), client clock
+  } | null>(null);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   // Session input queue (docs/design/session-input-queue.md): follow-up inputs
@@ -1354,6 +1374,76 @@ export const ConversationPage = () => {
     useSessionArtifacts(selectedSessionId);
   const navigate = useNavigate();
 
+  // Optimistic turn handed over by a page that minted the session itself (the
+  // project-detail composer). That page navigates here the moment it has an id
+  // and fires the send from its own closure, so all this does is SHOW the
+  // message: it sets the same ``pendingUserMessage`` / ``turnStartAnchor``
+  // pair a local send sets, which buys the bubble, the runtime-startup header
+  // and the echo dedup for free. It must not send — see the note on
+  // ``handoff`` in ProjectDetailPage.
+  //
+  // Consumed exactly once per session. The hash router restores
+  // ``history.state`` across a reload, so without the seen-set a refresh would
+  // resurrect a bubble for a turn that has long since landed in history.
+  const consumedHandoffSessionIdsRef = useRef<Set<string>>(new Set());
+  /** Oldest a handoff may be and still be the live one. See its use. */
+  const HANDOFF_MAX_AGE_MS = 30_000;
+  // Session-creation options the project-detail composer owns and this page
+  // otherwise knows nothing about. Read by ``ensureSession`` while it mints
+  // the handed-over session, so a project chat that asked for worktree
+  // isolation still gets it. A ref, not state: ``ensureSession`` needs the
+  // value in the same tick the send starts, before any re-render.
+  const projectSendHandoffRef = useRef<{
+    worktree?: { name?: string };
+    permissionMode?: typeof selectedPermissionMode;
+    providerId?: string | null;
+    modelId?: string | null;
+  } | null>(null);
+  // Set while a handed-over pending is live, and read by ``refreshEventsInner``
+  // so its unconditional "switching sessions invalidates the pending" clear
+  // does not wipe a pending that belongs to the session being loaded. Bootstrap
+  // runs that refresh on landing, i.e. always right after this seeds.
+  const handoffSessionIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const handoff = (
+      location.state as {
+        handoff?: { text?: string; sentAt?: number };
+      } | null
+    )?.handoff;
+    const text = handoff?.text?.trim();
+    if (!text || id === NEW_SESSION_ID) return;
+    if (consumedHandoffSessionIdsRef.current.has(id)) return;
+    const sentAt = handoff?.sentAt ?? Date.now();
+    // A reload restores ``history.state``, and the seen-set is a ref — it
+    // resets with the page, so it cannot be what stops a replay. The state is
+    // dropped from history below the moment it is consumed; this age check is
+    // the belt to that braces, covering a restore that happens before the
+    // replace lands. A genuine handoff is consumed within a frame or two of
+    // the navigation, so anything older is a replay: re-seeding it re-showed
+    // the startup label and re-armed ``sending`` on a turn that had long since
+    // finished, leaving the stop button up on a settled session.
+    if (Date.now() - sentAt > HANDOFF_MAX_AGE_MS) return;
+    consumedHandoffSessionIdsRef.current.add(id);
+    handoffSessionIdRef.current = id;
+    setPendingUserMessage({
+      text,
+      attachments: [],
+      fromSeq: historyCursorRef.current,
+      sentAt,
+    });
+    setTurnStartAnchor({ text, fromSeq: historyCursorRef.current, sentAt });
+    // The turn is genuinely in flight — the handing-over page has already
+    // posted it. Released by the ``message.user`` echo like any other send.
+    setSending(true);
+    // Consume the state out of history so a reload cannot replay it. Only the
+    // handing-over navigation sets ``handoff`` and it carries nothing else, so
+    // clearing the whole entry is safe here.
+    navigate(location.pathname + location.search, {
+      replace: true,
+      state: null,
+    });
+  }, [id, location.state, location.pathname, location.search, navigate]);
+
   const [availableSkills, setAvailableSkills] = useState<SkillView[]>([]);
   const [selectedComposerSkill, setSelectedComposerSkill] =
     useState<SkillView | null>(null);
@@ -1585,41 +1675,49 @@ export const ConversationPage = () => {
   // last turn — placing the optimistic one at the end gets that for
   // free without touching the renderer.
   const effectiveTurns = useMemo(() => {
-    if (!pendingUserMessage) return turns;
+    const lastTurn = turns[turns.length - 1];
+    const lastTurnSeq = lastTurn?.userMessageSeq ?? 0;
+    // "Is the latest real turn the kernel's echo of send S?" — two signals,
+    // because the echo can arrive from either seq space: a HISTORY row
+    // satisfies ``seq > fromSeq`` (fromSeq is the history cursor at send
+    // time); a LIVE frame carries a kernel-local seq that can't be compared
+    // to fromSeq, so fall back to the store-independent event timestamp vs
+    // the moment of the send. A previous turn that happens to share the exact
+    // same text fails both (its history seq <= fromSeq; its timestamp <
+    // sentAt), which is what keeps re-sending identical text from collapsing
+    // onto the older turn.
+    const lastTurnIsEchoOf = (send: {
+      text: string;
+      fromSeq: number;
+      sentAt: number;
+    }): boolean =>
+      lastTurn !== undefined &&
+      lastTurn.userText === send.text &&
+      (lastTurnSeq > send.fromSeq ||
+        (lastTurn.userTimestamp !== undefined &&
+          lastTurn.userTimestamp >= send.sentAt));
+
+    // Re-stamp the echoed turn with the moment the user pressed Send, so the
+    // turn header's elapsed counter spans the runtime-startup window instead
+    // of restarting at the kernel's stamp (see ``turnStartAnchor``).
+    const base =
+      lastTurn && turnStartAnchor && lastTurnIsEchoOf(turnStartAnchor)
+        ? [
+            ...turns.slice(0, -1),
+            { ...lastTurn, clientSentAtMs: turnStartAnchor.sentAt },
+          ]
+        : turns;
+
+    if (!pendingUserMessage) return base;
     // Defensive dedup: if the kernel's ``message.user`` echo has already
     // been folded into ``turns`` but ``setPendingUserMessage(null)`` hasn't
     // landed yet (race between two batched setStates inside the SSE
     // callback), the latest real turn carries the same userText as the
     // optimistic — drop the optimistic so the user doesn't see two
     // identical bubbles in the same render.
-    //
-    // The ``fromSeq`` guard makes this dedup specific to THIS pending
-    // send: only collapse when the latest turn was built from an event
-    // with a seq STRICTLY LATER than the moment we set the pending. A
-    // previous turn that happens to share the exact same text was
-    // born from an event with seq <= fromSeq, so it stays + the new
-    // optimistic still appends — otherwise re-sending identical text
-    // would silently land snap-to-top on the older turn.
-    const lastTurn = turns[turns.length - 1];
-    const lastTurnSeq = lastTurn?.userMessageSeq ?? 0;
-    // Two "the echo is newer than this send" signals, because the echo can
-    // arrive from either seq space: a HISTORY row satisfies
-    // ``seq > fromSeq`` (fromSeq is the history cursor at send time); a
-    // LIVE frame carries a kernel-local seq that can't be compared to
-    // fromSeq, so fall back to the store-independent event timestamp vs
-    // the moment the pending was set. A previous turn with identical text
-    // fails both (its history seq <= fromSeq; its timestamp < sentAt).
-    if (
-      lastTurn &&
-      lastTurn.userText === pendingUserMessage.text &&
-      (lastTurnSeq > pendingUserMessage.fromSeq ||
-        (lastTurn.userTimestamp !== undefined &&
-          lastTurn.userTimestamp >= pendingUserMessage.sentAt))
-    ) {
-      return turns;
-    }
+    if (lastTurnIsEchoOf(pendingUserMessage)) return base;
     return [
-      ...turns,
+      ...base,
       {
         id: "pending-turn",
         userMessageSeq: 0,
@@ -1631,8 +1729,34 @@ export const ConversationPage = () => {
             ? pendingUserMessage.attachments
             : undefined,
         userTimestamp: pendingUserMessage.sentAt,
+        clientSentAtMs: pendingUserMessage.sentAt,
       },
     ];
+  }, [turns, pendingUserMessage, turnStartAnchor]);
+
+  // Retire the optimistic pending once its echo is VISIBLE, whichever path
+  // delivered it.
+  //
+  // Clearing it only from the live SSE handler is not enough: the echo can
+  // just as well arrive in the history refetch bootstrap runs on landing, and
+  // then nothing releases the pending. ``effectiveTurns`` above still dedupes
+  // the bubble, so the transcript looks right — but ``startingRuntime`` is
+  // derived from the pending, so the header stays stuck on "正在启动…运行环境"
+  // for the rest of the turn, counting up while the agent is plainly already
+  // answering. ``refreshEventsInner``'s unconditional clear used to mask this;
+  // the handoff guard added with the project-composer change removed that
+  // accident for exactly the sessions most likely to hit it.
+  useEffect(() => {
+    if (!pendingUserMessage) return;
+    const lastTurn = turns[turns.length - 1];
+    if (!lastTurn || lastTurn.userText !== pendingUserMessage.text) return;
+    const echoed =
+      (lastTurn.userMessageSeq ?? 0) > pendingUserMessage.fromSeq ||
+      (lastTurn.userTimestamp !== undefined &&
+        lastTurn.userTimestamp >= pendingUserMessage.sentAt);
+    if (!echoed) return;
+    setPendingUserMessage(null);
+    handoffSessionIdRef.current = null;
   }, [turns, pendingUserMessage]);
 
   // ── ``submit_skill`` tool_use → submission card wiring ──────────────
@@ -2537,6 +2661,17 @@ export const ConversationPage = () => {
   const providerTarget =
     executionTargets.find((target) => target.id === providerTargetId) ??
     getDefaultExecutionTarget();
+  // Runtime-startup phase for the turn header: set from Send until the kernel
+  // echoes ``message.user`` (which it writes at run() entry, i.e. once the
+  // runtime is actually up). ``pendingUserMessage`` tracks exactly that
+  // window, so it doubles as the phase flag. The location only picks the
+  // wording — OSS registers no execution targets, so ``providerTargetId`` is
+  // undefined there and this always reads "local".
+  const startingRuntime: RuntimeStartLocation | null = pendingUserMessage
+    ? providerTargetId === "cloud"
+      ? "cloud"
+      : "local"
+    : null;
   const providerChannelState =
     useComposerProviderChannelState(providerTargetId);
   const providers = providerChannelState.providers;
@@ -2827,8 +2962,19 @@ export const ConversationPage = () => {
       historyHydratedSessionIdRef.current = null;
     }
     // Switching sessions invalidates any optimistic pending message —
-    // it belongs to whatever session was active before, not this one.
-    setPendingUserMessage(null);
+    // it belongs to whatever session was active before, not this one. Same
+    // for the send anchor: another session's turn must not inherit this
+    // session's send time.
+    //
+    // Exception: a pending handed over WITH this navigation belongs to the
+    // session being loaded, not the previous one. Bootstrap calls this on
+    // landing, so without the guard the handoff would be seeded and then wiped
+    // a beat later, and the project-detail send would still land on a blank
+    // conversation.
+    if (sessionId === null || handoffSessionIdRef.current !== sessionId) {
+      setPendingUserMessage(null);
+      setTurnStartAnchor(null);
+    }
     // CRITICAL: clear ``events`` synchronously BEFORE awaiting the
     // network fetch. The URL-change handler updates ``selectedSessionId``
     // and then calls this function, but ``selectedSessionId`` and
@@ -3499,8 +3645,28 @@ export const ConversationPage = () => {
               !remoteCreate && selectedMcpSlugs.length > 0
                 ? selectedMcpSlugs
                 : undefined,
-            permission_mode: selectedPermissionMode,
+            permission_mode:
+              projectSendHandoffRef.current?.permissionMode ??
+              selectedPermissionMode,
             effort: selectedEffort,
+            // Everything the project-detail composer had picked and this page
+            // would otherwise answer with its OWN defaults. Worktree is the
+            // obvious one — this page has no such field at all — but the
+            // dangerous ones are the rest: they exist on both pages under the
+            // same names, so dropping them raises no error, it just silently
+            // mints the session with the wrong provider / model / permission.
+            // (Execution location is carried too, but through
+            // ``recordEntityOrigin`` where the handoff is consumed, because
+            // that is what ``getEntityOrigin`` / ``resolveApiBase`` read.)
+            ...(projectSendHandoffRef.current?.worktree
+              ? { worktree: projectSendHandoffRef.current.worktree }
+              : {}),
+            ...(projectSendHandoffRef.current?.providerId
+              ? { provider_id: projectSendHandoffRef.current.providerId }
+              : {}),
+            ...(projectSendHandoffRef.current?.modelId
+              ? { model_id: projectSendHandoffRef.current.modelId }
+              : {}),
           },
           createBaseUrl ? { baseUrl: createBaseUrl } : undefined,
         );
@@ -3718,6 +3884,9 @@ export const ConversationPage = () => {
         // double-render the same text.
         if (event.event.event_type === "message.user") {
           setPendingUserMessage(null);
+          // The handed-over pending has served its purpose; drop the guard so
+          // a later switch back to this session clears normally.
+          handoffSessionIdRef.current = null;
         }
         // Live TODO panel update — kernel V5+messages emits
         // ``session.todos.update`` whenever the agent calls
@@ -4205,10 +4374,14 @@ export const ConversationPage = () => {
 
   // The actual send. Attachments are uploaded on attach, so this never
   // uploads — it just mints/reuses the session and posts the message.
-  const performSend = async () => {
+  const performSend = async (overrideText?: string) => {
+    // ``overrideText`` is the project-detail handoff: that page navigates here
+    // before any session exists and lets this page mint + send, so its draft
+    // arrives out of band rather than through the composer's state.
+    const source = (overrideText ?? draft).trim();
     // Re-entrancy guard on the derived ``isBusy`` (not raw ``sending``): a
     // stuck ``sending`` on a reconciled-idle session must not swallow the send.
-    if (!draft.trim() || isBusy) return;
+    if (!source || isBusy) return;
     // Skill-creator binds an agent (its create flow needs one) — nudge if none.
     // A normal new 临时对话 may now be agentless (a quick chat on the default
     // model), so it sends without an agent pick.
@@ -4222,7 +4395,7 @@ export const ConversationPage = () => {
     // Composer serializes its skill chips into the controlled value.
     // Don't prepend ``selectedComposerSkill`` again or the message
     // ships with ``/skill /skill ...``.
-    const text = draft.trim();
+    const text = source;
     // Optimistic UI: clear the input and surface the message + a
     // "thinking" hint immediately so the user gets sub-frame feedback,
     // even while ensureSession + uploads + POST /messages are still
@@ -4235,12 +4408,14 @@ export const ConversationPage = () => {
       .map((a) => ({ name: a.filename, size: a.size_bytes }));
     pinNextTurnToTopRef.current = true;
     keepCurrentTurnAtTopRef.current = true;
+    const sentAt = Date.now();
     setPendingUserMessage({
       text,
       attachments: queuedAttachmentMeta,
       fromSeq: historyCursorRef.current,
-      sentAt: Date.now(),
+      sentAt,
     });
+    setTurnStartAnchor({ text, fromSeq: historyCursorRef.current, sentAt });
     setSending(true);
     // Optimistically mark the active session running so the derived loading flag
     // shows immediately (an existing session re-send would otherwise read its
@@ -4265,6 +4440,20 @@ export const ConversationPage = () => {
     }
     try {
       const session = await ensureSession();
+      // Protect the optimistic turn we just painted from the landing refresh.
+      //
+      // ``refreshEventsInner`` clears ``pendingUserMessage`` for any session it
+      // is asked to load unless that session owns the pending, and bootstrap
+      // runs it the moment we promote to /conversation/{id}. A plain 新对话
+      // escapes it through bootstrap's promote fast-path; the project-detail
+      // handoff waits for the project binding first, which shifts the timing
+      // enough to miss that path — and the pending was wiped a beat after it
+      // was set, taking the runtime-startup header down with it (the label
+      // vanished and the row fell through to "已处理").
+      //
+      // Claiming the freshly minted id is what makes the guard recognise it.
+      // The claim is released by the ``message.user`` echo, like any other.
+      handoffSessionIdRef.current = session.id;
       if (!session?.id) throw new Error("Failed to create session.");
       // Land on the real session URL on SEND. ``ensureSession`` navigates
       // inline when it mints a brand-new session (no prior attach), but when
@@ -4389,8 +4578,10 @@ export const ConversationPage = () => {
       keepCurrentTurnAtTopRef.current = false;
       // Optimistic turn never got a real ``message.user`` echo because
       // the send failed — drop it so the user can retry without a
-      // phantom card lingering. The session-lifetime stream stays up.
+      // phantom card lingering. The session-lifetime stream stays up. The
+      // anchor goes with it: there is no turn for it to stamp.
       setPendingUserMessage(null);
+      setTurnStartAnchor(null);
       // The optimistic ``running`` status write above must be reconciled:
       // under the derived busy (``sendPending || status === "running"``) a
       // stale optimistic ``running`` would pin the loading state forever.
@@ -4619,6 +4810,122 @@ export const ConversationPage = () => {
     }
     void performSend();
   };
+
+  // Project-detail send handoff, draft-first form.
+  //
+  // That page used to await ``sessionsApi.create`` before it could navigate,
+  // so a cloud project froze its composer for the whole round trip with no
+  // feedback. 新对话 never had that problem because the user is ALREADY on
+  // this page: ``performSend`` paints the optimistic turn first and mints the
+  // session behind it. The project page now navigates to ``/conversation/new``
+  // with nothing but the draft, which puts both entries on that same path.
+  //
+  // Placed after ``performSend`` so the reference is not a forward one.
+  const consumedProjectSendRef = useRef(false);
+  // True from the moment this page is entered by a project-detail send until
+  // the send has produced its optimistic turn. Suppresses the new-chat
+  // welcome for exactly that window.
+  //
+  // Two sources on purpose. The route state covers arrival and the wait for
+  // bootstrap to bind the project; the explicit flag covers the handover
+  // itself, because consuming the handoff CLEARS that state (it has to — a
+  // reload must not replay the send) and the optimistic turn does not exist
+  // yet at that instant. Deriving the flag from the state alone left exactly
+  // one frame where neither held, and the welcome rendered in it.
+  const [projectSendInFlight, setProjectSendInFlight] = useState(false);
+  const hasPendingProjectSend =
+    projectSendInFlight ||
+    Boolean(
+      (
+        location.state as {
+          projectSend?: { text?: string };
+        } | null
+      )?.projectSend?.text?.trim(),
+    );
+  useEffect(() => {
+    if (id !== NEW_SESSION_ID) return;
+    if (consumedProjectSendRef.current) return;
+    const send = (
+      location.state as {
+        projectSend?: {
+          text?: string;
+          sentAt?: number;
+          worktree?: { name?: string };
+          permissionMode?: typeof selectedPermissionMode;
+          providerId?: string | null;
+          modelId?: string | null;
+          projectId?: string;
+          execOrigin?: string;
+        };
+      } | null
+    )?.projectSend;
+    const text = send?.text?.trim();
+    if (!text) return;
+    // Same reasoning as the session-scoped handoff: the hash router restores
+    // ``history.state`` across a reload, and a ref cannot outlive one. The
+    // state is dropped from history below; this bounds the window before that
+    // lands, so a reload can never re-fire the send.
+    if (Date.now() - (send?.sentAt ?? 0) > HANDOFF_MAX_AGE_MS) return;
+    // WAIT for bootstrap to bind the project before sending.
+    //
+    // ``?project=`` is only turned into ``selectedProjectId`` after bootstrap
+    // has fetched the project list and validated it, and ``ensureSession``
+    // reads that state — not the URL. Firing the moment the route state
+    // arrives therefore raced bootstrap and lost: ``selectedProjectId`` was
+    // still null, so ``sessionProjectId`` fell back to ``"chat-default"``,
+    // ``isChat`` went true, and the session was minted as a QUICK CHAT — not
+    // bound to the project, and routed by the chat target picker (i.e. local)
+    // rather than the project's own execution origin. Carrying the origin
+    // observation could not help, because the lookup was keyed on
+    // ``"chat-default"``.
+    //
+    // The ref is set below, at the point of no return, so an early bail here
+    // leaves the handoff intact for the re-run that bootstrap triggers.
+    if (
+      !canSendProjectHandoff({
+        projectParam: searchParams.get("project"),
+        selectedProjectId,
+      })
+    )
+      return;
+    consumedProjectSendRef.current = true;
+    projectSendHandoffRef.current = {
+      ...(send?.worktree ? { worktree: send.worktree } : {}),
+      ...(send?.permissionMode ? { permissionMode: send.permissionMode } : {}),
+      ...(send?.providerId ? { providerId: send.providerId } : {}),
+      ...(send?.modelId ? { modelId: send.modelId } : {}),
+    };
+    // Execution location does not travel as a create field: ``ensureSession``
+    // resolves a project conversation's target through ``getEntityOrigin`` /
+    // ``resolveApiBase``. Seeding the observation is therefore what actually
+    // routes the create at the right backend — without it a 云端 project
+    // silently mints its session on the default one.
+    if (send?.projectId && send?.execOrigin) {
+      recordEntityOrigin(send.projectId, send.execOrigin);
+    }
+    navigate(location.pathname + location.search, {
+      replace: true,
+      state: null,
+    });
+    // Held until the send settles, so the flag outlives the ``state: null``
+    // navigation above; the ``finally`` also covers a failed send, which
+    // would otherwise suppress the welcome on this page forever.
+    setProjectSendInFlight(true);
+    void performSend(text).finally(() => setProjectSendInFlight(false));
+    // ``performSend`` is a plain function, so it changes identity every render;
+    // listing it would re-run this effect on every frame. ``consumedProjectSendRef``
+    // already makes re-entry impossible, and the effect only ever needs the
+    // definition current at the moment the handoff lands.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    id,
+    location.state,
+    location.pathname,
+    location.search,
+    navigate,
+    searchParams,
+    selectedProjectId,
+  ]);
 
   const handleInterrupt = async () => {
     const sessionId = selectedSessionId;
@@ -6000,7 +6307,14 @@ export const ConversationPage = () => {
                 // while its transcript loads — gate on the URL, not the transient
                 // ``selectedSessionId`` (which briefly nulls mid-navigation), so
                 // the mascot + suggestions don't flash before history lands.
-                showWelcome={id === NEW_SESSION_ID}
+                // …and not while a project-detail send is still landing: that
+                // arrives at /conversation/new with no turns yet and waits for
+                // bootstrap to bind the project before it can fire, so the
+                // mascot + suggestions would flash in the gap — on a page the
+                // user reached by SENDING something, which reads as the message
+                // having been dropped.
+                showWelcome={id === NEW_SESSION_ID && !hasPendingProjectSend}
+                startingRuntime={startingRuntime}
               />
             </div>
           </>
