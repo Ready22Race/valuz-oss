@@ -4806,6 +4806,16 @@ export const ConversationPage = () => {
   //
   // Placed after ``performSend`` so the reference is not a forward one.
   const consumedProjectSendRef = useRef(false);
+  // True from the moment this page is entered by a project-detail send until
+  // that send actually fires (the route state is dropped as it is consumed).
+  // Suppresses the new-chat welcome for exactly that window.
+  const hasPendingProjectSend = Boolean(
+    (
+      location.state as {
+        projectSend?: { text?: string };
+      } | null
+    )?.projectSend?.text?.trim(),
+  );
   useEffect(() => {
     if (id !== NEW_SESSION_ID) return;
     if (consumedProjectSendRef.current) return;
@@ -6259,7 +6269,13 @@ export const ConversationPage = () => {
                 // while its transcript loads — gate on the URL, not the transient
                 // ``selectedSessionId`` (which briefly nulls mid-navigation), so
                 // the mascot + suggestions don't flash before history lands.
-                showWelcome={id === NEW_SESSION_ID}
+                // …and not while a project-detail send is still landing: that
+                // arrives at /conversation/new with no turns yet and waits for
+                // bootstrap to bind the project before it can fire, so the
+                // mascot + suggestions would flash in the gap — on a page the
+                // user reached by SENDING something, which reads as the message
+                // having been dropped.
+                showWelcome={id === NEW_SESSION_ID && !hasPendingProjectSend}
                 startingRuntime={startingRuntime}
               />
             </div>
