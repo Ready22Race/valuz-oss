@@ -4438,6 +4438,20 @@ export const ConversationPage = () => {
     }
     try {
       const session = await ensureSession();
+      // Protect the optimistic turn we just painted from the landing refresh.
+      //
+      // ``refreshEventsInner`` clears ``pendingUserMessage`` for any session it
+      // is asked to load unless that session owns the pending, and bootstrap
+      // runs it the moment we promote to /conversation/{id}. A plain 新对话
+      // escapes it through bootstrap's promote fast-path; the project-detail
+      // handoff waits for the project binding first, which shifts the timing
+      // enough to miss that path — and the pending was wiped a beat after it
+      // was set, taking the runtime-startup header down with it (the label
+      // vanished and the row fell through to "已处理").
+      //
+      // Claiming the freshly minted id is what makes the guard recognise it.
+      // The claim is released by the ``message.user`` echo, like any other.
+      handoffSessionIdRef.current = session.id;
       if (!session?.id) throw new Error("Failed to create session.");
       // Land on the real session URL on SEND. ``ensureSession`` navigates
       // inline when it mints a brand-new session (no prior attach), but when
