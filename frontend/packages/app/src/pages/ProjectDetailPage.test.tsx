@@ -604,12 +604,23 @@ describe("ProjectDetailPage auto-refresh wiring", () => {
 
     const [path, options] = navigate.mock.calls.at(-1) as unknown as [
       string,
-      { state?: { projectSend?: { text?: string } } },
+      { state?: { projectSend?: Record<string, unknown> } },
     ];
     expect(path).toContain("/conversation/new");
     expect(path).toContain("project=A");
     expect(path).toContain("agent=lead-agent");
     expect(options?.state?.projectSend?.text).toBe("你好");
+    // Everything else the composer holds must ride along. The conversation
+    // page has its own state under most of these names, so an omission is
+    // silent: it mints the session with that page's defaults instead of what
+    // the user picked here. Execution location travels as an origin
+    // observation because that is what routes the create.
+    const sent = options?.state?.projectSend as Record<string, unknown>;
+    expect(sent.projectId).toBe("A");
+    expect(sent.execOrigin).toBeDefined();
+    expect("permissionMode" in sent).toBe(true);
+    expect("providerId" in sent).toBe(true);
+    expect("modelId" in sent).toBe(true);
   });
 
   it("auto-refresh adds a newly-appearing task without duplicating existing rows", async () => {

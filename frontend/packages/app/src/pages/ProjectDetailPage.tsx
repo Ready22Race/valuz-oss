@@ -1215,6 +1215,17 @@ export const ProjectDetailPage = () => {
           projectSend: {
             text,
             sentAt: Date.now(),
+            // Every choice this composer holds. The conversation page has its
+            // own state under most of these names, so anything omitted here is
+            // not an error — it silently mints the session with that page's
+            // defaults instead of what the user picked.
+            permissionMode: selectedPermissionMode,
+            providerId: selectedProviderId,
+            modelId: selectedModelId,
+            // Execution location (本地 / 云端服务): carried as an origin
+            // observation because that is what routes the create.
+            projectId: id,
+            execOrigin: project?.exec_origin ?? "local",
             ...(worktreeEnabled
               ? { worktree: worktreeName ? { name: worktreeName } : {} }
               : {}),
