@@ -1383,8 +1383,16 @@ export const ConversationPage = () => {
   // ``history.state`` across a reload, so without the seen-set a refresh would
   // resurrect a bubble for a turn that has long since landed in history.
   const consumedHandoffSessionIdsRef = useRef<Set<string>>(new Set());
-  /** Oldest a ``handoff`` may be and still be the live one. See its use. */
+  /** Oldest a handoff may be and still be the live one. See its use. */
   const HANDOFF_MAX_AGE_MS = 30_000;
+  // Session-creation options the project-detail composer owns and this page
+  // otherwise knows nothing about. Read by ``ensureSession`` while it mints
+  // the handed-over session, so a project chat that asked for worktree
+  // isolation still gets it. A ref, not state: ``ensureSession`` needs the
+  // value in the same tick the send starts, before any re-render.
+  const projectSendHandoffRef = useRef<{
+    worktree?: { name?: string };
+  } | null>(null);
   // Set while a handed-over pending is live, and read by ``refreshEventsInner``
   // so its unconditional "switching sessions invalidates the pending" clear
   // does not wipe a pending that belongs to the session being loaded. Bootstrap
@@ -3633,6 +3641,13 @@ export const ConversationPage = () => {
                 : undefined,
             permission_mode: selectedPermissionMode,
             effort: selectedEffort,
+            // Worktree isolation is picked on the project-detail composer and
+            // frozen into the session at creation. It rides along when that
+            // page hands its send over instead of minting the session itself,
+            // so the handed-over path produces the same session it used to.
+            ...(projectSendHandoffRef.current?.worktree
+              ? { worktree: projectSendHandoffRef.current.worktree }
+              : {}),
           },
           createBaseUrl ? { baseUrl: createBaseUrl } : undefined,
         );
@@ -4340,10 +4355,14 @@ export const ConversationPage = () => {
 
   // The actual send. Attachments are uploaded on attach, so this never
   // uploads — it just mints/reuses the session and posts the message.
-  const performSend = async () => {
+  const performSend = async (overrideText?: string) => {
+    // ``overrideText`` is the project-detail handoff: that page navigates here
+    // before any session exists and lets this page mint + send, so its draft
+    // arrives out of band rather than through the composer's state.
+    const source = (overrideText ?? draft).trim();
     // Re-entrancy guard on the derived ``isBusy`` (not raw ``sending``): a
     // stuck ``sending`` on a reconciled-idle session must not swallow the send.
-    if (!draft.trim() || isBusy) return;
+    if (!source || isBusy) return;
     // Skill-creator binds an agent (its create flow needs one) — nudge if none.
     // A normal new 临时对话 may now be agentless (a quick chat on the default
     // model), so it sends without an agent pick.
@@ -4357,7 +4376,7 @@ export const ConversationPage = () => {
     // Composer serializes its skill chips into the controlled value.
     // Don't prepend ``selectedComposerSkill`` again or the message
     // ships with ``/skill /skill ...``.
-    const text = draft.trim();
+    const text = source;
     // Optimistic UI: clear the input and surface the message + a
     // "thinking" hint immediately so the user gets sub-frame feedback,
     // even while ensureSession + uploads + POST /messages are still
@@ -4758,6 +4777,52 @@ export const ConversationPage = () => {
     }
     void performSend();
   };
+
+  // Project-detail send handoff, draft-first form.
+  //
+  // That page used to await ``sessionsApi.create`` before it could navigate,
+  // so a cloud project froze its composer for the whole round trip with no
+  // feedback. 新对话 never had that problem because the user is ALREADY on
+  // this page: ``performSend`` paints the optimistic turn first and mints the
+  // session behind it. The project page now navigates to ``/conversation/new``
+  // with nothing but the draft, which puts both entries on that same path.
+  //
+  // Placed after ``performSend`` so the reference is not a forward one.
+  const consumedProjectSendRef = useRef(false);
+  useEffect(() => {
+    if (id !== NEW_SESSION_ID) return;
+    if (consumedProjectSendRef.current) return;
+    const send = (
+      location.state as {
+        projectSend?: {
+          text?: string;
+          sentAt?: number;
+          worktree?: { name?: string };
+        };
+      } | null
+    )?.projectSend;
+    const text = send?.text?.trim();
+    if (!text) return;
+    // Same reasoning as the session-scoped handoff: the hash router restores
+    // ``history.state`` across a reload, and a ref cannot outlive one. The
+    // state is dropped from history below; this bounds the window before that
+    // lands, so a reload can never re-fire the send.
+    if (Date.now() - (send?.sentAt ?? 0) > HANDOFF_MAX_AGE_MS) return;
+    consumedProjectSendRef.current = true;
+    projectSendHandoffRef.current = send?.worktree
+      ? { worktree: send.worktree }
+      : null;
+    navigate(location.pathname + location.search, {
+      replace: true,
+      state: null,
+    });
+    void performSend(text);
+    // ``performSend`` is a plain function, so it changes identity every render;
+    // listing it would re-run this effect on every frame. ``consumedProjectSendRef``
+    // already makes re-entry impossible, and the effect only ever needs the
+    // definition current at the moment the handoff lands.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, location.state, location.pathname, location.search, navigate]);
 
   const handleInterrupt = async () => {
     const sessionId = selectedSessionId;
