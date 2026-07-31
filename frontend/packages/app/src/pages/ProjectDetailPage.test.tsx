@@ -557,12 +557,12 @@ describe("ProjectDetailPage auto-refresh wiring", () => {
     );
   });
 
-  it("navigates as soon as the session exists, before the send round-trip", async () => {
-    // The cloud round-trip used to run BEFORE the navigation, so the user sat
-    // on a composer that looked frozen for its whole duration and then landed
-    // on a blank conversation (the kernel had not echoed ``message.user``
-    // yet). Session creation still has to happen here — this page owns the
-    // worktree / permission / agent picks — but nothing after it does.
+  it("hands the draft to /conversation/new without minting a session first", async () => {
+    // The composer used to await ``sessionsApi.create`` before it could
+    // navigate, so a cloud project froze for the whole round trip. 新对话
+    // never had that problem because the user is already on the conversation
+    // page, which paints the optimistic turn before minting. Both entries now
+    // take that same path, so nothing is awaited here at all.
     h.sendOrder = [];
     h.members = [
       {
@@ -598,16 +598,18 @@ describe("ProjectDetailPage auto-refresh wiring", () => {
     });
     fireEvent.click(screen.getByTestId("composer-send"));
 
-    await waitFor(() => expect(h.sendOrder).toContain("send"));
-    expect(h.sendOrder).toEqual(["navigate", "send"]);
+    await waitFor(() => expect(h.sendOrder).toContain("navigate"));
+    // No session was created and no message was posted from this page.
+    expect(h.sendOrder).toEqual(["navigate"]);
 
-    // …and the draft rides along so the conversation page can show the turn
-    // immediately instead of waiting for the echo.
-    const [, options] = navigate.mock.calls.at(-1) as unknown as [
+    const [path, options] = navigate.mock.calls.at(-1) as unknown as [
       string,
-      { state?: { handoff?: { text?: string } } },
+      { state?: { projectSend?: { text?: string } } },
     ];
-    expect(options?.state?.handoff?.text).toBe("你好");
+    expect(path).toContain("/conversation/new");
+    expect(path).toContain("project=A");
+    expect(path).toContain("agent=lead-agent");
+    expect(options?.state?.projectSend?.text).toBe("你好");
   });
 
   it("auto-refresh adds a newly-appearing task without duplicating existing rows", async () => {

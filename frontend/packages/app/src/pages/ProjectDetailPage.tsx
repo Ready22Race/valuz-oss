@@ -1196,6 +1196,36 @@ export const ProjectDetailPage = () => {
   const performChatSend = async () => {
     const text = composerValue.trim();
     if (!text || sending) return;
+    // Draft-first: with no session minted yet there is nothing to wait for.
+    // Hand the draft to /conversation/new and let that page paint the
+    // optimistic turn and mint the session behind it, exactly as 新对话 does.
+    // Awaiting ``ensureChatSession`` here is what still froze this composer
+    // for a whole cloud round trip after the send itself was moved off it.
+    //
+    // Worktree rides along because ``ensureSession`` on that page has no other
+    // way to know about it; agent and project go in the URL, which is the
+    // shape /conversation/new already accepts.
+    if (!chatSessionId) {
+      setComposerValue("");
+      markPendingConsumed();
+      const params = new URLSearchParams({ project: id });
+      if (selectedAgentSlug) params.set("agent", selectedAgentSlug);
+      navigate(`/conversation/new?${params.toString()}`, {
+        state: {
+          projectSend: {
+            text,
+            sentAt: Date.now(),
+            ...(worktreeEnabled
+              ? { worktree: worktreeName ? { name: worktreeName } : {} }
+              : {}),
+          },
+        },
+      });
+      return;
+    }
+    // A session already exists — attachments were uploaded, which mints it
+    // early. Send into it from here and hand the conversation page only the
+    // optimistic turn.
     setSending(true);
     try {
       const session = await ensureChatSession();
