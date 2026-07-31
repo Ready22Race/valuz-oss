@@ -2399,6 +2399,8 @@ export type KnownI18nKey =
   | "ui.citation.integrityDegraded"
   | "ui.citation.noReadableDocument"
   | "ui.citation.openSource"
+  | "ui.citation.qualityDegraded"
+  | "ui.citation.qualityUnverified"
   | "ui.citation.sources"
   | "ui.citation.unavailable"
   | "ui.deleteConfirm.description"

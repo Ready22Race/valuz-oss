@@ -741,6 +741,27 @@ export const MarkdownContent = memo(function MarkdownContent({
           <span>{t("ui.citation.integrityDegraded")}</span>
         </div>
       ) : null}
+      {citationBundle?.integrity?.status !== "degraded" &&
+      citationBundle?.quality?.status !== undefined &&
+      citationBundle.quality.status !== "passed" ? (
+        <div
+          role="status"
+          data-citation-quality-warning={citationBundle.quality.status}
+          className="mt-2 flex items-start gap-1.5 rounded-md border border-warning/30 bg-warning-light px-2.5 py-2 text-xs leading-5 text-warning-text"
+        >
+          <AlertTriangle
+            className="mt-0.5 h-3.5 w-3.5 shrink-0"
+            aria-hidden="true"
+          />
+          <span>
+            {t(
+              citationBundle.quality.status === "unverified"
+                ? "ui.citation.qualityUnverified"
+                : "ui.citation.qualityDegraded",
+            )}
+          </span>
+        </div>
+      ) : null}
       <CitationSourceCards
         content={content}
         citationBundle={citationBundle}

@@ -391,4 +391,53 @@ describe("MarkdownContent citations", () => {
       ),
     ).not.toBeNull();
   });
+
+  it("surfaces the edition quality gate when base integrity passed", () => {
+    render(
+      <MarkdownContent
+        content="Revenue was 100 USD [source](citation://cit_first)."
+        citationBundle={{
+          ...CITATIONS,
+          integrity: {
+            status: "repaired",
+            unknownCitationIds: [],
+            unusedCitationIds: [],
+            missingLocatorCitationIds: [],
+            repairAttempts: 1,
+            policyRevision: "citation-v1",
+          },
+          quality: {
+            policyId: "finance",
+            policyRevision: "finance-citation-policy-v1",
+            mode: "strict-domain",
+            status: "degraded",
+            publishStatus: "draft-only",
+            layers: { L4: "degraded" },
+            issues: [
+              {
+                code: "numeric_claim_without_citation",
+                layer: "L4",
+                severity: "degraded",
+              },
+            ],
+            metrics: {
+              citationCount: 1,
+              unsourcedClaimCount: 1,
+              unverifiedClaimCount: 0,
+              tierCounts: { T1: 1 },
+            },
+          },
+        }}
+      />,
+    );
+
+    expect(
+      document.querySelector('[data-citation-quality-warning="degraded"]'),
+    ).not.toBeNull();
+    expect(
+      screen.getByText(
+        /some claims did not pass citation quality checks|部分内容未通过引用质量校验/i,
+      ),
+    ).not.toBeNull();
+  });
 });

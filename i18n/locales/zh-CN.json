@@ -2000,6 +2000,8 @@
       "integrityDegraded": "部分引用未能通过验证，请谨慎使用这条回答。",
       "noReadableDocument": "此来源没有可预览的原文，可返回聊天查看来源信息。",
       "openSource": "打开原文",
+      "qualityDegraded": "部分内容未通过引用质量校验，请谨慎使用这条回答。",
+      "qualityUnverified": "部分引用来源相互冲突或尚未核验，请谨慎使用这条回答。",
       "sources": "来源",
       "unavailable": "引用不可用"
     },

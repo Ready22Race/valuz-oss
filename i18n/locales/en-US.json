@@ -2000,6 +2000,8 @@
       "integrityDegraded": "Some citations could not be verified. Treat this answer with caution.",
       "noReadableDocument": "This source has no previewable document. Return to the chat to review its source details.",
       "openSource": "Open source",
+      "qualityDegraded": "Some claims did not pass citation quality checks. Treat this answer with caution.",
+      "qualityUnverified": "Some sources conflict or remain unverified. Treat this answer with caution.",
       "sources": "Sources",
       "unavailable": "Citation unavailable"
     },
