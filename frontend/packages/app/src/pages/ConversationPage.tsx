@@ -1392,6 +1392,9 @@ export const ConversationPage = () => {
   // value in the same tick the send starts, before any re-render.
   const projectSendHandoffRef = useRef<{
     worktree?: { name?: string };
+    permissionMode?: typeof selectedPermissionMode;
+    providerId?: string | null;
+    modelId?: string | null;
   } | null>(null);
   // Set while a handed-over pending is live, and read by ``refreshEventsInner``
   // so its unconditional "switching sessions invalidates the pending" clear
@@ -3639,14 +3642,27 @@ export const ConversationPage = () => {
               !remoteCreate && selectedMcpSlugs.length > 0
                 ? selectedMcpSlugs
                 : undefined,
-            permission_mode: selectedPermissionMode,
+            permission_mode:
+              projectSendHandoffRef.current?.permissionMode ??
+              selectedPermissionMode,
             effort: selectedEffort,
-            // Worktree isolation is picked on the project-detail composer and
-            // frozen into the session at creation. It rides along when that
-            // page hands its send over instead of minting the session itself,
-            // so the handed-over path produces the same session it used to.
+            // Everything the project-detail composer had picked and this page
+            // would otherwise answer with its OWN defaults. Worktree is the
+            // obvious one — this page has no such field at all — but the
+            // dangerous ones are the rest: they exist on both pages under the
+            // same names, so dropping them raises no error, it just silently
+            // mints the session with the wrong provider / model / permission.
+            // (Execution location is carried too, but through
+            // ``recordEntityOrigin`` where the handoff is consumed, because
+            // that is what ``getEntityOrigin`` / ``resolveApiBase`` read.)
             ...(projectSendHandoffRef.current?.worktree
               ? { worktree: projectSendHandoffRef.current.worktree }
+              : {}),
+            ...(projectSendHandoffRef.current?.providerId
+              ? { provider_id: projectSendHandoffRef.current.providerId }
+              : {}),
+            ...(projectSendHandoffRef.current?.modelId
+              ? { model_id: projectSendHandoffRef.current.modelId }
               : {}),
           },
           createBaseUrl ? { baseUrl: createBaseUrl } : undefined,
@@ -4798,6 +4814,11 @@ export const ConversationPage = () => {
           text?: string;
           sentAt?: number;
           worktree?: { name?: string };
+          permissionMode?: typeof selectedPermissionMode;
+          providerId?: string | null;
+          modelId?: string | null;
+          projectId?: string;
+          execOrigin?: string;
         };
       } | null
     )?.projectSend;
@@ -4809,9 +4830,20 @@ export const ConversationPage = () => {
     // lands, so a reload can never re-fire the send.
     if (Date.now() - (send?.sentAt ?? 0) > HANDOFF_MAX_AGE_MS) return;
     consumedProjectSendRef.current = true;
-    projectSendHandoffRef.current = send?.worktree
-      ? { worktree: send.worktree }
-      : null;
+    projectSendHandoffRef.current = {
+      ...(send?.worktree ? { worktree: send.worktree } : {}),
+      ...(send?.permissionMode ? { permissionMode: send.permissionMode } : {}),
+      ...(send?.providerId ? { providerId: send.providerId } : {}),
+      ...(send?.modelId ? { modelId: send.modelId } : {}),
+    };
+    // Execution location does not travel as a create field: ``ensureSession``
+    // resolves a project conversation's target through ``getEntityOrigin`` /
+    // ``resolveApiBase``. Seeding the observation is therefore what actually
+    // routes the create at the right backend — without it a 云端 project
+    // silently mints its session on the default one.
+    if (send?.projectId && send?.execOrigin) {
+      recordEntityOrigin(send.projectId, send.execOrigin);
+    }
     navigate(location.pathname + location.search, {
       replace: true,
       state: null,
