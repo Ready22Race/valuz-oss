@@ -192,11 +192,14 @@ const formatRuntimeStarting = (
     { elapsed: formatDuration(elapsedMs) },
   );
 
-/** Upper bound on the Send→runtime-start gap we treat as a real boot rather
- * than clock skew. ``clientSentAtMs`` is a CLIENT stamp and ``userTimestamp``
- * a SERVER one, so the difference is only meaningful while it is small and
- * positive; beyond this the two clocks disagree and the offset is dropped. */
-const MAX_RUNTIME_START_OFFSET_MS = 10 * 60 * 1000;
+/** How long a turn must stay in flight before its header appears at all.
+ *
+ * A local OSS runtime usually has the session created and the turn started
+ * well inside this window, so without the delay the startup label renders for
+ * a few frames and vanishes — worse than never showing it. Anything the user
+ * can actually read takes longer than this; below it the composer's own
+ * loading state is the feedback. */
+const HEADER_REVEAL_DELAY_MS = 500;
 
 const ICON_BY_CATEGORY: Record<ToolCategory, LucideIcon> = {
   search: Globe,
@@ -752,20 +755,6 @@ const TurnRow = memo(
       }
       return max;
     }, [turn.blocks, turn.userTimestamp, turn.endTimestamp]);
-    // How long the runtime took to come up, i.e. Send → the kernel's
-    // ``message.user`` stamp. Every number above is measured from the SERVER
-    // stamp, so without folding this back in the header would drop by exactly
-    // the boot time the moment the turn settles — the same jump the live
-    // counter used to make at handover, just moved to the other end of the
-    // turn. Zero for history-loaded turns and whenever the two clocks
-    // disagree (see ``MAX_RUNTIME_START_OFFSET_MS``).
-    const runtimeStartOffsetMs = useMemo(() => {
-      if (turn.clientSentAtMs === undefined || turn.userTimestamp === undefined)
-        return 0;
-      const gap = turn.userTimestamp - turn.clientSentAtMs;
-      return gap > 0 && gap <= MAX_RUNTIME_START_OFFSET_MS ? gap : 0;
-    }, [turn.clientSentAtMs, turn.userTimestamp]);
-    const settledElapsedMs = totalElapsedMs + runtimeStartOffsetMs;
     const hasProcess = useMemo(() => {
       return turn.blocks.some(
         (b) => b.kind === "thinking" || b.kind === "tool",
@@ -832,19 +821,10 @@ const TurnRow = memo(
     }, [inFlight]);
     const headerFoldable = !inFlight && hasProcess;
 
-    // While streaming, tick a 1Hz wall-clock interval so "已处理 X 秒"
-    // advances every second even between SSE event arrivals (otherwise
-    // the displayed elapsed only updates when a new tool/thinking block
-    // lands, which feels stuck during e.g. a long Bash run). Computes
-    // ``Date.now() - <turn start>`` so the displayed value tracks real time,
-    // not the latest block's stamp. Once the turn settles we freeze on
-    // ``settledElapsedMs`` (the canonical max from blocks, plus the boot
-    // window those block stamps don't cover).
-    //
-    // The start is ``clientSentAtMs`` when the host page supplies it —
-    // ``userTimestamp`` is stamped when the RUNTIME started, so anchoring on
-    // it restarts the counter from zero at the optimistic → real handover,
-    // which reads as the turn having just begun after a long sandbox boot.
+    // While streaming, tick a 1Hz wall-clock interval so the header advances
+    // every second even between SSE event arrivals (otherwise the displayed
+    // elapsed only updates when a new tool/thinking block lands, which feels
+    // stuck during e.g. a long Bash run).
     const [tick, setTick] = useState(0);
     useEffect(() => {
       if (!inFlight) return;
@@ -853,36 +833,70 @@ const TurnRow = memo(
       }, 1000);
       return () => window.clearInterval(interval);
     }, [inFlight]);
-    const displayedElapsedMs = useMemo(() => {
-      // ``tick`` only matters when streaming — referenced so React
-      // re-evaluates this memo each second while inFlight.
+
+    // TWO counters, deliberately not one.
+    //
+    // The startup phase is measured on the CLIENT clock (Send → now) and the
+    // processing phase on the SERVER one (the kernel's ``message.user`` stamp
+    // → now). Splitting them is what keeps a live turn and a reloaded one
+    // agreeing: ``clientSentAtMs`` is React state, so it is gone after a
+    // refresh, and a single counter spanning both phases would therefore show
+    // the startup window before a refresh and hide it after — a gap of tens of
+    // seconds on a cold sandbox. Restarting at zero when the runtime reports
+    // in also makes "已处理" mean what it says, and it removes the only place
+    // the two clocks were ever subtracted from each other.
+    const startupElapsedMs = useMemo(() => {
       void tick;
-      if (!inFlight) return settledElapsedMs;
-      const startedAt = turn.clientSentAtMs ?? turn.userTimestamp;
-      if (!startedAt) return settledElapsedMs;
-      const startMs = new Date(startedAt).getTime();
-      if (Number.isNaN(startMs)) return settledElapsedMs;
-      const live = Date.now() - startMs;
-      // Guard against clock skew: never go backwards from the
-      // canonical block-derived elapsed. If for some reason ``Date.now``
-      // < block stamp (rare wall-clock skew), keep the higher number.
-      return Math.max(live, settledElapsedMs);
-    }, [
-      tick,
-      inFlight,
-      turn.clientSentAtMs,
-      turn.userTimestamp,
-      settledElapsedMs,
-    ]);
+      if (turn.clientSentAtMs === undefined) return 0;
+      return Math.max(0, Date.now() - turn.clientSentAtMs);
+    }, [tick, turn.clientSentAtMs]);
+    const processedElapsedMs = useMemo(() => {
+      void tick;
+      if (!inFlight || !turn.userTimestamp) return totalElapsedMs;
+      const startMs = new Date(turn.userTimestamp).getTime();
+      if (Number.isNaN(startMs)) return totalElapsedMs;
+      // Never go backwards from the canonical block-derived elapsed: on rare
+      // wall-clock skew ``Date.now()`` can sit below the latest block stamp.
+      return Math.max(Date.now() - startMs, totalElapsedMs);
+    }, [tick, inFlight, turn.userTimestamp, totalElapsedMs]);
+
+    // Hold the header back for the first {@link HEADER_REVEAL_DELAY_MS} of a
+    // turn so a fast local runtime doesn't flash "正在启动本地运行环境" for a
+    // few frames on its way to "已处理". The composer's own loading state
+    // covers the gap. Only in-flight turns the host page stamped are held —
+    // history has no Send time and renders immediately.
+    const [headerRevealed, setHeaderRevealed] = useState(
+      () => turn.clientSentAtMs === undefined,
+    );
+    useEffect(() => {
+      if (!inFlight || turn.clientSentAtMs === undefined) {
+        setHeaderRevealed(true);
+        return;
+      }
+      const remaining =
+        HEADER_REVEAL_DELAY_MS - (Date.now() - turn.clientSentAtMs);
+      if (remaining <= 0) {
+        setHeaderRevealed(true);
+        return;
+      }
+      const handle = window.setTimeout(
+        () => setHeaderRevealed(true),
+        remaining,
+      );
+      return () => window.clearTimeout(handle);
+    }, [inFlight, turn.clientSentAtMs]);
+
     // Phase copy. Before the runtime reports in there is nothing being
-    // "processed" yet, so the header names what IS happening (a local or
-    // remote runtime coming up) while the same counter keeps running
-    // underneath it. ``startingRuntime`` is null/undefined once the host page
-    // sees the kernel's ``message.user`` echo — and for every settled turn.
-    const headerLabel =
-      inFlight && startingRuntime
-        ? formatRuntimeStarting(startingRuntime, displayedElapsedMs)
-        : formatTurnElapsed(displayedElapsedMs);
+    // "processed" yet, so the header names what IS happening (a local or cloud
+    // runtime coming up) on its own counter. ``startingRuntime`` is
+    // null/undefined once the host page sees the kernel's ``message.user``
+    // echo — and for every settled turn.
+    const isStartingUp = inFlight && startingRuntime != null;
+    const headerLabel = !headerRevealed
+      ? null
+      : isStartingUp
+        ? formatRuntimeStarting(startingRuntime, startupElapsedMs)
+        : formatTurnElapsed(processedElapsedMs);
     return (
       <div data-conversation-turn className="space-y-[26px]">
         {turn.userText || (turn.attachments && turn.attachments.length > 0) ? (
@@ -923,28 +937,34 @@ const TurnRow = memo(
                 Divider line removed: it visually competed with the ``<hr>``
                 markdown the agent often emits at the top of the final
                 answer. The grey chevron strip alone is enough boundary. */}
-            <div className="font-sans text-[13px] leading-[1.6] text-[#6e7481]">
-              {headerFoldable ? (
-                <button
-                  type="button"
-                  onClick={() => setTurnFolded((value) => !value)}
-                  className="inline-flex items-center py-1 text-left text-[13px] font-normal text-[#6e7481] transition-colors hover:text-[#525860]"
-                  aria-expanded={!turnFolded}
-                >
-                  <span>{headerLabel}</span>
-                  <ChevronRight
-                    className={`ml-1 h-3.5 w-3.5 shrink-0 transition-transform ${
-                      !turnFolded ? "rotate-90" : ""
-                    }`}
-                    aria-hidden="true"
-                  />
-                </button>
-              ) : (
-                <div className="inline-flex items-center py-1 text-[13px] font-normal text-[#6e7481]">
-                  <span>{headerLabel}</span>
-                </div>
-              )}
-            </div>
+            {/* Omitted entirely (not rendered empty) for the first
+                ``HEADER_REVEAL_DELAY_MS`` of a turn: an empty wrapper would
+                still take a ``space-y-3`` gap and the row would visibly shift
+                when the label appeared. */}
+            {headerLabel === null ? null : (
+              <div className="font-sans text-[13px] leading-[1.6] text-[#6e7481]">
+                {headerFoldable ? (
+                  <button
+                    type="button"
+                    onClick={() => setTurnFolded((value) => !value)}
+                    className="inline-flex items-center py-1 text-left text-[13px] font-normal text-[#6e7481] transition-colors hover:text-[#525860]"
+                    aria-expanded={!turnFolded}
+                  >
+                    <span>{headerLabel}</span>
+                    <ChevronRight
+                      className={`ml-1 h-3.5 w-3.5 shrink-0 transition-transform ${
+                        !turnFolded ? "rotate-90" : ""
+                      }`}
+                      aria-hidden="true"
+                    />
+                  </button>
+                ) : (
+                  <div className="inline-flex items-center py-1 text-[13px] font-normal text-[#6e7481]">
+                    <span>{headerLabel}</span>
+                  </div>
+                )}
+              </div>
+            )}
 
             {displayBlocks.map((block, blockIndex) => {
               const isLastBlock = blockIndex === displayBlocks.length - 1;
