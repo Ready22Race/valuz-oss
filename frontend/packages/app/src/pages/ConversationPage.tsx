@@ -125,7 +125,11 @@ import {
   useIncrementalTurns,
   type PlanSubtask,
 } from "@valuz/core";
-import { BackgroundTaskStrip, ConversationTurnList } from "@valuz/ui";
+import {
+  BackgroundTaskStrip,
+  ConversationTurnList,
+  type RuntimeStartLocation,
+} from "@valuz/ui";
 import { usePlatform } from "@valuz/app/platform";
 import {
   useHasUsableChannel,
@@ -883,6 +887,21 @@ export const ConversationPage = () => {
      */
     sentAt: number; // Unix epoch ms (UTC)
   } | null>(null);
+  // Wall-clock anchor for the latest send, deliberately OUTLIVING
+  // ``pendingUserMessage``: that one is cleared by the kernel's
+  // ``message.user`` echo, and the echo is exactly the moment the anchor
+  // becomes load-bearing. The real turn's ``userTimestamp`` is stamped when
+  // the RUNTIME started — after local kernel warm-up or, in sandboxed / cloud
+  // execution, after the whole instance boots — so handing the turn header
+  // that stamp restarts its "已处理 X 秒" counter from zero mid-turn. Carrying
+  // the send time onto the real turn as ``clientSentAtMs`` keeps ONE counter
+  // across the optimistic → real handover. Cleared only where the send is
+  // genuinely void: a failed send, or a session switch.
+  const [turnStartAnchor, setTurnStartAnchor] = useState<{
+    text: string;
+    fromSeq: number;
+    sentAt: number; // Unix epoch ms (UTC), client clock
+  } | null>(null);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   // Session input queue (docs/design/session-input-queue.md): follow-up inputs
@@ -1583,41 +1602,49 @@ export const ConversationPage = () => {
   // last turn — placing the optimistic one at the end gets that for
   // free without touching the renderer.
   const effectiveTurns = useMemo(() => {
-    if (!pendingUserMessage) return turns;
+    const lastTurn = turns[turns.length - 1];
+    const lastTurnSeq = lastTurn?.userMessageSeq ?? 0;
+    // "Is the latest real turn the kernel's echo of send S?" — two signals,
+    // because the echo can arrive from either seq space: a HISTORY row
+    // satisfies ``seq > fromSeq`` (fromSeq is the history cursor at send
+    // time); a LIVE frame carries a kernel-local seq that can't be compared
+    // to fromSeq, so fall back to the store-independent event timestamp vs
+    // the moment of the send. A previous turn that happens to share the exact
+    // same text fails both (its history seq <= fromSeq; its timestamp <
+    // sentAt), which is what keeps re-sending identical text from collapsing
+    // onto the older turn.
+    const lastTurnIsEchoOf = (send: {
+      text: string;
+      fromSeq: number;
+      sentAt: number;
+    }): boolean =>
+      lastTurn !== undefined &&
+      lastTurn.userText === send.text &&
+      (lastTurnSeq > send.fromSeq ||
+        (lastTurn.userTimestamp !== undefined &&
+          lastTurn.userTimestamp >= send.sentAt));
+
+    // Re-stamp the echoed turn with the moment the user pressed Send, so the
+    // turn header's elapsed counter spans the runtime-startup window instead
+    // of restarting at the kernel's stamp (see ``turnStartAnchor``).
+    const base =
+      lastTurn && turnStartAnchor && lastTurnIsEchoOf(turnStartAnchor)
+        ? [
+            ...turns.slice(0, -1),
+            { ...lastTurn, clientSentAtMs: turnStartAnchor.sentAt },
+          ]
+        : turns;
+
+    if (!pendingUserMessage) return base;
     // Defensive dedup: if the kernel's ``message.user`` echo has already
     // been folded into ``turns`` but ``setPendingUserMessage(null)`` hasn't
     // landed yet (race between two batched setStates inside the SSE
     // callback), the latest real turn carries the same userText as the
     // optimistic — drop the optimistic so the user doesn't see two
     // identical bubbles in the same render.
-    //
-    // The ``fromSeq`` guard makes this dedup specific to THIS pending
-    // send: only collapse when the latest turn was built from an event
-    // with a seq STRICTLY LATER than the moment we set the pending. A
-    // previous turn that happens to share the exact same text was
-    // born from an event with seq <= fromSeq, so it stays + the new
-    // optimistic still appends — otherwise re-sending identical text
-    // would silently land snap-to-top on the older turn.
-    const lastTurn = turns[turns.length - 1];
-    const lastTurnSeq = lastTurn?.userMessageSeq ?? 0;
-    // Two "the echo is newer than this send" signals, because the echo can
-    // arrive from either seq space: a HISTORY row satisfies
-    // ``seq > fromSeq`` (fromSeq is the history cursor at send time); a
-    // LIVE frame carries a kernel-local seq that can't be compared to
-    // fromSeq, so fall back to the store-independent event timestamp vs
-    // the moment the pending was set. A previous turn with identical text
-    // fails both (its history seq <= fromSeq; its timestamp < sentAt).
-    if (
-      lastTurn &&
-      lastTurn.userText === pendingUserMessage.text &&
-      (lastTurnSeq > pendingUserMessage.fromSeq ||
-        (lastTurn.userTimestamp !== undefined &&
-          lastTurn.userTimestamp >= pendingUserMessage.sentAt))
-    ) {
-      return turns;
-    }
+    if (lastTurnIsEchoOf(pendingUserMessage)) return base;
     return [
-      ...turns,
+      ...base,
       {
         id: "pending-turn",
         userMessageSeq: 0,
@@ -1629,9 +1656,10 @@ export const ConversationPage = () => {
             ? pendingUserMessage.attachments
             : undefined,
         userTimestamp: pendingUserMessage.sentAt,
+        clientSentAtMs: pendingUserMessage.sentAt,
       },
     ];
-  }, [turns, pendingUserMessage]);
+  }, [turns, pendingUserMessage, turnStartAnchor]);
 
   // ── ``submit_skill`` tool_use → submission card wiring ──────────────
   //
@@ -2535,6 +2563,17 @@ export const ConversationPage = () => {
   const providerTarget =
     executionTargets.find((target) => target.id === providerTargetId) ??
     getDefaultExecutionTarget();
+  // Runtime-startup phase for the turn header: set from Send until the kernel
+  // echoes ``message.user`` (which it writes at run() entry, i.e. once the
+  // runtime is actually up). ``pendingUserMessage`` tracks exactly that
+  // window, so it doubles as the phase flag. The location only picks the
+  // wording — OSS registers no execution targets, so ``providerTargetId`` is
+  // undefined there and this always reads "local".
+  const startingRuntime: RuntimeStartLocation | null = pendingUserMessage
+    ? providerTargetId === "cloud"
+      ? "remote"
+      : "local"
+    : null;
   const providerChannelState =
     useComposerProviderChannelState(providerTargetId);
   const providers = providerChannelState.providers;
@@ -2825,8 +2864,11 @@ export const ConversationPage = () => {
       historyHydratedSessionIdRef.current = null;
     }
     // Switching sessions invalidates any optimistic pending message —
-    // it belongs to whatever session was active before, not this one.
+    // it belongs to whatever session was active before, not this one. Same
+    // for the send anchor: another session's turn must not inherit this
+    // session's send time.
     setPendingUserMessage(null);
+    setTurnStartAnchor(null);
     // CRITICAL: clear ``events`` synchronously BEFORE awaiting the
     // network fetch. The URL-change handler updates ``selectedSessionId``
     // and then calls this function, but ``selectedSessionId`` and
@@ -4233,12 +4275,14 @@ export const ConversationPage = () => {
       .map((a) => ({ name: a.filename, size: a.size_bytes }));
     pinNextTurnToTopRef.current = true;
     keepCurrentTurnAtTopRef.current = true;
+    const sentAt = Date.now();
     setPendingUserMessage({
       text,
       attachments: queuedAttachmentMeta,
       fromSeq: historyCursorRef.current,
-      sentAt: Date.now(),
+      sentAt,
     });
+    setTurnStartAnchor({ text, fromSeq: historyCursorRef.current, sentAt });
     setSending(true);
     // Optimistically mark the active session running so the derived loading flag
     // shows immediately (an existing session re-send would otherwise read its
@@ -4387,8 +4431,10 @@ export const ConversationPage = () => {
       keepCurrentTurnAtTopRef.current = false;
       // Optimistic turn never got a real ``message.user`` echo because
       // the send failed — drop it so the user can retry without a
-      // phantom card lingering. The session-lifetime stream stays up.
+      // phantom card lingering. The session-lifetime stream stays up. The
+      // anchor goes with it: there is no turn for it to stamp.
       setPendingUserMessage(null);
+      setTurnStartAnchor(null);
       // The optimistic ``running`` status write above must be reconciled:
       // under the derived busy (``sendPending || status === "running"``) a
       // stale optimistic ``running`` would pin the loading state forever.
@@ -5991,6 +6037,7 @@ export const ConversationPage = () => {
                 // ``selectedSessionId`` (which briefly nulls mid-navigation), so
                 // the mascot + suggestions don't flash before history lands.
                 showWelcome={id === NEW_SESSION_ID}
+                startingRuntime={startingRuntime}
               />
             </div>
           </>
