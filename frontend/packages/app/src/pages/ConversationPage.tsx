@@ -4807,15 +4807,25 @@ export const ConversationPage = () => {
   // Placed after ``performSend`` so the reference is not a forward one.
   const consumedProjectSendRef = useRef(false);
   // True from the moment this page is entered by a project-detail send until
-  // that send actually fires (the route state is dropped as it is consumed).
-  // Suppresses the new-chat welcome for exactly that window.
-  const hasPendingProjectSend = Boolean(
-    (
-      location.state as {
-        projectSend?: { text?: string };
-      } | null
-    )?.projectSend?.text?.trim(),
-  );
+  // the send has produced its optimistic turn. Suppresses the new-chat
+  // welcome for exactly that window.
+  //
+  // Two sources on purpose. The route state covers arrival and the wait for
+  // bootstrap to bind the project; the explicit flag covers the handover
+  // itself, because consuming the handoff CLEARS that state (it has to — a
+  // reload must not replay the send) and the optimistic turn does not exist
+  // yet at that instant. Deriving the flag from the state alone left exactly
+  // one frame where neither held, and the welcome rendered in it.
+  const [projectSendInFlight, setProjectSendInFlight] = useState(false);
+  const hasPendingProjectSend =
+    projectSendInFlight ||
+    Boolean(
+      (
+        location.state as {
+          projectSend?: { text?: string };
+        } | null
+      )?.projectSend?.text?.trim(),
+    );
   useEffect(() => {
     if (id !== NEW_SESSION_ID) return;
     if (consumedProjectSendRef.current) return;
@@ -4881,7 +4891,11 @@ export const ConversationPage = () => {
       replace: true,
       state: null,
     });
-    void performSend(text);
+    // Held until the send settles, so the flag outlives the ``state: null``
+    // navigation above; the ``finally`` also covers a failed send, which
+    // would otherwise suppress the welcome on this page forever.
+    setProjectSendInFlight(true);
+    void performSend(text).finally(() => setProjectSendInFlight(false));
     // ``performSend`` is a plain function, so it changes identity every render;
     // listing it would re-run this effect on every frame. ``consumedProjectSendRef``
     // already makes re-entry impossible, and the effect only ever needs the
