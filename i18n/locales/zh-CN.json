@@ -364,7 +364,7 @@
     "durationMinutes": "{m} 分",
     "durationMinutesSeconds": "{m} 分 {s} 秒",
     "startingLocalRuntime": "正在启动本地运行环境 · {elapsed}",
-    "startingRemoteRuntime": "正在启动远端运行环境 · {elapsed}",
+    "startingCloudRuntime": "正在启动云端运行环境 · {elapsed}",
     "processing": "处理中",
     "ranCommands": "运行了 {count} 个命令",
     "readFiles": "查阅了 {count} 个文件",

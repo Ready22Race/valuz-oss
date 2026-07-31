@@ -722,7 +722,7 @@ export const TaskDetailPage = () => {
   const followUpStartingRuntime: RuntimeStartLocation | null =
     followUp.awaitingRuntime
       ? leadExecOrigin === "cloud"
-        ? "remote"
+        ? "cloud"
         : "local"
       : null;
   // Render the Lead's ``AskUserQuestion`` tool as the interactive question card

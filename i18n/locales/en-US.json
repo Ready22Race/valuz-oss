@@ -364,7 +364,7 @@
     "durationMinutes": "{m}m",
     "durationMinutesSeconds": "{m}m {s}s",
     "startingLocalRuntime": "Starting local runtime · {elapsed}",
-    "startingRemoteRuntime": "Starting remote runtime · {elapsed}",
+    "startingCloudRuntime": "Starting cloud runtime · {elapsed}",
     "processing": "Processing",
     "ranCommands": "Ran {count} commands",
     "readFiles": "Read {count} files",

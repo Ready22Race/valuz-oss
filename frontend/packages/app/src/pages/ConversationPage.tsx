@@ -2571,7 +2571,7 @@ export const ConversationPage = () => {
   // undefined there and this always reads "local".
   const startingRuntime: RuntimeStartLocation | null = pendingUserMessage
     ? providerTargetId === "cloud"
-      ? "remote"
+      ? "cloud"
       : "local"
     : null;
   const providerChannelState =

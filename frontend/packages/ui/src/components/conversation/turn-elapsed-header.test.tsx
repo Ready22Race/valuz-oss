@@ -36,7 +36,7 @@ const NOW_MS = 30_000; // Send → "now"
 
 function renderTurn(
   turn: ConversationTurn,
-  opts: { sending: boolean; startingRuntime?: "local" | "remote" | null },
+  opts: { sending: boolean; startingRuntime?: "local" | "cloud" | null },
 ) {
   const scrollContainerRef = createRef<HTMLDivElement>();
   return render(
@@ -96,9 +96,9 @@ describe("turn header elapsed", () => {
         userTimestamp: T0,
         clientSentAtMs: T0,
       },
-      { sending: true, startingRuntime: "remote" },
+      { sending: true, startingRuntime: "cloud" },
     );
-    expect(screen.getByText("正在启动远端运行环境 · 30 秒")).toBeTruthy();
+    expect(screen.getByText("正在启动云端运行环境 · 30 秒")).toBeTruthy();
 
     // Local execution gets its own wording off the same counter.
     const scrollContainerRef = createRef<HTMLDivElement>();

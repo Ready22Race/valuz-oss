@@ -13,8 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it re-anchored from the client's Send time onto the kernel's `message.user`
   stamp (written once the runtime is up), so it fell back to zero mid-turn and
   dropped again when the turn settled. It is now one continuous counter, and
-  while the runtime is still coming up the header names that instead of claiming
-  to process (#674 @Ready22Race).
+  while the runtime is still coming up the header names that (local or cloud)
+  instead of claiming to process (#674 @Ready22Race).
 - **Task follow-up chat** — the user's message stayed invisible until the kernel
   echoed it back, with no in-flight indicator in between, because the send HTTP
   call returns as soon as the run is scheduled (#674 @Ready22Race).

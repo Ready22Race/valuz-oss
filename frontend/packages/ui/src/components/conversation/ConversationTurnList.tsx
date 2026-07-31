@@ -166,10 +166,17 @@ const formatDuration = (elapsedMs: number | undefined): string => {
       });
 };
 
-/** Where the agent runtime for this turn is coming up. The host page decides
- * (OSS is single-target and always ``local``; a multi-target edition reads the
- * session's execution origin) — the renderer only picks a string. */
-export type RuntimeStartLocation = "local" | "remote";
+/** Where the agent runtime for this turn is coming up — the renderer only
+ * picks a string; the host page decides.
+ *
+ * ``"cloud"`` is unreachable in a plain OSS build: it is derived from the
+ * session's execution origin, and origin comes from the ``entity-origin``
+ * edition seam, which OSS leaves unregistered (see
+ * ``core/src/edition/entity-origin.ts``). Single-backend OSS therefore always
+ * reads ``"local"``; a multi-target edition registers the adapter and this
+ * turns two-valued. The value name matches the target id it comes from
+ * (``"cloud"``), so there is one word for the concept end to end. */
+export type RuntimeStartLocation = "local" | "cloud";
 
 /** Header text for the pre-run phase: the message is sent but the runtime is
  * still coming up, so "已处理" would be a lie. The counter itself keeps
@@ -179,8 +186,8 @@ const formatRuntimeStarting = (
   elapsedMs: number | undefined,
 ): string =>
   _t(
-    (location === "remote"
-      ? "conversation.startingRemoteRuntime"
+    (location === "cloud"
+      ? "conversation.startingCloudRuntime"
       : "conversation.startingLocalRuntime") as Parameters<typeof _t>[0],
     { elapsed: formatDuration(elapsedMs) },
   );
