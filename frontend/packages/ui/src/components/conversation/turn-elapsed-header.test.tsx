@@ -166,6 +166,35 @@ describe("turn header elapsed", () => {
     expect(screen.getByText(/正在启动本地运行环境/)).toBeTruthy();
   });
 
+  it("stops claiming the runtime is starting once the turn has real content", () => {
+    // Regression: the startup label is driven by the host page's pending
+    // send, which used to be released only by the LIVE ``message.user``
+    // handler. When the echo instead arrived in the history refetch that
+    // bootstrap runs on landing, nothing released it — so the header sat on
+    // "正在启动云端运行环境" counting upwards while the agent was already
+    // answering on screen. The host now retires the pending as soon as the
+    // echo is visible; this pins the renderer's half of the contract: with
+    // ``startingRuntime`` cleared, a turn that has content reads as processing.
+    vi.useFakeTimers();
+    vi.setSystemTime(T0 + BOOT_MS + 8_000);
+
+    renderTurn(
+      {
+        id: "turn-1",
+        userMessageSeq: 1,
+        userText: "你好",
+        blocks: [{ kind: "assistant", text: "你好！有什么我可以帮你的吗？" }],
+        failedMessage: null,
+        userTimestamp: T0 + BOOT_MS,
+        clientSentAtMs: T0,
+      },
+      { sending: true, startingRuntime: null },
+    );
+
+    expect(screen.queryByText(/正在启动/)).toBeNull();
+    expect(screen.getByText("已处理 8 秒")).toBeTruthy();
+  });
+
   it("shows a settled turn's header immediately — the delay is for live turns", () => {
     renderTurn(
       {

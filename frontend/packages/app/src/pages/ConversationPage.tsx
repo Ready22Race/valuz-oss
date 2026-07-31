@@ -1702,6 +1702,31 @@ export const ConversationPage = () => {
     ];
   }, [turns, pendingUserMessage, turnStartAnchor]);
 
+  // Retire the optimistic pending once its echo is VISIBLE, whichever path
+  // delivered it.
+  //
+  // Clearing it only from the live SSE handler is not enough: the echo can
+  // just as well arrive in the history refetch bootstrap runs on landing, and
+  // then nothing releases the pending. ``effectiveTurns`` above still dedupes
+  // the bubble, so the transcript looks right — but ``startingRuntime`` is
+  // derived from the pending, so the header stays stuck on "正在启动…运行环境"
+  // for the rest of the turn, counting up while the agent is plainly already
+  // answering. ``refreshEventsInner``'s unconditional clear used to mask this;
+  // the handoff guard added with the project-composer change removed that
+  // accident for exactly the sessions most likely to hit it.
+  useEffect(() => {
+    if (!pendingUserMessage) return;
+    const lastTurn = turns[turns.length - 1];
+    if (!lastTurn || lastTurn.userText !== pendingUserMessage.text) return;
+    const echoed =
+      (lastTurn.userMessageSeq ?? 0) > pendingUserMessage.fromSeq ||
+      (lastTurn.userTimestamp !== undefined &&
+        lastTurn.userTimestamp >= pendingUserMessage.sentAt);
+    if (!echoed) return;
+    setPendingUserMessage(null);
+    handoffSessionIdRef.current = null;
+  }, [turns, pendingUserMessage]);
+
   // ── ``submit_skill`` tool_use → submission card wiring ──────────────
   //
   // The agent calls ``submit_skill`` once a draft is staged and ready
