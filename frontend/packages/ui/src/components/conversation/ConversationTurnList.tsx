@@ -145,6 +145,59 @@ const formatTurnElapsed = (elapsedMs: number | undefined): string => {
       });
 };
 
+/** Bare duration, no leading verb — the ``{elapsed}`` slot of the
+ * runtime-startup labels. Same M/S rounding as {@link formatTurnElapsed} so
+ * the number doesn't change shape when the header flips phase. */
+const formatDuration = (elapsedMs: number | undefined): string => {
+  const totalSec = Math.max(0, Math.round((elapsedMs ?? 0) / 1000));
+  if (totalSec < 60)
+    return _t("conversation.durationSeconds" as Parameters<typeof _t>[0], {
+      count: String(totalSec),
+    });
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return s === 0
+    ? _t("conversation.durationMinutes" as Parameters<typeof _t>[0], {
+        m: String(m),
+      })
+    : _t("conversation.durationMinutesSeconds" as Parameters<typeof _t>[0], {
+        m: String(m),
+        s: String(s),
+      });
+};
+
+/** Where the agent runtime for this turn is coming up — the renderer only
+ * picks a string; the host page decides.
+ *
+ * ``"cloud"`` is unreachable in a plain OSS build: it is derived from the
+ * session's execution origin, and origin comes from the ``entity-origin``
+ * edition seam, which OSS leaves unregistered (see
+ * ``core/src/edition/entity-origin.ts``). Single-backend OSS therefore always
+ * reads ``"local"``; a multi-target edition registers the adapter and this
+ * turns two-valued. The value name matches the target id it comes from
+ * (``"cloud"``), so there is one word for the concept end to end. */
+export type RuntimeStartLocation = "local" | "cloud";
+
+/** Header text for the pre-run phase: the message is sent but the runtime is
+ * still coming up, so "已处理" would be a lie. The counter itself keeps
+ * running — only the verb changes when the runtime reports in. */
+const formatRuntimeStarting = (
+  location: RuntimeStartLocation,
+  elapsedMs: number | undefined,
+): string =>
+  _t(
+    (location === "cloud"
+      ? "conversation.startingCloudRuntime"
+      : "conversation.startingLocalRuntime") as Parameters<typeof _t>[0],
+    { elapsed: formatDuration(elapsedMs) },
+  );
+
+/** Upper bound on the Send→runtime-start gap we treat as a real boot rather
+ * than clock skew. ``clientSentAtMs`` is a CLIENT stamp and ``userTimestamp``
+ * a SERVER one, so the difference is only meaningful while it is small and
+ * positive; beyond this the two clocks disagree and the offset is dropped. */
+const MAX_RUNTIME_START_OFFSET_MS = 10 * 60 * 1000;
+
 const ICON_BY_CATEGORY: Record<ToolCategory, LucideIcon> = {
   search: Globe,
   fetch: Globe,
@@ -633,6 +686,8 @@ interface TurnRowProps {
   /** Predicate + handler for local-path markdown links emitted by an agent. */
   isLocalFileHref?: (href: string) => boolean;
   onLocalFileLinkClick?: (href: string) => void;
+  /** See ``ConversationTurnListProps.startingRuntime``. */
+  startingRuntime?: RuntimeStartLocation | null;
 }
 
 const TurnRow = memo(
@@ -649,6 +704,7 @@ const TurnRow = memo(
     onRevealFile,
     isLocalFileHref,
     onLocalFileLinkClick,
+    startingRuntime,
   }: TurnRowProps) {
     const { t } = useI18n();
     const inFlight = sending && isLatest;
@@ -696,6 +752,20 @@ const TurnRow = memo(
       }
       return max;
     }, [turn.blocks, turn.userTimestamp, turn.endTimestamp]);
+    // How long the runtime took to come up, i.e. Send → the kernel's
+    // ``message.user`` stamp. Every number above is measured from the SERVER
+    // stamp, so without folding this back in the header would drop by exactly
+    // the boot time the moment the turn settles — the same jump the live
+    // counter used to make at handover, just moved to the other end of the
+    // turn. Zero for history-loaded turns and whenever the two clocks
+    // disagree (see ``MAX_RUNTIME_START_OFFSET_MS``).
+    const runtimeStartOffsetMs = useMemo(() => {
+      if (turn.clientSentAtMs === undefined || turn.userTimestamp === undefined)
+        return 0;
+      const gap = turn.userTimestamp - turn.clientSentAtMs;
+      return gap > 0 && gap <= MAX_RUNTIME_START_OFFSET_MS ? gap : 0;
+    }, [turn.clientSentAtMs, turn.userTimestamp]);
+    const settledElapsedMs = totalElapsedMs + runtimeStartOffsetMs;
     const hasProcess = useMemo(() => {
       return turn.blocks.some(
         (b) => b.kind === "thinking" || b.kind === "tool",
@@ -766,9 +836,15 @@ const TurnRow = memo(
     // advances every second even between SSE event arrivals (otherwise
     // the displayed elapsed only updates when a new tool/thinking block
     // lands, which feels stuck during e.g. a long Bash run). Computes
-    // ``Date.now() - turn.userTimestamp`` so the displayed value tracks
-    // real time, not the latest block's stamp. Once the turn settles we
-    // freeze on ``totalElapsedMs`` (the canonical max from blocks).
+    // ``Date.now() - <turn start>`` so the displayed value tracks real time,
+    // not the latest block's stamp. Once the turn settles we freeze on
+    // ``settledElapsedMs`` (the canonical max from blocks, plus the boot
+    // window those block stamps don't cover).
+    //
+    // The start is ``clientSentAtMs`` when the host page supplies it —
+    // ``userTimestamp`` is stamped when the RUNTIME started, so anchoring on
+    // it restarts the counter from zero at the optimistic → real handover,
+    // which reads as the turn having just begun after a long sandbox boot.
     const [tick, setTick] = useState(0);
     useEffect(() => {
       if (!inFlight) return;
@@ -781,16 +857,32 @@ const TurnRow = memo(
       // ``tick`` only matters when streaming — referenced so React
       // re-evaluates this memo each second while inFlight.
       void tick;
-      if (!inFlight) return totalElapsedMs;
-      if (!turn.userTimestamp) return totalElapsedMs;
-      const startMs = new Date(turn.userTimestamp).getTime();
-      if (Number.isNaN(startMs)) return totalElapsedMs;
+      if (!inFlight) return settledElapsedMs;
+      const startedAt = turn.clientSentAtMs ?? turn.userTimestamp;
+      if (!startedAt) return settledElapsedMs;
+      const startMs = new Date(startedAt).getTime();
+      if (Number.isNaN(startMs)) return settledElapsedMs;
       const live = Date.now() - startMs;
       // Guard against clock skew: never go backwards from the
       // canonical block-derived elapsed. If for some reason ``Date.now``
       // < block stamp (rare wall-clock skew), keep the higher number.
-      return Math.max(live, totalElapsedMs);
-    }, [tick, inFlight, turn.userTimestamp, totalElapsedMs]);
+      return Math.max(live, settledElapsedMs);
+    }, [
+      tick,
+      inFlight,
+      turn.clientSentAtMs,
+      turn.userTimestamp,
+      settledElapsedMs,
+    ]);
+    // Phase copy. Before the runtime reports in there is nothing being
+    // "processed" yet, so the header names what IS happening (a local or
+    // remote runtime coming up) while the same counter keeps running
+    // underneath it. ``startingRuntime`` is null/undefined once the host page
+    // sees the kernel's ``message.user`` echo — and for every settled turn.
+    const headerLabel =
+      inFlight && startingRuntime
+        ? formatRuntimeStarting(startingRuntime, displayedElapsedMs)
+        : formatTurnElapsed(displayedElapsedMs);
     return (
       <div data-conversation-turn className="space-y-[26px]">
         {turn.userText || (turn.attachments && turn.attachments.length > 0) ? (
@@ -839,7 +931,7 @@ const TurnRow = memo(
                   className="inline-flex items-center py-1 text-left text-[13px] font-normal text-[#6e7481] transition-colors hover:text-[#525860]"
                   aria-expanded={!turnFolded}
                 >
-                  <span>{formatTurnElapsed(displayedElapsedMs)}</span>
+                  <span>{headerLabel}</span>
                   <ChevronRight
                     className={`ml-1 h-3.5 w-3.5 shrink-0 transition-transform ${
                       !turnFolded ? "rotate-90" : ""
@@ -849,7 +941,7 @@ const TurnRow = memo(
                 </button>
               ) : (
                 <div className="inline-flex items-center py-1 text-[13px] font-normal text-[#6e7481]">
-                  <span>{formatTurnElapsed(displayedElapsedMs)}</span>
+                  <span>{headerLabel}</span>
                 </div>
               )}
             </div>
@@ -1014,6 +1106,14 @@ interface ConversationTurnListProps {
    *  must NOT flash the welcome before its history lands. The error card renders
    *  regardless. */
   showWelcome?: boolean;
+  /** Non-null while the message has been sent but the agent runtime has not
+   * reported in yet — the window in which the host is creating the session,
+   * warming the local kernel or booting a remote sandbox. The latest turn's
+   * header then names that instead of claiming to be processing, while the
+   * elapsed counter runs on unbroken. The host page clears it when the
+   * kernel's ``message.user`` echo lands; the value says WHERE the runtime is
+   * coming up (OSS is single-target and always ``"local"``). */
+  startingRuntime?: RuntimeStartLocation | null;
 }
 
 export function ConversationTurnList({
@@ -1037,6 +1137,7 @@ export function ConversationTurnList({
   emptySuggestions,
   onEmptySuggestionClick,
   showWelcome,
+  startingRuntime,
 }: ConversationTurnListProps) {
   const { t } = useI18n();
   const rowVirtualizer = useVirtualizer({
@@ -1194,6 +1295,7 @@ export function ConversationTurnList({
                     onRevealFile={onRevealFile}
                     isLocalFileHref={isLocalFileHref}
                     onLocalFileLinkClick={onLocalFileLinkClick}
+                    startingRuntime={startingRuntime}
                   />
                 </div>
               </div>
