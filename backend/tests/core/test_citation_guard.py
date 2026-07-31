@@ -215,6 +215,59 @@ def test_guard_uses_one_deterministic_repair_for_fallback_marker() -> None:
     assert "citation://cit_" in result.text
 
 
+def test_guard_repairs_bare_numbered_claims_from_trusted_source_list() -> None:
+    registry = _registry(_item(locator={"kind": "chunk", "chunkId": "chunk-1"}))
+    guard = CitationGuard(
+        registry,
+        message_id="msg-1",
+        user_prompt="Give me numbered citations",
+        policy_available=True,
+    )
+
+    result = guard.finalize(
+        "Revenue was 100 USD [1]. Profit was 20 USD [1].\n\n"
+        "Sources:\n"
+        "[1] [Annual Report](evidence://ev_revenue_2025)"
+    )
+
+    assert result.bundle is not None
+    citation_id = result.bundle["citations"][0]["citationId"]
+    assert f"100 USD [1](citation://{citation_id})" in result.text
+    assert f"20 USD [1](citation://{citation_id})" in result.text
+    assert (
+        f"[1] [Annual Report](citation://{citation_id})"
+        in result.text
+    )
+    assert result.bundle["integrity"]["status"] == "repaired"
+    assert result.bundle["integrity"]["repairAttempts"] == 1
+
+
+def test_guard_does_not_guess_ambiguous_numbered_source_bindings() -> None:
+    registry = _registry(
+        _item(locator={"kind": "chunk", "chunkId": "chunk-1"}),
+        _item(
+            "ev_other_12345678",
+            locator={"kind": "chunk", "chunkId": "chunk-2"},
+        ),
+    )
+    guard = CitationGuard(
+        registry,
+        message_id="msg-1",
+        user_prompt="Give me numbered citations",
+        policy_available=True,
+    )
+
+    result = guard.finalize(
+        "Revenue was 100 USD [1].\n\n"
+        "Sources:\n"
+        "[1] [Annual Report](evidence://ev_revenue_2025)\n"
+        "[1] [Other Report](evidence://ev_other_12345678)"
+    )
+
+    assert "100 USD [1]." in result.text
+    assert "100 USD [1](citation://" not in result.text
+
+
 def test_guard_never_promotes_unknown_model_minted_source() -> None:
     guard = CitationGuard(
         EvidenceRegistry(),

@@ -39,6 +39,13 @@ _REPAIR_MARKER_RE = re.compile(
     r"(?:\[\[evidence:([A-Za-z0-9_-]{1,160})\]\]|"
     r"<evidence:([A-Za-z0-9_-]{1,160})>)"
 )
+_NUMBERED_EVIDENCE_SOURCE_RE = re.compile(
+    r"(?m)^[ \t]*(?:[-*][ \t]+)?\[(\d{1,3})\][ \t]+"
+    r"\[[^\]\n]{1,240}\]\(evidence://([A-Za-z0-9_-]{1,160})\)"
+)
+_BARE_NUMBERED_MARKER_RE = re.compile(
+    r"(?<![\\\w])\[(\d{1,3})\](?!\()"
+)
 _EXPLICIT_CITATION_RE = re.compile(
     r"(?:引用|引文|出处|来源|根据.{0,12}(?:文档|资料)|核验|"
     r"总结.{0,12}(?:文档|文件)|citation|citations|cite|source(?:s)?\b|"
@@ -286,21 +293,55 @@ class CitationGuard:
                 return label or "source"
             return f"[{label or 'source'}](citation://{citation_id})"
 
+        numbered_bindings = _numbered_evidence_bindings(repaired_text)
         canonical_text = _MARKDOWN_LINK_RE.sub(replace_link, repaired_text)
 
         def replace_bare(match: re.Match[str]) -> str:
             handle = match.group(1)
-            record = self._registry.get(handle)
-            if record is None:
-                _append_unique(unknown_ids, handle)
+            citation_id = append_handle(handle)
+            if citation_id is None:
                 return "source"
             # Bare handles are not valid final prose, but the deterministic
             # repair can safely wrap a known handle without inventing evidence.
             nonlocal repair_attempts
             repair_attempts = 1
-            return replace_link(_SyntheticLinkMatch(handle))
+            return f"[source](citation://{citation_id})"
 
         canonical_text = _BARE_EVIDENCE_RE.sub(replace_bare, canonical_text)
+
+        # Models occasionally render the requested visual form (``[1]``)
+        # beside claims but put the trusted evidence link only in a numbered
+        # source list. Bind those claim markers deterministically when, and
+        # only when, that same answer contains one unambiguous
+        # ``[n] [label](evidence://HANDLE)`` entry. The source-list marker
+        # itself stays plain because the following canonical link is already
+        # interactive.
+        linked_text = canonical_text
+
+        def replace_bare_number(match: re.Match[str]) -> str:
+            handle = numbered_bindings.get(match.group(1))
+            if handle is None:
+                return match.group(0)
+            citation_id = append_handle(handle)
+            if citation_id is None:
+                return match.group(0)
+            following = linked_text[match.end() :]
+            source_link = re.match(
+                r"[ \t]+\[[^\]\n]{1,240}\]\(citation://"
+                + re.escape(citation_id)
+                + r"\)",
+                following,
+            )
+            if source_link is not None:
+                return match.group(0)
+            nonlocal repair_attempts
+            repair_attempts = 1
+            return f"[{match.group(1)}](citation://{citation_id})"
+
+        canonical_text = _BARE_NUMBERED_MARKER_RE.sub(
+            replace_bare_number,
+            linked_text,
+        )
 
         all_citation_ids = [self._citation_id(record.handle) for record in self._registry.values()]
         used_citation_ids = {self._citation_id(handle) for handle in cited_handles}
@@ -358,14 +399,15 @@ class CitationGuard:
         return f"cit_{digest}"
 
 
-class _SyntheticLinkMatch:
-    """Tiny Match-shaped adapter used when repairing a bare evidence URI."""
-
-    def __init__(self, handle: str) -> None:
-        self._handle = handle
-
-    def groups(self) -> tuple[str, str, str]:
-        return ("source", "evidence", self._handle)
+def _numbered_evidence_bindings(text: str) -> dict[str, str]:
+    candidates: dict[str, set[str]] = {}
+    for label, handle in _NUMBERED_EVIDENCE_SOURCE_RE.findall(text):
+        candidates.setdefault(label, set()).add(handle)
+    return {
+        label: next(iter(handles))
+        for label, handles in candidates.items()
+        if len(handles) == 1
+    }
 
 
 def _decode_json_payload(content: Any, *, max_chars: int) -> Any | None:
