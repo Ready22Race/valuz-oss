@@ -603,7 +603,7 @@ describe("ProjectDetailPage auto-refresh wiring", () => {
 
     // …and the draft rides along so the conversation page can show the turn
     // immediately instead of waiting for the echo.
-    const [, options] = navigate.mock.calls.at(-1) as [
+    const [, options] = navigate.mock.calls.at(-1) as unknown as [
       string,
       { state?: { handoff?: { text?: string } } },
     ];
