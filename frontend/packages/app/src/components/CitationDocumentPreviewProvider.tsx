@@ -48,6 +48,24 @@ interface CitationDocumentPreviewContextValue {
 const CitationDocumentPreviewContext =
   createContext<CitationDocumentPreviewContextValue | null>(null);
 
+export function citationResolutionI18nKey(
+  reason: string | null | undefined,
+): string {
+  switch (reason) {
+    case "citation_has_no_document":
+    case "citation_has_no_readable_document":
+      return "ui.citation.noReadableDocument";
+    case "document_address_unavailable":
+      return "ui.citation.documentAddressUnavailable";
+    case "document_version_changed":
+      return "ui.reader.locationDegraded";
+    case "external_reader_unavailable":
+      return "ui.reader.externalOnly";
+    default:
+      return "ui.citation.unavailable";
+  }
+}
+
 export function useCitationDocumentPreview(): CitationDocumentPreviewContextValue {
   const value = useContext(CitationDocumentPreviewContext);
   if (!value) {
@@ -326,7 +344,11 @@ export function CitationDocumentPreviewProvider({
       setResolutionNotice(null);
       try {
         const result = await citationsApi.resolve(active, { signal });
-        if (!result.document) throw new Error(result.fallback_reason ?? "unavailable");
+        if (!result.document) {
+          throw new Error(
+            citationResolutionI18nKey(result.fallback_reason),
+          );
+        }
         const resolved = await materializeCitationDocument(
           result.document,
           platform,
@@ -339,18 +361,26 @@ export function CitationDocumentPreviewProvider({
         );
         setResolutionNotice(
           result.status === "stale" || result.status === "degraded"
-            ? result.fallback_reason ?? result.status
+            ? t(citationResolutionI18nKey(result.fallback_reason))
             : null,
         );
       } catch (cause) {
         if (signal.aborted) return;
         setResolvedDocument(null);
-        setError(cause instanceof Error ? cause.message : "citation_unavailable");
+        const reason =
+          cause instanceof Error
+            ? cause.message
+            : "ui.citation.unavailable";
+        setError(
+          reason.startsWith("ui.")
+            ? t(reason)
+            : t(citationResolutionI18nKey(reason)),
+        );
       } finally {
         if (!signal.aborted) setLoading(false);
       }
     },
-    [platform],
+    [platform, t],
   );
 
   useEffect(() => {

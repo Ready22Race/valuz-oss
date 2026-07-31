@@ -512,7 +512,7 @@ export function DocumentResearchPanel({
       ) : null}
       {resolutionNotice ? (
         <div className="border-b border-warning/30 bg-warning-light px-3 py-2 text-xs text-warning-text">
-          {t("ui.reader.locationDegraded" as Parameters<typeof t>[0])}
+          {resolutionNotice}
         </div>
       ) : null}
       {tab === "summary" ? renderSummary() : renderQa()}

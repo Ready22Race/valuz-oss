@@ -1995,8 +1995,10 @@
     "citation": {
       "ariaLabel": "Citation {index}",
       "calculationInputs": "Calculation inputs",
+      "documentAddressUnavailable": "The document address is temporarily unavailable. Please try again.",
       "documentDialog": "Citation document",
       "integrityDegraded": "Some citations could not be verified. Treat this answer with caution.",
+      "noReadableDocument": "This source has no previewable document. Return to the chat to review its source details.",
       "openSource": "Open source",
       "sources": "Sources",
       "unavailable": "Citation unavailable"

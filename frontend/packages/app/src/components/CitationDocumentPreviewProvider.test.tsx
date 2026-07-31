@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PlatformCapabilities } from "@valuz/core";
 
 import {
+  citationResolutionI18nKey,
   decodeCitationOpenRef,
   encodeCitationOpenRef,
   locatorToDocumentLocation,
@@ -24,6 +25,18 @@ afterEach(() => {
 });
 
 describe("citation document preview helpers", () => {
+  it("maps backend resolution reasons to user-facing locale keys", () => {
+    expect(
+      citationResolutionI18nKey("citation_has_no_readable_document"),
+    ).toBe("ui.citation.noReadableDocument");
+    expect(citationResolutionI18nKey("document_version_changed")).toBe(
+      "ui.reader.locationDegraded",
+    );
+    expect(citationResolutionI18nKey("unexpected_backend_reason")).toBe(
+      "ui.citation.unavailable",
+    );
+  });
+
   it("round-trips an opaque identity-only open ref", () => {
     const target = {
       sessionId: "session-1",
