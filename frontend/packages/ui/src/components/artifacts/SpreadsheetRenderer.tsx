@@ -370,7 +370,7 @@ export function SpreadsheetRenderer({
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-surface-base">
-      <div className="flex h-11 shrink-0 items-center justify-between border-b border-surface-border bg-surface-soft px-4">
+      <div className="flex h-11 shrink-0 items-center justify-between border-b border-surface-border bg-surface px-4">
         <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto">
           {sheetNames.map((sheetName) => (
             <button
@@ -379,7 +379,7 @@ export function SpreadsheetRenderer({
               onClick={() => selectWorkbookSheet(sheetName)}
               className={`h-7 max-w-[180px] shrink-0 truncate rounded-md px-3 text-xs transition ${
                 sheetName === activeSheet.name
-                  ? "bg-surface text-ink-heading shadow-sm"
+                  ? "bg-surface-soft text-ink-heading"
                   : "text-ink-body hover:bg-surface-muted hover:text-ink-heading"
               }`}
               title={sheetName}

@@ -438,6 +438,18 @@ class MessageListResponse(BaseModel):
     error: ApiError | None = None
 
 
+class ImportMessageRequest(BaseModel):
+    """Clone one completed canonical message into another owned session.
+
+    The client supplies only the source message id and a display label for the
+    synthetic user turn.  Assistant text, citation metadata, and provenance
+    are always copied server-side from the stored source message.
+    """
+
+    source_message_id: str
+    user_text: str = Field(min_length=1, max_length=500)
+
+
 # -- Events --
 
 

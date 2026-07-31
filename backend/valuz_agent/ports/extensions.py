@@ -32,6 +32,11 @@ from valuz_agent.ports.automation_runtime import (
 )
 from valuz_agent.ports.billing import BillingPort, NoopBillingProvider
 from valuz_agent.ports.cache import CachePort, FileCache
+from valuz_agent.ports.citation_documents import CitationDocumentResolverPort
+from valuz_agent.ports.citation_quality import (
+    CitationQualityPolicyPort,
+    NoopCitationQualityPolicy,
+)
 from valuz_agent.ports.connector_lifecycle import (
     ConnectorLifecycleHook,
     NoopConnectorLifecycleHook,
@@ -40,6 +45,7 @@ from valuz_agent.ports.connector_oauth_refresh import (
     ConnectorOAuthRefreshPort,
     LocalConnectorOAuthRefreshProvider,
 )
+from valuz_agent.ports.document_research import DocumentResearchProviderPort
 from valuz_agent.ports.file_address import FileAddressResolverPort, LocalFileAddressResolver
 from valuz_agent.ports.instructions import (
     GlobalInstructionsPort,
@@ -100,6 +106,19 @@ class Extensions:
         self.connector_oauth_refresh: ConnectorOAuthRefreshPort = (
             LocalConnectorOAuthRefreshProvider()
         )
+        # Resolve a citation's stable document identity after the route has
+        # reloaded its canonical message under the current owner. ``None`` uses
+        # the OSS document-library adapter; editions may bind a connector or
+        # SaaS-aware resolver without changing the message/reader contract.
+        self.citation_document_resolver: CitationDocumentResolverPort | None = None
+        # Connector-owned documents can participate in the same summary and
+        # locked Q&A workspace as local library documents. Editions resolve
+        # their stable document identity and provider-native summary here.
+        self.document_research_provider: DocumentResearchProviderPort | None = None
+        # Optional edition-level quality policy.  The resolved declarative
+        # snapshot is re-stamped before every turn, so a user cannot weaken the
+        # gate by editing session metadata.  OSS has no domain policy.
+        self.citation_quality_policy: CitationQualityPolicyPort = NoopCitationQualityPolicy()
         # Resolve a file's absolute path into a client-usable access address
         # (see docs/design/file-address-resolution.md). OSS default returns the
         # local absolute path (bundled desktop reads it directly); the commercial

@@ -124,6 +124,7 @@ def _checkpoint_backend() -> str:
         return raw
     return "file" if _in_sandbox() else "sqlite"
 
+
 # langchain TodoListMiddleware tool name (auto-included by deepagents). Treated
 # as a planning channel: emit `todo_update` and suppress the generic tool_use /
 # tool_result pair so the UI trace doesn't double-render it.
@@ -1550,7 +1551,7 @@ def _stringify_tool_output(output: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return "".join(str(p) for p in content)
+        return json.dumps(_jsonify(content), ensure_ascii=False)
     return str(output)
 
 

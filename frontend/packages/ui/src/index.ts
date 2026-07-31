@@ -184,6 +184,7 @@ export * from "./components/ui/toggle-group";
 export * from "./components/ui/tooltip";
 export * from "./hooks/use-mobile";
 export * from "./hooks/use-i18n";
+export * from "./hooks/use-persistent-scroll";
 export * from "./layout/AppShell";
 export * from "./layout/DesktopSidebar";
 export * from "./layout/TopBar";

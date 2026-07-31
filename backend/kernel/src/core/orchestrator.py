@@ -19,10 +19,12 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 from src.core import recovery
 from src.core.agent_config import AgentConfig
+from src.core.citation import CitationGuard, EvidenceRegistry
 from src.core.events import Event, EventSink, GlobalEventTap
 from src.core.prompt_builder import wrap_for_mode
 from src.core.runtime_port import RuntimePort
@@ -41,6 +43,23 @@ from src.core.workspace import bootstrap_session_workspace
 SessionRuleFinder = Callable[[str, str, dict[str, Any], dict[str, Any]], "SessionRule | None"]
 
 logger = logging.getLogger(__name__)
+
+_CITATION_REPAIR_PROMPT = """The previous draft was withheld by citation validation.
+Rewrite the answer now, preserving the original user's language and using only
+facts supported by evidence handles already returned by tools in this turn.
+
+Requirements:
+- Put a Markdown citation link in the same sentence or table row as every
+  factual or numeric claim: `[n](evidence://EVIDENCE_HANDLE)`.
+- Use only exact evidence handles from prior tool results.
+- Remove any claim that cannot be bound to a trusted handle.
+- Do not append a Sources, References, or 来源 section.
+- Return only the rewritten answer, with no validation commentary.
+"""
+_CITATION_BLOCKED_TEXT = (
+    "Citation verification failed after one automatic repair attempt. "
+    "The unverified draft was not published; please retry the request."
+)
 
 
 class SessionNotFoundError(Exception):
@@ -165,6 +184,45 @@ class _MessageIdStampSink:
         await self._inner.emit(stamped)
 
 
+def _session_citation_quality_policy(
+    session: Session,
+) -> dict[str, Any] | None:
+    """Read only the host-stamped, JSON-safe policy snapshot."""
+
+    metadata = session.metadata if isinstance(session.metadata, dict) else {}
+    valuz = metadata.get("valuz")
+    if not isinstance(valuz, dict):
+        return None
+    snapshot = valuz.get("citation_quality_policy")
+    if not isinstance(snapshot, dict):
+        return None
+    if snapshot.get("mode") not in {"required-on-evidence", "strict-domain"}:
+        return None
+    if not isinstance(snapshot.get("config"), dict):
+        return None
+    return snapshot
+
+
+def _session_document_scope(session: Session) -> set[str] | None:
+    """Return the host-stamped locked document scope, if present."""
+
+    metadata = session.metadata if isinstance(session.metadata, dict) else {}
+    valuz = metadata.get("valuz")
+    if not isinstance(valuz, dict):
+        return None
+    research = valuz.get("document_research")
+    if (
+        not isinstance(research, dict)
+        or research.get("purpose") != "document-research"
+        or research.get("source_scope") != "locked"
+    ):
+        return None
+    document_ids = research.get("document_ids")
+    if not isinstance(document_ids, list):
+        return set()
+    return {str(item) for item in document_ids if str(item)}
+
+
 class _MessageObserverSink:
     """Forwards events to ``inner`` while accumulating per-Message state.
 
@@ -174,14 +232,44 @@ class _MessageObserverSink:
     these accumulators when finalizing the Message row.
     """
 
-    def __init__(self, inner: EventSink) -> None:
+    def __init__(
+        self,
+        inner: EventSink,
+        *,
+        message_id: str = "message",
+        user_prompt: str = "",
+        citation_policy_available: bool = False,
+        citation_quality_policy: dict[str, Any] | None = None,
+        allowed_document_ids: set[str] | None = None,
+        force_citation_required: bool = False,
+    ) -> None:
         self._inner = inner
         self._assistant_chunks: list[str] = []
         self._assistant_delta_chunks: list[str] = []
+        self._pending_assistant: Event | None = None
+        self._tool_names: dict[str, str] = {}
+        self._evidence_registry = EvidenceRegistry(
+            allowed_document_ids=allowed_document_ids,
+        )
+        self._citation_guard = CitationGuard(
+            self._evidence_registry,
+            message_id=message_id,
+            user_prompt=user_prompt,
+            policy_available=citation_policy_available,
+            quality_policy=citation_quality_policy,
+            force_required=force_citation_required,
+        )
+        self._citation_repair_requested = False
+        self._citation_repair_attempts = 0
+        self._usage_before_citation_repair: dict[str, int] | None = None
         self.num_turns: int = 0
         self.error_payload: dict[str, Any] | None = None
         self.usage: dict[str, int] | None = None
         self.model_usage: dict[str, Any] | None = None
+        # Canonical citation sidecar from the latest final assistant event.
+        # Runtimes/guards emit it once with the sealed answer; the orchestrator
+        # copies it into Message.metadata during finalization.
+        self.citation_bundle: dict[str, Any] | None = None
         # Last `todo_update` payload observed in this turn. None means the
         # agent did not touch the TODO list. An empty list is a meaningful
         # "all done" signal from the SDK and is preserved.
@@ -197,29 +285,103 @@ class _MessageObserverSink:
         self.runtime_mode_change: Literal["default", "plan", "goal"] | None = None
 
     async def emit(self, event: Event) -> None:
+        is_top_level = event.data.get("parent_tool_use_id") is None
+        if event.type == "assistant_message" and is_top_level:
+            # A runtime can emit multiple canonical text blocks in one turn:
+            # an assistant preamble, then a tool call, then the final answer.
+            # Hold only the latest top-level block until we know whether a
+            # continuation follows.  This lets the Citation Guard seal the one
+            # final block before either persistence or broadcast.
+            if self._pending_assistant is not None:
+                await self._flush_pending_assistant(final=False)
+            self._pending_assistant = event
+            # The canonical block supersedes its already-streamed deltas.
+            self._assistant_delta_chunks.clear()
+            return
+
+        if (
+            self._pending_assistant is not None
+            and is_top_level
+            and event.type in {"text_delta", "tool_use"}
+        ):
+            await self._flush_pending_assistant(final=False)
+
         if event.type == "assistant_message":
+            # Subagent text is an out-of-band flow and must not take ownership
+            # of the lead's pending final block.
             self._record_assistant_message(event)
         elif event.type == "text_delta":
             text = event.data.get("text") or event.data.get("delta") or ""
             if text:
                 self._assistant_delta_chunks.append(str(text))
+        elif event.type == "tool_use":
+            tool_use_id = event.data.get("id")
+            tool_name = event.data.get("name")
+            if isinstance(tool_use_id, str) and isinstance(tool_name, str):
+                self._tool_names[tool_use_id] = tool_name
+        elif event.type == "tool_result":
+            tool_use_id = event.data.get("id")
+            tool_name = self._tool_names.get(tool_use_id) if isinstance(tool_use_id, str) else None
+            citation_content = event.data.get("_citation_content")
+            self._evidence_registry.register_tool_result(
+                citation_content
+                if isinstance(citation_content, str)
+                else event.data.get("content"),
+                tool_name=tool_name,
+            )
+            if "_citation_content" in event.data:
+                # Runtime-private sidecar: it may contain the untruncated tool
+                # result, so never persist or broadcast it.  The normal
+                # ``content`` field remains the compact CLI placeholder.
+                event = Event(
+                    type=event.type,
+                    data={
+                        key: value
+                        for key, value in event.data.items()
+                        if key != "_citation_content"
+                    },
+                    timestamp=event.timestamp,
+                )
         elif event.type == "session_idle":
             raw = event.data.get("num_turns")
             if isinstance(raw, int) and raw > 0:
-                self.num_turns = raw
-            await self.ensure_partial_assistant_message()
+                if self._citation_repair_attempts:
+                    self.num_turns += raw
+                else:
+                    self.num_turns = raw
+            stop_reason = event.data.get("stop_reason")
+            allow_repair = not (
+                isinstance(stop_reason, dict)
+                and stop_reason.get("type") in {"error", "user_interrupt", "budget_exhausted"}
+            )
+            await self.ensure_partial_assistant_message(allow_repair=allow_repair)
+            if self._citation_repair_requested:
+                # Keep the turn running while the orchestrator sends one
+                # hidden repair instruction to the same runtime.  The failed
+                # candidate and this interim idle frame are neither persisted
+                # nor broadcast.
+                return
+            await self._inner.emit(event)
+            return
         elif event.type == "session_error":
             self.error_payload = {
                 "category": "execution_error",
                 "message": str(event.data.get("message", "")),
             }
         elif event.type == "usage_update":
-            self.usage = {
+            current_usage = {
                 "input_tokens": int(event.data.get("input_tokens") or 0),
                 "output_tokens": int(event.data.get("output_tokens") or 0),
                 "cache_read_tokens": int(event.data.get("cache_read_tokens") or 0),
                 "cache_write_tokens": int(event.data.get("cache_write_tokens") or 0),
             }
+            if self._usage_before_citation_repair is None:
+                self.usage = current_usage
+            else:
+                self.usage = {
+                    key: self._usage_before_citation_repair[key] + current_usage[key]
+                    for key in current_usage
+                }
             raw_model_usage = event.data.get("model_usage")
             self.model_usage = dict(raw_model_usage) if isinstance(raw_model_usage, dict) else None
         elif event.type == "todo_update":
@@ -238,14 +400,181 @@ class _MessageObserverSink:
         if text:
             self._assistant_chunks.append(str(text))
             self._assistant_delta_chunks.clear()
+        citation_bundle = event.data.get("citation_bundle")
+        if isinstance(citation_bundle, dict):
+            # Copy the shallow top-level container so later runtime mutations
+            # cannot replace the canonical sidecar after the event was emitted.
+            self.citation_bundle = dict(citation_bundle)
 
-    async def ensure_partial_assistant_message(self) -> None:
+    @property
+    def citation_repair_requested(self) -> bool:
+        return self._citation_repair_requested
+
+    def begin_citation_repair(self) -> None:
+        """Consume the one retry request and preserve first-run usage."""
+
+        if not self._citation_repair_requested:
+            return
+        self._citation_repair_requested = False
+        self._citation_repair_attempts += 1
+        self._usage_before_citation_repair = (
+            dict(self.usage) if self.usage is not None else None
+        )
+
+    async def ensure_partial_assistant_message(
+        self,
+        *,
+        allow_repair: bool = True,
+    ) -> bool:
+        if self._pending_assistant is not None:
+            return await self._flush_pending_assistant(
+                final=True,
+                allow_repair=allow_repair,
+            )
         text = self.partial_assistant_text
         if not text:
-            return
-        event = Event(type="assistant_message", data={"text": text})
+            return False
+        event = self._build_final_assistant_event(
+            text,
+            allow_repair=allow_repair,
+        )
+        if event is None:
+            return False
         self._record_assistant_message(event)
         await self._inner.emit(event)
+        return True
+
+    async def _flush_pending_assistant(
+        self,
+        *,
+        final: bool,
+        allow_repair: bool = True,
+    ) -> bool:
+        pending = self._pending_assistant
+        if pending is None:
+            return False
+        self._pending_assistant = None
+        raw_text = pending.data.get("text") or pending.data.get("content") or ""
+        data = {
+            key: value
+            for key, value in pending.data.items()
+            if key not in {"text", "content", "citation_bundle"}
+        }
+        data["text"] = str(raw_text)
+        if final:
+            event = self._build_final_assistant_event(
+                str(raw_text),
+                base_data=data,
+                timestamp=pending.timestamp,
+                allow_repair=allow_repair,
+            )
+            if event is None:
+                return False
+        else:
+            event = Event(type="assistant_message", data=data, timestamp=pending.timestamp)
+        self._record_assistant_message(event)
+        await self._inner.emit(event)
+        return True
+
+    def _build_final_assistant_event(
+        self,
+        raw_text: str,
+        *,
+        base_data: dict[str, Any] | None = None,
+        timestamp: int | None = None,
+        allow_repair: bool,
+    ) -> Event | None:
+        result = self._citation_guard.finalize(raw_text)
+        data = dict(base_data or {})
+        data["text"] = result.text
+        if result.bundle is not None:
+            data["citation_bundle"] = result.bundle
+            integrity = result.bundle.get("integrity") or {}
+            logger.info(
+                "citation_guard sealed message status=%s citations=%d unknown=%d",
+                integrity.get("status"),
+                len(result.bundle.get("citations") or []),
+                len(integrity.get("unknownCitationIds") or []),
+            )
+            quality = result.bundle.get("quality")
+            if isinstance(quality, dict):
+                metrics = quality.get("metrics")
+                metrics = metrics if isinstance(metrics, dict) else {}
+                logger.info(
+                    "citation_quality policy=%s revision=%s status=%s "
+                    "citations=%s unsourced=%s unverified=%s",
+                    quality.get("policyId"),
+                    quality.get("policyRevision"),
+                    quality.get("status"),
+                    metrics.get("citationCount", 0),
+                    metrics.get("unsourcedClaimCount", 0),
+                    metrics.get("unverifiedClaimCount", 0),
+                )
+
+        needs_repair = self._citation_publication_needs_repair(result.bundle)
+        if allow_repair and needs_repair and self._citation_repair_attempts == 0:
+            self._citation_repair_requested = True
+            logger.warning(
+                "citation_guard withheld draft and requested one repair pass"
+            )
+            return None
+        citations_after_repair = (
+            result.bundle.get("citations")
+            if isinstance(result.bundle, dict)
+            else None
+        )
+        has_trusted_citation = bool(
+            citations_after_repair
+            if isinstance(citations_after_repair, list)
+            else []
+        )
+        if (
+            needs_repair
+            and self._citation_repair_attempts
+            and not has_trusted_citation
+        ):
+            bundle = result.bundle
+            if isinstance(bundle, dict):
+                integrity = bundle.get("integrity")
+                integrity = dict(integrity) if isinstance(integrity, dict) else {}
+                integrity["publicationBlocked"] = True
+                bundle["integrity"] = integrity
+                quality = bundle.get("quality")
+                if isinstance(quality, dict):
+                    quality = dict(quality)
+                    quality["publishStatus"] = "blocked"
+                    bundle["quality"] = quality
+            data["text"] = _CITATION_BLOCKED_TEXT
+            logger.error(
+                "citation_guard blocked draft after automatic repair failed"
+            )
+        return Event(
+            type="assistant_message",
+            data=data,
+            **({"timestamp": timestamp} if timestamp is not None else {}),
+        )
+
+    def _citation_publication_needs_repair(
+        self,
+        bundle: dict[str, Any] | None,
+    ) -> bool:
+        # No trusted evidence means there is nothing the deterministic guard
+        # can ask the model to bind.  Do not create a retry loop for ordinary
+        # conversational answers or a legitimate "not found" response.
+        if not len(self._evidence_registry) or not isinstance(bundle, dict):
+            return False
+        citations = bundle.get("citations")
+        citations = citations if isinstance(citations, list) else []
+        integrity = bundle.get("integrity")
+        integrity = integrity if isinstance(integrity, dict) else {}
+        if not citations or bool(integrity.get("unknownCitationIds")):
+            return True
+        # Finance's layered evaluator may still mark a cited answer
+        # ``draft-only`` when citation coverage is incomplete.  That state is
+        # surfaced as a quality warning, but it must not discard an otherwise
+        # inspectable answer.  The hard publication gate is intentionally
+        # narrower: zero trusted citations or model-authored unknown handles.
+        return False
 
     @property
     def assistant_text(self) -> str | None:
@@ -572,7 +901,16 @@ class SessionOrchestrator:
         # count without changing the canonical assistant_message/thinking
         # record.
         coalesced: EventSink = DeltaCoalescingSink(persist_then_live)
-        observer = _MessageObserverSink(coalesced)
+        document_scope = _session_document_scope(session)
+        observer = _MessageObserverSink(
+            coalesced,
+            message_id=message.id,
+            user_prompt=user_message.text,
+            citation_policy_available=any(Path(path).name == "citation" for path in session.skills),
+            citation_quality_policy=_session_citation_quality_policy(session),
+            allowed_document_ids=document_scope,
+            force_citation_required=document_scope is not None,
+        )
 
         # Sessions are self-sufficient: ``session.cwd`` is required at
         # creation. Seed the workspace stub lazily (idempotent, one stat on
@@ -614,6 +952,21 @@ class SessionOrchestrator:
                 )
             )
             await runtime.run(session, user_message)
+            if (
+                observer.citation_repair_requested
+                and getattr(session.stop_reason, "type", None) == "end_turn"
+            ):
+                observer.begin_citation_repair()
+                session.status = "running"
+                logger.warning(
+                    "citation_guard retrying message=%s session=%s",
+                    message.id,
+                    session.id,
+                )
+                await runtime.run(
+                    session,
+                    UserMessage(text=_CITATION_REPAIR_PROMPT),
+                )
             await observer.ensure_partial_assistant_message()
             # finalize must run BEFORE save_session — it writes session.todos
             # (and message.todos) from the observer's last todo_update payload;
@@ -685,6 +1038,11 @@ class SessionOrchestrator:
     ) -> None:
         message.ended_at = now_ms()
         message.assistant_message = observer.assistant_text
+        if observer.citation_bundle is not None:
+            message.metadata = {
+                **message.metadata,
+                "citation_bundle": observer.citation_bundle,
+            }
         message.total_turns = observer.num_turns or 1
         message.stop_reason = session.stop_reason
         if observer.usage is not None:

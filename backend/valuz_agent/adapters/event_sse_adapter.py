@@ -270,11 +270,15 @@ def _translate_kernel_event(
         )
 
     if kernel_type == "assistant_message":
+        payload = {
+            "text": _stringify(data.get("text") or data.get("content") or ""),
+        }
+        citation_bundle = data.get("citation_bundle")
+        if isinstance(citation_bundle, dict):
+            payload["citation_bundle"] = _stringify(citation_bundle)
         return "message.assistant.delta", _with_parent_tool_use_id(
             _with_message_id(
-                {
-                    "text": _stringify(data.get("text") or data.get("content") or ""),
-                },
+                payload,
                 data,
             ),
             data,

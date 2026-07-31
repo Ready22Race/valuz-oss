@@ -1120,13 +1120,14 @@ export const TaskDetailPage = () => {
 
   if (selectedArtifactPath || artifactLoading || artifactError) {
     return (
-      <div className="flex h-full min-h-0 flex-col p-3">
+      <div className="flex h-full min-h-0 flex-col">
         <ArtifactViewerShell
           artifact={artifact}
           content={artifactContent}
           target={artifactTarget}
           loading={artifactLoading}
           error={artifactError}
+          framed={false}
           onReload={handleArtifactReload}
           onClose={handleArtifactClose}
           onCopyContent={handleArtifactCopy}

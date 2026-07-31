@@ -145,6 +145,7 @@ import {
   computePlanAnchors,
   extractToolOutputJson,
 } from "./conversation-plan-anchors";
+import { useCitationDocumentPreview } from "../components/CitationDocumentPreviewProvider";
 import {
   deriveTurnActive,
   shouldApplySessionStatus,
@@ -617,6 +618,7 @@ function automationTriggerSummary(
 
 export const ConversationPage = () => {
   const { t } = useTranslation();
+  const { openCitation } = useCitationDocumentPreview();
   const platform = usePlatform();
   const { revealInFinder } = platform;
   const { id = NEW_SESSION_ID } = useParams<{ id: string }>();
@@ -6274,6 +6276,14 @@ export const ConversationPage = () => {
                 onRevealFile={revealInFinder}
                 isLocalFileHref={localFileLinks.isLocalFileHref}
                 onLocalFileLinkClick={localFileLinks.openLocalFileHref}
+                onCitationClick={({ messageId, citationId }) => {
+                  if (!selectedSessionId || !messageId) return;
+                  openCitation({
+                    sessionId: selectedSessionId,
+                    messageId,
+                    citationId,
+                  });
+                }}
                 emptySuggestions={[
                   t(
                     "conversation.newChatSuggestion1" as Parameters<
@@ -6714,7 +6724,7 @@ export const ConversationPage = () => {
         </div>
         {artifactViewerOpen ? (
           <div
-            className="absolute inset-0 z-30 overflow-hidden overscroll-contain bg-surface p-3"
+            className="absolute inset-0 z-30 overflow-hidden overscroll-contain bg-surface"
             onWheel={(event) => event.stopPropagation()}
             onTouchMove={(event) => event.stopPropagation()}
           >
@@ -6724,6 +6734,7 @@ export const ConversationPage = () => {
               target={artifactTarget}
               loading={artifactLoading}
               error={artifactError}
+              framed={false}
               onReload={handleArtifactReload}
               onClose={handleArtifactClose}
               onCopyContent={handleArtifactCopy}

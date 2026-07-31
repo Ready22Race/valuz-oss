@@ -1,4 +1,8 @@
 import type { ReactNode } from "react";
+import type {
+  NormalizedRectV1,
+  TextQuoteSelectorV1,
+} from "@valuz/shared";
 
 /**
  * A block of parsed document body. ``id`` is the anchor target — it lands on the
@@ -35,7 +39,11 @@ export interface DocumentSource {
     | { kind: "chunks"; chunks: DocumentChunk[] }
     | { kind: "media"; url: string; mimeType: string }
     /** Already-sanitized HTML. */
-    | { kind: "html"; html: string };
+    | { kind: "html"; html: string }
+    | { kind: "external"; url: string };
+  /** Optional text index used as a quote fallback for any primary renderer. */
+  chunks?: DocumentChunk[];
+  documentVersion?: string | null;
   /** Header action: open the publisher's original. */
   originalUrl?: string;
   /** Header action: download the source file. */
@@ -48,20 +56,30 @@ export interface DocumentSource {
  * only consumes the resolved values.
  */
 export interface DocumentLocation {
+  kind?: "chunk" | "html" | "pdf" | "external";
   /** One-based physical page; PDFs only. */
   page?: number;
   chunkId?: string;
   segmentId?: string;
+  elementId?: string;
+  cssSelector?: string;
+  quote?: TextQuoteSelectorV1;
+  rects?: NormalizedRectV1[];
+  pageRotation?: 0 | 90 | 180 | 270;
 }
 
 export interface DocumentReaderViewProps {
   doc: DocumentSource | null;
   loading?: boolean;
   error?: string | null;
+  /** Draw the reader's own panel frame. Disable when the host already owns it. */
+  framed?: boolean;
   /** Re-locates whenever the value changes. */
   location?: DocumentLocation;
-  /** Left slot (AI summary, translation, …). Omitted = single column. */
+  /** Right research slot (AI summary, document Q&A, …). */
   sidePanel?: ReactNode;
   onClose?: () => void;
   onReload?: () => void;
+  /** One automatic resolver refresh when a temporary file address fails. */
+  onLoadError?: () => void;
 }

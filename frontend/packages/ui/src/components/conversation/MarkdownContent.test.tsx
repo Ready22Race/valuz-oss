@@ -1,7 +1,49 @@
 /** @vitest-environment jsdom */
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { MarkdownContent } from "./MarkdownContent";
+import type { CitationBundleV1 } from "@valuz/shared";
+
+const CITATIONS: CitationBundleV1 = {
+  version: 1,
+  citations: [
+    {
+      citationId: "cit_first",
+      source: {
+        sourceId: "doc:1",
+        providerId: "docs",
+        documentId: "1",
+        sourceType: "document",
+        title: "Annual report",
+        organization: "Example Corp",
+        publishedAt: "2026-03-20T00:00:00Z",
+        retrievedAt: "2026-07-30T08:00:00Z",
+      },
+      evidence: {
+        kind: "text",
+        quote: "Revenue increased 18%.",
+        snippet: "For the year, revenue increased 18%.",
+        capturedAt: "2026-07-30T08:00:00Z",
+      },
+    },
+    {
+      citationId: "cit_second",
+      source: {
+        sourceId: "doc:2",
+        providerId: "docs",
+        sourceType: "document",
+        title: "Earnings release",
+        retrievedAt: "2026-07-30T08:00:00Z",
+      },
+      evidence: {
+        kind: "text",
+        quote: "Margin expanded.",
+        snippet: "Gross margin expanded.",
+        capturedAt: "2026-07-30T08:00:00Z",
+      },
+    },
+  ],
+};
 
 describe("MarkdownContent local file links", () => {
   it("routes local file hrefs through the provided handler", () => {
@@ -54,5 +96,869 @@ describe("MarkdownContent local file links", () => {
     fireEvent.click(screen.getByRole("link", { name: "Settings" }));
 
     expect(onLocalFileLinkClick).not.toHaveBeenCalled();
+  });
+});
+
+describe("MarkdownContent citations", () => {
+  it("numbers citations by first appearance and reuses duplicate numbers", () => {
+    render(
+      <MarkdownContent
+        content={
+          "First [source](citation://cit_second), then [source](citation://cit_first), again [source](citation://cit_second)."
+        }
+        citationBundle={CITATIONS}
+      />,
+    );
+
+    expect(
+      screen.getAllByRole("button", { name: /(?:citation|引用) 1/i }),
+    ).toHaveLength(2);
+    expect(
+      screen.getAllByRole("button", { name: /(?:citation|引用) 2/i }),
+    ).toHaveLength(1);
+    expect(
+      screen
+        .getAllByRole("button", { name: /(?:citation|引用) 1/i })
+        .every((pill) => pill.textContent === "1"),
+    ).toBe(true);
+  });
+
+  it("renders citation numbers without visual brackets in pills, hover cards, and sources", () => {
+    render(
+      <MarkdownContent
+        content={"Revenue [source](citation://cit_first)."}
+        citationBundle={CITATIONS}
+      />,
+    );
+
+    const pill = screen.getByRole("button", {
+      name: /(?:citation|引用) 1/i,
+    });
+    expect(pill.textContent).toBe("1");
+
+    fireEvent.mouseEnter(pill);
+    expect(screen.getByText("1 Annual report")).not.toBeNull();
+    expect(
+      screen.getByRole("button", { name: /^1Annual report$/i }),
+    ).not.toBeNull();
+  });
+
+  it("uses neutral circular inline controls and stacks sources one per row", () => {
+    render(
+      <MarkdownContent
+        content={
+          "Revenue [source](citation://cit_first), margin [source](citation://cit_second)."
+        }
+        citationBundle={CITATIONS}
+      />,
+    );
+
+    const pill = screen.getByRole("button", {
+      name: /(?:citation|引用) 1/i,
+    });
+    expect(pill.className).toContain("h-4");
+    expect(pill.className).toContain("w-4");
+    expect(pill.className).toContain("rounded-full");
+    expect(pill.className).toContain("bg-surface-muted");
+    expect(pill.parentElement?.className).toContain("align-middle");
+    expect(pill.parentElement?.className).toContain("-top-px");
+    expect(pill.parentElement?.className).toContain("mx-0.5");
+
+    const firstSource = screen.getByRole("button", {
+      name: /^1Annual report$/i,
+    });
+    const secondSource = screen.getByRole("button", {
+      name: /^2Earnings release$/i,
+    });
+    expect(firstSource.parentElement).toBe(secondSource.parentElement);
+    expect(firstSource.parentElement?.className).toContain("flex-col");
+    expect(firstSource.className).toContain("w-full");
+    expect(secondSource.className).toContain("w-full");
+    expect(firstSource.className).not.toContain("border");
+    expect(secondSource.className).not.toContain("border");
+  });
+
+  it("groups chunk citations from the same document into one source row", () => {
+    const sameDocumentBundle: CitationBundleV1 = {
+      ...CITATIONS,
+      citations: [
+        CITATIONS.citations[0]!,
+        {
+          ...CITATIONS.citations[1]!,
+          source: {
+            ...CITATIONS.citations[0]!.source,
+          },
+        },
+      ],
+    };
+
+    render(
+      <MarkdownContent
+        content={
+          "Revenue [source](citation://cit_first), margin [source](citation://cit_second)."
+        }
+        citationBundle={sameDocumentBundle}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: /(?:citation|引用) 2/i }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: /^1–2Annual report$/i }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: /^2Annual report$/i }),
+    ).toBeNull();
+  });
+
+  it("shows the evidence snapshot on hover without fetching", () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    render(
+      <MarkdownContent
+        content={"Revenue [source](citation://cit_first)."}
+        citationBundle={CITATIONS}
+      />,
+    );
+
+    fireEvent.mouseEnter(
+      screen.getByRole("button", { name: /(?:citation|引用) 1/i }),
+    );
+
+    expect(screen.getByText("Annual report")).not.toBeNull();
+    expect(screen.getByText("Revenue increased 18%.")).not.toBeNull();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+  });
+
+  it("shows full text evidence without the three-line clamp", () => {
+    render(
+      <MarkdownContent
+        content={"Revenue [source](citation://cit_first)."}
+        citationBundle={CITATIONS}
+      />,
+    );
+
+    fireEvent.mouseEnter(
+      screen.getByRole("button", { name: /(?:citation|引用) 1/i }),
+    );
+
+    const evidence = document.querySelector("[data-citation-evidence-text]");
+    expect(evidence).not.toBeNull();
+    expect(evidence?.className).toContain("max-h-64");
+    expect(evidence?.className).toContain("overflow-auto");
+    expect(screen.getByText("For the year, revenue increased 18%.").className).not.toContain(
+      "line-clamp-3",
+    );
+  });
+
+  it("does not repeat a snippet that only normalizes quote whitespace", () => {
+    const bundle: CitationBundleV1 = {
+      version: 1,
+      citations: [
+        {
+          ...CITATIONS.citations[0],
+          evidence: {
+            kind: "text",
+            quote: "Revenue increased 18%.\nNet income also grew.",
+            snippet: "Revenue increased 18%. Net income also grew.",
+            capturedAt: "2026-07-30T08:00:00Z",
+          },
+        },
+      ],
+    };
+    render(
+      <MarkdownContent
+        content={"Revenue [source](citation://cit_first)."}
+        citationBundle={bundle}
+      />,
+    );
+
+    fireEvent.mouseEnter(
+      screen.getByRole("button", { name: /(?:citation|引用) 1/i }),
+    );
+
+    expect(
+      screen.getAllByText(/Revenue increased 18%.*Net income also grew/s),
+    ).toHaveLength(1);
+  });
+
+  it("does not repeat a truncated table snippet already contained by the quote", () => {
+    const snippet =
+      "| Product | Revenue | | --- | --- | | Moutai | 145,928 | | Series | 24,683 | 增加 0...";
+    const bundle: CitationBundleV1 = {
+      version: 1,
+      citations: [
+        {
+          ...CITATIONS.citations[0],
+          evidence: {
+            kind: "text",
+            quote: [
+              "| Product | Revenue |",
+              "| --- | --- |",
+              "| Moutai | 145,928 |",
+              "| Series | 24,683 | 增加 0.11 |",
+              "| Direct | 74,843 |",
+            ].join("\n"),
+            snippet,
+            capturedAt: "2026-07-30T08:00:00Z",
+          },
+        },
+      ],
+    };
+    render(
+      <MarkdownContent
+        content={"Revenue [source](citation://cit_first)."}
+        citationBundle={bundle}
+      />,
+    );
+
+    fireEvent.mouseEnter(
+      screen.getByRole("button", { name: /(?:citation|引用) 1/i }),
+    );
+
+    expect(screen.queryByText(snippet)).toBeNull();
+    expect(
+      document.querySelectorAll("[data-citation-evidence-text]"),
+    ).toHaveLength(1);
+    expect(screen.getByRole("table").className).toContain("text-[11px]");
+    expect(
+      screen.getByRole("cell", { name: "145,928" }).className,
+    ).toContain("px-2");
+    expect(screen.getByRole("tooltip").className).toContain(
+      "w-[min(680px,calc(100vw-32px))]",
+    );
+  });
+
+  it("spans extracted table section labels across the compact table", () => {
+    const bundle: CitationBundleV1 = {
+      version: 1,
+      citations: [
+        {
+          ...CITATIONS.citations[0],
+          evidence: {
+            kind: "text",
+            quote: [
+              "| Product data | |",
+              "| --- | --- |",
+              "| Product | Revenue |",
+              "| Moutai | 145,928 |",
+            ].join("\n"),
+            snippet: "Product data: Moutai revenue 145,928.",
+            capturedAt: "2026-07-30T08:00:00Z",
+          },
+        },
+      ],
+    };
+    render(
+      <MarkdownContent
+        content={"Revenue [source](citation://cit_first)."}
+        citationBundle={bundle}
+      />,
+    );
+
+    fireEvent.mouseEnter(
+      screen.getByRole("button", { name: /(?:citation|引用) 1/i }),
+    );
+
+    const sectionRow = document.querySelector(
+      "[data-citation-table-section]",
+    );
+    expect(sectionRow).not.toBeNull();
+    expect(sectionRow?.querySelector("th")?.colSpan).toBe(2);
+    expect(sectionRow?.textContent).toBe("Product data");
+  });
+
+  it("shows readable structured evidence without internal record metadata", () => {
+    const bundle: CitationBundleV1 = {
+      version: 1,
+      citations: [
+        {
+          citationId: "cit_structured",
+          source: {
+            sourceId: "income:600519",
+            providerId: "valuz-stock",
+            sourceType: "dataset",
+            title: "Company income statement · 600519",
+            retrievedAt: "2026-07-31T03:41:38Z",
+          },
+          evidence: {
+            kind: "structured-data",
+            datasetId: "reportify-financial-income-statement",
+            toolName: "company_income_statement",
+            recordKey: "600519|2024 FY|2024-12-31",
+            field: "total_revenue.total_revenue",
+            value: 174144069958,
+            unit: "CNY",
+            period: "2024 FY",
+            asOf: "2024-12-31",
+            capturedAt: "2026-07-31T03:41:38Z",
+          },
+        },
+      ],
+    };
+    render(
+      <MarkdownContent
+        content={"Revenue [source](citation://cit_structured)."}
+        citationBundle={bundle}
+      />,
+    );
+
+    fireEvent.mouseEnter(
+      screen.getByRole("button", { name: /(?:citation|引用) 1/i }),
+    );
+
+    const evidence = document.querySelector("[data-citation-evidence-section]");
+    expect(evidence).not.toBeNull();
+    expect(evidence?.textContent).toMatch(/cited content|引用内容/i);
+    expect(evidence?.textContent).toContain(
+      "total revenue: 174144069958 CNY",
+    );
+    const tooltipText = screen.getByRole("tooltip").textContent ?? "";
+    expect(tooltipText).not.toContain("record ·");
+    expect(tooltipText).not.toContain("dataset ·");
+    expect(tooltipText).not.toContain("tool ·");
+  });
+
+  it("prefers opening below and stays open while the pointer enters the card", () => {
+    vi.useFakeTimers();
+    try {
+      render(
+        <MarkdownContent
+          content={"Revenue [source](citation://cit_first)."}
+          citationBundle={CITATIONS}
+        />,
+      );
+
+      const pill = screen.getByRole("button", {
+        name: /(?:citation|引用) 1/i,
+      });
+      fireEvent.mouseEnter(pill);
+
+      const card = screen.getByRole("tooltip");
+      expect(card.getAttribute("data-side")).toBe("bottom");
+
+      fireEvent.mouseLeave(pill.parentElement as HTMLElement);
+      fireEvent.mouseEnter(card);
+      act(() => vi.advanceTimersByTime(200));
+
+      expect(screen.getByRole("tooltip")).toBe(card);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("opens above when the card cannot fit below the citation", () => {
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: HTMLElement) {
+        if (this.getAttribute("role") === "tooltip") {
+          return {
+            bottom: 950,
+            height: 200,
+            left: 0,
+            right: 360,
+            top: 750,
+            width: 360,
+            x: 0,
+            y: 750,
+            toJSON: () => ({}),
+          };
+        }
+        if (this.getAttribute("aria-label")?.match(/(?:citation|引用) 1/i)) {
+          return {
+            bottom: 750,
+            height: 16,
+            left: 100,
+            right: 116,
+            top: 734,
+            width: 16,
+            x: 100,
+            y: 734,
+            toJSON: () => ({}),
+          };
+        }
+        return {
+          bottom: 0,
+          height: 0,
+          left: 0,
+          right: 0,
+          top: 0,
+          width: 0,
+          x: 0,
+          y: 0,
+          toJSON: () => ({}),
+        };
+      });
+
+    try {
+      render(
+        <MarkdownContent
+          content={"Revenue [source](citation://cit_first)."}
+          citationBundle={CITATIONS}
+        />,
+      );
+
+      fireEvent.mouseEnter(
+        screen.getByRole("button", { name: /(?:citation|引用) 1/i }),
+      );
+
+      expect(screen.getByRole("tooltip").getAttribute("data-side")).toBe("top");
+    } finally {
+      rectSpy.mockRestore();
+    }
+  });
+
+  it("keeps the hover action usable while keyboard focus moves into the card", () => {
+    const onCitationClick = vi.fn();
+    render(
+      <MarkdownContent
+        content={"Revenue [source](citation://cit_first)."}
+        citationBundle={CITATIONS}
+        messageId="msg-1"
+        onCitationClick={onCitationClick}
+      />,
+    );
+
+    const pill = screen.getByRole("button", { name: /(?:citation|引用) 1/i });
+    fireEvent.focus(pill);
+    const openSource = screen.getByRole("button", {
+      name: /(?:open source|打开原文)/i,
+    });
+    fireEvent.blur(pill, { relatedTarget: openSource });
+    fireEvent.focus(openSource);
+    fireEvent.click(openSource);
+
+    expect(onCitationClick).toHaveBeenCalledWith({
+      messageId: "msg-1",
+      citationId: "cit_first",
+    });
+  });
+
+  it("renders an additive policy quality badge without changing citation identity", () => {
+    const bundle: CitationBundleV1 = {
+      ...CITATIONS,
+      citations: [
+        {
+          ...CITATIONS.citations[0],
+          annotations: {
+            quality: {
+              policyId: "domain-policy",
+              policyRevision: "v1",
+              tier: "P1",
+              status: "passed",
+              label: "P1",
+            },
+          },
+        },
+      ],
+    };
+    render(
+      <MarkdownContent
+        content={"Revenue [source](citation://cit_first)."}
+        citationBundle={bundle}
+      />,
+    );
+
+    fireEvent.mouseEnter(
+      screen.getByRole("button", { name: /(?:citation|引用) 1/i }),
+    );
+    const badges = screen.getAllByText("P1");
+    expect(badges).toHaveLength(2);
+    expect(
+      badges.every(
+        (badge) => badge.getAttribute("data-citation-quality") === "passed",
+      ),
+    ).toBe(true);
+  });
+
+  it("opens the authoritative inputs from a calculation citation card", () => {
+    const onCitationClick = vi.fn();
+    const input = CITATIONS.citations[0];
+    const bundle: CitationBundleV1 = {
+      version: 1,
+      citations: [
+        input,
+        {
+          citationId: "cit_calculation",
+          source: {
+            sourceId: "calculation:1",
+            providerId: "runtime",
+            sourceType: "tool-result",
+            title: "Growth calculation",
+            retrievedAt: "2026-07-30T08:00:00Z",
+          },
+          evidence: {
+            kind: "calculation",
+            expression: "revenue / 100",
+            inputs: [
+              {
+                name: "revenue",
+                citationId: input.citationId,
+                value: 118,
+                unit: "USD million",
+              },
+            ],
+            result: 1.18,
+            unit: "x",
+            calculatedAt: "2026-07-30T08:00:00Z",
+          },
+        },
+      ],
+    };
+    render(
+      <MarkdownContent
+        content={"Growth [calc](citation://cit_calculation)."}
+        citationBundle={bundle}
+        messageId="msg-1"
+        onCitationClick={onCitationClick}
+      />,
+    );
+
+    fireEvent.focus(
+      screen.getByRole("button", { name: /(?:citation|引用) 1/i }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /revenue.*annual report/i }));
+
+    expect(onCitationClick).toHaveBeenCalledWith({
+      messageId: "msg-1",
+      citationId: "cit_first",
+    });
+  });
+
+  it("opens a known citation and degrades an unknown citation", () => {
+    const onCitationClick = vi.fn();
+    render(
+      <MarkdownContent
+        content={
+          "Known [source](citation://cit_first), unknown [source](citation://cit_missing)."
+        }
+        citationBundle={CITATIONS}
+        messageId="msg-1"
+        onCitationClick={onCitationClick}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /(?:citation|引用) 1/i }),
+    );
+    expect(onCitationClick).toHaveBeenCalledWith({
+      messageId: "msg-1",
+      citationId: "cit_first",
+    });
+    const unavailable = screen.getByRole("button", {
+      name: /(?:citation unavailable|引用不可用)/i,
+    });
+    expect(unavailable.getAttribute("aria-disabled")).toBe("true");
+    expect(unavailable.textContent).toBe("2");
+  });
+
+  it("keeps body-derived numbering when the citation bundle is unavailable", () => {
+    render(
+      <MarkdownContent
+        content="Source [report](citation://cit_from_newer_bundle)."
+      />,
+    );
+
+    const unavailable = screen.getByRole("button", {
+      name: /(?:citation unavailable|引用不可用)/i,
+    });
+    expect(unavailable.textContent).toBe("1");
+    expect(unavailable.getAttribute("aria-disabled")).toBe("true");
+  });
+
+  it("leaves an unbound plain [1] as normal text", () => {
+    render(<MarkdownContent content="Plain [1] text." citationBundle={CITATIONS} />);
+
+    expect(screen.getByText(/Plain \[1\] text/)).not.toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /(?:citation|引用)/i }),
+    ).toBeNull();
+  });
+
+  it("surfaces a generic warning when runtime citation integrity is degraded", () => {
+    render(
+      <MarkdownContent
+        content="The answer could not bind a source."
+        citationBundle={{
+          version: 1,
+          citations: [],
+          integrity: {
+            status: "degraded",
+            unknownCitationIds: ["ev_missing"],
+            unusedCitationIds: [],
+            missingLocatorCitationIds: [],
+            repairAttempts: 1,
+            policyRevision: "citation-v1",
+          },
+        }}
+      />,
+    );
+
+    const warning = document.querySelector(
+      '[data-citation-integrity="degraded"]',
+    );
+    expect(warning).not.toBeNull();
+    expect(warning?.className).toContain("items-center");
+    expect(warning?.querySelector("svg")?.className.baseVal).toContain(
+      "top-px",
+    );
+    expect(warning?.className).toContain("text-ink-meta");
+    expect(warning?.className).not.toContain("border-warning");
+    expect(warning?.className).not.toContain("bg-warning-light");
+    expect(
+      screen.getByText(
+        /some citations could not be located or verified|部分引用无法定位或验证/i,
+      ),
+    ).not.toBeNull();
+  });
+
+  it("marks only the cited claim when a quality issue has citation ids", () => {
+    render(
+      <MarkdownContent
+        content="Revenue was 100 USD [source](citation://cit_first)."
+        citationBundle={{
+          ...CITATIONS,
+          integrity: {
+            status: "degraded",
+            unknownCitationIds: ["cit_missing"],
+            unusedCitationIds: [],
+            missingLocatorCitationIds: [],
+            repairAttempts: 0,
+            policyRevision: "citation-v1",
+          },
+          quality: {
+            policyId: "finance",
+            policyRevision: "finance-citation-policy-v1",
+            mode: "strict-domain",
+            status: "degraded",
+            publishStatus: "draft-only",
+            layers: { L4: "degraded" },
+            issues: [
+              {
+                code: "calculation_result_mismatch",
+                layer: "L4",
+                severity: "degraded",
+                citationIds: ["cit_first"],
+              },
+              {
+                code: "source_tier_unmatched",
+                layer: "L2",
+                severity: "degraded",
+              },
+            ],
+            metrics: {
+              citationCount: 1,
+              unsourcedClaimCount: 0,
+              unverifiedClaimCount: 0,
+              tierCounts: { T1: 1 },
+            },
+          },
+        }}
+      />,
+    );
+
+    const pill = screen.getByRole("button", {
+      name: /(?:citation|引用) 1.*(?:needs review|需要核验)/i,
+    });
+    expect(pill.getAttribute("data-citation-quality")).toBe("degraded");
+    expect(pill.parentElement?.className).toContain("mx-1");
+    expect(
+      document.querySelector("[data-citation-quality-warning]"),
+    ).toBeNull();
+    expect(
+      document.querySelector('[data-citation-integrity="degraded"]'),
+    ).toBeNull();
+    expect(
+      document.querySelector("[data-citation-quality-summary]"),
+    ).toBeNull();
+
+    fireEvent.mouseEnter(pill);
+    const evidenceSection = document.querySelector(
+      "[data-citation-evidence-section]",
+    );
+    const qualityIssues = document.querySelector(
+      "[data-citation-quality-issues]",
+    );
+    expect(evidenceSection?.textContent).toMatch(/cited content|引用内容/i);
+    expect(qualityIssues?.textContent).toMatch(
+      /needs review|需要核验/i,
+    );
+    expect(qualityIssues?.textContent).toMatch(
+      /number or calculation|数字或计算依据/i,
+    );
+    expect(
+      evidenceSection?.compareDocumentPosition(qualityIssues!),
+    ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
+  it("marks an uncited claim at its exact sentence without a global warning", () => {
+    render(
+      <MarkdownContent
+        content="Revenue was 100 USD [source](citation://cit_first). Margin was 23.5%."
+        citationBundle={{
+          ...CITATIONS,
+          integrity: {
+            status: "passed",
+            unknownCitationIds: [],
+            unusedCitationIds: [],
+            missingLocatorCitationIds: [],
+            repairAttempts: 0,
+            policyRevision: "citation-v1",
+          },
+          quality: {
+            policyId: "finance",
+            policyRevision: "finance-citation-policy-v1",
+            mode: "strict-domain",
+            status: "degraded",
+            publishStatus: "draft-only",
+            layers: { L4: "degraded" },
+            issues: [
+              {
+                code: "numeric_claim_without_citation",
+                layer: "L4",
+                severity: "degraded",
+                claim: { exact: "Margin was 23.5%." },
+              },
+            ],
+            metrics: {
+              citationCount: 1,
+              unsourcedClaimCount: 1,
+              unverifiedClaimCount: 0,
+              tierCounts: { T1: 1 },
+            },
+          },
+        }}
+      />,
+    );
+
+    const marker = document.querySelector<HTMLButtonElement>(
+      "[data-citation-claim-quality]",
+    );
+    expect(marker).not.toBeNull();
+    expect(marker?.getAttribute("aria-label")).toMatch(
+      /number or calculation|数字或计算依据/i,
+    );
+    expect(
+      document.querySelector("[data-citation-quality-warning]"),
+    ).toBeNull();
+    expect(
+      document.querySelector("[data-citation-quality-summary]"),
+    ).toBeNull();
+  });
+
+  it("keeps a global warning for quality issues without a location", () => {
+    render(
+      <MarkdownContent
+        content="Revenue was 100 USD [source](citation://cit_first)."
+        citationBundle={{
+          ...CITATIONS,
+          integrity: {
+            status: "repaired",
+            unknownCitationIds: [],
+            unusedCitationIds: [],
+            missingLocatorCitationIds: [],
+            repairAttempts: 1,
+            policyRevision: "citation-v1",
+          },
+          quality: {
+            policyId: "finance",
+            policyRevision: "finance-citation-policy-v1",
+            mode: "strict-domain",
+            status: "degraded",
+            publishStatus: "draft-only",
+            layers: { L4: "degraded" },
+            issues: [
+              {
+                code: "numeric_claim_without_citation",
+                layer: "L4",
+                severity: "degraded",
+              },
+            ],
+            metrics: {
+              citationCount: 1,
+              unsourcedClaimCount: 1,
+              unverifiedClaimCount: 0,
+              tierCounts: { T1: 1 },
+            },
+          },
+        }}
+      />,
+    );
+
+    const warning = document.querySelector(
+      '[data-citation-quality-warning="degraded"]',
+    );
+    expect(warning).not.toBeNull();
+    expect(warning?.className).toContain("items-center");
+    expect(warning?.querySelector("svg")?.className.baseVal).toContain(
+      "top-px",
+    );
+    expect(warning?.className).toContain("text-ink-meta");
+    expect(warning?.className).not.toContain("border-warning");
+    expect(warning?.className).not.toContain("bg-warning-light");
+    expect(
+      screen.getByText(
+        /some conclusions lack sufficient citation support|部分结论缺少充分的引用支持/i,
+      ),
+    ).not.toBeNull();
+  });
+
+  it("uses the restrained unverified fallback when conflicts have no location", () => {
+    render(
+      <MarkdownContent
+        content="Revenue may differ across sources."
+        citationBundle={{
+          version: 1,
+          citations: [],
+          integrity: {
+            status: "passed",
+            unknownCitationIds: [],
+            unusedCitationIds: [],
+            missingLocatorCitationIds: [],
+            repairAttempts: 0,
+            policyRevision: "citation-v1",
+          },
+          quality: {
+            policyId: "finance",
+            policyRevision: "finance-citation-policy-v1",
+            mode: "strict-domain",
+            status: "unverified",
+            publishStatus: "draft-only",
+            layers: { L3: "degraded" },
+            issues: [
+              {
+                code: "cross_source_value_conflict",
+                layer: "L3",
+                severity: "unverified",
+              },
+            ],
+            metrics: {
+              citationCount: 0,
+              unsourcedClaimCount: 0,
+              unverifiedClaimCount: 1,
+              tierCounts: {},
+            },
+          },
+        }}
+      />,
+    );
+
+    const warning = document.querySelector(
+      '[data-citation-quality-warning="unverified"]',
+    );
+    expect(warning).not.toBeNull();
+    expect(warning?.className).toContain("items-center");
+    expect(warning?.querySelector("svg")?.className.baseVal).toContain(
+      "top-px",
+    );
+    expect(warning?.className).toContain("text-ink-meta");
+    expect(warning?.className).not.toContain("border-warning");
+    expect(warning?.className).not.toContain("bg-warning-light");
+    expect(
+      screen.getByText(
+        /some sources have not been cross-checked or conflict|部分来源尚未交叉验证或存在冲突/i,
+      ),
+    ).not.toBeNull();
   });
 });

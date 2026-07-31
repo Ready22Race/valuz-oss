@@ -760,6 +760,129 @@ paths:
                 $ref: "#/components/schemas/ResolveFilesResponse"
         "422":
           description: Invalid request or more than 256 refs
+  /v1/citations/resolve:
+    post:
+      summary: Resolve a canonical message citation for in-app reading
+      description: |
+        Reloads the citation from the owner-scoped canonical message, checks
+        that it belongs to the requested session, reauthorizes the current
+        document identity, and only then returns a temporary reading address.
+        Source metadata, locators, file paths, and URLs supplied by the client
+        are never trusted.
+      operationId: resolveCitation
+      tags: [citations]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResolveCitationRequest"
+      responses:
+        "200":
+          description: Current document and best available locator
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResolveCitationResponse"
+        "403":
+          description: The current owner no longer has document access
+        "404":
+          description: Message, citation, or document unavailable
+  /v1/document-research/sessions:
+    post:
+      summary: Create or restore a locked single-document research session
+      operationId: createDocumentResearchSession
+      tags: [document-research]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DocumentResearchSessionRequest"
+      responses:
+        "201":
+          description: Owner-scoped child session with a server-enforced source scope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentResearchSession"
+        "404":
+          description: Document or origin session unavailable
+  /v1/document-research/documents/{document_id}/summary:
+    get:
+      summary: Get a cached citation-bearing document summary
+      operationId: getDocumentSummary
+      tags: [document-research]
+      parameters:
+        - name: document_id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: profile
+          in: query
+          required: false
+          schema: {type: string, enum: [brief, detailed], default: brief}
+      responses:
+        "200":
+          description: Cached artifact, or null when none has been generated
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/DocumentSummaryArtifactV1"
+                  - type: "null"
+        "404":
+          description: Document unavailable to the current owner
+    post:
+      summary: Generate or refresh a citation-bearing document summary
+      operationId: generateDocumentSummary
+      tags: [document-research]
+      parameters:
+        - name: document_id
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GenerateDocumentSummaryRequest"
+      responses:
+        "200":
+          description: Current summary artifact
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentSummaryArtifactV1"
+        "404":
+          description: Document unavailable to the current owner
+  /v1/document-research/share:
+    post:
+      summary: Copy one stored canonical research answer into its origin chat
+      description: |
+        The client submits identities only. The server reloads the completed
+        source message and copies its canonical citation bundle within the same
+        owner scope; client-authored prose or citations are never accepted.
+      operationId: shareDocumentResearchMessage
+      tags: [document-research]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ShareDocumentResearchMessageRequest"
+      responses:
+        "200":
+          description: Imported message identity
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SharedResearchMessage"
+        "404":
+          description: Research session, origin, or source message unavailable
+        "409":
+          description: Source message cannot be safely copied
   /v1/tasks:
     get:
       summary: List tasks across every project
@@ -6585,6 +6708,463 @@ components:
             ``provider_id`` — ignored when it does not match the
             session's frozen model.
 
+    CitationBundleV1:
+      type: object
+      required: [version, citations]
+      properties:
+        version:
+          type: integer
+          enum: [1]
+        citations:
+          type: array
+          items:
+            $ref: "#/components/schemas/CitationRefV1"
+        integrity:
+          $ref: "#/components/schemas/CitationIntegrityV1"
+        quality:
+          $ref: "#/components/schemas/CitationQualityResultV1"
+
+    DocumentResearchSessionRequest:
+      type: object
+      required: [document_id]
+      properties:
+        document_id: {type: string, minLength: 1}
+        origin_session_id: {type: string, nullable: true}
+        origin_message_id: {type: string, nullable: true}
+
+    GenerateDocumentSummaryRequest:
+      type: object
+      properties:
+        profile:
+          type: string
+          enum: [brief, detailed]
+          default: brief
+        origin_session_id: {type: string, nullable: true}
+        origin_message_id: {type: string, nullable: true}
+        force: {type: boolean, default: false}
+
+    ShareDocumentResearchMessageRequest:
+      type: object
+      required: [research_session_id]
+      properties:
+        research_session_id: {type: string, minLength: 1}
+        source_message_id: {type: string, nullable: true}
+
+    DocumentResearchSession:
+      type: object
+      required:
+        [session_id, purpose, document_ids, document_versions,
+         source_scope, reused]
+      properties:
+        session_id: {type: string}
+        purpose: {type: string, enum: [document-research]}
+        document_ids:
+          type: array
+          minItems: 1
+          items: {type: string}
+        document_versions:
+          type: array
+          minItems: 1
+          items: {type: string}
+        source_scope: {type: string, enum: [locked]}
+        origin_session_id: {type: string, nullable: true}
+        origin_message_id: {type: string, nullable: true}
+        reused: {type: boolean}
+
+    DocumentSummaryArtifactV1:
+      type: object
+      required:
+        [version, summary_id, document_id, document_version, status,
+         profile, content, citation_bundle, generated_at, model_id,
+         prompt_revision, policy_revision, research_session_id,
+         message_id, error_message]
+      properties:
+        version: {type: integer, enum: [1]}
+        summary_id: {type: string}
+        document_id: {type: string}
+        document_version: {type: string}
+        status:
+          type: string
+          enum: [pending, ready, degraded, failed, stale]
+        profile: {type: string}
+        content: {type: string}
+        citation_bundle:
+          $ref: "#/components/schemas/CitationBundleV1"
+        generated_at: {type: string, format: date-time, nullable: true}
+        model_id: {type: string, nullable: true}
+        prompt_revision: {type: string}
+        policy_revision: {type: string}
+        research_session_id: {type: string, nullable: true}
+        message_id: {type: string, nullable: true}
+        error_message: {type: string, nullable: true}
+
+    SharedResearchMessage:
+      type: object
+      required:
+        [target_session_id, message_id, source_session_id, source_message_id]
+      properties:
+        target_session_id: {type: string}
+        message_id: {type: string}
+        source_session_id: {type: string}
+        source_message_id: {type: string}
+
+    ResolveCitationRequest:
+      type: object
+      required: [session_id, message_id, citation_id]
+      properties:
+        session_id: {type: string, minLength: 1}
+        message_id: {type: string, minLength: 1}
+        citation_id: {type: string, minLength: 1}
+
+    CitationDocumentAddress:
+      type: object
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          enum: [local, remote]
+        absPath:
+          type: string
+          nullable: true
+          description: Present only for a local desktop resolver.
+        url:
+          type: string
+          nullable: true
+          description: Short-lived address; never persisted in CitationBundle.
+        expiresAt:
+          type: integer
+          format: int64
+          nullable: true
+
+    ResolvedCitationDocumentSource:
+      type: object
+      required: [id, title, render]
+      properties:
+        id: {type: string}
+        title: {type: string}
+        source:
+          type: object
+          properties:
+            name: {type: string}
+            logoUrl: {type: string}
+        render:
+          oneOf:
+            - type: object
+              required: [kind, mimeType, address]
+              properties:
+                kind: {type: string, enum: [file]}
+                mimeType: {type: string}
+                address: {$ref: "#/components/schemas/CitationDocumentAddress"}
+            - type: object
+              required: [kind, html]
+              properties:
+                kind: {type: string, enum: [html]}
+                html:
+                  type: string
+                  description: Trusted backend-fetched HTML; sanitized by the app host.
+            - type: object
+              required: [kind, chunks]
+              properties:
+                kind: {type: string, enum: [chunks]}
+                chunks:
+                  type: array
+                  items:
+                    type: object
+                    additionalProperties: true
+            - type: object
+              required: [kind, url]
+              properties:
+                kind: {type: string, enum: [external]}
+                url: {type: string, format: uri}
+        chunks:
+          type: array
+          description: Optional locator index independent of the primary render.
+          items:
+            type: object
+            additionalProperties: true
+        documentVersion:
+          type: string
+          nullable: true
+        originalUrl:
+          type: string
+          nullable: true
+
+    ResolveCitationResponse:
+      type: object
+      required: [document, status]
+      properties:
+        document:
+          allOf:
+            - $ref: "#/components/schemas/ResolvedCitationDocumentSource"
+          nullable: true
+        effective_locator:
+          nullable: true
+          oneOf:
+            - $ref: "#/components/schemas/ChunkLocatorV1"
+            - $ref: "#/components/schemas/HtmlLocatorV1"
+            - $ref: "#/components/schemas/PdfLocatorV1"
+            - $ref: "#/components/schemas/ExternalLocatorV1"
+        status:
+          type: string
+          enum: [ready, stale, missing, forbidden, degraded]
+        fallback_reason:
+          type: string
+          nullable: true
+        canonical_url:
+          type: string
+          nullable: true
+
+    CitationRefV1:
+      type: object
+      required: [citationId, source, evidence]
+      properties:
+        citationId:
+          type: string
+          minLength: 1
+        source:
+          $ref: "#/components/schemas/CitationSourceV1"
+        evidence:
+          oneOf:
+            - $ref: "#/components/schemas/TextCitationEvidenceV1"
+            - $ref: "#/components/schemas/StructuredDataEvidenceV1"
+            - $ref: "#/components/schemas/CalculationEvidenceV1"
+        locator:
+          oneOf:
+            - $ref: "#/components/schemas/ChunkLocatorV1"
+            - $ref: "#/components/schemas/HtmlLocatorV1"
+            - $ref: "#/components/schemas/PdfLocatorV1"
+            - $ref: "#/components/schemas/ExternalLocatorV1"
+        resolutionStatus:
+          type: string
+          enum: [ready, stale, missing, forbidden, degraded]
+        annotations:
+          type: object
+          additionalProperties: true
+
+    CitationSourceV1:
+      type: object
+      required:
+        [sourceId, providerId, sourceType, title, retrievedAt]
+      properties:
+        sourceId: {type: string, minLength: 1}
+        providerId: {type: string, minLength: 1}
+        documentId: {type: string}
+        documentVersion: {type: string}
+        sourceType:
+          type: string
+          enum: [document, web, dataset, tool-result, conversation]
+        sourceCategory: {type: string}
+        mimeType: {type: string}
+        title: {type: string, minLength: 1}
+        organization: {type: string}
+        author: {type: string}
+        publishedAt: {type: string, format: date-time}
+        retrievedAt: {type: string, format: date-time}
+        canonicalUrl:
+          type: string
+          format: uri
+          description: Stable public URL only. Signed or secret-bearing URLs are forbidden.
+
+    TextCitationEvidenceV1:
+      type: object
+      required: [kind, quote, snippet, capturedAt]
+      properties:
+        kind: {type: string, enum: [text]}
+        quote: {type: string}
+        snippet: {type: string}
+        prefix: {type: string}
+        suffix: {type: string}
+        language: {type: string}
+        capturedAt: {type: string, format: date-time}
+        contentHash: {type: string}
+
+    StructuredDataEvidenceV1:
+      type: object
+      required: [kind, datasetId, toolName, field, value, capturedAt]
+      properties:
+        kind: {type: string, enum: [structured-data]}
+        datasetId: {type: string}
+        toolName: {type: string}
+        recordKey: {type: string}
+        field: {type: string}
+        value:
+          nullable: true
+          oneOf:
+            - {type: string}
+            - {type: number}
+            - {type: boolean}
+        unit: {type: string}
+        period: {type: string}
+        asOf: {type: string}
+        capturedAt: {type: string, format: date-time}
+        toolTraceRef: {type: string}
+        coverage:
+          type: object
+          properties:
+            start: {type: string}
+            end: {type: string}
+
+    CalculationEvidenceV1:
+      type: object
+      required: [kind, expression, inputs, result, calculatedAt]
+      properties:
+        kind: {type: string, enum: [calculation]}
+        expression: {type: string}
+        inputs:
+          type: array
+          items:
+            type: object
+            required: [name, citationId, value]
+            properties:
+              name: {type: string}
+              citationId: {type: string}
+              value:
+                oneOf:
+                  - {type: string}
+                  - {type: number}
+              unit: {type: string}
+        result:
+          oneOf:
+            - {type: string}
+            - {type: number}
+        unit: {type: string}
+        rounding: {type: string}
+        calculatedAt: {type: string, format: date-time}
+
+    TextQuoteSelectorV1:
+      type: object
+      required: [exact]
+      properties:
+        exact: {type: string}
+        prefix: {type: string}
+        suffix: {type: string}
+
+    NormalizedRectV1:
+      type: object
+      required: [x, y, width, height]
+      properties:
+        x: {type: number, minimum: 0, maximum: 1}
+        y: {type: number, minimum: 0, maximum: 1}
+        width: {type: number, minimum: 0, maximum: 1}
+        height: {type: number, minimum: 0, maximum: 1}
+
+    ChunkLocatorV1:
+      type: object
+      required: [kind, chunkId]
+      properties:
+        kind: {type: string, enum: [chunk]}
+        chunkId: {type: string}
+        segmentId: {type: string}
+        quote: {$ref: "#/components/schemas/TextQuoteSelectorV1"}
+
+    HtmlLocatorV1:
+      type: object
+      required: [kind, quote]
+      properties:
+        kind: {type: string, enum: [html]}
+        chunkId: {type: string}
+        elementId: {type: string}
+        cssSelector: {type: string}
+        quote: {$ref: "#/components/schemas/TextQuoteSelectorV1"}
+
+    PdfLocatorV1:
+      type: object
+      required: [kind, page]
+      properties:
+        kind: {type: string, enum: [pdf]}
+        page: {type: integer, minimum: 1}
+        chunkId: {type: string}
+        rects:
+          type: array
+          items: {$ref: "#/components/schemas/NormalizedRectV1"}
+        quote: {$ref: "#/components/schemas/TextQuoteSelectorV1"}
+        coordinateSpace:
+          type: string
+          enum: [viewport-normalized-v1]
+        pageRotation:
+          type: integer
+          enum: [0, 90, 180, 270]
+
+    ExternalLocatorV1:
+      type: object
+      required: [kind]
+      properties:
+        kind: {type: string, enum: [external]}
+        fragment: {type: string}
+
+    CitationIntegrityV1:
+      type: object
+      required:
+        [status, unknownCitationIds, unusedCitationIds,
+         missingLocatorCitationIds, repairAttempts, policyRevision]
+      properties:
+        status:
+          type: string
+          enum: [passed, repaired, degraded, not-required]
+        unknownCitationIds:
+          type: array
+          items: {type: string}
+        unusedCitationIds:
+          type: array
+          items: {type: string}
+        missingLocatorCitationIds:
+          type: array
+          items: {type: string}
+        repairAttempts: {type: integer, minimum: 0, maximum: 1}
+        policyRevision: {type: string}
+
+    CitationQualityIssueV1:
+      type: object
+      required: [code, layer, severity]
+      properties:
+        code: {type: string}
+        layer: {type: string}
+        severity: {type: string, enum: [degraded, unverified]}
+        citationIds:
+          type: array
+          items: {type: string}
+        claim:
+          $ref: "#/components/schemas/TextQuoteSelectorV1"
+
+    CitationQualityResultV1:
+      type: object
+      required:
+        [policyId, policyRevision, mode, status, publishStatus,
+         layers, issues, metrics]
+      properties:
+        policyId: {type: string}
+        policyRevision: {type: string}
+        mode:
+          type: string
+          enum: [required-on-evidence, strict-domain]
+        status:
+          type: string
+          enum: [passed, unverified, degraded]
+        publishStatus:
+          type: string
+          enum: [ready, draft-only]
+        layers:
+          type: object
+          additionalProperties:
+            type: string
+            enum: [passed, degraded]
+        issues:
+          type: array
+          items:
+            $ref: "#/components/schemas/CitationQualityIssueV1"
+        metrics:
+          type: object
+          required:
+            [citationCount, unsourcedClaimCount,
+             unverifiedClaimCount, tierCounts]
+          properties:
+            citationCount: {type: integer, minimum: 0}
+            unsourcedClaimCount: {type: integer, minimum: 0}
+            unverifiedClaimCount: {type: integer, minimum: 0}
+            tierCounts:
+              type: object
+              additionalProperties: {type: integer, minimum: 0}
+
     SessionEvent:
       type: object
       required: [event_type]
@@ -6593,6 +7173,9 @@ components:
           type: string
         payload:
           type: object
+          description: >-
+            Flat string map. Final message.assistant.delta frames may carry a
+            JSON-encoded CitationBundleV1 under citation_bundle.
           additionalProperties:
             type: string
 

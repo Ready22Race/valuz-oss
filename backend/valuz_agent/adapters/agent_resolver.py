@@ -47,6 +47,7 @@ from valuz_agent.adapters.system_prompt_builder import (
     OUTPUT_FORMAT_INSTRUCTIONS,
     assemble_session_instructions,
     build_project_system_prompt,
+    ensure_citation_system_policy,
 )
 from valuz_agent.modules.agents.datastore import ProjectMemberDatastore
 from valuz_agent.modules.memory.injection import memory_instructions_block
@@ -1143,6 +1144,7 @@ async def build_member_session(
             ("output-format", OUTPUT_FORMAT_INSTRUCTIONS),
         ]
     )
+    instructions = ensure_citation_system_policy(instructions)
 
     run_kind = "lead" if is_lead else "subtask"
 

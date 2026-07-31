@@ -498,7 +498,7 @@ describe("ProjectDetailPage auto-refresh wiring", () => {
     fireEvent.click(screen.getByRole("button", { name: /delete|删除/i }));
 
     await waitFor(() =>
-      expect(channelsApi.deleteFeishuChat).toHaveBeenCalledWith("chat-1"),
+      expect(channelsApi.deleteFeishuChat).toHaveBeenCalledWith("chat-1", "A"),
     );
     await waitFor(() => expect(h.setRightPanel).toHaveBeenCalled());
     await waitFor(() =>

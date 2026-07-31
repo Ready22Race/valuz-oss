@@ -1,17 +1,48 @@
 import {
-  act,
   fireEvent,
   render,
   screen,
   waitFor,
   within,
 } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
+import { setLocale } from "@valuz/shared/i18n";
 
 import {
+  ArtifactRenderer,
   ArtifactViewerShell,
   type ArtifactDescriptor,
 } from "./ArtifactViewerShell";
+
+vi.mock("../reader/PdfDocumentRenderer", () => ({
+  PdfDocumentRenderer: ({
+    url,
+    title,
+    location,
+  }: {
+    url: string;
+    title: string;
+    location?: { page?: number };
+  }) => (
+    <div
+      data-testid="pdfjs-document"
+      data-url={url}
+      data-page={location?.page}
+      aria-label={title}
+    />
+  ),
+}));
+
+beforeAll(() => {
+  Object.defineProperty(Range.prototype, "getClientRects", {
+    configurable: true,
+    value: () => [],
+  });
+  Object.defineProperty(Range.prototype, "getBoundingClientRect", {
+    configurable: true,
+    value: () => new DOMRect(),
+  });
+});
 
 function artifact(
   capabilities: Partial<ArtifactDescriptor["capabilities"]> = {},
@@ -34,6 +65,94 @@ function artifact(
 }
 
 describe("ArtifactViewerShell", () => {
+  it("renders Markdown source in the wrapped code editor", async () => {
+    render(
+      <ArtifactViewerShell
+        artifact={{
+          ...artifact({ canPreview: true }),
+          previewKind: "markdown",
+          mimeType: "text/markdown",
+          name: "notes.md",
+        }}
+        content={{
+          kind: "text",
+          encoding: "utf-8",
+          content: "# Heading",
+          truncated: false,
+        }}
+      />,
+    );
+
+    const shell = screen.getByRole("article");
+    const titleActions = within(shell.querySelector("header")!);
+    const preview = titleActions.getByRole("button", { name: "预览" });
+    const source = titleActions.getByRole("button", { name: "源代码" });
+
+    expect(preview.getAttribute("aria-pressed")).toBe("true");
+    expect(source.getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getAllByText("Markdown")).toHaveLength(1);
+
+    fireEvent.click(source);
+
+    expect(preview.getAttribute("aria-pressed")).toBe("false");
+    expect(source.getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getAllByText("Markdown")).toHaveLength(1);
+    await waitFor(() =>
+      expect(shell.querySelector(".cm-editor")).not.toBeNull(),
+    );
+    expect(shell.querySelector(".cm-lineNumbers")).not.toBeNull();
+    expect(shell.querySelector(".cm-activeLine")).not.toBeNull();
+    expect(shell.querySelector(".cm-lineWrapping")).not.toBeNull();
+  });
+
+  it("renders HTML source with line numbers and active-line highlighting", async () => {
+    render(
+      <ArtifactViewerShell
+        artifact={{
+          ...artifact({ canPreview: true }),
+          previewKind: "html",
+          mimeType: "text/html",
+          name: "report.html",
+        }}
+        content={{
+          kind: "text",
+          encoding: "utf-8",
+          content: "<main>\n  <h1>Report</h1>\n</main>",
+          truncated: false,
+        }}
+      />,
+    );
+
+    const shell = screen.getByRole("article");
+    fireEvent.click(
+      within(shell.querySelector("header")!).getByRole("button", {
+        name: "源代码",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(shell.querySelector(".cm-editor")).not.toBeNull(),
+    );
+    expect(shell.querySelector(".cm-lineNumbers")).not.toBeNull();
+    expect(shell.querySelector(".cm-activeLine")).not.toBeNull();
+    expect(shell.querySelector(".cm-lineWrapping")).not.toBeNull();
+  });
+
+  it("does not draw a second frame when embedded in a panel", () => {
+    render(
+      <ArtifactViewerShell
+        artifact={artifact()}
+        content={{ kind: "external", reason: "unsupported" }}
+        framed={false}
+      />,
+    );
+
+    const shell = screen.getByRole("article");
+    expect(shell.classList.contains("border")).toBe(false);
+    expect(shell.classList.contains("rounded-[14px]")).toBe(false);
+    expect(shell.classList.contains("shadow-sm")).toBe(false);
+  });
+
   it("announces preview errors and exposes a retry action", () => {
     const onReload = vi.fn();
     render(
@@ -115,6 +234,93 @@ describe("ArtifactViewerShell", () => {
     expect(screen.getByRole("alert").textContent).toContain("无法加载图片");
   });
 
+  it("moves image zoom controls into the title actions", () => {
+    render(
+      <ArtifactViewerShell
+        artifact={{
+          ...artifact(),
+          previewKind: "image",
+          mimeType: "image/png",
+          name: "preview.png",
+        }}
+        content={{
+          kind: "binary",
+          openUrl: "https://example.invalid/preview.png",
+          mimeType: "image/png",
+        }}
+      />,
+    );
+
+    const shell = screen.getByRole("article");
+    const titleActions = within(shell.querySelector("header")!);
+    expect(
+      titleActions.getByRole("button", { name: "缩小图片" }),
+    ).not.toBeNull();
+    expect(
+      titleActions.getByRole("button", { name: "放大图片" }),
+    ).not.toBeNull();
+    expect(screen.getAllByText("Image")).toHaveLength(1);
+    expect(
+      titleActions.getByRole("button", { name: "图片适合窗口" }).textContent,
+    ).toBe("适合窗口");
+
+    fireEvent.click(titleActions.getByRole("button", { name: "放大图片" }));
+    expect(
+      titleActions.getByRole("button", { name: "图片适合窗口" }).textContent,
+    ).toBe("125%");
+  });
+
+  it("localizes the standalone image fit control", () => {
+    render(
+      <ArtifactRenderer
+        artifact={{
+          ...artifact(),
+          previewKind: "image",
+          mimeType: "image/png",
+          name: "preview.png",
+        }}
+        content={{
+          kind: "binary",
+          openUrl: "https://example.invalid/preview.png",
+          mimeType: "image/png",
+        }}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "图片适合窗口" }).textContent,
+    ).toBe("适合窗口");
+  });
+
+  it("renders the image fit control in English", () => {
+    setLocale("en-US");
+    const view = render(
+      <ArtifactRenderer
+        artifact={{
+          ...artifact(),
+          previewKind: "image",
+          mimeType: "image/png",
+          name: "preview.png",
+        }}
+        content={{
+          kind: "binary",
+          openUrl: "https://example.invalid/preview.png",
+          mimeType: "image/png",
+        }}
+      />,
+    );
+
+    try {
+      expect(
+        screen.getByRole("button", { name: "Fit image to window" })
+          .textContent,
+      ).toBe("Fit to window");
+    } finally {
+      view.unmount();
+      setLocale("zh-CN");
+    }
+  });
+
   it("surfaces media loading failures", () => {
     const { container } = render(
       <ArtifactViewerShell
@@ -138,29 +344,7 @@ describe("ArtifactViewerShell", () => {
     expect(screen.getByRole("alert").textContent).toContain("无法加载媒体文件");
   });
 
-  it("removes the PDF loading overlay after the frame loads", () => {
-    render(
-      <ArtifactViewerShell
-        artifact={{
-          ...artifact(),
-          previewKind: "pdf",
-          mimeType: "application/pdf",
-          name: "preview.pdf",
-        }}
-        content={{
-          kind: "binary",
-          openUrl: "https://example.invalid/preview.pdf",
-          mimeType: "application/pdf",
-        }}
-      />,
-    );
-
-    expect(screen.getByRole("status").textContent).toContain("正在加载 PDF");
-    fireEvent.load(screen.getByTitle("preview.pdf"));
-    expect(screen.queryByText("正在加载 PDF")).toBeNull();
-  });
-
-  it("opens a PDF at the requested one-based page", () => {
+  it("renders PDFs with PDF.js at the requested one-based page", () => {
     render(
       <ArtifactViewerShell
         artifact={{
@@ -178,77 +362,12 @@ describe("ArtifactViewerShell", () => {
       />,
     );
 
-    expect(screen.getByTitle("preview.pdf").getAttribute("src")).toBe(
-      "https://example.invalid/preview.pdf#zoom=page-width&page=12",
+    const pdf = screen.getByTestId("pdfjs-document");
+    expect(pdf.getAttribute("data-url")).toBe(
+      "https://example.invalid/preview.pdf#zoom=page-width",
     );
-  });
-
-  it("offers retry and external-open recovery when PDF loading times out", () => {
-    const onOpenExternal = vi.fn();
-    vi.useFakeTimers();
-    try {
-      render(
-        <ArtifactViewerShell
-          artifact={{
-            ...artifact({ canOpenExternal: true }),
-            previewKind: "pdf",
-            mimeType: "application/pdf",
-            name: "preview.pdf",
-          }}
-          content={{
-            kind: "binary",
-            openUrl: "https://example.invalid/preview.pdf",
-            mimeType: "application/pdf",
-          }}
-          onOpenExternal={onOpenExternal}
-        />,
-      );
-
-      act(() => vi.advanceTimersByTime(15_000));
-      const alert = screen.getByRole("alert");
-      expect(alert.textContent).toContain("preview.pdf");
-      fireEvent.click(
-        within(alert).getByRole("button", { name: "外部打开" }),
-      );
-      expect(onOpenExternal).toHaveBeenCalledOnce();
-
-      fireEvent.click(within(alert).getByRole("button", { name: "重试" }));
-      expect(screen.getByRole("status").textContent).toContain("正在加载 PDF");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("re-resolves on PDF retry instead of reusing a possibly expired address", () => {
-    const onReload = vi.fn();
-    vi.useFakeTimers();
-    try {
-      render(
-        <ArtifactViewerShell
-          artifact={{
-            ...artifact(),
-            previewKind: "pdf",
-            mimeType: "application/pdf",
-            name: "preview.pdf",
-          }}
-          content={{
-            kind: "binary",
-            openUrl: "https://example.invalid/preview.pdf",
-            mimeType: "application/pdf",
-          }}
-          onReload={onReload}
-        />,
-      );
-
-      act(() => vi.advanceTimersByTime(15_000));
-      fireEvent.click(
-        within(screen.getByRole("alert")).getByRole("button", { name: "重试" }),
-      );
-
-      expect(onReload).toHaveBeenCalledOnce();
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(pdf.getAttribute("data-page")).toBe("12");
+    expect(screen.queryByTitle("preview.pdf")).toBeNull();
   });
 
   it("offers a re-resolving retry when an image fails to load", () => {

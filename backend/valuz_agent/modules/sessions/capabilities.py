@@ -22,6 +22,98 @@ from valuz_agent.infra.db import async_unit_of_work
 logger = logging.getLogger(__name__)
 
 
+async def refresh_citation_policy_for_session(session_id: str, user_id: str) -> bool:
+    """Install/upgrade the built-in citation skill and system policy.
+
+    Unlike project instructions, this is a product-level trust boundary rather
+    than user-authored prompt content.  Existing conversations therefore
+    converge lazily before each turn instead of remaining on their creation
+    snapshot forever.
+    """
+
+    from valuz_agent.adapters.capability_resolver import citation_skill_dir
+    from valuz_agent.adapters.system_prompt_builder import (
+        CITATION_POLICY_REVISION,
+        ensure_citation_system_policy,
+    )
+
+    session = await kernel_client.get_session(user_id, session_id)
+    if session is None or session.status in ("terminated",):
+        return False
+
+    skill_dir = citation_skill_dir(session.user_id)
+    skill_path = str(skill_dir.resolve(strict=False))
+    current_skills = list(session.skills or ())
+    new_skills = current_skills if skill_path in current_skills else [*current_skills, skill_path]
+    new_instructions = ensure_citation_system_policy(session.instructions or "")
+    metadata = dict(session.metadata or {})
+    valuz = dict(metadata.get("valuz") or {})
+    old_revision = valuz.get("citation_policy_revision")
+    valuz["citation_policy_revision"] = CITATION_POLICY_REVISION
+    old_quality_policy = valuz.get("citation_quality_policy")
+    from valuz_agent.ports.extensions import ext
+
+    try:
+        quality_snapshot = await ext.citation_quality_policy.resolve(
+            user_id,
+            session_metadata=metadata,
+        )
+    except Exception:  # noqa: BLE001 — a configured domain gate fails closed
+        logger.exception(
+            "citation quality policy resolution failed for session %s",
+            session_id,
+        )
+        if isinstance(old_quality_policy, dict):
+            quality_policy = {
+                **old_quality_policy,
+                "config": {"unavailable": True},
+            }
+        else:
+            quality_policy = None
+    else:
+        quality_policy = (
+            quality_snapshot.session_metadata() if quality_snapshot is not None else None
+        )
+    if quality_policy is None:
+        valuz.pop("citation_quality_policy", None)
+    else:
+        valuz["citation_quality_policy"] = quality_policy
+    metadata["valuz"] = valuz
+
+    if (
+        new_skills == current_skills
+        and new_instructions == (session.instructions or "")
+        and old_revision == CITATION_POLICY_REVISION
+        and old_quality_policy == quality_policy
+    ):
+        return False
+
+    if not skill_dir.is_dir():
+        # Keep the machine policy even when a damaged/partial installation is
+        # missing the skill.  The kernel guard sees the missing skill and marks
+        # source-dependent answers degraded (fail closed).
+        logger.error("citation built-in skill is missing: %s", skill_dir)
+        new_skills = current_skills
+
+    await kernel_client.update_session(
+        user_id,
+        session_id,
+        UpdateSessionRequest(
+            skills=list(new_skills),
+            instructions=new_instructions,
+            metadata=metadata,
+        ),
+    )
+    logger.info(
+        "Refreshed citation policy on session %s (skill=%s revision=%s quality=%s)",
+        session_id,
+        skill_path not in current_skills and skill_dir.is_dir(),
+        CITATION_POLICY_REVISION,
+        quality_policy.get("revision") if quality_policy else "none",
+    )
+    return True
+
+
 async def refresh_docs_capabilities_for_session(session_id: str, user_id: str) -> bool:
     """Ensure the valuz-project-docs skill + ``valuz_docs`` MCP are
     present on an existing session row.
@@ -195,16 +287,32 @@ async def refresh_always_on_mcp_for_session(session_id: str, user_id: str) -> bo
         return False
 
     run_kind = ((session.metadata or {}).get("valuz", {}) or {}).get("run_kind")
+    research_context = ((session.metadata or {}).get("valuz", {}) or {}).get("document_research")
+    locked_document_research = (
+        isinstance(research_context, dict)
+        and research_context.get("purpose") == "document-research"
+        and research_context.get("source_scope") == "locked"
+    )
     fresh = await always_on_http_mcp_servers(
         session_id, owner_user_id=user_id, toolkit=harness_toolkit_for_run_kind(run_kind)
     )
+    if locked_document_research:
+        # The document-research contract is server-enforced: this child
+        # session can only call the owner-scoped docs MCP. Do not reintroduce
+        # connectors, automations, harness tools or external MCPs while
+        # restamping credentials.
+        fresh = [item for item in fresh if item.name == "valuz_docs"]
     fresh_names = {m.name for m in fresh}
     current = list(session.mcp_servers or ())
     # Drop any existing always-on entry (stale token/url), keep everything
     # else (external catalog connectors the user attached), then re-append the
     # freshly-stamped trio. Order mirrors capability_resolver (external first,
     # always-on last) so an unchanged token yields an identical tuple → no save.
-    preserved = [m for m in current if getattr(m, "name", None) not in fresh_names]
+    preserved = (
+        []
+        if locked_document_research
+        else [m for m in current if getattr(m, "name", None) not in fresh_names]
+    )
     # External catalog connectors carry credentials baked at resolve time —
     # an OAuth bearer header with ~1h expiry for Reportify-backed connectors.
     # Re-resolve them here too, or an EXISTING conversation keeps the stale

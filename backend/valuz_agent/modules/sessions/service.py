@@ -44,7 +44,10 @@ from valuz_agent.adapters import kernel_client
 from valuz_agent.adapters.capability_resolver import resolve_session_capabilities
 from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.adapters.model_resolver import resolve_model
-from valuz_agent.adapters.system_prompt_builder import build_project_system_prompt
+from valuz_agent.adapters.system_prompt_builder import (
+    build_project_system_prompt,
+    ensure_citation_system_policy,
+)
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.integrations.skills_filesystem import FilesystemSkillSource
@@ -66,6 +69,7 @@ from valuz_agent.modules.sessions.attachments import (
 )
 from valuz_agent.modules.sessions.capabilities import (
     refresh_always_on_mcp_for_session,
+    refresh_citation_policy_for_session,
     refresh_docs_capabilities_for_session,
 )
 from valuz_agent.modules.sessions.context_builder import _build_additional_context
@@ -845,6 +849,7 @@ class SessionService:
                 ("output-format", OUTPUT_FORMAT_INSTRUCTIONS),
             ]
         )
+        instructions = ensure_citation_system_policy(instructions)
 
         effective_permission_mode = _coerce_session_permission_mode(
             permission_mode or agent.permission_mode
@@ -1320,6 +1325,7 @@ class SessionService:
             session_instructions = (
                 f"{session_instructions}\n\n{notice}" if session_instructions else notice
             )
+        session_instructions = ensure_citation_system_policy(session_instructions)
 
         from app.serializers import agent_config_to_schema
 
@@ -1366,6 +1372,14 @@ class SessionService:
         user_id: str | None = None,
     ) -> SessionDetail:
         """Kick off an async agent turn in the background.  Returns immediately."""
+        try:
+            await refresh_citation_policy_for_session(session_id, user_id)
+        except Exception:  # noqa: BLE001 — guard still fails closed if refresh fails
+            logger.exception(
+                "send_message: citation policy refresh failed for %s",
+                session_id,
+            )
+
         # Lazy refresh — if the user bound docs to this project AFTER
         # the session was created, the docs skill+MCP would be missing
         # from session.{skills,mcp_servers} (capability_resolver only
@@ -1461,6 +1475,14 @@ class SessionService:
         self, session_id: str, content: str, user_id: str | None = None
     ) -> SessionRunResponse:
         """Block until the agent turn completes.  Used by the schedule runner."""
+        try:
+            await refresh_citation_policy_for_session(session_id, user_id)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "send_message_sync: citation policy refresh failed for %s",
+                session_id,
+            )
+
         # Mirror send_message: lazy refresh of docs caps before the turn
         # so scheduled runs (which never go through the eventbus
         # subscriber on bind-time) also pick up KB bindings added since
