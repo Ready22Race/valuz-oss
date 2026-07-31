@@ -69,6 +69,14 @@ describe("GenerativeUICard", () => {
     expect(styles).toContain("@container (max-width: 34rem)");
     expect(styles).toContain("flex-basis: 100% !important");
     expect(styles).toContain(":has(> .openui-card:nth-child(3)) > .openui-card");
+    expect(styles).toContain(".openui-card-sunk");
+    expect(styles).toContain(
+      "> :not([class]):has(> .openui-tag):has(> :nth-child(2) .openui-markdown-renderer)",
+    );
+    expect(styles).toContain("flex: 1 1 15rem");
+    expect(styles).toContain(
+      "padding: var(--openui-space-l)",
+    );
     expect(styles).toContain("background: var(--color-surface-soft)");
     expect(styles).toContain("background: transparent");
     expect(styles).toContain(".openui-table-container");

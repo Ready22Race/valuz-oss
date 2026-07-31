@@ -284,10 +284,15 @@ const GENERATIVE_UI_LAYOUT_CSS = `
   }
 
   ${OPENUI_SCOPE_SELECTOR} .openui-card-card,
-  ${OPENUI_SCOPE_SELECTOR} .openui-card-sunk,
   ${OPENUI_SCOPE_SELECTOR} .openui-card-clear {
     border-color: transparent;
     background: transparent;
+    box-shadow: none;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} .openui-card-sunk {
+    border-color: transparent;
+    background: var(--color-surface-soft);
     box-shadow: none;
   }
 
@@ -295,13 +300,31 @@ const GENERATIVE_UI_LAYOUT_CSS = `
      larger content sections unframed, and give only these metrics a soft tile. */
   ${OPENUI_SCOPE_SELECTOR}
     :has(> .openui-card:nth-child(3)) > .openui-card {
+    flex: 1 1 15rem !important;
     border-color: transparent;
     background: var(--color-surface-soft);
     border-radius: 8px;
+    padding: var(--openui-space-l);
+  }
+
+  /* Older generated dashboards sometimes express KPI tiles as anonymous Stack
+     children instead of Cards. Match their title/value/tag signature so saved
+     conversations receive the same stable surface without changing their data. */
+  ${OPENUI_SCOPE_SELECTOR}
+    :has(> :nth-child(3))
+    > :not([class]):has(> .openui-tag):has(> :nth-child(2) .openui-markdown-renderer) {
+    flex: 1 1 15rem;
+    background: var(--color-surface-soft);
+    border-radius: 8px;
+    padding: var(--openui-space-l);
   }
 
   ${OPENUI_SCOPE_SELECTOR}
-    :has(> .openui-card:nth-child(3)) > .openui-card .openui-tag {
+    :has(> .openui-card:nth-child(3)) > .openui-card .openui-tag,
+  ${OPENUI_SCOPE_SELECTOR}
+    :has(> :nth-child(3))
+    > :not([class]):has(> .openui-tag):has(> :nth-child(2) .openui-markdown-renderer)
+    > .openui-tag {
     min-height: 0;
     width: fit-content;
     padding: 0;
@@ -321,11 +344,33 @@ const GENERATIVE_UI_LAYOUT_CSS = `
   }
 
   ${OPENUI_SCOPE_SELECTOR}
+    :has(> :nth-child(3))
+    > :not([class]):has(> .openui-tag):has(> :nth-child(2) .openui-markdown-renderer)
+    > .openui-tag-success,
+  ${OPENUI_SCOPE_SELECTOR}
+    :has(> :nth-child(3))
+    > :not([class]):has(> .openui-tag):has(> :nth-child(2) .openui-markdown-renderer)
+    > .openui-tag-success .openui-tag-text {
+    color: var(--error-text);
+  }
+
+  ${OPENUI_SCOPE_SELECTOR}
     :has(> .openui-card:nth-child(3)) > .openui-card
     .openui-tag-danger,
   ${OPENUI_SCOPE_SELECTOR}
     :has(> .openui-card:nth-child(3)) > .openui-card
     .openui-tag-danger .openui-tag-text {
+    color: var(--success-text);
+  }
+
+  ${OPENUI_SCOPE_SELECTOR}
+    :has(> :nth-child(3))
+    > :not([class]):has(> .openui-tag):has(> :nth-child(2) .openui-markdown-renderer)
+    > .openui-tag-danger,
+  ${OPENUI_SCOPE_SELECTOR}
+    :has(> :nth-child(3))
+    > :not([class]):has(> .openui-tag):has(> :nth-child(2) .openui-markdown-renderer)
+    > .openui-tag-danger .openui-tag-text {
     color: var(--success-text);
   }
 
