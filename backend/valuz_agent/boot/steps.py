@@ -151,6 +151,20 @@ def acquire_single_writer_lock() -> None:
         _sys.exit(2)
 
 
+async def enrich_login_shell_path() -> None:
+    """Merge the user's login-shell PATH into this process's PATH.
+
+    A Finder / launchd-launched backend inherits launchd's minimal PATH and
+    can't see user-installed tools (nvm's ``npx``, ``uv``, homebrew) that
+    stdio MCP connectors, the CLI login probe and the browser dev fallback
+    resolve by name. Append-only, fail-open, ``VALUZ_DISABLE_LOGIN_PATH=1``
+    opts out — see ``boot/login_path.py``.
+    """
+    from valuz_agent.boot.login_path import enrich_login_shell_path as _enrich
+
+    await _enrich()
+
+
 def migrate_data_dir() -> None:
     """One-time data-dir cutover: carry a pre-rename ``~/.valuz/app`` install
     into the new flat ``~/.valuz-oss`` root (copy → rewrite DB path prefixes →
