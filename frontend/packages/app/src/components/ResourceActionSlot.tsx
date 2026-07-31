@@ -42,3 +42,22 @@ export function ResourceDetailActionSlot({
     />
   );
 }
+
+/**
+ * Overlay contributions rendered inside the host-owned Copy dropdown.
+ *
+ * The native Copy handler always remains the first item. The host only
+ * switches from its original one-click control to a dropdown when this slot
+ * has at least one registration.
+ */
+export function ResourceCopyMenuItemSlot({
+  resourceType,
+  resource,
+}: ResourceActionSlotProps) {
+  return (
+    <SlotRenderer
+      name={`resource.${resourceType}.copy.menu-items`}
+      context={{ resourceType, resource }}
+    />
+  );
+}
