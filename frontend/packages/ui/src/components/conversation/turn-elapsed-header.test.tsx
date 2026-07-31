@@ -1,18 +1,19 @@
 /**
- * The turn header's elapsed counter must run ONCE, from Send to the end of
- * the turn.
+ * The turn header runs TWO counters, one per phase, and never mixes them.
  *
- * It used to run twice. The optimistic turn is anchored on the client's Send
- * time; the real turn that replaces it is anchored on the kernel's
- * ``message.user`` stamp, which is written at run() entry — after the runtime
- * is up. Locally that gap is milliseconds, but a sandboxed / cloud kernel has
- * to boot first, so the counter visibly fell back to "已处理 0 秒" after
- * already showing twenty-odd seconds. ``clientSentAtMs`` carries the Send time
- * across that handover, and ``startingRuntime`` renames the header for the
- * part of the turn where nothing is being processed yet.
+ * Startup is measured on the client clock (Send → now) under its own label;
+ * processing restarts at zero on the kernel's ``message.user`` stamp. A single
+ * counter spanning both would disagree with itself across a refresh —
+ * ``clientSentAtMs`` is React state and does not survive one — so a live turn
+ * would include the startup window and a reloaded one would not, a gap of tens
+ * of seconds on a cold sandbox.
+ *
+ * The header is also held back for the first {@link HEADER_REVEAL_DELAY_MS} of
+ * a turn: a local runtime usually starts inside that window, and a label that
+ * renders for three frames is worse than no label.
  */
 import { createRef } from "react";
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ConversationTurn } from "@valuz/shared";
 import { ConversationTurnList } from "./ConversationTurnList";
@@ -33,6 +34,7 @@ vi.mock("@tanstack/react-virtual", () => ({
 const T0 = 1_700_000_000_000; // arbitrary fixed epoch — the test owns the clock
 const BOOT_MS = 20_000; // Send → runtime up
 const NOW_MS = 30_000; // Send → "now"
+const REVEAL_MS = 500; // must match HEADER_REVEAL_DELAY_MS
 
 function renderTurn(
   turn: ConversationTurn,
@@ -58,12 +60,11 @@ afterEach(() => {
 });
 
 describe("turn header elapsed", () => {
-  it("counts from the Send stamp, not the runtime's, once the turn is live", () => {
+  it("restarts the counter at zero when the runtime reports in", () => {
     vi.useFakeTimers();
-    vi.setSystemTime(T0 + NOW_MS);
+    // Runtime came up 20s after Send; it has been processing for 10s since.
+    vi.setSystemTime(T0 + BOOT_MS + 10_000);
 
-    // The kernel echo has landed (``startingRuntime`` cleared) and stamped the
-    // turn 20s after Send. Anchoring on that stamp would show "已处理 10 秒".
     renderTurn(
       {
         id: "turn-1",
@@ -77,16 +78,38 @@ describe("turn header elapsed", () => {
       { sending: true, startingRuntime: null },
     );
 
-    expect(screen.getByText("已处理 30 秒")).toBeTruthy();
-    expect(screen.queryByText("已处理 10 秒")).toBeNull();
+    // 10s of processing — NOT 30s. The startup window belongs to the other
+    // phase, and counting it here is exactly what a refresh could not
+    // reproduce (``clientSentAtMs`` is gone after one).
+    expect(screen.getByText("已处理 10 秒")).toBeTruthy();
+    expect(screen.queryByText("已处理 30 秒")).toBeNull();
   });
 
-  it("names the runtime startup instead of claiming to process, counter still running", () => {
+  it("agrees with a reloaded turn, which has no Send stamp at all", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(T0 + BOOT_MS + 10_000);
+
+    // Same turn as above, rebuilt from history: no ``clientSentAtMs``.
+    renderTurn(
+      {
+        id: "turn-1",
+        userMessageSeq: 1,
+        userText: "hi",
+        blocks: [],
+        failedMessage: null,
+        userTimestamp: T0 + BOOT_MS,
+      },
+      { sending: true, startingRuntime: null },
+    );
+
+    expect(screen.getByText("已处理 10 秒")).toBeTruthy();
+  });
+
+  it("counts the startup phase on its own clock, under its own label", () => {
     vi.useFakeTimers();
     vi.setSystemTime(T0 + NOW_MS);
 
-    // Pre-echo: the optimistic turn has no kernel stamp at all.
-    const { rerender, unmount } = renderTurn(
+    const { unmount } = renderTurn(
       {
         id: "pending-turn",
         userMessageSeq: 0,
@@ -99,38 +122,51 @@ describe("turn header elapsed", () => {
       { sending: true, startingRuntime: "cloud" },
     );
     expect(screen.getByText("正在启动云端运行环境 · 30 秒")).toBeTruthy();
+    unmount();
 
-    // Local execution gets its own wording off the same counter.
-    const scrollContainerRef = createRef<HTMLDivElement>();
-    rerender(
-      <div ref={scrollContainerRef}>
-        <ConversationTurnList
-          turns={[
-            {
-              id: "pending-turn",
-              userMessageSeq: 0,
-              userText: "hi",
-              blocks: [],
-              failedMessage: null,
-              userTimestamp: T0,
-              clientSentAtMs: T0,
-            },
-          ]}
-          scrollContainerRef={scrollContainerRef}
-          sending
-          loading={false}
-          error={null}
-          startingRuntime="local"
-        />
-      </div>,
+    renderTurn(
+      {
+        id: "pending-turn",
+        userMessageSeq: 0,
+        userText: "hi",
+        blocks: [],
+        failedMessage: null,
+        userTimestamp: T0,
+        clientSentAtMs: T0,
+      },
+      { sending: true, startingRuntime: "local" },
     );
     expect(screen.getByText("正在启动本地运行环境 · 30 秒")).toBeTruthy();
-    unmount();
   });
 
-  it("keeps the boot window in the frozen total when the turn settles", () => {
-    // Block elapsedMs are measured from the KERNEL stamp, so a settled turn
-    // would drop by exactly the boot time without folding the offset back in.
+  it("holds the header back for the first half second so a fast local start doesn't flash", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(T0 + 100); // 100ms in — well inside the reveal delay
+
+    renderTurn(
+      {
+        id: "pending-turn",
+        userMessageSeq: 0,
+        userText: "hi",
+        blocks: [],
+        failedMessage: null,
+        userTimestamp: T0,
+        clientSentAtMs: T0,
+      },
+      { sending: true, startingRuntime: "local" },
+    );
+
+    expect(screen.queryByText(/正在启动/)).toBeNull();
+    expect(screen.queryByText(/已处理/)).toBeNull();
+
+    // Crossing the threshold reveals it.
+    act(() => {
+      vi.advanceTimersByTime(REVEAL_MS);
+    });
+    expect(screen.getByText(/正在启动本地运行环境/)).toBeTruthy();
+  });
+
+  it("shows a settled turn's header immediately — the delay is for live turns", () => {
     renderTurn(
       {
         id: "turn-1",
@@ -155,35 +191,8 @@ describe("turn header elapsed", () => {
       { sending: false },
     );
 
-    expect(screen.getByText("已处理 25 秒")).toBeTruthy();
-  });
-
-  it("falls back to the kernel stamp for history-loaded turns", () => {
-    // No ``clientSentAtMs``: nobody was watching this turn go out, so there is
-    // no boot window to account for and the old behaviour stands.
-    renderTurn(
-      {
-        id: "turn-1",
-        userMessageSeq: 1,
-        userText: "hi",
-        blocks: [
-          {
-            kind: "tool",
-            tool: {
-              id: "t1",
-              kind: "bash",
-              title: "Bash",
-              status: "success",
-            },
-            elapsedMs: 5_000,
-          },
-        ],
-        failedMessage: null,
-        userTimestamp: T0,
-      },
-      { sending: false },
-    );
-
+    // 5s of work — the boot window is NOT folded in, so this is the same
+    // number the turn will show forever, refresh or not.
     expect(screen.getByText("已处理 5 秒")).toBeTruthy();
   });
 });
