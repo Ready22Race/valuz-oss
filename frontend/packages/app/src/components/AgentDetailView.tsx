@@ -6,12 +6,10 @@ import {
   BookOpen,
   Bot,
   ChevronRight,
-  Copy,
   KeyRound,
   Plug,
   Plus,
   Trash2,
-  Upload,
 } from "lucide-react";
 import {
   Button,
@@ -23,10 +21,6 @@ import {
   DialogHeader,
   DialogTitle,
   DialogField,
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
   Input,
   PageLoader,
   Select,
@@ -49,7 +43,6 @@ import {
   connectorsApi,
   skillsApi,
   useResourceGuard,
-  useRegistryStore,
   projectsApi,
   useTranslation,
   type Agent,
@@ -67,12 +60,10 @@ import {
 } from "@valuz/core";
 import { modelLabel } from "@valuz/shared";
 import { AgentModelPicker, type AgentModelSelection } from "./AgentModelPicker";
+import { AgentDetailCopyActions } from "./AgentDetailCopyActions";
 import { CatalogPickerDialog } from "./CatalogPickerDialog";
 import { ExportPackDialog } from "./ExportPackDialog";
-import {
-  ResourceCopyMenuItemSlot,
-  ResourceDetailActionSlot,
-} from "./ResourceActionSlot";
+import { ResourceDetailActionSlot } from "./ResourceActionSlot";
 import { useOptionalProjectOutlet } from "../layout";
 import {
   AVATAR_PRESETS,
@@ -174,10 +165,6 @@ export const AgentDetailView = ({
 }: AgentDetailViewProps) => {
   const navigate = useNavigate();
   const { t } = useTranslation();
-  const hasCopyMenuItems = useRegistryStore(
-    (state) =>
-      (state.slots["resource.agent.copy.menu-items"]?.length ?? 0) > 0,
-  );
   // Rendered both as a full page (inside the project outlet) and inside the
   // agent-library master-detail right panel, which the layout mounts in its
   // aside slot — OUTSIDE any ``<Outlet context>`` — so the outlet may be
@@ -1023,53 +1010,12 @@ export const AgentDetailView = ({
               use the same plain ``h-7 w-7`` icon buttons as the Skills
               detail panel; 派驻到项目 is the agent-specific primary CTA. */}
           <div className="flex shrink-0 items-center gap-0.5">
-            {!isSystem ? (
-              <button
-              type="button"
-              onClick={() => setExportOpen(true)}
-              title={t("agent.pack.export" as Parameters<typeof t>[0])}
-              aria-label={t("agent.pack.export" as Parameters<typeof t>[0])}
-              className="flex h-7 w-7 cursor-default items-center justify-center rounded-md text-ink-meta transition-colors hover:bg-surface-soft hover:text-ink-body"
-            >
-              <Upload className="h-3.5 w-3.5" />
-              </button>
-            ) : null}
-            {hasCopyMenuItems ? (
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <button
-                    type="button"
-                    title={t("agent.copyAgent" as Parameters<typeof t>[0])}
-                    aria-label={t("agent.copyAgent" as Parameters<typeof t>[0])}
-                    className="flex h-7 w-7 cursor-default items-center justify-center rounded-md text-ink-meta transition-colors hover:bg-surface-soft hover:text-ink-body"
-                  >
-                    <Copy className="h-3.5 w-3.5" />
-                  </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" forceMount>
-                  <DropdownMenuItem
-                    onSelect={() => setCopyConfirmOpen(true)}
-                  >
-                    <Copy className="h-3.5 w-3.5" />
-                    {t("agent.copyAgent" as Parameters<typeof t>[0])}
-                  </DropdownMenuItem>
-                  <ResourceCopyMenuItemSlot
-                    resourceType="agent"
-                    resource={agent as unknown as Record<string, unknown>}
-                  />
-                </DropdownMenuContent>
-              </DropdownMenu>
-            ) : (
-              <button
-                type="button"
-                onClick={() => setCopyConfirmOpen(true)}
-                title={t("agent.copyAgent" as Parameters<typeof t>[0])}
-                aria-label={t("agent.copyAgent" as Parameters<typeof t>[0])}
-                className="flex h-7 w-7 cursor-default items-center justify-center rounded-md text-ink-meta transition-colors hover:bg-surface-soft hover:text-ink-body"
-              >
-                <Copy className="h-3.5 w-3.5" />
-              </button>
-            )}
+            <AgentDetailCopyActions
+              resource={agent as unknown as Record<string, unknown>}
+              isSystem={isSystem}
+              onExport={() => setExportOpen(true)}
+              onCopy={() => setCopyConfirmOpen(true)}
+            />
             {canDelete && agent.deletable && (
               <button
                 type="button"
