@@ -6986,7 +6986,10 @@ components:
         datasetId: {type: string}
         toolName: {type: string}
         recordKey: {type: string}
+        entityId: {type: string}
+        entityName: {type: string}
         field: {type: string}
+        metric: {type: string}
         value:
           nullable: true
           oneOf:
@@ -6994,8 +6997,15 @@ components:
             - {type: number}
             - {type: boolean}
         unit: {type: string}
+        currency: {type: string}
+        scale:
+          oneOf:
+            - {type: string}
+            - {type: number}
         period: {type: string}
         asOf: {type: string}
+        scope: {type: string}
+        basis: {type: string}
         capturedAt: {type: string, format: date-time}
         toolTraceRef: {type: string}
         coverage:
@@ -7030,6 +7040,12 @@ components:
         unit: {type: string}
         rounding: {type: string}
         calculatedAt: {type: string, format: date-time}
+        entityId: {type: string}
+        entityName: {type: string}
+        metric: {type: string}
+        period: {type: string}
+        scope: {type: string}
+        basis: {type: string}
 
     TextQuoteSelectorV1:
       type: object
@@ -7112,6 +7128,12 @@ components:
           items: {type: string}
         repairAttempts: {type: integer, minimum: 0, maximum: 1}
         policyRevision: {type: string}
+        evidenceRegisteredCount: {type: integer, minimum: 0}
+        evidenceRejectedCount: {type: integer, minimum: 0}
+        evidenceOverflowReasons:
+          type: array
+          items: {type: string}
+        publicationBlocked: {type: boolean}
 
     CitationQualityIssueV1:
       type: object
@@ -7123,8 +7145,85 @@ components:
         citationIds:
           type: array
           items: {type: string}
+        claimId: {type: string}
         claim:
           $ref: "#/components/schemas/TextQuoteSelectorV1"
+        location:
+          $ref: "#/components/schemas/ClaimLocationV1"
+
+    ClaimLocationV1:
+      oneOf:
+        - type: object
+          required: [kind, blockIndex, start, end]
+          properties:
+            kind: {type: string, enum: [text]}
+            blockIndex: {type: integer, minimum: 0}
+            start: {type: integer, minimum: 0}
+            end: {type: integer, minimum: 0}
+            sourceStart: {type: integer, minimum: 0}
+            sourceEnd: {type: integer, minimum: 0}
+        - type: object
+          required: [kind, blockIndex, itemIndex, start, end]
+          properties:
+            kind: {type: string, enum: [list-item]}
+            blockIndex: {type: integer, minimum: 0}
+            itemIndex: {type: integer, minimum: 0}
+            start: {type: integer, minimum: 0}
+            end: {type: integer, minimum: 0}
+            sourceStart: {type: integer, minimum: 0}
+            sourceEnd: {type: integer, minimum: 0}
+        - type: object
+          required: [kind, blockIndex, rowIndex, columnIndex]
+          properties:
+            kind: {type: string, enum: [table-cell]}
+            blockIndex: {type: integer, minimum: 0}
+            rowIndex: {type: integer, minimum: 0}
+            columnIndex: {type: integer, minimum: 0}
+            sourceStart: {type: integer, minimum: 0}
+            sourceEnd: {type: integer, minimum: 0}
+        - type: object
+          required: [kind]
+          properties:
+            kind: {type: string, enum: [legacy]}
+
+    ClaimEvidenceBindingV1:
+      type: object
+      required: [citationId, role, supportStatus]
+      properties:
+        citationId: {type: string}
+        role:
+          type: string
+          enum:
+            [primary, corroborating, component, calculation-input, conflicting]
+        supportStatus:
+          type: string
+          enum: [supported, partially-supported, contradicted, not-found]
+
+    CitationClaimAuditV1:
+      type: object
+      required:
+        [claimId, exact, segmentIndex, citationRequired, citationIds,
+         status, issueCodes]
+      properties:
+        claimId: {type: string}
+        exact: {type: string}
+        segmentIndex: {type: integer, minimum: 0}
+        citationRequired: {type: boolean}
+        citationIds:
+          type: array
+          items: {type: string}
+        bindings:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClaimEvidenceBindingV1"
+        status:
+          type: string
+          enum: [passed, auto-bound, repaired, degraded, unverified, unsupported]
+        issueCodes:
+          type: array
+          items: {type: string}
+        location:
+          $ref: "#/components/schemas/ClaimLocationV1"
 
     CitationQualityResultV1:
       type: object
@@ -7142,7 +7241,7 @@ components:
           enum: [passed, unverified, degraded]
         publishStatus:
           type: string
-          enum: [ready, draft-only]
+          enum: [ready, draft-only, blocked]
         layers:
           type: object
           additionalProperties:
@@ -7152,6 +7251,12 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/CitationQualityIssueV1"
+        claims:
+          type: array
+          items:
+            $ref: "#/components/schemas/CitationClaimAuditV1"
+        extractorRevision: {type: string}
+        verifierRevision: {type: string}
         metrics:
           type: object
           required:
@@ -7159,6 +7264,14 @@ components:
              unverifiedClaimCount, tierCounts]
           properties:
             citationCount: {type: integer, minimum: 0}
+            claimDetectedCount: {type: integer, minimum: 0}
+            claimCitationRequiredCount: {type: integer, minimum: 0}
+            claimBoundCount: {type: integer, minimum: 0}
+            claimAutoBoundCount: {type: integer, minimum: 0}
+            claimUnsupportedCount: {type: integer, minimum: 0}
+            claimSemanticMismatchCount: {type: integer, minimum: 0}
+            claimAmbiguousCount: {type: integer, minimum: 0}
+            claimAuditTruncated: {type: boolean}
             unsourcedClaimCount: {type: integer, minimum: 0}
             unverifiedClaimCount: {type: integer, minimum: 0}
             tierCounts:

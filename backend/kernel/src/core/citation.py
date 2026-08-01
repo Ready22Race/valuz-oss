@@ -26,6 +26,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
 from src.core.citation_quality import evaluate_citation_quality
+from src.core.claim_audit import auto_bind_unique_claims
 
 POLICY_REVISION = "citation-v1"
 EVIDENCE_ENVELOPE_KEY = "_valuz_evidence"
@@ -43,17 +44,13 @@ _NUMBERED_EVIDENCE_SOURCE_RE = re.compile(
     r"(?m)^[ \t]*(?:[-*][ \t]+)?\[(\d{1,3})\][ \t]+"
     r"\[[^\]\n]{1,240}\]\(evidence://([A-Za-z0-9_-]{1,160})\)"
 )
-_BARE_NUMBERED_MARKER_RE = re.compile(
-    r"(?<![\\\w])\[(\d{1,3})\](?!\()"
-)
+_BARE_NUMBERED_MARKER_RE = re.compile(r"(?<![\\\w])\[(\d{1,3})\](?!\()")
 _SOURCE_SECTION_HEADING_RE = re.compile(
     r"(?im)^[ \t]*(?:#{1,6}[ \t]+)?(?:\*\*|__)?[ \t]*"
     r"(?:sources?|references?|citations?|来源|参考来源|引用来源|参考资料)"
     r"[ \t]*[:：]?[ \t]*(?:\*\*|__)?[ \t]*$"
 )
-_CANONICAL_CITATION_URI_RE = re.compile(
-    r"citation://([A-Za-z0-9_-]{1,160})"
-)
+_CANONICAL_CITATION_URI_RE = re.compile(r"citation://([A-Za-z0-9_-]{1,160})")
 _MARKDOWN_DESTINATION_RE = re.compile(r"\]\(([^)\n]+)\)")
 _EXPLICIT_CITATION_RE = re.compile(
     r"(?:引用|引文|出处|来源|根据.{0,12}(?:文档|资料)|核验|"
@@ -126,6 +123,8 @@ class EvidenceRegistry:
         allowed_document_ids: set[str] | None = None,
     ) -> None:
         self._records: dict[str, EvidenceRecord] = {}
+        self._rejected_count = 0
+        self._overflow_reasons: set[str] = set()
         self._allowed_document_ids = (
             {str(item) for item in allowed_document_ids if str(item)}
             if allowed_document_ids is not None
@@ -143,6 +142,9 @@ class EvidenceRegistry:
 
         payload = _decode_json_payload(content, max_chars=self._MAX_TOOL_RESULT_CHARS)
         if payload is None:
+            if _contains_evidence_marker(content):
+                self._rejected_count += 1
+                self._overflow_reasons.add("tool_result_invalid_or_oversized")
             return 0
 
         before = len(self._records)
@@ -152,17 +154,25 @@ class EvidenceRegistry:
             node, depth = stack.pop()
             visited += 1
             if depth > self._MAX_DEPTH:
+                self._rejected_count += 1
+                self._overflow_reasons.add("max_depth")
                 continue
             if isinstance(node, dict):
                 envelope = node.get(EVIDENCE_ENVELOPE_KEY)
                 for candidate in _as_envelope_items(envelope):
                     if len(self._records) >= _MAX_REGISTRY_RECORDS:
+                        self._rejected_count += 1
+                        self._overflow_reasons.add("max_records")
                         break
                     record = _validate_evidence_item(candidate, tool_name=tool_name)
-                    if record is not None and self._source_is_allowed(record.source):
+                    if record is None:
+                        self._rejected_count += 1
+                    elif self._source_is_allowed(record.source):
                         # First writer wins.  A later tool result cannot replace
                         # the evidence snapshot bound to an already-seen handle.
                         self._records.setdefault(record.handle, record)
+                    else:
+                        self._rejected_count += 1
                 stack.extend((value, depth + 1) for value in node.values())
             elif isinstance(node, list):
                 stack.extend((value, depth + 1) for value in node)
@@ -178,6 +188,9 @@ class EvidenceRegistry:
                 )
                 if nested is not None:
                     stack.append((nested, depth + 1))
+        if stack:
+            self._rejected_count += 1
+            self._overflow_reasons.add("max_visited_nodes")
         return len(self._records) - before
 
     def get(self, handle: str) -> EvidenceRecord | None:
@@ -188,6 +201,18 @@ class EvidenceRegistry:
 
     def __len__(self) -> int:
         return len(self._records)
+
+    @property
+    def rejected_count(self) -> int:
+        return self._rejected_count
+
+    @property
+    def overflow_reasons(self) -> tuple[str, ...]:
+        return tuple(sorted(self._overflow_reasons))
+
+    @property
+    def had_evidence_activity(self) -> bool:
+        return bool(self._records) or self._rejected_count > 0
 
     def _source_is_allowed(self, source: dict[str, Any]) -> bool:
         """Fail closed for a document-research session's locked source scope."""
@@ -222,7 +247,22 @@ class CitationGuard:
         self._quality_policy = quality_policy
         self._force_required = force_required
 
-    def finalize(self, text: str) -> GuardResult:
+    @property
+    def requires_citation(self) -> bool:
+        """Whether the current turn must be sealed before text is published.
+
+        The registry can become non-empty after construction, so this is a
+        property rather than a cached flag.  Callers use it to keep candidate
+        answer deltas provisional once source-bearing evidence is available.
+        """
+
+        return (
+            self._force_required
+            or self._registry.had_evidence_activity
+            or self._explicitly_requested
+        )
+
+    def finalize(self, text: str, *, repair_attempts: int = 0) -> GuardResult:
         """Return a safe canonical body and its ``CitationBundleV1``.
 
         Expected ``evidence://`` links are normal protocol binding and do not
@@ -232,12 +272,36 @@ class CitationGuard:
         plain labels so the client can never resolve them as trusted sources.
         """
 
-        required = self._force_required or bool(len(self._registry)) or self._explicitly_requested
+        required = self.requires_citation
         if not required and "evidence://" not in text and "citation://" not in text:
             return GuardResult(text=text, bundle=None)
 
         repaired_text, repaired_handles = self._repair_markers(text)
-        repair_attempts = 1 if repaired_handles else 0
+        repair_attempts = max(
+            1 if repaired_handles else 0,
+            min(max(int(repair_attempts), 0), 1),
+        )
+        policy_mode = (
+            self._quality_policy.get("mode")
+            if isinstance(self._quality_policy, dict)
+            else "required-on-evidence"
+        )
+        policy_config = (
+            self._quality_policy.get("config") if isinstance(self._quality_policy, dict) else None
+        )
+        policy_config = policy_config if isinstance(policy_config, dict) else {}
+        semantics = policy_config.get("semantics")
+        semantics = semantics if isinstance(semantics, dict) else None
+        auto_bind_result = auto_bind_unique_claims(
+            repaired_text,
+            self._registry.values(),
+            mode=str(policy_mode or "required-on-evidence"),
+            semantics=semantics,
+        )
+        repaired_text = auto_bind_result.text
+        auto_bound_claims_by_handle: dict[str, list[str]] = {}
+        for claim_id, handle in auto_bind_result.claim_handles.items():
+            auto_bound_claims_by_handle.setdefault(handle, []).append(claim_id)
 
         citations: list[dict[str, Any]] = []
         cited_handles: list[str] = []
@@ -279,8 +343,16 @@ class CitationGuard:
                 "evidence": evidence,
                 "resolutionStatus": "ready",
             }
+            annotations: dict[str, Any] = {}
             if record.tool_name:
-                citation["annotations"] = {"provenance": {"toolName": record.tool_name}}
+                annotations["provenance"] = {"toolName": record.tool_name}
+            auto_bound_claim_ids = auto_bound_claims_by_handle.get(identifier)
+            if auto_bound_claim_ids:
+                annotations["binding"] = {
+                    "autoBoundClaimIds": list(auto_bound_claim_ids),
+                }
+            if annotations:
+                citation["annotations"] = annotations
             if record.locator is not None:
                 citation["locator"] = copy.deepcopy(record.locator)
             elif record.source.get("sourceType") == "document":
@@ -336,9 +408,7 @@ class CitationGuard:
                 return match.group(0)
             following = linked_text[match.end() :]
             source_link = re.match(
-                r"[ \t]+\[[^\]\n]{1,240}\]\(citation://"
-                + re.escape(citation_id)
-                + r"\)",
+                r"[ \t]+\[[^\]\n]{1,240}\]\(citation://" + re.escape(citation_id) + r"\)",
                 following,
             )
             if source_link is not None:
@@ -360,6 +430,7 @@ class CitationGuard:
         degraded = (
             bool(unknown_ids)
             or bool(missing_locator_ids)
+            or self._registry.rejected_count > 0
             or (required and not citations)
             or (required and not self._policy_available)
         )
@@ -385,12 +456,16 @@ class CitationGuard:
                 "missingLocatorCitationIds": missing_locator_ids,
                 "repairAttempts": repair_attempts,
                 "policyRevision": POLICY_REVISION,
+                "evidenceRegisteredCount": len(self._registry),
+                "evidenceRejectedCount": self._registry.rejected_count,
+                "evidenceOverflowReasons": list(self._registry.overflow_reasons),
             },
         }
         bundle = evaluate_citation_quality(
             canonical_text,
             bundle,
             self._quality_policy,
+            available_evidence=self._registry.values(),
         )
         return GuardResult(text=canonical_text, bundle=bundle)
 
@@ -414,9 +489,7 @@ def _numbered_evidence_bindings(text: str) -> dict[str, str]:
     for label, handle in _NUMBERED_EVIDENCE_SOURCE_RE.findall(text):
         candidates.setdefault(label, set()).add(handle)
     return {
-        label: next(iter(handles))
-        for label, handles in candidates.items()
-        if len(handles) == 1
+        label: next(iter(handles)) for label, handles in candidates.items() if len(handles) == 1
     }
 
 
@@ -474,6 +547,18 @@ def _decode_json_payload(content: Any, *, max_chars: int) -> Any | None:
     except (json.JSONDecodeError, TypeError, ValueError):
         return None
     return parsed if isinstance(parsed, (dict, list)) else None
+
+
+def _contains_evidence_marker(content: Any) -> bool:
+    if isinstance(content, str):
+        return EVIDENCE_ENVELOPE_KEY in content
+    if isinstance(content, dict):
+        if EVIDENCE_ENVELOPE_KEY in content:
+            return True
+        return any(_contains_evidence_marker(value) for value in content.values())
+    if isinstance(content, list):
+        return any(_contains_evidence_marker(value) for value in content)
+    return False
 
 
 def _as_envelope_items(value: Any) -> list[dict[str, Any]]:
@@ -602,11 +687,18 @@ def _normalize_evidence(value: dict[str, Any]) -> dict[str, Any] | None:
                 "datasetId",
                 "toolName",
                 "recordKey",
+                "entityId",
+                "entityName",
                 "field",
+                "metric",
                 "value",
                 "unit",
+                "currency",
+                "scale",
                 "period",
                 "asOf",
+                "scope",
+                "basis",
                 "capturedAt",
                 "toolTraceRef",
             ),
@@ -655,7 +747,20 @@ def _normalize_evidence(value: dict[str, Any]) -> dict[str, Any] | None:
         normalized_inputs.append(_pick_fields(item, ("name", "citationId", "value", "unit")))
     result = _pick_fields(
         value,
-        ("kind", "expression", "result", "unit", "rounding", "calculatedAt"),
+        (
+            "kind",
+            "expression",
+            "result",
+            "unit",
+            "rounding",
+            "calculatedAt",
+            "entityId",
+            "entityName",
+            "metric",
+            "period",
+            "scope",
+            "basis",
+        ),
     )
     result["inputs"] = normalized_inputs
     return result

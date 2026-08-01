@@ -1,5 +1,7 @@
 """Citation-bearing document summaries and document-scoped child sessions."""
 
+# ruff: noqa: I001 — kernel bootstrap side-effect import must precede src.*
+
 from __future__ import annotations
 
 import hashlib
@@ -13,6 +15,8 @@ from typing import TYPE_CHECKING, Any, Literal
 from app.schemas import ImportMessageRequest, UpdateSessionRequest
 
 import valuz_agent.boot.kernel  # noqa: F401 — app/src import path bootstrap
+from src.core.citation_quality import evaluate_citation_quality
+
 from valuz_agent.adapters import kernel_client
 from valuz_agent.adapters.system_prompt_builder import CITATION_POLICY_REVISION
 from valuz_agent.infra.time_utils import now_ms
@@ -120,6 +124,7 @@ class DocumentResearchService:
                 document_version=_document_version(detail),
                 provider_id="docs",
                 mcp_server_names=("valuz_docs",),
+                source_category="files",
             ),
             detail,
             None,
@@ -276,9 +281,7 @@ class DocumentResearchService:
                 document,
                 profile=profile,
                 summary=summary,
-                error_message=(
-                    None if summary is not None else "provider_summary_unavailable"
-                ),
+                error_message=(None if summary is not None else "provider_summary_unavailable"),
             )
         if detail is None:
             raise DocumentNotFound()
@@ -469,10 +472,7 @@ class DocumentResearchService:
                 and context.get("document_ids") == [document_id]
                 and (
                     context.get("provider_id") == provider_id
-                    or (
-                        provider_id == "docs"
-                        and context.get("provider_id") is None
-                    )
+                    or (provider_id == "docs" and context.get("provider_id") is None)
                 )
                 and session.status != "terminated"
             ):
@@ -577,6 +577,14 @@ def validate_document_summary(
         "repaired",
     }:
         errors.append("citation_integrity_not_passed")
+    # Legacy summary artifacts predate claim-level quality metadata. Keep
+    # those readable; newly audited provider/runtime bundles must satisfy it.
+    quality = bundle.get("quality")
+    if quality is not None:
+        if not isinstance(quality, dict) or quality.get("status") != "passed":
+            errors.append("citation_quality_not_passed")
+        if isinstance(quality, dict) and quality.get("publishStatus") != "ready":
+            errors.append("citation_quality_not_publishable")
     return list(dict.fromkeys(errors))
 
 
@@ -672,10 +680,7 @@ def _ensure_document_scope_instructions(
 ) -> str:
     base = _SCOPE_BLOCK_RE.sub("\n\n", instructions or "").strip()
     if document.provider_id == "docs":
-        access = (
-            "Use only the built-in document library search tools for this "
-            "document."
-        )
+        access = "Use only the built-in document library search tools for this document."
     else:
         servers = ", ".join(f"`{name}`" for name in document.mcp_server_names)
         access = (
@@ -787,26 +792,41 @@ def _provider_summary_artifact(
     summary_id = f"provider:{hashlib.sha256(identity.encode()).hexdigest()[:24]}"
     generated_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     content = summary.content if summary is not None else ""
+    bundle = summary.citation_bundle if summary is not None else {"version": 1, "citations": []}
+    if summary is not None:
+        bundle = evaluate_citation_quality(
+            content,
+            bundle,
+            summary.quality_policy,
+        )
+    validation_errors = (
+        validate_document_summary(content, bundle, document_id=document.id) if content else []
+    )
+    combined_errors = list(
+        dict.fromkeys(
+            [
+                message
+                for message in (error_message, *validation_errors)
+                if isinstance(message, str) and message
+            ]
+        )
+    )
     return DocumentSummaryArtifact(
         version=1,
         summary_id=summary_id,
         document_id=document.id,
         document_version=document.document_version,
-        status="ready" if content else "failed",
+        status=("failed" if not content else "ready" if not validation_errors else "degraded"),
         profile=profile,
         content=content,
-        citation_bundle=(
-            summary.citation_bundle
-            if summary is not None
-            else {"version": 1, "citations": []}
-        ),
+        citation_bundle=bundle,
         generated_at=generated_at,
         model_id=document.provider_id,
         prompt_revision=f"{document.provider_id}-summary-v1",
         policy_revision=CITATION_POLICY_REVISION,
         research_session_id=None,
         message_id=None,
-        error_message=error_message,
+        error_message="; ".join(combined_errors) or None,
     )
 
 

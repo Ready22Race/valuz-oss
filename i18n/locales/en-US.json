@@ -2004,6 +2004,7 @@
       "documentDialog": "Citation document",
       "evidenceTitle": "Cited content",
       "integrityDegraded": "Some citations could not be located or verified. Check the relevant content against the original source.",
+      "publicationBlocked": "Citation verification failed. The unverified answer was not published. Please retry.",
       "noReadableDocument": "This source has no previewable document. Return to the chat to review its source details.",
       "openSource": "Open source",
       "qualityCheckTitle": "Check results",

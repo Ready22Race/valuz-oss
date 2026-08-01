@@ -7,7 +7,9 @@ import {
 } from "react";
 import type {
   CitationBundleV1,
+  CitationClaimAuditV1,
   CitationQualityIssueV1,
+  ClaimLocationV1,
   OpenCitationInput,
 } from "@valuz/shared";
 import {
@@ -81,7 +83,9 @@ const QUALITY_CLAIM_HREF_PREFIX = "https://valuz.quality-claim.invalid/";
 
 interface LocalizedClaimQualityEntry {
   targetId: string;
+  claimId?: string;
   exact: string;
+  location?: ClaimLocationV1;
   issues: CitationQualityDisplayIssue[];
 }
 
@@ -94,17 +98,37 @@ function qualityClaimIdFromHref(href?: string): string | null {
   }
 }
 
+function claimSourceEnd(location?: ClaimLocationV1): number | undefined {
+  return location && location.kind !== "legacy" ? location.sourceEnd : undefined;
+}
+
 function injectQualityClaimMarkers(
   content: string,
   entries: LocalizedClaimQualityEntry[],
 ): string {
   let result = content;
+  const positioned = entries
+    .map((entry) => ({ entry, end: claimSourceEnd(entry.location) }))
+    .filter(
+      (item): item is { entry: LocalizedClaimQualityEntry; end: number } =>
+        Number.isInteger(item.end) && item.end! >= 0 && item.end! <= content.length,
+    )
+    .sort((left, right) => right.end - left.end);
+  const inserted = new Set<string>();
+  for (const { entry, end } of positioned) {
+    const marker = ` [!](<${QUALITY_CLAIM_HREF_PREFIX}${encodeURIComponent(entry.targetId)}>)`;
+    result = `${result.slice(0, end)}${marker}${result.slice(end)}`;
+    inserted.add(entry.targetId);
+  }
+  let fallbackCursor = 0;
   for (const entry of entries) {
-    const start = result.indexOf(entry.exact);
+    if (inserted.has(entry.targetId)) continue;
+    const start = result.indexOf(entry.exact, fallbackCursor);
     if (start < 0) continue;
     const insertAt = start + entry.exact.length;
     const marker = ` [!](<${QUALITY_CLAIM_HREF_PREFIX}${encodeURIComponent(entry.targetId)}>)`;
     result = `${result.slice(0, insertAt)}${marker}${result.slice(insertAt)}`;
+    fallbackCursor = insertAt + marker.length;
   }
   return result;
 }
@@ -632,7 +656,16 @@ export const MarkdownContent = memo(function MarkdownContent({
 }: MarkdownContentProps) {
   const { t } = useI18n();
   const [pendingUrl, setPendingUrl] = useState<string | null>(null);
-  const citationOrder = useMemo(() => citationDisplayOrder(content), [content]);
+  const publicationBlocked =
+    citationBundle?.integrity?.publicationBlocked === true ||
+    citationBundle?.quality?.publishStatus === "blocked";
+  const displayContent = publicationBlocked
+    ? t("ui.citation.publicationBlocked")
+    : content;
+  const citationOrder = useMemo(
+    () => citationDisplayOrder(displayContent),
+    [displayContent],
+  );
   const citationsById = useMemo(
     () =>
       new Map(
@@ -648,6 +681,7 @@ export const MarkdownContent = memo(function MarkdownContent({
       const code = issue.code;
       if (
         code.includes("conflict") ||
+        code.includes("ambiguous") ||
         code === "low_tier_without_cross_check"
       ) {
         return t("ui.citation.qualityIssueCrossCheck");
@@ -671,10 +705,17 @@ export const MarkdownContent = memo(function MarkdownContent({
       }
       if (
         code.startsWith("evidence_") ||
+        code === "claim_without_citation" ||
+        code === "date_claim_without_citation" ||
+        code === "claim_evidence_mismatch" ||
+        code === "claim_partially_supported" ||
         code === "text_quote_missing" ||
         code === "structured_value_missing"
       ) {
         return t("ui.citation.qualityIssueEvidence");
+      }
+      if (code === "claim_audit_truncated") {
+        return t("ui.citation.qualityIssueIntegrity");
       }
       const keyByLayer: Record<string, string> = {
         L0: "ui.citation.qualityIssueIntegrity",
@@ -690,8 +731,12 @@ export const MarkdownContent = memo(function MarkdownContent({
   );
   const qualityIssuePlacement = useMemo(() => {
     const byCitationId = new Map<string, CitationQualityDisplayIssue[]>();
-    const claimsByExact = new Map<string, LocalizedClaimQualityEntry>();
+    const claimEntriesById = new Map<string, LocalizedClaimQualityEntry>();
     const unlocalized: CitationQualityIssueV1[] = [];
+    const auditedClaims = citationBundle?.quality?.claims ?? [];
+    const auditedClaimsById = new Map<string, CitationClaimAuditV1>(
+      auditedClaims.map((claim) => [claim.claimId, claim]),
+    );
     const issues = citationBundle?.quality?.issues ?? [];
     for (const [issueIndex, issue] of issues.entries()) {
       const localIds = Array.from(new Set(issue.citationIds ?? [])).filter(
@@ -703,16 +748,30 @@ export const MarkdownContent = memo(function MarkdownContent({
         severity: issue.severity,
       };
       if (!localIds.length) {
-        const exact = issue.claim?.exact?.trim();
+        const auditedClaim = issue.claimId
+          ? auditedClaimsById.get(issue.claimId)
+          : undefined;
+        const exact = (auditedClaim?.exact ?? issue.claim?.exact)?.trim();
+        const location = issue.location ?? auditedClaim?.location;
+        const sourceEnd = claimSourceEnd(location);
+        const hasStableSourceLocation =
+          Number.isInteger(sourceEnd) &&
+          sourceEnd! >= 0 &&
+          sourceEnd! <= displayContent.length;
         if (
           exact &&
-          !exact.includes("\n") &&
-          !exact.includes("|") &&
-          content.includes(exact)
+          (hasStableSourceLocation ||
+            (!exact.includes("\n") &&
+              !exact.includes("|") &&
+              displayContent.includes(exact)))
         ) {
-          const entry = claimsByExact.get(exact) ?? {
-            targetId: `quality-claim-${issueIndex + 1}`,
+          const entryKey =
+            auditedClaim?.claimId ?? issue.claimId ?? `legacy-${issueIndex + 1}`;
+          const entry = claimEntriesById.get(entryKey) ?? {
+            targetId: `quality-claim-${entryKey}`,
+            claimId: auditedClaim?.claimId ?? issue.claimId,
             exact,
+            location,
             issues: [],
           };
           if (
@@ -724,7 +783,7 @@ export const MarkdownContent = memo(function MarkdownContent({
           ) {
             entry.issues.push(displayIssue);
           }
-          claimsByExact.set(exact, entry);
+          claimEntriesById.set(entryKey, entry);
           continue;
         }
         unlocalized.push(issue);
@@ -746,14 +805,22 @@ export const MarkdownContent = memo(function MarkdownContent({
     }
     return {
       byCitationId,
-      claimEntries: Array.from(claimsByExact.values()),
+      claimEntries: Array.from(claimEntriesById.values()).sort((left, right) => {
+        const leftEnd = claimSourceEnd(left.location);
+        const rightEnd = claimSourceEnd(right.location);
+        if (typeof leftEnd === "number" && typeof rightEnd === "number") {
+          return leftEnd - rightEnd;
+        }
+        return left.targetId.localeCompare(right.targetId);
+      }),
       unlocalized,
     };
   }, [
+    citationBundle?.quality?.claims,
     citationBundle?.quality?.issues,
     citationOrder,
     citationsById,
-    content,
+    displayContent,
     qualityIssueLabel,
   ]);
   const hasLocalizedQualityIssues =
@@ -790,13 +857,13 @@ export const MarkdownContent = memo(function MarkdownContent({
       rewriteLocalFileMarkdownLinks(
         rewriteCitationMarkdownLinks(
           injectQualityClaimMarkers(
-            content,
+            displayContent,
             qualityIssuePlacement.claimEntries,
           ),
         ),
         isLocalFileHref,
       ),
-    [content, isLocalFileHref, qualityIssuePlacement.claimEntries],
+    [displayContent, isLocalFileHref, qualityIssuePlacement.claimEntries],
   );
   const urlTransform = useCallback<UrlTransform>(
     (url, key, node) => {
@@ -931,7 +998,8 @@ export const MarkdownContent = memo(function MarkdownContent({
           {renderedContent}
         </Streamdown>
       </div>
-      {!hasLocalizedQualityIssues &&
+      {!publicationBlocked &&
+      !hasLocalizedQualityIssues &&
       citationBundle?.integrity?.status === "degraded" ? (
         <div
           role="status"
@@ -945,7 +1013,8 @@ export const MarkdownContent = memo(function MarkdownContent({
           <span>{t("ui.citation.integrityDegraded")}</span>
         </div>
       ) : null}
-      {!hasLocalizedQualityIssues &&
+      {!publicationBlocked &&
+      !hasLocalizedQualityIssues &&
       citationBundle?.integrity?.status !== "degraded" &&
       unlocalizedQualityStatus ? (
         <div
@@ -967,7 +1036,7 @@ export const MarkdownContent = memo(function MarkdownContent({
         </div>
       ) : null}
       <CitationSourceCards
-        content={content}
+        content={displayContent}
         citationBundle={citationBundle}
         messageId={messageId}
         onCitationClick={onCitationClick}
