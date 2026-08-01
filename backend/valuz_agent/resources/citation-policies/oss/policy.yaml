@@ -1,0 +1,28 @@
+policy_id: oss-citation-baseline
+layer: oss
+version: citation-baseline-v2
+
+activation:
+  default_mode: required-on-evidence
+  document_research_mode: required-on-evidence
+
+source_tiers: []
+
+rules:
+  factual_claim:
+    citation_required: true
+
+failure:
+  repair_attempts: 1
+  publish_on_degraded: ready
+
+observability:
+  record:
+    - status
+    - issue_codes
+    - policy_revision
+  redact:
+    - answer
+    - quote
+    - snippet
+    - canonical_url

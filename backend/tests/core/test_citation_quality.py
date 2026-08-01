@@ -9,6 +9,20 @@ def _policy() -> dict:
         "policy_id": "test-quality",
         "revision": "test-v1",
         "mode": "strict-domain",
+        "layers": [
+            {
+                "layer": "oss",
+                "policy_id": "oss-citation-baseline",
+                "revision": "citation-baseline-v2",
+                "status": "active",
+            },
+            {
+                "layer": "distribution",
+                "policy_id": "test-quality",
+                "revision": "test-v1",
+                "status": "active",
+            },
+        ],
         "config": {
             "source_tiers": [
                 {
@@ -119,6 +133,10 @@ def test_policy_passes_structured_data_and_adds_stable_annotations() -> None:
 
     assert result["quality"]["status"] == "passed"
     assert result["quality"]["publishStatus"] == "ready"
+    assert [layer["layer"] for layer in result["quality"]["policyLayers"]] == [
+        "oss",
+        "distribution",
+    ]
     assert result["quality"]["metrics"]["tierCounts"] == {"P1": 1}
     assert result["citations"][0]["annotations"]["quality"] == {
         "policyId": "test-quality",

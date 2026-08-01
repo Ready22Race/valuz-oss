@@ -90,6 +90,18 @@ def evaluate_citation_quality(
     config = policy_snapshot.get("config")
     if not isinstance(config, dict):
         config = {"unavailable": True}
+    policy_layers = policy_snapshot.get("layers")
+    policy_layers = (
+        [copy.deepcopy(item) for item in policy_layers if isinstance(item, dict)]
+        if isinstance(policy_layers, list)
+        else []
+    )
+    unavailable_policy_layers = policy_snapshot.get("unavailable_layers")
+    unavailable_policy_layers = (
+        [item for item in unavailable_policy_layers if isinstance(item, str)]
+        if isinstance(unavailable_policy_layers, list)
+        else []
+    )
 
     result = copy.deepcopy(bundle)
     citations = result.get("citations")
@@ -135,6 +147,9 @@ def evaluate_citation_quality(
         issue("base_integrity_not_passed", "L0")
     if config.get("unavailable") is True:
         issue("quality_policy_unavailable", "L0")
+    for unavailable_layer in unavailable_policy_layers:
+        issue("quality_policy_layer_unavailable", "L0")
+        issues[-1]["policyLayer"] = unavailable_layer
 
     tiers = config.get("source_tiers")
     tier_configs = (
@@ -359,6 +374,10 @@ def evaluate_citation_quality(
                 claim_groups,
                 tier_by_citation,
                 check_tiers,
+                citation_by_id,
+                require_independent_sources=(
+                    cross_rule.get("require_independent_sources") is True
+                ),
             )
         ]
         if low_without_check:
@@ -433,6 +452,7 @@ def evaluate_citation_quality(
     result["quality"] = {
         "policyId": policy_id,
         "policyRevision": revision,
+        "policyLayers": policy_layers,
         "mode": mode,
         "status": status,
         "publishStatus": publish_status,
@@ -1324,13 +1344,43 @@ def _citation_has_claim_cross_check(
     groups: list[tuple[str, set[str]]],
     tier_by_citation: dict[str, str | None],
     check_tiers: set[str],
+    citation_by_id: dict[str, dict[str, Any]],
+    *,
+    require_independent_sources: bool,
 ) -> bool:
     matching = [ids for _, ids in groups if citation_id in ids]
     if not matching:
         return False
+    source_identity = _citation_source_identity(citation_by_id.get(citation_id, {}))
     return all(
-        any(other != citation_id and tier_by_citation.get(other) in check_tiers for other in ids)
+        any(
+            other != citation_id
+            and tier_by_citation.get(other) in check_tiers
+            and (
+                not require_independent_sources
+                or _citation_source_identity(citation_by_id.get(other, {})) != source_identity
+            )
+            for other in ids
+        )
         for ids in matching
+    )
+
+
+def _citation_source_identity(citation: dict[str, Any]) -> str:
+    source = citation.get("source")
+    source = source if isinstance(source, dict) else {}
+    annotations = citation.get("annotations")
+    annotations = annotations if isinstance(annotations, dict) else {}
+    provenance = annotations.get("provenance")
+    provenance = provenance if isinstance(provenance, dict) else {}
+    upstream = _clean_text(provenance.get("upstreamSourceId"), "")
+    if upstream:
+        return f"upstream:{upstream}"
+    return "\0".join(
+        (
+            _clean_text(source.get("providerId"), ""),
+            _clean_text(source.get("sourceId"), ""),
+        )
     )
 
 
