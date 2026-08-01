@@ -17,6 +17,7 @@ from collections import Counter, defaultdict
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from src.core.calculation import evaluate_decimal_expression
 from src.core.claim_audit import (
     CLAIM_EXTRACTOR_REVISION,
     CLAIM_VERIFIER_REVISION,
@@ -24,6 +25,7 @@ from src.core.claim_audit import (
     canonical_evidence_dimension,
     canonical_evidence_metric,
     canonical_evidence_period,
+    evidence_semantic_options,
     extract_claims_with_status,
     match_available_evidence,
     structured_components_cover_claim,
@@ -51,16 +53,6 @@ _DERIVED_CLAIM_RE = re.compile(
 _EXPLICIT_ARITHMETIC_RE = re.compile(
     r"(?:\d[\d,.]*|\))\s*(?:[+*/÷]|\s-\s)\s*(?:[-+]?\d|\()",
 )
-_ALLOWED_BINARY = {
-    ast.Add: lambda left, right: left + right,
-    ast.Sub: lambda left, right: left - right,
-    ast.Mult: lambda left, right: left * right,
-    ast.Div: lambda left, right: left / right,
-}
-_ALLOWED_UNARY = {
-    ast.UAdd: lambda value: value,
-    ast.USub: lambda value: -value,
-}
 _BASELINE_POLICY = {
     "policy_id": "oss-citation-baseline",
     "revision": "citation-baseline-v2",
@@ -258,6 +250,7 @@ def evaluate_citation_quality(
                 evidence,
                 time_rule,
                 issue,
+                semantics=semantics,
             )
         elif kind == "calculation":
             _validate_calculation(
@@ -375,9 +368,7 @@ def evaluate_citation_quality(
                 tier_by_citation,
                 check_tiers,
                 citation_by_id,
-                require_independent_sources=(
-                    cross_rule.get("require_independent_sources") is True
-                ),
+                require_independent_sources=(cross_rule.get("require_independent_sources") is True),
             )
         ]
         if low_without_check:
@@ -670,9 +661,10 @@ def _claim_was_auto_bound(
         annotations = annotations if isinstance(annotations, dict) else {}
         binding = annotations.get("binding")
         binding = binding if isinstance(binding, dict) else {}
-        claim_ids = binding.get("autoBoundClaimIds")
-        if isinstance(claim_ids, list) and claim.claim_id in claim_ids:
-            return True
+        for key in ("autoBoundClaimIds", "autoReboundClaimIds"):
+            claim_ids = binding.get(key)
+            if isinstance(claim_ids, list) and claim.claim_id in claim_ids:
+                return True
     return False
 
 
@@ -920,9 +912,11 @@ def _validate_structured_evidence(
         issue("structured_value_missing", "L1", citation_ids=[citation_id])
         return
     numeric = _as_decimal(value) is not None
+    semantic_options = evidence_semantic_options(evidence, semantics)
+    require_unit = semantic_options.get("require_unit", rule.get("require_unit"))
     if (
         numeric
-        and rule.get("require_unit") is True
+        and require_unit is True
         and not _clean_text(
             evidence.get("unit"),
             "",
@@ -940,6 +934,8 @@ def _validate_structured_evidence(
             value,
             _clean_text(evidence.get("unit"), ""),
             claim_text,
+            field=_clean_text(evidence.get("field"), ""),
+            metric=_clean_text(evidence.get("metric"), ""),
             semantics=semantics,
         ):
             issue(
@@ -1160,6 +1156,8 @@ def _validate_time_boundary(
     evidence: dict[str, Any],
     rule: dict[str, Any],
     issue: Any,
+    *,
+    semantics: dict[str, Any] | None = None,
 ) -> None:
     if rule.get("forbid_extrapolation") is not True:
         return
@@ -1180,7 +1178,12 @@ def _validate_time_boundary(
         issue("evidence_before_coverage", "L5", citation_ids=[citation_id])
     if as_of and end and as_of > end:
         issue("evidence_after_coverage", "L5", citation_ids=[citation_id])
-    claim_dates = _ISO_DATE_RE.findall(claim_text)
+    semantic_options = evidence_semantic_options(evidence, semantics)
+    claim_dates = (
+        []
+        if semantic_options.get("date_role") == "publication"
+        else _ISO_DATE_RE.findall(claim_text)
+    )
     if start and any(value < start for value in claim_dates):
         issue(
             "claim_before_evidence_coverage",
@@ -1198,29 +1201,7 @@ def _validate_time_boundary(
 
 
 def _safe_decimal_eval(expression: str, values: dict[str, Decimal]) -> Decimal:
-    if len(expression) > 500:
-        raise ValueError("expression_too_long")
-    root = ast.parse(expression, mode="eval")
-
-    def evaluate(node: ast.AST, depth: int = 0) -> Decimal:
-        if depth > 32:
-            raise ValueError("expression_too_deep")
-        if isinstance(node, ast.Expression):
-            return evaluate(node.body, depth + 1)
-        if isinstance(node, ast.Name) and node.id in values:
-            return values[node.id]
-        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
-            return Decimal(str(node.value))
-        if isinstance(node, ast.BinOp) and type(node.op) in _ALLOWED_BINARY:
-            return _ALLOWED_BINARY[type(node.op)](
-                evaluate(node.left, depth + 1),
-                evaluate(node.right, depth + 1),
-            )
-        if isinstance(node, ast.UnaryOp) and type(node.op) in _ALLOWED_UNARY:
-            return _ALLOWED_UNARY[type(node.op)](evaluate(node.operand, depth + 1))
-        raise ValueError("unsupported_expression")
-
-    return evaluate(root)
+    return evaluate_decimal_expression(expression, values)
 
 
 def _expression_has_additive_op(expression: str) -> bool:
@@ -1292,9 +1273,15 @@ def _value_present(value: Any, text: str) -> bool:
 def _citation_claim_groups(answer: str) -> list[tuple[str, set[str]]]:
     groups: list[tuple[str, set[str]]] = []
     for segment in _CLAIM_BOUNDARY_RE.split(answer):
-        citation_ids = set(_CITATION_LINK_RE.findall(segment))
-        if citation_ids:
-            groups.append((segment, citation_ids))
+        comma_parts = re.split(r"(?<!\d)[,，]|[,，](?!\d)", segment)
+        if len(comma_parts) > 1 and all(_CITATION_LINK_RE.search(part) for part in comma_parts):
+            candidates = comma_parts
+        else:
+            candidates = [segment]
+        for candidate in candidates:
+            citation_ids = set(_CITATION_LINK_RE.findall(candidate))
+            if citation_ids:
+                groups.append((candidate, citation_ids))
     return groups
 
 

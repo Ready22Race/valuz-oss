@@ -365,6 +365,9 @@ async def init_kernel(app: FastAPI) -> None:
     from valuz_agent.integrations.tools_skill_creator import build_submit_skill_tool_defs
     from valuz_agent.modules.browser import service as browser_service
     from valuz_agent.modules.browser.tools import build_browser_tool_defs
+    from valuz_agent.modules.citations.calculation_tool import (
+        build_citation_calculation_tool_defs,
+    )
     from valuz_agent.modules.genui.tools import build_generative_ui_tool_defs
     from valuz_agent.modules.memory.tools import build_memory_tool_defs
     from valuz_agent.modules.projects.tools import build_project_instructions_tool_defs
@@ -386,6 +389,7 @@ async def init_kernel(app: FastAPI) -> None:
         + build_submit_skill_tool_defs()
         + build_agent_proposal_tool_defs()
         + build_deliver_artifacts_tool_defs()
+        + build_citation_calculation_tool_defs()
         + build_generative_ui_tool_defs()
     )
     # browser_start/browser_stop only work when the engine (Node +

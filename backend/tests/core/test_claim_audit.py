@@ -15,22 +15,49 @@ _FINANCE_SEMANTICS = {
     "metric_ontology": {
         "metrics": {
             "operating_revenue": {
-                "aliases": ["营业收入", "operating revenue"],
+                "aliases": ["营业收入", "销售收入", "operating revenue"],
                 "fields": ["operating_revenue"],
             },
             "net_profit": {
                 "aliases": ["净利润", "net profit"],
                 "fields": ["net_profit"],
             },
+            "revenue_growth": {
+                "aliases": ["营业收入同比增长", "revenue growth"],
+                "fields": ["operating_revenue_growth_rate"],
+            },
+            "audit_opinion": {
+                "aliases": ["审计意见"],
+                "fields": ["audit_opinion_type"],
+            },
+            "reporting_period": {
+                "aliases": ["报告期"],
+                "fields": ["fiscal_year"],
+            },
+            "filing_date": {
+                "aliases": ["申报日期"],
+                "fields": ["filing_date"],
+                "date_role": "publication",
+            },
         }
     },
     "unit_ontology": {
         "units": {
             "yuan": {"canonical": "CNY", "aliases": ["元", "CNY"], "scale": 1},
+            "ten-thousand": {
+                "canonical": "CNY",
+                "aliases": ["万元"],
+                "scale": 10_000,
+            },
             "hundred-million": {
                 "canonical": "CNY",
                 "aliases": ["亿元"],
                 "scale": 100_000_000,
+            },
+            "percentage": {
+                "canonical": "percent",
+                "aliases": ["%"],
+                "scale": 1,
             },
         }
     },
@@ -41,6 +68,7 @@ _FINANCE_SEMANTICS = {
         },
         "basis": {},
     },
+    "calculation_dependencies": {"revenue_growth": ["operating_revenue"]},
 }
 
 
@@ -97,6 +125,18 @@ def test_extracts_every_claim_when_one_sentence_is_already_cited() -> None:
     assert claims[0].location["sourceEnd"] > claims[0].location["end"]
 
 
+def test_attaches_citation_written_after_terminal_punctuation() -> None:
+    claims = extract_claims(
+        "营业总收入为 174,144,069,958.25 元。 [来源](citation://cit_revenue) 下一项为说明。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert claims[0].exact == "营业总收入为 174,144,069,958.25 元。"
+    assert claims[0].attached_citation_ids == ("cit_revenue",)
+    assert claims[1].attached_citation_ids == ()
+
+
 def test_extracts_dates_and_non_numeric_facts_but_not_reasoning() -> None:
     claims = extract_claims(
         "The company was founded in 1999. Alice is the CEO. This may improve execution.",
@@ -132,6 +172,96 @@ def test_strict_domain_allows_explicit_empty_search_result_without_citation() ->
     assert len(mixed) == 1
     assert mixed[0].kind == "date-fact"
     assert mixed[0].citation_required is True
+
+
+def test_strict_domain_does_not_flag_section_titles_or_user_facing_limitations() -> None:
+    claims = extract_claims(
+        "**2. 营业总收入 与 营业收入**\n\n"
+        "贵州茅台 2024 年度三项查询结果如下：\n\n"
+        "部分结果的来源定位不完整，相关内容暂时无法核验。\n\n"
+        "如需进一步确认，建议查阅贵州茅台 2024 年年度报告原文。",
+        mode="strict-domain",
+    )
+
+    assert [claim.exact for claim in claims] == [
+        "贵州茅台 2024 年度三项查询结果如下：",
+        "如需进一步确认，建议查阅贵州茅台 2024 年年度报告原文。",
+    ]
+    assert [claim.kind for claim in claims] == ["presentation", "reasoning"]
+    assert all(claim.citation_required is False for claim in claims)
+
+
+def test_independently_cited_comma_clauses_are_atomic_claims() -> None:
+    claims = extract_claims(
+        "2024 年度审计意见为无保留意见 [a](citation://cit_a)，"
+        "报告期为全年 [b](citation://cit_b)，"
+        "申报日期为 2025-04-03 [c](citation://cit_c)。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert [claim.attached_citation_ids for claim in claims] == [
+        ("cit_a",),
+        ("cit_b",),
+        ("cit_c",),
+    ]
+    assert [claim.normalized.get("period") for claim in claims] == [
+        "2024 FY",
+        "2024 FY",
+        "2024 FY",
+    ]
+
+
+def test_each_comma_clause_keeps_its_explicit_period_and_infers_derived_metric() -> None:
+    claims = extract_claims(
+        "2024 年营业收入为 1,708.99 亿元 [a](citation://cit_a)，"
+        "2023 年营业收入为 1,476.94 亿元 [b](citation://cit_b)，"
+        "2024 年同比增速为 15.71% [c](citation://cit_c)。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert [claim.normalized.get("period") for claim in claims] == [
+        "2024 FY",
+        "2023 FY",
+        "2024 FY",
+    ]
+    assert [claim.normalized.get("metric") for claim in claims] == [
+        "operating_revenue",
+        "operating_revenue",
+        "revenue_growth",
+    ]
+
+
+def test_citation_clause_split_ignores_internal_commas_before_the_binding() -> None:
+    claims = extract_claims(
+        "2024 年营业收入为 170,899,152,276.34 元，较上年同期增长 15.71% "
+        "[表格](citation://cit_table)，利润表对此亦予以披露 "
+        "[分析](citation://cit_analysis)。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert [claim.attached_citation_ids for claim in claims] == [
+        ("cit_table",),
+    ]
+    assert claims[0].exact == ("2024 年营业收入为 170,899,152,276.34 元，较上年同期增长 15.71%，")
+
+
+def test_text_evidence_supports_scaled_financial_values_and_percentages() -> None:
+    claim = extract_claims(
+        "2024 年营业收入为 1,708.99 亿元，同比增长 15.71%。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    evidence = {
+        "kind": "text",
+        "quote": ("营业收入 | 170,899,000,000 元 | 2024 年；本期比上年同期增长 15.71%。"),
+    }
+
+    assert (
+        verify_evidence_support(claim, evidence, semantics=_FINANCE_SEMANTICS).status == "supported"
+    )
 
 
 def test_list_and_table_claims_have_stable_structural_locations() -> None:
@@ -533,6 +663,112 @@ def test_finance_semantics_split_independent_metric_clauses() -> None:
         "operating_revenue",
         "net_profit",
     ]
+
+
+def test_text_quote_matching_ignores_pdf_line_wrap_spacing_in_chinese() -> None:
+    claim = extract_claims(
+        "我们认为，财务报表公允反映了贵州茅台公司2024年度的经营成果。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    evidence = {
+        "kind": "text",
+        "quote": "我们认为，财务报表公允反映了贵州茅台公司2024\n年度的经营成果。",
+    }
+
+    assert (
+        verify_evidence_support(claim, evidence, semantics=_FINANCE_SEMANTICS).status == "supported"
+    )
+
+
+def test_text_quote_matching_allows_attribution_before_exact_quote() -> None:
+    claim = extract_claims(
+        (
+            '年报重要提示第三条原文："天健会计师事务所(特殊普通合伙)'
+            '为本公司出具了标准无保留意见的审计报告。"'
+        ),
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    evidence = {
+        "kind": "text",
+        "quote": ("三、 天健会计师事务所(特殊普通合伙)为本公司出具了标准无保留意见的审计报告。"),
+    }
+
+    assert (
+        verify_evidence_support(claim, evidence, semantics=_FINANCE_SEMANTICS).status == "supported"
+    )
+
+
+def test_text_numeric_support_accepts_equivalent_currency_conversions() -> None:
+    claim = extract_claims(
+        ("2024年度营业收入为17,089,915.23万元，即170,899,152,300元，约1,708.99亿元。"),
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    evidence = {
+        "kind": "text",
+        "quote": "2024 年度，营业收入为人民币 17,089,915.23 万元。",
+    }
+
+    assert (
+        verify_evidence_support(claim, evidence, semantics=_FINANCE_SEMANTICS).status == "supported"
+    )
+
+
+def test_text_table_evidence_supports_a_claim_with_an_equivalent_display_value() -> None:
+    claim = extract_claims(
+        ("直销渠道：2024年本期销售收入 74,843,327,030.79 元（约 748.43 亿元），同比增长 11.32%。"),
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    evidence = {
+        "kind": "text",
+        "quote": ("| 按销售渠道 | 金额 | 同比 |\n| 直销 | 74,843,327,030.79 | 11.32 |"),
+        "prefix": "渠道类型 本期销售收入 上期销售收入 本期销售量 上期销售量",
+    }
+
+    assert (
+        verify_evidence_support(claim, evidence, semantics=_FINANCE_SEMANTICS).status == "supported"
+    )
+
+
+def test_generic_market_quote_with_all_numbers_is_supported_without_metric_ontology() -> None:
+    claim = extract_claims(
+        (
+            "据 TrendForce 数据，2026年Q2通用DRAM合约价环比Q1上涨 58–63%，"
+            "NAND Flash合约价上涨 81–86%。"
+        ),
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    evidence = {
+        "kind": "text",
+        "quote": (
+            "TrendForce：2026 年第二季（Q2）通用 DRAM 合约价预计较第一季（Q1）"
+            "上涨 58–63%；NAND Flash 合约价预计上涨\n81–86%。"
+        ),
+    }
+
+    assert (
+        verify_evidence_support(claim, evidence, semantics=_FINANCE_SEMANTICS).status == "supported"
+    )
+
+
+def test_generic_numeric_quote_does_not_match_unrelated_subject_with_same_values() -> None:
+    claim = extract_claims(
+        "DRAM 合约价上涨 58–63%。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    evidence = {
+        "kind": "text",
+        "quote": "航空客运量同比上涨 58–63%。",
+    }
+
+    assert (
+        verify_evidence_support(claim, evidence, semantics=_FINANCE_SEMANTICS).status != "supported"
+    )
 
 
 def test_finance_clause_split_ignores_numeric_thousands_separator() -> None:

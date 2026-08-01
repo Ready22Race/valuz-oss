@@ -22,11 +22,12 @@ import math
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
 from src.core.citation_quality import evaluate_citation_quality
-from src.core.claim_audit import auto_bind_unique_claims
+from src.core.claim_audit import auto_bind_unique_claims, rebind_unique_mismatched_claims
 
 POLICY_REVISION = "citation-v1"
 EVIDENCE_ENVELOPE_KEY = "_valuz_evidence"
@@ -111,6 +112,12 @@ class EvidenceRegistry:
     """Collect validated evidence envelopes from this turn's tool results."""
 
     _MAX_TOOL_RESULT_CHARS = 2_000_000
+    # Claude persists oversized tool results outside the model transcript and
+    # the runtime forwards their contents through a private, non-broadcast
+    # sidecar.  Search/transcript results can legitimately exceed the normal
+    # MCP payload ceiling, so accept a larger bounded payload only on that
+    # trusted-private path.  This does not increase model context size.
+    _MAX_PRIVATE_TOOL_RESULT_CHARS = 16_000_000
     # Structured financial tools may return several hundred exact per-field
     # envelopes in one response.  Keep a hard bound, but do not truncate a
     # normal eight-period financial statement before its cited field.
@@ -131,7 +138,13 @@ class EvidenceRegistry:
             else None
         )
 
-    def register_tool_result(self, content: Any, *, tool_name: str | None = None) -> int:
+    def register_tool_result(
+        self,
+        content: Any,
+        *,
+        tool_name: str | None = None,
+        trusted_private: bool = False,
+    ) -> int:
         """Register every valid envelope nested inside ``content``.
 
         MCP/SDK runtimes usually surface tool output as a JSON string, while
@@ -140,7 +153,10 @@ class EvidenceRegistry:
         Returns the number of newly registered handles.
         """
 
-        payload = _decode_json_payload(content, max_chars=self._MAX_TOOL_RESULT_CHARS)
+        max_chars = (
+            self._MAX_PRIVATE_TOOL_RESULT_CHARS if trusted_private else self._MAX_TOOL_RESULT_CHARS
+        )
+        payload = _decode_json_payload(content, max_chars=max_chars)
         if payload is None:
             if _contains_evidence_marker(content):
                 self._rejected_count += 1
@@ -184,7 +200,7 @@ class EvidenceRegistry:
                 # the model while the guard silently missed the registry entry.
                 nested = _decode_json_payload(
                     node,
-                    max_chars=self._MAX_TOOL_RESULT_CHARS,
+                    max_chars=max_chars,
                 )
                 if nested is not None:
                     stack.append((nested, depth + 1))
@@ -292,6 +308,13 @@ class CitationGuard:
         policy_config = policy_config if isinstance(policy_config, dict) else {}
         semantics = policy_config.get("semantics")
         semantics = semantics if isinstance(semantics, dict) else None
+        rebind_result = rebind_unique_mismatched_claims(
+            repaired_text,
+            self._registry.values(),
+            mode=str(policy_mode or "required-on-evidence"),
+            semantics=semantics,
+        )
+        repaired_text = rebind_result.text
         auto_bind_result = auto_bind_unique_claims(
             repaired_text,
             self._registry.values(),
@@ -302,6 +325,9 @@ class CitationGuard:
         auto_bound_claims_by_handle: dict[str, list[str]] = {}
         for claim_id, handle in auto_bind_result.claim_handles.items():
             auto_bound_claims_by_handle.setdefault(handle, []).append(claim_id)
+        auto_rebound_claims_by_handle: dict[str, list[str]] = {}
+        for claim_id, handle in rebind_result.claim_handles.items():
+            auto_rebound_claims_by_handle.setdefault(handle, []).append(claim_id)
 
         citations: list[dict[str, Any]] = []
         cited_handles: list[str] = []
@@ -327,6 +353,7 @@ class CitationGuard:
             # envelope cannot recurse forever.
             cited_handles.append(identifier)
             evidence = copy.deepcopy(record.evidence)
+            calculation_input_auto_bindings: list[dict[str, str]] = []
             if evidence.get("kind") == "calculation":
                 for item in evidence.get("inputs", []):
                     if not isinstance(item, dict):
@@ -334,6 +361,21 @@ class CitationGuard:
                     input_ref = item.get("citationId")
                     if not isinstance(input_ref, str):
                         continue
+                    resolved_ref = _resolve_calculation_input_handle(
+                        item,
+                        current_handle=input_ref,
+                        records=self._registry.values(),
+                    )
+                    if resolved_ref != input_ref:
+                        calculation_input_auto_bindings.append(
+                            {
+                                "name": str(item.get("name") or ""),
+                                "fromHandle": input_ref,
+                                "toHandle": resolved_ref,
+                            }
+                        )
+                        input_ref = resolved_ref
+                        item["citationId"] = resolved_ref
                     canonical_input = append_handle(input_ref)
                     if canonical_input is not None:
                         item["citationId"] = canonical_input
@@ -347,10 +389,16 @@ class CitationGuard:
             if record.tool_name:
                 annotations["provenance"] = {"toolName": record.tool_name}
             auto_bound_claim_ids = auto_bound_claims_by_handle.get(identifier)
-            if auto_bound_claim_ids:
-                annotations["binding"] = {
-                    "autoBoundClaimIds": list(auto_bound_claim_ids),
-                }
+            auto_rebound_claim_ids = auto_rebound_claims_by_handle.get(identifier)
+            if auto_bound_claim_ids or auto_rebound_claim_ids or calculation_input_auto_bindings:
+                binding: dict[str, Any] = {}
+                if auto_bound_claim_ids:
+                    binding["autoBoundClaimIds"] = list(auto_bound_claim_ids)
+                if auto_rebound_claim_ids:
+                    binding["autoReboundClaimIds"] = list(auto_rebound_claim_ids)
+                if calculation_input_auto_bindings:
+                    binding["calculationInputAutoBindings"] = calculation_input_auto_bindings
+                annotations["binding"] = binding
             if annotations:
                 citation["annotations"] = annotations
             if record.locator is not None:
@@ -368,10 +416,10 @@ class CitationGuard:
                 # id that would hash to a registered handle, only handles in a
                 # tool envelope are accepted at this boundary.
                 _append_unique(unknown_ids, identifier)
-                return label or "source"
+                return _untrusted_link_label(label)
             citation_id = append_handle(identifier)
             if citation_id is None:
-                return label or "source"
+                return _untrusted_link_label(label)
             return f"[{label or 'source'}](citation://{citation_id})"
 
         numbered_bindings = _numbered_evidence_bindings(repaired_text)
@@ -381,7 +429,7 @@ class CitationGuard:
             handle = match.group(1)
             citation_id = append_handle(handle)
             if citation_id is None:
-                return "source"
+                return ""
             # Bare handles are not valid final prose, but the deterministic
             # repair can safely wrap a known handle without inventing evidence.
             nonlocal repair_attempts
@@ -422,6 +470,7 @@ class CitationGuard:
             linked_text,
         )
         canonical_text = _strip_redundant_source_section(canonical_text)
+        canonical_text = _strip_protocol_source_placeholders(canonical_text)
 
         all_citation_ids = [self._citation_id(record.handle) for record in self._registry.values()]
         used_citation_ids = {self._citation_id(handle) for handle in cited_handles}
@@ -430,7 +479,6 @@ class CitationGuard:
         degraded = (
             bool(unknown_ids)
             or bool(missing_locator_ids)
-            or self._registry.rejected_count > 0
             or (required and not citations)
             or (required and not self._policy_available)
         )
@@ -484,6 +532,68 @@ class CitationGuard:
         return f"cit_{digest}"
 
 
+def _resolve_calculation_input_handle(
+    item: dict[str, Any],
+    *,
+    current_handle: str,
+    records: Iterable[EvidenceRecord],
+) -> str:
+    """Return a unique structured field matching one calculation input.
+
+    A model may bind a calculation input to a sibling field from the same
+    statement (for example ``end_date`` instead of ``operating_revenue``).
+    Keep a matching current binding; otherwise replace it only when value and
+    unit identify exactly one Registry record.  This stays deterministic and
+    fails closed on ambiguity.
+    """
+
+    available = list(records)
+    current = next((record for record in available if record.handle == current_handle), None)
+    if current is not None and _structured_record_matches_calculation_input(current, item):
+        return current_handle
+    candidates = [
+        record.handle
+        for record in available
+        if _structured_record_matches_calculation_input(record, item)
+    ]
+    unique = list(dict.fromkeys(candidates))
+    return unique[0] if len(unique) == 1 else current_handle
+
+
+def _structured_record_matches_calculation_input(
+    record: EvidenceRecord,
+    item: dict[str, Any],
+) -> bool:
+    evidence = record.evidence
+    if evidence.get("kind") != "structured-data":
+        return False
+    input_value = _decimal_scalar(item.get("value"))
+    evidence_value = _decimal_scalar(evidence.get("value"))
+    if input_value is None or evidence_value is None or input_value != evidence_value:
+        return False
+    input_unit = _normalized_unit(item.get("unit"))
+    evidence_unit = _normalized_unit(evidence.get("unit") or evidence.get("currency"))
+    return not (input_unit or evidence_unit) or input_unit == evidence_unit
+
+
+def _decimal_scalar(value: Any) -> Decimal | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        result = Decimal(str(value).replace(",", "").strip())
+    except (InvalidOperation, ValueError):
+        return None
+    return result if result.is_finite() else None
+
+
+def _normalized_unit(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    aliases = {"percent": "%", "percentage": "%", "rmb": "cny"}
+    normalized = re.sub(r"\s+", "", value).casefold()
+    return aliases.get(normalized, normalized)
+
+
 def _numbered_evidence_bindings(text: str) -> dict[str, str]:
     candidates: dict[str, set[str]] = {}
     for label, handle in _NUMBERED_EVIDENCE_SOURCE_RE.findall(text):
@@ -534,6 +644,50 @@ def _strip_redundant_source_section(text: str) -> str:
     return body.rstrip()
 
 
+def _untrusted_link_label(label: str) -> str:
+    """Keep prose labels but never publish citation protocol placeholders."""
+
+    normalized = re.sub(r"\s+", "", label).casefold()
+    if normalized in {
+        "source",
+        "sources",
+        "citation",
+        "cite",
+        "reference",
+        "references",
+        "来源",
+        "引用",
+        "出处",
+    }:
+        return ""
+    return label
+
+
+def _strip_protocol_source_placeholders(text: str) -> str:
+    """Remove leaked line-ending ``source`` tokens without touching prose."""
+
+    output: list[str] = []
+    suffix = re.compile(
+        r"(?:[ \t]+|(?<=[。！？；;]))source([.!?。！？；;]?)\s*$",
+        re.IGNORECASE,
+    )
+    for line in text.splitlines(keepends=True):
+        newline = ""
+        body = line
+        if body.endswith("\r\n"):
+            body, newline = body[:-2], "\r\n"
+        elif body.endswith("\n"):
+            body, newline = body[:-1], "\n"
+        match = suffix.search(body)
+        if match and (
+            re.search(r"[\u4e00-\u9fff]", body[: match.start()])
+            or "citation://" in body[: match.start()]
+        ):
+            body = f"{body[: match.start()].rstrip()}{match.group(1)}"
+        output.append(f"{body}{newline}")
+    return "".join(output).rstrip()
+
+
 def _decode_json_payload(content: Any, *, max_chars: int) -> Any | None:
     if isinstance(content, (dict, list)):
         return content
@@ -547,6 +701,89 @@ def _decode_json_payload(content: Any, *, max_chars: int) -> Any | None:
     except (json.JSONDecodeError, TypeError, ValueError):
         return None
     return parsed if isinstance(parsed, (dict, list)) else None
+
+
+def compact_citation_tool_content(content: Any) -> Any | None:
+    """Return a model/history-safe view of source-bearing tool content.
+
+    The full validated envelopes remain available to the turn Registry, while
+    model context and persisted tool traces retain only the fields needed to
+    select an evidence handle.  ``None`` means no evidence envelope was found
+    and callers should preserve the original value unchanged.
+    """
+
+    compacted, changed = _compact_citation_value(content)
+    return compacted if changed else None
+
+
+def _compact_citation_value(value: Any) -> tuple[Any, bool]:
+    if isinstance(value, str):
+        if EVIDENCE_ENVELOPE_KEY not in value:
+            return value, False
+        try:
+            parsed = json.loads(value)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return value, False
+        compacted, changed = _compact_citation_value(parsed)
+        if not changed:
+            return value, False
+        return json.dumps(compacted, ensure_ascii=False, separators=(",", ":")), True
+    if isinstance(value, list):
+        output: list[Any] = []
+        changed = False
+        for item in value:
+            compacted, item_changed = _compact_citation_value(item)
+            output.append(compacted)
+            changed = changed or item_changed
+        return output, changed
+    if not isinstance(value, dict):
+        return value, False
+    output = dict(value)
+    changed = False
+    if EVIDENCE_ENVELOPE_KEY in output:
+        raw = output[EVIDENCE_ENVELOPE_KEY]
+        items = raw if isinstance(raw, list) else [raw]
+        output[EVIDENCE_ENVELOPE_KEY] = [
+            item for item in (_compact_citation_envelope(item) for item in items) if item
+        ]
+        changed = True
+    for key, item in list(output.items()):
+        if key == EVIDENCE_ENVELOPE_KEY:
+            continue
+        compacted, item_changed = _compact_citation_value(item)
+        if item_changed:
+            output[key] = compacted
+            changed = True
+    return output, changed
+
+
+def _compact_citation_envelope(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or not isinstance(value.get("evidenceHandle"), str):
+        return None
+    evidence = value.get("evidence")
+    evidence = evidence if isinstance(evidence, dict) else {}
+    source = value.get("source")
+    source = source if isinstance(source, dict) else {}
+    compact = {
+        key: item
+        for key, item in {
+            "evidenceHandle": value["evidenceHandle"],
+            "kind": evidence.get("kind"),
+            "field": evidence.get("field"),
+            "metric": evidence.get("metric"),
+            "value": evidence.get("value", evidence.get("result")),
+            "unit": evidence.get("unit"),
+            "period": evidence.get("period") or evidence.get("asOf"),
+            "recordKey": evidence.get("recordKey"),
+            "sourceTitle": source.get("title"),
+        }.items()
+        if item is not None and item != ""
+    }
+    if evidence.get("kind") == "text":
+        excerpt = evidence.get("snippet") or evidence.get("quote")
+        if isinstance(excerpt, str) and excerpt:
+            compact["excerpt"] = excerpt[:2_000]
+    return compact
 
 
 def _contains_evidence_marker(content: Any) -> bool:
@@ -749,6 +986,7 @@ def _normalize_evidence(value: dict[str, Any]) -> dict[str, Any] | None:
         value,
         (
             "kind",
+            "toolName",
             "expression",
             "result",
             "unit",

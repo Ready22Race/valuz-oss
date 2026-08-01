@@ -145,6 +145,24 @@ def test_registry_reports_oversized_evidence_payload_instead_of_silent_drop() ->
     assert registry.overflow_reasons == ("tool_result_invalid_or_oversized",)
 
 
+def test_unrelated_rejected_tool_payload_does_not_degrade_valid_final_citation() -> None:
+    registry = _registry(_item(locator={"kind": "pdf", "page": 1}))
+    registry._MAX_TOOL_RESULT_CHARS = 32
+    assert registry.register_tool_result(json.dumps({"_valuz_evidence": _item()})) == 0
+
+    guard = CitationGuard(
+        registry,
+        message_id="msg-1",
+        user_prompt="Use the report",
+        policy_available=True,
+    )
+    result = guard.finalize("Revenue [report](evidence://ev_revenue_2025).")
+
+    assert result.bundle is not None
+    assert result.bundle["integrity"]["status"] == "passed"
+    assert result.bundle["integrity"]["evidenceRejectedCount"] == 1
+
+
 def test_registry_rejects_oversized_snapshots_and_locator_geometry() -> None:
     oversized = _item(locator={"kind": "pdf", "page": 1})
     oversized["evidence"]["quote"] = "x" * 32_001
@@ -375,6 +393,41 @@ def test_guard_never_promotes_unknown_model_minted_source() -> None:
     ]
 
 
+def test_guard_removes_protocol_source_placeholders_without_rewriting_prose() -> None:
+    registry = _registry(_item(locator={"kind": "chunk", "chunkId": "chunk-1"}))
+    guard = CitationGuard(
+        registry,
+        message_id="msg-1",
+        user_prompt="请列出有引用的数据",
+        policy_available=True,
+    )
+
+    result = guard.finalize(
+        "收入同比增长 12%。[1](evidence://ev_revenue_2025) source\n\n"
+        "The primary source is the annual report."
+    )
+
+    assert "citation://cit_" in result.text
+    assert "12%。[1](citation://" in result.text
+    assert ") source" not in result.text
+    assert "The primary source is the annual report." in result.text
+
+
+def test_guard_drops_unknown_protocol_label_instead_of_publishing_source() -> None:
+    guard = CitationGuard(
+        EvidenceRegistry(),
+        message_id="msg-1",
+        user_prompt="请给出引用",
+        policy_available=True,
+    )
+
+    result = guard.finalize("结论。[source](evidence://ev_unknown_12345678)")
+
+    assert result.text == "结论。"
+    assert result.bundle is not None
+    assert result.bundle["integrity"]["unknownCitationIds"] == ["ev_unknown_12345678"]
+
+
 def test_guard_marks_missing_document_locator_and_unused_evidence() -> None:
     registry = _registry(
         _item(),
@@ -565,6 +618,138 @@ def test_guard_auto_binds_one_unique_structured_candidate_without_model_repair()
     assert result.bundle["integrity"]["repairAttempts"] == 0
     assert result.bundle["quality"]["claims"][0]["status"] == "auto-bound"
     assert result.bundle["quality"]["metrics"]["claimAutoBoundCount"] == 1
+
+
+def test_guard_rebinds_one_wrong_sibling_field_to_unique_exact_evidence() -> None:
+    wrong = _item("ev_end_date_12345678")
+    wrong["source"].update({"sourceType": "dataset", "sourceId": "financials:2025"})
+    wrong["source"].pop("documentId")
+    wrong["source"].pop("documentVersion")
+    wrong["evidence"] = {
+        "kind": "structured-data",
+        "datasetId": "financials",
+        "toolName": "company_income_statement",
+        "recordKey": "issuer|FY2025",
+        "field": "end_date",
+        "metric": "end_date",
+        "value": "2025-12-31",
+        "period": "FY2025",
+        "capturedAt": "2026-08-01T08:00:00Z",
+    }
+    revenue = json.loads(json.dumps(wrong))
+    revenue["evidenceHandle"] = "ev_revenue_exact_12345678"
+    revenue["evidence"].update(
+        {
+            "field": "revenue",
+            "metric": "revenue",
+            "value": 120,
+            "unit": "USDm",
+        }
+    )
+    guard = CitationGuard(
+        _registry(wrong, revenue),
+        message_id="msg-rebind",
+        user_prompt="What was revenue?",
+        policy_available=True,
+    )
+
+    result = guard.finalize(
+        "FY2025 revenue was 120 USDm [source](evidence://ev_end_date_12345678)."
+    )
+
+    assert result.bundle is not None
+    assert "ev_end_date_12345678" not in result.text
+    assert len(result.bundle["citations"]) == 1
+    citation = result.bundle["citations"][0]
+    assert citation["evidence"]["field"] == "revenue"
+    assert citation["annotations"]["binding"]["autoReboundClaimIds"]
+    assert result.bundle["quality"]["claims"][0]["status"] == "auto-bound"
+
+
+def test_guard_rebinds_calculation_inputs_to_unique_value_and_unit_fields() -> None:
+    template = _item("ev_wrong_current_12345678")
+    template["source"].update({"sourceType": "dataset", "sourceId": "financials"})
+    template["source"].pop("documentId")
+    template["source"].pop("documentVersion")
+    template["evidence"] = {
+        "kind": "structured-data",
+        "datasetId": "financials",
+        "toolName": "company_income_statement",
+        "recordKey": "issuer|FY2025",
+        "field": "end_date",
+        "metric": "end_date",
+        "value": "2025-12-31",
+        "period": "FY2025",
+        "capturedAt": "2026-08-01T08:00:00Z",
+    }
+    wrong_prior = json.loads(json.dumps(template))
+    wrong_prior["evidenceHandle"] = "ev_wrong_prior_12345678"
+    wrong_prior["evidence"].update(
+        {"recordKey": "issuer|FY2024", "value": "2024-12-31", "period": "FY2024"}
+    )
+    current = json.loads(json.dumps(template))
+    current["evidenceHandle"] = "ev_revenue_current_12345678"
+    current["evidence"].update(
+        {"field": "revenue", "metric": "revenue", "value": 120, "unit": "USDm"}
+    )
+    prior = json.loads(json.dumps(wrong_prior))
+    prior["evidenceHandle"] = "ev_revenue_prior_12345678"
+    prior["evidence"].update(
+        {"field": "revenue", "metric": "revenue", "value": 100, "unit": "USDm"}
+    )
+    calculation = _item("ev_growth_calculation_12345678")
+    calculation["source"].update(
+        {"sourceId": "runtime-calc", "providerId": "runtime", "sourceType": "tool-result"}
+    )
+    calculation["source"].pop("documentId")
+    calculation["source"].pop("documentVersion")
+    calculation["evidence"] = {
+        "kind": "calculation",
+        "expression": "(current - prior) / prior * 100",
+        "inputs": [
+            {
+                "name": "current",
+                "citationId": "ev_wrong_current_12345678",
+                "value": 120,
+                "unit": "USDm",
+            },
+            {
+                "name": "prior",
+                "citationId": "ev_wrong_prior_12345678",
+                "value": 100,
+                "unit": "USDm",
+            },
+        ],
+        "result": 20,
+        "unit": "%",
+        "rounding": "2dp",
+        "calculatedAt": "2026-08-01T08:00:00Z",
+    }
+    guard = CitationGuard(
+        _registry(template, wrong_prior, current, prior, calculation),
+        message_id="msg-calc-rebind",
+        user_prompt="Calculate growth with citations",
+        policy_available=True,
+    )
+
+    result = guard.finalize(
+        "Growth was 20% [calculation](evidence://ev_growth_calculation_12345678)."
+    )
+
+    assert result.bundle is not None
+    calculation_citation = next(
+        item for item in result.bundle["citations"] if item["evidence"]["kind"] == "calculation"
+    )
+    revenue_citations = {
+        item["evidence"].get("period"): item
+        for item in result.bundle["citations"]
+        if item["evidence"].get("field") == "revenue"
+    }
+    assert [item["citationId"] for item in calculation_citation["evidence"]["inputs"]] == [
+        revenue_citations["FY2025"]["citationId"],
+        revenue_citations["FY2024"]["citationId"],
+    ]
+    assert len(calculation_citation["annotations"]["binding"]["calculationInputAutoBindings"]) == 2
 
 
 def test_guard_does_not_auto_bind_ambiguous_structured_candidates() -> None:

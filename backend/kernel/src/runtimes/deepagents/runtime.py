@@ -64,7 +64,11 @@ from src.runtimes.deepagents.approval_bridge import (
     _build_pending_payload,
     _classify_subject,
 )
-from src.runtimes.deepagents.middleware import ToolErrorTolerantMiddleware
+from src.runtimes.deepagents.middleware import (
+    CitationEvidenceCompactionMiddleware,
+    ToolErrorTolerantMiddleware,
+    citation_artifact_content,
+)
 from src.runtimes.interruption import describe_exception, is_runtime_interruption
 from src.runtimes.mcp_env import resolve_stdio_env
 
@@ -413,14 +417,18 @@ class DeepAgentsRuntime:
                             continue
                         output = data.get("output")
                         is_error = _output_is_error(output)
+                        citation_content = citation_artifact_content(output)
+                        event_data = {
+                            "id": run_id,
+                            "content": _stringify_tool_output(output),
+                            "is_error": is_error,
+                        }
+                        if citation_content is not None:
+                            event_data["_citation_content"] = citation_content
                         await self.event_sink.emit(
                             Event(
                                 type="tool_result",
-                                data={
-                                    "id": run_id,
-                                    "content": _stringify_tool_output(output),
-                                    "is_error": is_error,
-                                },
+                                data=event_data,
                             )
                         )
 
@@ -987,7 +995,10 @@ class DeepAgentsRuntime:
             "subagents": subagents or None,
             "backend": backend,
             "checkpointer": self._checkpointer,
-            "middleware": [ToolErrorTolerantMiddleware()],
+            "middleware": [
+                ToolErrorTolerantMiddleware(),
+                CitationEvidenceCompactionMiddleware(),
+            ],
         }
         # DeepAgents prepends our ``system_prompt`` argument to its base
         # prompt; we pass the per-session ``instructions`` straight through
@@ -1262,13 +1273,11 @@ class DeepAgentsRuntime:
             return_exceptions=True,
         )
         tools: list[Any] = []
-        for name, result in zip(names, results):
+        for name, result in zip(names, results, strict=True):
             if isinstance(result, asyncio.CancelledError):
                 raise result
             if isinstance(result, BaseException):
-                logger.warning(
-                    "mcp server %r unavailable — skipping its tools: %s", name, result
-                )
+                logger.warning("mcp server %r unavailable — skipping its tools: %s", name, result)
                 continue
             tools.extend(result)
         return tools

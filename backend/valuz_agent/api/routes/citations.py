@@ -73,14 +73,35 @@ async def resolve_citation(
     source = citation.get("source")
     if not isinstance(source, dict):
         raise HTTPException(status_code=404, detail="Citation not found")
+    evidence = citation.get("evidence")
+    if not isinstance(evidence, dict):
+        raise HTTPException(status_code=404, detail="Citation not found")
     locator = citation.get("locator")
     if locator is not None and not isinstance(locator, dict):
         locator = None
 
+    edition_resolver = get_citation_document_resolver()
+    local_resolver = LocalCitationDocumentResolver(document_service)
+    try:
+        resolved = (
+            await edition_resolver.resolve(
+                owner_user_id=user_id,
+                source=source,
+                evidence=evidence,
+                locator=locator,
+            )
+            if edition_resolver is not None
+            else None
+        )
+    except DocumentNotFound as exc:
+        raise HTTPException(status_code=404, detail="Citation document unavailable") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail="Citation document forbidden") from exc
+
     canonical_url = (
         source.get("canonicalUrl") if isinstance(source.get("canonicalUrl"), str) else None
     )
-    if not source.get("documentId"):
+    if resolved is None and not source.get("documentId"):
         if not canonical_url:
             return ResolveCitationResponse(
                 document=None,
@@ -105,29 +126,13 @@ async def resolve_citation(
             fallback_reason="external_reader_unavailable",
             canonical_url=canonical_url,
         )
-
-    edition_resolver = get_citation_document_resolver()
-    local_resolver = LocalCitationDocumentResolver(document_service)
-    try:
-        resolved = (
-            await edition_resolver.resolve(
-                owner_user_id=user_id,
-                source=source,
-                locator=locator,
-            )
-            if edition_resolver is not None
-            else None
+    if resolved is None:
+        resolved = await local_resolver.resolve(
+            owner_user_id=user_id,
+            source=source,
+            evidence=evidence,
+            locator=locator,
         )
-        if resolved is None:
-            resolved = await local_resolver.resolve(
-                owner_user_id=user_id,
-                source=source,
-                locator=locator,
-            )
-    except DocumentNotFound as exc:
-        raise HTTPException(status_code=404, detail="Citation document unavailable") from exc
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail="Citation document forbidden") from exc
 
     return ResolveCitationResponse(
         document=resolved.document or None,

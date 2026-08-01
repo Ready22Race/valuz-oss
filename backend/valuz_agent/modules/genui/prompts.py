@@ -12,13 +12,13 @@ import json
 from importlib import resources
 
 TOOL_DESCRIPTION = (
-    "Generate a rich, interactive UI — charts, tables, forms, KPI cards, or a "
-    "dashboard — when a visual component would communicate the answer more "
-    "clearly than prose. Pass a natural-language `request` describing what to "
-    "show, and optional `data` (structured values to render directly). Do NOT "
-    "call this for ordinary Q&A that text answers well. The tool returns OpenUI "
-    "Lang that the client renders inline; do not repeat the same content as "
-    "text afterwards."
+    "Generate a rich, interactive UI — charts, forms, KPI cards, or a dashboard — "
+    "only when the user's current message explicitly asks for a chart, dashboard, "
+    "visualization, or interactive UI. Never infer this intent from data, and do "
+    "not call it merely because the user asks to list items or show a table. Pass "
+    "a natural-language `request` describing what to show, and optional `data`. "
+    "The client renders the returned OpenUI Lang inline; do not repeat the same "
+    "content as text afterwards."
 )
 
 GENERATIVE_UI_INSTRUCTIONS = (
@@ -33,7 +33,7 @@ GENERATIVE_UI_INSTRUCTIONS = (
     "an application shell, sidebar, top navigation, user menu, or fixed-width "
     "page chrome. The root must be a compact column layout that fits its parent. "
     "Use a mobile-first responsive layout: the root should be "
-    "Stack(..., \"column\", ...), but do not force every module to occupy a "
+    'Stack(..., "column", ...), but do not force every module to occupy a '
     "full-width row. Peer modules may share wrapping rows or responsive grids "
     "when there is room, then stack on narrow screens. For text-heavy content, "
     "avoid narrow sidebars and use columns only when every column remains "

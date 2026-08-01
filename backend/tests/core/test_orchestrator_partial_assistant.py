@@ -11,7 +11,7 @@ from src.adapters.database_sink import DatabaseEventSink
 from src.adapters.delta_coalescing_sink import DeltaCoalescingSink
 from src.adapters.persist_then_broadcast_sink import PersistThenBroadcastSink
 from src.core.events import Event
-from src.core.orchestrator import _MessageObserverSink
+from src.core.orchestrator import _MessageObserverSink, _sanitize_citation_repair_prose
 
 
 class _FakeStore:
@@ -33,6 +33,30 @@ class _RecordingSink:
 
     async def emit(self, event: Event) -> None:
         self.events.append(event)
+
+
+def test_repair_prose_sanitizer_covers_internal_protocol_synonyms() -> None:
+    for internal_term in (
+        "evidenceHandle",
+        "evidence handle",
+        "citationId",
+        "证据句柄",
+        "引用句柄",
+        "证据记录",
+        "独立证据凭证",
+        "合规绑定",
+        "经认证的引用",
+        "可引用来源",
+        "行内引用",
+        "嵌套财务子字段",
+        "工具原始返回",
+        "valuz.quality-claim.invalid",
+        "[UNSOURCED]",
+    ):
+        result = _sanitize_citation_repair_prose(f"安全结论。\n\n诊断：{internal_term}。")
+        assert result.startswith("安全结论。")
+        assert "来源定位不完整" in result
+        assert internal_term not in result
 
 
 def _observer() -> tuple[_FakeStore, _RecordingSink, _MessageObserverSink]:
@@ -135,6 +159,32 @@ async def test_final_assistant_message_wins_over_streamed_delta() -> None:
     ]
 
 
+async def test_internal_compaction_handoff_is_not_persisted_or_broadcast() -> None:
+    store, live, observer = _observer()
+    handoff = """## SESSION INTENT
+Research the filing.
+
+## SUMMARY
+Internal state.
+
+## ARTIFACTS
+None.
+
+## NEXT STEPS
+Continue with tools.
+"""
+
+    await observer.emit(Event(type="assistant_message", data={"text": handoff}))
+    await observer.emit(Event(type="tool_use", data={"id": "tool-1", "name": "search"}))
+    await observer.emit(Event(type="assistant_message", data={"text": "Visible answer."}))
+    await observer.emit(Event(type="session_idle", data={"num_turns": 1}))
+
+    assistants = [event for event in store.appended if event.type == "assistant_message"]
+    assert [event.data["text"] for event in assistants] == ["Visible answer."]
+    assert "SESSION INTENT" not in observer.assistant_text
+    assert all("SESSION INTENT" not in str(event.data.get("text") or "") for event in live.events)
+
+
 async def test_final_assistant_message_captures_citation_bundle() -> None:
     _store, _live, observer = _observer()
 
@@ -192,6 +242,56 @@ async def test_final_assistant_is_guarded_before_persistence_and_broadcast() -> 
     assert live_assistant.data["citation_bundle"] == assistant.data["citation_bundle"]
 
 
+async def test_unrelated_oversized_tool_result_does_not_retry_clean_cited_answer() -> None:
+    store, _live, observer = _observer_with_citations()
+    evidence = {
+        "_valuz_evidence": {
+            "evidenceHandle": "ev_revenue_2025",
+            "source": {
+                "sourceId": "doc-1",
+                "providerId": "docs",
+                "documentId": "doc-1",
+                "sourceType": "document",
+                "title": "Report",
+                "retrievedAt": "2026-07-30T10:00:00Z",
+            },
+            "evidence": {
+                "kind": "text",
+                "quote": "Revenue increased.",
+                "snippet": "Revenue increased.",
+                "capturedAt": "2026-07-30T10:00:00Z",
+            },
+            "locator": {"kind": "pdf", "page": 1},
+        }
+    }
+    await observer.emit(Event(type="tool_use", data={"id": "tool-1", "name": "docs"}))
+    await observer.emit(
+        Event(type="tool_result", data={"id": "tool-1", "content": json.dumps(evidence)})
+    )
+    await observer.emit(Event(type="tool_use", data={"id": "tool-2", "name": "other"}))
+    await observer.emit(
+        Event(
+            type="tool_result",
+            data={
+                "id": "tool-2",
+                "content": '{"_valuz_evidence":' + ("x" * 2_000_100),
+            },
+        )
+    )
+    await observer.emit(
+        Event(
+            type="assistant_message",
+            data={"text": "Revenue increased [source](evidence://ev_revenue_2025)."},
+        )
+    )
+    await observer.emit(Event(type="session_idle", data={"num_turns": 1}))
+
+    assert observer.citation_repair_requested is False
+    assistant = next(event for event in store.appended if event.type == "assistant_message")
+    assert assistant.data["citation_bundle"]["quality"]["status"] == "passed"
+    assert assistant.data["citation_bundle"]["integrity"]["evidenceOverflowReasons"]
+
+
 async def test_private_citation_content_is_registered_but_not_forwarded() -> None:
     store, live, observer = _observer_with_citations()
     evidence = {
@@ -244,6 +344,128 @@ async def test_private_citation_content_is_registered_but_not_forwarded() -> Non
     assert len(assistant.data["citation_bundle"]["citations"]) == 1
 
 
+async def test_large_private_citation_content_registers_evidence_without_forwarding() -> None:
+    store, live, observer = _observer_with_citations()
+    evidence = {
+        "padding": "x" * 2_100_000,
+        "_valuz_evidence": {
+            "evidenceHandle": "ev_large_persisted_2025",
+            "source": {
+                "sourceId": "transcript-1",
+                "providerId": "search",
+                "documentId": "transcript-1",
+                "sourceType": "document",
+                "title": "Earnings call transcript",
+                "retrievedAt": "2026-07-30T10:00:00Z",
+            },
+            "evidence": {
+                "kind": "text",
+                "quote": "Cloud revenue increased by 20%.",
+                "snippet": "Cloud revenue increased by 20%.",
+                "capturedAt": "2026-07-30T10:00:00Z",
+            },
+            "locator": {"kind": "chunk", "chunkId": "chunk-1"},
+        },
+    }
+    await observer.emit(Event(type="tool_use", data={"id": "tool-1", "name": "search"}))
+    await observer.emit(
+        Event(
+            type="tool_result",
+            data={
+                "id": "tool-1",
+                "content": "<persisted-output>placeholder</persisted-output>",
+                "_citation_content": json.dumps(evidence),
+            },
+        )
+    )
+    await observer.emit(
+        Event(
+            type="assistant_message",
+            data={
+                "text": "Cloud revenue increased by 20% [1](evidence://ev_large_persisted_2025)."
+            },
+        )
+    )
+    await observer.emit(Event(type="session_idle", data={"num_turns": 1}))
+
+    tool_result = next(event for event in store.appended if event.type == "tool_result")
+    assert "_citation_content" not in tool_result.data
+    assert "padding" not in str(tool_result.data)
+    assert "padding" not in str(next(e for e in live.events if e.type == "tool_result").data)
+    assistant = next(event for event in store.appended if event.type == "assistant_message")
+    assert len(assistant.data["citation_bundle"]["citations"]) == 1
+    assert assistant.data["citation_bundle"]["integrity"]["evidenceRejectedCount"] == 0
+
+
+async def test_source_tool_result_persists_compact_evidence_but_seals_full_snapshot() -> None:
+    store, live, observer = _observer_with_citations()
+    payload = {
+        "_valuz_evidence": {
+            "evidenceHandle": "ev_compact_revenue_2025",
+            "source": {
+                "sourceId": "financials:issuer",
+                "providerId": "valuz-stock",
+                "sourceType": "dataset",
+                "title": "Income statement",
+                "retrievedAt": "2026-08-01T08:00:00Z",
+            },
+            "evidence": {
+                "kind": "structured-data",
+                "datasetId": "financials",
+                "toolName": "income_statement",
+                "recordKey": "issuer|FY2025",
+                "field": "revenue",
+                "metric": "revenue",
+                "value": 120,
+                "unit": "USDm",
+                "period": "FY2025",
+                "capturedAt": "2026-08-01T08:00:00Z",
+            },
+        },
+        "data": [{"revenue": 120}],
+    }
+    await observer.emit(Event(type="tool_use", data={"id": "tool-1", "name": "income"}))
+    await observer.emit(
+        Event(
+            type="tool_result",
+            data={"id": "tool-1", "content": json.dumps(payload)},
+        )
+    )
+    await observer.emit(
+        Event(
+            type="assistant_message",
+            data={"text": "FY2025 revenue was 120 USDm [1](evidence://ev_compact_revenue_2025)."},
+        )
+    )
+    await observer.emit(Event(type="session_idle", data={"num_turns": 1}))
+
+    persisted = next(event for event in store.appended if event.type == "tool_result")
+    visible = json.loads(persisted.data["content"])
+    assert visible["_valuz_evidence"] == [
+        {
+            "evidenceHandle": "ev_compact_revenue_2025",
+            "kind": "structured-data",
+            "field": "revenue",
+            "metric": "revenue",
+            "value": 120,
+            "unit": "USDm",
+            "period": "FY2025",
+            "recordKey": "issuer|FY2025",
+            "sourceTitle": "Income statement",
+        }
+    ]
+    assert visible["data"] == [{"revenue": 120}]
+    assert "providerId" not in persisted.data["content"]
+    assert (
+        "providerId"
+        not in next(event for event in live.events if event.type == "tool_result").data["content"]
+    )
+    assistant = next(event for event in store.appended if event.type == "assistant_message")
+    citation = assistant.data["citation_bundle"]["citations"][0]
+    assert citation["source"]["providerId"] == "valuz-stock"
+    assert citation["evidence"]["capturedAt"] == "2026-08-01T08:00:00Z"
+
+
 async def test_uncited_evidence_answer_is_withheld_then_repaired_once() -> None:
     store, live, observer = _observer_with_citations()
     evidence = {
@@ -279,6 +501,10 @@ async def test_uncited_evidence_answer_is_withheld_then_repaired_once() -> None:
     )
 
     assert observer.citation_repair_requested is True
+    assert "Never expose evidence handles" in observer.citation_repair_prompt
+    assert "Never emit internal markers" in observer.citation_repair_prompt
+    assert "Keep the complete claim and its value outside" in observer.citation_repair_prompt
+    assert "Do not delete requested facts or values" in observer.citation_repair_prompt
     assert not any(event.type == "assistant_message" for event in store.appended)
     assert not any(event.type == "session_idle" for event in store.appended)
     observer.begin_citation_repair()
@@ -382,9 +608,7 @@ async def test_strict_policy_repairs_claim_local_quality_issue_even_with_valid_c
     await observer.emit(
         Event(
             type="assistant_message",
-            data={
-                "text": "Revenue was 120 in 2025 [data](evidence://ev_strict_revenue_2025)."
-            },
+            data={"text": "Revenue was 120 in 2025 [data](evidence://ev_strict_revenue_2025)."},
         )
     )
     await observer.emit(Event(type="session_idle", data={"num_turns": 1}))
@@ -454,7 +678,7 @@ async def test_citation_delta_only_draft_is_hidden_and_replaced_after_repair() -
     assert [event.type for event in store.appended].count("assistant_message") == 1
 
 
-async def test_second_uncited_answer_is_fail_closed() -> None:
+async def test_second_uncited_answer_publishes_degraded_repair() -> None:
     store, _live, observer = _observer_with_citations()
     evidence = {
         "_valuz_evidence": {
@@ -492,11 +716,70 @@ async def test_second_uncited_answer_is_fail_closed() -> None:
             observer.begin_citation_repair()
 
     assistant = next(event for event in store.appended if event.type == "assistant_message")
-    assert assistant.data["text"].startswith("Citation verification failed")
-    assert assistant.data["citation_bundle"]["integrity"]["publicationBlocked"] is True
+    assert assistant.data["text"] == "Uncited draft."
+    bundle = assistant.data["citation_bundle"]
+    assert bundle["integrity"]["status"] == "degraded"
+    assert bundle["integrity"]["repairAttempts"] == 1
+    assert bundle["integrity"]["repairOutcome"] == "rejected-no-improvement"
+    assert "publicationBlocked" not in bundle["integrity"]
+    # Baseline OSS does not invent a claim-level issue when no claim was
+    # detected; the degraded integrity notice remains the UI fallback.
+    assert bundle["quality"]["publishStatus"] == "ready"
 
 
-async def test_second_semantically_mismatched_citation_is_fail_closed() -> None:
+async def test_repaired_answer_redacts_internal_citation_protocol_prose() -> None:
+    store, _live, observer = _observer_with_citations()
+    evidence = {
+        "_valuz_evidence": {
+            "evidenceHandle": "ev_retry_2025",
+            "source": {
+                "sourceId": "doc-1",
+                "providerId": "docs",
+                "documentId": "doc-1",
+                "sourceType": "document",
+                "title": "Report",
+                "retrievedAt": "2026-07-30T10:00:00Z",
+            },
+            "evidence": {
+                "kind": "text",
+                "quote": "审计意见为无保留意见。",
+                "snippet": "审计意见为无保留意见。",
+                "capturedAt": "2026-07-30T10:00:00Z",
+            },
+            "locator": {"kind": "pdf", "page": 1},
+        }
+    }
+    await observer.emit(Event(type="tool_use", data={"id": "tool-1", "name": "doc_search"}))
+    await observer.emit(
+        Event(type="tool_result", data={"id": "tool-1", "content": json.dumps(evidence)})
+    )
+    await observer.emit(Event(type="assistant_message", data={"text": "没有引用的初稿。"}))
+    await observer.emit(Event(type="session_idle", data={"num_turns": 1}))
+    observer.begin_citation_repair()
+
+    await observer.emit(
+        Event(
+            type="assistant_message",
+            data={
+                "text": (
+                    "审计意见为无保留意见 [source](evidence://ev_retry_2025)。\n\n"
+                    "营业收入属于嵌套财务子字段，未附带独立证据记录，"
+                    "无法绑定行内引用。"
+                )
+            },
+        )
+    )
+    await observer.emit(Event(type="session_idle", data={"num_turns": 1}))
+
+    assistant = next(event for event in store.appended if event.type == "assistant_message")
+    assert "审计意见为无保留意见" in assistant.data["text"]
+    assert "citation://cit_" in assistant.data["text"]
+    assert "来源定位不完整" in assistant.data["text"]
+    for internal_term in ("嵌套财务子字段", "证据记录", "行内引用"):
+        assert internal_term not in assistant.data["text"]
+
+
+async def test_second_semantically_mismatched_citation_publishes_degraded_repair() -> None:
     store, _live, observer = _observer_with_strict_policy()
     evidence = {
         "_valuz_evidence": {
@@ -530,8 +813,7 @@ async def test_second_semantically_mismatched_citation_is_fail_closed() -> None:
                 type="assistant_message",
                 data={
                     "text": (
-                        "Revenue was 2025 USD in 2025 "
-                        "[data](evidence://ev_wrong_financial_field)."
+                        "Revenue was 2025 USD in 2025 [data](evidence://ev_wrong_financial_field)."
                     )
                 },
             )
@@ -548,11 +830,234 @@ async def test_second_semantically_mismatched_citation_is_fail_closed() -> None:
 
     assistant = next(event for event in store.appended if event.type == "assistant_message")
     bundle = assistant.data["citation_bundle"]
-    assert assistant.data["text"].startswith("Citation verification failed")
-    assert bundle["integrity"]["status"] == "repaired"
+    assert assistant.data["text"].startswith("Revenue was 2025 USD in 2025 [data](citation://cit_")
+    assert bundle["integrity"]["status"] == "degraded"
     assert bundle["integrity"]["repairAttempts"] == 1
-    assert bundle["integrity"]["publicationBlocked"] is True
-    assert bundle["quality"]["publishStatus"] == "blocked"
+    assert bundle["integrity"]["repairOutcome"] == "rejected-no-improvement"
+    assert "publicationBlocked" not in bundle["integrity"]
+    assert bundle["quality"]["publishStatus"] == "draft-only"
+    assert "claim_evidence_mismatch" in {issue["code"] for issue in bundle["quality"]["issues"]}
+
+
+async def test_repair_that_increases_claim_problems_is_rejected_in_favor_of_initial_draft() -> None:
+    store, _live, observer = _observer_with_citations()
+    evidence = {
+        "_valuz_evidence": {
+            "evidenceHandle": "ev_revenue_2025",
+            "source": {
+                "sourceId": "doc-1",
+                "providerId": "docs",
+                "documentId": "doc-1",
+                "sourceType": "document",
+                "title": "Report",
+                "retrievedAt": "2026-07-30T10:00:00Z",
+            },
+            "evidence": {
+                "kind": "text",
+                "quote": "Revenue increased by 20%.",
+                "snippet": "Revenue increased by 20%.",
+                "capturedAt": "2026-07-30T10:00:00Z",
+            },
+            "locator": {"kind": "chunk", "chunkId": "chunk-1"},
+        }
+    }
+    await observer.emit(Event(type="tool_use", data={"id": "tool-1", "name": "docs"}))
+    await observer.emit(
+        Event(type="tool_result", data={"id": "tool-1", "content": json.dumps(evidence)})
+    )
+    initial = "Revenue increased by 20% [1](evidence://ev_revenue_2025). CEO is Alice."
+    await observer.emit(Event(type="assistant_message", data={"text": initial}))
+    await observer.emit(Event(type="session_idle", data={"num_turns": 1}))
+    assert observer.citation_repair_requested is True
+    observer.begin_citation_repair()
+
+    await observer.emit(
+        Event(
+            type="assistant_message",
+            data={
+                "text": (
+                    "Revenue increased by 20% [1](evidence://ev_revenue_2025). "
+                    "CEO is Alice. Margin was 42%."
+                )
+            },
+        )
+    )
+    await observer.emit(Event(type="session_idle", data={"num_turns": 1}))
+
+    assistant = next(event for event in store.appended if event.type == "assistant_message")
+    assert "Margin was 42%" not in assistant.data["text"]
+    assert "CEO is Alice" in assistant.data["text"]
+    assert (
+        assistant.data["citation_bundle"]["integrity"]["repairOutcome"] == "rejected-no-improvement"
+    )
+
+
+async def test_repair_cannot_improve_score_by_deleting_all_factual_claims() -> None:
+    store, _live, observer = _observer_with_citations()
+    evidence = {
+        "_valuz_evidence": {
+            "evidenceHandle": "ev_revenue_2025",
+            "source": {
+                "sourceId": "doc-1",
+                "providerId": "docs",
+                "documentId": "doc-1",
+                "sourceType": "document",
+                "title": "Report",
+                "retrievedAt": "2026-07-30T10:00:00Z",
+            },
+            "evidence": {
+                "kind": "text",
+                "quote": "Revenue increased by 20%.",
+                "snippet": "Revenue increased by 20%.",
+                "capturedAt": "2026-07-30T10:00:00Z",
+            },
+            "locator": {"kind": "chunk", "chunkId": "chunk-1"},
+        }
+    }
+    await observer.emit(Event(type="tool_use", data={"id": "tool-1", "name": "docs"}))
+    await observer.emit(
+        Event(type="tool_result", data={"id": "tool-1", "content": json.dumps(evidence)})
+    )
+    initial = (
+        "Revenue increased by 20% [1](evidence://ev_revenue_2025). "
+        "Margin was 42%."
+    )
+    await observer.emit(Event(type="assistant_message", data={"text": initial}))
+    await observer.emit(Event(type="session_idle", data={"num_turns": 1}))
+    assert observer.citation_repair_requested is True
+    observer.begin_citation_repair()
+
+    await observer.emit(
+        Event(
+            type="assistant_message",
+            data={
+                "text": (
+                    "部分结果的来源定位不完整，相关内容暂时无法核验。"
+                    "请稍后重试，或以原始资料为准。"
+                )
+            },
+        )
+    )
+    await observer.emit(Event(type="session_idle", data={"num_turns": 1}))
+
+    assistant = next(event for event in store.appended if event.type == "assistant_message")
+    assert "Revenue increased by 20%" in assistant.data["text"]
+    assert "Margin was 42%" in assistant.data["text"]
+    assert (
+        assistant.data["citation_bundle"]["integrity"]["repairOutcome"]
+        == "rejected-no-improvement"
+    )
+
+
+async def test_large_input_skips_second_model_repair_and_publishes_initial_draft() -> None:
+    store, _live, observer = _observer_with_citations()
+    evidence = {
+        "_valuz_evidence": {
+            "evidenceHandle": "ev_revenue_2025",
+            "source": {
+                "sourceId": "doc-1",
+                "providerId": "docs",
+                "documentId": "doc-1",
+                "sourceType": "document",
+                "title": "Report",
+                "retrievedAt": "2026-07-30T10:00:00Z",
+            },
+            "evidence": {
+                "kind": "text",
+                "quote": "Revenue increased by 20%.",
+                "snippet": "Revenue increased by 20%.",
+                "capturedAt": "2026-07-30T10:00:00Z",
+            },
+            "locator": {"kind": "chunk", "chunkId": "chunk-1"},
+        }
+    }
+    await observer.emit(Event(type="tool_use", data={"id": "tool-1", "name": "docs"}))
+    await observer.emit(
+        Event(type="tool_result", data={"id": "tool-1", "content": json.dumps(evidence)})
+    )
+    await observer.emit(
+        Event(
+            type="usage_update",
+            data={"input_tokens": 250_001, "output_tokens": 100},
+        )
+    )
+    await observer.emit(Event(type="assistant_message", data={"text": "CEO is Alice."}))
+    await observer.emit(Event(type="session_idle", data={"num_turns": 1}))
+
+    assert observer.citation_repair_requested is False
+    assistant = next(event for event in store.appended if event.type == "assistant_message")
+    integrity = assistant.data["citation_bundle"]["integrity"]
+    assert integrity["repairOutcome"] == "skipped"
+    assert integrity["repairSkippedReason"] == "input-token-budget"
+
+
+async def test_wrong_calendar_binding_is_rebound_to_unique_transcript_without_repair() -> None:
+    store, _live, observer = _observer_with_strict_policy()
+    evidences = [
+        {
+            "evidenceHandle": "ev_calendar_2025",
+            "source": {
+                "sourceId": "calendar-msft",
+                "providerId": "stock",
+                "sourceType": "dataset",
+                "title": "Stock earnings calendar · MSFT",
+                "retrievedAt": "2026-08-01T08:00:00Z",
+            },
+            "evidence": {
+                "kind": "structured-data",
+                "datasetId": "calendar",
+                "toolName": "earnings_calendar",
+                "recordKey": "MSFT|2025 FY",
+                "field": "filing_date",
+                "value": "2025-07-30",
+                "period": "2025 FY",
+                "capturedAt": "2026-08-01T08:00:00Z",
+            },
+        },
+        {
+            "evidenceHandle": "ev_transcript_cloud_2025",
+            "source": {
+                "sourceId": "transcript-msft-q4",
+                "providerId": "search",
+                "documentId": "transcript-msft-q4",
+                "sourceType": "document",
+                "title": "Microsoft Q4 earnings call transcript",
+                "retrievedAt": "2026-08-01T08:00:00Z",
+            },
+            "evidence": {
+                "kind": "text",
+                "quote": "Microsoft cloud revenue increased by 20% in 2025 Q4.",
+                "snippet": "Microsoft cloud revenue increased by 20% in 2025 Q4.",
+                "capturedAt": "2026-08-01T08:00:00Z",
+            },
+            "locator": {"kind": "chunk", "chunkId": "q4-cloud"},
+        },
+    ]
+    await observer.emit(Event(type="tool_use", data={"id": "tool-1", "name": "search"}))
+    await observer.emit(
+        Event(
+            type="tool_result",
+            data={"id": "tool-1", "content": json.dumps({"_valuz_evidence": evidences})},
+        )
+    )
+    await observer.emit(
+        Event(
+            type="assistant_message",
+            data={
+                "text": (
+                    "Microsoft cloud revenue increased by 20% in 2025 Q4 "
+                    "[1](evidence://ev_calendar_2025)."
+                )
+            },
+        )
+    )
+    await observer.emit(Event(type="session_idle", data={"num_turns": 1}))
+
+    assert observer.citation_repair_requested is False
+    assistant = next(event for event in store.appended if event.type == "assistant_message")
+    citations = assistant.data["citation_bundle"]["citations"]
+    assert [citation["source"]["sourceId"] for citation in citations] == ["transcript-msft-q4"]
+    assert citations[0]["annotations"]["binding"]["autoReboundClaimIds"]
 
 
 async def test_partial_after_a_canonical_block_is_persisted_separately() -> None:

@@ -103,7 +103,33 @@ async def test_resolve_reloads_canonical_message_and_passes_explicit_owner(monke
     assert seen == [("owner-a", "message-1")]
     assert resolver.calls[0]["owner_user_id"] == "owner-a"
     assert resolver.calls[0]["source"]["documentId"] == "doc-1"
+    assert resolver.calls[0]["evidence"]["quote"] == "Revenue grew."
     assert response.status == "ready"
+
+
+@pytest.mark.asyncio
+async def test_edition_resolver_can_open_structured_evidence_without_document_id(
+    monkeypatch,
+):
+    async def get_message(user_id: str, message_id: str):
+        return _message(document_id=None)
+
+    monkeypatch.setattr(routes.kernel_client, "get_message", get_message)
+    resolver = _Resolver()
+    ext.citation_document_resolver = resolver
+
+    response = await routes.resolve_citation(
+        routes.ResolveCitationRequest(
+            session_id="session-1",
+            message_id="message-1",
+            citation_id="cit-1",
+        ),
+        user_id="owner-a",
+        document_service=object(),  # type: ignore[arg-type]
+    )
+
+    assert response.status == "ready"
+    assert resolver.calls[0]["evidence"]["kind"] == "text"
 
 
 @pytest.mark.asyncio

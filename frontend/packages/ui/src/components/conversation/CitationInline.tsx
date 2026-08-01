@@ -34,6 +34,8 @@ type CitationCardSide = "bottom" | "top";
 type CitationCardPosition = { left: number; top: number };
 
 export interface CitationQualityDisplayIssue {
+  code?: string;
+  claimId?: string;
   label: string;
   severity: string;
 }
@@ -519,7 +521,9 @@ function CitationHoverCard({
             onOpen();
           }}
         >
-          {t("ui.citation.openSource", "Open source")}
+          {qualityIssues?.length
+            ? t("ui.citation.viewEvidence", "View evidence")
+            : t("ui.citation.openSource", "Open source")}
           <ExternalLink className="h-3 w-3" aria-hidden="true" />
         </button>
       ) : null}

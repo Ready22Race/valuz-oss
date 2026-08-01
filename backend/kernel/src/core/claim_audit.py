@@ -20,8 +20,8 @@ from typing import Any, Literal
 
 from markdown_it import MarkdownIt
 
-CLAIM_EXTRACTOR_REVISION = "claim-extractor-v1"
-CLAIM_VERIFIER_REVISION = "claim-verifier-local-v1"
+CLAIM_EXTRACTOR_REVISION = "claim-extractor-v2"
+CLAIM_VERIFIER_REVISION = "claim-verifier-local-v2"
 MAX_CLAIMS_PER_ANSWER = 1_000
 
 _CITATION_LINK_RE = re.compile(
@@ -61,9 +61,26 @@ _NOT_FOUND_RE = re.compile(
     r"could not find|unable to find|search returned no results?)\b)",
     re.IGNORECASE,
 )
+_LIMITATION_RE = re.compile(
+    r"(?:来源(?:定位|覆盖).{0,12}(?:不完整|不足)|"
+    r"(?:暂时|目前|当前)?.{0,8}(?:无法|不能)(?:定位|核验|验证)|"
+    r"(?:证据|来源).{0,8}(?:不足|缺失|不完整)|以原始资料为准|"
+    r"\b(?:source coverage is incomplete|could not be verified|"
+    r"cannot be verified|unable to verify|check the original material)\b)",
+    re.IGNORECASE,
+)
+_PRESENTATION_RE = re.compile(
+    r"(?:结果如下|如下所示|以下(?:是|为)|概览如下|一览|"
+    r"\b(?:results? (?:are|follow)|summary follows)\b)",
+    re.IGNORECASE,
+)
 _SOURCE_HEADING_RE = re.compile(
     r"^(?:sources?|references?|citations?|来源|参考来源|引用来源|参考资料)\s*[:：]?$",
     re.IGNORECASE,
+)
+_SECTION_TITLE_RE = re.compile(
+    r"^(?:(?:第?[一二三四五六七八九十百]+|\d+)[.、．)）]\s*)"
+    r"[^.!?。！？；;]{1,100}$"
 )
 _DECLARATIVE_RE = re.compile(
     r"(?:是|为|有|达到|增长|下降|成立|发布|宣布|位于|属于|担任|"
@@ -449,6 +466,65 @@ def auto_bind_unique_claims(
     return AutoBindResult(text=text, claim_handles=claim_handles)
 
 
+def rebind_unique_mismatched_claims(
+    answer: str,
+    records: Iterable[Any],
+    *,
+    mode: str = "required-on-evidence",
+    semantics: Mapping[str, Any] | None = None,
+) -> AutoBindResult:
+    """Replace one wrong provisional handle with one uniquely exact candidate.
+
+    Models can select a sibling field from a wide structured result even when
+    the Registry also contains the exact field used by the prose.  Correct
+    that binding before publication only when the attached handle does not
+    support the claim and the full Registry yields exactly one supported
+    alternative.  Ambiguous or multi-source bindings are deliberately left
+    for the normal quality/repair path.
+    """
+
+    available = list(records)
+    evidence_by_handle = {
+        handle: evidence
+        for record in available
+        for handle, _source, evidence in [_evidence_parts(record)]
+        if handle and isinstance(evidence, Mapping)
+    }
+    replacements: list[tuple[int, int, str]] = []
+    claim_handles: dict[str, str] = {}
+    for claim in extract_claims(answer, mode=mode, semantics=semantics):
+        if not claim.citation_required or len(claim.attached_evidence_handles) != 1:
+            continue
+        current_handle = claim.attached_evidence_handles[0]
+        current_evidence = evidence_by_handle.get(current_handle)
+        if current_evidence is not None:
+            support = verify_evidence_support(claim, current_evidence, semantics=semantics)
+            if support.status == "supported":
+                continue
+        match = match_available_evidence(claim, available, semantics=semantics)
+        if match.status != "exact" or len(match.handles) != 1 or match.handles[0] == current_handle:
+            continue
+        source_start = claim.location.get("sourceStart")
+        source_end = claim.location.get("sourceEnd")
+        if not isinstance(source_start, int) or not isinstance(source_end, int):
+            continue
+        source_slice = answer[source_start:source_end]
+        marker = f"evidence://{current_handle}"
+        marker_offset = source_slice.find(marker)
+        if marker_offset < 0:
+            continue
+        replacement_start = source_start + marker_offset + len("evidence://")
+        replacement_end = replacement_start + len(current_handle)
+        target_handle = match.handles[0]
+        replacements.append((replacement_start, replacement_end, target_handle))
+        claim_handles[claim.claim_id] = target_handle
+
+    text = answer
+    for start, end, target_handle in sorted(replacements, reverse=True):
+        text = f"{text[:start]}{target_handle}{text[end:]}"
+    return AutoBindResult(text=text, claim_handles=claim_handles)
+
+
 def verify_evidence_support(
     claim: ClaimCandidate,
     evidence_container: Mapping[str, Any],
@@ -462,6 +538,7 @@ def verify_evidence_support(
         evidence_container = evidence
     kind = evidence_container.get("kind")
     if kind == "structured-data":
+        semantic_options = evidence_semantic_options(evidence_container, semantics)
         value = evidence_container.get("value")
         if not _structured_value_matches_claim(value, evidence_container, claim, semantics):
             return EvidenceSupport("not-found", 0)
@@ -476,7 +553,12 @@ def verify_evidence_support(
             semantics,
         )
         claim_period = claim.normalized.get("period", "")
-        if claim_period and evidence_period and claim_period != evidence_period:
+        if (
+            semantic_options.get("date_role") != "publication"
+            and claim_period
+            and evidence_period
+            and claim_period != evidence_period
+        ):
             return EvidenceSupport("contradicted", 2)
         evidence_unit = _canonical_unit(
             str(evidence_container.get("unit") or ""),
@@ -499,12 +581,27 @@ def verify_evidence_support(
         return EvidenceSupport("supported", 4)
     if kind == "text":
         quote = _plain_text(str(evidence_container.get("quote") or ""))
+        metric_context = " ".join(
+            str(evidence_container.get(key) or "") for key in ("prefix", "quote", "suffix")
+        )
         claim_text = _normalize_prose(claim.exact)
         quote_text = _normalize_prose(quote)
         if not quote_text:
             return EvidenceSupport("not-found", 0)
-        if claim_text in quote_text or quote_text in claim_text:
+        if _prose_contains(claim_text, quote_text):
             return EvidenceSupport("supported", 4)
+        if any(
+            _prose_contains(_normalize_prose(fragment), quote_text)
+            for fragment in _quoted_claim_fragments(claim.exact)
+        ):
+            return EvidenceSupport("supported", 4)
+        if _text_numeric_supports_claim(
+            claim,
+            quote,
+            semantics,
+            metric_context=metric_context,
+        ):
+            return EvidenceSupport("supported", 3)
         claim_tokens = _semantic_tokens(claim_text)
         quote_tokens = _semantic_tokens(quote_text)
         if claim_tokens and len(claim_tokens & quote_tokens) / len(claim_tokens) >= 0.6:
@@ -553,11 +650,13 @@ def structured_value_present(
     unit: str,
     text: str,
     *,
+    field: str = "",
+    metric: str = "",
     semantics: Mapping[str, Any] | None = None,
 ) -> bool:
     """Return whether *text* contains *value* under the configured unit scale."""
 
-    evidence = {"value": value, "unit": unit}
+    evidence = {"value": value, "unit": unit, "field": field, "metric": metric}
     claims = extract_claims(text, mode="strict-domain", semantics=semantics)
     return any(
         _structured_value_matches_claim(value, evidence, claim, semantics) for claim in claims
@@ -609,6 +708,22 @@ def canonical_evidence_metric(
     return _canonical_metric(evidence, semantics)
 
 
+def evidence_semantic_options(
+    evidence: Mapping[str, Any],
+    semantics: Mapping[str, Any] | None = None,
+) -> Mapping[str, Any]:
+    """Return edition-supplied options for an evidence metric.
+
+    The generic verifier stays industry-neutral; editions may describe
+    categorical value aliases and metadata behavior next to their metric
+    ontology entries.
+    """
+
+    metric = _canonical_metric(evidence, semantics)
+    definition = _metric_ontology(semantics).get(metric)
+    return definition if isinstance(definition, Mapping) else {}
+
+
 def canonical_evidence_dimension(
     value: str,
     semantics: Mapping[str, Any] | None,
@@ -640,10 +755,51 @@ def _append_inline_claims(
     semantics: Mapping[str, Any] | None,
     normalization_context: str = "",
 ) -> None:
+    stripped = content.strip()
+    if (
+        re.fullmatch(r"(?:\*\*|__).+(?:\*\*|__)", stripped, re.DOTALL)
+        and _SECTION_TITLE_RE.fullmatch(_plain_text(stripped))
+        and _binding_refs(stripped) == ((), ())
+    ):
+        return
     for sentence_start, sentence_end in _sentence_spans(content):
         sentence = content[sentence_start:sentence_end]
         clause_spans = _atomic_clause_spans(sentence, semantics)
-        for clause_start, clause_end in clause_spans:
+        shared_period = _DATE_RE.search(sentence)
+        shared_subject = (
+            _leading_subject_context(
+                _plain_text(sentence[clause_spans[0][0] : clause_spans[0][1]]),
+                semantics,
+            )
+            if len(clause_spans) > 1
+            else ""
+        )
+        previous_metric = ""
+        for clause_index, (clause_start, clause_end) in enumerate(clause_spans):
+            clause = _plain_text(sentence[clause_start:clause_end])
+            clause_context_parts = [normalization_context]
+            if clause_index > 0 and shared_subject:
+                clause_context_parts.append(shared_subject)
+            # A leading period can scope comma-separated clauses (for example
+            # ``2024 年，收入……，利润……``), but must never overwrite a later
+            # clause's own period.
+            if (
+                len(clause_spans) > 1
+                and shared_period is not None
+                and (
+                    _DATE_RE.search(clause) is None
+                    or _clause_date_is_publication_metadata(clause, semantics)
+                )
+            ):
+                clause_context_parts.append(shared_period.group(0))
+            contextual_metric = _contextual_derived_metric(
+                clause,
+                previous_metric=previous_metric,
+                semantics=semantics,
+            )
+            if contextual_metric:
+                clause_context_parts.append(contextual_metric)
+            clause_context = " ".join(part for part in clause_context_parts if part).strip()
             raw_start = sentence_start + clause_start
             raw_end = sentence_start + clause_end
             _append_inline_claim(
@@ -657,8 +813,97 @@ def _append_inline_claims(
                 item_index=item_index,
                 mode=mode,
                 semantics=semantics,
-                normalization_context=normalization_context,
+                normalization_context=clause_context,
             )
+            explicit_metrics = _claim_metric_candidates(clause, semantics)
+            if len(explicit_metrics) == 1:
+                previous_metric = explicit_metrics[0]
+
+
+def _contextual_derived_metric(
+    clause: str,
+    *,
+    previous_metric: str,
+    semantics: Mapping[str, Any] | None,
+) -> str:
+    """Resolve an abbreviated derived metric from the nearest explicit metric.
+
+    Edition policy supplies the dependency graph.  This lets a phrase such as
+    ``营业收入……，同比增速为 15.71%`` resolve to ``revenue_growth`` without
+    hard-coding finance vocabulary into the OSS extractor.  Ambiguous graphs
+    deliberately produce no inferred metric.
+    """
+
+    if (
+        not previous_metric
+        or _DERIVED_RE.search(clause) is None
+        or _claim_metric_candidates(clause, semantics)
+        or not isinstance(semantics, Mapping)
+    ):
+        return ""
+    dependencies = semantics.get("calculation_dependencies")
+    if not isinstance(dependencies, Mapping):
+        return ""
+    candidates = [
+        str(metric)
+        for metric, inputs in dependencies.items()
+        if isinstance(metric, str)
+        and isinstance(inputs, list)
+        and previous_metric in {str(value) for value in inputs if str(value)}
+    ]
+    return candidates[0] if len(candidates) == 1 else ""
+
+
+def _leading_subject_context(
+    clause: str,
+    semantics: Mapping[str, Any] | None,
+) -> str:
+    """Keep only the leading subject before an edition-defined metric.
+
+    Later comma clauses commonly omit the company name.  Reusing only this
+    bounded prefix gives entity verification the sentence subject without
+    leaking the first clause's value or period into subsequent claims.
+    """
+
+    boundaries: list[int] = []
+    for metric_id, definition in _metric_ontology(semantics).items():
+        if not isinstance(metric_id, str):
+            continue
+        for term in _metric_terms(metric_id, definition):
+            normalized_term = term.replace("_", " ").strip()
+            if not normalized_term:
+                continue
+            if re.search(r"[\u4e00-\u9fff]", normalized_term):
+                index = clause.find(normalized_term)
+                if index >= 0:
+                    boundaries.append(index)
+            else:
+                match = re.search(
+                    rf"(?<![A-Za-z0-9]){re.escape(normalized_term)}(?![A-Za-z0-9])",
+                    clause,
+                    re.IGNORECASE,
+                )
+                if match is not None:
+                    boundaries.append(match.start())
+    if not boundaries:
+        return ""
+    prefix = clause[: min(boundaries)]
+    prefix = _DATE_RE.sub(" ", prefix)
+    prefix = _NUMBER_RE.sub(" ", prefix)
+    prefix = re.sub(r"(?<![\u4e00-\u9fff])年(?![\u4e00-\u9fff])", " ", prefix)
+    prefix = re.sub(r"[\s,，:：;；()（）]+", " ", prefix).strip()
+    return prefix[:160]
+
+
+def _clause_date_is_publication_metadata(
+    clause: str,
+    semantics: Mapping[str, Any] | None,
+) -> bool:
+    candidates = _claim_metric_candidates(clause, semantics)
+    if len(candidates) != 1:
+        return False
+    definition = _metric_ontology(semantics).get(candidates[0])
+    return isinstance(definition, Mapping) and definition.get("date_role") == "publication"
 
 
 def _append_inline_claim(
@@ -806,12 +1051,16 @@ def _classify_claim(text: str) -> str:
         return "calculation"
     if _FINANCIAL_NUMBER_RE.search(text):
         return "financial-fact"
+    if _LIMITATION_RE.search(text):
+        return "limitation"
+    if _PRESENTATION_RE.search(text):
+        return "presentation"
+    if _REASONING_RE.search(text):
+        return "reasoning"
     if _DATE_RE.search(text):
         return "date-fact"
     if _NUMBER_RE.search(text):
         return "numeric-fact"
-    if _REASONING_RE.search(text):
-        return "reasoning"
     if re.search(r"[\"“”‘’][^\"“”‘’]+[\"“”‘’]", text):
         return "quotation"
     return "document-claim"
@@ -829,6 +1078,8 @@ def _citation_required(
     if kind == "user-provided":
         return False
     if kind == "reasoning":
+        return False
+    if kind in {"limitation", "presentation"} or _LIMITATION_RE.search(text):
         return False
     if kind == "document-claim" and _NOT_FOUND_RE.search(text):
         return False
@@ -908,13 +1159,33 @@ def _sentence_spans(value: str) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     start = 0
     for match in _SENTENCE_BOUNDARY_RE.finditer(value):
-        spans.append((start, match.end()))
-        start = match.end()
+        end = _trailing_binding_end(value, match.end())
+        spans.append((start, end))
+        start = end
         while start < len(value) and value[start].isspace():
             start += 1
     if start < len(value):
         spans.append((start, len(value)))
     return spans
+
+
+def _trailing_binding_end(value: str, start: int) -> int:
+    """Include citation links written immediately after sentence punctuation.
+
+    Markdown authors commonly write ``Claim. [source](citation://...)``.  The
+    citation is still semantically attached to that claim, even though the
+    terminal punctuation appears before the link.
+    """
+
+    cursor = start
+    while cursor < len(value):
+        whitespace = re.match(r"\s*", value[cursor:])
+        candidate_start = cursor + (whitespace.end() if whitespace else 0)
+        binding = _CITATION_LINK_RE.match(value, candidate_start)
+        if binding is None:
+            break
+        cursor = binding.end()
+    return cursor
 
 
 def _atomic_clause_spans(
@@ -935,6 +1206,19 @@ def _atomic_clause_spans(
     boundaries = [match.span() for match in re.finditer(r"(?<!\d)[,，]|[,，](?!\d)", value)]
     if not boundaries:
         return [(0, len(value))]
+    citation_spans: list[tuple[int, int]] = []
+    citation_start = 0
+    for _boundary_start, boundary_end in boundaries:
+        candidate = value[citation_start:boundary_end]
+        remainder = value[boundary_end:]
+        if _binding_refs(candidate) != ((), ()) and _binding_refs(remainder) != ((), ()):
+            citation_spans.append((citation_start, boundary_end))
+            citation_start = boundary_end
+    if citation_spans:
+        citation_spans.append((citation_start, len(value)))
+        if all(_binding_refs(value[start:end]) != ((), ()) for start, end in citation_spans):
+            return citation_spans
+
     raw_spans: list[tuple[int, int]] = []
     start = 0
     for _boundary_start, boundary_end in boundaries:
@@ -955,6 +1239,8 @@ def _atomic_clause_spans(
 
 def _is_meaningful_claim(text: str) -> bool:
     if len(text) < 4 or _SOURCE_HEADING_RE.fullmatch(text):
+        return False
+    if _SECTION_TITLE_RE.fullmatch(text.strip()):
         return False
     if re.fullmatch(r"[-:：,，.。\s]+", text):
         return False
@@ -1294,7 +1580,131 @@ def _structured_value_matches_claim(
     for amount in _claim_amounts(claim.exact, semantics):
         if _evidence_matches_amount(evidence, amount, semantics):
             return True
+    definition = evidence_semantic_options(evidence, semantics)
+    value_aliases = definition.get("value_aliases")
+    if isinstance(value_aliases, Mapping):
+        aliases = value_aliases.get(str(value))
+        wildcard_aliases = value_aliases.get("*")
+        candidates: list[str] = []
+        if isinstance(aliases, list):
+            candidates.extend(item for item in aliases if isinstance(item, str))
+        if isinstance(wildcard_aliases, list):
+            candidates.extend(item for item in wildcard_aliases if isinstance(item, str))
+        if any(_term_in_text(alias, claim.exact) for alias in candidates):
+            return True
     return _value_present(value, claim.exact)
+
+
+def _text_numeric_supports_claim(
+    claim: ClaimCandidate,
+    quote: str,
+    semantics: Mapping[str, Any] | None,
+    *,
+    metric_context: str | None = None,
+) -> bool:
+    claim_amounts = _claim_amounts(claim.exact, semantics)
+    if not claim_amounts:
+        return False
+    quote_amounts = _claim_amounts(quote, semantics)
+    if not quote_amounts:
+        return False
+    directly_supported = [
+        claim_amount
+        for claim_amount in claim_amounts
+        if any(
+            _amounts_equivalent(claim_amount, quote_amount, semantics)
+            for quote_amount in quote_amounts
+        )
+    ]
+    if not directly_supported or not all(
+        claim_amount in directly_supported
+        or any(
+            _amounts_equivalent(claim_amount, supported_amount, semantics)
+            or _amounts_equivalent(supported_amount, claim_amount, semantics)
+            for supported_amount in directly_supported
+        )
+        for claim_amount in claim_amounts
+    ):
+        return False
+    metric = claim.normalized.get("metric", "")
+    context = metric_context or quote
+    if metric:
+        definition = _metric_ontology(semantics).get(metric)
+        if any(_term_in_text(term, context) for term in _metric_terms(metric, definition)):
+            return True
+
+    # Generic retrieved text (market research, transcripts, web documents)
+    # does not necessarily use an edition ontology metric.  Requiring one made
+    # a verbatim quote with every numeric value fail as "partially supported".
+    # Numeric equality alone is still too weak, so require distinctive lexical
+    # overlap as a second independent condition.
+    return _generic_text_subject_overlap(claim.exact, context)
+
+
+def _generic_text_subject_overlap(claim_text: str, evidence_text: str) -> bool:
+    latin_pattern = re.compile(r"[A-Za-z][A-Za-z0-9_-]{1,}")
+    ignored = _METRIC_STOP_WORDS | {
+        "data",
+        "value",
+        "values",
+        "report",
+        "reported",
+        "according",
+        "quarter",
+    }
+    claim_latin = {
+        token.casefold()
+        for token in latin_pattern.findall(claim_text)
+        if token.casefold() not in ignored
+    }
+    evidence_latin = {
+        token.casefold()
+        for token in latin_pattern.findall(evidence_text)
+        if token.casefold() not in ignored
+    }
+    latin_overlap = claim_latin & evidence_latin
+    if len(latin_overlap) >= 2 or any(len(token) >= 5 for token in latin_overlap):
+        return True
+
+    claim_cjk = _cjk_bigrams(claim_text)
+    evidence_cjk = _cjk_bigrams(evidence_text)
+    return len(claim_cjk & evidence_cjk) >= 2
+
+
+def _cjk_bigrams(value: str) -> set[str]:
+    output: set[str] = set()
+    for sequence in re.findall(r"[\u3400-\u9fff]{2,}", value):
+        output.update(sequence[index : index + 2] for index in range(len(sequence) - 1))
+    return output
+
+
+def _amounts_equivalent(
+    left: tuple[str, str, Decimal | None, str],
+    right: tuple[str, str, Decimal | None, str],
+    semantics: Mapping[str, Any] | None,
+) -> bool:
+    left_raw, left_unit, left_base, left_base_unit = left
+    right_raw, _right_unit, right_base, right_base_unit = right
+    if (
+        left_base is not None
+        and right_base is not None
+        and left_base_unit
+        and left_base_unit == right_base_unit
+    ):
+        resolved_left_unit = _resolve_unit(left_unit, semantics)
+        tolerance = (
+            _display_rounding_tolerance(left_raw, resolved_left_unit[1])
+            if resolved_left_unit is not None
+            else Decimal(0)
+        )
+        return _decimal_close(left_base, right_base, minimum_tolerance=tolerance)
+    left_decimal = _as_decimal(left_raw)
+    right_decimal = _as_decimal(right_raw)
+    return (
+        left_decimal is not None
+        and right_decimal is not None
+        and _decimal_close(left_decimal, right_decimal)
+    )
 
 
 def _evidence_matches_amount(
@@ -1520,6 +1930,23 @@ def _normalize_prose(value: str) -> str:
     return re.sub(r"[^\w\u4e00-\u9fff%]+", " ", value.lower()).strip()
 
 
+def _prose_contains(left: str, right: str) -> bool:
+    if left in right or right in left:
+        return True
+    if not (re.search(r"[\u4e00-\u9fff]", left) or re.search(r"[\u4e00-\u9fff]", right)):
+        return False
+    compact_left = re.sub(r"\s+", "", left)
+    compact_right = re.sub(r"\s+", "", right)
+    return compact_left in compact_right or compact_right in compact_left
+
+
+def _quoted_claim_fragments(value: str) -> tuple[str, ...]:
+    fragments: list[str] = []
+    for pattern in (r'"([^"\n]{4,})"', r"“([^”\n]{4,})”"):
+        fragments.extend(match.group(1).strip() for match in re.finditer(pattern, value))
+    return tuple(fragment for fragment in fragments if fragment)
+
+
 def _units_compatible(left: str, right: str) -> bool:
     aliases = {"percent": "%", "percentage": "%", "bps": "bp"}
     return aliases.get(left.lower(), left.lower()) == aliases.get(right.lower(), right.lower())
@@ -1538,6 +1965,7 @@ __all__ = [
     "extract_claims",
     "extract_claims_with_status",
     "auto_bind_unique_claims",
+    "rebind_unique_mismatched_claims",
     "match_available_evidence",
     "structured_components_cover_claim",
     "structured_value_present",

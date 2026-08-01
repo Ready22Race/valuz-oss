@@ -100,6 +100,23 @@ describe("MarkdownContent local file links", () => {
 });
 
 describe("MarkdownContent citations", () => {
+  it("does not show leaked source protocol placeholders from stored answers", () => {
+    render(
+      <MarkdownContent
+        content={
+          "管理层预计容量增长 80%。source\n\n" +
+          "The primary source is the annual report."
+        }
+      />,
+    );
+
+    expect(document.body.textContent).toContain("管理层预计容量增长 80%。");
+    expect(document.body.textContent).not.toContain("80%。source");
+    expect(document.body.textContent).toContain(
+      "The primary source is the annual report.",
+    );
+  });
+
   it("numbers citations by first appearance and reuses duplicate numbers", () => {
     render(
       <MarkdownContent
@@ -418,6 +435,110 @@ describe("MarkdownContent citations", () => {
     expect(tooltipText).not.toContain("record ·");
     expect(tooltipText).not.toContain("dataset ·");
     expect(tooltipText).not.toContain("tool ·");
+  });
+
+  it("explains a structured field mismatch once without cascading validator errors", () => {
+    const bundle: CitationBundleV1 = {
+      version: 1,
+      citations: [
+        {
+          citationId: "cit_revenue",
+          source: {
+            sourceId: "reportify-financial-income-statement:600519",
+            providerId: "valuz-stock",
+            sourceType: "dataset",
+            title: "Company income statement · 600519",
+            retrievedAt: "2026-08-01T07:26:44Z",
+          },
+          evidence: {
+            kind: "structured-data",
+            datasetId: "reportify-financial-income-statement",
+            toolName: "company_income_statement",
+            field: "total_comprehensive_income",
+            value: 89330873529,
+            period: "2024 FY",
+            asOf: "2024-12-31",
+            capturedAt: "2026-08-01T07:26:44Z",
+          },
+        },
+      ],
+      quality: {
+        policyId: "finance",
+        policyRevision: "v1",
+        mode: "strict-domain",
+        status: "unverified",
+        publishStatus: "draft-only",
+        layers: { L1: "degraded", L4: "degraded" },
+        issues: [
+          {
+            code: "numeric_unit_missing",
+            layer: "L1",
+            severity: "degraded",
+            citationIds: ["cit_revenue"],
+          },
+          {
+            code: "structured_value_not_present_in_answer",
+            layer: "L4",
+            severity: "degraded",
+            citationIds: ["cit_revenue"],
+          },
+          {
+            code: "claim_evidence_mismatch",
+            layer: "L4",
+            severity: "unverified",
+            citationIds: ["cit_revenue"],
+            claimId: "clm_revenue",
+            claim: {
+              exact: "Revenue was 170899152276 CNY.",
+            },
+          },
+        ],
+        claims: [
+          {
+            claimId: "clm_revenue",
+            exact: "Revenue was 170899152276 CNY.",
+            segmentIndex: 0,
+            citationRequired: true,
+            citationIds: ["cit_revenue"],
+            status: "unverified",
+            issueCodes: [
+              "numeric_unit_missing",
+              "structured_value_not_present_in_answer",
+              "claim_evidence_mismatch",
+            ],
+          },
+        ],
+        metrics: {
+          citationCount: 1,
+          unsourcedClaimCount: 0,
+          unverifiedClaimCount: 1,
+          tierCounts: {},
+        },
+      },
+    };
+
+    render(
+      <MarkdownContent
+        content={
+          "Revenue was 170899152276 CNY [source](citation://cit_revenue)."
+        }
+        citationBundle={bundle}
+        messageId="message-1"
+        onCitationClick={vi.fn()}
+      />,
+    );
+
+    fireEvent.mouseEnter(
+      screen.getByRole("button", { name: /(?:citation|引用) 1/i }),
+    );
+    const quality = document.querySelector("[data-citation-quality-issues]");
+    expect(quality?.textContent).toMatch(
+      /total comprehensive income.*89330873529.*may not match|total comprehensive income.*89330873529.*可能不一致/i,
+    );
+    expect(quality?.textContent).not.toMatch(
+      /no unit|未标明单位|numeric basis|数字或计算依据/i,
+    );
+    expect(screen.getByRole("button", { name: /view evidence|查看依据/i })).not.toBeNull();
   });
 
   it("prefers opening below and stays open while the pointer enters the card", () => {
@@ -837,7 +958,19 @@ describe("MarkdownContent citations", () => {
     );
     expect(marker).not.toBeNull();
     expect(marker?.getAttribute("aria-label")).toMatch(
-      /number or calculation|数字或计算依据/i,
+      /no source was found|暂未找到可供核对的来源/i,
+    );
+    fireEvent.mouseEnter(marker!);
+    const qualityCard = document.querySelector(
+      "[data-citation-claim-quality-card]",
+    );
+    expect(qualityCard?.textContent).toMatch(/review note|核对说明/i);
+    expect(qualityCard?.textContent).toContain("Margin was 23.5%.");
+    expect(qualityCard?.textContent).toMatch(
+      /no source was found|暂未找到可供核对的来源/i,
+    );
+    expect(qualityCard?.textContent).not.toMatch(
+      /regenerate|重新生成|corresponding source that can be opened|没有可打开的对应来源/i,
     );
     expect(
       document.querySelector("[data-citation-quality-warning]"),
@@ -977,6 +1110,63 @@ describe("MarkdownContent citations", () => {
 
     expect(document.querySelector("[data-citation-claim-quality]")).not.toBeNull();
     expect(screen.getByText("120 USD")).not.toBeNull();
+  });
+
+  it("moves a claim marker outside display math instead of exposing its internal URL", () => {
+    const content = "计算如下：\n\n$$\n增长率 = 15.71\\%\n$$";
+    const mathValueEnd = content.indexOf("15.71") + "15.71".length;
+    render(
+      <MarkdownContent
+        content={content}
+        citationBundle={{
+          version: 1,
+          citations: [],
+          integrity: {
+            status: "passed",
+            unknownCitationIds: [],
+            unusedCitationIds: [],
+            missingLocatorCitationIds: [],
+            repairAttempts: 0,
+            policyRevision: "citation-v1",
+          },
+          quality: {
+            policyId: "finance",
+            policyRevision: "v1",
+            mode: "strict-domain",
+            status: "degraded",
+            publishStatus: "draft-only",
+            layers: { L4: "degraded" },
+            issues: [
+              {
+                code: "numeric_claim_without_citation",
+                layer: "L4",
+                severity: "degraded",
+                claimId: "clm_math",
+                claim: { exact: "增长率 = 15.71%" },
+                location: {
+                  kind: "text",
+                  blockIndex: 1,
+                  start: 0,
+                  end: 13,
+                  sourceStart: content.indexOf("增长率"),
+                  sourceEnd: mathValueEnd,
+                },
+              },
+            ],
+            metrics: {
+              citationCount: 0,
+              unsourcedClaimCount: 1,
+              unverifiedClaimCount: 0,
+              tierCounts: {},
+            },
+          },
+        }}
+      />,
+    );
+
+    expect(document.body.textContent).not.toContain("valuz.quality-claim.invalid");
+    expect(document.querySelector("[data-citation-claim-quality]")).not.toBeNull();
+    expect(document.querySelector(".katex")).not.toBeNull();
   });
 
   it("keeps a global warning for quality issues without a location", () => {

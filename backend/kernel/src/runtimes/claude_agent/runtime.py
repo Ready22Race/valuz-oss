@@ -124,10 +124,14 @@ _STDERR_TAIL_LINES: int = 40
 # Claude CLI replaces large tool results with a small ``<persisted-output>``
 # notice and stores the original payload under its private project journal.
 # The model can still read that file, so citation handles inside it must also
-# reach the host-side EvidenceRegistry.  Keep this ceiling aligned with the
-# registry's tool-result limit; oversized files stay unavailable to citation
-# binding rather than being read unboundedly from a path supplied in text.
-_MAX_PERSISTED_CITATION_CONTENT_BYTES: int = 2_000_000
+# reach the host-side EvidenceRegistry.  This ceiling is aligned with the
+# Registry's private-sidecar limit; oversized files stay unavailable to
+# citation binding rather than being read unboundedly from a path supplied in
+# text.
+# Persisted results stay outside the model transcript.  The larger bound lets
+# citation registration recover evidence envelopes from transcript/search
+# payloads without feeding those bytes back into the LLM context.
+_MAX_PERSISTED_CITATION_CONTENT_BYTES: int = 16_000_000
 _PERSISTED_OUTPUT_PATH_RE = re.compile(
     r"\A<persisted-output>\s*\n"
     r"Output too large \([^)]+\)\. Full output saved to: ([^\r\n]+)"

@@ -13,9 +13,11 @@ this orchestrator does not create or own the directory beyond seeding the
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import json
 import logging
+import re
 import time
 import uuid
 from collections.abc import Callable
@@ -25,7 +27,12 @@ from typing import Any, Literal
 
 from src.core import recovery
 from src.core.agent_config import AgentConfig
-from src.core.citation import CitationGuard, EvidenceRegistry
+from src.core.citation import (
+    CitationGuard,
+    EvidenceRegistry,
+    compact_citation_tool_content,
+)
+from src.core.claim_audit import extract_claims, verify_evidence_support
 from src.core.events import Event, EventSink, GlobalEventTap
 from src.core.prompt_builder import wrap_for_mode
 from src.core.runtime_port import RuntimePort
@@ -52,15 +59,105 @@ facts supported by evidence handles already returned by tools in this turn.
 Requirements:
 - Put a Markdown citation link in the same sentence or table row as every
   factual or numeric claim: `[n](evidence://EVIDENCE_HANDLE)`.
+- Keep the complete claim and its value outside the citation link. The client
+  replaces the whole link with a numbered marker, so never wrap a fact such as
+  `[12%](evidence://...)`; write `12% [1](evidence://...)` instead. The link
+  label is only a protocol placeholder; never emit the word `source` as prose.
 - Use only exact evidence handles from prior tool results.
-- Remove any claim that cannot be bound to a trusted handle.
+- Do not delete requested facts or values merely to reduce validation issue
+  counts. Preserve every requested result from the draft unless an existing
+  trusted handle supports a corrected value; keep any user-facing uncertainty
+  note adjacent to that result.
+- Do not replace an unsupported requested fact with unrelated metadata merely
+  because that metadata has a handle. State a concise business limitation for
+  each requested result that remains unavailable.
+- Keep each factual claim in one sentence or table row with its citation. Do
+  not repeat a cited value in an uncited heading, subheading, introduction,
+  or explanatory recap. If a heading contains a fact or value, cite it in the
+  heading itself; otherwise keep the heading non-factual.
+- Do not add an explanatory distinction or interpretation unless the same
+  sentence is directly supported by an allowed evidence item.
+- Preserve explicit output-scope constraints from the original request. If the
+  user asked for only a fixed set of items, return exactly those items: do not
+  add an introduction, conclusion, recap, comparison, or explanatory note.
+- Write for the end user, not for a developer debugging the citation system.
+  Never expose evidence handles, citation IDs, internal field paths, validation
+  codes, policy names, tool payload structure, or other protocol metadata.
+- Never emit internal markers such as `[UNSOURCED]` or `[UNVERIFIED: ...]`.
+  When a requested result cannot be verified, explain only the user-facing
+  limitation and likely business reason (for example, incomplete source
+  coverage or conflicting source values), without describing implementation
+  details.
+- Translate machine field names and enum values into the user's language.
 - Do not append a Sources, References, or 来源 section.
 - Return only the rewritten answer, with no validation commentary.
 """
-_CITATION_BLOCKED_TEXT = (
-    "Citation verification failed after one automatic repair attempt. "
-    "The unverified draft was not published; please retry the request."
+
+_MAX_CITATION_REPAIR_INPUT_TOKENS = 200_000
+_MAX_CITATION_REPAIR_CLAIMS = 20
+_MAX_CITATION_REPAIR_DRAFT_CHARS = 40_000
+
+_INTERNAL_CITATION_PROSE_RE = re.compile(
+    r"(?:"
+    r"\bevidence\s*handles?\b|"
+    r"\bevidenceHandle\b|"
+    r"\bcitation\s*ids?\b|"
+    r"\bcitationId\b|"
+    r"\bclaimId\b|"
+    r"\bpolicyRevision\b|"
+    r"\bissueCodes?\b|"
+    r"valuz\.quality-claim\.invalid|"
+    r"_valuz_evidence|"
+    r"\[UNSOURCED\]|"
+    r"\[UNVERIFIED(?::[^\]]*)?\]|"
+    r"(?:证据|引用).{0,12}(?:句柄|记录|凭证|绑定|协议)|"
+    r"(?:句柄|记录|凭证).{0,12}(?:证据|引用)|"
+    r"合规绑定|经认证的引用|可引用来源|行内引用|"
+    r"嵌套(?:财务)?(?:子)?字段|工具原始返回"
+    r")",
+    re.IGNORECASE,
 )
+_CJK_RE = re.compile(r"[\u3400-\u9fff]")
+_INTERNAL_HANDOFF_RE = re.compile(
+    r"^\s*##\s+SESSION INTENT\b[\s\S]*?^##\s+SUMMARY\b"
+    r"[\s\S]*?^##\s+ARTIFACTS\b[\s\S]*?^##\s+NEXT STEPS\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _sanitize_citation_repair_prose(text: str) -> str:
+    """Remove citation-protocol diagnostics from a repaired user answer.
+
+    The model receives opaque repair metadata so it can bind evidence, but
+    that implementation vocabulary is never useful to the end user. Prompt
+    rules are the primary control; this block-level filter is the deterministic
+    backstop when a model repeats the restricted context in its answer. Safe
+    blocks and their citations are preserved instead of replacing the whole
+    paid response with a generic failure sentence.
+    """
+
+    parts = re.split(r"(\n[ \t]*\n)", text)
+    output: list[str] = []
+    inserted_notice = False
+    for part in parts:
+        if not part or re.fullmatch(r"\n[ \t]*\n", part):
+            if output and output[-1] != "\n\n":
+                output.append("\n\n")
+            continue
+        if _INTERNAL_CITATION_PROSE_RE.search(part):
+            if not inserted_notice:
+                output.append(
+                    "部分结果的来源定位不完整，相关内容暂时无法核验。请稍后重试，或以原始资料为准。"
+                    if _CJK_RE.search(text)
+                    else (
+                        "Some results could not be verified because source coverage is "
+                        "incomplete. Please retry later or check the original material."
+                    )
+                )
+                inserted_notice = True
+            continue
+        output.append(part)
+    return "".join(output).strip()
 
 
 class SessionNotFoundError(Exception):
@@ -252,6 +349,7 @@ class _MessageObserverSink:
         self._evidence_registry = EvidenceRegistry(
             allowed_document_ids=allowed_document_ids,
         )
+        self._citation_quality_policy = citation_quality_policy
         self._citation_guard = CitationGuard(
             self._evidence_registry,
             message_id=message_id,
@@ -264,6 +362,7 @@ class _MessageObserverSink:
         self._citation_repair_prompt: str | None = None
         self._citation_repair_attempts = 0
         self._usage_before_citation_repair: dict[str, int] | None = None
+        self._citation_repair_baseline_event: Event | None = None
         self.num_turns: int = 0
         self.error_payload: dict[str, Any] | None = None
         self.usage: dict[str, int] | None = None
@@ -331,20 +430,23 @@ class _MessageObserverSink:
             tool_use_id = event.data.get("id")
             tool_name = self._tool_names.get(tool_use_id) if isinstance(tool_use_id, str) else None
             citation_content = event.data.get("_citation_content")
+            visible_content = event.data.get("content")
+            compacted_content = compact_citation_tool_content(visible_content)
             self._evidence_registry.register_tool_result(
-                citation_content
-                if isinstance(citation_content, str)
-                else event.data.get("content"),
+                citation_content if isinstance(citation_content, str) else visible_content,
                 tool_name=tool_name,
+                trusted_private=(
+                    isinstance(citation_content, str) or compacted_content is not None
+                ),
             )
-            if "_citation_content" in event.data:
-                # Runtime-private sidecar: it may contain the untruncated tool
-                # result, so never persist or broadcast it.  The normal
-                # ``content`` field remains the compact CLI placeholder.
+            if "_citation_content" in event.data or compacted_content is not None:
+                # The full evidence payload is turn-private: the Registry has
+                # consumed it, so persist/broadcast only the compact model
+                # view (or the runtime's existing placeholder).
                 event = Event(
                     type=event.type,
                     data={
-                        key: value
+                        key: (compacted_content if key == "content" else value)
                         for key, value in event.data.items()
                         if key != "_citation_content"
                     },
@@ -470,6 +572,13 @@ class _MessageObserverSink:
             return False
         self._pending_assistant = None
         raw_text = pending.data.get("text") or pending.data.get("content") or ""
+        if _INTERNAL_HANDOFF_RE.search(str(raw_text)):
+            # DeepAgents' context-compaction middleware may surface its
+            # machine-to-machine handoff as a top-level assistant block.  It
+            # is runtime state, not an answer, and must never be persisted or
+            # broadcast to the user.
+            self._assistant_delta_chunks.clear()
+            return False
         data = {
             key: value
             for key, value in pending.data.items()
@@ -499,6 +608,8 @@ class _MessageObserverSink:
         timestamp: int | None = None,
         allow_repair: bool,
     ) -> Event | None:
+        if self._citation_repair_attempts:
+            raw_text = _sanitize_citation_repair_prose(raw_text)
         result = self._citation_guard.finalize(
             raw_text,
             repair_attempts=self._citation_repair_attempts,
@@ -529,85 +640,55 @@ class _MessageObserverSink:
                     metrics.get("unverifiedClaimCount", 0),
                 )
 
-        needs_repair = self._citation_publication_needs_repair(result.bundle)
-        if allow_repair and needs_repair and self._citation_repair_attempts == 0:
-            self._citation_repair_requested = True
-            self._citation_repair_prompt = self._build_citation_repair_prompt(
-                result.bundle,
-            )
-            logger.warning("citation_guard withheld draft and requested one repair pass")
-            return None
-        has_trusted_citation = self._has_trusted_citation(result.bundle)
-        if needs_repair and self._citation_repair_attempts and not has_trusted_citation:
-            bundle = result.bundle
-            if isinstance(bundle, dict):
-                integrity = bundle.get("integrity")
-                integrity = dict(integrity) if isinstance(integrity, dict) else {}
-                integrity["publicationBlocked"] = True
-                bundle["integrity"] = integrity
-                quality = bundle.get("quality")
-                if isinstance(quality, dict):
-                    quality = dict(quality)
-                    quality["publishStatus"] = "blocked"
-                    bundle["quality"] = quality
-            data["text"] = _CITATION_BLOCKED_TEXT
-            logger.error("citation_guard blocked draft after automatic repair failed")
-        return Event(
+        event = Event(
             type="assistant_message",
             data=data,
             **({"timestamp": timestamp} if timestamp is not None else {}),
         )
-
-    @staticmethod
-    def _has_trusted_citation(bundle: dict[str, Any] | None) -> bool:
-        """Return whether at least one cited claim is actually supported.
-
-        A canonical citation id proves only that the handle came from the
-        current turn's Registry.  It does not prove that the selected field or
-        excerpt supports the surrounding claim.  Publication after the single
-        hidden repair therefore uses Claim Audit support, falling back to the
-        legacy citation-count rule only for old bundles without ``claims``.
-        """
-
-        if not isinstance(bundle, dict):
-            return False
-        citations = bundle.get("citations")
-        citations = citations if isinstance(citations, list) else []
-        quality = bundle.get("quality")
-        quality = quality if isinstance(quality, dict) else {}
-        claims = quality.get("claims")
-        if not isinstance(claims, list):
-            return bool(citations)
-
-        required_claims = [
-            claim
-            for claim in claims
-            if isinstance(claim, dict) and claim.get("citationRequired") is True
-        ]
-        if not required_claims:
-            return bool(citations)
-        for claim in required_claims:
-            citation_ids = claim.get("citationIds")
-            if not isinstance(citation_ids, list) or not citation_ids:
-                continue
-            if claim.get("status") in {"passed", "auto-bound", "repaired"}:
-                return True
-            bindings = claim.get("bindings")
-            if isinstance(bindings, list) and any(
-                isinstance(binding, dict)
-                and binding.get("supportStatus") == "supported"
-                for binding in bindings
-            ):
-                # A later policy layer may degrade an otherwise supported
-                # binding (for example a missing displayed unit).  That is a
-                # claim-local warning, not a reason to discard the citation as
-                # semantically untrusted.
-                return True
-        return False
+        needs_repair = self._citation_publication_needs_repair(result.bundle)
+        if allow_repair and needs_repair and self._citation_repair_attempts == 0:
+            skip_reason = self._citation_repair_skip_reason(result.bundle, result.text)
+            if skip_reason is not None:
+                self._mark_repair_outcome(
+                    event,
+                    outcome="skipped",
+                    skip_reason=skip_reason,
+                )
+                logger.warning(
+                    "citation_guard skipped automatic repair reason=%s",
+                    skip_reason,
+                )
+                return event
+            self._citation_repair_baseline_event = copy.deepcopy(event)
+            self._citation_repair_requested = True
+            self._citation_repair_prompt = self._build_citation_repair_prompt(
+                result.bundle,
+                result.text,
+            )
+            logger.warning("citation_guard withheld draft and requested one repair pass")
+            return None
+        if needs_repair and self._citation_repair_attempts:
+            baseline = self._citation_repair_baseline_event
+            if baseline is not None and not self._repair_improves(baseline, event):
+                rejected = copy.deepcopy(baseline)
+                self._mark_repair_outcome(rejected, outcome="rejected-no-improvement")
+                self._citation_repair_baseline_event = None
+                logger.warning(
+                    "citation_guard rejected automatic repair because quality did not improve"
+                )
+                return rejected
+            self._mark_repair_outcome(event, outcome="accepted")
+            self._citation_repair_baseline_event = None
+            logger.warning("citation_guard published improved but still degraded repair")
+        elif self._citation_repair_attempts:
+            self._mark_repair_outcome(event, outcome="accepted")
+            self._citation_repair_baseline_event = None
+        return event
 
     def _build_citation_repair_prompt(
         self,
         bundle: dict[str, Any] | None,
+        draft_text: str,
     ) -> str:
         quality = bundle.get("quality") if isinstance(bundle, dict) else None
         quality = quality if isinstance(quality, dict) else {}
@@ -615,6 +696,14 @@ class _MessageObserverSink:
         raw_claims = raw_claims if isinstance(raw_claims, list) else []
         raw_issues = quality.get("issues")
         raw_issues = raw_issues if isinstance(raw_issues, list) else []
+        policy_mode, semantics = self._citation_policy_context()
+        extracted = extract_claims(
+            draft_text,
+            mode=policy_mode,
+            semantics=semantics,
+        )
+        extracted_by_id = {claim.claim_id: claim for claim in extracted}
+        extracted_by_exact = {claim.exact.strip(): claim for claim in extracted}
         claim_issues: list[dict[str, Any]] = []
         for claim in raw_claims[:50]:
             if not isinstance(claim, dict) or claim.get("citationRequired") is not True:
@@ -628,45 +717,34 @@ class _MessageObserverSink:
             if not issue_codes:
                 continue
             exact = claim.get("exact")
+            exact_text = str(exact)[:500] if exact is not None else ""
+            extracted_claim = extracted_by_id.get(str(claim.get("claimId") or ""))
+            if extracted_claim is None:
+                extracted_claim = extracted_by_exact.get(exact_text.strip())
+            candidates: list[dict[str, Any]] = []
+            if extracted_claim is not None:
+                for record in list(self._evidence_registry.values())[:200]:
+                    support = verify_evidence_support(
+                        extracted_claim,
+                        {"evidence": record.evidence},
+                        semantics=semantics,
+                    )
+                    if support.status != "supported":
+                        continue
+                    candidates.append(self._repair_evidence_summary(record))
+                    if len(candidates) >= 12:
+                        break
             claim_issues.append(
                 {
                     "claimId": claim.get("claimId"),
-                    "exact": str(exact)[:500] if exact is not None else "",
+                    "exact": exact_text,
                     "issueCodes": issue_codes[:20],
                     "citationIds": [
                         value for value in claim.get("citationIds", []) if isinstance(value, str)
                     ][:20],
+                    "candidateEvidence": candidates,
                 }
             )
-        candidates: list[dict[str, Any]] = []
-        for record in list(self._evidence_registry.values())[:100]:
-            evidence = record.evidence
-            summary: dict[str, Any] = {
-                "evidenceHandle": record.handle,
-                "sourceTitle": str(record.source.get("title") or "")[:240],
-                "kind": evidence.get("kind"),
-            }
-            if evidence.get("kind") == "structured-data":
-                summary.update(
-                    {
-                        "field": evidence.get("field"),
-                        "value": evidence.get("value"),
-                        "unit": evidence.get("unit"),
-                        "period": evidence.get("period"),
-                        "asOf": evidence.get("asOf"),
-                    }
-                )
-            elif evidence.get("kind") == "text":
-                summary["quote"] = str(evidence.get("quote") or "")[:500]
-            elif evidence.get("kind") == "calculation":
-                summary.update(
-                    {
-                        "expression": str(evidence.get("expression") or "")[:240],
-                        "result": evidence.get("result"),
-                        "unit": evidence.get("unit"),
-                    }
-                )
-            candidates.append(summary)
         context = {
             "claimIssues": claim_issues,
             "generalIssues": [
@@ -674,13 +752,155 @@ class _MessageObserverSink:
                 for entry in raw_issues[:50]
                 if isinstance(entry, dict) and isinstance(entry.get("code"), str)
             ],
-            "allowedEvidence": candidates,
         }
         return (
             _CITATION_REPAIR_PROMPT.rstrip()
             + "\n\nRestricted repair context (JSON):\n"
             + json.dumps(context, ensure_ascii=False, separators=(",", ":"))
         )
+
+    def _citation_policy_context(self) -> tuple[str, dict[str, Any] | None]:
+        policy = self._citation_quality_policy
+        if not isinstance(policy, dict):
+            return "required-on-evidence", None
+        config = policy.get("config")
+        config = config if isinstance(config, dict) else {}
+        semantics = config.get("semantics")
+        return (
+            str(policy.get("mode") or "required-on-evidence"),
+            semantics if isinstance(semantics, dict) else None,
+        )
+
+    @staticmethod
+    def _repair_evidence_summary(record: Any) -> dict[str, Any]:
+        evidence = record.evidence
+        source = record.source
+        summary: dict[str, Any] = {
+            "evidenceHandle": record.handle,
+            "sourceTitle": str(source.get("title") or "")[:240],
+            "providerId": str(source.get("providerId") or "")[:120],
+            "sourceId": str(source.get("sourceId") or "")[:240],
+            "documentId": str(source.get("documentId") or "")[:240],
+            "kind": evidence.get("kind"),
+        }
+        if record.locator is not None:
+            summary["locator"] = dict(record.locator)
+        if evidence.get("kind") == "structured-data":
+            summary.update(
+                {
+                    "field": evidence.get("field"),
+                    "value": evidence.get("value"),
+                    "unit": evidence.get("unit"),
+                    "period": evidence.get("period"),
+                    "asOf": evidence.get("asOf"),
+                }
+            )
+        elif evidence.get("kind") == "text":
+            summary["quote"] = str(evidence.get("quote") or "")[:800]
+        elif evidence.get("kind") == "calculation":
+            summary.update(
+                {
+                    "expression": str(evidence.get("expression") or "")[:240],
+                    "result": evidence.get("result"),
+                    "unit": evidence.get("unit"),
+                }
+            )
+        return summary
+
+    def _citation_repair_skip_reason(
+        self,
+        bundle: dict[str, Any] | None,
+        draft_text: str,
+    ) -> str | None:
+        usage = self.usage if isinstance(self.usage, dict) else {}
+        if int(usage.get("input_tokens") or 0) > _MAX_CITATION_REPAIR_INPUT_TOKENS:
+            return "input-token-budget"
+        if len(draft_text) > _MAX_CITATION_REPAIR_DRAFT_CHARS:
+            return "draft-size-budget"
+        quality = bundle.get("quality") if isinstance(bundle, dict) else None
+        claims = quality.get("claims") if isinstance(quality, dict) else None
+        problematic = sum(
+            1
+            for claim in claims or []
+            if isinstance(claim, dict)
+            and claim.get("citationRequired") is True
+            and bool(claim.get("issueCodes"))
+        )
+        if problematic > _MAX_CITATION_REPAIR_CLAIMS:
+            return "claim-count-budget"
+        return None
+
+    @staticmethod
+    def _repair_metrics(event: Event) -> dict[str, int]:
+        bundle = event.data.get("citation_bundle")
+        bundle = bundle if isinstance(bundle, dict) else {}
+        integrity = bundle.get("integrity")
+        integrity = integrity if isinstance(integrity, dict) else {}
+        quality = bundle.get("quality")
+        quality = quality if isinstance(quality, dict) else {}
+        metrics = quality.get("metrics")
+        metrics = metrics if isinstance(metrics, dict) else {}
+        claims = quality.get("claims")
+        claims = claims if isinstance(claims, list) else []
+        return {
+            "problem": (
+                int(metrics.get("unsourcedClaimCount") or 0)
+                + int(metrics.get("unverifiedClaimCount") or 0)
+                + len(integrity.get("unknownCitationIds") or [])
+                + len(integrity.get("missingLocatorCitationIds") or [])
+            ),
+            "unknown": len(integrity.get("unknownCitationIds") or []),
+            "mismatch": int(metrics.get("claimSemanticMismatchCount") or 0),
+            "supported": sum(
+                1
+                for claim in claims
+                if isinstance(claim, dict)
+                and claim.get("citationRequired") is True
+                and claim.get("status") in {"passed", "auto-bound", "repaired"}
+                and not claim.get("issueCodes")
+            ),
+            "required": sum(
+                1
+                for claim in claims
+                if isinstance(claim, dict) and claim.get("citationRequired") is True
+            ),
+        }
+
+    @classmethod
+    def _repair_improves(cls, baseline: Event, candidate: Event) -> bool:
+        before = cls._repair_metrics(baseline)
+        after = cls._repair_metrics(candidate)
+        return (
+            after["problem"] < before["problem"]
+            and after["unknown"] <= before["unknown"]
+            and after["mismatch"] <= before["mismatch"]
+            and after["supported"] >= before["supported"]
+            # Deleting factual claims makes the issue counter look better but
+            # does not repair the user's answer.  A repair pass may rephrase or
+            # split claims, but it must retain at least the baseline coverage.
+            and after["required"] >= before["required"]
+        )
+
+    @staticmethod
+    def _mark_repair_outcome(
+        event: Event,
+        *,
+        outcome: str,
+        skip_reason: str | None = None,
+    ) -> None:
+        bundle = event.data.get("citation_bundle")
+        if not isinstance(bundle, dict):
+            return
+        integrity = bundle.get("integrity")
+        if not isinstance(integrity, dict):
+            integrity = {}
+            bundle["integrity"] = integrity
+        integrity["repairOutcome"] = outcome
+        if skip_reason is not None:
+            integrity["repairSkippedReason"] = skip_reason
+        if outcome.startswith("rejected"):
+            integrity["repairAttempts"] = 1
+            integrity["status"] = "degraded"
 
     def _citation_publication_needs_repair(
         self,
@@ -695,11 +915,7 @@ class _MessageObserverSink:
         citations = citations if isinstance(citations, list) else []
         integrity = bundle.get("integrity")
         integrity = integrity if isinstance(integrity, dict) else {}
-        if (
-            not citations
-            or bool(integrity.get("unknownCitationIds"))
-            or bool(integrity.get("evidenceOverflowReasons"))
-        ):
+        if not citations or bool(integrity.get("unknownCitationIds")):
             return True
         quality = bundle.get("quality")
         quality = quality if isinstance(quality, dict) else {}
@@ -727,9 +943,7 @@ class _MessageObserverSink:
                 continue
             issue_codes = claim.get("issueCodes")
             if isinstance(issue_codes, list):
-                claim_codes = {
-                    value for value in issue_codes if isinstance(value, str)
-                }
+                claim_codes = {value for value in issue_codes if isinstance(value, str)}
                 if claim_codes and (
                     policy_requires_clean_claims
                     or bool(repair_issue_codes.intersection(claim_codes))

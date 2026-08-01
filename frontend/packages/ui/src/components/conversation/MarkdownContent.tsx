@@ -1,7 +1,9 @@
 import {
   memo,
   useCallback,
+  useEffect,
   useMemo,
+  useRef,
   useState,
   type AnchorHTMLAttributes,
 } from "react";
@@ -49,6 +51,11 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import { Button } from "../ui/button";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "../ui/popover";
 import { useI18n } from "../../hooks/use-i18n";
 import {
   citationDisplayOrder,
@@ -89,6 +96,124 @@ interface LocalizedClaimQualityEntry {
   issues: CitationQualityDisplayIssue[];
 }
 
+function ClaimQualityMarker({ entry }: { entry: LocalizedClaimQualityEntry }) {
+  const { t } = useI18n();
+  const [open, setOpen] = useState(false);
+  const closeTimerRef = useRef<number | null>(null);
+  const label = entry.issues.map((issue) => issue.label).join("；");
+  const cancelScheduledClose = useCallback(() => {
+    if (closeTimerRef.current === null) return;
+    window.clearTimeout(closeTimerRef.current);
+    closeTimerRef.current = null;
+  }, []);
+  const showCard = useCallback(() => {
+    cancelScheduledClose();
+    setOpen(true);
+  }, [cancelScheduledClose]);
+  const scheduleClose = useCallback(() => {
+    cancelScheduledClose();
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null;
+      setOpen(false);
+    }, 150);
+  }, [cancelScheduledClose]);
+
+  useEffect(() => cancelScheduledClose, [cancelScheduledClose]);
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          data-citation-claim-quality
+          data-quality-claim-id={entry.targetId}
+          aria-label={`${t("ui.citation.qualityNeedsReview")} · ${label}`}
+          className="relative -top-px mx-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full border border-warning/50 bg-warning-light/70 align-middle text-warning-text no-underline transition hover:bg-warning-light focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warning/20"
+          onMouseEnter={showCard}
+          onMouseLeave={scheduleClose}
+          onFocus={showCard}
+          onBlur={scheduleClose}
+        >
+          <AlertTriangle className="h-2.5 w-2.5" aria-hidden="true" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        data-citation-claim-quality-card
+        side="bottom"
+        sideOffset={8}
+        className="w-[min(380px,calc(100vw-32px))] rounded-lg border-surface-border bg-surface p-3 text-xs text-ink-body shadow-xl"
+        onMouseEnter={cancelScheduledClose}
+        onMouseLeave={scheduleClose}
+      >
+        <div className="flex items-center gap-1.5 font-medium text-warning-text">
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          <span>{t("ui.citation.qualityCheckTitle")}</span>
+        </div>
+        <div className="mt-2 border-l-2 border-warning/40 pl-2.5 leading-5 text-ink-heading">
+          {entry.exact}
+        </div>
+        <ul className="mt-2 space-y-1 pl-4 leading-5">
+          {entry.issues.map((issue) => (
+            <li key={`${issue.label}:${issue.severity}`} className="list-disc">
+              {issue.label}
+            </li>
+          ))}
+        </ul>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+function readableEvidenceField(field: string): string {
+  return (field.split(".").at(-1) ?? field)
+    .replace(/([a-z0-9])([A-Z])/gu, "$1 $2")
+    .replace(/[_-]+/gu, " ")
+    .trim();
+}
+
+function evidenceValueLabel(citation: CitationBundleV1["citations"][number]): string {
+  const evidence = citation.evidence;
+  if (evidence.kind !== "structured-data") return "";
+  const value = String(evidence.value ?? "");
+  const unit = evidence.unit ?? evidence.currency;
+  return unit ? `${value} ${unit}` : value;
+}
+
+function selectUserFacingQualityIssues(
+  issues: CitationQualityDisplayIssue[],
+): CitationQualityDisplayIssue[] {
+  const hasClaimMismatch = issues.some(
+    (issue) => issue.code === "claim_evidence_mismatch",
+  );
+  const hasCalculationValueMismatch = issues.some(
+    (issue) => issue.code === "calculation_input_value_mismatch",
+  );
+  const seen = new Set<string>();
+  return issues.filter((issue) => {
+    if (
+      hasClaimMismatch &&
+      [
+        "structured_value_not_present_in_answer",
+        "numeric_unit_missing",
+        "calculation_input_value_mismatch",
+        "calculation_input_unit_mismatch",
+      ].includes(issue.code ?? "")
+    ) {
+      return false;
+    }
+    if (
+      hasCalculationValueMismatch &&
+      issue.code === "calculation_input_unit_mismatch"
+    ) {
+      return false;
+    }
+    const key = `${issue.claimId ?? ""}\0${issue.label}\0${issue.severity}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function qualityClaimIdFromHref(href?: string): string | null {
   if (!href?.startsWith(QUALITY_CLAIM_HREF_PREFIX)) return null;
   try {
@@ -102,22 +227,83 @@ function claimSourceEnd(location?: ClaimLocationV1): number | undefined {
   return location && location.kind !== "legacy" ? location.sourceEnd : undefined;
 }
 
+function stripProtocolSourcePlaceholders(content: string): string {
+  return content
+    .split("\n")
+    .map((line) => {
+      const match = line.match(
+        /(?:[ \t]+|(?<=[。！？；;]))source([.!?。！？；;]?)\s*$/i,
+      );
+      if (!match || match.index === undefined) return line;
+      const prefix = line.slice(0, match.index);
+      if (!/[\u4e00-\u9fff]/.test(prefix) && !prefix.includes("citation://")) {
+        return line;
+      }
+      return `${prefix.trimEnd()}${match[1]}`;
+    })
+    .join("\n")
+    .trimEnd();
+}
+
+function safeQualityMarkerInsertion(
+  content: string,
+  requestedOffset: number,
+  targetId: string,
+): { offset: number; marker: string } {
+  let offset = requestedOffset;
+  let movedOutsideBlock = false;
+  for (const pattern of [/\$\$[\s\S]*?\$\$/g, /\\\[[\s\S]*?\\\]/g, /```[\s\S]*?```/g]) {
+    for (const match of content.matchAll(pattern)) {
+      const start = match.index;
+      const end = start + match[0].length;
+      if (start < offset && offset < end) {
+        offset = end;
+        movedOutsideBlock = true;
+        const followingNewline = content.slice(offset).match(/^[ \t]*\r?\n/);
+        if (followingNewline) offset += followingNewline[0].length;
+        break;
+      }
+    }
+  }
+  const separator = movedOutsideBlock ? "\n" : " ";
+  return {
+    offset,
+    marker: `${separator}[!](<${QUALITY_CLAIM_HREF_PREFIX}${encodeURIComponent(targetId)}>)`,
+  };
+}
+
 function injectQualityClaimMarkers(
   content: string,
   entries: LocalizedClaimQualityEntry[],
 ): string {
   let result = content;
   const positioned = entries
-    .map((entry) => ({ entry, end: claimSourceEnd(entry.location) }))
+    .map((entry) => {
+      const requestedOffset = claimSourceEnd(entry.location);
+      return {
+        entry,
+        insertion:
+          requestedOffset === undefined
+            ? undefined
+            : safeQualityMarkerInsertion(content, requestedOffset, entry.targetId),
+      };
+    })
     .filter(
-      (item): item is { entry: LocalizedClaimQualityEntry; end: number } =>
-        Number.isInteger(item.end) && item.end! >= 0 && item.end! <= content.length,
+      (
+        item,
+      ): item is {
+        entry: LocalizedClaimQualityEntry;
+        insertion: { offset: number; marker: string };
+      } =>
+        item.insertion !== undefined &&
+        Number.isInteger(item.insertion.offset) &&
+        item.insertion.offset >= 0 &&
+        item.insertion.offset <= content.length,
     )
-    .sort((left, right) => right.end - left.end);
+    .sort((left, right) => right.insertion.offset - left.insertion.offset);
   const inserted = new Set<string>();
-  for (const { entry, end } of positioned) {
-    const marker = ` [!](<${QUALITY_CLAIM_HREF_PREFIX}${encodeURIComponent(entry.targetId)}>)`;
-    result = `${result.slice(0, end)}${marker}${result.slice(end)}`;
+  for (const { entry, insertion } of positioned) {
+    result = `${result.slice(0, insertion.offset)}${insertion.marker}${result.slice(insertion.offset)}`;
     inserted.add(entry.targetId);
   }
   let fallbackCursor = 0;
@@ -125,10 +311,13 @@ function injectQualityClaimMarkers(
     if (inserted.has(entry.targetId)) continue;
     const start = result.indexOf(entry.exact, fallbackCursor);
     if (start < 0) continue;
-    const insertAt = start + entry.exact.length;
-    const marker = ` [!](<${QUALITY_CLAIM_HREF_PREFIX}${encodeURIComponent(entry.targetId)}>)`;
-    result = `${result.slice(0, insertAt)}${marker}${result.slice(insertAt)}`;
-    fallbackCursor = insertAt + marker.length;
+    const insertion = safeQualityMarkerInsertion(
+      result,
+      start + entry.exact.length,
+      entry.targetId,
+    );
+    result = `${result.slice(0, insertion.offset)}${insertion.marker}${result.slice(insertion.offset)}`;
+    fallbackCursor = insertion.offset + insertion.marker.length;
   }
   return result;
 }
@@ -659,9 +848,9 @@ export const MarkdownContent = memo(function MarkdownContent({
   const publicationBlocked =
     citationBundle?.integrity?.publicationBlocked === true ||
     citationBundle?.quality?.publishStatus === "blocked";
-  const displayContent = publicationBlocked
-    ? t("ui.citation.publicationBlocked")
-    : content;
+  const displayContent = stripProtocolSourcePlaceholders(
+    publicationBlocked ? t("ui.citation.publicationBlocked") : content,
+  );
   const citationOrder = useMemo(
     () => citationDisplayOrder(displayContent),
     [displayContent],
@@ -679,6 +868,89 @@ export const MarkdownContent = memo(function MarkdownContent({
   const qualityIssueLabel = useCallback(
     (issue: CitationQualityIssueV1): string => {
       const code = issue.code;
+      const cited = (issue.citationIds ?? [])
+        .map((citationId) => citationsById.get(citationId))
+        .filter((citation): citation is CitationBundleV1["citations"][number] =>
+          Boolean(citation),
+        );
+      const structured = cited.find(
+        (citation) => citation.evidence.kind === "structured-data",
+      );
+      const calculation = cited.find(
+        (citation) => citation.evidence.kind === "calculation",
+      );
+
+      if (
+        code === "claim_without_citation" ||
+        code === "numeric_claim_without_citation" ||
+        code === "date_claim_without_citation"
+      ) {
+        return t("ui.citation.qualityClaimSourceMissing");
+      }
+      if (code === "claim_evidence_mismatch") {
+        if (structured?.evidence.kind === "structured-data") {
+          return t("ui.citation.qualityClaimStructuredMismatch", {
+            field: readableEvidenceField(structured.evidence.field),
+            value: evidenceValueLabel(structured),
+          });
+        }
+        return t("ui.citation.qualityClaimMismatch");
+      }
+      if (code === "claim_partially_supported") {
+        return t("ui.citation.qualityClaimPartial");
+      }
+      if (code === "structured_value_not_present_in_answer" && structured) {
+        return t("ui.citation.qualityStructuredValueMismatch", {
+          value: evidenceValueLabel(structured),
+        });
+      }
+      if (code === "numeric_unit_missing") {
+        return t("ui.citation.qualityStructuredUnitMissing");
+      }
+      if (code === "calculation_input_value_mismatch") {
+        if (calculation?.evidence.kind === "calculation") {
+          const mismatchedInput = calculation.evidence.inputs.find((input) => {
+            const inputCitation = citationsById.get(input.citationId);
+            return (
+              inputCitation?.evidence.kind === "structured-data" &&
+              String(inputCitation.evidence.value) !== String(input.value)
+            );
+          });
+          const inputCitation = mismatchedInput
+            ? citationsById.get(mismatchedInput.citationId)
+            : undefined;
+          if (
+            mismatchedInput &&
+            inputCitation?.evidence.kind === "structured-data"
+          ) {
+            return t("ui.citation.qualityCalculationInputMismatchDetail", {
+              input: `${String(mismatchedInput.value)}${
+                mismatchedInput.unit ? ` ${mismatchedInput.unit}` : ""
+              }`,
+              evidence: evidenceValueLabel(inputCitation),
+            });
+          }
+        }
+        return t("ui.citation.qualityCalculationInputMismatch");
+      }
+      if (code === "calculation_input_unit_mismatch") {
+        return t("ui.citation.qualityCalculationUnitMismatch");
+      }
+      if (
+        code === "claim_after_evidence_coverage" ||
+        code === "evidence_after_coverage"
+      ) {
+        const coverageEnd = cited
+          .map((citation) =>
+            citation.evidence.kind === "structured-data"
+              ? citation.evidence.coverage?.end
+              : undefined,
+          )
+          .find(Boolean);
+        return coverageEnd
+          ? t("ui.citation.qualityCoverageEnded", { date: coverageEnd })
+          : t("ui.citation.qualityIssueFreshness");
+      }
       if (
         code.includes("conflict") ||
         code.includes("ambiguous") ||
@@ -727,7 +999,7 @@ export const MarkdownContent = memo(function MarkdownContent({
       };
       return t(keyByLayer[issue.layer] ?? "ui.citation.qualityIssueGeneric");
     },
-    [t],
+    [citationsById, t],
   );
   const qualityIssuePlacement = useMemo(() => {
     const byCitationId = new Map<string, CitationQualityDisplayIssue[]>();
@@ -739,18 +1011,20 @@ export const MarkdownContent = memo(function MarkdownContent({
     );
     const issues = citationBundle?.quality?.issues ?? [];
     for (const [issueIndex, issue] of issues.entries()) {
+      const auditedClaim = issue.claimId
+        ? auditedClaimsById.get(issue.claimId)
+        : undefined;
       const localIds = Array.from(new Set(issue.citationIds ?? [])).filter(
         (citationId) =>
           citationsById.has(citationId) && citationOrder.has(citationId),
       );
       const displayIssue = {
+        code: issue.code,
+        claimId: auditedClaim?.claimId ?? issue.claimId,
         label: qualityIssueLabel(issue),
         severity: issue.severity,
       };
       if (!localIds.length) {
-        const auditedClaim = issue.claimId
-          ? auditedClaimsById.get(issue.claimId)
-          : undefined;
         const exact = (auditedClaim?.exact ?? issue.claim?.exact)?.trim();
         const location = issue.location ?? auditedClaim?.location;
         const sourceEnd = claimSourceEnd(location);
@@ -803,16 +1077,29 @@ export const MarkdownContent = memo(function MarkdownContent({
         byCitationId.set(citationId, current);
       }
     }
-    return {
-      byCitationId,
-      claimEntries: Array.from(claimEntriesById.values()).sort((left, right) => {
+    for (const [citationId, citationIssues] of byCitationId) {
+      byCitationId.set(
+        citationId,
+        selectUserFacingQualityIssues(citationIssues),
+      );
+    }
+    const claimEntries = Array.from(claimEntriesById.values())
+      .map((entry) => ({
+        ...entry,
+        issues: selectUserFacingQualityIssues(entry.issues),
+      }))
+      .filter((entry) => entry.issues.length > 0)
+      .sort((left, right) => {
         const leftEnd = claimSourceEnd(left.location);
         const rightEnd = claimSourceEnd(right.location);
         if (typeof leftEnd === "number" && typeof rightEnd === "number") {
           return leftEnd - rightEnd;
         }
         return left.targetId.localeCompare(right.targetId);
-      }),
+      });
+    return {
+      byCitationId,
+      claimEntries,
       unlocalized,
     };
   }, [
@@ -893,19 +1180,7 @@ export const MarkdownContent = memo(function MarkdownContent({
         if (qualityClaimId) {
           const entry = claimQualityById.get(qualityClaimId);
           if (!entry) return null;
-          const label = entry.issues.map((issue) => issue.label).join("；");
-          return (
-            <button
-              type="button"
-              data-citation-claim-quality
-              data-quality-claim-id={entry.targetId}
-              aria-label={`${t("ui.citation.qualityNeedsReview")} · ${label}`}
-              title={label}
-              className="relative -top-px mx-0.5 inline-flex h-4 w-4 align-middle items-center justify-center rounded-full border border-warning/50 bg-warning-light/70 text-warning-text no-underline transition hover:bg-warning-light focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warning/20"
-            >
-              <AlertTriangle className="h-2.5 w-2.5" aria-hidden="true" />
-            </button>
-          );
+          return <ClaimQualityMarker entry={entry} />;
         }
         const citationId = citationIdFromHref(href);
         if (citationId) {
@@ -969,7 +1244,6 @@ export const MarkdownContent = memo(function MarkdownContent({
       onCitationClick,
       onLocalFileLinkClick,
       qualityIssuePlacement.byCitationId,
-      t,
     ],
   );
 

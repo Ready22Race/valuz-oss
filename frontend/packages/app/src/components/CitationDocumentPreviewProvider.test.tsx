@@ -5,7 +5,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { useLayoutEffect, useState } from "react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   citationsApi,
@@ -113,6 +113,11 @@ function OpenBeforeHostProbe() {
       <main>conversation</main>
     </div>
   ) : null;
+}
+
+function LocationProbe() {
+  const location = useLocation();
+  return <div data-testid="location-probe">{location.pathname}{location.search}</div>;
 }
 
 describe("citation document preview helpers", () => {
@@ -294,6 +299,47 @@ describe("citation document preview helpers", () => {
     await waitFor(() => {
       expect(screen.queryByRole("dialog")).toBeNull();
     });
+  });
+
+  it("navigates a canonical structured-data route inside the app", async () => {
+    vi.spyOn(citationsApi, "resolve").mockResolvedValue({
+      document: {
+        id: "structured:income:600519:2024",
+        title: "Company income statement · 600519",
+        render: {
+          kind: "external",
+          url: "/finance/stock/600519?tab=financials&statement=income&period=annual&field=total_revenue",
+        },
+      },
+      effective_locator: { kind: "external" },
+      status: "ready",
+      fallback_reason: null,
+      canonical_url: null,
+    });
+
+    render(
+      <WebPlatformProvider>
+        <MemoryRouter initialEntries={["/conversation/session-1"]}>
+          <div>
+            <main>
+              <CitationDocumentPreviewProvider>
+                <OpenCloseProbe />
+                <LocationProbe />
+              </CitationDocumentPreviewProvider>
+            </main>
+          </div>
+        </MemoryRouter>
+      </WebPlatformProvider>,
+    );
+
+    fireEvent.click(screen.getByText("open preview"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("location-probe").textContent).toBe(
+        "/finance/stock/600519?tab=financials&statement=income&period=annual&field=total_revenue",
+      );
+    });
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("opens a resolved document in the same reader with research tabs", async () => {

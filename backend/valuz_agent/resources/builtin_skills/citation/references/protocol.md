@@ -18,14 +18,32 @@ original reasoning that does not rely on retrieved facts.
 ## Good examples
 
 ```markdown
-The policy took effect on 1 July [Policy document](evidence://ev_policy_date).
+The policy took effect on 1 July [source](evidence://ev_policy_date).
 ```
 
 ```markdown
 The two filings report different totals
-[Q1 filing](evidence://ev_q1_total)
-[Q2 filing](evidence://ev_q2_total).
+[source](evidence://ev_q1_total)
+[source](evidence://ev_q2_total).
 ```
+
+The claim text and value must remain outside each evidence link because the
+client renders the link itself as a numbered citation marker.
+
+## Derived values
+
+Do not treat an input citation as proof of a calculation performed in prose.
+For a growth rate, margin, ratio, difference, sum, or other derived number:
+
+1. retrieve a structured or text evidence handle for every numeric input;
+2. call `citation_calculate` with those exact handles, input values, units,
+   and a simple arithmetic expression; for `%`, a unitless ratio expression is
+   normalized to percentage points by the tool;
+3. use the tool's returned result in the answer; and
+4. cite the returned calculation evidence handle on the derived claim.
+
+The host recomputes the expression and checks each input against its cited
+evidence before the calculation can pass quality validation.
 
 ## Failure handling
 
