@@ -182,6 +182,14 @@ export interface CitationQualityIssueV1 {
   claimId?: string;
   claim?: TextQuoteSelectorV1;
   location?: ClaimLocationV1;
+  policyLayer?: "oss" | "commercial" | "distribution" | string;
+}
+
+export interface CitationPolicyLayerV1 {
+  layer: "oss" | "commercial" | "distribution" | string;
+  policy_id: string;
+  revision: string;
+  status: "active" | "unavailable" | string;
 }
 
 export type ClaimLocationV1 =
@@ -248,6 +256,7 @@ export interface CitationClaimAuditV1 {
 export interface CitationQualityResultV1 {
   policyId: string;
   policyRevision: string;
+  policyLayers?: CitationPolicyLayerV1[];
   mode: "required-on-evidence" | "strict-domain" | string;
   status: "passed" | "unverified" | "degraded";
   publishStatus: "ready" | "draft-only" | "blocked" | string;

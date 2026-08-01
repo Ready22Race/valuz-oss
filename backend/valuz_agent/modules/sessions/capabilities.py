@@ -54,7 +54,7 @@ async def refresh_citation_policy_for_session(session_id: str, user_id: str) -> 
     from valuz_agent.ports.extensions import ext
 
     try:
-        quality_snapshot = await ext.citation_quality_policy.resolve(
+        quality_snapshot = await ext.citation_quality_policies.resolve(
             user_id,
             session_metadata=metadata,
         )

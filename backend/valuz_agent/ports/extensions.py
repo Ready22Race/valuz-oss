@@ -34,8 +34,7 @@ from valuz_agent.ports.billing import BillingPort, NoopBillingProvider
 from valuz_agent.ports.cache import CachePort, FileCache
 from valuz_agent.ports.citation_documents import CitationDocumentResolverPort
 from valuz_agent.ports.citation_quality import (
-    CitationQualityPolicyPort,
-    NoopCitationQualityPolicy,
+    CitationQualityPolicyRegistry,
 )
 from valuz_agent.ports.connector_lifecycle import (
     ConnectorLifecycleHook,
@@ -115,10 +114,11 @@ class Extensions:
         # locked Q&A workspace as local library documents. Editions resolve
         # their stable document identity and provider-native summary here.
         self.document_research_provider: DocumentResearchProviderPort | None = None
-        # Optional edition-level quality policy.  The resolved declarative
-        # snapshot is re-stamped before every turn, so a user cannot weaken the
-        # gate by editing session metadata.  OSS has no domain policy.
-        self.citation_quality_policy: CitationQualityPolicyPort = NoopCitationQualityPolicy()
+        # Fixed-order OSS + commercial + distribution policy layers. Overlays
+        # register their own slot; no later edition can replace an earlier
+        # provider. The effective declarative snapshot is re-stamped before
+        # every turn so user-authored session metadata cannot weaken the gate.
+        self.citation_quality_policies = CitationQualityPolicyRegistry()
         # Resolve a file's absolute path into a client-usable access address
         # (see docs/design/file-address-resolution.md). OSS default returns the
         # local absolute path (bundled desktop reads it directly); the commercial

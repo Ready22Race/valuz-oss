@@ -10,7 +10,10 @@ from valuz_agent.adapters.system_prompt_builder import (
     ensure_citation_system_policy,
 )
 from valuz_agent.modules.sessions import capabilities
-from valuz_agent.ports.citation_quality import CitationQualityPolicySnapshot
+from valuz_agent.ports.citation_quality import (
+    CitationQualityPolicyRegistry,
+    CitationQualityPolicySnapshot,
+)
 from valuz_agent.ports.extensions import ext
 
 
@@ -74,6 +77,11 @@ async def test_refresh_is_idempotent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = _session(skill_path=str(citation_dir.resolve()), current_policy=True)
+    snapshot = await ext.citation_quality_policies.resolve(
+        "owner-1",
+        session_metadata=session.metadata,
+    )
+    session.metadata["valuz"]["citation_quality_policy"] = snapshot.session_metadata()
 
     async def get_session(user_id: str, session_id: str) -> object:
         return session
@@ -131,7 +139,7 @@ async def test_refresh_stamps_trusted_quality_policy_and_replaces_user_value(
     }
     updates: list[object] = []
 
-    class _Policy:
+    class _OssPolicy:
         async def resolve(
             self,
             user_id: str,
@@ -141,10 +149,26 @@ async def test_refresh_stamps_trusted_quality_policy_and_replaces_user_value(
             assert user_id == "owner-1"
             assert session_metadata["other"] == {"keep": True}
             return CitationQualityPolicySnapshot(
+                policy_id="trusted-oss",
+                revision="trusted-oss-v1",
+                mode="required-on-evidence",
+                config={"rules": {"factual_claim": {"citation_required": True}}},
+                layer="oss",
+            )
+
+    class _DistributionPolicy:
+        async def resolve(
+            self,
+            user_id: str,
+            *,
+            session_metadata: dict,
+        ) -> CitationQualityPolicySnapshot:
+            return CitationQualityPolicySnapshot(
                 policy_id="trusted-edition",
                 revision="trusted-v1",
                 mode="strict-domain",
                 config={"rules": {"numeric_claim": {"require_unit": True}}},
+                layer="distribution",
             )
 
     async def get_session(user_id: str, session_id: str) -> object:
@@ -154,7 +178,9 @@ async def test_refresh_stamps_trusted_quality_policy_and_replaces_user_value(
         updates.append(body)
         return session
 
-    monkeypatch.setattr(ext, "citation_quality_policy", _Policy())
+    registry = CitationQualityPolicyRegistry(oss_provider=_OssPolicy())
+    registry.register("distribution", _DistributionPolicy())
+    monkeypatch.setattr(ext, "citation_quality_policies", registry)
     monkeypatch.setattr(capabilities.kernel_client, "get_session", get_session)
     monkeypatch.setattr(capabilities.kernel_client, "update_session", update_session)
 
@@ -165,9 +191,26 @@ async def test_refresh_stamps_trusted_quality_policy_and_replaces_user_value(
 
     assert changed is True
     stamped = updates[0].metadata["valuz"]["citation_quality_policy"]
-    assert stamped == {
-        "policy_id": "trusted-edition",
-        "revision": "trusted-v1",
-        "mode": "strict-domain",
-        "config": {"rules": {"numeric_claim": {"require_unit": True}}},
+    assert stamped["policy_id"] == "effective-citation-policy"
+    assert stamped["revision"].startswith("citation-effective-")
+    assert stamped["mode"] == "strict-domain"
+    assert stamped["config"] == {
+        "rules": {
+            "factual_claim": {"citation_required": True},
+            "numeric_claim": {"require_unit": True},
+        }
     }
+    assert stamped["layers"] == [
+        {
+            "layer": "oss",
+            "policy_id": "trusted-oss",
+            "revision": "trusted-oss-v1",
+            "status": "active",
+        },
+        {
+            "layer": "distribution",
+            "policy_id": "trusted-edition",
+            "revision": "trusted-v1",
+            "status": "active",
+        },
+    ]
