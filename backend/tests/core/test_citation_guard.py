@@ -90,6 +90,37 @@ def test_registry_decodes_json_nested_in_mcp_text_content_blocks() -> None:
     assert record.tool_name == "valuz-search/document_fetch"
 
 
+def test_registry_preserves_structured_semantic_dimensions() -> None:
+    item = _item("ev_dimensions_12345678")
+    item["source"].update({"sourceType": "dataset"})
+    item["evidence"] = {
+        "kind": "structured-data",
+        "datasetId": "financials",
+        "toolName": "company_income_statement",
+        "recordKey": "600519|2024 FY",
+        "entityId": "600519",
+        "entityName": "贵州茅台",
+        "field": "operating_revenue",
+        "metric": "operating_revenue",
+        "value": 174_144_000_000,
+        "unit": "CNY",
+        "currency": "CNY",
+        "scale": 1,
+        "period": "2024 FY",
+        "scope": "consolidated",
+        "basis": "reported",
+        "capturedAt": "2026-08-01T08:00:00Z",
+    }
+
+    record = _registry(item).get("ev_dimensions_12345678")
+
+    assert record is not None
+    assert record.evidence["entityId"] == "600519"
+    assert record.evidence["metric"] == "operating_revenue"
+    assert record.evidence["scope"] == "consolidated"
+    assert record.evidence["basis"] == "reported"
+
+
 def test_registry_ignores_malformed_and_non_json_results() -> None:
     registry = EvidenceRegistry()
 
@@ -101,6 +132,17 @@ def test_registry_ignores_malformed_and_non_json_results() -> None:
         == 0
     )
     assert len(registry) == 0
+    assert registry.rejected_count == 1
+    assert registry.had_evidence_activity is True
+
+
+def test_registry_reports_oversized_evidence_payload_instead_of_silent_drop() -> None:
+    registry = EvidenceRegistry()
+    registry._MAX_TOOL_RESULT_CHARS = 32
+
+    assert registry.register_tool_result(json.dumps({"_valuz_evidence": _item()})) == 0
+    assert registry.rejected_count == 1
+    assert registry.overflow_reasons == ("tool_result_invalid_or_oversized",)
 
 
 def test_registry_rejects_oversized_snapshots_and_locator_geometry() -> None:
@@ -191,6 +233,9 @@ def test_guard_binds_known_handle_and_builds_bundle_from_registry() -> None:
         "missingLocatorCitationIds": [],
         "repairAttempts": 0,
         "policyRevision": "citation-v1",
+        "evidenceRegisteredCount": 1,
+        "evidenceRejectedCount": 0,
+        "evidenceOverflowReasons": [],
     }
     citation = result.bundle["citations"][0]
     assert citation["source"]["title"] == "Annual Report"
@@ -451,6 +496,12 @@ def test_guard_promotes_calculation_input_handles_to_canonical_dependencies() ->
         "unit": "%",
         "rounding": "2dp",
         "calculatedAt": "2026-07-30T10:00:00Z",
+        "entityId": "issuer-1",
+        "entityName": "Issuer",
+        "metric": "revenue_growth_rate",
+        "period": "FY2025",
+        "scope": "consolidated",
+        "basis": "reported",
     }
     registry = _registry(left, right, calculation)
     guard = CitationGuard(
@@ -467,6 +518,9 @@ def test_guard_promotes_calculation_input_handles_to_canonical_dependencies() ->
         citation["source"]["sourceId"]: citation for citation in result.bundle["citations"]
     }
     calculation_citation = citations["runtime-calc"]
+    assert calculation_citation["evidence"]["metric"] == "revenue_growth_rate"
+    assert calculation_citation["evidence"]["entityId"] == "issuer-1"
+    assert calculation_citation["evidence"]["scope"] == "consolidated"
     input_ids = [item["citationId"] for item in calculation_citation["evidence"]["inputs"]]
     assert input_ids == [
         citations["doc-1"]["citationId"],
@@ -474,3 +528,81 @@ def test_guard_promotes_calculation_input_handles_to_canonical_dependencies() ->
     ]
     assert result.bundle["integrity"]["unknownCitationIds"] == []
     assert result.bundle["integrity"]["unusedCitationIds"] == []
+
+
+def test_guard_auto_binds_one_unique_structured_candidate_without_model_repair() -> None:
+    margin = _item("ev_margin_12345678")
+    margin["source"] = {
+        "sourceId": "financials:600519:2024",
+        "providerId": "market-data",
+        "sourceType": "dataset",
+        "title": "Financial data",
+        "retrievedAt": "2026-08-01T08:00:00Z",
+    }
+    margin["evidence"] = {
+        "kind": "structured-data",
+        "datasetId": "financials",
+        "toolName": "company_income_statement",
+        "recordKey": "600519|2024 FY",
+        "field": "gross_margin",
+        "value": 23.5,
+        "unit": "%",
+        "period": "2024 FY",
+        "capturedAt": "2026-08-01T08:00:00Z",
+    }
+    registry = _registry(margin)
+    guard = CitationGuard(
+        registry,
+        message_id="msg-auto-bind",
+        user_prompt="What was gross margin?",
+        policy_available=True,
+    )
+
+    result = guard.finalize("Gross margin was 23.5% in 2024.")
+
+    assert result.bundle is not None
+    assert result.text.count("citation://") == 1
+    assert result.bundle["integrity"]["repairAttempts"] == 0
+    assert result.bundle["quality"]["claims"][0]["status"] == "auto-bound"
+    assert result.bundle["quality"]["metrics"]["claimAutoBoundCount"] == 1
+
+
+def test_guard_does_not_auto_bind_ambiguous_structured_candidates() -> None:
+    candidates = []
+    for handle in ("ev_margin_first_12345678", "ev_margin_second_12345678"):
+        item = _item(handle)
+        item["source"] = {
+            "sourceId": f"financials:{handle}",
+            "providerId": "market-data",
+            "sourceType": "dataset",
+            "title": "Financial data",
+            "retrievedAt": "2026-08-01T08:00:00Z",
+        }
+        item["evidence"] = {
+            "kind": "structured-data",
+            "datasetId": "financials",
+            "toolName": "company_income_statement",
+            "recordKey": "600519|2024 FY",
+            "field": "gross_margin",
+            "value": 23.5,
+            "unit": "%",
+            "period": "2024 FY",
+            "capturedAt": "2026-08-01T08:00:00Z",
+        }
+        candidates.append(item)
+    guard = CitationGuard(
+        _registry(*candidates),
+        message_id="msg-ambiguous",
+        user_prompt="What was gross margin?",
+        policy_available=True,
+    )
+
+    result = guard.finalize("Gross margin was 23.5% in 2024.")
+
+    assert result.bundle is not None
+    assert result.bundle["citations"] == []
+    assert "citation://" not in result.text
+    assert result.bundle["quality"]["claims"][0]["status"] == "unverified"
+    assert "claim_evidence_ambiguous" in {
+        issue["code"] for issue in result.bundle["quality"]["issues"]
+    }

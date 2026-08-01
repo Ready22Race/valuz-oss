@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import logging
 import time
 import uuid
@@ -260,6 +261,7 @@ class _MessageObserverSink:
             force_required=force_citation_required,
         )
         self._citation_repair_requested = False
+        self._citation_repair_prompt: str | None = None
         self._citation_repair_attempts = 0
         self._usage_before_citation_repair: dict[str, int] | None = None
         self.num_turns: int = 0
@@ -314,6 +316,12 @@ class _MessageObserverSink:
             text = event.data.get("text") or event.data.get("delta") or ""
             if text:
                 self._assistant_delta_chunks.append(str(text))
+            if is_top_level and self._citation_guard.requires_citation:
+                # Source-bearing answers are provisional until the complete
+                # body has passed Guard + Claim Audit.  Do not leak the first
+                # draft through the live delta stream before a hidden repair
+                # can replace it.  Non-citation chat keeps normal streaming.
+                return
         elif event.type == "tool_use":
             tool_use_id = event.data.get("id")
             tool_name = event.data.get("name")
@@ -410,6 +418,10 @@ class _MessageObserverSink:
     def citation_repair_requested(self) -> bool:
         return self._citation_repair_requested
 
+    @property
+    def citation_repair_prompt(self) -> str:
+        return self._citation_repair_prompt or _CITATION_REPAIR_PROMPT
+
     def begin_citation_repair(self) -> None:
         """Consume the one retry request and preserve first-run usage."""
 
@@ -417,9 +429,12 @@ class _MessageObserverSink:
             return
         self._citation_repair_requested = False
         self._citation_repair_attempts += 1
-        self._usage_before_citation_repair = (
-            dict(self.usage) if self.usage is not None else None
-        )
+        self._usage_before_citation_repair = dict(self.usage) if self.usage is not None else None
+        # A runtime may emit only text_delta frames and no final
+        # assistant_message.  The withheld first draft must not be prefixed to
+        # the repaired attempt.
+        self._assistant_delta_chunks.clear()
+        self._pending_assistant = None
 
     async def ensure_partial_assistant_message(
         self,
@@ -484,7 +499,10 @@ class _MessageObserverSink:
         timestamp: int | None = None,
         allow_repair: bool,
     ) -> Event | None:
-        result = self._citation_guard.finalize(raw_text)
+        result = self._citation_guard.finalize(
+            raw_text,
+            repair_attempts=self._citation_repair_attempts,
+        )
         data = dict(base_data or {})
         data["text"] = result.text
         if result.bundle is not None:
@@ -514,25 +532,13 @@ class _MessageObserverSink:
         needs_repair = self._citation_publication_needs_repair(result.bundle)
         if allow_repair and needs_repair and self._citation_repair_attempts == 0:
             self._citation_repair_requested = True
-            logger.warning(
-                "citation_guard withheld draft and requested one repair pass"
+            self._citation_repair_prompt = self._build_citation_repair_prompt(
+                result.bundle,
             )
+            logger.warning("citation_guard withheld draft and requested one repair pass")
             return None
-        citations_after_repair = (
-            result.bundle.get("citations")
-            if isinstance(result.bundle, dict)
-            else None
-        )
-        has_trusted_citation = bool(
-            citations_after_repair
-            if isinstance(citations_after_repair, list)
-            else []
-        )
-        if (
-            needs_repair
-            and self._citation_repair_attempts
-            and not has_trusted_citation
-        ):
+        has_trusted_citation = self._has_trusted_citation(result.bundle)
+        if needs_repair and self._citation_repair_attempts and not has_trusted_citation:
             bundle = result.bundle
             if isinstance(bundle, dict):
                 integrity = bundle.get("integrity")
@@ -545,13 +551,135 @@ class _MessageObserverSink:
                     quality["publishStatus"] = "blocked"
                     bundle["quality"] = quality
             data["text"] = _CITATION_BLOCKED_TEXT
-            logger.error(
-                "citation_guard blocked draft after automatic repair failed"
-            )
+            logger.error("citation_guard blocked draft after automatic repair failed")
         return Event(
             type="assistant_message",
             data=data,
             **({"timestamp": timestamp} if timestamp is not None else {}),
+        )
+
+    @staticmethod
+    def _has_trusted_citation(bundle: dict[str, Any] | None) -> bool:
+        """Return whether at least one cited claim is actually supported.
+
+        A canonical citation id proves only that the handle came from the
+        current turn's Registry.  It does not prove that the selected field or
+        excerpt supports the surrounding claim.  Publication after the single
+        hidden repair therefore uses Claim Audit support, falling back to the
+        legacy citation-count rule only for old bundles without ``claims``.
+        """
+
+        if not isinstance(bundle, dict):
+            return False
+        citations = bundle.get("citations")
+        citations = citations if isinstance(citations, list) else []
+        quality = bundle.get("quality")
+        quality = quality if isinstance(quality, dict) else {}
+        claims = quality.get("claims")
+        if not isinstance(claims, list):
+            return bool(citations)
+
+        required_claims = [
+            claim
+            for claim in claims
+            if isinstance(claim, dict) and claim.get("citationRequired") is True
+        ]
+        if not required_claims:
+            return bool(citations)
+        for claim in required_claims:
+            citation_ids = claim.get("citationIds")
+            if not isinstance(citation_ids, list) or not citation_ids:
+                continue
+            if claim.get("status") in {"passed", "auto-bound", "repaired"}:
+                return True
+            bindings = claim.get("bindings")
+            if isinstance(bindings, list) and any(
+                isinstance(binding, dict)
+                and binding.get("supportStatus") == "supported"
+                for binding in bindings
+            ):
+                # A later policy layer may degrade an otherwise supported
+                # binding (for example a missing displayed unit).  That is a
+                # claim-local warning, not a reason to discard the citation as
+                # semantically untrusted.
+                return True
+        return False
+
+    def _build_citation_repair_prompt(
+        self,
+        bundle: dict[str, Any] | None,
+    ) -> str:
+        quality = bundle.get("quality") if isinstance(bundle, dict) else None
+        quality = quality if isinstance(quality, dict) else {}
+        raw_claims = quality.get("claims")
+        raw_claims = raw_claims if isinstance(raw_claims, list) else []
+        raw_issues = quality.get("issues")
+        raw_issues = raw_issues if isinstance(raw_issues, list) else []
+        claim_issues: list[dict[str, Any]] = []
+        for claim in raw_claims[:50]:
+            if not isinstance(claim, dict) or claim.get("citationRequired") is not True:
+                continue
+            issue_codes = claim.get("issueCodes")
+            issue_codes = (
+                [value for value in issue_codes if isinstance(value, str)]
+                if isinstance(issue_codes, list)
+                else []
+            )
+            if not issue_codes:
+                continue
+            exact = claim.get("exact")
+            claim_issues.append(
+                {
+                    "claimId": claim.get("claimId"),
+                    "exact": str(exact)[:500] if exact is not None else "",
+                    "issueCodes": issue_codes[:20],
+                    "citationIds": [
+                        value for value in claim.get("citationIds", []) if isinstance(value, str)
+                    ][:20],
+                }
+            )
+        candidates: list[dict[str, Any]] = []
+        for record in list(self._evidence_registry.values())[:100]:
+            evidence = record.evidence
+            summary: dict[str, Any] = {
+                "evidenceHandle": record.handle,
+                "sourceTitle": str(record.source.get("title") or "")[:240],
+                "kind": evidence.get("kind"),
+            }
+            if evidence.get("kind") == "structured-data":
+                summary.update(
+                    {
+                        "field": evidence.get("field"),
+                        "value": evidence.get("value"),
+                        "unit": evidence.get("unit"),
+                        "period": evidence.get("period"),
+                        "asOf": evidence.get("asOf"),
+                    }
+                )
+            elif evidence.get("kind") == "text":
+                summary["quote"] = str(evidence.get("quote") or "")[:500]
+            elif evidence.get("kind") == "calculation":
+                summary.update(
+                    {
+                        "expression": str(evidence.get("expression") or "")[:240],
+                        "result": evidence.get("result"),
+                        "unit": evidence.get("unit"),
+                    }
+                )
+            candidates.append(summary)
+        context = {
+            "claimIssues": claim_issues,
+            "generalIssues": [
+                str(entry.get("code"))
+                for entry in raw_issues[:50]
+                if isinstance(entry, dict) and isinstance(entry.get("code"), str)
+            ],
+            "allowedEvidence": candidates,
+        }
+        return (
+            _CITATION_REPAIR_PROMPT.rstrip()
+            + "\n\nRestricted repair context (JSON):\n"
+            + json.dumps(context, ensure_ascii=False, separators=(",", ":"))
         )
 
     def _citation_publication_needs_repair(
@@ -567,13 +695,46 @@ class _MessageObserverSink:
         citations = citations if isinstance(citations, list) else []
         integrity = bundle.get("integrity")
         integrity = integrity if isinstance(integrity, dict) else {}
-        if not citations or bool(integrity.get("unknownCitationIds")):
+        if (
+            not citations
+            or bool(integrity.get("unknownCitationIds"))
+            or bool(integrity.get("evidenceOverflowReasons"))
+        ):
             return True
-        # Finance's layered evaluator may still mark a cited answer
-        # ``draft-only`` when citation coverage is incomplete.  That state is
-        # surfaced as a quality warning, but it must not discard an otherwise
-        # inspectable answer.  The hard publication gate is intentionally
-        # narrower: zero trusted citations or model-authored unknown handles.
+        quality = bundle.get("quality")
+        quality = quality if isinstance(quality, dict) else {}
+        claims = quality.get("claims")
+        claims = claims if isinstance(claims, list) else []
+        issues = quality.get("issues")
+        issues = issues if isinstance(issues, list) else []
+        if any(
+            isinstance(entry, dict) and entry.get("code") == "claim_audit_truncated"
+            for entry in issues
+        ):
+            return True
+        repair_issue_codes = {
+            "claim_without_citation",
+            "numeric_claim_without_citation",
+            "date_claim_without_citation",
+            "claim_evidence_ambiguous",
+            "claim_evidence_conflict",
+            "claim_evidence_mismatch",
+            "claim_partially_supported",
+        }
+        policy_requires_clean_claims = quality.get("publishStatus") == "draft-only"
+        for claim in claims:
+            if not isinstance(claim, dict) or claim.get("citationRequired") is not True:
+                continue
+            issue_codes = claim.get("issueCodes")
+            if isinstance(issue_codes, list):
+                claim_codes = {
+                    value for value in issue_codes if isinstance(value, str)
+                }
+                if claim_codes and (
+                    policy_requires_clean_claims
+                    or bool(repair_issue_codes.intersection(claim_codes))
+                ):
+                    return True
         return False
 
     @property
@@ -965,7 +1126,7 @@ class SessionOrchestrator:
                 )
                 await runtime.run(
                     session,
-                    UserMessage(text=_CITATION_REPAIR_PROMPT),
+                    UserMessage(text=observer.citation_repair_prompt),
                 )
             await observer.ensure_partial_assistant_message()
             # finalize must run BEFORE save_session — it writes session.todos

@@ -17,6 +17,20 @@ from collections import Counter, defaultdict
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from src.core.claim_audit import (
+    CLAIM_EXTRACTOR_REVISION,
+    CLAIM_VERIFIER_REVISION,
+    ClaimCandidate,
+    canonical_evidence_dimension,
+    canonical_evidence_metric,
+    canonical_evidence_period,
+    extract_claims_with_status,
+    match_available_evidence,
+    structured_components_cover_claim,
+    structured_value_present,
+    verify_evidence_support,
+)
+
 _UNSOURCED_RE = re.compile(r"\[UNSOURCED\]", re.IGNORECASE)
 _UNVERIFIED_RE = re.compile(r"\[UNVERIFIED(?::[^\]]*)?\]", re.IGNORECASE)
 _ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -47,17 +61,29 @@ _ALLOWED_UNARY = {
     ast.UAdd: lambda value: value,
     ast.USub: lambda value: -value,
 }
+_BASELINE_POLICY = {
+    "policy_id": "oss-citation-baseline",
+    "revision": "citation-baseline-v2",
+    "mode": "required-on-evidence",
+    "config": {
+        "source_tiers": [],
+        "rules": {"factual_claim": {"citation_required": True}},
+        "failure": {"publish_on_degraded": "ready"},
+    },
+}
 
 
 def evaluate_citation_quality(
     answer: str,
     bundle: dict[str, Any],
     policy_snapshot: dict[str, Any] | None,
+    *,
+    available_evidence: Any = (),
 ) -> dict[str, Any]:
     """Return a copy of *bundle* decorated with quality annotations."""
 
     if not isinstance(policy_snapshot, dict):
-        return bundle
+        policy_snapshot = _BASELINE_POLICY
     policy_id = _clean_text(policy_snapshot.get("policy_id"), "unknown")
     revision = _clean_text(policy_snapshot.get("revision"), "unknown")
     mode = _clean_text(policy_snapshot.get("mode"), "required-on-evidence")
@@ -73,6 +99,7 @@ def evaluate_citation_quality(
     issues: list[dict[str, Any]] = []
     layer_issues: dict[str, int] = defaultdict(int)
     claim_groups = _citation_claim_groups(answer)
+    directly_linked_citation_ids = set(_CITATION_LINK_RE.findall(answer))
 
     def issue(
         code: str,
@@ -80,6 +107,8 @@ def evaluate_citation_quality(
         *,
         citation_ids: list[str] | None = None,
         claim: str | None = None,
+        claim_id: str | None = None,
+        location: dict[str, Any] | None = None,
         severity: str = "degraded",
     ) -> None:
         entry: dict[str, Any] = {
@@ -91,6 +120,10 @@ def evaluate_citation_quality(
             entry["citationIds"] = list(dict.fromkeys(citation_ids))
         if claim and claim.strip():
             entry["claim"] = {"exact": claim.strip()}
+        if claim_id:
+            entry["claimId"] = claim_id
+        if location:
+            entry["location"] = dict(location)
         issues.append(entry)
         layer_issues[layer] += 1
 
@@ -124,7 +157,7 @@ def evaluate_citation_quality(
         authority = _clean_text(tier.get("authority"), "") if tier else None
         tier_by_citation[citation_id] = tier_id or None
         authority_by_citation[citation_id] = authority or None
-        if not tier_id:
+        if tier_configs and not tier_id:
             issue("source_tier_unmatched", "L2", citation_ids=[citation_id])
         annotations = citation.get("annotations")
         if not isinstance(annotations, dict):
@@ -147,6 +180,8 @@ def evaluate_citation_quality(
     derived_rule = derived_rule if isinstance(derived_rule, dict) else {}
     time_rule = rules.get("time_boundary")
     time_rule = time_rule if isinstance(time_rule, dict) else {}
+    semantics = config.get("semantics")
+    semantics = semantics if isinstance(semantics, dict) else None
 
     structured_groups: dict[
         tuple[str, str, str, str],
@@ -163,12 +198,19 @@ def evaluate_citation_quality(
             continue
         kind = evidence.get("kind")
         if kind == "structured-data":
+            structured_rule = numeric_rule
+            if citation_id not in directly_linked_citation_ids:
+                structured_rule = {
+                    **numeric_rule,
+                    "require_value_in_answer": False,
+                }
             _validate_structured_evidence(
                 _citation_context(answer, citation_id, claim_groups),
                 citation_id,
                 evidence,
-                numeric_rule,
+                structured_rule,
                 issue,
+                semantics=semantics,
             )
             dataset_id = _clean_text(evidence.get("datasetId"), "")
             source = citation.get("source")
@@ -210,6 +252,7 @@ def evaluate_citation_quality(
                 citation_by_id,
                 derived_rule,
                 issue,
+                semantics=semantics,
             )
         elif kind == "text":
             quote = evidence.get("quote")
@@ -326,19 +369,22 @@ def evaluate_citation_quality(
                 severity="unverified",
             )
 
-    unsourced_marker_count = len(_UNSOURCED_RE.findall(answer))
-    uncited_numeric_claims = (
-        _uncited_numeric_claims(answer)
-        if (
+    claim_audits, claim_metrics = _audit_claims(
+        answer,
+        citation_by_id,
+        list(available_evidence),
+        mode=mode,
+        enabled=(
             isinstance(rules.get("factual_claim"), dict)
             and rules["factual_claim"].get("citation_required") is True
-        )
-        else []
+        ),
+        issue=issue,
+        integrity=integrity,
+        semantics=semantics,
     )
-    for claim in uncited_numeric_claims:
-        issue("numeric_claim_without_citation", "L4", claim=claim)
-    unsourced_count = unsourced_marker_count + len(uncited_numeric_claims)
-    unverified_count = len(_UNVERIFIED_RE.findall(answer))
+    unsourced_marker_count = len(_UNSOURCED_RE.findall(answer))
+    unsourced_count = unsourced_marker_count + claim_metrics["unsupported"]
+    unverified_count = len(_UNVERIFIED_RE.findall(answer)) + claim_metrics["unverified"]
     for claim in _claims_with_marker(answer, _UNSOURCED_RE):
         issue("answer_contains_unsourced_marker", "L5", claim=claim)
     for claim in _claims_with_marker(answer, _UNVERIFIED_RE):
@@ -348,6 +394,8 @@ def evaluate_citation_quality(
             claim=claim,
             severity="unverified",
         )
+
+    _merge_issues_into_claim_audits(claim_audits, issues)
 
     issue_severity_by_citation: dict[str, set[str]] = defaultdict(set)
     for entry in issues:
@@ -393,14 +441,334 @@ def evaluate_citation_quality(
             for layer in ("L0", "L1", "L2", "L3", "L4", "L5")
         },
         "issues": issues,
+        "claims": claim_audits,
+        "extractorRevision": CLAIM_EXTRACTOR_REVISION,
+        "verifierRevision": CLAIM_VERIFIER_REVISION,
         "metrics": {
             "citationCount": len(citation_by_id),
+            "claimDetectedCount": claim_metrics["detected"],
+            "claimCitationRequiredCount": claim_metrics["required"],
+            "claimBoundCount": claim_metrics["bound"],
+            "claimAutoBoundCount": claim_metrics["auto_bound"],
+            "claimUnsupportedCount": claim_metrics["unsupported"],
+            "claimSemanticMismatchCount": claim_metrics["mismatch"],
+            "claimAmbiguousCount": claim_metrics["ambiguous"],
+            "claimAuditTruncated": bool(claim_metrics["truncated"]),
             "unsourcedClaimCount": unsourced_count,
             "unverifiedClaimCount": unverified_count,
             "tierCounts": dict(sorted(tier_counts.items())),
         },
     }
     return result
+
+
+def _audit_claims(
+    answer: str,
+    citation_by_id: dict[str, dict[str, Any]],
+    available_evidence: list[Any],
+    *,
+    mode: str,
+    enabled: bool,
+    issue: Any,
+    integrity: dict[str, Any],
+    semantics: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    claims, extraction_truncated = extract_claims_with_status(
+        answer,
+        mode=mode,
+        semantics=semantics,
+    )
+    audits: list[dict[str, Any]] = []
+    metrics = {
+        "detected": len(claims),
+        "required": 0,
+        "bound": 0,
+        "auto_bound": 0,
+        "unsupported": 0,
+        "unverified": 0,
+        "mismatch": 0,
+        "ambiguous": 0,
+        "truncated": int(extraction_truncated),
+    }
+    if extraction_truncated:
+        issue("claim_audit_truncated", "L0")
+    for claim in claims:
+        required = claim.citation_required if enabled else bool(claim.attached_citation_ids)
+        if required:
+            metrics["required"] += 1
+        citation_ids = [
+            citation_id
+            for citation_id in claim.attached_citation_ids
+            if citation_id in citation_by_id
+        ]
+        issue_codes: list[str] = []
+        bindings: list[dict[str, str]] = []
+        status = "passed"
+        auto_bound = _claim_was_auto_bound(claim, citation_ids, citation_by_id)
+        if not required:
+            audits.append(
+                claim.to_bundle_dict(
+                    citation_ids=citation_ids,
+                    status="passed",
+                )
+            )
+            continue
+        if not citation_ids:
+            match = match_available_evidence(
+                claim,
+                available_evidence,
+                semantics=semantics,
+            )
+            if match.status == "ambiguous":
+                code = "claim_evidence_ambiguous"
+                status = "unverified"
+                metrics["ambiguous"] += 1
+                metrics["unverified"] += 1
+                severity = "unverified"
+            elif match.status == "conflict":
+                code = "claim_evidence_conflict"
+                status = "unverified"
+                metrics["unverified"] += 1
+                severity = "unverified"
+            else:
+                code = _missing_claim_code(claim)
+                status = "unsupported"
+                metrics["unsupported"] += 1
+                severity = "degraded"
+            issue_codes.append(code)
+            issue(
+                code,
+                "L4",
+                claim=claim.exact,
+                claim_id=claim.claim_id,
+                location=claim.location,
+                severity=severity,
+            )
+        else:
+            metrics["bound"] += 1
+            support_rows: list[tuple[str, str, int]] = []
+            for citation_id in citation_ids:
+                citation = citation_by_id[citation_id]
+                support = verify_evidence_support(
+                    claim,
+                    citation,
+                    semantics=semantics,
+                )
+                support_rows.append((citation_id, support.status, support.directness))
+            primary_id = _select_primary_citation(support_rows, citation_by_id)
+            for citation_id, support_status, _directness in support_rows:
+                if support_status == "supported":
+                    role = "primary" if citation_id == primary_id else "corroborating"
+                elif support_status == "partially-supported":
+                    role = "component"
+                elif support_status == "contradicted":
+                    role = "conflicting"
+                else:
+                    role = "component"
+                bindings.append(
+                    {
+                        "citationId": citation_id,
+                        "role": role,
+                        "supportStatus": support_status,
+                    }
+                )
+            bindings.extend(
+                _calculation_input_bindings(
+                    citation_ids,
+                    citation_by_id,
+                )
+            )
+            supported = [row for row in support_rows if row[1] == "supported"]
+            partial = [row for row in support_rows if row[1] == "partially-supported"]
+            contradicted = [row for row in support_rows if row[1] == "contradicted"]
+            missing = [row for row in support_rows if row[1] == "not-found"]
+            component_covered = structured_components_cover_claim(
+                claim,
+                [citation_by_id[citation_id] for citation_id in citation_ids],
+                semantics=semantics,
+            )
+            if contradicted or (not supported and not partial and not component_covered):
+                code = "claim_evidence_mismatch"
+                issue_codes.append(code)
+                status = "unverified"
+                metrics["mismatch"] += 1
+                metrics["unverified"] += 1
+                issue(
+                    code,
+                    "L4",
+                    citation_ids=[row[0] for row in contradicted + missing],
+                    claim=claim.exact,
+                    claim_id=claim.claim_id,
+                    location=claim.location,
+                    severity="unverified",
+                )
+            elif not supported and (partial or missing) and not component_covered:
+                code = "claim_partially_supported"
+                issue_codes.append(code)
+                status = "unverified"
+                metrics["unverified"] += 1
+                issue(
+                    code,
+                    "L4",
+                    citation_ids=[row[0] for row in partial + missing],
+                    claim=claim.exact,
+                    claim_id=claim.claim_id,
+                    location=claim.location,
+                    severity="unverified",
+                )
+            elif auto_bound:
+                status = "auto-bound"
+                metrics["auto_bound"] += 1
+            elif integrity.get("status") == "repaired":
+                status = "repaired"
+        audits.append(
+            claim.to_bundle_dict(
+                citation_ids=citation_ids,
+                bindings=bindings,
+                status=status,
+                issue_codes=issue_codes,
+            )
+        )
+    return audits, metrics
+
+
+def _missing_claim_code(claim: ClaimCandidate) -> str:
+    if claim.kind in {"financial-fact", "numeric-fact", "calculation"}:
+        return "numeric_claim_without_citation"
+    if claim.kind == "date-fact":
+        return "date_claim_without_citation"
+    return "claim_without_citation"
+
+
+def _claim_was_auto_bound(
+    claim: ClaimCandidate,
+    citation_ids: list[str],
+    citation_by_id: dict[str, dict[str, Any]],
+) -> bool:
+    for citation_id in citation_ids:
+        annotations = citation_by_id[citation_id].get("annotations")
+        annotations = annotations if isinstance(annotations, dict) else {}
+        binding = annotations.get("binding")
+        binding = binding if isinstance(binding, dict) else {}
+        claim_ids = binding.get("autoBoundClaimIds")
+        if isinstance(claim_ids, list) and claim.claim_id in claim_ids:
+            return True
+    return False
+
+
+def _calculation_input_bindings(
+    direct_citation_ids: list[str],
+    citation_by_id: dict[str, dict[str, Any]],
+) -> list[dict[str, str]]:
+    """Expose calculation dependencies without treating them as inline claims."""
+
+    output: list[dict[str, str]] = []
+    seen = set(direct_citation_ids)
+    for citation_id in direct_citation_ids:
+        citation = citation_by_id.get(citation_id)
+        evidence = citation.get("evidence") if isinstance(citation, dict) else None
+        if not isinstance(evidence, dict) or evidence.get("kind") != "calculation":
+            continue
+        inputs = evidence.get("inputs")
+        if not isinstance(inputs, list):
+            continue
+        for item in inputs:
+            if not isinstance(item, dict):
+                continue
+            dependency_id = item.get("citationId")
+            if not isinstance(dependency_id, str) or dependency_id in seen:
+                continue
+            dependency = citation_by_id.get(dependency_id)
+            dependency_evidence = (
+                dependency.get("evidence") if isinstance(dependency, dict) else None
+            )
+            support_status = "not-found"
+            if isinstance(dependency_evidence, dict):
+                kind = dependency_evidence.get("kind")
+                if kind == "structured-data":
+                    value_matches = _stable_scalar(
+                        dependency_evidence.get("value")
+                    ) == _stable_scalar(item.get("value"))
+                    cited_unit = _clean_text(dependency_evidence.get("unit"), "")
+                    input_unit = _clean_text(item.get("unit"), "")
+                    unit_matches = not (cited_unit or input_unit) or cited_unit == input_unit
+                    support_status = (
+                        "supported" if value_matches and unit_matches else "contradicted"
+                    )
+                elif kind == "text":
+                    quote = _clean_text(dependency_evidence.get("quote"), "")
+                    support_status = (
+                        "supported"
+                        if quote and _value_present(item.get("value"), quote)
+                        else "not-found"
+                    )
+            output.append(
+                {
+                    "citationId": dependency_id,
+                    "role": "calculation-input",
+                    "supportStatus": support_status,
+                }
+            )
+            seen.add(dependency_id)
+    return output
+
+
+def _select_primary_citation(
+    support_rows: list[tuple[str, str, int]],
+    citation_by_id: dict[str, dict[str, Any]],
+) -> str | None:
+    supported = [row for row in support_rows if row[1] == "supported"]
+    if not supported:
+        return None
+
+    def key(row: tuple[str, str, int]) -> tuple[int, int, int, str]:
+        citation_id, _status, directness = row
+        citation = citation_by_id[citation_id]
+        annotations = citation.get("annotations")
+        annotations = annotations if isinstance(annotations, dict) else {}
+        quality = annotations.get("quality")
+        quality = quality if isinstance(quality, dict) else {}
+        authority = _clean_text(quality.get("authority"), "")
+        authority_rank = {
+            "primary": 4,
+            "issuer": 3,
+            "authoritative": 3,
+            "secondary": 2,
+        }.get(authority, 0)
+        locator_rank = 1 if isinstance(citation.get("locator"), dict) else 0
+        return (-directness, -authority_rank, -locator_rank, citation_id)
+
+    return min(supported, key=key)[0]
+
+
+def _merge_issues_into_claim_audits(
+    audits: list[dict[str, Any]],
+    issues: list[dict[str, Any]],
+) -> None:
+    by_id = {
+        audit.get("claimId"): audit for audit in audits if isinstance(audit.get("claimId"), str)
+    }
+    for issue_entry in issues:
+        targets: list[dict[str, Any]] = []
+        claim_id = issue_entry.get("claimId")
+        if isinstance(claim_id, str) and claim_id in by_id:
+            targets = [by_id[claim_id]]
+        elif isinstance(issue_entry.get("citationIds"), list):
+            citation_ids = {value for value in issue_entry["citationIds"] if isinstance(value, str)}
+            targets = [
+                audit
+                for audit in audits
+                if citation_ids.intersection(audit.get("citationIds") or [])
+            ]
+        for audit in targets:
+            codes = audit.setdefault("issueCodes", [])
+            code = issue_entry.get("code")
+            if isinstance(code, str) and code not in codes:
+                codes.append(code)
+            if audit.get("status") in {"passed", "auto-bound", "repaired"}:
+                audit["status"] = (
+                    "unverified" if issue_entry.get("severity") == "unverified" else "degraded"
+                )
 
 
 def _match_tier(
@@ -517,6 +885,8 @@ def _validate_structured_evidence(
     evidence: dict[str, Any],
     rule: dict[str, Any],
     issue: Any,
+    *,
+    semantics: dict[str, Any] | None,
 ) -> None:
     for field in ("datasetId", "toolName", "field", "capturedAt"):
         if not _clean_text(evidence.get(field), ""):
@@ -546,7 +916,12 @@ def _validate_structured_evidence(
     ):
         issue("numeric_period_or_as_of_missing", "L1", citation_ids=[citation_id])
     if numeric and rule.get("require_value_in_answer") is True:
-        if not _value_present(value, claim_text):
+        if not structured_value_present(
+            value,
+            _clean_text(evidence.get("unit"), ""),
+            claim_text,
+            semantics=semantics,
+        ):
             issue(
                 "structured_value_not_present_in_answer",
                 "L4",
@@ -561,6 +936,8 @@ def _validate_calculation(
     citation_by_id: dict[str, dict[str, Any]],
     rule: dict[str, Any],
     issue: Any,
+    *,
+    semantics: dict[str, Any] | None = None,
 ) -> None:
     expression = evidence.get("expression")
     inputs = evidence.get("inputs")
@@ -607,6 +984,15 @@ def _validate_calculation(
                         "L4",
                         citation_ids=[citation_id, input_citation_id],
                     )
+                _validate_calculation_input_semantics(
+                    calculation=evidence,
+                    input_name=name,
+                    input_evidence=input_evidence,
+                    calculation_citation_id=citation_id,
+                    input_citation_id=input_citation_id,
+                    semantics=semantics,
+                    issue=issue,
+                )
             elif input_kind == "text":
                 quote = _clean_text(input_evidence.get("quote"), "")
                 if not quote or not _value_present(item.get("value"), quote):
@@ -654,6 +1040,97 @@ def _validate_calculation(
         and len(set(input_units)) > 1
     ):
         issue("calculation_input_unit_mismatch", "L4", citation_ids=[citation_id])
+
+
+def _validate_calculation_input_semantics(
+    *,
+    calculation: dict[str, Any],
+    input_name: str,
+    input_evidence: dict[str, Any],
+    calculation_citation_id: str,
+    input_citation_id: str,
+    semantics: dict[str, Any] | None,
+    issue: Any,
+) -> None:
+    if not isinstance(semantics, dict):
+        return
+    citation_ids = [calculation_citation_id, input_citation_id]
+    calculation_metric = canonical_evidence_metric(calculation, semantics)
+    dependencies = semantics.get("calculation_dependencies")
+    dependencies = dependencies if isinstance(dependencies, dict) else {}
+    allowed_metrics = dependencies.get(calculation_metric)
+    if isinstance(allowed_metrics, list) and allowed_metrics:
+        input_metric = canonical_evidence_metric(input_evidence, semantics)
+        allowed = {str(value) for value in allowed_metrics if str(value)}
+        if input_metric not in allowed:
+            issue(
+                "calculation_input_metric_mismatch",
+                "L4",
+                citation_ids=citation_ids,
+            )
+
+    calculation_entity = _clean_text(
+        calculation.get("entityId") or calculation.get("entityName"),
+        "",
+    )
+    input_entity = _clean_text(
+        input_evidence.get("entityId") or input_evidence.get("entityName"),
+        "",
+    )
+    if calculation_entity and input_entity and calculation_entity != input_entity:
+        issue(
+            "calculation_input_entity_mismatch",
+            "L4",
+            citation_ids=citation_ids,
+        )
+
+    for dimension in ("scope", "basis"):
+        calculation_value = _clean_text(calculation.get(dimension), "")
+        input_value = _clean_text(input_evidence.get(dimension), "")
+        if not calculation_value:
+            continue
+        if not input_value or canonical_evidence_dimension(
+            input_value,
+            semantics,
+            dimension,
+        ) != canonical_evidence_dimension(calculation_value, semantics, dimension):
+            issue(
+                f"calculation_input_{dimension}_mismatch",
+                "L4",
+                citation_ids=citation_ids,
+            )
+
+    calculation_period = canonical_evidence_period(
+        _clean_text(calculation.get("period"), ""),
+        semantics,
+    )
+    if not calculation_period or input_name not in {"current", "prior"}:
+        return
+    input_period = canonical_evidence_period(
+        _clean_text(
+            input_evidence.get("period") or input_evidence.get("asOf"),
+            "",
+        ),
+        semantics,
+    )
+    expected_period = (
+        calculation_period
+        if input_name == "current"
+        else _previous_comparable_period(calculation_period)
+    )
+    if not input_period or not expected_period or input_period != expected_period:
+        issue(
+            "calculation_input_period_mismatch",
+            "L4",
+            citation_ids=citation_ids,
+        )
+
+
+def _previous_comparable_period(period: str) -> str:
+    match = re.fullmatch(r"((?:19|20)\d{2})(.*)", period)
+    if match is None:
+        return ""
+    return f"{int(match.group(1)) - 1}{match.group(2)}"
 
 
 def _validate_time_boundary(

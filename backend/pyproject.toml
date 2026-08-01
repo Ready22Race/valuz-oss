@@ -78,6 +78,8 @@ dependencies = [
     # org introduces a Rust core we don't need for this scale of HTML.
     # Provides ``markdownify`` callable as a drop-in markdownify alias.
     "html-to-markdown>=1.0,<2.0",
+    # Deterministic block/list/table positions for Citation Claim Audit.
+    "markdown-it-py>=4.0,<5.0",
     # Image OCR for the LightLocal parser (KB image documents). rapidocr 3.x
     # supports PP-OCRv5 (the older ``rapidocr-onnxruntime`` package is frozen at
     # PP-OCRv4); its public API uses OmegaConf params

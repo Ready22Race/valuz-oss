@@ -80,9 +80,7 @@ class _FakeRuntime:
         pass
 
 
-async def test_run_turn_emits_running_session_update_before_runtime(
-    tmp_path, monkeypatch
-) -> None:
+async def test_run_turn_emits_running_session_update_before_runtime(tmp_path, monkeypatch) -> None:
     agent = AgentConfig(id="agent-1", name="tester")
     session = Session(
         id="sess-1",
@@ -141,8 +139,8 @@ class _CitationRepairRuntime:
                     },
                     "evidence": {
                         "kind": "text",
-                        "quote": "Revenue increased.",
-                        "snippet": "Revenue increased.",
+                        "quote": "Revenue increased by 12%.",
+                        "snippet": "Revenue increased by 12%.",
                         "capturedAt": "2026-07-30T10:00:00Z",
                     },
                     "locator": {"kind": "pdf", "page": 1},
@@ -157,7 +155,7 @@ class _CitationRepairRuntime:
                     data={"id": "tool-1", "content": json.dumps(evidence)},
                 )
             )
-            answer = "Revenue increased."
+            answer = "Revenue declined."
         else:
             answer = "Revenue increased [1](evidence://ev_repair_12345678)."
         await self.sink.emit(Event(type="assistant_message", data={"text": answer}))
@@ -177,9 +175,7 @@ class _CitationRepairRuntime:
         pass
 
 
-async def test_run_turn_performs_one_hidden_citation_repair(
-    tmp_path, monkeypatch
-) -> None:
+async def test_run_turn_performs_one_hidden_citation_repair(tmp_path, monkeypatch) -> None:
     agent = AgentConfig(id="agent-1", name="tester")
     session = Session(
         id="sess-1",
@@ -210,6 +206,8 @@ async def test_run_turn_performs_one_hidden_citation_repair(
     assert len(runtimes[0].prompts) == 2
     assert runtimes[0].prompts[0] == "Answer with citations"
     assert "previous draft was withheld" in runtimes[0].prompts[1]
+    assert '"claimIssues"' in runtimes[0].prompts[1]
+    assert '"evidenceHandle":"ev_repair_12345678"' in runtimes[0].prompts[1]
     assert message.assistant_message is not None
     assert "citation://cit_" in message.assistant_message
     assert [event.type for event in store.appended].count("assistant_message") == 1

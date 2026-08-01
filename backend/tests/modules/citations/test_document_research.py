@@ -298,9 +298,13 @@ async def test_connector_document_uses_provider_summary_and_locks_qa_to_connecto
     )
 
     assert summary is not None
-    assert summary.status == "ready"
+    assert summary.status == "degraded"
     assert summary.content == "Reportify canonical summary"
     assert summary.model_id == "valuz-search"
+    assert "base_integrity_not_passed" in {
+        issue["code"] for issue in summary.citation_bundle["quality"]["issues"]
+    }
+    assert "citation_quality_not_passed" in (summary.error_message or "")
     assert research.document_versions == ["reportify-v1"]
     assert [item.name for item in updates[0].mcp_servers] == ["valuz-search"]
     assert 'document_fetch(doc_id="reportify-1")' in updates[0].instructions

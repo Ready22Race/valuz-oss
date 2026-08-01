@@ -64,11 +64,18 @@ export interface StructuredDataEvidenceV1 {
   datasetId: string;
   toolName: string;
   recordKey?: string;
+  entityId?: string;
+  entityName?: string;
   field: string;
+  metric?: string;
   value: string | number | boolean | null;
   unit?: string;
+  currency?: string;
+  scale?: string | number;
   period?: string;
   asOf?: string;
+  scope?: string;
+  basis?: string;
   capturedAt: string;
   toolTraceRef?: string;
   /** Authoritative returned data window; never inferred from today's date. */
@@ -91,6 +98,12 @@ export interface CalculationEvidenceV1 {
   unit?: string;
   rounding?: string;
   calculatedAt: string;
+  entityId?: string;
+  entityName?: string;
+  metric?: string;
+  period?: string;
+  scope?: string;
+  basis?: string;
 }
 
 export type CitationEvidenceV1 =
@@ -155,6 +168,10 @@ export interface CitationIntegrityV1 {
   missingLocatorCitationIds: string[];
   repairAttempts: number;
   policyRevision: string;
+  evidenceRegisteredCount?: number;
+  evidenceRejectedCount?: number;
+  evidenceOverflowReasons?: string[];
+  publicationBlocked?: boolean;
 }
 
 export interface CitationQualityIssueV1 {
@@ -162,7 +179,70 @@ export interface CitationQualityIssueV1 {
   layer: "L0" | "L1" | "L2" | "L3" | "L4" | "L5" | string;
   severity: "degraded" | "unverified" | string;
   citationIds?: string[];
+  claimId?: string;
   claim?: TextQuoteSelectorV1;
+  location?: ClaimLocationV1;
+}
+
+export type ClaimLocationV1 =
+  | {
+      kind: "text";
+      blockIndex: number;
+      start: number;
+      end: number;
+      sourceStart?: number;
+      sourceEnd?: number;
+    }
+  | {
+      kind: "list-item";
+      blockIndex: number;
+      itemIndex: number;
+      start: number;
+      end: number;
+      sourceStart?: number;
+      sourceEnd?: number;
+    }
+  | {
+      kind: "table-cell";
+      blockIndex: number;
+      rowIndex: number;
+      columnIndex: number;
+      sourceStart?: number;
+      sourceEnd?: number;
+    }
+  | { kind: "legacy" };
+
+export interface ClaimEvidenceBindingV1 {
+  citationId: string;
+  role:
+    | "primary"
+    | "corroborating"
+    | "component"
+    | "calculation-input"
+    | "conflicting";
+  supportStatus:
+    | "supported"
+    | "partially-supported"
+    | "contradicted"
+    | "not-found";
+}
+
+export interface CitationClaimAuditV1 {
+  claimId: string;
+  exact: string;
+  segmentIndex: number;
+  citationRequired: boolean;
+  citationIds: string[];
+  bindings?: ClaimEvidenceBindingV1[];
+  status:
+    | "passed"
+    | "auto-bound"
+    | "repaired"
+    | "degraded"
+    | "unverified"
+    | "unsupported";
+  issueCodes: string[];
+  location?: ClaimLocationV1;
 }
 
 export interface CitationQualityResultV1 {
@@ -170,11 +250,22 @@ export interface CitationQualityResultV1 {
   policyRevision: string;
   mode: "required-on-evidence" | "strict-domain" | string;
   status: "passed" | "unverified" | "degraded";
-  publishStatus: "ready" | "draft-only" | string;
+  publishStatus: "ready" | "draft-only" | "blocked" | string;
   layers: Record<string, "passed" | "degraded" | string>;
   issues: CitationQualityIssueV1[];
+  claims?: CitationClaimAuditV1[];
+  extractorRevision?: string;
+  verifierRevision?: string;
   metrics: {
     citationCount: number;
+    claimDetectedCount?: number;
+    claimCitationRequiredCount?: number;
+    claimBoundCount?: number;
+    claimAutoBoundCount?: number;
+    claimUnsupportedCount?: number;
+    claimSemanticMismatchCount?: number;
+    claimAmbiguousCount?: number;
+    claimAuditTruncated?: boolean;
     unsourcedClaimCount: number;
     unverifiedClaimCount: number;
     tierCounts: Record<string, number>;

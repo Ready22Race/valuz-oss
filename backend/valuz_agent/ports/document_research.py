@@ -16,12 +16,15 @@ class ResolvedResearchDocument:
     document_version: str
     provider_id: str
     mcp_server_names: tuple[str, ...]
+    source_category: str | None = None
+    organization: str | None = None
 
 
 @dataclass(frozen=True)
 class ResolvedResearchSummary:
     content: str
     citation_bundle: dict[str, Any]
+    quality_policy: dict[str, Any] | None = None
 
 
 class DocumentResearchProviderPort(Protocol):

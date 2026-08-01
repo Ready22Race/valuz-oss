@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from src.core.citation_quality import evaluate_citation_quality
+from src.core.claim_audit import MAX_CLAIMS_PER_ANSWER
 
 
 def _policy() -> dict:
@@ -182,6 +183,104 @@ def test_policy_detects_uncited_financial_number_and_missing_coverage() -> None:
     )
     assert numeric_issue["claim"] == {"exact": "Margin was 23.5%."}
     assert result["quality"]["metrics"]["unsourcedClaimCount"] == 1
+    claims = {claim["exact"]: claim for claim in result["quality"]["claims"]}
+    assert claims["Revenue was 120 USDm."]["status"] == "degraded"
+    assert "evidence_coverage_missing" in claims["Revenue was 120 USDm."]["issueCodes"]
+    assert claims["Margin was 23.5%."]["status"] == "unsupported"
+    assert {
+        key: claims["Margin was 23.5%."]["location"][key]
+        for key in ("kind", "blockIndex", "start", "end")
+    } == {
+        "kind": "text",
+        "blockIndex": 0,
+        "start": 22,
+        "end": 39,
+    }
+
+
+def test_policy_audits_non_numeric_external_facts_and_dates() -> None:
+    result = evaluate_citation_quality(
+        "The company was founded in 1999. Alice is the CEO.",
+        {
+            "version": 1,
+            "citations": [],
+            "integrity": _integrity(),
+        },
+        _policy(),
+    )
+
+    claims = result["quality"]["claims"]
+    assert [claim["exact"] for claim in claims] == [
+        "The company was founded in 1999.",
+        "Alice is the CEO.",
+    ]
+    assert all(claim["citationRequired"] for claim in claims)
+    assert all(claim["status"] == "unsupported" for claim in claims)
+    assert result["quality"]["metrics"]["unsourcedClaimCount"] == 2
+
+
+def test_extra_non_supporting_citation_does_not_degrade_supported_claim() -> None:
+    def text_citation(citation_id: str, quote: str) -> dict:
+        return {
+            "citationId": citation_id,
+            "source": {
+                "sourceId": citation_id,
+                "providerId": "documents",
+                "sourceType": "document",
+                "sourceCategory": "filings",
+                "documentId": "doc-1",
+                "title": "Annual report",
+                "retrievedAt": "2026-07-30T10:00:00Z",
+            },
+            "evidence": {
+                "kind": "text",
+                "quote": quote,
+                "snippet": "",
+                "capturedAt": "2026-07-30T10:00:00Z",
+            },
+        }
+
+    result = evaluate_citation_quality(
+        "- Revenue grew [source](citation://cit_revenue)\n"
+        "- Profit rose [source](citation://cit_revenue)"
+        "[source](citation://cit_profit)",
+        {
+            "version": 1,
+            "citations": [
+                text_citation("cit_revenue", "Revenue grew from the filing."),
+                text_citation("cit_profit", "Profit rose from the filing."),
+            ],
+            "integrity": _integrity(),
+        },
+        _policy(),
+    )
+
+    assert result["quality"]["status"] == "passed"
+    assert result["quality"]["metrics"]["claimBoundCount"] == 2
+    assert all(claim["status"] == "passed" for claim in result["quality"]["claims"])
+
+
+def test_policy_rejects_real_structured_citation_with_wrong_field_semantics() -> None:
+    citation = _structured()
+    citation["evidence"]["field"] = "fiscal_year"
+    citation["evidence"]["value"] = 2025
+    citation["evidence"]["unit"] = "year"
+
+    result = evaluate_citation_quality(
+        "Revenue was 2025 USDm [source](citation://cit_revenue).",
+        {
+            "version": 1,
+            "citations": [citation],
+            "integrity": _integrity(),
+        },
+        _policy(),
+    )
+
+    claim = result["quality"]["claims"][0]
+    assert claim["status"] == "unverified"
+    assert claim["bindings"][0]["supportStatus"] == "not-found"
+    assert "claim_evidence_mismatch" in claim["issueCodes"]
+    assert "claim_evidence_mismatch" in {issue["code"] for issue in result["quality"]["issues"]}
 
 
 def test_policy_recomputes_calculation_and_checks_input_provenance() -> None:
@@ -440,4 +539,22 @@ def test_low_tier_requires_cross_check_on_same_claim_not_elsewhere() -> None:
     )
     assert "low_tier_without_cross_check" not in {
         issue["code"] for issue in checked["quality"]["issues"]
+    }
+
+
+def test_quality_bundle_exposes_claim_audit_truncation() -> None:
+    answer = "\n".join(
+        f"- Company {index} reported revenue of {index + 1} USD."
+        for index in range(MAX_CLAIMS_PER_ANSWER + 1)
+    )
+
+    result = evaluate_citation_quality(
+        answer,
+        {"version": 1, "citations": [], "integrity": _integrity()},
+        _policy(),
+    )
+
+    assert result["quality"]["metrics"]["claimAuditTruncated"] is True
+    assert "claim_audit_truncated" in {
+        issue["code"] for issue in result["quality"]["issues"]
     }

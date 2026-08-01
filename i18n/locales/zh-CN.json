@@ -2004,6 +2004,7 @@
       "documentDialog": "引用文档",
       "evidenceTitle": "引用内容",
       "integrityDegraded": "部分引用无法定位或验证，相关内容请结合原文核对。",
+      "publicationBlocked": "引用校验未通过，未经验证的回答未发布，请重试。",
       "noReadableDocument": "此来源没有可预览的原文，可返回聊天查看来源信息。",
       "openSource": "打开原文",
       "qualityCheckTitle": "检查结果",

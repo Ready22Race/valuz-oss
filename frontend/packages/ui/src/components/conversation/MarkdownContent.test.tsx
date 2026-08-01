@@ -847,6 +847,138 @@ describe("MarkdownContent citations", () => {
     ).toBeNull();
   });
 
+  it("uses claim source offsets to mark repeated claims independently", () => {
+    const content = "Metric repeated. Metric repeated.";
+    const locations = [
+      { kind: "text" as const, blockIndex: 0, start: 0, end: 16, sourceStart: 0, sourceEnd: 16 },
+      { kind: "text" as const, blockIndex: 0, start: 17, end: 33, sourceStart: 17, sourceEnd: 33 },
+    ];
+    render(
+      <MarkdownContent
+        content={content}
+        citationBundle={{
+          version: 1,
+          citations: [],
+          integrity: {
+            status: "passed",
+            unknownCitationIds: [],
+            unusedCitationIds: [],
+            missingLocatorCitationIds: [],
+            repairAttempts: 0,
+            policyRevision: "citation-v1",
+          },
+          quality: {
+            policyId: "finance",
+            policyRevision: "v1",
+            mode: "strict-domain",
+            status: "degraded",
+            publishStatus: "draft-only",
+            layers: { L4: "degraded" },
+            issues: locations.map((location, index) => ({
+              code: "claim_without_citation",
+              layer: "L4",
+              severity: "degraded",
+              claimId: `clm_${index + 1}`,
+              claim: { exact: "Metric repeated." },
+              location,
+            })),
+            claims: locations.map((location, index) => ({
+              claimId: `clm_${index + 1}`,
+              exact: "Metric repeated.",
+              segmentIndex: index,
+              citationRequired: true,
+              citationIds: [],
+              status: "unsupported" as const,
+              issueCodes: ["claim_without_citation"],
+              location,
+            })),
+            metrics: {
+              citationCount: 0,
+              unsourcedClaimCount: 2,
+              unverifiedClaimCount: 0,
+              tierCounts: {},
+            },
+          },
+        }}
+      />,
+    );
+
+    expect(document.querySelectorAll("[data-citation-claim-quality]")).toHaveLength(2);
+    expect(
+      document.querySelector("[data-citation-claim-quality]")?.getAttribute("aria-label"),
+    ).toMatch(/citation evidence is incomplete|引用证据不完整/i);
+    expect(document.querySelector("[data-citation-quality-warning]")).toBeNull();
+  });
+
+  it("places a table-cell claim marker using its stable source location", () => {
+    const content = "| Metric | 2024 |\n|---|---:|\n| Revenue | 120 USD |";
+    const valueStart = content.indexOf("120 USD");
+    const location = {
+      kind: "table-cell" as const,
+      blockIndex: 0,
+      rowIndex: 0,
+      columnIndex: 1,
+      sourceStart: valueStart,
+      sourceEnd: valueStart + "120 USD".length,
+    };
+    render(
+      <MarkdownContent
+        content={content}
+        citationBundle={{
+          version: 1,
+          citations: [],
+          integrity: {
+            status: "passed",
+            unknownCitationIds: [],
+            unusedCitationIds: [],
+            missingLocatorCitationIds: [],
+            repairAttempts: 0,
+            policyRevision: "citation-v1",
+          },
+          quality: {
+            policyId: "finance",
+            policyRevision: "v1",
+            mode: "strict-domain",
+            status: "degraded",
+            publishStatus: "draft-only",
+            layers: { L4: "degraded" },
+            issues: [
+              {
+                code: "numeric_claim_without_citation",
+                layer: "L4",
+                severity: "degraded",
+                claimId: "clm_table",
+                claim: { exact: "Revenue — 2024: 120 USD" },
+                location,
+              },
+            ],
+            claims: [
+              {
+                claimId: "clm_table",
+                exact: "Revenue — 2024: 120 USD",
+                segmentIndex: 0,
+                citationRequired: true,
+                citationIds: [],
+                status: "unsupported",
+                issueCodes: ["numeric_claim_without_citation"],
+                location,
+              },
+            ],
+            metrics: {
+              citationCount: 0,
+              unsourcedClaimCount: 1,
+              unverifiedClaimCount: 0,
+              tierCounts: {},
+            },
+          },
+        }}
+      />,
+    );
+
+    expect(document.querySelector("[data-citation-claim-quality]")).not.toBeNull();
+    expect(screen.getByText("120 USD")).not.toBeNull();
+  });
+
   it("keeps a global warning for quality issues without a location", () => {
     render(
       <MarkdownContent
@@ -960,5 +1092,75 @@ describe("MarkdownContent citations", () => {
         /some sources have not been cross-checked or conflict|部分来源尚未交叉验证或存在冲突/i,
       ),
     ).not.toBeNull();
+  });
+
+  it("renders one localized blocked state without quality fallbacks", () => {
+    render(
+      <MarkdownContent
+        content="Citation verification failed after one automatic repair attempt."
+        citationBundle={{
+          version: 1,
+          citations: [],
+          integrity: {
+            status: "repaired",
+            unknownCitationIds: [],
+            unusedCitationIds: [],
+            missingLocatorCitationIds: [],
+            repairAttempts: 1,
+            policyRevision: "citation-v1",
+            publicationBlocked: true,
+          },
+          quality: {
+            policyId: "finance",
+            policyRevision: "finance-citation-policy-v1",
+            mode: "strict-domain",
+            status: "degraded",
+            publishStatus: "blocked",
+            layers: { L4: "degraded" },
+            issues: [
+              {
+                code: "claim_evidence_mismatch",
+                layer: "L4",
+                severity: "unverified",
+                claimId: "clm_blocked",
+                claim: { exact: "Revenue was 100 USD." },
+              },
+            ],
+            claims: [
+              {
+                claimId: "clm_blocked",
+                exact: "Revenue was 100 USD.",
+                segmentIndex: 0,
+                citationRequired: true,
+                citationIds: [],
+                status: "unverified",
+                issueCodes: ["claim_evidence_mismatch"],
+              },
+            ],
+            metrics: {
+              citationCount: 0,
+              unsourcedClaimCount: 1,
+              unverifiedClaimCount: 1,
+              tierCounts: {},
+            },
+          },
+        }}
+      />,
+    );
+
+    expect(
+      screen.getByText(
+        /unverified answer was not published|未经验证的回答未发布/i,
+      ),
+    ).not.toBeNull();
+    expect(
+      screen.queryByText(/after one automatic repair attempt/i),
+    ).toBeNull();
+    expect(
+      document.querySelector("[data-citation-quality-warning]"),
+    ).toBeNull();
+    expect(
+      document.querySelector("[data-citation-claim-quality]"),
+    ).toBeNull();
   });
 });
