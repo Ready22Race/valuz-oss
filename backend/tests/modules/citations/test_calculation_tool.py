@@ -103,6 +103,43 @@ async def test_calculation_tool_converts_unscaled_ratio_to_percentage_points() -
     )
 
 
+async def test_calculation_tool_preserves_structured_collection_addresses() -> None:
+    current = "evc_income_current_12345678#/data/1/total_revenue/operating_revenue"
+    prior = "evc_income_prior_12345678#/data/0/total_revenue/operating_revenue"
+    result = await _citation_calculate_handler(
+        {
+            "expression": "(current - prior) / prior",
+            "inputs": [
+                {
+                    "name": "current",
+                    "value": "170899152276",
+                    "unit": "CNY",
+                    "evidenceHandle": current,
+                },
+                {
+                    "name": "prior",
+                    "value": "147693604994",
+                    "unit": "CNY",
+                    "evidenceHandle": prior,
+                },
+            ],
+            "unit": "%",
+            "decimalPlaces": 2,
+        },
+        ExecContext(session_id="s1"),
+    )
+
+    assert result.is_error is False
+    payload = json.loads(result.content)
+    assert payload["result"] == "15.71"
+    assert [
+        item["citationId"]
+        for item in payload["_valuz_evidence"]["evidence"]["inputs"]
+    ] == [current, prior]
+    registry = EvidenceRegistry()
+    assert registry.register_tool_result(result.content, tool_name="citation_calculate") == 1
+
+
 def test_calculation_tool_is_available_to_every_session() -> None:
     (tool,) = build_citation_calculation_tool_defs()
     assert tool.name == "citation_calculate"

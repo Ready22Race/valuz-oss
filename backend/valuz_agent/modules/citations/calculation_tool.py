@@ -17,6 +17,9 @@ from src.core.tools import ExecContext
 CITATION_CALCULATE_TOOL_NAME = "citation_calculate"
 _NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 _HANDLE_RE = re.compile(r"^ev_[A-Za-z0-9_-]{8,128}$")
+_COLLECTION_ADDRESS_RE = re.compile(
+    r"^evc_[A-Za-z0-9_-]{8,128}#/[^\s#?]{1,1024}$"
+)
 
 _PARAMS = {
     "type": "object",
@@ -142,7 +145,10 @@ async def _citation_calculate_handler(
             handle = raw.get("evidenceHandle")
             if not isinstance(name, str) or not _NAME_RE.fullmatch(name) or name in values:
                 raise ValueError("invalid_input_name")
-            if not isinstance(handle, str) or not _HANDLE_RE.fullmatch(handle):
+            if not isinstance(handle, str) or not (
+                _HANDLE_RE.fullmatch(handle)
+                or _COLLECTION_ADDRESS_RE.fullmatch(handle)
+            ):
                 raise ValueError("invalid_evidence_handle")
             value = _decimal(raw.get("value"))
             values[name] = value
@@ -217,7 +223,8 @@ def build_citation_calculation_tool_defs() -> tuple[ToolDef, ...]:
             name=CITATION_CALCULATE_TOOL_NAME,
             description=(
                 "Compute a derived numeric result deterministically from values that already "
-                "have evidence handles, and return a calculation evidence handle. Use this "
+                "have direct evidence handles or exact structured Collection Addresses, and "
+                "return a calculation evidence handle. Use this "
                 "for growth rates, margins, ratios, differences, sums, and other arithmetic "
                 "that appears in a citation-aware answer. Cite the returned handle on the "
                 "derived claim; do not calculate those values only in prose. When unit is %, "

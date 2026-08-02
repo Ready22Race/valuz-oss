@@ -40,11 +40,13 @@ from src.core.claim_audit import (
 _UNSOURCED_RE = re.compile(r"\[UNSOURCED\]", re.IGNORECASE)
 _UNVERIFIED_RE = re.compile(r"\[UNVERIFIED(?::[^\]]*)?\]", re.IGNORECASE)
 _ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
-_NUMBER_RE = re.compile(r"(?<![A-Za-z0-9_])[-+]?\d[\d,]*(?:\.\d+)?")
+_NUMBER_RE = re.compile(r"(?<![A-Za-z0-9_])[-+−﹣－＋]?\d[\d,]*(?:\.\d+)?")
+_CJK_CHAR_RE = re.compile(r"[\u3400-\u9fff]")
+_LATIN_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9'-]{1,}")
 _CITATION_LINK_RE = re.compile(r"\[[^\]\n]{0,240}\]\(citation://([A-Za-z0-9_-]{1,160})\)")
 _CLAIM_BOUNDARY_RE = re.compile(r"(?<=[.!?。！？；;])\s+|\n+")
 _FINANCIAL_NUMBER_RE = re.compile(
-    r"(?<![A-Za-z0-9_])[-+]?\d[\d,]*(?:\.\d+)?"
+    r"(?<![A-Za-z0-9_])[-+−﹣－＋]?\d[\d,]*(?:\.\d+)?"
     r"(?:\s*(?:%|bp|bps|[A-Z]{3}|百万元|亿元|万元|元|倍))",
     re.IGNORECASE,
 )
@@ -523,6 +525,11 @@ def _audit_claims(
         bindings: list[dict[str, str]] = []
         status = "passed"
         auto_bound = _claim_was_auto_bound(claim, citation_ids, citation_by_id)
+        equivalent_bound = _claim_was_equivalent_bound(
+            claim,
+            citation_ids,
+            citation_by_id,
+        )
         if not required:
             audits.append(
                 claim.to_bundle_dict(
@@ -622,6 +629,14 @@ def _audit_claims(
             ]
             entity_conflicted = [row for row in support_rows if row[1] == "entity-conflict"]
             missing = [row for row in support_rows if row[1] == "not-found"]
+            verification_gap_ids = [
+                row[0] for row in partial + missing + advisory_contradicted
+            ]
+            cross_language_gap = _cross_language_text_evidence_gap(
+                claim,
+                verification_gap_ids,
+                citation_by_id,
+            )
             component_covered = (
                 structured_components_cover_claim(
                     claim,
@@ -674,6 +689,26 @@ def _audit_claims(
                     location=claim.location,
                     severity="unverified",
                 )
+            elif equivalent_bound:
+                # A deterministic pre-audit pass proved this shorter recap is
+                # equivalent to an already-supported claim from the same
+                # period and metric. The underlying excerpt may not directly
+                # match a translated/abbreviated recap, so expose the actual
+                # transitive proof instead of reporting a false mismatch.
+                bindings = [
+                    (
+                        {
+                            **binding,
+                            "role": "primary" if index == 0 else "corroborating",
+                            "supportStatus": "equivalent-claim",
+                        }
+                        if binding.get("citationId") in citation_ids
+                        else binding
+                    )
+                    for index, binding in enumerate(bindings)
+                ]
+                status = "auto-bound"
+                metrics["auto_bound"] += 1
             elif (
                 not supported
                 and not partial
@@ -683,10 +718,15 @@ def _audit_claims(
                 # ``not-found`` is an advisory verification gap, not proof
                 # that the statement is wrong.  Preserve it for the citation
                 # detail card without escalating the inline index.
-                code = "claim_evidence_mismatch"
+                code = (
+                    "claim_translation_not_verified"
+                    if cross_language_gap
+                    else "claim_evidence_mismatch"
+                )
                 issue_codes.append(code)
                 status = "unverified"
-                metrics["mismatch"] += 1
+                if code == "claim_evidence_mismatch":
+                    metrics["mismatch"] += 1
                 metrics["unverified"] += 1
                 issue(
                     code,
@@ -702,7 +742,11 @@ def _audit_claims(
                 and (partial or missing or advisory_contradicted)
                 and not component_covered
             ):
-                code = "claim_partially_supported"
+                code = (
+                    "claim_translation_not_verified"
+                    if cross_language_gap
+                    else "claim_partially_supported"
+                )
                 issue_codes.append(code)
                 status = "unverified"
                 metrics["unverified"] += 1
@@ -868,6 +912,22 @@ def _claim_was_auto_bound(
     return False
 
 
+def _claim_was_equivalent_bound(
+    claim: ClaimCandidate,
+    citation_ids: list[str],
+    citation_by_id: dict[str, dict[str, Any]],
+) -> bool:
+    for citation_id in citation_ids:
+        annotations = citation_by_id[citation_id].get("annotations")
+        annotations = annotations if isinstance(annotations, dict) else {}
+        binding = annotations.get("binding")
+        binding = binding if isinstance(binding, dict) else {}
+        claim_ids = binding.get("equivalentClaimIds")
+        if isinstance(claim_ids, list) and claim.claim_id in claim_ids:
+            return True
+    return False
+
+
 def _calculation_input_bindings(
     direct_citation_ids: list[str],
     citation_by_id: dict[str, dict[str, Any]],
@@ -993,6 +1053,53 @@ def _select_primary_citation(
         return (-directness, -authority_rank, -locator_rank, citation_id)
 
     return min(supported, key=key)[0]
+
+
+def _cross_language_text_evidence_gap(
+    claim: ClaimCandidate,
+    citation_ids: list[str],
+    citation_by_id: dict[str, dict[str, Any]],
+) -> bool:
+    """Distinguish an unverified translation from an evidence mismatch.
+
+    The deterministic verifier can prove numbers, periods and direct text
+    overlap, but it cannot prove that a Chinese paraphrase is semantically
+    equivalent to an English transcript (or vice versa). Calling that common
+    case a mismatch tells the user the source is wrong when the actual limit
+    is only that no cross-language semantic verifier ran. Return true only
+    when every unresolved citation is text evidence in the opposite script;
+    mixed or same-language evidence keeps the ordinary mismatch class.
+    """
+
+    unresolved_texts: list[str] = []
+    for citation_id in citation_ids:
+        citation = citation_by_id.get(citation_id)
+        evidence = citation.get("evidence") if isinstance(citation, dict) else None
+        if not isinstance(evidence, dict) or evidence.get("kind") != "text":
+            return False
+        evidence_text = " ".join(
+            str(evidence.get(key) or "")
+            for key in ("prefix", "quote", "suffix", "snippet")
+        ).strip()
+        if not evidence_text:
+            return False
+        unresolved_texts.append(evidence_text)
+    if not unresolved_texts:
+        return False
+
+    claim_cjk = len(_CJK_CHAR_RE.findall(claim.exact))
+    claim_latin = len(_LATIN_WORD_RE.findall(claim.exact))
+    for evidence_text in unresolved_texts:
+        evidence_cjk = len(_CJK_CHAR_RE.findall(evidence_text))
+        evidence_latin = len(_LATIN_WORD_RE.findall(evidence_text))
+        opposite_script = (
+            claim_cjk >= 4 and evidence_cjk < 2 and evidence_latin >= 4
+        ) or (
+            claim_latin >= 4 and evidence_latin < 2 and evidence_cjk >= 4
+        )
+        if not opposite_script:
+            return False
+    return True
 
 
 def _merge_issues_into_claim_audits(
@@ -1230,6 +1337,13 @@ def _validate_calculation(
             if input_kind == "structured-data":
                 cited_unit = _clean_text(input_evidence.get("unit"), "")
                 input_unit = _clean_text(item.get("unit"), "")
+                # A Collection Address already identifies the exact structured
+                # field.  Calculation tools may preserve only that address and
+                # numeric value, so inherit the field's trusted unit instead of
+                # treating an omitted duplicate unit as a mismatch.
+                if not input_unit and cited_unit:
+                    input_unit = cited_unit
+                    item["unit"] = cited_unit
                 if not structured_values_equivalent(
                     input_evidence.get("value"),
                     cited_unit,
@@ -1434,7 +1548,12 @@ def _validate_time_boundary(
     as_of = _date_prefix(evidence.get("asOf"))
     start = _date_prefix(coverage.get("start"))
     end = _date_prefix(coverage.get("end"))
-    if rule.get("require_coverage") is True and as_of and not (start or end):
+    if (
+        rule.get("require_coverage") is True
+        and as_of
+        and not (start or end)
+        and _claim_requires_range_coverage(claim_text)
+    ):
         issue("evidence_coverage_missing", "L5", citation_ids=[citation_id])
     if as_of and start and as_of < start:
         issue("evidence_before_coverage", "L5", citation_ids=[citation_id])
@@ -1460,6 +1579,37 @@ def _validate_time_boundary(
             citation_ids=[citation_id],
             severity="unverified",
         )
+
+
+def _claim_requires_range_coverage(claim_text: str) -> bool:
+    """Return whether a claim needs interval coverage rather than a snapshot.
+
+    ``asOf`` and ``period`` identify a point or reporting-period observation.
+    They are sufficient for claims about that observation.  A separate
+    coverage range is only required when the prose asserts a span, trend or
+    change over time.  Requiring ``coverage`` for every structured snapshot
+    made exact financial-statement fields look unverified to users.
+    """
+
+    if re.search(
+        r"(?:"
+        r"(?:从|自).{0,32}(?:至|到|截至)|"
+        r"(?:过去|近|最近|连续)\s*(?:\d+|一|两|三|四|五|六|七|八|九|十)?\s*"
+        r"(?:天|周|月|季|季度|年)|"
+        r"(?:区间|期间内|时间段|走势|趋势|历史变化)|"
+        r"\b(?:from|between|since|through|over|during|trend|history)\b"
+        r")",
+        claim_text,
+        re.IGNORECASE,
+    ):
+        return True
+
+    temporal_values = {
+        value
+        for value in _ISO_DATE_RE.findall(claim_text)
+        if isinstance(value, str) and value
+    }
+    return len(temporal_values) > 1
 
 
 def _safe_decimal_eval(expression: str, values: dict[str, Decimal]) -> Decimal:
@@ -1509,7 +1659,10 @@ def _as_decimal(value: Any) -> Decimal | None:
     if isinstance(value, bool) or value is None:
         return None
     try:
-        result = Decimal(str(value).replace(",", ""))
+        normalized = str(value).translate(
+            str.maketrans({"−": "-", "﹣": "-", "－": "-", "＋": "+"})
+        )
+        result = Decimal(normalized.replace(",", ""))
     except (InvalidOperation, ValueError):
         return None
     return result if result.is_finite() else None
@@ -1521,7 +1674,19 @@ def _value_present(value: Any, text: str) -> bool:
     decimal = _as_decimal(value)
     if decimal is not None:
         for match in _NUMBER_RE.finditer(text):
-            candidate = _as_decimal(match.group(0))
+            candidate_text = match.group(0).translate(
+                str.maketrans({"−": "-", "﹣": "-", "－": "-", "＋": "+"})
+            )
+            if not candidate_text.startswith(("-", "+")):
+                prefix = text[max(0, match.start() - 32) : match.start()]
+                if re.search(
+                    r"(?:同比|环比)?\s*(?:下降|减少|下跌|降低)\s*$|"
+                    r"\b(?:declined?|decreased?|fell|down)\s+(?:by\s+)?$",
+                    prefix,
+                    re.IGNORECASE,
+                ):
+                    candidate_text = f"-{candidate_text}"
+            candidate = _as_decimal(candidate_text)
             if candidate is not None and candidate == decimal:
                 return True
         return False

@@ -93,11 +93,12 @@ async def test_post_tool_hook_compacts_model_output_and_keeps_private_sidecar() 
     )
 
     compacted = output["hookSpecificOutput"]["updatedMCPToolOutput"]
-    assert "bulk transcript" not in json.dumps(compacted)
+    assert "bulk transcript" in json.dumps(compacted)
     envelope = compacted["chunks"][0]["_valuz_evidence"][0]
     assert envelope["evidenceHandle"] == "ev_msft_q1_12345678"
     assert envelope["excerpt"] == "Azure revenue grew 40% and 39% in constant currency."
-    assert "bulk transcript" in runtime._citation_tool_result_sidecars["tool-1"]
+    assert "bulk transcript" not in runtime._citation_tool_result_sidecars["tool-1"]
+    assert "ev_msft_q1_12345678" in runtime._citation_tool_result_sidecars["tool-1"]
 
 
 async def test_post_tool_hook_bounds_filing_evidence_but_keeps_private_sidecar() -> None:
@@ -117,12 +118,13 @@ async def test_post_tool_hook_bounds_filing_evidence_but_keeps_private_sidecar()
     compacted = output["hookSpecificOutput"]["updatedMCPToolOutput"]
     assert compacted["_valuz_compaction"] == {
         "evidenceReturned": 80,
-        "evidenceShown": 24,
-        "bulkTextOmitted": True,
+        "evidenceShown": 80,
+        "bulkTextOmitted": False,
+        "modelContentPreserved": True,
     }
-    assert compacted["_valuz_evidence"][-1]["evidenceHandle"] == "ev_msft_q1_00000023"
+    assert compacted["_valuz_evidence"][-1]["evidenceHandle"] == "ev_msft_q1_00000079"
     assert len(compacted["_valuz_evidence"][-1]["excerpt"]) == 700
-    assert "complete transcript" not in json.dumps(compacted)
+    assert "complete transcript" in json.dumps(compacted)
     assert "ev_msft_q1_00000079" in runtime._citation_tool_result_sidecars["tool-long"]
 
 
@@ -155,8 +157,9 @@ async def test_post_tool_hook_standardizes_indexed_chunks_into_evidence() -> Non
     )
 
     compacted = output["hookSpecificOutput"]["updatedMCPToolOutput"]
-    assert compacted["_valuz_evidence"][0]["evidenceHandle"].startswith(
-        "ev_chunk_"
+    assert compacted["chunks"][0]["evidenceHandle"].startswith("ev_chunk_")
+    assert compacted["chunks"][0]["content"] == (
+        "Demand continues to exceed available supply."
     )
     sidecar = json.loads(runtime._citation_tool_result_sidecars["kb-chunk"])
     assert sidecar["_valuz_evidence"][0]["locator"]["page"] == 9
@@ -188,8 +191,8 @@ async def test_post_tool_hook_keeps_larger_transcript_window_visible() -> None:
     )
 
     compacted = output["hookSpecificOutput"]["updatedMCPToolOutput"]
-    assert compacted["_valuz_compaction"]["evidenceShown"] == 60
-    assert compacted["_valuz_evidence"][-1]["evidenceHandle"] == "ev_msft_q1_00000059"
+    assert compacted["_valuz_compaction"]["evidenceShown"] == 80
+    assert compacted["_valuz_evidence"][-1]["evidenceHandle"] == "ev_msft_q1_00000079"
 
 
 async def test_post_tool_hook_keeps_late_prose_visible_within_long_chunk() -> None:

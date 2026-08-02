@@ -31,6 +31,7 @@ from src.core.citation import (
     CitationGuard,
     EvidenceRegistry,
     compact_citation_tool_content,
+    private_citation_tool_content,
 )
 from src.core.citation_repair import (
     CITATION_CLAIM_PATCH_VERSION,
@@ -38,7 +39,8 @@ from src.core.citation_repair import (
     repairable_claim_ids,
 )
 from src.core.citation_research_budget import is_stable_general_knowledge_query
-from src.core.claim_audit import extract_claims, verify_evidence_support
+from src.core.claim_audit import extract_claims
+from src.core.claim_evidence_resolution import resolve_claim_evidence
 from src.core.events import Event, EventSink, GlobalEventTap
 from src.core.output_contract import parse_output_contract
 from src.core.prompt_builder import wrap_for_mode
@@ -47,7 +49,13 @@ from src.core.session_approval_cache import SessionApprovalCache, SessionRule
 from src.core.session_bus import SessionEventBus
 from src.core.store_port import StorePort
 from src.core.time_utils import now_ms
-from src.core.types import Error, Message, Session, UserMessage
+from src.core.types import (
+    BARE_COMPLETION_METADATA_KEY,
+    Error,
+    Message,
+    Session,
+    UserMessage,
+)
 from src.core.workspace import bootstrap_session_workspace
 
 # Per-session callable injected into runtimes that wire ``approve_for_session``.
@@ -60,6 +68,27 @@ CitationRepairRefreshHook = Callable[[str, str], Awaitable[bool]]
 
 logger = logging.getLogger(__name__)
 
+
+def _citation_output_scope_context(user_prompt: str) -> str:
+    """Return a small host contract for multi-period sourced answers."""
+
+    contract = parse_output_contract(user_prompt)
+    count = contract.requested_period_count
+    if count is None or count < 2:
+        return ""
+    return (
+        "Host-enforced multi-period answer contract:\n"
+        f"- The final answer must contain {count} distinct period sections, one for "
+        "each requested source period.\n"
+        "- Cover the user's requested topics inside every period. If a topic is "
+        "absent from that period's source, state that gap inside the same period.\n"
+        "- Do not finish with only a cross-period recap, retrieval note, coverage "
+        "limitation, or statement that the work is complete. Publish the actual "
+        "period-by-period answer.\n"
+        "- Once the required periods have evidence, stop searching and compose the "
+        "answer from the collected evidence handles."
+    )
+
 _CITATION_REPAIR_PROMPT = f"""The sealed draft has claim-local citation issues.
 Do not rewrite the answer. Return only a JSON claim patch with this exact shape:
 {{"version":"{CITATION_CLAIM_PATCH_VERSION}","patches":[{{"claimId":"...","replacementText":"...","evidenceHandles":["ev_..."]}}]}}
@@ -71,12 +100,12 @@ Rules:
   claim, return only the replacement cell content, not its row/header labels.
   It contains no Markdown citation link, evidence handle, source list,
   validation code, or commentary. The host attaches validated handles.
-- Use only exact handles from candidateEvidence or newly returned trusted tool
-  evidence. Never invent, copy, merge, or guess a handle.
-- If candidateEvidence is non-empty, do not call tools. If it cannot support a
-  claim, replace only that claim with a concise user-facing coverage limitation.
-- If candidateEvidence is empty, retrieve only evidence needed by the listed
-  claims, within the shared research budget, then return the JSON patch.
+- Use only exact handles from candidateEvidence. Never invent, copy, merge, or
+  guess a handle.
+- Do not call tools. Research is complete and the repair pass is intentionally
+  isolated from tools and conversation history. If candidateEvidence cannot
+  support a claim, replace only that claim with a concise user-facing coverage
+  limitation.
 - Correct a value only when trusted evidence supports the correction. Never use
   a proxy metric, different entity, period, document, or derived calculation as
   if it were the requested claim.
@@ -106,6 +135,10 @@ _REPAIRABLE_CLAIM_ISSUE_CODES = {
     "claim_source_entity_conflict",
     "claim_evidence_mismatch",
     "claim_partially_supported",
+}
+_ACTIONABLE_REPAIR_ISSUE_CODES = {
+    "claim_evidence_conflict",
+    "claim_source_entity_conflict",
 }
 
 _INTERNAL_CITATION_PROSE_RE = re.compile(
@@ -154,7 +187,11 @@ _LEADING_PROGRESS_RE = re.compile(
     r"(?:结果|答案).{0,16}|"
     r"(?:现在)?(?:可以|将要)?给出.{0,48}(?:答案|结果).{0,80}|"
     r"以下是.{0,32}(?:完整)?答案\s*[:：]?|"
-    r"(?:I|we)(?: have|'ve)? (?:found|retrieved|collected).{0,80}"
+    r"(?:I|we)(?: now)?(?: have|'ve)? (?:found|retrieved|collected).{0,80}|"
+    r"(?:I|we)(?: now)?(?: have|'ve) (?:all|enough|the needed).{0,32}"
+    r"(?:data|information|sources?|evidence).{0,80}|"
+    r"(?:let me|I(?: will|'ll)|we(?: will|'ll))\s+"
+    r"(?:compile|consolidate|summari[sz]e|prepare|write).{0,80}"
     r")$",
     re.IGNORECASE,
 )
@@ -198,6 +235,30 @@ _NO_RETRIEVAL_REQUEST_RE = re.compile(
 _STRICT_MARKDOWN_TABLE_REQUEST_RE = re.compile(
     r"(?:只|仅).{0,16}(?:输出|返回|列出).{0,16}(?:Markdown\s*)?表格|"
     r"\bonly\s+(?:output|return)\b.{0,24}\bmarkdown\s+table\b",
+    re.IGNORECASE,
+)
+_PERIOD_BY_PERIOD_REQUEST_RE = re.compile(
+    r"(?:按|逐)(?:季度|月份|月度|年度|年份|期间|期次)|"
+    r"\b(?:quarter|period)[ -]by[ -](?:quarter|period)\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_CROSS_PERIOD_RECAP_RE = re.compile(
+    r"(?:跨(?:季度|月份|年度|期间).{0,12}(?:趋势|概览|对比|比较|汇总)|"
+    r"(?:趋势|概览|对比|比较|汇总).{0,12}(?:表|表格)|"
+    r"\b(?:cross[ -]period|comparison|trend|overview|summary)[ -]?(?:table|view)?\b)",
+    re.IGNORECASE,
+)
+_PERIOD_HEADING_RE = re.compile(
+    r"^\s*#{1,6}\s+.*(?:FY\s*\d{2,4}\s*Q[1-4]|Q[1-4]\s*FY\s*\d{2,4}|"
+    r"\d{4}\s*年?\s*(?:Q[1-4]|第?[一二三四1-4]季度))",
+    re.IGNORECASE,
+)
+_CROSS_PERIOD_RECAP_HEADING_RE = re.compile(
+    r"^\s*#{1,6}\s+.*(?:跨(?:季度|月份|年度|期间)|"
+    r"(?:趋势|对比|比较|汇总).{0,12}(?:概览|总览|表)|"
+    r"(?:核心|主要|整体).{0,12}(?:主线|趋势|结论).{0,8}(?:归纳|总结|汇总)|"
+    r"(?:横向|纵向|整体|综合)?\s*(?:对比|比较|小结|总结|归纳)\s*$|"
+    r"(?:cross[ -]period|comparison|trend|overview))",
     re.IGNORECASE,
 )
 _REPAIR_RELEVANCE_TRANSLATION = str.maketrans(
@@ -262,19 +323,26 @@ _STRICT_TRAILING_ADVICE_RE = re.compile(
     re.IGNORECASE,
 )
 _RETRIEVAL_INTERNAL_TERM_RE = re.compile(
-    r"(?:(?:excerpt|chunks?|middle omitted)|"
+    r"(?:(?:\b(?:excerpt|chunks?)\b|\bmiddle omitted\b)|"
+    r"(?:indexed|index(?:ed)? content)|"
+    r"(?:检索|索引|来源)(?:内容|结果|块)|"
     r"(?:文档|原文|文本|证据|上下文).{0,80}(?:分块|截断|压缩)|"
     r"(?:工具|系统).{0,12}(?:返回|省略|截断|限制)|"
     r"(?:节选|句子|内容|文本).{0,12}(?:截断|省略|不完整|未完整)|"
     r"(?:返回的?)?(?:全部)?\s*\d+\s*个?(?:文本)?段落|"
+    r"(?:检索到的?)?(?:电话会|文档|原文).{0,160}(?:未完整(?:收录|覆盖)|覆盖不完整)|"
     r"(?:检索|扫描|检查|读取).{0,32}(?:全部|全文|所有|完整).{0,24}"
     r"(?:内容|原文|文档))",
     re.IGNORECASE,
 )
 _NEGATIVE_RETRIEVAL_ABSENCE_RE = re.compile(
-    r"(?:未(?:出现|披露|找到|发现|给出|提供|确认|能完整获取)|"
+    r"(?:未(?:出现|涉及|披露|找到|发现|给出|提供|确认|能完整获取)|"
     r"没有(?:出现|披露|找到|发现|给出|提供)|无法(?:引用|确认)|"
     r"\b(?:not disclosed|not found|not available|unable to cite)\b)",
+    re.IGNORECASE,
+)
+_INCOMPLETE_SOURCE_COVERAGE_RE = re.compile(
+    r"(?:未完整(?:收录|覆盖)|覆盖不完整|未能完整获取)",
     re.IGNORECASE,
 )
 _BARE_CITATION_BLOCK_RE = re.compile(
@@ -284,14 +352,17 @@ _BARE_CITATION_BLOCK_RE = re.compile(
 _STANDALONE_BOLD_LABEL_RE = re.compile(r"^\s*\*\*[^*\n]{1,120}\*\*\s*$")
 _BOLD_LABEL_PREFIX_RE = re.compile(r"^\s*\*\*[^*\n]{1,120}\*\*(?:\s*[:：])?")
 _RETRIEVAL_INTERNAL_SENTENCE_RE = re.compile(
-    r"[^。！？!?\n]*(?:(?:excerpt|chunks?|middle omitted)|"
+    r"[^。！？!?\n]*(?:(?:\b(?:excerpt|chunks?)\b|\bmiddle omitted\b)|"
+    r"(?:indexed|index(?:ed)? content)|"
+    r"(?:检索|索引|来源)(?:内容|结果|块)|"
     r"(?:文档|原文|文本|证据|上下文).{0,80}(?:分块|截断|压缩)|"
     r"(?:工具|系统).{0,12}(?:返回|省略|截断|限制)|"
     r"(?:节选|句子|内容|文本).{0,12}(?:截断|省略|不完整|未完整)|"
     r"(?:返回的?)?(?:全部)?\s*\d+\s*个?(?:文本)?段落|"
+    r"(?:检索到的?)?(?:电话会|文档|原文).{0,160}(?:未完整(?:收录|覆盖)|覆盖不完整)|"
     r"(?:检索|扫描|检查|读取).{0,32}(?:全部|全文|所有|完整).{0,24}"
     r"(?:内容|原文|文档))"
-    r"[^。！？!?\n]*[。！？!?]?",
+    r"[^。！？!?\n]*[。！？!?]?[*_]{0,3}",
     re.IGNORECASE,
 )
 _RETRIEVAL_ABSENCE_PREFIX_RE = re.compile(
@@ -343,8 +414,13 @@ def _strip_leading_assistant_progress(text: str) -> str:
     # handles in the next block, then add another transition before the real
     # cited answer.  Once a raw handle appears near the start, treat the whole
     # prefix as one worklog and resume at the first user-facing citation.
+    progress_probes = [_INLINE_EVIDENCE_LINK_RE.sub("", block) for block in blocks]
     internal_index = next(
-        (i for i, block in enumerate(blocks[:6]) if _LEADING_PROGRESS_INTERNAL_RE.search(block)),
+        (
+            i
+            for i, block in enumerate(progress_probes[:6])
+            if _LEADING_PROGRESS_INTERNAL_RE.search(block)
+        ),
         None,
     )
     if internal_index is not None:
@@ -370,7 +446,7 @@ def _strip_leading_assistant_progress(text: str) -> str:
         or any(
             _LEADING_PROGRESS_RE.search(line.strip()) for line in block.splitlines() if line.strip()
         )
-        for block in blocks[:3]
+        for block in progress_probes[:3]
     )
     if has_progress_prefix:
         for boundary_index, block in enumerate(blocks[:10]):
@@ -391,14 +467,15 @@ def _strip_leading_assistant_progress(text: str) -> str:
     removed = False
     while index < len(blocks):
         stripped = blocks[index].strip()
+        progress_probe = progress_probes[index].strip()
         if not stripped:
             index += 1
             continue
         if stripped in {"---", "***", "___"} and removed:
             index += 1
             continue
-        lines = [line.strip() for line in stripped.splitlines() if line.strip()]
-        if _LEADING_PROGRESS_INTERNAL_RE.search(stripped) or any(
+        lines = [line.strip() for line in progress_probe.splitlines() if line.strip()]
+        if _LEADING_PROGRESS_INTERNAL_RE.search(progress_probe) or any(
             _LEADING_PROGRESS_RE.search(line) for line in lines
         ):
             removed = True
@@ -473,6 +550,59 @@ def _strip_unrequested_derived_restatement(text: str, user_prompt: str) -> str:
     return prefix
 
 
+def _strip_unrequested_cross_period_recap(text: str, user_prompt: str) -> str:
+    """Keep the requested period sequence as the single answer structure.
+
+    Models sometimes repeat an already complete period-by-period answer in a
+    trailing comparison table.  Besides wasting space, that recap creates a
+    second set of claims whose citations frequently detach from the supported
+    period-local statements.  Remove only an explicit trailing recap section
+    when the user requested a period sequence and did not request that extra
+    comparison/trend view.
+    """
+
+    if not _PERIOD_BY_PERIOD_REQUEST_RE.search(user_prompt):
+        return text
+    if _EXPLICIT_CROSS_PERIOD_RECAP_RE.search(user_prompt):
+        return text
+    lines = text.splitlines()
+    period_headings = 0
+    for index, line in enumerate(lines):
+        if _PERIOD_HEADING_RE.match(line):
+            period_headings += 1
+            continue
+        if period_headings < 2 or not _CROSS_PERIOD_RECAP_HEADING_RE.match(line):
+            continue
+        kept = lines[:index]
+        while kept and kept[-1].strip() in {"", "---", "***", "___"}:
+            kept.pop()
+        return "\n".join(kept).strip()
+    return text
+
+
+def _strip_unrequested_period_leadin(text: str, user_prompt: str) -> str:
+    """Start a period-by-period answer at its first requested period.
+
+    A title, research-method preamble, and synthetic coverage range ahead of
+    an otherwise complete period sequence add no answer content and create
+    extra uncited claims. Keep them only when the user explicitly requested a
+    cross-period overview; otherwise the first period heading is the stable
+    answer boundary.
+    """
+
+    if not _PERIOD_BY_PERIOD_REQUEST_RE.search(user_prompt):
+        return text
+    if _EXPLICIT_CROSS_PERIOD_RECAP_RE.search(user_prompt):
+        return text
+    lines = text.splitlines()
+    heading_indexes = [
+        index for index, line in enumerate(lines) if _PERIOD_HEADING_RE.match(line)
+    ]
+    if len(heading_indexes) < 2 or heading_indexes[0] == 0:
+        return text
+    return "\n".join(lines[heading_indexes[0] :]).strip()
+
+
 def _strip_strict_scope_leadin(text: str, user_prompt: str) -> str:
     """Remove a presentation-only preamble when the user requested only rows."""
 
@@ -520,7 +650,42 @@ def _strip_strict_scope_leadin(text: str, user_prompt: str) -> str:
     text = _STRICT_TRAILING_SOURCE_NOTE_RE.sub("", text).strip()
     text = _STRICT_TRAILING_SOURCE_EXPLANATION_RE.sub("", text).strip()
     text = _strict_markdown_tables_only(text, user_prompt)
+    text = _strip_strict_table_trailing_blocks(text, user_prompt)
     return _enforce_requested_line_count(text, user_prompt)
+
+
+def _strip_strict_table_trailing_blocks(text: str, user_prompt: str) -> str:
+    """Keep one complete table as the sole strict-scope answer structure."""
+
+    if not _STRICT_OUTPUT_SCOPE_RE.search(user_prompt):
+        return text
+    if _EXPLANATION_REQUEST_RE.search(user_prompt):
+        return text
+    lines = text.splitlines()
+    table_ranges: list[tuple[int, int]] = []
+    index = 0
+    while index < len(lines):
+        if not lines[index].strip().startswith("|"):
+            index += 1
+            continue
+        start = index
+        while index < len(lines) and lines[index].strip().startswith("|"):
+            index += 1
+        block = lines[start:index]
+        if len(block) >= 3 and re.fullmatch(
+            r"\s*\|(?:\s*:?-{3,}:?\s*\|)+\s*",
+            block[1],
+        ):
+            table_ranges.append((start, index - 1))
+    if len(table_ranges) != 1:
+        return text
+    _start, end = table_ranges[0]
+    if not any(line.strip() for line in lines[end + 1 :]):
+        return text
+    # A strict "only these fields" request does not authorize a prose recap
+    # after the complete table.  Removing it also prevents duplicate uncited
+    # formulas from triggering a costly repair pass.
+    return "\n".join(lines[: end + 1]).strip()
 
 
 def _enforce_requested_line_count(text: str, user_prompt: str) -> str:
@@ -592,6 +757,114 @@ def _strict_markdown_tables_only(text: str, user_prompt: str) -> str:
     return "\n\n".join(tables) if tables else text
 
 
+def _attach_standalone_citation_lines(text: str) -> str:
+    """Attach a citation-only Markdown line to its local rendered claims.
+
+    Models often format a block quote as ``> quote`` followed by
+    ``> [source](evidence://...)``. Markdown renders that as one visual quote,
+    but the claim auditor sees two line records and previously left the quote
+    unsourced. Fold only citation-only lines whose preceding non-empty line is
+    itself a block quote; decorative heading citations remain untouched and
+    continue through the normal cleanup path.
+
+    A second common shape is a complete Markdown table followed by one line of
+    N source links, one per data row.  When the counts match exactly, distribute
+    those links to the rows in order.  This is structural binding, not fuzzy
+    evidence matching: ambiguous counts or already-cited rows are untouched.
+    """
+
+    citation_only = re.compile(
+        r"^\s*>\s*(?P<links>(?:\[[^\]\n]{0,240}\]"
+        r"\((?:evidence|citation)://[^)\n]+\)\s*)+)$",
+        re.IGNORECASE,
+    )
+    lines = text.splitlines()
+    plain_citation_only = re.compile(
+        r"^\s*(?P<links>(?:\[[^\]\n]{0,240}\]"
+        r"\((?:evidence|citation)://[^)\n]+\)\s*)+)$",
+        re.IGNORECASE,
+    )
+    table_delimiter = re.compile(
+        r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$"
+    )
+    table_bound: list[str] = []
+    for line in lines:
+        match = plain_citation_only.fullmatch(line)
+        links = _INLINE_EVIDENCE_LINK_RE.findall(match.group("links")) if match else []
+        previous_index = len(table_bound) - 1
+        while previous_index >= 0 and not table_bound[previous_index].strip():
+            previous_index -= 1
+        if (
+            not links
+            or previous_index < 0
+            or not table_bound[previous_index].strip().startswith("|")
+            or not table_bound[previous_index].rstrip().endswith("|")
+        ):
+            table_bound.append(line)
+            continue
+        block_start = previous_index
+        while block_start > 0 and table_bound[block_start - 1].strip().startswith("|"):
+            block_start -= 1
+        delimiter_index = next(
+            (
+                index
+                for index in range(block_start, previous_index + 1)
+                if table_delimiter.fullmatch(table_bound[index])
+            ),
+            None,
+        )
+        data_rows = (
+            list(range(delimiter_index + 1, previous_index + 1))
+            if delimiter_index is not None
+            else []
+        )
+        if (
+            len(data_rows) != len(links)
+            or any(_INLINE_EVIDENCE_LINK_RE.search(table_bound[index]) for index in data_rows)
+        ):
+            table_bound.append(line)
+            continue
+        for row_index, link in zip(data_rows, links, strict=True):
+            row = table_bound[row_index].rstrip()
+            table_bound[row_index] = f"{row[:-1].rstrip()} {link} |"
+        del table_bound[previous_index + 1 :]
+    lines = table_bound
+    output: list[str] = []
+    for line in lines:
+        match = citation_only.fullmatch(line)
+        if match is None:
+            output.append(line)
+            continue
+        previous_index = len(output) - 1
+        while previous_index >= 0 and not output[previous_index].strip():
+            previous_index -= 1
+        if previous_index < 0 or not output[previous_index].lstrip().startswith(">"):
+            output.append(line)
+            continue
+        output[previous_index] = (
+            f"{output[previous_index].rstrip()} {match.group('links').strip()}"
+        )
+    # A cited introduction ending in a colon commonly owns the literal block
+    # quote that follows. Propagate only to the first uncited quote line; this
+    # keeps source attribution local and does not spread citations across
+    # ordinary paragraphs.
+    for index, line in enumerate(output):
+        if not line.lstrip().startswith(">") or _INLINE_EVIDENCE_LINK_RE.search(line):
+            continue
+        previous_index = index - 1
+        while previous_index >= 0 and not output[previous_index].strip():
+            previous_index -= 1
+        if previous_index < 0 or output[previous_index].lstrip().startswith(">"):
+            continue
+        previous = output[previous_index].rstrip()
+        if not re.search(r"[:：]\s*$", previous):
+            continue
+        citations = _INLINE_EVIDENCE_LINK_RE.findall(previous)
+        if citations:
+            output[index] = f"{line.rstrip()} {citations[-1]}"
+    return "\n".join(output)
+
+
 def _strip_unrequested_retrieval_internals(text: str, user_prompt: str) -> str:
     """Hide model narration about evidence transport unless explicitly requested."""
 
@@ -621,6 +894,7 @@ def _strip_unrequested_retrieval_internals(text: str, user_prompt: str) -> str:
         lambda match: "  \n" if match.group(1) == "  " else "\n",
         cleaned,
     )
+    cleaned = re.sub(r"(?m)^\s*(?:\*+|_+)\s*$\n?", "", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
 
@@ -684,6 +958,8 @@ def _rewrite_or_remove_retrieval_internal_sentence(match: re.Match[str]) -> str:
     value = match.group(0)
     if not _NEGATIVE_RETRIEVAL_ABSENCE_RE.search(value):
         return ""
+    if _INCOMPLETE_SOURCE_COVERAGE_RE.search(value):
+        return "当前来源未包含具体数字。"
     citations = re.findall(
         r"\s*\[[^\]]+\]\((?:evidence|citation)://[^)]+\)",
         value,
@@ -1154,6 +1430,39 @@ class _MessageObserverSink:
             # final block before either persistence or broadcast.
             if self._pending_assistant is not None:
                 await self._flush_pending_assistant(final=False)
+            canonical_text = str(event.data.get("text") or event.data.get("content") or "")
+            streamed_text = self.partial_assistant_text or ""
+            # Claude can occasionally report only the last paragraph in its
+            # canonical AssistantMessage even though the immediately preceding
+            # top-level text_delta stream contains the complete final answer.
+            # Citation turns intentionally hide those deltas until sealing, so
+            # blindly preferring that short canonical block discards the whole
+            # researched answer and leaves the user with an epilogue such as
+            # "以上即为……".  The stream is safe to promote only when it is a
+            # materially longer superset containing the canonical block; tool
+            # boundaries already clear research preambles from this buffer.
+            if (
+                self._citation_guard.requires_citation
+                and len(streamed_text) >= max(400, len(canonical_text) * 2)
+            ):
+                event = Event(
+                    type=event.type,
+                    data={
+                        **{
+                            key: value
+                            for key, value in event.data.items()
+                            if key not in {"text", "content", "citation_bundle"}
+                        },
+                        "text": streamed_text,
+                    },
+                    timestamp=event.timestamp,
+                )
+                logger.warning(
+                    "citation_guard preserved complete streamed answer over short "
+                    "canonical block streamed=%d canonical=%d",
+                    len(streamed_text),
+                    len(canonical_text),
+                )
             self._pending_assistant = event
             # The canonical block supersedes its already-streamed deltas.
             self._assistant_delta_chunks.clear()
@@ -1197,11 +1506,19 @@ class _MessageObserverSink:
             visible_content = event.data.get("content")
             compacted_content = compact_citation_tool_content(visible_content)
             if self._citation_enabled:
-                self._evidence_registry.register_tool_result(
-                    citation_content if isinstance(citation_content, str) else visible_content,
+                private_projection = (
+                    citation_content
+                    if isinstance(citation_content, str)
+                    else private_citation_tool_content(visible_content)
+                    if compacted_content is not None
+                    else None
+                )
+                self._evidence_registry.register_tool_projection(
+                    compacted_content if compacted_content is not None else visible_content,
+                    private_projection,
                     tool_name=tool_name,
                     trusted_private=(
-                        isinstance(citation_content, str) or compacted_content is not None
+                        private_projection is not None or compacted_content is not None
                     ),
                 )
             if "_citation_content" in event.data or compacted_content is not None:
@@ -1461,7 +1778,7 @@ class _MessageObserverSink:
                 response_text=raw_text,
                 allowed_claim_ids=repairable_claim_ids(
                     baseline_bundle if isinstance(baseline_bundle, dict) else None,
-                    repairable_issue_codes=_REPAIRABLE_CLAIM_ISSUE_CODES,
+                    repairable_issue_codes=_ACTIONABLE_REPAIR_ISSUE_CODES,
                 ),
                 allowed_evidence_handles={
                     record.handle for record in self._evidence_registry.values()
@@ -1484,9 +1801,12 @@ class _MessageObserverSink:
         raw_text = _strip_leading_assistant_progress(raw_text)
         if not raw_text.strip():
             return None
+        raw_text = _attach_standalone_citation_lines(raw_text)
         raw_text = _strip_strict_scope_leadin(raw_text, self._user_prompt)
         raw_text = _strip_unrequested_source_excerpt(raw_text, self._user_prompt)
         raw_text = _strip_unrequested_derived_restatement(raw_text, self._user_prompt)
+        raw_text = _strip_unrequested_period_leadin(raw_text, self._user_prompt)
+        raw_text = _strip_unrequested_cross_period_recap(raw_text, self._user_prompt)
         raw_text = _strip_unrequested_retrieval_internals(raw_text, self._user_prompt)
         raw_text = _strip_empty_markdown_labels(raw_text)
         raw_text = _strip_empty_markdown_tables(raw_text)
@@ -1553,7 +1873,7 @@ class _MessageObserverSink:
             self._citation_repair_prompt = repair_prompt
             logger.warning("citation_guard withheld draft and requested one repair pass")
             return None
-        if needs_repair and self._citation_repair_attempts:
+        if self._citation_repair_attempts:
             baseline = self._citation_repair_baseline_event
             if baseline is not None and not self._repair_improves(
                 baseline,
@@ -1574,10 +1894,8 @@ class _MessageObserverSink:
                 return rejected
             self._mark_repair_outcome(event, outcome="accepted")
             self._citation_repair_baseline_event = None
-            logger.warning("citation_guard published improved but still degraded repair")
-        elif self._citation_repair_attempts:
-            self._mark_repair_outcome(event, outcome="accepted")
-            self._citation_repair_baseline_event = None
+            if needs_repair:
+                logger.warning("citation_guard published improved but still degraded repair")
         return event
 
     def _build_citation_repair_prompt(
@@ -1601,6 +1919,8 @@ class _MessageObserverSink:
         extracted_by_exact = {claim.exact.strip(): claim for claim in extracted}
         claim_issues: list[dict[str, Any]] = []
         candidate_evidence: dict[str, dict[str, Any]] = {}
+        registry_records = list(self._evidence_registry.values())[:200]
+        records_by_handle = {record.handle: record for record in registry_records}
         for claim in raw_claims:
             if not isinstance(claim, dict) or claim.get("citationRequired") is not True:
                 continue
@@ -1609,7 +1929,7 @@ class _MessageObserverSink:
                 [
                     value
                     for value in issue_codes
-                    if isinstance(value, str) and value in _REPAIRABLE_CLAIM_ISSUE_CODES
+                    if isinstance(value, str) and value in _ACTIONABLE_REPAIR_ISSUE_CODES
                 ]
                 if isinstance(issue_codes, list)
                 else []
@@ -1634,21 +1954,33 @@ class _MessageObserverSink:
                 extracted_claim = extracted_by_exact.get(exact_text.strip())
             candidate_handles: list[str] = []
             if extracted_claim is not None:
-                for record in list(self._evidence_registry.values())[:200]:
-                    support = verify_evidence_support(
-                        extracted_claim,
-                        {"evidence": record.evidence},
-                        semantics=semantics,
-                    )
-                    if support.status != "supported":
-                        continue
-                    candidate_evidence.setdefault(
-                        record.handle,
-                        self._repair_evidence_summary(record),
-                    )
-                    candidate_handles.append(record.handle)
-                    if len(candidate_handles) >= 6:
-                        break
+                resolution = resolve_claim_evidence(
+                    extracted_claim,
+                    registry_records,
+                    semantics=semantics,
+                )
+                if resolution.binding_action == "auto-rebind":
+                    candidate_handles = list(resolution.selected_handles)
+                elif _ACTIONABLE_REPAIR_ISSUE_CODES.intersection(issue_codes):
+                    contradicted_handles = [
+                        handle
+                        for handle in resolution.candidate_handles
+                        if resolution.support_by_handle.get(handle) == "contradicted"
+                    ]
+                    # A local value patch is safe only when the Resolver found
+                    # one concrete conflicting data point. Multiple possible
+                    # records remain ambiguous and must not trigger a model.
+                    if len(contradicted_handles) == 1:
+                        candidate_handles = contradicted_handles
+                for handle in candidate_handles:
+                    record = records_by_handle.get(handle)
+                    if record is not None:
+                        candidate_evidence.setdefault(
+                            handle,
+                            self._repair_evidence_summary(record),
+                        )
+            if not candidate_handles:
+                continue
             claim_issues.append(
                 {
                     "claimId": claim.get("claimId"),
@@ -1664,26 +1996,6 @@ class _MessageObserverSink:
             )
             if len(claim_issues) >= _MAX_CITATION_REPAIR_CLAIMS:
                 break
-        # A mismatched draft may need an existing record to *correct* the
-        # claim, even though that record cannot be marked as supporting the
-        # current wording.  Keep a bounded turn-level evidence catalogue in
-        # addition to claim-local candidates so an isolated repair thread does
-        # not lose the authoritative value and then retrieve (or invent) it
-        # again.  Claim-local handles remain the stronger hint.
-        for record in self._request_relevant_repair_evidence_records():
-            if len(candidate_evidence) >= _MAX_CITATION_REPAIR_EVIDENCE:
-                break
-            candidate_evidence.setdefault(
-                record.handle,
-                self._repair_evidence_summary(record),
-            )
-        for record in self._diverse_repair_evidence_records():
-            if len(candidate_evidence) >= _MAX_CITATION_REPAIR_EVIDENCE:
-                break
-            candidate_evidence.setdefault(
-                record.handle,
-                self._repair_evidence_summary(record),
-            )
         context = {
             "patchVersion": CITATION_CLAIM_PATCH_VERSION,
             "originalRequest": self._user_prompt,
@@ -1700,7 +2012,7 @@ class _MessageObserverSink:
                 for entry in raw_issues[:50]
                 if isinstance(entry, dict)
                 and isinstance(entry.get("code"), str)
-                and entry.get("code") in _REPAIRABLE_CLAIM_ISSUE_CODES
+                and entry.get("code") in _ACTIONABLE_REPAIR_ISSUE_CODES
             ],
         }
         return (
@@ -1844,6 +2156,18 @@ class _MessageObserverSink:
     ) -> str | None:
         if len(draft_text) > _MAX_CITATION_REPAIR_DRAFT_CHARS:
             return "draft-size-budget"
+        if repair_prompt is not None and "Restricted repair context (JSON):\n" in repair_prompt:
+            raw_context = repair_prompt.rsplit("Restricted repair context (JSON):\n", 1)[1]
+            try:
+                repair_context = json.loads(raw_context)
+            except (TypeError, ValueError):
+                repair_context = {}
+            if not isinstance(repair_context, dict):
+                repair_context = {}
+            if not repair_context.get("claimIssues") or not repair_context.get(
+                "candidateEvidence"
+            ):
+                return "no-actionable-resolution"
         citations = bundle.get("citations") if isinstance(bundle, dict) else None
         if (
             not len(self._evidence_registry)
@@ -1866,11 +2190,24 @@ class _MessageObserverSink:
         )
         metrics = quality.get("metrics") if isinstance(quality, dict) else None
         metrics = metrics if isinstance(metrics, dict) else {}
-        problematic = max(
-            problematic,
-            int(metrics.get("unsourcedClaimCount") or 0)
-            + int(metrics.get("unverifiedClaimCount") or 0),
+        claim_detected = metrics.get("claimDetectedCount")
+        claims_complete = (
+            isinstance(claims, list)
+            and isinstance(claim_detected, int)
+            and claim_detected == len(claims)
+            and metrics.get("claimAuditTruncated") is not True
         )
+        if not claims_complete:
+            # Legacy or truncated bundles may omit claim rows, so their
+            # aggregate counters remain the conservative fallback. Modern
+            # complete bundles use only explicitly repairable issue codes;
+            # advisory translation-review rows must not consume the twelve
+            # claim repair budget or trigger a pointless hidden model pass.
+            problematic = max(
+                problematic,
+                int(metrics.get("unsourcedClaimCount") or 0)
+                + int(metrics.get("unverifiedClaimCount") or 0),
+            )
         # The patch protocol exposes at most twelve explicit claim issues.
         # Never run a hidden repair that provably cannot see and patch the full
         # failed set; retain the sealed answer instead of spending another
@@ -1987,13 +2324,22 @@ class _MessageObserverSink:
             and after["unknown"] <= before["unknown"]
             and after["supported"] >= before["supported"]
             and after["required"] >= minimum_required
-            # A repair is not an improvement when it turns a numeric answer
-            # into a source-coverage refusal.  Large answers may shed
-            # duplicated expansion, but must retain at least one material
-            # business value whenever the draft contained one.  The rejected
-            # draft is still published with neutral advisory citations.
-            and (before["material_values"] == 0 or after["material_values"] > 0)
-            and (before["required"] > 6 or after["values"] >= before["values"])
+            # A repair must not erase already-supported numeric content and
+            # turn it into a source-coverage refusal.  When the draft had no
+            # supported claim at all, however, replacing an invented number
+            # with the qualitative fact actually present in the evidence is
+            # a genuine improvement.  The rejected draft is still published
+            # with neutral advisory citations.
+            and (
+                (before["supported"] == 0 and after["supported"] > 0)
+                or before["material_values"] == 0
+                or after["material_values"] > 0
+            )
+            and (
+                (before["supported"] == 0 and after["supported"] > 0)
+                or before["required"] > 6
+                or after["values"] >= before["values"]
+            )
         )
 
     @staticmethod
@@ -2032,41 +2378,24 @@ class _MessageObserverSink:
         if not self._citation_verification_enabled:
             return False
         # A generated bundle means this turn crossed the citation boundary.
-        # When it contains unsupported claims but the registry is empty, the
-        # hidden retry must retrieve evidence rather than merely re-bind an
-        # existing handle. The old early return made the most important repair
-        # case impossible: a model that answered from memory without calling
-        # any source tool was published immediately with warnings.
+        # Missing retrieval and unresolved support are not actionable local
+        # patches: a tool-isolated repair cannot create trusted Evidence and
+        # must not spend a second model pass merely to restate uncertainty.
         if not isinstance(bundle, dict):
             return False
-        citations = bundle.get("citations")
-        citations = citations if isinstance(citations, list) else []
-        integrity = bundle.get("integrity")
-        integrity = integrity if isinstance(integrity, dict) else {}
         quality = bundle.get("quality")
         quality = quality if isinstance(quality, dict) else {}
-        metrics = quality.get("metrics")
-        metrics = metrics if isinstance(metrics, dict) else {}
         if not len(self._evidence_registry):
-            return int(metrics.get("unsourcedClaimCount") or 0) > 0
-        if not citations or bool(integrity.get("unknownCitationIds")):
-            return True
+            return False
         claims = quality.get("claims")
         claims = claims if isinstance(claims, list) else []
-        issues = quality.get("issues")
-        issues = issues if isinstance(issues, list) else []
-        if any(
-            isinstance(entry, dict) and entry.get("code") == "claim_audit_truncated"
-            for entry in issues
-        ):
-            return True
         for claim in claims:
             if not isinstance(claim, dict) or claim.get("citationRequired") is not True:
                 continue
             issue_codes = claim.get("issueCodes")
             if isinstance(issue_codes, list):
                 claim_codes = {value for value in issue_codes if isinstance(value, str)}
-                if _REPAIRABLE_CLAIM_ISSUE_CODES.intersection(claim_codes):
+                if _ACTIONABLE_REPAIR_ISSUE_CODES.intersection(claim_codes):
                     return True
         return False
 
@@ -2367,6 +2696,19 @@ class SessionOrchestrator:
         if wrapped_text != user_message.text:
             user_message = dataclasses.replace(user_message, text=wrapped_text)
 
+        if _session_citation_enabled(session):
+            scope_context = _citation_output_scope_context(user_message.text)
+            if scope_context:
+                existing_context = user_message.additional_context.strip()
+                user_message = dataclasses.replace(
+                    user_message,
+                    additional_context=(
+                        f"{existing_context}\n\n{scope_context}"
+                        if existing_context
+                        else scope_context
+                    ),
+                )
+
         message = Message(
             id=str(uuid.uuid4()),
             session_id=session_id,
@@ -2476,17 +2818,14 @@ class SessionOrchestrator:
             ):
                 observer.begin_citation_repair()
                 session.status = "running"
-                # External MCP credentials are resolved at normal turn entry,
-                # but citation repair is a second hidden runtime run inside the
-                # same user turn.  Refresh at this boundary too; otherwise a
-                # long research turn can cross an OAuth expiry and every repair
-                # tool call starts returning 401.  Rebuild the runtime only
-                # when the host actually changed the session MCP snapshot so
-                # the new graph/client receives the fresh headers.
-                refreshed_runtime_config = False
+                # Hosts may still use this boundary to refresh their persisted
+                # resource snapshot.  The repair itself never receives those
+                # resources: all admissible evidence is sealed into its compact
+                # prompt, so a hidden quality pass cannot start a second
+                # research run or cross an expiring tool credential.
                 if self._citation_repair_refresh_hook is not None:
                     try:
-                        refreshed_runtime_config = await self._citation_repair_refresh_hook(
+                        await self._citation_repair_refresh_hook(
                             user_id,
                             session_id,
                         )
@@ -2496,38 +2835,53 @@ class SessionOrchestrator:
                             session_id,
                             exc_info=True,
                         )
-                if refreshed_runtime_config:
-                    await self._evict_runtime(session_id)
-                    session, agent = await self._load_session(user_id, session_id)
-                    session.status = "running"
-                if str(session.runtime_provider) == "deepagents":
-                    # A citation repair only needs the original request, failed
-                    # draft, compact issue list, and registered evidence copied
-                    # into ``citation_repair_prompt``.  Reusing the research
-                    # thread also replays hundreds of thousands of discovery
-                    # tokens and makes the repair both expensive and less
-                    # likely to follow its narrow scope.  Move the session to a
-                    # fresh checkpoint thread; successful repaired output and
-                    # all future follow-ups then share this compact history.
-                    session.runtime_session_id = f"{session.id}:citation-repair:{uuid.uuid4().hex}"
-                if refreshed_runtime_config:
-                    runtime = await self._ensure_runtime(
-                        session_id,
-                        agent,
-                        session,
-                        observer,
-                        session.cwd,
-                    )
-                    self._active[session_id] = runtime
+
+                # A claim repair needs only the original request, sealed draft,
+                # compact issue list, and bounded candidate evidence copied into
+                # ``citation_repair_prompt``.  Never resume the full research
+                # thread here: doing so replays tool schemas, skills, discovery
+                # history and hundreds of thousands of tokens.  Instead, use a
+                # fresh bare completion for every provider.  The user's real
+                # session retains its native thread id, resources and history,
+                # so later follow-ups still resume the original conversation.
+                await self._evict_runtime(session_id)
+                repair_metadata = copy.deepcopy(session.metadata)
+                repair_metadata[BARE_COMPLETION_METADATA_KEY] = True
+                repair_session = dataclasses.replace(
+                    session,
+                    instructions="",
+                    skills=(),
+                    mcp_servers=(),
+                    mode="default",
+                    status="running",
+                    stop_reason=None,
+                    metadata=repair_metadata,
+                    runtime_session_id=None,
+                    todos=None,
+                )
+                runtime = await self._ensure_runtime(
+                    session_id,
+                    agent,
+                    repair_session,
+                    observer,
+                    repair_session.cwd,
+                )
+                self._active[session_id] = runtime
                 logger.warning(
                     "citation_guard retrying message=%s session=%s",
                     message.id,
                     session.id,
                 )
-                await runtime.run(
-                    session,
-                    UserMessage(text=observer.citation_repair_prompt),
-                )
+                try:
+                    await runtime.run(
+                        repair_session,
+                        UserMessage(text=observer.citation_repair_prompt),
+                    )
+                    session.status = repair_session.status
+                    session.stop_reason = repair_session.stop_reason
+                finally:
+                    await self._evict_runtime(session_id)
+                    self._active.pop(session_id, None)
             await observer.ensure_partial_assistant_message()
             # finalize must run BEFORE save_session — it writes session.todos
             # (and message.todos) from the observer's last todo_update payload;

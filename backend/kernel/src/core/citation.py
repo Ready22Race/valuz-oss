@@ -24,7 +24,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from src.core.citation_quality import evaluate_citation_quality
 from src.core.claim_audit import (
@@ -32,19 +32,26 @@ from src.core.claim_audit import (
     auto_bind_unique_claims,
     canonical_evidence_metric,
     extract_claims,
+    propagate_equivalent_claim_bindings,
     rebind_unique_mismatched_claims,
     structured_units_compatible,
+    structured_value_present,
     structured_values_equivalent,
 )
 
 POLICY_REVISION = "citation-v1"
 EVIDENCE_ENVELOPE_KEY = "_valuz_evidence"
+EVIDENCE_HINT_KEY = "_valuz_evidence_hint"
 
 _HANDLE_RE = re.compile(r"^ev_[A-Za-z0-9_-]{8,128}$")
+_COLLECTION_HANDLE_RE = re.compile(r"^evc_[A-Za-z0-9_-]{8,128}$")
 _MARKDOWN_LINK_RE = re.compile(
-    r"\[([^\]\n]{0,240})\]\((evidence|citation)://([A-Za-z0-9_-]{1,160})\)"
+    r"\[([^\]\n]{0,240})\]\((evidence|citation)://([A-Za-z0-9_-]{1,160})"
+    r"(#[^\s)\n]{1,2048})?\)"
 )
-_BARE_EVIDENCE_RE = re.compile(r"(?<![\w/])evidence://([A-Za-z0-9_-]{1,160})")
+_BARE_EVIDENCE_RE = re.compile(
+    r"(?<![\w/])evidence://([A-Za-z0-9_-]{1,160})(#[^\s)\]\n]{1,2048})?"
+)
 _INTRA_NUMBER_CITATION_RE = re.compile(
     r"(?P<prefix>(?<![\d,])\d{1,3}(?:,\d{3})*,\d{1,2})[ \t]*"
     r"(?P<link>\[[^\]\n]{1,240}\]\((?:citation|evidence)://[A-Za-z0-9_-]{1,160}\))"
@@ -58,7 +65,8 @@ _REPAIR_MARKER_RE = re.compile(
 )
 _NUMBERED_EVIDENCE_SOURCE_RE = re.compile(
     r"(?m)^[ \t]*(?:[-*][ \t]+)?\[(\d{1,3})\][ \t]+"
-    r"\[[^\]\n]{1,240}\]\(evidence://([A-Za-z0-9_-]{1,160})\)"
+    r"\[[^\]\n]{1,240}\]\(evidence://([A-Za-z0-9_-]{1,160})"
+    r"(?:#[^\s)\n]{1,2048})?\)"
 )
 _BARE_NUMBERED_MARKER_RE = re.compile(r"(?<![\\\w])\[(\d{1,3})\](?!\()")
 _SOURCE_SECTION_HEADING_RE = re.compile(
@@ -133,6 +141,20 @@ class EvidenceRecord:
 
 
 @dataclass(frozen=True)
+class EvidenceCollectionRecord:
+    """Validated immutable structured result registered once per tool call."""
+
+    handle: str
+    source: dict[str, Any]
+    common: dict[str, Any]
+    addressing: dict[str, Any]
+    content_hash: str
+    snapshot: Any
+    tool_name: str | None
+    scalar_index: dict[str, tuple[str, ...]]
+
+
+@dataclass(frozen=True)
 class GuardResult:
     """Canonical final body and optional citation sidecar."""
 
@@ -162,7 +184,12 @@ class EvidenceRegistry:
         allowed_document_ids: set[str] | None = None,
     ) -> None:
         self._records: dict[str, EvidenceRecord] = {}
+        self._collections: dict[str, EvidenceCollectionRecord] = {}
+        self._pending_collection_snapshots: dict[str, tuple[Any, str, str]] = {}
         self._rejected_count = 0
+        self._address_requested_count = 0
+        self._materialized_count = 0
+        self._materialization_rejected_count = 0
         self._overflow_reasons: set[str] = set()
         self._allowed_document_ids = (
             {str(item) for item in allowed_document_ids if str(item)}
@@ -195,7 +222,7 @@ class EvidenceRegistry:
                 self._overflow_reasons.add("tool_result_invalid_or_oversized")
             return 0
 
-        before = len(self._records)
+        before = len(self._records) + len(self._collections)
         visited = 0
         stack: list[tuple[Any, int]] = [(payload, 0)]
         while stack and visited < self._MAX_VISITED_NODES:
@@ -207,7 +234,43 @@ class EvidenceRegistry:
                 continue
             if isinstance(node, dict):
                 envelope = node.get(EVIDENCE_ENVELOPE_KEY)
-                for candidate in _as_envelope_items(envelope):
+                candidates = _as_envelope_items(envelope)
+                consumed: set[int] = set()
+                for index, candidate in enumerate(candidates):
+                    if candidate.get("kind") != "structured-evidence-collection":
+                        continue
+                    collection = _validate_evidence_collection(
+                        candidate,
+                        container=node,
+                        pending_snapshot=self._pending_collection_snapshots.get(
+                            str(candidate.get("collectionHandle") or "")
+                        ),
+                        tool_name=tool_name,
+                    )
+                    consumed.add(index)
+                    if collection is None:
+                        self._rejected_count += 1
+                    elif self._source_is_allowed(collection.source):
+                        self._collections.setdefault(collection.handle, collection)
+                    else:
+                        self._rejected_count += 1
+
+                legacy_collections = _legacy_collection_records(
+                    node,
+                    candidates,
+                    consumed=consumed,
+                    tool_name=tool_name,
+                )
+                for collection, indexes in legacy_collections:
+                    consumed.update(indexes)
+                    if self._source_is_allowed(collection.source):
+                        self._collections.setdefault(collection.handle, collection)
+                    else:
+                        self._rejected_count += 1
+
+                for index, candidate in enumerate(candidates):
+                    if index in consumed:
+                        continue
                     if len(self._records) >= _MAX_REGISTRY_RECORDS:
                         self._rejected_count += 1
                         self._overflow_reasons.add("max_records")
@@ -239,7 +302,74 @@ class EvidenceRegistry:
         if stack:
             self._rejected_count += 1
             self._overflow_reasons.add("max_visited_nodes")
-        return len(self._records) - before
+        return len(self._records) + len(self._collections) - before
+
+    def register_tool_projection(
+        self,
+        model_content: Any,
+        private_content: Any | None = None,
+        *,
+        tool_name: str | None = None,
+        trusted_private: bool = False,
+    ) -> int:
+        """Register one three-channel tool projection without duplicating data.
+
+        The model-visible payload owns the structured ``data`` snapshot and a
+        lightweight collection hint.  The private sidecar owns only trusted
+        source/schema metadata.  Hints are captured first so collection
+        validation can bind the sidecar to that exact immutable snapshot.
+        """
+
+        self._capture_collection_hints(model_content, trusted_private=trusted_private)
+        return self.register_tool_result(
+            private_content if private_content is not None else model_content,
+            tool_name=tool_name,
+            trusted_private=trusted_private,
+        )
+
+    def _capture_collection_hints(self, content: Any, *, trusted_private: bool) -> None:
+        max_chars = (
+            self._MAX_PRIVATE_TOOL_RESULT_CHARS if trusted_private else self._MAX_TOOL_RESULT_CHARS
+        )
+        payload = _decode_json_payload(content, max_chars=max_chars)
+        if payload is None:
+            return
+        stack: list[tuple[Any, int]] = [(payload, 0)]
+        visited = 0
+        while stack and visited < self._MAX_VISITED_NODES:
+            node, depth = stack.pop()
+            visited += 1
+            if depth > self._MAX_DEPTH:
+                continue
+            if isinstance(node, dict):
+                raw_hint = node.get(EVIDENCE_HINT_KEY)
+                hints = raw_hint if isinstance(raw_hint, list) else [raw_hint]
+                for hint in hints:
+                    if not isinstance(hint, dict):
+                        continue
+                    handle = hint.get("collectionHandle")
+                    content_root = hint.get("contentRoot")
+                    if (
+                        not isinstance(handle, str)
+                        or not _COLLECTION_HANDLE_RE.fullmatch(handle)
+                        or not isinstance(content_root, str)
+                    ):
+                        continue
+                    found, snapshot = _resolve_json_pointer(node, content_root)
+                    if not found:
+                        continue
+                    content_hash = _content_hash(snapshot)
+                    self._pending_collection_snapshots.setdefault(
+                        handle,
+                        (copy.deepcopy(snapshot), content_hash, content_root),
+                    )
+                stack.extend((item, depth + 1) for item in node.values())
+            elif isinstance(node, list):
+                stack.extend((item, depth + 1) for item in node)
+            elif isinstance(node, str):
+                nested = _decode_json_payload(node, max_chars=max_chars)
+                if nested is not None:
+                    stack.append((nested, depth + 1))
 
     def get(self, handle: str) -> EvidenceRecord | None:
         return self._records.get(handle)
@@ -264,11 +394,118 @@ class EvidenceRegistry:
         candidates = [record for key, record in self._records.items() if key.endswith(suffix)]
         return candidates[0] if len(candidates) == 1 else None
 
+    def materialize_reference(self, handle: str, fragment: str | None) -> EvidenceRecord | None:
+        """Resolve one model-proposed Collection Address into immutable Evidence."""
+
+        if fragment is None:
+            return self.resolve(handle)
+        self._address_requested_count += 1
+        collection = self._collections.get(handle)
+        if collection is None or not fragment.startswith("#/"):
+            self._materialization_rejected_count += 1
+            return None
+        pointer = unquote(fragment[1:])
+        record = _materialize_collection_address(collection, pointer)
+        if record is None:
+            self._materialization_rejected_count += 1
+            return None
+        existing = self._records.setdefault(record.handle, record)
+        if existing is record:
+            self._materialized_count += 1
+        return existing
+
+    def materialize_claim_candidates(
+        self,
+        text: str,
+        *,
+        mode: str,
+        semantics: dict[str, Any] | None,
+    ) -> int:
+        """Materialize only Collection fields that may support actual claims.
+
+        Collection indexes contain scalar normalization keys and JSON pointers,
+        not expanded Evidence/Source objects.  Existing deterministic matchers
+        still make the final entity/metric/period/unit decision after this
+        bounded candidate materialization step.
+        """
+
+        before = len(self._records)
+        claims = extract_claims(text, mode=mode, semantics=semantics)
+        requested: set[tuple[str, str]] = set()
+        for claim in claims:
+            if not claim.citation_required:
+                continue
+            keys = _claim_scalar_keys(claim.exact)
+            if not keys:
+                continue
+            for collection in self._collections.values():
+                for key in keys:
+                    for pointer in collection.scalar_index.get(key, ()):
+                        requested.add((collection.handle, pointer))
+                        if len(requested) >= _MAX_REGISTRY_RECORDS:
+                            self._overflow_reasons.add("max_materialization_candidates")
+                            break
+                    if len(requested) >= _MAX_REGISTRY_RECORDS:
+                        break
+                if len(requested) >= _MAX_REGISTRY_RECORDS:
+                    break
+            if len(requested) >= _MAX_REGISTRY_RECORDS:
+                break
+        for handle, pointer in sorted(requested):
+            self.materialize_reference(handle, f"#{pointer}")
+        return len(self._records) - before
+
+    def materialize_calculation_inputs(self) -> int:
+        """Resolve Collection Addresses carried by calculation Evidence.
+
+        ``citation_calculate`` runs outside this turn-local Registry, so it
+        preserves structured input addresses as opaque references.  Once the
+        resulting calculation returns, the Registry has both channels and can
+        safely materialize those exact addresses before claim auto-binding and
+        formula verification.  Invalid or stale addresses remain unresolved
+        and flow through the normal degraded-quality path.
+        """
+
+        before = len(self._records)
+        requested: set[tuple[str, str]] = set()
+        for record in tuple(self._records.values()):
+            if record.evidence.get("kind") != "calculation":
+                continue
+            inputs = record.evidence.get("inputs")
+            if not isinstance(inputs, list):
+                continue
+            for item in inputs:
+                reference = item.get("citationId") if isinstance(item, dict) else None
+                if not isinstance(reference, str) or "#" not in reference:
+                    continue
+                handle, fragment = reference.split("#", 1)
+                if _COLLECTION_HANDLE_RE.fullmatch(handle) and fragment.startswith("/"):
+                    requested.add((handle, f"#{fragment}"))
+        for handle, fragment in sorted(requested):
+            self.materialize_reference(handle, fragment)
+        return len(self._records) - before
+
     def values(self) -> Iterable[EvidenceRecord]:
         return self._records.values()
 
     def __len__(self) -> int:
         return len(self._records)
+
+    @property
+    def collection_count(self) -> int:
+        return len(self._collections)
+
+    @property
+    def address_requested_count(self) -> int:
+        return self._address_requested_count
+
+    @property
+    def materialized_count(self) -> int:
+        return self._materialized_count
+
+    @property
+    def materialization_rejected_count(self) -> int:
+        return self._materialization_rejected_count
 
     @property
     def rejected_count(self) -> int:
@@ -280,7 +517,7 @@ class EvidenceRegistry:
 
     @property
     def had_evidence_activity(self) -> bool:
-        return bool(self._records) or self._rejected_count > 0
+        return bool(self._records) or bool(self._collections) or self._rejected_count > 0
 
     def _source_is_allowed(self, source: dict[str, Any]) -> bool:
         """Fail closed for a document-research session's locked source scope."""
@@ -392,11 +629,30 @@ class CitationGuard:
         if not required and not has_protocol_binding:
             return GuardResult(text=text, bundle=None)
 
+        # A hidden claim-patch repair is applied to the already sealed first
+        # draft.  Its untouched spans therefore contain canonical
+        # ``citation://`` ids emitted by this guard, not model-authored
+        # ``evidence://`` handles.  Preserve only ids that map back to this
+        # turn's immutable registry during that host-controlled second pass.
+        # The first pass still rejects every model-minted canonical id.
+        allow_registered_citation_ids = int(repair_attempts) > 0
         repaired_text, repaired_handles = self._repair_markers(text)
+        repaired_text = self._materialize_collection_addresses(repaired_text)
         repaired_text = _move_citation_after_split_number(repaired_text)
+        repaired_text = _move_calculation_citations_to_value_cells(
+            repaired_text,
+            self._registry,
+            semantics=semantics,
+        )
         repair_attempts = max(
             1 if repaired_handles else 0,
             min(max(int(repair_attempts), 0), 1),
+        )
+        self._registry.materialize_calculation_inputs()
+        self._registry.materialize_claim_candidates(
+            repaired_text,
+            mode=str(policy_mode or "required-on-evidence"),
+            semantics=semantics,
         )
         rebind_result = rebind_unique_mismatched_claims(
             repaired_text,
@@ -419,12 +675,23 @@ class CitationGuard:
             semantics=semantics,
         )
         repaired_text = composite_bind_result.text
+        propagated_bind_result = propagate_equivalent_claim_bindings(
+            repaired_text,
+            self._registry.values(),
+            mode=str(policy_mode or "required-on-evidence"),
+            semantics=semantics,
+        )
+        repaired_text = propagated_bind_result.text
         auto_bound_claims_by_handle: dict[str, list[str]] = {}
         for claim_id, handle in auto_bind_result.claim_handles.items():
             auto_bound_claims_by_handle.setdefault(handle, []).append(claim_id)
         for claim_id, handles in composite_bind_result.claim_handles.items():
             for handle in handles:
                 auto_bound_claims_by_handle.setdefault(handle, []).append(claim_id)
+        equivalent_claims_by_handle: dict[str, list[str]] = {}
+        for claim_id, handles in propagated_bind_result.claim_handles.items():
+            for handle in handles:
+                equivalent_claims_by_handle.setdefault(handle, []).append(claim_id)
         auto_rebound_claims_by_handle: dict[str, list[str]] = {}
         for claim_id, handle in rebind_result.claim_handles.items():
             auto_rebound_claims_by_handle.setdefault(handle, []).append(claim_id)
@@ -463,13 +730,23 @@ class CitationGuard:
                     input_ref = item.get("citationId")
                     if not isinstance(input_ref, str):
                         continue
-                    resolved_ref = _resolve_calculation_input_handle(
-                        item,
-                        current_handle=input_ref,
-                        records=self._registry.values(),
-                        calculation=evidence,
-                        semantics=semantics,
-                    )
+                    resolved_ref = input_ref
+                    if "#" in input_ref:
+                        collection_handle, fragment = input_ref.split("#", 1)
+                        addressed_record = self._registry.materialize_reference(
+                            collection_handle,
+                            f"#{fragment}",
+                        )
+                        if addressed_record is not None:
+                            resolved_ref = addressed_record.handle
+                    if resolved_ref == input_ref:
+                        resolved_ref = _resolve_calculation_input_handle(
+                            item,
+                            current_handle=input_ref,
+                            records=self._registry.values(),
+                            calculation=evidence,
+                            semantics=semantics,
+                        )
                     if resolved_ref != input_ref:
                         calculation_input_auto_bindings.append(
                             {
@@ -494,12 +771,20 @@ class CitationGuard:
                 annotations["provenance"] = {"toolName": record.tool_name}
             auto_bound_claim_ids = auto_bound_claims_by_handle.get(identifier)
             auto_rebound_claim_ids = auto_rebound_claims_by_handle.get(identifier)
-            if auto_bound_claim_ids or auto_rebound_claim_ids or calculation_input_auto_bindings:
+            equivalent_claim_ids = equivalent_claims_by_handle.get(identifier)
+            if (
+                auto_bound_claim_ids
+                or auto_rebound_claim_ids
+                or equivalent_claim_ids
+                or calculation_input_auto_bindings
+            ):
                 binding: dict[str, Any] = {}
                 if auto_bound_claim_ids:
                     binding["autoBoundClaimIds"] = list(auto_bound_claim_ids)
                 if auto_rebound_claim_ids:
                     binding["autoReboundClaimIds"] = list(auto_rebound_claim_ids)
+                if equivalent_claim_ids:
+                    binding["equivalentClaimIds"] = list(equivalent_claim_ids)
                 if calculation_input_auto_bindings:
                     binding["calculationInputAutoBindings"] = calculation_input_auto_bindings
                 annotations["binding"] = binding
@@ -517,8 +802,18 @@ class CitationGuard:
             return citation_id
 
         def replace_link(match: re.Match[str]) -> str:
-            label, scheme, identifier = match.groups()
+            label, scheme, identifier, fragment = match.groups()
             if scheme == "citation":
+                if fragment:
+                    _append_unique(unknown_ids, f"{identifier}{fragment}")
+                    return _untrusted_link_label(label)
+                if allow_registered_citation_ids and identifier in canonical_to_handle:
+                    citation_id = append_handle(identifier)
+                    if citation_id is not None:
+                        return (
+                            f"[{_citation_display_number(citations, citation_id)}]"
+                            f"(citation://{citation_id})"
+                        )
                 # The model cannot mint canonical ids.  Even if it guessed an
                 # id that would hash to a registered handle, only handles in a
                 # tool envelope are accepted at this boundary.
@@ -531,6 +826,14 @@ class CitationGuard:
 
         numbered_bindings = _numbered_evidence_bindings(repaired_text)
         canonical_text = _MARKDOWN_LINK_RE.sub(replace_link, repaired_text)
+        if unknown_ids:
+            # Removing an untrusted citation marker must not leave a visible
+            # gap before the sentence punctuation (``fact [source](...) .``).
+            canonical_text = re.sub(
+                r"[ \t]+([,.;:!?，。；：！？])",
+                r"\1",
+                canonical_text,
+            )
 
         def replace_bare(match: re.Match[str]) -> str:
             handle = match.group(1)
@@ -612,6 +915,12 @@ class CitationGuard:
                 "repairAttempts": repair_attempts,
                 "policyRevision": POLICY_REVISION,
                 "evidenceRegisteredCount": len(self._registry),
+                "evidenceCollectionCount": self._registry.collection_count,
+                "evidenceAddressRequestedCount": self._registry.address_requested_count,
+                "evidenceMaterializedCount": self._registry.materialized_count,
+                "evidenceMaterializationRejectedCount": (
+                    self._registry.materialization_rejected_count
+                ),
                 "evidenceRejectedCount": self._registry.rejected_count,
                 "evidenceOverflowReasons": list(self._registry.overflow_reasons),
             },
@@ -635,6 +944,30 @@ class CitationGuard:
             return f"[source](evidence://{handle})"
 
         return _REPAIR_MARKER_RE.sub(replace, text), repaired
+
+    def _materialize_collection_addresses(self, text: str) -> str:
+        """Replace valid provisional Collection Addresses with direct handles."""
+
+        def replace_link(match: re.Match[str]) -> str:
+            label, scheme, identifier, fragment = match.groups()
+            if scheme != "evidence" or fragment is None:
+                return match.group(0)
+            record = self._registry.materialize_reference(identifier, fragment)
+            if record is None:
+                return f"[{label}](evidence://{identifier})"
+            return f"[{label}](evidence://{record.handle})"
+
+        materialized = _MARKDOWN_LINK_RE.sub(replace_link, text)
+
+        def replace_bare(match: re.Match[str]) -> str:
+            identifier = match.group(1)
+            fragment = match.group(2)
+            if fragment is None:
+                return match.group(0)
+            record = self._registry.materialize_reference(identifier, fragment)
+            return f"evidence://{record.handle}" if record is not None else f"evidence://{identifier}"
+
+        return _BARE_EVIDENCE_RE.sub(replace_bare, materialized)
 
     def _citation_id(self, handle: str) -> str:
         digest = hashlib.sha256(f"{self._message_id}\0{handle}".encode()).hexdigest()[:20]
@@ -975,10 +1308,11 @@ def compact_citation_tool_content(
 ) -> Any | None:
     """Return a model/history-safe view of source-bearing tool content.
 
-    The full validated envelopes remain available to the turn Registry, while
-    model context and persisted tool traces retain only the fields needed to
-    select an evidence handle.  ``None`` means no evidence envelope was found
-    and callers should preserve the original value unchanged.
+    The projection removes repeated trusted metadata but preserves the complete
+    task content selected by the retrieval/tool plan.  Text handles are aligned
+    with their content whenever possible; structured batches become one
+    Collection hint while their ``data`` appears exactly once.  ``None`` means
+    no evidence envelope was found and callers should preserve the original.
     """
 
     compacted, changed = _compact_citation_value(
@@ -986,6 +1320,168 @@ def compact_citation_tool_content(
         max_text_evidence_items=max(1, max_text_evidence_items),
     )
     return compacted if changed else None
+
+
+def private_citation_tool_content(content: Any) -> str | None:
+    """Return only trusted direct Evidence and Collection descriptors.
+
+    Structured ``data`` remains in the model projection and is captured through
+    its collection hint by :meth:`EvidenceRegistry.register_tool_projection`;
+    this sidecar therefore does not duplicate the full API result.
+    """
+
+    payload = _decode_json_payload(
+        content,
+        max_chars=EvidenceRegistry._MAX_PRIVATE_TOOL_RESULT_CHARS,
+    )
+    if payload is None:
+        return None
+    private_items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    stack: list[tuple[Any, int]] = [(payload, 0)]
+    visited = 0
+    while stack and visited < EvidenceRegistry._MAX_VISITED_NODES:
+        node, depth = stack.pop()
+        visited += 1
+        if depth > EvidenceRegistry._MAX_DEPTH:
+            continue
+        if isinstance(node, dict):
+            candidates = _as_envelope_items(node.get(EVIDENCE_ENVELOPE_KEY))
+            consumed: set[int] = set()
+            for index, candidate in enumerate(candidates):
+                if candidate.get("kind") != "structured-evidence-collection":
+                    continue
+                handle = candidate.get("collectionHandle")
+                if isinstance(handle, str) and handle not in seen:
+                    private_items.append(copy.deepcopy(candidate))
+                    seen.add(handle)
+                consumed.add(index)
+            for collection, indexes in _legacy_collection_records(
+                node,
+                candidates,
+                consumed=consumed,
+                tool_name=None,
+            ):
+                consumed.update(indexes)
+                if collection.handle in seen:
+                    continue
+                private_items.append(_collection_descriptor(collection))
+                seen.add(collection.handle)
+            for index, candidate in enumerate(candidates):
+                if index in consumed:
+                    continue
+                handle = candidate.get("evidenceHandle")
+                if isinstance(handle, str) and handle not in seen:
+                    private_items.append(copy.deepcopy(candidate))
+                    seen.add(handle)
+            stack.extend(
+                (item, depth + 1)
+                for key, item in node.items()
+                if key != EVIDENCE_ENVELOPE_KEY
+            )
+        elif isinstance(node, list):
+            stack.extend((item, depth + 1) for item in node)
+        elif isinstance(node, str):
+            nested = _decode_json_payload(
+                node,
+                max_chars=EvidenceRegistry._MAX_PRIVATE_TOOL_RESULT_CHARS,
+            )
+            if nested is not None:
+                stack.append((nested, depth + 1))
+    if not private_items:
+        return None
+    return json.dumps(
+        {EVIDENCE_ENVELOPE_KEY: private_items},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _collection_descriptor(collection: EvidenceCollectionRecord) -> dict[str, Any]:
+    return {
+        "version": 1,
+        "kind": "structured-evidence-collection",
+        "collectionHandle": collection.handle,
+        "source": copy.deepcopy(collection.source),
+        "common": copy.deepcopy(collection.common),
+        "addressing": copy.deepcopy(collection.addressing),
+        "contentHash": collection.content_hash,
+    }
+
+
+def _collection_hint(collection: EvidenceCollectionRecord) -> dict[str, Any]:
+    hint: dict[str, Any] = {
+        "collectionHandle": collection.handle,
+        "contentRoot": collection.addressing["contentRoot"],
+        "addressing": collection.addressing["mode"],
+        "identityFields": list(collection.addressing.get("identityFields", [])),
+        "citationTemplate": f"evidence://{collection.handle}#{{json-pointer}}",
+    }
+    if "fieldSchemaRef" in collection.addressing:
+        hint["fieldSchemaRef"] = copy.deepcopy(collection.addressing["fieldSchemaRef"])
+    return hint
+
+
+def _attach_text_evidence_hints(
+    output: dict[str, Any],
+    candidates: list[dict[str, Any]],
+) -> set[int]:
+    """Attach handles to their exact visible chunk without copying the quote."""
+
+    aligned: set[int] = set()
+    nodes: list[dict[str, Any]] = []
+    stack: list[Any] = [
+        value
+        for key, value in output.items()
+        if key not in {EVIDENCE_ENVELOPE_KEY, EVIDENCE_HINT_KEY}
+    ]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            nodes.append(node)
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    for index, candidate in enumerate(candidates):
+        evidence = candidate.get("evidence")
+        locator = candidate.get("locator")
+        if not isinstance(evidence, dict) or evidence.get("kind") != "text":
+            continue
+        chunk_id = locator.get("chunkId") if isinstance(locator, dict) else None
+        matches: list[dict[str, Any]] = []
+        if isinstance(chunk_id, str) and chunk_id:
+            matches = [
+                node
+                for node in nodes
+                if chunk_id
+                in {
+                    str(node.get("id") or ""),
+                    str(node.get("chunkId") or ""),
+                    str(node.get("chunk_id") or ""),
+                }
+            ]
+        if not matches:
+            quote = str(evidence.get("quote") or evidence.get("snippet") or "").strip()
+            if quote:
+                matches = [
+                    node
+                    for node in nodes
+                    if any(
+                        quote in value
+                        for key, value in node.items()
+                        if key in {"content", "text", "html", "markdown", "raw_content"}
+                        and isinstance(value, str)
+                    )
+                ]
+        if len(matches) != 1:
+            continue
+        handle = candidate.get("evidenceHandle")
+        if not isinstance(handle, str):
+            continue
+        matches[0]["evidenceHandle"] = handle
+        matches[0]["citationLink"] = f"[source](evidence://{handle})"
+        aligned.add(index)
+    return aligned
 
 
 def _compact_citation_value(
@@ -1025,23 +1521,87 @@ def _compact_citation_value(
     if EVIDENCE_ENVELOPE_KEY in output:
         raw = output[EVIDENCE_ENVELOPE_KEY]
         items = raw if isinstance(raw, list) else [raw]
-        compact_items = [
-            item for item in (_compact_citation_envelope(item) for item in items) if item
+        candidates = [item for item in items if isinstance(item, dict)]
+        consumed: set[int] = set()
+        collections: list[EvidenceCollectionRecord] = []
+        for index, candidate in enumerate(candidates):
+            if candidate.get("kind") != "structured-evidence-collection":
+                continue
+            collection = _validate_evidence_collection(
+                candidate,
+                container=output,
+                pending_snapshot=None,
+                tool_name=None,
+            )
+            consumed.add(index)
+            if collection is not None:
+                collections.append(collection)
+        for collection, indexes in _legacy_collection_records(
+            output,
+            candidates,
+            consumed=consumed,
+            tool_name=None,
+        ):
+            collections.append(collection)
+            consumed.update(indexes)
+        direct_items = [
+            candidate for index, candidate in enumerate(candidates) if index not in consumed
         ]
-        text_evidence = bool(compact_items) and all(
-            item.get("kind") == "text" for item in compact_items
+        aligned_direct_indexes = _attach_text_evidence_hints(output, direct_items)
+        unaligned_direct_items = [
+            candidate
+            for index, candidate in enumerate(direct_items)
+            if index not in aligned_direct_indexes
+        ]
+        compact_items = [
+            item
+            for item in (_compact_citation_envelope(item) for item in unaligned_direct_items)
+            if item
+        ]
+        text_evidence = bool(direct_items) and all(
+            isinstance(item.get("evidence"), dict)
+            and item["evidence"].get("kind") == "text"
+            for item in direct_items
         )
-        if text_evidence:
-            original_count = len(compact_items)
-            compact_items = compact_items[:max_text_evidence_items]
-            for key in _BULK_TEXT_RESULT_KEYS:
-                output.pop(key, None)
+        has_model_content = any(key in output for key in _BULK_TEXT_RESULT_KEYS)
+        if text_evidence and has_model_content:
+            original_count = len(direct_items)
+            has_local_scalar_content = any(
+                isinstance(output.get(key), str)
+                for key in ("content", "html", "markdown", "raw_content", "text")
+            )
+            local_text = "\n".join(
+                str(output.get(key) or "")
+                for key in ("content", "html", "markdown", "raw_content", "text")
+                if isinstance(output.get(key), str)
+            )
+            compact_excerpt = (
+                str(compact_items[0].get("excerpt") or "")
+                if len(compact_items) == 1
+                else ""
+            )
+            if (
+                len(compact_items) == 1
+                and has_local_scalar_content
+                and compact_excerpt
+                and compact_excerpt in local_text
+            ):
+                output["evidenceHandle"] = compact_items[0]["evidenceHandle"]
+                output["citationLink"] = compact_items[0]["citationLink"]
+                compact_items = []
             output["_valuz_compaction"] = {
                 "evidenceReturned": original_count,
-                "evidenceShown": len(compact_items),
-                "bulkTextOmitted": True,
+                "evidenceShown": original_count,
+                "bulkTextOmitted": False,
+                "modelContentPreserved": True,
             }
-        output[EVIDENCE_ENVELOPE_KEY] = compact_items
+        if compact_items:
+            output[EVIDENCE_ENVELOPE_KEY] = compact_items
+        else:
+            output.pop(EVIDENCE_ENVELOPE_KEY, None)
+        if collections:
+            hints = [_collection_hint(collection) for collection in collections]
+            output[EVIDENCE_HINT_KEY] = hints[0] if len(hints) == 1 else hints
         changed = True
     for key, item in list(output.items()):
         if key == EVIDENCE_ENVELOPE_KEY:
@@ -1172,6 +1732,653 @@ def _as_envelope_items(value: Any) -> list[dict[str, Any]]:
     if isinstance(value, list):
         return [item for item in value if isinstance(item, dict)]
     return []
+
+
+def _content_hash(value: Any) -> str:
+    serialized = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return f"sha256:{hashlib.sha256(serialized.encode()).hexdigest()}"
+
+
+def _json_pointer_tokens(pointer: str) -> list[str] | None:
+    if pointer == "":
+        return []
+    if not pointer.startswith("/") or len(pointer) > 4_096:
+        return None
+    tokens: list[str] = []
+    for raw in pointer[1:].split("/"):
+        if re.search(r"~(?![01])", raw):
+            return None
+        tokens.append(raw.replace("~1", "/").replace("~0", "~"))
+    return tokens
+
+
+def _resolve_json_pointer(value: Any, pointer: str) -> tuple[bool, Any]:
+    tokens = _json_pointer_tokens(pointer)
+    if tokens is None:
+        return False, None
+    current = value
+    for token in tokens:
+        if isinstance(current, dict):
+            if token not in current:
+                return False, None
+            current = current[token]
+            continue
+        if isinstance(current, list) and token.isdigit():
+            index = int(token)
+            if index >= len(current):
+                return False, None
+            current = current[index]
+            continue
+        return False, None
+    return True, current
+
+
+def _escape_json_pointer_token(value: str) -> str:
+    return value.replace("~", "~0").replace("/", "~1")
+
+
+def _field_to_json_pointer(field: str, *, content_root: str) -> str | None:
+    if field.startswith("/"):
+        return field
+    tokens: list[str] = []
+    position = 0
+    for match in re.finditer(r"(?:^|\.)([^.\[\]]+)|\[(\d+)\]", field):
+        if match.start() != position:
+            return None
+        token = match.group(1) or match.group(2)
+        if token is None:
+            return None
+        tokens.append(token)
+        position = match.end()
+    if position != len(field) or not tokens:
+        return None
+    root_tokens = _json_pointer_tokens(content_root)
+    if root_tokens is None:
+        return None
+    if tokens[: len(root_tokens)] != root_tokens:
+        tokens = [*root_tokens, *tokens]
+    return "/" + "/".join(_escape_json_pointer_token(token) for token in tokens)
+
+
+def _unique_pointer_for_legacy_field(
+    container: dict[str, Any],
+    field: str,
+    *,
+    evidence: dict[str, Any] | None = None,
+) -> str | None:
+    direct = _field_to_json_pointer(field, content_root="/data")
+    if direct is not None:
+        found, value = _resolve_json_pointer(container, direct)
+        if found and _safe_scalar(
+            value,
+            allow_none=True,
+            max_string_chars=_MAX_STRUCTURED_STRING_CHARS,
+        ):
+            return direct
+    field_pointer = _field_to_json_pointer(field, content_root="")
+    suffix_tokens = _json_pointer_tokens(field_pointer or "")
+    if not suffix_tokens:
+        return None
+    matches: list[str] = []
+    stack: list[tuple[Any, str, int]] = [(container.get("data"), "/data", 0)]
+    while stack and len(matches) <= _MAX_REGISTRY_RECORDS:
+        node, pointer, depth = stack.pop()
+        if depth > EvidenceRegistry._MAX_DEPTH:
+            continue
+        if isinstance(node, dict):
+            for key, item in node.items():
+                stack.append(
+                    (item, f"{pointer}/{_escape_json_pointer_token(str(key))}", depth + 1)
+                )
+        elif isinstance(node, list):
+            for index, item in enumerate(node):
+                stack.append((item, f"{pointer}/{index}", depth + 1))
+        else:
+            pointer_tokens = _json_pointer_tokens(pointer) or []
+            if pointer_tokens[-len(suffix_tokens) :] == suffix_tokens:
+                matches.append(pointer)
+    if len(matches) == 1:
+        return matches[0]
+    if not matches or not isinstance(evidence, dict):
+        return None
+
+    # A multi-period result repeats the same field path once per row.  Legacy
+    # producers already attach the exact scalar value and period/entity
+    # identity to each envelope, so map each envelope back to one pointer
+    # before replacing N leaf handles with one Collection.  Ambiguity remains
+    # a hard stop: equal values with no distinguishing identity stay direct.
+    expected_value = evidence.get("value")
+    value_matches = [
+        pointer
+        for pointer in matches
+        if _legacy_scalar_values_equal(
+            _resolve_json_pointer(container, pointer)[1],
+            expected_value,
+        )
+    ]
+    candidates = value_matches if value_matches else matches
+    if len(candidates) == 1:
+        return candidates[0]
+    contextual_matches = [
+        pointer
+        for pointer in candidates
+        if _legacy_pointer_row_matches_evidence(container, pointer, evidence)
+    ]
+    return contextual_matches[0] if len(contextual_matches) == 1 else None
+
+
+def _legacy_scalar_values_equal(left: Any, right: Any) -> bool:
+    left_decimal = _decimal_scalar(left)
+    right_decimal = _decimal_scalar(right)
+    if left_decimal is not None and right_decimal is not None:
+        return left_decimal == right_decimal
+    return type(left) is type(right) and left == right
+
+
+def _legacy_pointer_row_matches_evidence(
+    container: dict[str, Any],
+    pointer: str,
+    evidence: dict[str, Any],
+) -> bool:
+    tokens = _json_pointer_tokens(pointer) or []
+    data = container.get("data")
+    if len(tokens) < 2 or tokens[0] != "data" or not tokens[1].isdigit():
+        return False
+    index = int(tokens[1])
+    if not isinstance(data, list) or index >= len(data) or not isinstance(data[index], dict):
+        return False
+    row = data[index]
+
+    expected_entity = str(evidence.get("entityId") or "").strip().casefold()
+    row_entity = str(
+        row.get("entityId")
+        or row.get("entity_id")
+        or row.get("symbol")
+        or row.get("ticker")
+        or row.get("code")
+        or ""
+    ).strip().casefold()
+    if expected_entity and row_entity and expected_entity != row_entity:
+        return False
+
+    expected_period = " ".join(
+        str(evidence.get(key) or "") for key in ("period", "asOf")
+    )
+    row_period = " ".join(
+        str(row.get(key) or "")
+        for key in (
+            "fiscal_year",
+            "fiscalYear",
+            "fiscal_quarter",
+            "fiscalQuarter",
+            "period",
+            "end_date",
+            "endDate",
+            "as_of",
+            "asOf",
+        )
+    )
+    expected_years = set(re.findall(r"(?:19|20)\d{2}", expected_period))
+    row_years = set(re.findall(r"(?:19|20)\d{2}", row_period))
+    if expected_years and row_years and expected_years.isdisjoint(row_years):
+        return False
+    expected_quarters = set(re.findall(r"\b(?:FY|Q[1-4])\b", expected_period, re.I))
+    row_quarters = set(re.findall(r"\b(?:FY|Q[1-4])\b", row_period, re.I))
+    if expected_quarters and row_quarters and {
+        item.upper() for item in expected_quarters
+    }.isdisjoint({item.upper() for item in row_quarters}):
+        return False
+    return bool(expected_entity or expected_years or expected_quarters)
+
+
+def _decimal_key(value: Any) -> str | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        decimal = Decimal(str(value).replace(",", "").strip())
+    except (InvalidOperation, ValueError):
+        return None
+    if not decimal.is_finite():
+        return None
+    normalized = format(decimal.normalize(), "f")
+    return normalized.rstrip("0").rstrip(".") if "." in normalized else normalized
+
+
+def _scalar_index_keys(value: Any, *, field: str = "") -> tuple[str, ...]:
+    keys: set[str] = set()
+    numeric = _decimal_key(value)
+    if numeric is not None:
+        keys.add(f"n:{numeric}")
+        normalized_field = field.casefold()
+        if (
+            any(term in normalized_field for term in ("rate", "ratio", "margin", "yoy", "growth"))
+            and abs(Decimal(numeric)) <= 1
+        ):
+            scaled = _decimal_key(Decimal(numeric) * 100)
+            if scaled is not None:
+                keys.add(f"n:{scaled}")
+    elif isinstance(value, str):
+        normalized = re.sub(r"\s+", " ", value).strip().casefold()
+        if 3 <= len(normalized) <= _MAX_STRUCTURED_STRING_CHARS:
+            keys.add(f"s:{normalized}")
+    return tuple(sorted(keys))
+
+
+def _build_scalar_index(snapshot: Any, *, content_root: str) -> dict[str, tuple[str, ...]]:
+    index: dict[str, list[str]] = {}
+    stack: list[tuple[Any, str, int]] = [(snapshot, content_root.rstrip("/"), 0)]
+    visited = 0
+    while stack and visited < EvidenceRegistry._MAX_VISITED_NODES:
+        node, pointer, depth = stack.pop()
+        visited += 1
+        if depth > EvidenceRegistry._MAX_DEPTH:
+            continue
+        if isinstance(node, dict):
+            for key, item in node.items():
+                child = f"{pointer}/{_escape_json_pointer_token(str(key))}"
+                stack.append((item, child, depth + 1))
+        elif isinstance(node, list):
+            for position, item in enumerate(node):
+                stack.append((item, f"{pointer}/{position}", depth + 1))
+        elif _safe_scalar(node, allow_none=True, max_string_chars=_MAX_STRUCTURED_STRING_CHARS):
+            field = pointer.rsplit("/", 1)[-1]
+            for key in _scalar_index_keys(node, field=field):
+                index.setdefault(key, []).append(pointer)
+    return {key: tuple(sorted(set(pointers))) for key, pointers in index.items()}
+
+
+def _claim_scalar_keys(text: str) -> tuple[str, ...]:
+    keys: set[str] = set()
+    for match in re.finditer(r"(?<![A-Za-z0-9_])[-+]?\d[\d,]*(?:\.\d+)?", text):
+        numeric = _decimal_key(match.group(0))
+        if numeric is not None:
+            keys.add(f"n:{numeric}")
+    return tuple(sorted(keys))
+
+
+def _normalize_collection_common(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    if any(
+        not _bounded_nonempty_string(value.get(key), limit)
+        for key, limit in {
+            "datasetId": _MAX_SOURCE_ID_CHARS,
+            "toolName": _MAX_SOURCE_TEXT_CHARS,
+            "capturedAt": 128,
+        }.items()
+    ):
+        return None
+    return _pick_fields(
+        value,
+        (
+            "datasetId",
+            "toolName",
+            "entityId",
+            "entityName",
+            "period",
+            "asOf",
+            "scope",
+            "basis",
+            "currency",
+            "scale",
+            "capturedAt",
+        ),
+    )
+
+
+def _normalize_collection_addressing(value: Any) -> dict[str, Any] | None:
+    # v1 implementation materializes JSON Pointer addresses.  ``typed-path``
+    # remains reserved by the protocol until a versioned schema resolver is
+    # registered; accepting it here would imply validation we do not perform.
+    if not isinstance(value, dict) or value.get("mode") != "json-pointer":
+        return None
+    content_root = value.get("contentRoot")
+    if not isinstance(content_root, str) or _json_pointer_tokens(content_root) is None:
+        return None
+    identity_fields = value.get("identityFields", [])
+    if (
+        not isinstance(identity_fields, list)
+        or len(identity_fields) > 32
+        or any(
+            not isinstance(item, str) or _json_pointer_tokens(item) is None
+            for item in identity_fields
+        )
+    ):
+        return None
+    allowed_roots = value.get("allowedPathRoots", [content_root])
+    if (
+        not isinstance(allowed_roots, list)
+        or not allowed_roots
+        or len(allowed_roots) > 32
+        or any(
+            not isinstance(item, str) or _json_pointer_tokens(item) is None
+            for item in allowed_roots
+        )
+    ):
+        return None
+    result: dict[str, Any] = {
+        "mode": value["mode"],
+        "contentRoot": content_root,
+        "identityFields": list(identity_fields),
+        "allowedPathRoots": list(allowed_roots),
+    }
+    schema_ref = value.get("fieldSchemaRef")
+    if isinstance(schema_ref, dict) and all(
+        _bounded_nonempty_string(schema_ref.get(key), _MAX_SOURCE_ID_CHARS)
+        for key in ("schemaId", "revision")
+    ):
+        result["fieldSchemaRef"] = {
+            "schemaId": schema_ref["schemaId"],
+            "revision": schema_ref["revision"],
+        }
+    return result
+
+
+def _validate_evidence_collection(
+    item: dict[str, Any],
+    *,
+    container: dict[str, Any],
+    pending_snapshot: tuple[Any, str, str] | None,
+    tool_name: str | None,
+) -> EvidenceCollectionRecord | None:
+    handle = item.get("collectionHandle")
+    source = _normalize_source(item.get("source")) if isinstance(item.get("source"), dict) else None
+    common = _normalize_collection_common(item.get("common"))
+    addressing = _normalize_collection_addressing(item.get("addressing"))
+    content_hash = item.get("contentHash")
+    if (
+        item.get("version") != 1
+        or item.get("kind") != "structured-evidence-collection"
+        or not isinstance(handle, str)
+        or not _COLLECTION_HANDLE_RE.fullmatch(handle)
+        or source is None
+        or common is None
+        or addressing is None
+        or not isinstance(content_hash, str)
+        or len(content_hash) > 128
+    ):
+        return None
+    content_root = addressing["contentRoot"]
+    if pending_snapshot is not None:
+        snapshot, actual_hash, pending_root = pending_snapshot
+        if pending_root != content_root:
+            return None
+    else:
+        found, snapshot = _resolve_json_pointer(container, content_root)
+        if not found:
+            return None
+        actual_hash = _content_hash(snapshot)
+    if actual_hash != content_hash:
+        return None
+    return EvidenceCollectionRecord(
+        handle=handle,
+        source=source,
+        common=common,
+        addressing=addressing,
+        content_hash=content_hash,
+        snapshot=copy.deepcopy(snapshot),
+        tool_name=(
+            tool_name if _bounded_nonempty_string(tool_name, _MAX_SOURCE_TEXT_CHARS) else None
+        ),
+        scalar_index=_build_scalar_index(snapshot, content_root=content_root),
+    )
+
+
+def _legacy_collection_records(
+    container: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    *,
+    consumed: set[int],
+    tool_name: str | None,
+) -> list[tuple[EvidenceCollectionRecord, set[int]]]:
+    if "data" not in container or not isinstance(container.get("data"), (dict, list)):
+        return []
+    groups: dict[str, list[tuple[int, EvidenceRecord, str]]] = {}
+    for index, candidate in enumerate(candidates):
+        if index in consumed:
+            continue
+        evidence = candidate.get("evidence")
+        if not isinstance(evidence, dict) or evidence.get("kind") != "structured-data":
+            continue
+        record = _validate_evidence_item(candidate, tool_name=tool_name)
+        if record is None:
+            continue
+        field = str(record.evidence.get("field") or "")
+        pointer = _unique_pointer_for_legacy_field(
+            container,
+            field,
+            evidence=record.evidence,
+        )
+        if pointer is None:
+            continue
+        group_key = json.dumps(
+            {
+                "source": record.source,
+                "datasetId": record.evidence.get("datasetId"),
+                "toolName": record.evidence.get("toolName"),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        groups.setdefault(group_key, []).append((index, record, pointer))
+
+    output: list[tuple[EvidenceCollectionRecord, set[int]]] = []
+    snapshot = container["data"]
+    content_hash = _content_hash(snapshot)
+    for group_key, items in groups.items():
+        first = items[0][1]
+        evidence = first.evidence
+        digest = hashlib.sha256(f"{group_key}\0{content_hash}".encode()).hexdigest()[:24]
+        handle = f"evc_legacy_{digest}"
+        common: dict[str, Any] = {
+            "datasetId": str(evidence.get("datasetId") or "tool-result"),
+            "toolName": str(evidence.get("toolName") or tool_name or "tool"),
+            "capturedAt": str(evidence.get("capturedAt") or first.source.get("retrievedAt") or ""),
+        }
+        for key in (
+            "entityId",
+            "entityName",
+            "period",
+            "asOf",
+            "scope",
+            "basis",
+            "currency",
+            "scale",
+        ):
+            values = {
+                str(record.evidence.get(key))
+                for _, record, _ in items
+                if record.evidence.get(key) not in (None, "")
+            }
+            if len(values) == 1:
+                common[key] = next(iter(values))
+        if "currency" not in common:
+            units = {
+                str(record.evidence.get("unit"))
+                for _, record, _ in items
+                if str(record.evidence.get("unit") or "").upper()
+                in {"CNY", "USD", "EUR", "GBP", "JPY", "HKD"}
+            }
+            if len(units) == 1:
+                common["currency"] = next(iter(units)).upper()
+        addressing = {
+            "mode": "json-pointer",
+            "contentRoot": "/data",
+            "identityFields": [],
+            "allowedPathRoots": ["/data"],
+        }
+        output.append(
+            (
+                EvidenceCollectionRecord(
+                    handle=handle,
+                    source=copy.deepcopy(first.source),
+                    common=common,
+                    addressing=addressing,
+                    content_hash=content_hash,
+                    snapshot=copy.deepcopy(snapshot),
+                    tool_name=first.tool_name,
+                    scalar_index=_build_scalar_index(snapshot, content_root="/data"),
+                ),
+                {index for index, _, _ in items},
+            )
+        )
+    return output
+
+
+def _pointer_is_allowed(pointer: str, roots: list[str]) -> bool:
+    return any(pointer == root or pointer.startswith(f"{root.rstrip('/')}/") for root in roots)
+
+
+def _materialize_collection_address(
+    collection: EvidenceCollectionRecord,
+    pointer: str,
+) -> EvidenceRecord | None:
+    content_root = str(collection.addressing.get("contentRoot") or "")
+    allowed_roots = collection.addressing.get("allowedPathRoots")
+    allowed_roots = allowed_roots if isinstance(allowed_roots, list) else [content_root]
+    if not _pointer_is_allowed(pointer, allowed_roots):
+        return None
+    pointer_tokens = _json_pointer_tokens(pointer)
+    if pointer_tokens is None or any(
+        token.casefold() in _SECRET_QUERY_KEYS
+        or token.casefold() in {"credentials", "headers", "request_headers", "tool_trace"}
+        for token in pointer_tokens
+    ):
+        return None
+    if pointer == content_root:
+        relative = ""
+    elif pointer.startswith(f"{content_root.rstrip('/')}/"):
+        relative = pointer[len(content_root) :]
+    else:
+        return None
+    found, raw_value = _resolve_json_pointer(collection.snapshot, relative)
+    if not found or not _safe_scalar(
+        raw_value,
+        allow_none=True,
+        max_string_chars=_MAX_STRUCTURED_STRING_CHARS,
+    ):
+        return None
+
+    tokens = _json_pointer_tokens(relative) or []
+    context: dict[str, Any] = {}
+    current = collection.snapshot
+    for token in tokens[:-1]:
+        if isinstance(current, dict):
+            for key, value in current.items():
+                if not isinstance(value, (dict, list)):
+                    context[str(key)] = value
+            current = current.get(token)
+        elif isinstance(current, list) and token.isdigit() and int(token) < len(current):
+            current = current[int(token)]
+        else:
+            break
+    if isinstance(current, dict):
+        for key, value in current.items():
+            if not isinstance(value, (dict, list)):
+                context[str(key)] = value
+
+    field = tokens[-1] if tokens else pointer.rsplit("/", 1)[-1]
+    value = raw_value
+    unit = str(context.get("unit") or "")
+    normalized_field = field.casefold()
+    numeric = _decimal_key(raw_value)
+    if (
+        numeric is not None
+        and any(term in normalized_field for term in ("rate", "ratio", "margin", "yoy", "growth"))
+    ):
+        decimal = Decimal(numeric)
+        if abs(decimal) <= 1:
+            value = float(decimal * 100)
+        unit = unit or "percent"
+    currency = str(context.get("currency") or collection.common.get("currency") or "")
+    if not unit and currency and any(
+        term in normalized_field
+        for term in ("revenue", "cost", "profit", "asset", "liabil", "cash", "income")
+    ):
+        unit = currency
+
+    fiscal_year = context.get("fiscal_year") or context.get("fiscalYear")
+    period_part = context.get("period")
+    period = str(collection.common.get("period") or "")
+    if not period and fiscal_year is not None:
+        period = f"{fiscal_year} {period_part or ''}".strip()
+    elif not period and period_part is not None:
+        period = str(period_part)
+    entity_id = (
+        collection.common.get("entityId")
+        or context.get("entityId")
+        or context.get("entity_id")
+        or context.get("symbol")
+        or context.get("ticker")
+        or context.get("code")
+    )
+    entity_name = (
+        collection.common.get("entityName")
+        or context.get("entityName")
+        or context.get("entity_name")
+        or context.get("name")
+    )
+    identity_values: list[str] = []
+    for identity_pointer in collection.addressing.get("identityFields", []):
+        identity_relative = (
+            identity_pointer[len(content_root) :]
+            if identity_pointer.startswith(content_root)
+            else identity_pointer
+        )
+        identity_found, identity_value = _resolve_json_pointer(
+            collection.snapshot,
+            identity_relative,
+        )
+        if identity_found and _safe_scalar(
+            identity_value,
+            allow_none=True,
+            max_string_chars=_MAX_STRUCTURED_STRING_CHARS,
+        ):
+            identity_values.append(str(identity_value))
+
+    evidence: dict[str, Any] = {
+        "kind": "structured-data",
+        "datasetId": collection.common["datasetId"],
+        "toolName": collection.common["toolName"],
+        "recordKey": "|".join(identity_values) or pointer,
+        "field": pointer,
+        "metric": field,
+        "value": value,
+        "capturedAt": collection.common["capturedAt"],
+    }
+    for key, candidate in {
+        "entityId": entity_id,
+        "entityName": entity_name,
+        "unit": unit,
+        "currency": currency,
+        "scale": collection.common.get("scale") or context.get("scale"),
+        "period": period,
+        "asOf": collection.common.get("asOf") or context.get("asOf") or context.get("end_date"),
+        "scope": collection.common.get("scope") or context.get("scope"),
+        "basis": collection.common.get("basis") or context.get("basis"),
+    }.items():
+        if candidate not in (None, ""):
+            evidence[key] = candidate
+    normalized_evidence = _normalize_evidence(evidence)
+    if normalized_evidence is None:
+        return None
+    digest = hashlib.sha256(
+        f"{collection.handle}\0{collection.content_hash}\0{pointer}".encode()
+    ).hexdigest()[:24]
+    return EvidenceRecord(
+        handle=f"ev_mat_{digest}",
+        source=copy.deepcopy(collection.source),
+        evidence=normalized_evidence,
+        locator=None,
+        tool_name=collection.tool_name or str(collection.common.get("toolName") or "") or None,
+    )
 
 
 def _validate_evidence_item(
@@ -1525,6 +2732,65 @@ def _move_citation_after_split_number(value: str) -> str:
         ),
         value,
     )
+
+
+def _move_calculation_citations_to_value_cells(
+    value: str,
+    registry: EvidenceRegistry,
+    *,
+    semantics: dict[str, Any] | None,
+) -> str:
+    """Place a calculation citation beside the result it proves.
+
+    Markdown generators occasionally attach the calculation handle to a
+    neighboring ``期间``/``Period`` cell.  The row still looks plausible, but
+    the result cell is then uncited and the verifier quite correctly rejects
+    it.  Relocate only when one calculation handle and one result-matching
+    sibling cell exist; ambiguous rows remain untouched.
+    """
+
+    lines = value.splitlines()
+    for line_index, line in enumerate(lines):
+        stripped = line.strip()
+        if not (stripped.startswith("|") and stripped.endswith("|")):
+            continue
+        cells = line.split("|")
+        calculation_links: list[tuple[int, re.Match[str], EvidenceRecord]] = []
+        for cell_index, cell in enumerate(cells[1:-1], start=1):
+            for match in _MARKDOWN_LINK_RE.finditer(cell):
+                if match.group(2) != "evidence" or match.group(4) is not None:
+                    continue
+                record = registry.resolve(match.group(3))
+                if record is not None and record.evidence.get("kind") == "calculation":
+                    calculation_links.append((cell_index, match, record))
+        if len(calculation_links) != 1:
+            continue
+        source_index, source_match, record = calculation_links[0]
+        evidence = record.evidence
+        target_indexes = [
+            cell_index
+            for cell_index, cell in enumerate(cells[1:-1], start=1)
+            if cell_index != source_index
+            and _MARKDOWN_LINK_RE.search(cell) is None
+            and structured_value_present(
+                evidence.get("result"),
+                str(evidence.get("unit") or ""),
+                cell,
+                metric=str(evidence.get("metric") or ""),
+                semantics=semantics,
+            )
+        ]
+        if len(target_indexes) != 1:
+            continue
+        target_index = target_indexes[0]
+        link = source_match.group(0)
+        source_cell = cells[source_index]
+        cells[source_index] = (
+            f"{source_cell[:source_match.start()]}{source_cell[source_match.end():]}"
+        ).rstrip()
+        cells[target_index] = f"{cells[target_index].rstrip()} {link} "
+        lines[line_index] = "|".join(cells)
+    return "\n".join(lines)
 
 
 def _append_unique(items: list[str], value: str) -> None:

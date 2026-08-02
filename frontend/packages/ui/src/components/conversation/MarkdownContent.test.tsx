@@ -136,7 +136,7 @@ describe("MarkdownContent citations", () => {
     ).toHaveLength(1);
     expect(
       screen.queryByRole("button", { name: /(?:citation|引用) 2/i }),
-    ).not.toBeInTheDocument();
+    ).toBeNull();
     expect(document.body.textContent).toContain("Next section.");
   });
 
@@ -157,7 +157,7 @@ describe("MarkdownContent citations", () => {
     ).toHaveLength(1);
     expect(
       screen.queryByRole("button", { name: /(?:citation|引用) 2/i }),
-    ).not.toBeInTheDocument();
+    ).toBeNull();
   });
 
   it("numbers citations by first appearance and reuses duplicate numbers", () => {
@@ -641,6 +641,50 @@ describe("MarkdownContent citations", () => {
     );
     expect(note?.className).toContain("bg-surface-muted");
     expect(note?.className).not.toContain("bg-warning-light");
+    const qualityIconWrapper = note?.querySelector("svg")?.parentElement;
+    expect(qualityIconWrapper?.className).toContain("h-5");
+    expect(qualityIconWrapper?.className).toContain("items-center");
+  });
+
+  it("explains cross-language paraphrases without calling them mismatches", () => {
+    render(
+      <MarkdownContent
+        content="管理层表示需求持续增长 [source](citation://cit_first)。"
+        citationBundle={{
+          ...CITATIONS,
+          quality: {
+            policyId: "finance",
+            policyRevision: "finance-citation-policy-v1",
+            mode: "strict-domain",
+            status: "unverified",
+            publishStatus: "draft-only",
+            layers: { L4: "degraded" },
+            issues: [
+              {
+                code: "claim_translation_not_verified",
+                layer: "L4",
+                severity: "unverified",
+                citationIds: ["cit_first"],
+              },
+            ],
+            metrics: {
+              citationCount: 1,
+              unsourcedClaimCount: 0,
+              unverifiedClaimCount: 1,
+              tierCounts: {},
+            },
+          },
+        }}
+      />,
+    );
+
+    const pill = screen.getByRole("button", { name: /(?:citation|引用) 1/i });
+    expect(pill.getAttribute("data-citation-quality")).toBeNull();
+    fireEvent.mouseEnter(pill);
+    expect(
+      document.querySelector('[data-citation-quality-issues="advisory"]')
+        ?.textContent,
+    ).toMatch(/another language|外文原文/i);
   });
 
   it("limits a claim issue to the matching occurrence when a citation is reused", () => {
@@ -1248,7 +1292,7 @@ describe("MarkdownContent citations", () => {
     expect(document.querySelectorAll("[data-citation-claim-quality]")).toHaveLength(2);
     expect(
       document.querySelector("[data-citation-claim-quality]")?.getAttribute("aria-label"),
-    ).toMatch(/cross-check|conflict|交叉验证|冲突/i);
+    ).toMatch(/cross-check|conflict|inconsistent|交叉验证|冲突|不一致/i);
     expect(document.querySelector("[data-citation-quality-warning]")).toBeNull();
   });
 

@@ -160,7 +160,7 @@ function ClaimQualityMarker({ entry }: { entry: LocalizedClaimQualityEntry }) {
 }
 
 function readableEvidenceField(field: string): string {
-  return (field.split(".").at(-1) ?? field)
+  return (field.split(/[./]/u).at(-1) ?? field)
     .replace(/([a-z0-9])([A-Z])/gu, "$1 $2")
     .replace(/[_-]+/gu, " ")
     .trim();
@@ -938,6 +938,9 @@ export const MarkdownContent = memo(function MarkdownContent({
       if (code === "claim_partially_supported") {
         return t("ui.citation.qualityClaimPartial");
       }
+      if (code === "claim_translation_not_verified") {
+        return t("ui.citation.qualityClaimTranslationReview");
+      }
       if (code === "structured_value_not_present_in_answer" && structured) {
         return t("ui.citation.qualityStructuredValueMismatch", {
           value: evidenceValueLabel(structured),
@@ -1028,6 +1031,7 @@ export const MarkdownContent = memo(function MarkdownContent({
         code === "date_claim_without_citation" ||
         code === "claim_evidence_mismatch" ||
         code === "claim_partially_supported" ||
+        code === "claim_translation_not_verified" ||
         code === "text_quote_missing" ||
         code === "structured_value_missing"
       ) {

@@ -2041,6 +2041,7 @@
       "qualityClaimMismatch": "当前表述与引用内容的对应关系不够明确，建议查看原文确认。",
       "qualityClaimStructuredMismatch": "引用字段“{field}”的值为 {value}，与当前表述可能不一致，请核对。",
       "qualityClaimPartial": "引用只能核对当前表述中的部分内容，其余内容可能缺少依据，请核对。",
+      "qualityClaimTranslationReview": "当前表述是对外文原文的概括或译述，系统未做逐字语义核对，建议查看原文确认。",
       "qualityStructuredValueMismatch": "引用数据为 {value}，与当前表述可能不一致，请核对。",
       "qualityStructuredUnitMissing": "引用数据未标明单位，当前数字口径可能不完整，请核对。",
       "qualityCalculationInputMismatch": "计算所使用的输入值与引用数据可能不一致，请核对计算依据。",

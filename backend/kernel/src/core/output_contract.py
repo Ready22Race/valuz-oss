@@ -40,6 +40,17 @@ _GENERATED_UI_RE = re.compile(
     r"interactive\s+(?:ui|interface))",
     re.IGNORECASE,
 )
+_ZH_PERIOD_COUNT_RE = re.compile(
+    r"(?:最近|近|过去|此前|前)\s*(?P<count>[一二两三四五六七八九十\d]+)\s*个?"
+    r"(?:季度|财季|报告期)",
+    re.IGNORECASE,
+)
+_EN_PERIOD_COUNT_RE = re.compile(
+    r"\b(?:last|recent|previous|past)\s+"
+    r"(?P<count>one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+"
+    r"(?:fiscal\s+)?(?:quarters?|periods?)\b",
+    re.IGNORECASE,
+)
 _ZH_NUMBERS = {
     "一": 1,
     "二": 2,
@@ -53,6 +64,18 @@ _ZH_NUMBERS = {
     "九": 9,
     "十": 10,
 }
+_EN_NUMBERS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+}
 
 
 @dataclass(frozen=True)
@@ -61,6 +84,7 @@ class OutputContract:
     requested_fields: tuple[str, ...] = ()
     requested_item_count: int | None = None
     requested_line_count: int | None = None
+    requested_period_count: int | None = None
     table_only: bool = False
     generated_ui_allowed: bool = False
 
@@ -70,6 +94,7 @@ class OutputContract:
             "requestedFields": list(self.requested_fields),
             "requestedItemCount": self.requested_item_count,
             "requestedLineCount": self.requested_line_count,
+            "requestedPeriodCount": self.requested_period_count,
             "tableOnly": self.table_only,
             "generatedUiAllowed": self.generated_ui_allowed,
         }
@@ -93,6 +118,16 @@ def parse_output_contract(user_prompt: str) -> OutputContract:
             requested_count = len(requested_fields) or None
     if requested_count is not None and len(requested_fields) > requested_count:
         requested_fields = requested_fields[-requested_count:]
+    zh_period = _ZH_PERIOD_COUNT_RE.search(user_prompt)
+    en_period = _EN_PERIOD_COUNT_RE.search(user_prompt) if zh_period is None else None
+    requested_period_count = None
+    if zh_period is not None:
+        requested_period_count = _parse_count(zh_period.group("count"))
+    elif en_period is not None:
+        raw_count = en_period.group("count").lower()
+        requested_period_count = (
+            int(raw_count) if raw_count.isdigit() else _EN_NUMBERS.get(raw_count)
+        )
     return OutputContract(
         strict=bool(_STRICT_RE.search(user_prompt)),
         requested_fields=requested_fields,
@@ -102,6 +137,7 @@ def parse_output_contract(user_prompt: str) -> OutputContract:
             if (line_match := _LINE_COUNT_RE.search(user_prompt)) is not None
             else None
         ),
+        requested_period_count=requested_period_count,
         table_only=bool(_TABLE_ONLY_RE.search(user_prompt)),
         generated_ui_allowed=bool(_GENERATED_UI_RE.search(user_prompt)),
     )

@@ -66,24 +66,125 @@ async def test_citation_evidence_is_compacted_for_model_and_preserved_privately(
     compact_text = result.content[0]["text"]
     compact = json.loads(compact_text)
     assert compact["data"] == full_payload["data"]
-    assert compact["_valuz_evidence"] == [
-        {
-            "evidenceHandle": "ev_revenue_12345678",
-            "kind": "structured-data",
-            "field": "total_revenue.operating_revenue",
-            "metric": "operating_revenue",
-            "value": 170_899_152_276,
-            "unit": "CNY",
-            "period": "2024 FY",
-            "recordKey": "600519|2024 FY",
-            "sourceTitle": "Company income statement · 600519",
-            "citationLink": "[source](evidence://ev_revenue_12345678)",
-        }
-    ]
+    assert "_valuz_evidence" not in compact
+    hint = compact["_valuz_evidence_hint"]
+    assert hint["collectionHandle"].startswith("evc_legacy_")
+    assert hint["contentRoot"] == "/data"
+    assert hint["citationTemplate"].endswith("#{json-pointer}")
     assert "capturedAt" not in compact_text
     private_content = citation_artifact_content(result)
     assert private_content is not None
-    assert json.loads(private_content) == original_content
+    private_items = json.loads(private_content)["_valuz_evidence"]
+    assert len(private_items) == 1
+    assert private_items[0]["kind"] == "structured-evidence-collection"
+    assert private_items[0]["collectionHandle"] == hint["collectionHandle"]
+    assert "data" not in json.loads(private_content)
+
+
+async def test_calculation_rejects_value_that_does_not_match_collection_address() -> None:
+    middleware = CitationEvidenceCompactionMiddleware()
+    payload = {
+        "data": [
+            {
+                "fiscal_year": "2025",
+                "period": "annual",
+                "total_revenue": {"operating_revenue": 168_838_102_515},
+            },
+            {
+                "fiscal_year": "2024",
+                "period": "annual",
+                "total_revenue": {"operating_revenue": 170_899_152_276},
+            },
+        ],
+        "_valuz_evidence": [
+            {
+                "evidenceHandle": "ev_revenue_2025_12345678",
+                "source": {
+                    "sourceId": "financials:600519",
+                    "providerId": "valuz-stock",
+                    "sourceType": "dataset",
+                    "title": "Company income statement · 600519",
+                    "retrievedAt": "2026-08-02T08:00:00Z",
+                },
+                "evidence": {
+                    "kind": "structured-data",
+                    "datasetId": "financials",
+                    "toolName": "income_statement",
+                    "recordKey": "600519|2025 FY",
+                    "field": "operating_revenue",
+                    "metric": "operating_revenue",
+                    "value": 168_838_102_515,
+                    "unit": "CNY",
+                    "period": "2025 FY",
+                    "capturedAt": "2026-08-02T08:00:00Z",
+                },
+            }
+        ],
+    }
+    statement_request = cast(
+        Any,
+        type(
+            "Request",
+            (),
+            {
+                "tool_call": {
+                    "id": "statement",
+                    "name": "income_statement",
+                    "args": {"symbol": "600519", "period": "annual", "limit": 2},
+                }
+            },
+        )(),
+    )
+
+    async def statement_handler(_request: ToolCallRequest) -> ToolMessage:
+        return ToolMessage(
+            content=[{"type": "text", "text": json.dumps(payload)}],
+            tool_call_id="statement",
+            name="income_statement",
+        )
+
+    statement = await middleware.awrap_tool_call(statement_request, statement_handler)
+    assert isinstance(statement, ToolMessage)
+    hint = json.loads(statement.content[0]["text"])["_valuz_evidence_hint"]
+    address = f"{hint['collectionHandle']}#/data/0/total_revenue/operating_revenue"
+    calculation_request = cast(
+        Any,
+        type(
+            "Request",
+            (),
+            {
+                "tool_call": {
+                    "id": "calculation",
+                    "name": "citation_calculate",
+                    "args": {
+                        "expression": "current / prior",
+                        "inputs": [
+                            {
+                                "name": "current",
+                                "value": 170_899_152_276,
+                                "evidenceHandle": address,
+                            }
+                        ],
+                        "unit": "%",
+                    },
+                }
+            },
+        )(),
+    )
+    calculation_called = False
+
+    async def calculation_handler(_request: ToolCallRequest) -> ToolMessage:
+        nonlocal calculation_called
+        calculation_called = True
+        return ToolMessage(content="unexpected", tool_call_id="calculation")
+
+    rejected = await middleware.awrap_tool_call(calculation_request, calculation_handler)
+
+    assert isinstance(rejected, ToolMessage)
+    assert rejected.status == "error"
+    assert "evidence mismatch" in str(rejected.content)
+    assert "2025 FY" in str(rejected.content)
+    assert calculation_called is False
 
 
 async def test_indexed_chunks_gain_evidence_before_deepagents_compaction() -> None:
@@ -133,16 +234,17 @@ async def test_indexed_chunks_gain_evidence_before_deepagents_compaction() -> No
 
     assert isinstance(result, ToolMessage)
     compacted = json.loads(str(result.content))
-    assert compacted["_valuz_evidence"][0]["evidenceHandle"].startswith(
-        "ev_chunk_"
-    )
+    assert compacted["chunks"][0]["evidenceHandle"].startswith("ev_chunk_")
+    assert "Demand continues to exceed available supply." in compacted["chunks"][0][
+        "content"
+    ]
     private = citation_artifact_content(result)
     assert private is not None
     registry = EvidenceRegistry()
     assert registry.register_tool_result(private, trusted_private=True) == 1
 
 
-async def test_document_text_evidence_drops_bulk_chunks_and_is_bounded() -> None:
+async def test_document_text_evidence_preserves_selected_chunks_and_aligns_handles() -> None:
     envelopes = [
         {
             "evidenceHandle": f"ev_transcript_{index:08d}",
@@ -165,7 +267,10 @@ async def test_document_text_evidence_drops_bulk_chunks_and_is_bounded() -> None
     full_payload = {
         "doc_id": "doc-1",
         "title": "Earnings call transcript",
-        "chunks": [{"text": "detail " * 500} for _ in range(100)],
+        "chunks": [
+            {"id": f"chunk-{index}", "text": "detail " * 500}
+            for index in range(100)
+        ],
         "metadatas": [{"chunk": index} for index in range(100)],
         "_valuz_evidence": envelopes,
     }
@@ -186,18 +291,20 @@ async def test_document_text_evidence_drops_bulk_chunks_and_is_bounded() -> None
 
     assert isinstance(result, ToolMessage)
     compacted = json.loads(result.content[0]["text"])
-    assert "chunks" not in compacted
-    assert "metadatas" not in compacted
-    assert len(compacted["_valuz_evidence"]) == 80
-    assert len(compacted["_valuz_evidence"][0]["excerpt"]) <= 700
+    assert len(compacted["chunks"]) == 100
+    assert len(compacted["metadatas"]) == 100
+    assert "_valuz_evidence" not in compacted
+    assert compacted["chunks"][0]["evidenceHandle"] == "ev_transcript_00000000"
+    assert compacted["chunks"][-1]["evidenceHandle"] == "ev_transcript_00000099"
     assert compacted["_valuz_compaction"] == {
         "evidenceReturned": 100,
-        "evidenceShown": 80,
-        "bulkTextOmitted": True,
+        "evidenceShown": 100,
+        "bulkTextOmitted": False,
+        "modelContentPreserved": True,
     }
     private_content = citation_artifact_content(result)
     assert private_content is not None
-    assert len(json.loads(private_content)[0]["text"]) > len(result.content[0]["text"])
+    assert len(json.loads(private_content)["_valuz_evidence"]) == 100
 
 
 async def test_document_table_compaction_keeps_headers_and_trailing_rows() -> None:
@@ -239,13 +346,11 @@ async def test_document_table_compaction_keeps_headers_and_trailing_rows() -> No
     )
 
     compacted = json.loads(result.content[0]["text"])
-    excerpt = compacted["_valuz_evidence"][0]["excerpt"]
-    assert len(excerpt) <= 700
-    assert "销售模式" in excerpt
-    assert "\n…\n" in excerpt
-    assert "omitted" not in excerpt
-    assert "批发代理" in excerpt
-    assert "直销" in excerpt
+    assert compacted["chunks"][0]["text"] == table
+    assert compacted["chunks"][0]["evidenceHandle"] == (
+        "ev_channel_table_12345678"
+    )
+    assert "_valuz_evidence" not in compacted
 
 
 async def test_document_compaction_keeps_trusted_boundary_context() -> None:
@@ -582,7 +687,7 @@ async def test_discovery_summary_handles_survive_nested_compaction() -> None:
     assert registry.register_tool_result(private_content, trusted_private=True) == 1
 
 
-async def test_financial_status_only_result_gets_per_field_fallback_evidence() -> None:
+async def test_financial_status_only_result_gets_addressable_collection() -> None:
     status_envelope = {
         "evidenceHandle": "ev_status_12345678",
         "source": {
@@ -647,20 +752,34 @@ async def test_financial_status_only_result_gets_per_field_fallback_evidence() -
     result = await CitationEvidenceCompactionMiddleware().awrap_tool_call(request, handler)
 
     compacted = json.loads(result.content[0]["text"])
-    fields = {item.get("field") for item in compacted["_valuz_evidence"]}
-    assert "status" not in fields
-    assert "data.list[0].product[0].revenue" in fields
-    gross_margin = next(
-        item
-        for item in compacted["_valuz_evidence"]
-        if item.get("field") == "data.list[0].product[0].gross_profit_rate"
-    )
-    assert gross_margin["value"] == 94.06
-    assert gross_margin["unit"] == "percent"
+    assert compacted["data"] == payload["data"]
+    assert "_valuz_evidence" not in compacted
+    hint = compacted["_valuz_evidence_hint"]
+    assert hint["collectionHandle"].startswith("evc_tool_")
     private_content = citation_artifact_content(result)
     assert private_content is not None
     registry = EvidenceRegistry()
-    assert registry.register_tool_result(private_content, trusted_private=True) == 2
+    assert registry.register_tool_projection(
+        result.content,
+        private_content,
+        tool_name="revenue_breakdown",
+        trusted_private=True,
+    ) == 1
+    assert registry.collection_count == 1
+    revenue = registry.materialize_reference(
+        hint["collectionHandle"],
+        "#/data/list/0/product/0/revenue",
+    )
+    gross_margin = registry.materialize_reference(
+        hint["collectionHandle"],
+        "#/data/list/0/product/0/gross_profit_rate",
+    )
+    assert revenue is not None
+    assert revenue.evidence["value"] == 145_928_075_955.31
+    assert revenue.evidence["unit"] == "CNY"
+    assert gross_margin is not None
+    assert gross_margin.evidence["value"] == 94.06
+    assert gross_margin.evidence["unit"] == "percent"
 
 
 async def test_grep_over_raw_document_returns_traceable_focused_evidence() -> None:
@@ -784,6 +903,51 @@ async def test_document_discovery_calls_are_bounded_per_agent_turn() -> None:
     assert isinstance(reset_result, ToolMessage)
     assert reset_result.status != "error"
     assert calls == 7
+
+
+async def test_annual_statement_limit_reaches_oldest_requested_year() -> None:
+    middleware = ResearchToolBudgetMiddleware()
+    middleware.before_agent(
+        {
+            "messages": [
+                HumanMessage(content="查询 2024 年和 2023 年营业收入并计算同比增速")
+            ]
+        },
+        None,
+    )
+    seen_args: list[dict[str, Any]] = []
+
+    class Request:
+        def __init__(self, tool_call: dict[str, Any]) -> None:
+            self.tool_call = tool_call
+
+        def override(self, **updates: Any) -> Request:
+            return Request(updates.get("tool_call", self.tool_call))
+
+    async def handler(request: ToolCallRequest) -> ToolMessage:
+        seen_args.append(cast(dict[str, Any], request.tool_call["args"]))
+        return ToolMessage(
+            content="statement",
+            tool_call_id=request.tool_call["id"],
+            name=request.tool_call["name"],
+        )
+
+    await middleware.awrap_tool_call(
+        cast(
+            ToolCallRequest,
+            Request(
+                {
+                    "id": "annual-statement",
+                    "name": "income_statement",
+                    "args": {"symbol": "600519", "period": "annual", "limit": 2},
+                }
+            ),
+        ),
+        handler,
+    )
+
+    assert len(seen_args) == 1
+    assert seen_args[0]["limit"] >= 3
 
 
 def test_indexed_document_search_has_an_independent_bounded_budget() -> None:
@@ -1421,6 +1585,10 @@ def test_stable_general_knowledge_scope_is_conservative() -> None:
     )
     assert is_stable_general_knowledge_query(
         "What is free cash flow? Explain the formula in plain language."
+    )
+    assert is_stable_general_knowledge_query(
+        "ROE 是什么意思？为什么银行和制造业不能直接用同一个 ROE 阈值比较？"
+        "用通俗语言回答，不需要查询具体公司数据。"
     )
     assert not is_stable_general_knowledge_query(
         "请查询贵州茅台 2024 年 ROE 并引用年报。"

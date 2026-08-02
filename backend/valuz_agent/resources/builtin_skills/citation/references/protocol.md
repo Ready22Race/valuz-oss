@@ -27,6 +27,17 @@ The two filings report different totals
 [source](evidence://ev_q2_total).
 ```
 
+For a structured result that returns a Collection hint:
+
+```markdown
+Operating revenue was CNY 174.1 billion
+[source](evidence://evc_income_example#/data/0/operating_revenue).
+```
+
+Use the exact `collectionHandle`, `contentRoot`, and JSON pointer from the tool
+result. The runtime materializes only that used field into canonical Evidence;
+do not construct a list of addresses for unused fields.
+
 The claim text and value must remain outside each evidence link because the
 client renders the link itself as a numbered citation marker.
 
@@ -49,8 +60,8 @@ evidence before the calculation can pass quality validation.
 
 - No relevant evidence: explain that the available sources do not support the
   requested claim.
-- Evidence handle absent: run a source-bearing retrieval tool if available;
-  otherwise report that a verifiable citation is unavailable.
+- Direct handle and Collection hint both absent: run a source-bearing retrieval
+  tool if available; otherwise report that a verifiable citation is unavailable.
 - Conflicting evidence: cite each conflicting source and explain the conflict.
 - Tool or source unavailable: preserve the useful part of the answer and make
   the limitation explicit.

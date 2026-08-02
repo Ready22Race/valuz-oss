@@ -178,7 +178,7 @@ def test_policy_degrades_missing_unit_period_and_out_of_range_date() -> None:
     assert result["quality"]["publishStatus"] == "draft-only"
 
 
-def test_policy_detects_uncited_financial_number_and_missing_coverage() -> None:
+def test_policy_detects_uncited_financial_number_without_requiring_snapshot_coverage() -> None:
     citation = _structured()
     citation["evidence"].pop("coverage")
     result = evaluate_citation_quality(
@@ -193,7 +193,7 @@ def test_policy_detects_uncited_financial_number_and_missing_coverage() -> None:
 
     codes = {issue["code"] for issue in result["quality"]["issues"]}
     assert "numeric_claim_without_citation" in codes
-    assert "evidence_coverage_missing" in codes
+    assert "evidence_coverage_missing" not in codes
     numeric_issue = next(
         issue
         for issue in result["quality"]["issues"]
@@ -202,8 +202,8 @@ def test_policy_detects_uncited_financial_number_and_missing_coverage() -> None:
     assert numeric_issue["claim"] == {"exact": "Margin was 23.5%."}
     assert result["quality"]["metrics"]["unsourcedClaimCount"] == 1
     claims = {claim["exact"]: claim for claim in result["quality"]["claims"]}
-    assert claims["Revenue was 120 USDm."]["status"] == "degraded"
-    assert "evidence_coverage_missing" in claims["Revenue was 120 USDm."]["issueCodes"]
+    assert claims["Revenue was 120 USDm."]["status"] == "passed"
+    assert "evidence_coverage_missing" not in claims["Revenue was 120 USDm."]["issueCodes"]
     assert claims["Margin was 23.5%."]["status"] == "unsupported"
     assert {
         key: claims["Margin was 23.5%."]["location"][key]
@@ -214,6 +214,25 @@ def test_policy_detects_uncited_financial_number_and_missing_coverage() -> None:
         "start": 22,
         "end": 39,
     }
+
+
+def test_policy_requires_coverage_for_a_claimed_time_range() -> None:
+    citation = _structured()
+    citation["evidence"].pop("coverage")
+
+    result = evaluate_citation_quality(
+        "Revenue trend from 2024-01-01 to 2025-12-31 was stable "
+        "[source](citation://cit_revenue).",
+        {
+            "version": 1,
+            "citations": [citation],
+            "integrity": _integrity(),
+        },
+        _policy(),
+    )
+
+    codes = {issue["code"] for issue in result["quality"]["issues"]}
+    assert "evidence_coverage_missing" in codes
 
 
 def test_policy_audits_non_numeric_external_facts_and_dates() -> None:
@@ -359,6 +378,45 @@ def test_text_chunk_numeric_miss_is_advisory_not_a_confirmed_conflict() -> None:
     assert claim["status"] == "unverified"
     assert "claim_evidence_mismatch" in claim["issueCodes"]
     assert "claim_evidence_conflict" not in claim["issueCodes"]
+
+
+def test_cross_language_paraphrase_is_not_reported_as_evidence_mismatch() -> None:
+    citation = {
+        "citationId": "cit_transcript",
+        "source": {
+            "sourceId": "transcript-q1",
+            "providerId": "documents",
+            "sourceType": "document",
+            "title": "Earnings call transcript",
+            "retrievedAt": "2026-08-01T10:00:00Z",
+        },
+        "evidence": {
+            "kind": "text",
+            "quote": (
+                "Management said it is seeing increasing demand and diffusion "
+                "of its artificial intelligence platform."
+            ),
+            "snippet": "",
+            "capturedAt": "2026-08-01T10:00:00Z",
+        },
+    }
+
+    result = evaluate_citation_quality(
+        "管理层表示人工智能平台的需求正在持续增长 "
+        "[source](citation://cit_transcript)。",
+        {
+            "version": 1,
+            "citations": [citation],
+            "integrity": _integrity(),
+        },
+        _policy(),
+    )
+
+    claim = result["quality"]["claims"][0]
+    assert claim["status"] == "unverified"
+    assert "claim_translation_not_verified" in claim["issueCodes"]
+    assert "claim_evidence_mismatch" not in claim["issueCodes"]
+    assert result["quality"]["metrics"]["claimSemanticMismatchCount"] == 0
 
 
 def test_policy_recomputes_calculation_and_checks_input_provenance() -> None:
@@ -1042,6 +1100,63 @@ def test_calculation_result_matches_number_adjacent_to_chinese_text() -> None:
     assert "calculation_result_not_present_in_answer" not in {
         issue["code"] for issue in result["quality"]["issues"]
     }
+
+
+def test_negative_calculation_result_matches_unicode_minus_and_decline_wording() -> None:
+    source = _structured("cit_source")
+    source["evidence"].update(
+        {
+            "field": "net_profit_growth",
+            "value": -1.54,
+            "unit": "%",
+            "period": "FY2024",
+        }
+    )
+    calculation = {
+        "citationId": "cit_calc",
+        "source": {
+            "sourceId": "calculation-negative",
+            "providerId": "runtime",
+            "sourceType": "tool-result",
+            "title": "Calculation",
+            "retrievedAt": "2026-07-30T10:00:00Z",
+        },
+        "evidence": {
+            "kind": "calculation",
+            "expression": "growth",
+            "inputs": [
+                {
+                    "name": "growth",
+                    "citationId": "cit_source",
+                    "value": -1.54,
+                    "unit": "%",
+                }
+            ],
+            "result": -1.54,
+            "unit": "%",
+            "rounding": "2dp",
+            "calculatedAt": "2026-07-30T10:00:00Z",
+        },
+    }
+    policy = _policy()
+    policy["config"]["rules"]["derived_value"]["require_result_in_answer"] = True
+
+    for answer in (
+        "归母净利润同比为−1.54% [计算](citation://cit_calc)。",
+        "归母净利润同比下降1.54% [计算](citation://cit_calc)。",
+    ):
+        result = evaluate_citation_quality(
+            answer,
+            {
+                "version": 1,
+                "citations": [source, calculation],
+                "integrity": _integrity(),
+            },
+            policy,
+        )
+        assert "calculation_result_not_present_in_answer" not in {
+            issue["code"] for issue in result["quality"]["issues"]
+        }
 
 
 def test_document_category_tiers_fetched_chunk_not_generic_fetch_tool() -> None:

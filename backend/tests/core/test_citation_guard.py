@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import json
 
-from src.core.citation import CitationGuard, EvidenceRegistry
+from src.core.citation import (
+    CitationGuard,
+    EvidenceRegistry,
+    compact_citation_tool_content,
+    private_citation_tool_content,
+)
 
 
 def _item(
@@ -139,6 +144,494 @@ def test_registry_preserves_structured_semantic_dimensions() -> None:
     assert record.evidence["metric"] == "operating_revenue"
     assert record.evidence["scope"] == "consolidated"
     assert record.evidence["basis"] == "reported"
+
+
+def test_structured_batch_registers_one_collection_and_materializes_used_address() -> None:
+    item = _item("ev_legacy_revenue_12345678")
+    item["source"].update({"sourceType": "dataset"})
+    item["evidence"] = {
+        "kind": "structured-data",
+        "datasetId": "financials",
+        "toolName": "company_income_statement",
+        "recordKey": "600519|2024 FY",
+        "entityId": "600519",
+        "field": "data[0].operating_revenue",
+        "metric": "operating_revenue",
+        "value": 174_144_000_000,
+        "unit": "CNY",
+        "period": "2024 FY",
+        "capturedAt": "2026-08-01T08:00:00Z",
+    }
+    raw = {
+        "data": [
+            {
+                "symbol": "600519",
+                "fiscal_year": 2024,
+                "period": "FY",
+                "operating_revenue": 174_144_000_000,
+            }
+        ],
+        "_valuz_evidence": [item],
+    }
+
+    visible = compact_citation_tool_content(raw)
+    private = private_citation_tool_content(raw)
+
+    assert visible is not None
+    assert private is not None
+    assert visible["data"] == raw["data"]
+    assert "_valuz_evidence" not in visible
+    hint = visible["_valuz_evidence_hint"]
+    assert hint["citationTemplate"].endswith("#{json-pointer}")
+    private_payload = json.loads(private)
+    assert len(private_payload["_valuz_evidence"]) == 1
+    assert private_payload["_valuz_evidence"][0]["kind"] == (
+        "structured-evidence-collection"
+    )
+
+    registry = EvidenceRegistry()
+    assert registry.register_tool_projection(
+        visible,
+        private,
+        tool_name="company_income_statement",
+        trusted_private=True,
+    ) == 1
+    assert registry.collection_count == 1
+    assert len(registry) == 0
+
+    address = (
+        f"evidence://{hint['collectionHandle']}"
+        "#/data/0/operating_revenue"
+    )
+    result = CitationGuard(
+        registry,
+        message_id="msg-collection",
+        user_prompt="Cite operating revenue",
+        policy_available=True,
+        verification_enabled=False,
+    ).finalize(f"Operating revenue was CNY 174144000000 [source]({address}).")
+
+    assert "citation://" in result.text
+    assert result.bundle is not None
+    assert result.bundle["integrity"]["evidenceCollectionCount"] == 1
+    assert result.bundle["integrity"]["evidenceMaterializedCount"] == 1
+    assert len(result.bundle["citations"]) == 1
+    assert result.bundle["citations"][0]["evidence"]["metric"] == "operating_revenue"
+
+
+def test_multi_period_legacy_batch_collapses_repeated_fields_into_one_collection() -> None:
+    source = {
+        "sourceId": "financials:600519",
+        "providerId": "valuz-stock",
+        "sourceType": "dataset",
+        "title": "Company income statement · 600519",
+        "retrievedAt": "2026-08-02T08:00:00Z",
+    }
+    rows = [
+        {
+            "symbol": "600519",
+            "fiscal_year": "2024",
+            "fiscal_quarter": "FY",
+            "operating_revenue": 170_899_152_276,
+        },
+        {
+            "symbol": "600519",
+            "fiscal_year": "2023",
+            "fiscal_quarter": "FY",
+            "operating_revenue": 147_693_604_994,
+        },
+    ]
+    evidence = [
+        {
+            "evidenceHandle": f"ev_revenue_{year}_12345678",
+            "source": source,
+            "evidence": {
+                "kind": "structured-data",
+                "datasetId": "financials",
+                "toolName": "company_income_statement",
+                "recordKey": f"600519|{year} FY",
+                "entityId": "600519",
+                "field": "operating_revenue",
+                "metric": "operating_revenue",
+                "value": value,
+                "unit": "CNY",
+                "period": f"{year} FY",
+                "capturedAt": "2026-08-02T08:00:00Z",
+            },
+        }
+        for year, value in (
+            ("2024", 170_899_152_276),
+            ("2023", 147_693_604_994),
+        )
+    ]
+    raw = {"data": rows, "_valuz_evidence": evidence}
+
+    visible = compact_citation_tool_content(raw)
+    private = private_citation_tool_content(raw)
+
+    assert visible is not None and private is not None
+    assert "_valuz_evidence" not in visible
+    assert visible["data"] == rows
+    hint = visible["_valuz_evidence_hint"]
+    private_payload = json.loads(private)
+    assert len(private_payload["_valuz_evidence"]) == 1
+    assert private_payload["_valuz_evidence"][0]["kind"] == (
+        "structured-evidence-collection"
+    )
+
+    registry = EvidenceRegistry()
+    registry.register_tool_projection(visible, private, trusted_private=True)
+    assert registry.collection_count == 1
+    assert len(registry) == 0
+    result = CitationGuard(
+        registry,
+        message_id="msg-multi-period-collection",
+        user_prompt="Compare revenue",
+        policy_available=True,
+        verification_enabled=False,
+    ).finalize(
+        "2024 revenue was CNY 170899152276 "
+        f"[source](evidence://{hint['collectionHandle']}#/data/0/operating_revenue); "
+        "2023 revenue was CNY 147693604994 "
+        f"[source](evidence://{hint['collectionHandle']}#/data/1/operating_revenue)."
+    )
+    assert result.bundle is not None
+    assert result.bundle["integrity"]["evidenceCollectionCount"] == 1
+    # The two cited values plus two period candidates are materialized for the
+    # two actual claims; none of the other row fields become Evidence.
+    assert result.bundle["integrity"]["evidenceRegisteredCount"] == 4
+    assert len(result.bundle["integrity"]["unusedCitationIds"]) == 2
+    assert len(result.bundle["citations"]) == 2
+
+
+def test_calculation_citation_moves_from_period_cell_to_matching_result_cell() -> None:
+    def structured(handle: str, value: int, period: str) -> dict:
+        item = _item(handle)
+        item["source"]["sourceType"] = "dataset"
+        item["evidence"] = {
+            "kind": "structured-data",
+            "datasetId": "financials",
+            "toolName": "company_income_statement",
+            "recordKey": f"600519|{period}",
+            "entityId": "600519",
+            "field": "operating_revenue",
+            "metric": "operating_revenue",
+            "value": value,
+            "unit": "CNY",
+            "period": period,
+            "capturedAt": "2026-08-02T08:00:00Z",
+        }
+        return item
+
+    current = structured("ev_current_revenue_12345678", 170_899_152_276, "2024 FY")
+    prior = structured("ev_prior_revenue_12345678", 147_693_604_994, "2023 FY")
+    calculation = _item("ev_calc_yoy_12345678")
+    calculation["source"]["sourceType"] = "dataset"
+    calculation["evidence"] = {
+        "kind": "calculation",
+        "toolName": "citation_calculate",
+        "expression": "((current - prior) / prior) * 100",
+        "inputs": [
+            {
+                "name": "current",
+                "citationId": current["evidenceHandle"],
+                "value": 170_899_152_276,
+                "unit": "CNY",
+            },
+            {
+                "name": "prior",
+                "citationId": prior["evidenceHandle"],
+                "value": 147_693_604_994,
+                "unit": "CNY",
+            },
+        ],
+        "result": "15.71",
+        "unit": "%",
+        "metric": "revenue_growth",
+        "period": "2024 FY vs 2023 FY",
+        "calculatedAt": "2026-08-02T08:00:00Z",
+    }
+    registry = _registry(current, prior, calculation)
+
+    result = CitationGuard(
+        registry,
+        message_id="msg-calculation-cell",
+        user_prompt="Show the calculated growth",
+        policy_available=True,
+        verification_enabled=False,
+    ).finalize(
+        "| 指标 | 数值 | 单位 | 期间 |\n"
+        "|---|---:|---|---|\n"
+        "| 同比增速 | +15.71% | — | 2024 vs 2023 "
+        "[source](evidence://ev_calc_yoy_12345678) |"
+    )
+
+    row = result.text.splitlines()[-1].split("|")
+    assert "citation://" in row[2]
+    assert "citation://" not in row[4]
+    assert result.bundle is not None
+    assert len(result.bundle["citations"]) == 3
+
+
+def test_calculation_inputs_resolve_structured_collection_addresses() -> None:
+    source = {
+        "sourceId": "financials:600519",
+        "providerId": "valuz-stock",
+        "sourceType": "dataset",
+        "title": "Company income statement · 600519",
+        "retrievedAt": "2026-08-02T08:00:00Z",
+    }
+    rows = [
+        {
+            "symbol": "600519",
+            "fiscal_year": "2024",
+            "fiscal_quarter": "FY",
+            "operating_revenue": 170_899_152_276,
+        },
+        {
+            "symbol": "600519",
+            "fiscal_year": "2023",
+            "fiscal_quarter": "FY",
+            "operating_revenue": 147_693_604_994,
+        },
+    ]
+    raw = {
+        "data": rows,
+        "_valuz_evidence": [
+            {
+                "evidenceHandle": f"ev_revenue_{year}_12345678",
+                "source": source,
+                "evidence": {
+                    "kind": "structured-data",
+                    "datasetId": "financials",
+                    "toolName": "company_income_statement",
+                    "recordKey": f"600519|{year} FY",
+                    "entityId": "600519",
+                    "field": "operating_revenue",
+                    "metric": "operating_revenue",
+                    "value": value,
+                    "unit": "CNY",
+                    "period": f"{year} FY",
+                    "capturedAt": "2026-08-02T08:00:00Z",
+                },
+            }
+            for year, value in (
+                ("2024", 170_899_152_276),
+                ("2023", 147_693_604_994),
+            )
+        ],
+    }
+    visible = compact_citation_tool_content(raw)
+    private = private_citation_tool_content(raw)
+    assert visible is not None and private is not None
+    collection_handle = visible["_valuz_evidence_hint"]["collectionHandle"]
+    current_address = f"{collection_handle}#/data/0/operating_revenue"
+    prior_address = f"{collection_handle}#/data/1/operating_revenue"
+
+    registry = EvidenceRegistry()
+    assert registry.register_tool_projection(visible, private, trusted_private=True) == 1
+    calculation = _item("ev_calc_collection_inputs_12345678")
+    calculation["source"].update(
+        {
+            "sourceId": "calculation-growth",
+            "providerId": "valuz-calculation",
+            "sourceType": "tool-result",
+            "title": "Calculation",
+        }
+    )
+    calculation["evidence"] = {
+        "kind": "calculation",
+        "toolName": "runtime.calculation",
+        "expression": "((current - prior) / prior) * 100",
+        "inputs": [
+            {
+                "name": "current",
+                "citationId": current_address,
+                "value": "170899152276",
+            },
+            {
+                "name": "prior",
+                "citationId": prior_address,
+                "value": "147693604994",
+            },
+        ],
+        "result": "15.71",
+        "unit": "%",
+        "rounding": "2dp",
+        "calculatedAt": "2026-08-02T08:00:00Z",
+        "metric": "revenue_growth",
+        "period": "2024 FY vs 2023 FY",
+    }
+    assert registry.register_tool_result({"_valuz_evidence": calculation}) == 1
+
+    result = CitationGuard(
+        registry,
+        message_id="msg-collection-calculation",
+        user_prompt="Compare and calculate revenue growth",
+        policy_available=True,
+        verification_enabled=True,
+    ).finalize(
+        "2024 revenue was CNY 170899152276.\n"
+        "2023 revenue was CNY 147693604994.\n"
+        "Revenue growth was 15.71% "
+        "[source](evidence://ev_calc_collection_inputs_12345678)."
+    )
+
+    assert result.bundle is not None
+    citations = result.bundle["citations"]
+    calculation_citation = next(
+        citation
+        for citation in citations
+        if citation["evidence"]["kind"] == "calculation"
+    )
+    assert [
+        item["citationId"] for item in calculation_citation["evidence"]["inputs"]
+    ] == [citations[0]["citationId"], citations[1]["citationId"]]
+    assert result.bundle["integrity"]["unknownCitationIds"] == []
+    assert result.bundle["quality"]["status"] == "passed", result.bundle["quality"]
+    # The two calculation inputs are materialized first. Claim candidate
+    # discovery also addresses the two fiscal-year scope values used in the
+    # prose, but it must not expand the rest of either statement row.
+    assert result.bundle["integrity"]["evidenceMaterializedCount"] == 4
+
+
+def test_claim_audit_materializes_only_matching_collection_fields_for_missing_binding() -> None:
+    source = {
+        "sourceId": "financials:600519",
+        "providerId": "valuz-stock",
+        "sourceType": "dataset",
+        "title": "Company income statement · 600519",
+        "retrievedAt": "2026-08-01T08:00:00Z",
+    }
+    raw = {
+        "data": [
+            {
+                "symbol": "600519",
+                "fiscal_year": 2024,
+                "period": "FY",
+                "operating_revenue": 174_144_000_000,
+                "net_profit": 86_228_000_000,
+            }
+        ],
+        "_valuz_evidence": [
+            {
+                "evidenceHandle": "ev_legacy_revenue_87654321",
+                "source": source,
+                "evidence": {
+                    "kind": "structured-data",
+                    "datasetId": "financials",
+                    "toolName": "company_income_statement",
+                    "recordKey": "600519|2024 FY",
+                    "entityId": "600519",
+                    "field": "data[0].operating_revenue",
+                    "metric": "operating_revenue",
+                    "value": 174_144_000_000,
+                    "unit": "CNY",
+                    "period": "2024 FY",
+                    "capturedAt": "2026-08-01T08:00:00Z",
+                },
+            },
+            {
+                "evidenceHandle": "ev_legacy_profit_87654321",
+                "source": source,
+                "evidence": {
+                    "kind": "structured-data",
+                    "datasetId": "financials",
+                    "toolName": "company_income_statement",
+                    "recordKey": "600519|2024 FY",
+                    "entityId": "600519",
+                    "field": "data[0].net_profit",
+                    "metric": "net_profit",
+                    "value": 86_228_000_000,
+                    "unit": "CNY",
+                    "period": "2024 FY",
+                    "capturedAt": "2026-08-01T08:00:00Z",
+                },
+            },
+        ],
+    }
+    visible = compact_citation_tool_content(raw)
+    private = private_citation_tool_content(raw)
+    assert visible is not None and private is not None
+    registry = EvidenceRegistry()
+    registry.register_tool_projection(visible, private, trusted_private=True)
+
+    result = CitationGuard(
+        registry,
+        message_id="msg-audit-address",
+        user_prompt="Cite the operating revenue",
+        policy_available=True,
+        verification_enabled=False,
+    ).finalize("Operating revenue was CNY 174144000000 in 2024.")
+
+    assert "citation://" in result.text
+    assert result.bundle is not None
+    assert len(result.bundle["citations"]) == 1
+    assert result.bundle["citations"][0]["evidence"]["metric"] == "operating_revenue"
+    assert result.bundle["integrity"]["evidenceMaterializedCount"] == 2
+    assert result.bundle["integrity"]["evidenceRegisteredCount"] == 2
+
+
+def test_cross_source_collection_addresses_materialize_as_distinct_citations() -> None:
+    registry = EvidenceRegistry()
+    addresses: list[str] = []
+    for suffix, provider in (("primary", "valuz-stock"), ("filing", "exchange")):
+        raw = {
+            "data": {"symbol": "600519", "operating_revenue": 174_144_000_000},
+            "_valuz_evidence": [
+                {
+                    "evidenceHandle": f"ev_{suffix}_revenue_12345678",
+                    "source": {
+                        "sourceId": f"financials:{suffix}:600519",
+                        "providerId": provider,
+                        "sourceType": "dataset",
+                        "title": f"Income statement · {suffix}",
+                        "retrievedAt": "2026-08-01T08:00:00Z",
+                    },
+                    "evidence": {
+                        "kind": "structured-data",
+                        "datasetId": f"financials:{suffix}",
+                        "toolName": "company_income_statement",
+                        "recordKey": "600519|2024 FY",
+                        "entityId": "600519",
+                        "field": "data.operating_revenue",
+                        "metric": "operating_revenue",
+                        "value": 174_144_000_000,
+                        "unit": "CNY",
+                        "period": "2024 FY",
+                        "capturedAt": "2026-08-01T08:00:00Z",
+                    },
+                }
+            ],
+        }
+        visible = compact_citation_tool_content(raw)
+        private = private_citation_tool_content(raw)
+        assert visible is not None and private is not None
+        registry.register_tool_projection(visible, private, trusted_private=True)
+        addresses.append(
+            f"evidence://{visible['_valuz_evidence_hint']['collectionHandle']}"
+            "#/data/operating_revenue"
+        )
+
+    result = CitationGuard(
+        registry,
+        message_id="msg-cross-source",
+        user_prompt="Cross-check operating revenue",
+        policy_available=True,
+        verification_enabled=False,
+    ).finalize(
+        "Operating revenue was CNY 174144000000 "
+        f"[primary]({addresses[0]}) [corroborating]({addresses[1]})."
+    )
+
+    assert result.bundle is not None
+    assert len(result.bundle["citations"]) == 2
+    assert {item["source"]["providerId"] for item in result.bundle["citations"]} == {
+        "valuz-stock",
+        "exchange",
+    }
+    assert result.bundle["integrity"]["evidenceCollectionCount"] == 2
+    assert result.bundle["integrity"]["evidenceMaterializedCount"] == 2
 
 
 def test_registry_ignores_malformed_and_non_json_results() -> None:
@@ -333,6 +826,10 @@ def test_guard_binds_known_handle_and_builds_bundle_from_registry() -> None:
         "repairAttempts": 0,
         "policyRevision": "citation-v1",
         "evidenceRegisteredCount": 1,
+        "evidenceCollectionCount": 0,
+        "evidenceAddressRequestedCount": 0,
+        "evidenceMaterializedCount": 0,
+        "evidenceMaterializationRejectedCount": 0,
         "evidenceRejectedCount": 0,
         "evidenceOverflowReasons": [],
     }
@@ -566,6 +1063,29 @@ def test_guard_never_promotes_unknown_model_minted_source() -> None:
     ]
 
 
+def test_guard_preserves_its_registered_citation_ids_during_hidden_repair() -> None:
+    registry = _registry(_item(locator={"kind": "chunk", "chunkId": "chunk-1"}))
+    guard = CitationGuard(
+        registry,
+        message_id="msg-1",
+        user_prompt="请给出引用",
+        policy_available=True,
+    )
+    sealed = guard.finalize(
+        "Revenue increased by 12% [source](evidence://ev_revenue_2025)."
+    )
+
+    assert sealed.bundle is not None
+    assert sealed.bundle["integrity"]["unknownCitationIds"] == []
+
+    repaired = guard.finalize(sealed.text, repair_attempts=1)
+
+    assert repaired.bundle is not None
+    assert repaired.text == sealed.text
+    assert repaired.bundle["integrity"]["unknownCitationIds"] == []
+    assert len(repaired.bundle["citations"]) == 1
+
+
 def test_guard_removes_protocol_source_placeholders_without_rewriting_prose() -> None:
     registry = _registry(_item(locator={"kind": "chunk", "chunkId": "chunk-1"}))
     guard = CitationGuard(
@@ -685,7 +1205,7 @@ def test_guard_drops_unknown_numeric_citation_labels_without_leaking_digits() ->
         "[3](evidence://W33333333)."
     )
 
-    assert result.text == "Claim ."
+    assert result.text == "Claim."
     assert "123" not in result.text
     assert result.bundle is not None
     assert result.bundle["integrity"]["unknownCitationIds"] == [
@@ -921,6 +1441,61 @@ def test_guard_auto_binds_composite_claim_to_multiple_document_excerpts() -> Non
     assert result.text.count("citation://") == 3
     assert len(result.bundle["citations"]) == 3
     assert result.bundle["quality"]["claims"][0]["status"] == "auto-bound"
+    assert result.bundle["quality"]["metrics"]["unsourcedClaimCount"] == 0
+    assert result.bundle["quality"]["metrics"]["unverifiedClaimCount"] == 0
+
+
+def test_guard_audits_equivalent_recap_binding_as_transitive_support() -> None:
+    handle = "ev_msft_q3_throughput_12345678"
+    item = _item(handle, locator={"kind": "pdf", "page": 8})
+    item["source"].update(
+        {
+            "sourceId": "msft-q3",
+            "documentId": "msft-q3",
+            "title": "Microsoft FY2026 Q3 earnings call",
+        }
+    )
+    item["evidence"].update(
+        {
+            "quote": (
+                "Fairwater came online six weeks ahead of schedule and delivered "
+                "a 40% improvement in inference throughput."
+            ),
+            "snippet": (
+                "Fairwater came online six weeks ahead of schedule and delivered "
+                "a 40% improvement in inference throughput."
+            ),
+        }
+    )
+    guard = CitationGuard(
+        _registry(item),
+        message_id="msg-equivalent-recap",
+        user_prompt="请按季度引用电话会原文并提供对比表。",
+        policy_available=True,
+        force_required=True,
+    )
+
+    result = guard.finalize(
+        "### FY2026 Q3\n\n"
+        f"Fairwater 提前六周投产，推理吞吐量提升40% "
+        f"[source](evidence://{handle})。\n\n"
+        "| 维度 | Q3 |\n"
+        "|---|---|\n"
+        "| 核心优化指标 | 推理吞吐量（+40%） |"
+    )
+
+    assert result.bundle is not None
+    assert result.text.count("citation://") == 2
+    assert len(result.bundle["citations"]) == 1
+    citation = result.bundle["citations"][0]
+    assert citation["annotations"]["binding"]["equivalentClaimIds"]
+    required_claims = [
+        claim
+        for claim in result.bundle["quality"]["claims"]
+        if claim["citationRequired"]
+    ]
+    assert [claim["status"] for claim in required_claims] == ["passed", "auto-bound"]
+    assert required_claims[1]["bindings"][0]["supportStatus"] == "equivalent-claim"
     assert result.bundle["quality"]["metrics"]["unsourcedClaimCount"] == 0
     assert result.bundle["quality"]["metrics"]["unverifiedClaimCount"] == 0
 

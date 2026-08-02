@@ -207,7 +207,7 @@ function evidenceText(
         time: evidence.capturedAt,
       };
     }
-    const field = (evidence.field.split(".").at(-1) ?? evidence.field)
+    const field = (evidence.field.split(/[./]/u).at(-1) ?? evidence.field)
       .replace(/([a-z0-9])([A-Z])/gu, "$1 $2")
       .replace(/[_-]+/gu, " ")
       .trim();
@@ -520,17 +520,16 @@ function CitationHoverCard({
               : "bg-surface-muted/70",
           )}
         >
-          {qualityTone === "critical" ? (
-            <AlertTriangle
-              className="relative top-px h-3.5 w-3.5 shrink-0 text-warning-text"
-              aria-hidden="true"
-            />
-          ) : (
-            <Info
-              className="relative top-px h-3.5 w-3.5 shrink-0 text-ink-meta"
-              aria-hidden="true"
-            />
-          )}
+          <span
+            className="flex h-5 shrink-0 items-center"
+            aria-hidden="true"
+          >
+            {qualityTone === "critical" ? (
+              <AlertTriangle className="h-3.5 w-3.5 text-warning-text" />
+            ) : (
+              <Info className="h-3.5 w-3.5 text-ink-meta" />
+            )}
+          </span>
           <span>
             <span
               className={cn(

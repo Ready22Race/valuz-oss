@@ -2041,6 +2041,7 @@
       "qualityClaimMismatch": "The connection between this statement and the cited evidence is unclear. Review the original source if needed.",
       "qualityClaimStructuredMismatch": "The cited field “{field}” has the value {value}, which may not match this statement. Please check it.",
       "qualityClaimPartial": "The citation supports only part of this statement. The remaining content may lack evidence.",
+      "qualityClaimTranslationReview": "This statement summarizes or translates a source in another language. It was not semantically checked word for word; review the original if needed.",
       "qualityStructuredValueMismatch": "The cited value is {value}, which may not match this statement. Please check it.",
       "qualityStructuredUnitMissing": "The cited data has no unit, so the numeric basis may be incomplete. Please check it.",
       "qualityCalculationInputMismatch": "A calculation input may not match the cited data. Please check the calculation evidence.",

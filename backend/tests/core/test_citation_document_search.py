@@ -113,13 +113,16 @@ def test_indexed_chunk_compaction_is_idempotent_for_model_excerpt() -> None:
     assert augmented is not None
 
     once = compact_citation_tool_content(augmented)
-    twice = compact_citation_tool_content(once)
-
     assert once is not None
-    assert twice is not None
+    # ``None`` means the already-projected value contains no trusted envelope
+    # left to compact; callers preserve their input in that case.
+    twice = compact_citation_tool_content(once) or once
+
+    assert twice == once
     expected = "Customer demand continues to exceed available supply."
-    assert once["_valuz_evidence"][0]["excerpt"] == expected
-    assert twice["_valuz_evidence"][0]["excerpt"] == expected
+    assert once["chunks"][0]["content"] == expected
+    assert once["chunks"][0]["evidenceHandle"].startswith("ev_chunk_")
+    assert twice["chunks"][0]["content"] == expected
 
 
 def test_extracts_enumerated_requested_fields_without_finance_vocabulary() -> None:

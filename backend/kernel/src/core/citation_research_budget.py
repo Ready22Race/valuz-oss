@@ -41,12 +41,22 @@ _EXTERNAL_EVIDENCE_INTENT_RE = re.compile(
     r"引用|来源|出处|查找|查询|搜索|检索|根据|来自|"
     r"最新|近期|目前|当前|今天|截至|今年|本季度|过去|"
     r"报告|文档|文件|网页|新闻|财报|公告|电话会|原文|"
-    r"数据|数值|多少|价格|股价|业绩|排名|比较|对比|列出|总结|"
+    r"数据|数值|多少|价格|股价|业绩|排名|列出|总结|"
     r"\bcite\b|\bcitation\b|\bsource\b|\bsearch\b|\blook\s+up\b|"
     r"\blatest\b|\bcurrent\b|\btoday\b|\bas\s+of\b|\brecent\b|"
     r"\breport\b|\bdocument\b|\bfiling\b|\bnews\b|\bdata\b|"
     r"\bhow\s+much\b|\bcompare\b|\blist\b|\bsummar"
     r")",
+    re.IGNORECASE,
+)
+_NEGATED_EXTERNAL_EVIDENCE_CLAUSE_RE = re.compile(
+    r"(?:"
+    r"(?:不需要|无需|不用|不必|不要)\s*(?:再\s*)?"
+    r"(?:查询|检索|搜索|查找|引用|核验|验证)[^。！？!?；;]{0,100}|"
+    r"\b(?:no need to|do not|don't|without)\s+"
+    r"(?:search(?:ing)?|look(?:ing)?\s+up|cit(?:e|ing)|verif(?:y|ying))"
+    r"[^.!?;]{0,120}"
+    r")(?=[。！？!?；;]|$)",
     re.IGNORECASE,
 )
 _URL_OR_FILE_RE = re.compile(r"https?://|\bwww\.|\b\S+\.(?:pdf|docx?|xlsx?|pptx?|md)\b", re.I)
@@ -68,7 +78,13 @@ def is_stable_general_knowledge_query(text: str) -> bool:
         return False
     if re.search(r"\b(?:19|20)\d{2}\b|(?:19|20)\d{2}\s*年", normalized):
         return False
-    if _EXTERNAL_EVIDENCE_INTENT_RE.search(normalized):
+    # A user can explicitly rule out research while asking for a conceptual
+    # comparison (for example, why two industries use different ROE
+    # thresholds).  Remove only the negated research clause before checking
+    # external-evidence intent; the original text still drives the stable
+    # definition/explanation gate below.
+    external_probe = _NEGATED_EXTERNAL_EVIDENCE_CLAUSE_RE.sub("", normalized)
+    if _EXTERNAL_EVIDENCE_INTENT_RE.search(external_probe):
         return False
     return _STABLE_KNOWLEDGE_INTENT_RE.search(normalized) is not None
 
@@ -103,6 +119,7 @@ class CitationResearchBudget:
     )
     complete_document_ids: set[str] = field(default_factory=set)
     indexed_document_search_ids: set[str] = field(default_factory=set)
+    transcript_discovery_scopes: set[tuple[str, ...]] = field(default_factory=set)
 
     def reset(self) -> None:
         self.discovery_calls = 0
@@ -110,6 +127,7 @@ class CitationResearchBudget:
         self.document_fetch_windows.clear()
         self.complete_document_ids.clear()
         self.indexed_document_search_ids.clear()
+        self.transcript_discovery_scopes.clear()
 
     @property
     def has_research_activity(self) -> bool:
@@ -117,7 +135,36 @@ class CitationResearchBudget:
             self.discovery_calls > 0
             or self.document_fetch_calls > 0
             or self.indexed_document_search_ids
+            or self.transcript_discovery_scopes
         )
+
+    def allow_transcript_discovery(
+        self,
+        symbols: Sequence[str],
+    ) -> ResearchBudgetDecision:
+        """Allow one broad transcript discovery per entity scope per turn."""
+
+        scope = tuple(
+            sorted(
+                dict.fromkeys(
+                    str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()
+                )
+            )
+        )
+        if scope and scope in self.transcript_discovery_scopes:
+            return ResearchBudgetDecision(
+                allowed=False,
+                code="duplicate-transcript-discovery",
+                reason=(
+                    "Transcript discovery for this entity is already complete for "
+                    "this turn. Use the distinct fiscal-period documents already "
+                    "returned; do not issue one discovery query per quarter."
+                ),
+            )
+        decision = self.allow_discovery()
+        if decision.allowed and scope:
+            self.transcript_discovery_scopes.add(scope)
+        return decision
 
     def allow_discovery(self) -> ResearchBudgetDecision:
         if self.discovery_calls >= DISCOVERY_TOOL_CALL_LIMIT:

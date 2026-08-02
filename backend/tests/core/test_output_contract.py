@@ -1,3 +1,4 @@
+from src.core.orchestrator import _citation_output_scope_context
 from src.core.output_contract import parse_output_contract
 
 
@@ -27,3 +28,15 @@ def test_parses_explicit_two_line_contract() -> None:
 
     assert contract.strict is True
     assert contract.requested_line_count == 2
+
+
+def test_parses_multi_period_coverage_contract() -> None:
+    zh = parse_output_contract("请总结微软最近四个季度电话会中的表述。")
+    en = parse_output_contract("Summarize Microsoft's last four fiscal quarters.")
+
+    assert zh.requested_period_count == 4
+    assert en.requested_period_count == 4
+    assert zh.to_dict()["requestedPeriodCount"] == 4
+    context = _citation_output_scope_context("请总结微软最近四个季度电话会中的表述。")
+    assert "4 distinct period sections" in context
+    assert "Do not finish with only" in context

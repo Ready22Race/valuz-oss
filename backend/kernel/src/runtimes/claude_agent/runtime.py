@@ -72,7 +72,7 @@ from src.core.approval_rule_matcher import (
     RuntimeApprovalRuleMatcher,
     _permission_update_to_dict,
 )
-from src.core.citation import compact_citation_tool_content
+from src.core.citation import compact_citation_tool_content, private_citation_tool_content
 from src.core.citation_document_search import (
     augment_indexed_document_evidence,
     extract_raw_document,
@@ -98,6 +98,7 @@ from src.core.events import (
     EventSink,
 )
 from src.core.hooks import Hooks
+from src.core.output_contract import parse_output_contract
 from src.core.rule_canonicalize import reduce_args_for_subject
 from src.core.session_approval_cache import SessionRule
 from src.core.tools import ExecContext, ToolDef, ToolKit, ToolResult
@@ -451,6 +452,7 @@ class ClaudeAgentRuntime:
         self._citation_document_metadata: dict[str, dict[str, Any]] = {}
         self._citation_user_query = ""
         self._citation_no_research_scope = False
+        self._citation_requested_period_count: int | None = None
 
         # Slice 3 — approval contract.
         # ``_pending_futures`` maps pending_id → asyncio.Future that
@@ -593,6 +595,9 @@ class ClaudeAgentRuntime:
         self._citation_raw_documents = {}
         self._citation_document_metadata = {}
         self._citation_user_query = user_message.text
+        self._citation_requested_period_count = (
+            parse_output_contract(user_message.text).requested_period_count
+        )
         self._citation_no_research_scope = is_stable_general_knowledge_query(
             user_message.text
         )
@@ -2238,19 +2243,26 @@ class ClaudeAgentRuntime:
                 )
                 if augmented_indexed_content is not None:
                     effective_tool_response = augmented_indexed_content
-                raw_content = _stringify_tool_result_content(effective_tool_response)
+                private_citation_content = private_citation_tool_content(
+                    effective_tool_response
+                )
                 if (
                     tool_use_id
-                    and "_valuz_evidence" in raw_content
-                    and len(raw_content.encode()) <= _MAX_PERSISTED_CITATION_CONTENT_BYTES
+                    and private_citation_content is not None
+                    and len(private_citation_content.encode())
+                    <= _MAX_PERSISTED_CITATION_CONTENT_BYTES
                 ):
-                    self._citation_tool_result_sidecars[tool_use_id] = raw_content
-                # Claude Agent receives only bounded evidence summaries, while
-                # the private citation sidecar retains the complete result.
-                # Long filings and transcripts frequently place the requested
-                # metric well after the first dozen chunks, so expose the full
-                # bounded document index instead of forcing the model to page
-                # through the same document repeatedly.
+                    self._citation_tool_result_sidecars[tool_use_id] = (
+                        private_citation_content
+                    )
+                # Claude Agent receives the task-selected Model Content with
+                # repeated trusted metadata removed. The private sidecar keeps
+                # only immutable Evidence/Collection descriptors; it is not a
+                # second copy of document text or structured data. Long filings
+                # and transcripts frequently place the requested metric well
+                # after the first dozen chunks, so preserve the complete
+                # selected chunk window instead of replacing it with evidence
+                # excerpts or forcing repeated small-page reads.
                 input_mapping = _tool_input_mapping(data.get("tool_input"))
                 document_id = str(
                     input_mapping.get("doc_id")
@@ -2332,6 +2344,12 @@ class ClaudeAgentRuntime:
         simple_name = tool_name.rsplit("__", 1)[-1]
         input_mapping = _tool_input_mapping(tool_input)
         document_ids = _tool_document_ids(input_mapping)
+        if simple_name in TRANSCRIPT_DISCOVERY_TOOLS:
+            symbols = input_mapping.get("symbols")
+            decision = self._citation_research_budget.allow_transcript_discovery(
+                symbols if isinstance(symbols, list) else ()
+            )
+            return None if decision.allowed else decision.reason
         if simple_name == "kb_search" and any(
             document_id in self._citation_transcript_documents
             for document_id in document_ids
@@ -2378,6 +2396,18 @@ class ClaudeAgentRuntime:
     ) -> dict[str, Any] | None:
         simple_name = tool_name.rsplit("__", 1)[-1]
         input_mapping = dict(_tool_input_mapping(tool_input))
+        if (
+            simple_name in TRANSCRIPT_DISCOVERY_TOOLS
+            and (self._citation_requested_period_count or 0) > 1
+        ):
+            input_mapping.pop("fiscal_quarter", None)
+            input_mapping.pop("fiscal_year", None)
+            requested_num = input_mapping.get("num")
+            input_mapping["num"] = max(
+                TRANSCRIPT_DISCOVERY_RESULT_FLOOR,
+                requested_num if isinstance(requested_num, int) else 0,
+            )
+            return input_mapping
         if simple_name == "kb_search" and any(
             document_id in self._citation_transcript_documents
             for document_id in _tool_document_ids(input_mapping)

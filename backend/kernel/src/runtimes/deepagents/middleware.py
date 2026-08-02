@@ -14,12 +14,17 @@ import re
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from langchain.agents.middleware.types import AgentMiddleware, ToolCallRequest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
-from src.core.citation import compact_citation_tool_content
+from src.core.citation import (
+    EvidenceRegistry,
+    compact_citation_tool_content,
+    private_citation_tool_content,
+)
 from src.core.citation_document_search import (
     augment_indexed_document_evidence,
 )
@@ -40,6 +45,7 @@ from src.core.citation_research_budget import (
     is_stable_general_knowledge_query,
     prioritize_discovery_documents,
 )
+from src.core.output_contract import parse_output_contract
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +56,12 @@ _DOCUMENT_FETCH_FAILURE_LIMIT = 2
 _DOCUMENT_FETCH_BLOCK_SECONDS = 60.0
 _STRUCTURED_FALLBACK_EVIDENCE_LIMIT = 128
 _RAW_DOCUMENT_CACHE_LIMIT = 8
+_FINANCIAL_STATEMENT_TOOLS = {
+    "income_statement",
+    "balance_sheet",
+    "cashflow_statement",
+}
+_REQUESTED_YEAR_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
 
 
 class ToolErrorTolerantMiddleware(AgentMiddleware):
@@ -137,6 +149,8 @@ class ResearchToolBudgetMiddleware(AgentMiddleware):
         self._forced_finalization_attempts = 0
         self._lead_owned_evidence = lead_owned_evidence
         self._no_research_scope = False
+        self._requested_period_count: int | None = None
+        self._requested_years: tuple[int, ...] = ()
 
     def before_agent(self, state: Any, runtime: Any) -> None:
         del runtime
@@ -147,6 +161,11 @@ class ResearchToolBudgetMiddleware(AgentMiddleware):
         self._forced_finalization_attempts = 0
         self._no_research_scope = is_stable_general_knowledge_query(
             _state_last_human_text(state)
+        )
+        prompt = _state_last_human_text(state)
+        self._requested_period_count = parse_output_contract(prompt).requested_period_count
+        self._requested_years = tuple(
+            sorted({int(match.group(0)) for match in _REQUESTED_YEAR_RE.finditer(prompt)})
         )
 
     async def awrap_model_call(
@@ -256,6 +275,44 @@ class ResearchToolBudgetMiddleware(AgentMiddleware):
             )
         args = tool_call.get("args")
         args = args if isinstance(args, dict) else {}
+        normalized_tool_name = tool_name.rsplit("__", 1)[-1]
+        if (
+            normalized_tool_name in _FINANCIAL_STATEMENT_TOOLS
+            and str(args.get("period") or "").casefold() in {"annual", "yearly", "fy"}
+            and self._requested_years
+        ):
+            # Statement APIs return the latest rows first.  A request for an
+            # older explicit fiscal year therefore needs enough rows to reach
+            # that year, not merely ``len(requested_years)``.  Keep a bounded
+            # deterministic window and let the model select the requested
+            # periods from the returned rows.
+            latest_completed_year = datetime.now(UTC).year - 1
+            oldest_requested_year = min(self._requested_years)
+            minimum_limit = min(
+                10,
+                max(
+                    len(self._requested_years),
+                    latest_completed_year - oldest_requested_year + 1,
+                ),
+            )
+            requested_limit = args.get("limit")
+            if not isinstance(requested_limit, int) or requested_limit < minimum_limit:
+                args = {**args, "limit": minimum_limit}
+                request = request.override(tool_call={**tool_call, "args": args})
+                tool_call = request.tool_call
+        if tool_name in TRANSCRIPT_DISCOVERY_TOOLS and (self._requested_period_count or 0) > 1:
+            args = {
+                key: value
+                for key, value in args.items()
+                if key not in {"fiscal_quarter", "fiscal_year"}
+            }
+            requested_num = args.get("num")
+            args["num"] = max(
+                TRANSCRIPT_DISCOVERY_RESULT_FLOOR,
+                requested_num if isinstance(requested_num, int) else 0,
+            )
+            request = request.override(tool_call={**tool_call, "args": args})
+            tool_call = request.tool_call
         if (
             tool_name in TRANSCRIPT_DISCOVERY_TOOLS
             and not args.get("fiscal_quarter")
@@ -385,7 +442,13 @@ class ResearchToolBudgetMiddleware(AgentMiddleware):
             return result
         if not is_document_discovery_tool(tool_name):
             return await handler(request)
-        decision = self._research_budget.allow_discovery()
+        if tool_name in TRANSCRIPT_DISCOVERY_TOOLS:
+            symbols = args.get("symbols")
+            decision = self._research_budget.allow_transcript_discovery(
+                symbols if isinstance(symbols, list) else ()
+            )
+        else:
+            decision = self._research_budget.allow_discovery()
         if not decision.allowed:
             return ToolMessage(
                 content=decision.reason or "Citation research budget exhausted.",
@@ -499,31 +562,44 @@ def _state_last_human_text(state: Any) -> str:
 
 
 class CitationEvidenceCompactionMiddleware(AgentMiddleware):
-    """Keep full citation evidence private while giving the model slim handles.
+    """Separate Model Content from immutable citation descriptors.
 
     Source-bearing MCP tools can return hundreds of repeated source/evidence
-    envelopes.  LangChain would otherwise add all of that metadata to every
-    subsequent model call.  The model needs the handle-to-field mapping, while
-    CitationGuard needs the full immutable envelope.  Store the original in a
-    ToolMessage artifact (not sent to the model) and compact only the visible
-    content.  The runtime event adapter forwards the artifact through the
-    existing private ``_citation_content`` sidecar.
+    envelopes. LangChain would otherwise add all of that metadata to every
+    subsequent model call. Preserve the task-selected document chunks or the
+    structured result once for the model, while a ToolMessage artifact carries
+    only trusted direct Evidence or Collection descriptors for CitationGuard.
+    The private sidecar is never a second copy of the original result.
     """
 
     def __init__(self) -> None:
         self._raw_documents: dict[str, dict[str, Any]] = {}
         self._document_titles: dict[str, str] = {}
+        self._evidence_registry = EvidenceRegistry()
 
     async def awrap_tool_call(
         self,
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
     ) -> ToolMessage | Command[Any]:
+        request_call = getattr(request, "tool_call", None)
+        request_call = request_call if isinstance(request_call, dict) else {}
+        request_name = str(request_call.get("name") or "")
+        if request_name.rsplit("__", 1)[-1] == "citation_calculate":
+            validation_error = _calculation_input_validation_error(
+                request_call.get("args"),
+                self._evidence_registry,
+            )
+            if validation_error is not None:
+                return ToolMessage(
+                    content=validation_error,
+                    tool_call_id=str(request_call.get("id") or "citation-calculation"),
+                    name=request_name,
+                    status="error",
+                )
         result = await handler(request)
         if not isinstance(result, ToolMessage):
             return result
-        request_call = getattr(request, "tool_call", None)
-        request_call = request_call if isinstance(request_call, dict) else {}
         request_name = request_call.get("name") if not result.name else None
         tool_name = result.name or (str(request_name) if request_name else None)
         tool_args = request_call.get("args")
@@ -609,8 +685,82 @@ class CitationEvidenceCompactionMiddleware(AgentMiddleware):
         artifact = dict(result.artifact) if isinstance(result.artifact, dict) else {}
         if result.artifact is not None and not isinstance(result.artifact, dict):
             artifact["originalArtifact"] = result.artifact
-        artifact[_CITATION_ARTIFACT_KEY] = _serialize_tool_content(result.content)
+        private_content = private_citation_tool_content(result.content) or _serialize_tool_content(
+            result.content
+        )
+        artifact[_CITATION_ARTIFACT_KEY] = private_content
+        self._evidence_registry.register_tool_projection(
+            compacted,
+            private_content,
+            tool_name=str(tool_name or "") or None,
+            trusted_private=True,
+        )
         return result.model_copy(update={"content": compacted, "artifact": artifact})
+
+
+def _calculation_input_validation_error(
+    args: Any,
+    registry: EvidenceRegistry,
+) -> str | None:
+    """Reject calculations whose submitted values do not match Evidence.
+
+    The deterministic calculator cannot itself see the turn-local Evidence
+    Registry.  DeepAgents middleware can, so validate each structured direct
+    handle or Collection Address before the arithmetic runs.  This prevents a
+    plausible remembered value from being paired with a nearby but different
+    period or metric address.
+    """
+
+    if not isinstance(args, dict) or not isinstance(args.get("inputs"), list):
+        return None
+    for raw_input in args["inputs"]:
+        if not isinstance(raw_input, dict):
+            continue
+        reference = raw_input.get("evidenceHandle")
+        if not isinstance(reference, str) or not reference:
+            continue
+        if "#" in reference:
+            handle, fragment = reference.split("#", 1)
+            record = registry.materialize_reference(handle, f"#{fragment}")
+        else:
+            record = registry.resolve(reference)
+        name = str(raw_input.get("name") or "input")
+        if record is None:
+            return (
+                f"citation_calculate: evidence for input '{name}' is not registered or the "
+                "Collection Address is invalid. Retrieve the requested period and copy its "
+                "exact returned handle/address; do not calculate from memory."
+            )
+        evidence = record.evidence
+        if evidence.get("kind") == "calculation":
+            actual_value = evidence.get("result")
+        elif evidence.get("kind") == "structured-data":
+            actual_value = evidence.get("value")
+        else:
+            continue
+        submitted = _comparable_decimal(raw_input.get("value"))
+        actual = _comparable_decimal(actual_value)
+        if submitted is not None and actual is not None and submitted != actual:
+            period = str(evidence.get("period") or evidence.get("asOf") or "unknown period")
+            metric = str(evidence.get("metric") or evidence.get("field") or "unknown metric")
+            return (
+                f"citation_calculate: evidence mismatch for input '{name}'. The supplied "
+                f"address resolves to value {actual_value!s}, metric {metric}, period {period}, "
+                f"but the submitted value is {raw_input.get('value')!s}. Do not calculate. "
+                "Use the exact value at that address or retrieve the missing requested period "
+                "and use its exact address."
+            )
+    return None
+
+
+def _comparable_decimal(value: Any) -> Decimal | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        parsed = Decimal(str(value).replace(",", "").strip())
+    except (InvalidOperation, ValueError):
+        return None
+    return parsed if parsed.is_finite() else None
 
 
 def citation_artifact_content(output: Any) -> str | None:
@@ -959,26 +1109,26 @@ def _augment_structured_json_text(
     ]
     if valid_existing:
         return None
-    synthesized = _structured_fallback_envelopes(
+    synthesized = _structured_fallback_collection(
         payload["data"],
         tool_name=tool_name,
         tool_args=tool_args,
         captured_at=captured_at,
     )
-    if not synthesized:
+    if synthesized is None:
         return None
     enriched = dict(payload)
-    enriched["_valuz_evidence"] = [*valid_existing, *synthesized]
+    enriched["_valuz_evidence"] = synthesized
     return json.dumps(enriched, ensure_ascii=False, separators=(",", ":"))
 
 
-def _structured_fallback_envelopes(
+def _structured_fallback_collection(
     data: Any,
     *,
     tool_name: str,
     tool_args: dict[str, Any],
     captured_at: str,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any] | None:
     identifier = next(
         (
             str(tool_args.get(key)).strip()
@@ -988,7 +1138,7 @@ def _structured_fallback_envelopes(
         "result",
     )
     source_id = f"tool-result:{tool_name}:{identifier}"[:512]
-    source = {
+    source: dict[str, Any] = {
         "sourceId": source_id,
         "providerId": "valuz-stock",
         "sourceType": "tool-result",
@@ -996,69 +1146,42 @@ def _structured_fallback_envelopes(
         "title": f"{tool_name} · {identifier}"[:1_024],
         "retrievedAt": captured_at,
     }
-    root_currency = str(data.get("currency") or "") if isinstance(data, dict) else ""
-    envelopes: list[dict[str, Any]] = []
-
-    def walk(node: Any, path: str, context: dict[str, Any]) -> None:
-        if len(envelopes) >= _STRUCTURED_FALLBACK_EVIDENCE_LIMIT:
-            return
-        if isinstance(node, dict):
-            next_context = dict(context)
-            for key in _STRUCTURED_CONTEXT_KEYS:
-                value = node.get(key)
-                if value is not None and not isinstance(value, (dict, list)):
-                    next_context[key] = value
-            for key, value in node.items():
-                child_path = f"{path}.{key}" if path else key
-                if key in _STRUCTURED_CONTEXT_KEYS or key in {"status", "code"}:
-                    continue
-                if isinstance(value, bool):
-                    continue
-                if isinstance(value, (int, float)):
-                    normalized_value, unit = _structured_fallback_value(
-                        key,
-                        value,
-                        root_currency=root_currency,
-                    )
-                    digest = hashlib.sha256(
-                        f"{source_id}\0{child_path}\0{normalized_value}".encode()
-                    ).hexdigest()[:24]
-                    evidence: dict[str, Any] = {
-                        "kind": "structured-data",
-                        "datasetId": f"tool-result:{tool_name}",
-                        "toolName": tool_name,
-                        "recordKey": f"{identifier}|{child_path}"[:512],
-                        "field": child_path[:1_024],
-                        "metric": key[:1_024],
-                        "value": normalized_value,
-                        "capturedAt": captured_at,
-                    }
-                    if unit:
-                        evidence["unit"] = unit
-                    fiscal_year = next_context.get("fiscal_year")
-                    period = str(next_context.get("period") or "").strip()
-                    if fiscal_year is not None:
-                        evidence["period"] = f"{fiscal_year} {period}".strip()
-                    if next_context.get("end_date"):
-                        evidence["asOf"] = str(next_context["end_date"])
-                    if next_context.get("name"):
-                        evidence["entityName"] = str(next_context["name"])[:1_024]
-                    envelopes.append(
-                        {
-                            "evidenceHandle": f"ev_field_{digest}",
-                            "source": dict(source),
-                            "evidence": evidence,
-                        }
-                    )
-                    continue
-                walk(value, child_path, next_context)
-            return
-        if isinstance(node, list):
-            for index, item in enumerate(node):
-                walk(item, f"{path}[{index}]", context)
-
-    walk(data, "data", {})
-    return envelopes
+    try:
+        serialized = json.dumps(
+            data,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    except (TypeError, ValueError):
+        return None
+    content_hash = f"sha256:{hashlib.sha256(serialized.encode()).hexdigest()}"
+    digest = hashlib.sha256(
+        f"{source_id}\0{tool_name}\0{content_hash}".encode()
+    ).hexdigest()[:24]
+    common: dict[str, Any] = {
+        "datasetId": f"tool-result:{tool_name}",
+        "toolName": tool_name,
+        "capturedAt": captured_at,
+    }
+    if isinstance(data, dict) and data.get("currency"):
+        common["currency"] = str(data["currency"])
+    if identifier != "result":
+        common["entityId"] = identifier
+    return {
+        "version": 1,
+        "kind": "structured-evidence-collection",
+        "collectionHandle": f"evc_tool_{digest}",
+        "source": source,
+        "common": common,
+        "addressing": {
+            "mode": "json-pointer",
+            "contentRoot": "/data",
+            "identityFields": [],
+            "allowedPathRoots": ["/data"],
+        },
+        "contentHash": content_hash,
+    }
 
 
 def _structured_fallback_value(
