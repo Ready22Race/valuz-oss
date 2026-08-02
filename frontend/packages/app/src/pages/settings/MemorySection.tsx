@@ -13,14 +13,17 @@ import {
 } from "@valuz/ui";
 import {
   memoryApi,
+  settingsApi,
   useTranslation,
   type MemoryTarget,
   type MemoryView,
+  type PreferencesResponse,
 } from "@valuz/core";
 
 export const MemorySection = () => {
   const { t } = useTranslation();
   const [view, setView] = useState<MemoryView | null>(null);
+  const [preferences, setPreferences] = useState<PreferencesResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [clearTarget, setClearTarget] = useState<MemoryTarget | null>(null);
   // Locally-edited custom instructions; persisted on blur (see saveCustom).
@@ -28,8 +31,12 @@ export const MemorySection = () => {
 
   const load = useCallback(async () => {
     try {
-      const v = await memoryApi.getMemory();
+      const [v, prefs] = await Promise.all([
+        memoryApi.getMemory(),
+        settingsApi.getPreferences(),
+      ]);
       setView(v);
+      setPreferences(prefs);
       setCustomInstructions(v.custom_instructions);
     } catch {
       toast.error(t("settings.memory.loadFailed"));
@@ -52,6 +59,19 @@ export const MemorySection = () => {
       );
     } catch {
       toast.error(t("settings.memory.saveFailed"));
+    }
+  };
+
+  const toggleConversation = async (
+    key:
+      | "conversation_citations_enabled"
+      | "conversation_verification_enabled",
+    value: boolean,
+  ) => {
+    try {
+      setPreferences(await settingsApi.patchPreferences({ [key]: value }));
+    } catch {
+      toast.error(t("settings.personalization.saveFailed"));
     }
   };
 
@@ -95,12 +115,52 @@ export const MemorySection = () => {
   ];
 
   const masterOn = view?.enabled ?? true;
+  const citationsOn = preferences?.conversation_citations_enabled ?? true;
+  const verificationOn =
+    preferences?.conversation_verification_enabled ?? false;
 
   return (
     <SettingsSection
-      title={t("settings.tab.memory.label")}
-      desc={t("settings.tab.memory.desc")}
+      title={t("settings.tab.personalization.label")}
+      desc={t("settings.tab.personalization.desc")}
     >
+      <div className="mb-2 text-sm font-medium text-ink-heading">
+        {t("settings.personalization.conversationTitle")}
+      </div>
+      <Card className="mb-5 rounded-xl shadow-xs">
+        <CardContent className="py-5">
+          <SettingsRow
+            className="px-0 py-0"
+            label={t("settings.personalization.citationsLabel")}
+            desc={t("settings.personalization.citationsDesc")}
+          >
+            <Switch
+              checked={citationsOn}
+              onCheckedChange={(value) =>
+                void toggleConversation("conversation_citations_enabled", value)
+              }
+            />
+          </SettingsRow>
+          <div className="my-5 h-px bg-surface-border" />
+          <SettingsRow
+            className="px-0 py-0"
+            label={t("settings.personalization.verificationLabel")}
+            desc={t("settings.personalization.verificationDesc")}
+          >
+            <Switch
+              checked={verificationOn}
+              disabled={!citationsOn}
+              onCheckedChange={(value) =>
+                void toggleConversation("conversation_verification_enabled", value)
+              }
+            />
+          </SettingsRow>
+        </CardContent>
+      </Card>
+
+      <div className="mb-2 text-sm font-medium text-ink-heading">
+        {t("settings.personalization.memoryTitle")}
+      </div>
       <Card className="mb-5 rounded-xl shadow-xs">
         <CardContent className="py-5">
           <SettingsRow
@@ -113,7 +173,7 @@ export const MemorySection = () => {
               onCheckedChange={(v) => void toggle("enabled", v)}
             />
           </SettingsRow>
-          <div className="my-5 h-px bg-[#f7f8fa] dark:bg-surface-border" />
+          <div className="my-5 h-px bg-surface-border" />
           <SettingsRow
             className="px-0 py-0"
             label={t("settings.memory.autoExtractLabel")}
@@ -125,7 +185,7 @@ export const MemorySection = () => {
               onCheckedChange={(v) => void toggle("auto_extract", v)}
             />
           </SettingsRow>
-          <div className="my-5 h-px bg-[#f7f8fa] dark:bg-surface-border" />
+          <div className="my-5 h-px bg-surface-border" />
           <div className="flex flex-col gap-2">
             <div>
               <div className="text-sm font-medium text-ink-heading">
@@ -180,7 +240,7 @@ export const MemorySection = () => {
                   entries.map((text, idx) => (
                     <div
                       key={`${target}-${idx}`}
-                      className="flex items-start justify-between gap-2 border-b border-[#f7f8fa] py-2.5 last:border-b-0 dark:border-surface-border"
+                      className="flex items-start justify-between gap-2 border-b border-surface-border py-2.5 last:border-b-0"
                     >
                       <span className="whitespace-pre-wrap text-sm text-ink-body">
                         {text}

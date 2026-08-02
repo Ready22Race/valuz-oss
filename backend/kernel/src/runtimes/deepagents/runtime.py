@@ -30,6 +30,7 @@ import json
 import logging
 import os
 import shutil
+import sqlite3
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict
@@ -66,6 +67,7 @@ from src.runtimes.deepagents.approval_bridge import (
 )
 from src.runtimes.deepagents.middleware import (
     CitationEvidenceCompactionMiddleware,
+    ResearchToolBudgetMiddleware,
     ToolErrorTolerantMiddleware,
     citation_artifact_content,
 )
@@ -129,10 +131,36 @@ def _checkpoint_backend() -> str:
     return "file" if _in_sandbox() else "sqlite"
 
 
+def _build_local_shell_backend(workspace_root: str | None) -> LocalShellBackend:
+    """Create a backend that maps DeepAgents virtual paths into the workspace.
+
+    Built-in summarization writes to virtual absolute paths such as
+    ``/conversation_history/<thread>.md``. Without ``virtual_mode=True`` those
+    paths target the host filesystem root, where desktop runs fail and retry
+    summarization instead of completing the turn.
+    """
+
+    if workspace_root:
+        return LocalShellBackend(
+            root_dir=workspace_root,
+            inherit_env=True,
+            virtual_mode=True,
+        )
+    return LocalShellBackend(inherit_env=True, virtual_mode=True)
+
+
 # langchain TodoListMiddleware tool name (auto-included by deepagents). Treated
 # as a planning channel: emit `todo_update` and suppress the generic tool_use /
 # tool_result pair so the UI trace doesn't double-render it.
 DEEPAGENTS_TODO_TOOL_NAME = "write_todos"
+
+
+def _session_citation_mode_enabled(session: Session) -> bool:
+    """Whether this graph must keep source retrieval in the lead agent."""
+
+    metadata = session.metadata if isinstance(session.metadata, dict) else {}
+    valuz = metadata.get("valuz")
+    return bool(isinstance(valuz, dict) and valuz.get("citation_enabled"))
 
 
 class DeepAgentsRuntime:
@@ -212,6 +240,7 @@ class DeepAgentsRuntime:
             None
         )
         self._applied_effort: str | None = None
+        self._applied_citation_mode: bool | None = None
         self._mcp_tool_names: set[str] = set()
         # Per-session callable injected by the orchestrator via
         # ``set_session_rule_finder``. Closes over (session_id, cache,
@@ -311,6 +340,13 @@ class DeepAgentsRuntime:
                 "configurable": {"thread_id": str(thread_id)},
                 "recursion_limit": MAIN_GRAPH_RECURSION_LIMIT,
             }
+            known_citation_tool_messages: set[str] = set()
+            if not bare:
+                initial_state = await graph.aget_state(stream_config)
+                known_citation_tool_messages = {
+                    key
+                    for key, _tool_name, _content in _state_citation_artifacts(initial_state)
+                }
 
             usage_totals = {
                 "input_tokens": 0,
@@ -444,6 +480,19 @@ class DeepAgentsRuntime:
                 # the turn or it paused on an interrupt. Snapshot state to
                 # find out which.
                 state = await graph.aget_state(stream_config)
+                for key, tool_name, citation_content in _state_citation_artifacts(state):
+                    if key in known_citation_tool_messages:
+                        continue
+                    known_citation_tool_messages.add(key)
+                    await self.event_sink.emit(
+                        Event(
+                            type="citation_evidence",
+                            data={
+                                "tool_name": tool_name,
+                                "content": citation_content,
+                            },
+                        )
+                    )
                 pending_interrupts = list(getattr(state, "interrupts", ()) or ())
                 if not pending_interrupts:
                     break
@@ -914,13 +963,22 @@ class DeepAgentsRuntime:
         # the graph wasn't built via the normal path (most often a test
         # that mocked ``self._graph``). Reconcile only after we have a
         # real "previously applied" value to compare against.
-        if self._applied_permission_mode is None and self._applied_effort is None:
+        if (
+            self._applied_permission_mode is None
+            and self._applied_effort is None
+            and self._applied_citation_mode is None
+        ):
             return
 
         new_mode = session.permission_mode
         new_effort = session.model_settings.effort if session.model_settings else None
+        new_citation_mode = _session_citation_mode_enabled(session)
 
-        if new_mode == self._applied_permission_mode and new_effort == self._applied_effort:
+        if (
+            new_mode == self._applied_permission_mode
+            and new_effort == self._applied_effort
+            and new_citation_mode == self._applied_citation_mode
+        ):
             return
 
         # Drop the cached graph so ``_ensure_graph`` rebuilds cleanly.
@@ -945,6 +1003,7 @@ class DeepAgentsRuntime:
             self._cached_permission_mode = session.permission_mode
             self._applied_permission_mode = session.permission_mode
             self._applied_effort = session.model_settings.effort if session.model_settings else None
+            self._applied_citation_mode = _session_citation_mode_enabled(session)
             return self._graph
 
         # inherit_env=True so the agent shell sees the host's PATH / HOME / etc.
@@ -952,11 +1011,7 @@ class DeepAgentsRuntime:
         # EMPTY env — no PATH — so anything outside the shell's compiled-in
         # default path fails to resolve: the chrome-devtools wrapper, and in dev
         # even npx/node (nvm). See docs/design/browser-feature.md §8.
-        backend = (
-            LocalShellBackend(root_dir=self.workspace_root, inherit_env=True)
-            if self.workspace_root
-            else LocalShellBackend(inherit_env=True)
-        )
+        backend = _build_local_shell_backend(self.workspace_root)
 
         tools = self._build_tools()
         mcp_tools = await self._build_mcp_tools(session)
@@ -987,6 +1042,7 @@ class DeepAgentsRuntime:
         self._cached_permission_mode = session.permission_mode
         self._applied_permission_mode = session.permission_mode
         self._applied_effort = session.model_settings.effort if session.model_settings else None
+        self._applied_citation_mode = _session_citation_mode_enabled(session)
         interrupt_on = self._build_interrupt_on(session.permission_mode, tools)
 
         graph_kwargs: dict[str, Any] = {
@@ -997,6 +1053,9 @@ class DeepAgentsRuntime:
             "checkpointer": self._checkpointer,
             "middleware": [
                 ToolErrorTolerantMiddleware(),
+                ResearchToolBudgetMiddleware(
+                    lead_owned_evidence=_session_citation_mode_enabled(session)
+                ),
                 CitationEvidenceCompactionMiddleware(),
             ],
         }
@@ -1190,10 +1249,31 @@ class DeepAgentsRuntime:
         directory = os.path.dirname(self.checkpoint_db)
         if directory:
             os.makedirs(directory, exist_ok=True)
-        self._checkpointer_cm = AsyncSqliteSaver.from_conn_string(self.checkpoint_db)
-        self._checkpointer = await self._checkpointer_cm.__aenter__()
-        await self._checkpointer.setup()
-        return self._checkpointer
+        # A warm-runtime eviction closes the previous session's SQLite saver
+        # immediately before the next session opens its own one.  On macOS,
+        # removing/recreating WAL sidecars can briefly surface as SQLITE_IOERR
+        # even though the database itself is healthy.  Never retain the
+        # half-open saver: close it, yield once for the sidecar cleanup, and
+        # retry exactly once.  Other SQLite errors still fail immediately.
+        for attempt in range(2):
+            checkpointer_cm = AsyncSqliteSaver.from_conn_string(self.checkpoint_db)
+            checkpointer = await checkpointer_cm.__aenter__()
+            try:
+                await checkpointer.setup()
+            except sqlite3.OperationalError as exc:
+                await checkpointer_cm.__aexit__(type(exc), exc, exc.__traceback__)
+                if attempt > 0 or "disk i/o error" not in str(exc).lower():
+                    raise
+                logger.warning(
+                    "DeepAgents SQLite checkpointer setup hit a transient disk I/O "
+                    "error; retrying once"
+                )
+                await asyncio.sleep(0.05)
+                continue
+            self._checkpointer_cm = checkpointer_cm
+            self._checkpointer = checkpointer
+            return checkpointer
+        raise RuntimeError("unreachable")
 
     def _materialize_skills(self, session: Session) -> list[str]:
         if not self.workspace_root or not session.skills:
@@ -1551,6 +1631,38 @@ def _output_is_error(output: Any) -> bool:
     if status == "error":
         return True
     return False
+
+
+def _state_citation_artifacts(state: Any) -> list[tuple[str, str | None, str]]:
+    """Return private evidence sidecars added by graph tool middleware.
+
+    LangChain emits the underlying tool's ``on_tool_end`` event before
+    ``awrap_tool_call`` has attached its compacted evidence artifact. The
+    completed graph state contains the final ToolMessage, so replay only those
+    private artifacts into Citation Guard before the answer is sealed.
+    """
+
+    values = getattr(state, "values", None)
+    if not isinstance(values, dict):
+        return []
+    messages = values.get("messages")
+    if not isinstance(messages, list):
+        return []
+    artifacts: list[tuple[str, str | None, str]] = []
+    for index, message in enumerate(messages):
+        artifact = getattr(message, "artifact", None)
+        if not isinstance(artifact, dict):
+            continue
+        citation_content = artifact.get("_valuz_citation_content")
+        if not isinstance(citation_content, str):
+            continue
+        raw_id = getattr(message, "tool_call_id", None) or getattr(message, "id", None)
+        key = str(raw_id or f"tool-message-{index}")
+        raw_name = getattr(message, "name", None)
+        artifacts.append(
+            (key, str(raw_name) if raw_name else None, citation_content)
+        )
+    return artifacts
 
 
 def _stringify_tool_output(output: Any) -> str:

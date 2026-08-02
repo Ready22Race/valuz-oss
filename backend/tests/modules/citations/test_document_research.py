@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -125,7 +126,11 @@ class _Sessions:
         content: str,
         *,
         user_id: str,
+        citation_enabled_override: bool | None = None,
+        citation_verification_enabled_override: bool | None = None,
     ) -> object:
+        assert citation_enabled_override is True
+        assert citation_verification_enabled_override is False
         self.sent.append((session_id, content, user_id))
         return SimpleNamespace()
 
@@ -301,10 +306,9 @@ async def test_connector_document_uses_provider_summary_and_locks_qa_to_connecto
     assert summary.status == "degraded"
     assert summary.content == "Reportify canonical summary"
     assert summary.model_id == "valuz-search"
-    assert "base_integrity_not_passed" in {
-        issue["code"] for issue in summary.citation_bundle["quality"]["issues"]
-    }
-    assert "citation_quality_not_passed" in (summary.error_message or "")
+    assert "quality" not in summary.citation_bundle
+    assert "citations_missing" in (summary.error_message or "")
+    assert "citation_integrity_not_passed" in (summary.error_message or "")
     assert research.document_versions == ["reportify-v1"]
     assert [item.name for item in updates[0].mcp_servers] == ["valuz-search"]
     assert 'document_fetch(doc_id="reportify-1")' in updates[0].instructions
@@ -486,6 +490,37 @@ def test_summary_validator_enforces_each_fact_block_and_document_scope() -> None
         _bundle(document_id="doc-other"),
         document_id="doc-1",
     )
+
+
+def test_cached_summary_drops_legacy_quality_warnings_but_keeps_citations() -> None:
+    bundle = _bundle()
+    bundle["quality"] = {
+        "status": "unverified",
+        "publishStatus": "draft-only",
+        "issues": [{"code": "claim_evidence_mismatch"}],
+    }
+    row = research_module.DocumentSummaryArtifactRow(
+        id="summary-legacy",
+        user_id="owner",
+        document_id="doc-1",
+        document_version="sha256:abc",
+        profile="brief",
+        prompt_revision=research_module.SUMMARY_PROMPT_REVISION,
+        policy_revision=research_module.CITATION_POLICY_REVISION,
+        status="degraded",
+        content="- Revenue grew [report](citation://cit_1).",
+        citation_bundle_json=json.dumps(bundle),
+        error_message="citation_quality_not_passed; citation_quality_not_publishable",
+        created_at=1,
+        updated_at=2,
+    )
+
+    summary = research_module._summary_from_row(row)
+
+    assert summary.status == "ready"
+    assert summary.error_message is None
+    assert "quality" not in summary.citation_bundle
+    assert len(summary.citation_bundle["citations"]) == 1
 
 
 async def test_share_to_origin_copies_only_the_stored_canonical_message(

@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from src.core.claim_audit import (
     MAX_CLAIMS_PER_ANSWER,
+    auto_bind_composite_text_claims,
     auto_bind_unique_claims,
     extract_claims,
     extract_claims_with_status,
     match_available_evidence,
+    structured_value_present,
+    text_components_cover_claim,
     verify_evidence_support,
 )
 
@@ -23,7 +26,7 @@ _FINANCE_SEMANTICS = {
                 "fields": ["net_profit"],
             },
             "revenue_growth": {
-                "aliases": ["营业收入同比增长", "revenue growth"],
+                "aliases": ["营业收入同比增长", "营业收入同比增速", "revenue growth"],
                 "fields": ["operating_revenue_growth_rate"],
             },
             "audit_opinion": {
@@ -35,9 +38,14 @@ _FINANCE_SEMANTICS = {
                 "fields": ["fiscal_year"],
             },
             "filing_date": {
-                "aliases": ["申报日期"],
+                "aliases": ["申报日期", "出具日期"],
                 "fields": ["filing_date"],
                 "date_role": "publication",
+            },
+            "capital_expenditure": {
+                "aliases": ["资本支出", "资本开支", "capex", "capital expenditure"],
+                "fields": ["capital_expenditure"],
+                "value_transform": "absolute",
             },
         }
     },
@@ -58,6 +66,21 @@ _FINANCE_SEMANTICS = {
                 "canonical": "percent",
                 "aliases": ["%"],
                 "scale": 1,
+            },
+            "usd_hundred_million": {
+                "canonical": "USD",
+                "aliases": ["亿美元", "USD 100m"],
+                "scale": 100_000_000,
+            },
+            "usd": {
+                "canonical": "USD",
+                "aliases": ["美元", "USD"],
+                "scale": 1,
+            },
+            "usd_billion": {
+                "canonical": "USD",
+                "aliases": ["十亿美元", "USD billion", "USD bn"],
+                "scale": 1_000_000_000,
             },
         }
     },
@@ -125,6 +148,22 @@ def test_extracts_every_claim_when_one_sentence_is_already_cited() -> None:
     assert claims[0].location["sourceEnd"] > claims[0].location["end"]
 
 
+def test_text_quote_supports_verbatim_claim_after_markdown_label() -> None:
+    claim = extract_claims(
+        "**审计意见：** 天健会计师事务所（特殊普通合伙）为本公司出具了标准无保留意见的审计报告。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    evidence = {
+        "kind": "text",
+        "quote": ("三、 天健会计师事务所(特殊普通合伙)为本公司出具了标准无保留意见的审计报告。"),
+    }
+
+    assert (
+        verify_evidence_support(claim, evidence, semantics=_FINANCE_SEMANTICS).status == "supported"
+    )
+
+
 def test_attaches_citation_written_after_terminal_punctuation() -> None:
     claims = extract_claims(
         "营业总收入为 174,144,069,958.25 元。 [来源](citation://cit_revenue) 下一项为说明。",
@@ -135,6 +174,93 @@ def test_attaches_citation_written_after_terminal_punctuation() -> None:
     assert claims[0].exact == "营业总收入为 174,144,069,958.25 元。"
     assert claims[0].attached_citation_ids == ("cit_revenue",)
     assert claims[1].attached_citation_ids == ()
+
+
+def test_preserves_business_value_wrapped_by_citation_link() -> None:
+    claims = extract_claims(
+        (
+            "贵州茅台 2024 年营业收入 "
+            "[1,709 亿元](citation://cit_revenue)，"
+            "同比增速为 [+15.71%](citation://cit_growth)。"
+        ),
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert [claim.exact for claim in claims] == [
+        "贵州茅台 2024 年营业收入 1,709 亿元，",
+        "同比增速为 +15.71%。",
+    ]
+    assert claims[0].attached_citation_ids == ("cit_revenue",)
+    assert claims[1].attached_citation_ids == ("cit_growth",)
+    assert claims[0].normalized["valueBase"] == "170900000000"
+    assert claims[1].normalized["metric"] == "revenue_growth"
+
+
+def test_calculation_metric_accepts_edition_alias() -> None:
+    claim = extract_claims(
+        "2024 年营业收入同比增速为 +15.71%。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    evidence = {
+        "kind": "calculation",
+        "expression": "((current - prior) / prior) * 100",
+        "inputs": [],
+        "result": 15.71,
+        "unit": "%",
+        "metric": "营业收入同比增速",
+        "period": "2024 FY",
+        "calculatedAt": "2026-08-01T08:00:00Z",
+    }
+
+    assert (
+        verify_evidence_support(claim, evidence, semantics=_FINANCE_SEMANTICS).status == "supported"
+    )
+
+
+def test_calculation_normalizes_the_result_instead_of_the_first_input_amount() -> None:
+    claim = extract_claims(
+        "营业收入同比增长 = (1,708.99亿元 - 1,476.94亿元) / 1,476.94亿元 = 15.71%。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    evidence = {
+        "kind": "calculation",
+        "expression": "((current - prior) / prior) * 100",
+        "inputs": [],
+        "result": 15.71,
+        "unit": "%",
+        "metric": "营业收入同比增长",
+        "calculatedAt": "2026-08-01T08:00:00Z",
+    }
+
+    assert claim.normalized["value"] == "15.71"
+    assert claim.normalized["unitBase"] == "percent"
+    assert (
+        verify_evidence_support(claim, evidence, semantics=_FINANCE_SEMANTICS).status == "supported"
+    )
+
+
+def test_carries_metric_into_period_value_shorthand() -> None:
+    claims = extract_claims(
+        (
+            "2024 年营业收入为 1,708.99 亿元 "
+            "[来源](citation://cit_current)，"
+            "2023 年为 1,476.94 亿元 [来源](citation://cit_prior)。"
+        ),
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert [claim.normalized.get("metric") for claim in claims] == [
+        "operating_revenue",
+        "operating_revenue",
+    ]
+    assert [claim.normalized.get("period") for claim in claims] == [
+        "2024 FY",
+        "2023 FY",
+    ]
 
 
 def test_extracts_dates_and_non_numeric_facts_but_not_reasoning() -> None:
@@ -189,6 +315,57 @@ def test_strict_domain_does_not_flag_section_titles_or_user_facing_limitations()
     ]
     assert [claim.kind for claim in claims] == ["presentation", "reasoning"]
     assert all(claim.citation_required is False for claim in claims)
+
+
+def test_strict_domain_does_not_flag_assistant_progress_narration() -> None:
+    claims = extract_claims(
+        "数据已充分。现在整合所有来源，撰写综合报告。",
+        mode="strict-domain",
+    )
+
+    assert claims == []
+
+
+def test_presentation_preface_is_separate_from_the_following_factual_claim() -> None:
+    claims = extract_claims(
+        "本报告按产品品类横向呈现，三家公司在该品类下均是供给方。",
+        mode="strict-domain",
+    )
+
+    assert [claim.exact for claim in claims] == ["三家公司在该品类下均是供给方。"]
+    assert claims[0].kind == "document-claim"
+    assert claims[0].citation_required is True
+
+
+def test_document_original_text_label_is_presentation_not_a_date_claim() -> None:
+    claims = extract_claims(
+        "合并利润表（2024年1—12月）原文：",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert len(claims) == 1
+    assert claims[0].kind == "presentation"
+    assert claims[0].citation_required is False
+
+
+def test_plain_period_context_label_is_not_an_independent_date_claim() -> None:
+    claims = extract_claims(
+        "贵州茅台 2024 年全年：\n\n"
+        "- **营业收入**：1,708.99 亿元 [1](citation://cit_revenue)\n"
+        "- **归母净利润**：862.28 亿元 [2](citation://cit_profit)",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert [claim.exact for claim in claims] == [
+        "贵州茅台 2024 年全年：",
+        "营业收入：1,708.99 亿元",
+        "归母净利润：862.28 亿元",
+    ]
+    assert claims[0].kind == "presentation"
+    assert claims[0].citation_required is False
+    assert all(claim.citation_required for claim in claims[1:])
 
 
 def test_independently_cited_comma_clauses_are_atomic_claims() -> None:
@@ -308,6 +485,158 @@ year = 2024
     assert all("year = 2024" not in claim.exact for claim in first)
 
 
+def test_strict_domain_audits_text_only_factual_table_cells() -> None:
+    claims = extract_claims(
+        "| 公司 | 核心产品系列 |\n|---|---|\n| 三星电子 | DRAM、NAND Flash、HBM、企业级 SSD |",
+        mode="strict-domain",
+    )
+
+    assert [claim.exact for claim in claims] == [
+        "三星电子 — 核心产品系列: DRAM、NAND Flash、HBM、企业级 SSD"
+    ]
+    assert claims[0].citation_required is True
+
+
+def test_table_context_numbers_do_not_replace_the_cell_value() -> None:
+    claims = extract_claims(
+        "## 过去半年（2026年2月—8月）涨价情况\n\n"
+        "| 产品类别 | 涨价幅度（2026年2月至今） | 关键数据来源 |\n"
+        "|---|---|---|\n"
+        "| HBM3合约价（Q1 2026） | +50%–55%（东北证券研报数据） | "
+        "[报告](citation://cit_hbm) |",
+        mode="strict-domain",
+    )
+
+    table_claims = [claim for claim in claims if claim.location["kind"] == "table-cell"]
+    assert len(table_claims) == 1
+    assert table_claims[0].exact == (
+        "HBM3合约价（Q1 2026） — 涨价幅度（2026年2月至今）: +50%–55%（东北证券研报数据）"
+    )
+    assert table_claims[0].normalized["value"] == "50"
+    assert table_claims[0].normalized["unit"] == "%"
+    assert table_claims[0].attached_citation_ids == ("cit_hbm",)
+
+
+def test_key_data_source_table_column_is_not_a_second_business_claim() -> None:
+    claims = extract_claims(
+        "| 产品 | 涨幅 | 关键数据来源 |\n"
+        "|---|---:|---|\n"
+        "| 企业级SSD | +80% | TrendForce [来源](citation://cit_ssd) |",
+        mode="strict-domain",
+    )
+
+    assert [claim.exact for claim in claims] == ["企业级SSD — 涨幅: +80%"]
+    assert claims[0].attached_citation_ids == ("cit_ssd",)
+
+
+def test_two_quarterly_sources_jointly_cover_two_reported_ranges() -> None:
+    claim = extract_claims(
+        "| 产品 | Q2 合约价环比涨幅 |\n"
+        "|---|---:|\n"
+        "| NAND Flash（含企业级 SSD） | +55%～+60%；另据一说 +70%～+75% |",
+        mode="strict-domain",
+    )[0]
+    evidence_items = [
+        {
+            "source": {"sourceId": "half-year", "title": "2026 上半年存储周期"},
+            "evidence": {
+                "kind": "text",
+                "quote": "二季度 NAND Flash 合约价环比上涨55%至60%。",
+            },
+        },
+        {
+            "source": {"sourceId": "may-news", "title": "存储芯片短缺持续"},
+            "evidence": {
+                "kind": "text",
+                "quote": "2026年二季度NAND闪存合约价格将环比上涨70%-75%。",
+            },
+        },
+    ]
+
+    assert text_components_cover_claim(claim, evidence_items) is True
+
+
+def test_two_period_years_are_not_treated_as_business_amounts() -> None:
+    claim = extract_claims(
+        "以 64GB RDIMM 服务器内存为例，合约价从 2025 年 Q4 的 "
+        "450 美元飙升至 2026 年 Q1 的 900 美元以上。",
+        mode="strict-domain",
+    )[0]
+    citation = {
+        "source": {"title": "内存价格持续大涨"},
+        "evidence": {
+            "kind": "text",
+            "quote": (
+                "以服务器级内存为例，64GB RDIMM合约价从2025年第四季度的"
+                "450美元，飙升至2026年第一季度的900美元以上。"
+            ),
+        },
+    }
+
+    assert verify_evidence_support(claim, citation).status == "supported"
+
+
+def test_one_citation_in_value_cell_does_not_leak_across_the_same_table_row() -> None:
+    claims = extract_claims(
+        "| 项目 | 2024年度（元） | 同比增幅 |\n"
+        "|---|---:|---:|\n"
+        "| 营业收入 | 170,899,152,276.34 | "
+        "+15.71% [年报](citation://cit_row) |",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert len(claims) == 2
+    assert claims[0].attached_citation_ids == ()
+    assert claims[1].attached_citation_ids == ("cit_row",)
+
+
+def test_table_visual_placeholders_are_not_factual_claims() -> None:
+    claims = extract_claims(
+        "| 指标 | Q1 FY26 | Q2 FY26 | Q3 FY26 |\n"
+        "|---|---:|---:|---:|\n"
+        "| 单季新增容量 | — | ~1 GW | N/A |",
+        mode="strict-domain",
+    )
+
+    assert [claim.exact for claim in claims] == [
+        "单季新增容量 — Q2 FY26: ~1 GW"
+    ]
+    assert claims[0].normalized["period"] == "2026 Q2"
+
+
+def test_fiscal_shorthand_rejects_cross_quarter_text_binding() -> None:
+    claim = extract_claims(
+        "| 指标 | Q4 FY26 |\n|---|---:|\n| 单季新增容量 | ~1 GW |",
+        mode="strict-domain",
+    )[0]
+    q2_evidence = {
+        "source": {"title": "Microsoft FY2026 Q2 earnings call transcript"},
+        "evidence": {
+            "kind": "text",
+            "quote": "We added nearly 1 GW of total capacity this quarter alone.",
+        },
+    }
+
+    assert claim.normalized["period"] == "2026 Q4"
+    assert verify_evidence_support(claim, q2_evidence).status == "contradicted"
+
+
+def test_unique_fiscal_year_scopes_abbreviated_quarter_table_columns() -> None:
+    claims = extract_claims(
+        "## FY2026 产能变化\n\n"
+        "| 指标 | Q2（1月） | Q4（7月） |\n"
+        "|---|---:|---:|\n"
+        "| 单季新增容量 | 1 GW | 1 GW |",
+        mode="strict-domain",
+    )
+
+    assert [claim.normalized["period"] for claim in claims] == [
+        "2026 Q2",
+        "2026 Q4",
+    ]
+
+
 def test_claims_inherit_period_context_from_markdown_headings() -> None:
     answer = """# 贵州茅台
 
@@ -359,6 +688,115 @@ def test_claims_inherit_period_context_from_markdown_headings() -> None:
     )
 
 
+def test_structured_cny_value_matches_markdown_table_header_unit() -> None:
+    answer = "| 公司 | 营业收入（亿元） |\n|---|---:|\n| 贵州茅台 | 1,708.99 |"
+    claim = extract_claims(
+        answer,
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    revenue = _structured_record(
+        "ev_table_revenue_12345678",
+        field="operating_revenue",
+        value=170_899_152_276,
+    )
+    revenue["evidence"].update({"unit": "CNY", "entityName": "贵州茅台"})
+
+    assert claim.exact == "贵州茅台 — 营业收入（亿元）: 1,708.99"
+    assert (
+        verify_evidence_support(
+            claim,
+            revenue,
+            semantics=_FINANCE_SEMANTICS,
+        ).status
+        == "supported"
+    )
+    assert structured_value_present(
+        170_899_152_276,
+        "CNY",
+        answer,
+        field="operating_revenue",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+
+def test_calculation_inherits_entity_and_period_from_presentation_preface() -> None:
+    claims = extract_claims(
+        "贵州茅台 2024 年全年财务数据如下：\n\n"
+        "营业收入同比增长 = (170.9 / 147.7 - 1) * 100 = 15.71% "
+        "[计算](citation://cit_calculation)",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+    calculation = claims[-1]
+    evidence = {
+        "kind": "calculation",
+        "expression": "(current / prior - 1) * 100",
+        "inputs": [],
+        "result": 15.71,
+        "unit": "%",
+        "entityName": "贵州茅台",
+        "metric": "营业收入同比增长",
+        "period": "2024 FY",
+        "calculatedAt": "2026-08-01T08:00:00Z",
+    }
+
+    assert "贵州茅台 2024 年全年" in calculation.semantic_text
+    assert (
+        verify_evidence_support(calculation, evidence, semantics=_FINANCE_SEMANTICS).status
+        == "supported"
+    )
+
+
+def test_text_evidence_treats_q1_and_q1_ytd_as_the_same_reporting_period() -> None:
+    claim = extract_claims(
+        "青岛啤酒 2026 年一季度营业收入为 10,285,128,726 元。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    citation = {
+        "source": {
+            "title": "青岛啤酒 2026 Q1 财务报表",
+            "period": "2026 Q1",
+        },
+        "evidence": {
+            "kind": "text",
+            "quote": "营业收入 10,285,128,726 元",
+            "period": "2026 Q1",
+        },
+    }
+
+    assert claim.normalized["period"] == "2026 Q1 YTD"
+    assert (
+        verify_evidence_support(claim, citation, semantics=_FINANCE_SEMANTICS).status == "supported"
+    )
+
+
+def test_calculation_formula_with_all_inputs_is_direct_support() -> None:
+    claim = extract_claims(
+        "营业收入同比增长 = (10,285,128,726 / 10,445,537,525 - 1) × 100 = -1.54%。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    evidence = {
+        "kind": "calculation",
+        "expression": "(current / prior - 1) * 100",
+        "inputs": [
+            {"name": "current", "value": 10_285_128_726, "unit": "CNY"},
+            {"name": "prior", "value": 10_445_537_525, "unit": "CNY"},
+        ],
+        "result": -1.54,
+        "unit": "%",
+        "entityName": "青岛啤酒",
+        "metric": "营业收入同比增长",
+        "period": "2026 Q1",
+    }
+
+    assert (
+        verify_evidence_support(claim, evidence, semantics=_FINANCE_SEMANTICS).status == "supported"
+    )
+
+
 def test_markdown_sources_heading_stops_claim_audit() -> None:
     claims = extract_claims(
         "Revenue was 120 USD.\n\n## Sources\n\n- Publisher is Example Corp.",
@@ -407,6 +845,272 @@ def test_matcher_auto_binds_only_one_semantically_exact_candidate() -> None:
 
     assert result.status == "exact"
     assert result.handles == ("ev_margin_12345678",)
+
+
+def test_auto_bind_does_not_guess_for_explicitly_attributed_claim() -> None:
+    answer = (
+        "微软管理层披露 Azure 增长率通常包含“AI services contributed approximately 16 points”。"
+    )
+    unrelated = {
+        "evidenceHandle": "ev_iren_12345678",
+        "source": {
+            "sourceId": "iren-q1",
+            "providerId": "valuz-search",
+            "sourceType": "document",
+            "title": "Iris Energy (IREN) - Earnings Call Transcript",
+        },
+        "evidence": {
+            "kind": "text",
+            "quote": "AI services contributed approximately 16 points.",
+        },
+    }
+
+    result = auto_bind_unique_claims(
+        answer,
+        [unrelated],
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert result.text == answer
+    assert result.claim_handles == {}
+
+
+def test_auto_bind_accepts_attribution_when_named_speaker_is_in_exact_chunk() -> None:
+    answer = "FY2026 Q2，Satya Nadella 表示公司本季度单季新增近 1 GW 总容量。"
+    evidence = {
+        "evidenceHandle": "ev_msft_q2_capacity_12345678",
+        "source": {
+            "sourceId": "msft-2026-q2",
+            "providerId": "valuz-search",
+            "sourceType": "document",
+            "title": "Microsoft(MSFT) - 2026 Q2 - Earnings Call Transcript",
+        },
+        "evidence": {
+            "kind": "text",
+            "prefix": "Satya Nadella",
+            "quote": "All up, we added nearly 1 GW of total capacity this quarter alone.",
+        },
+    }
+
+    result = auto_bind_unique_claims(
+        answer,
+        [evidence],
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert result.text.count("evidence://ev_msft_q2_capacity_12345678") == 1
+    assert len(result.claim_handles) == 1
+
+
+def test_period_scoped_si_quantity_matches_spelled_out_source_unit() -> None:
+    semantics = {
+        "unit_ontology": {
+            "units": {
+                "gigawatt": {
+                    "canonical": "watt",
+                    "aliases": ["GW", "gigawatt", "gigawatts", "吉瓦"],
+                    "scale": 1_000_000_000,
+                }
+            }
+        }
+    }
+    answer = "FY2026 Q4 单季新增容量为 1 GW。"
+    evidence = {
+        "evidenceHandle": "ev_msft_q4_capacity_12345678",
+        "source": {
+            "sourceId": "msft-2026-q4",
+            "providerId": "valuz-search",
+            "sourceType": "document",
+            "title": "Microsoft(MSFT) - 2026 Q4 - Earnings Call Transcript",
+        },
+        "evidence": {
+            "kind": "text",
+            "quote": "All up, we added another gigawatt of capacity this quarter.",
+        },
+    }
+
+    claim = extract_claims(answer, mode="strict-domain", semantics=semantics)[0]
+    assert verify_evidence_support(claim, evidence, semantics=semantics).status == "supported"
+
+    result = auto_bind_unique_claims(
+        answer,
+        [evidence],
+        mode="strict-domain",
+        semantics=semantics,
+    )
+    assert result.text.count("evidence://ev_msft_q4_capacity_12345678") == 1
+
+
+def test_outflow_metric_can_display_authoritative_negative_value_as_magnitude() -> None:
+    answer = "FY2026 Q1 资本支出为 193.94 亿美元。"
+    evidence = {
+        "evidenceHandle": "ev_msft_q1_capex_12345678",
+        "source": {
+            "sourceId": "msft-cashflow-q1",
+            "providerId": "valuz-stock",
+            "sourceType": "dataset",
+            "title": "Company cash flow statement · MSFT",
+        },
+        "evidence": {
+            "kind": "structured-data",
+            "datasetId": "cashflow",
+            "toolName": "company_cashflow_statement",
+            "recordKey": "MSFT|2026 Q1",
+            "entityId": "MSFT",
+            "field": "cash_at_end_of_period.capital_expenditure",
+            "metric": "capital_expenditure",
+            "value": -19_394_000_000,
+            "unit": "USD",
+            "period": "2026 Q1",
+        },
+    }
+
+    claim = extract_claims(
+        answer,
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    assert (
+        verify_evidence_support(
+            claim,
+            evidence,
+            semantics=_FINANCE_SEMANTICS,
+        ).status
+        == "supported"
+    )
+
+
+def test_auto_bind_negative_disclosure_with_unique_quoted_anchor() -> None:
+    answer = (
+        'AI 服务贡献百分点：电话会原文中，Amy Hood 提到"Azure AI services '
+        'revenue was generally…"后未披露具体贡献百分点。'
+    )
+    evidence = {
+        "evidenceHandle": "ev_msft_ai_12345678",
+        "source": {
+            "sourceId": "msft-2026-q1",
+            "providerId": "valuz-search",
+            "sourceType": "document",
+            "title": "Microsoft FY2026 Q1 Earnings Call Transcript",
+        },
+        "evidence": {
+            "kind": "text",
+            "prefix": "Results were ahead of expectations.",
+            "quote": (
+                "Azure AI services revenue was generally in line with expectations, "
+                "while demand continued to exceed available supply."
+            ),
+            "suffix": "We continue to invest in capacity.",
+        },
+    }
+
+    result = auto_bind_unique_claims(
+        answer,
+        [evidence],
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert result.text.count("evidence://ev_msft_ai_12345678") == 1
+    claim = next(iter(extract_claims(answer, mode="strict-domain", semantics=_FINANCE_SEMANTICS)))
+    assert result.claim_handles == {claim.claim_id: "ev_msft_ai_12345678"}
+
+
+def test_auto_bind_negative_disclosure_from_unique_complete_document() -> None:
+    answer = "AI 服务贡献百分点：原文未披露具体数字。"
+    coverage = {
+        "evidenceHandle": "ev_doc_coverage_12345678",
+        "source": {
+            "sourceId": "msft-2026-q1",
+            "documentId": "msft-2026-q1",
+            "providerId": "valuz-search",
+            "sourceType": "document",
+            "title": "Microsoft FY2026 Q1 Earnings Call Transcript",
+        },
+        "evidence": {
+            "kind": "structured-data",
+            "datasetId": "document:msft-2026-q1",
+            "toolName": "document_fetch",
+            "field": "document_coverage_complete",
+            "metric": "document_coverage_complete",
+            "value": True,
+            "basis": "full-document",
+        },
+    }
+
+    result = auto_bind_unique_claims(
+        answer,
+        [coverage],
+        mode="required-on-evidence",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert result.text == (
+        "AI 服务贡献百分点：原文未披露具体数字 [source](evidence://ev_doc_coverage_12345678)。"
+    )
+
+
+def test_auto_bind_negative_disclosure_does_not_choose_between_complete_documents() -> None:
+    records = []
+    for index in range(2):
+        records.append(
+            {
+                "evidenceHandle": f"ev_doc_coverage_{index}_12345678",
+                "source": {},
+                "evidence": {
+                    "kind": "structured-data",
+                    "datasetId": f"document:doc-{index}",
+                    "toolName": "document_fetch",
+                    "field": "document_coverage_complete",
+                    "value": True,
+                    "basis": "full-document",
+                },
+            }
+        )
+
+    result = auto_bind_unique_claims(
+        "原文未披露具体数字。",
+        records,
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert result.text == "原文未披露具体数字。"
+    assert result.claim_handles == {}
+
+
+def test_composite_auto_bind_does_not_guess_for_explicitly_attributed_claim() -> None:
+    answer = (
+        "微软管理层披露 Azure 增长率通常包含“AI services contributed approximately 16 points”。"
+    )
+    records = [
+        {
+            "evidenceHandle": f"ev_iren_{index}_12345678",
+            "source": {
+                "sourceId": f"iren-{index}",
+                "providerId": "valuz-search",
+                "sourceType": "document",
+                "title": f"Iris Energy source {index}",
+            },
+            "evidence": {
+                "kind": "text",
+                "quote": "AI services contributed approximately 16 points.",
+            },
+        }
+        for index in range(2)
+    ]
+
+    result = auto_bind_composite_text_claims(
+        answer,
+        records,
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert result.text == answer
+    assert result.claim_handles == {}
 
 
 def test_matcher_never_guesses_between_equally_exact_candidates() -> None:
@@ -627,6 +1331,51 @@ def test_reportify_nine_month_period_matches_chinese_ytd_claim() -> None:
     )
 
 
+def test_chunk_period_overrides_broader_document_title_period() -> None:
+    claim = extract_claims(
+        "2026 Q1 PC DRAM 合约价环比上涨 110%～115%。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    evidence = {
+        "source": {
+            "title": "Memory Pricing Tracker: 2Q26 forecast - 20260402",
+        },
+        "evidence": {
+            "kind": "text",
+            "quote": (
+                "PC DRAM pricing rose 110-115% qoq in 1Q26, and "
+                "2Q26 pricing is forecast to increase by 40-45% qoq."
+            ),
+        },
+    }
+
+    assert claim.normalized["period"] == "2026 Q1"
+    assert (
+        verify_evidence_support(claim, evidence, semantics=_FINANCE_SEMANTICS).status == "supported"
+    )
+
+
+def test_chunk_without_claim_period_still_rejects_title_period_conflict() -> None:
+    claim = extract_claims(
+        "2026 Q1 PC DRAM 合约价环比上涨 110%～115%。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    evidence = {
+        "source": {"title": "Memory Pricing Tracker: 2Q26 - 20260402"},
+        "evidence": {
+            "kind": "text",
+            "quote": "PC DRAM pricing rose 110-115% qoq.",
+        },
+    }
+
+    assert (
+        verify_evidence_support(claim, evidence, semantics=_FINANCE_SEMANTICS).status
+        == "contradicted"
+    )
+
+
 def test_calculation_without_metric_does_not_match_empty_chinese_alias_token() -> None:
     claim = extract_claims(
         "growth was 20%.",
@@ -674,6 +1423,63 @@ def test_text_quote_matching_ignores_pdf_line_wrap_spacing_in_chinese() -> None:
     evidence = {
         "kind": "text",
         "quote": "我们认为，财务报表公允反映了贵州茅台公司2024\n年度的经营成果。",
+    }
+
+    assert (
+        verify_evidence_support(claim, evidence, semantics=_FINANCE_SEMANTICS).status == "supported"
+    )
+
+
+def test_markdown_line_break_is_an_atomic_claim_boundary() -> None:
+    claims = extract_claims(
+        "直销同比增长 11.32%  \n批发代理收入 957.69 亿元。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert [claim.exact for claim in claims] == [
+        "直销同比增长 11.32%",
+        "批发代理收入 957.69 亿元。",
+    ]
+
+
+def test_compact_line_label_scopes_every_claim_on_only_that_line() -> None:
+    claims = extract_claims(
+        (
+            "直销；本期销售收入：748.43 亿元；同比增幅：+11.32%  \n"
+            "批发代理；本期销售收入：957.69 亿元；同比增幅：+19.73%"
+        ),
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert "直销" in claims[1].semantic_text
+    assert "批发代理" not in claims[1].semantic_text
+    assert "批发代理" in claims[3].semantic_text
+    assert "直销" not in claims[3].semantic_text
+    assert verify_evidence_support(
+        claims[1],
+        {
+            "kind": "text",
+            "quote": (
+                "| 销售模式 | 营业收入 | 营业收入比上年增减（%） |\n"
+                "| 直销 | 74,843,327,030.79 | 11.32 |"
+            ),
+        },
+        semantics=_FINANCE_SEMANTICS,
+    ).status == "supported"
+
+
+def test_text_evidence_snippet_is_verified_as_trusted_local_context() -> None:
+    claim = extract_claims(
+        "直销渠道本期销售收入为 74,843,327,030.79 元。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    evidence = {
+        "kind": "text",
+        "quote": "渠道类型 本期销售收入 上期销售收入",
+        "snippet": "| 直销 | 74,843,327,030.79 | 11.32 |",
     }
 
     assert (
@@ -733,6 +1539,260 @@ def test_text_table_evidence_supports_a_claim_with_an_equivalent_display_value()
     )
 
 
+def test_text_table_base_unit_values_support_rounded_display_only_claim() -> None:
+    claims = extract_claims(
+        "直销渠道：营业收入 748.43亿元，同比 +11.32%。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+    evidence = {
+        "kind": "text",
+        "quote": (
+            "| 按销售渠道 | 金额 | 同比 |\n"
+            "| 直销 | 74,843,327,030.79 | 11.32 |\n"
+            "| 批发代理 | 95,768,511,021.23 | 19.73 |"
+        ),
+    }
+
+    assert len(claims) == 1
+    assert (
+        verify_evidence_support(claims[0], evidence, semantics=_FINANCE_SEMANTICS).status
+        == "supported"
+    )
+
+
+def test_text_table_with_currency_and_percent_columns_supports_both_values() -> None:
+    claim = extract_claims(
+        "茅台酒收入 1,459.28亿元，同比+15.28%。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    evidence = {
+        "kind": "text",
+        "quote": (
+            "单位：元 币种：人民币\n"
+            "| 分产品 | 营业收入 | 毛利率（%） | 营业收入比上年增减（%） |\n"
+            "| --- | --- | --- | --- |\n"
+            "| 茅台酒 | 145,928,075,955.31 | 94.06 | 15.28 |"
+        ),
+    }
+
+    assert (
+        verify_evidence_support(claim, evidence, semantics=_FINANCE_SEMANTICS).status == "supported"
+    )
+
+
+def test_text_table_cell_header_unit_matches_mixed_unit_filing_excerpt() -> None:
+    claims = extract_claims(
+        (
+            "| 产品 | 2024年收入（亿元） | 同比增速 |\n"
+            "| --- | --- | --- |\n"
+            "| 茅台酒 | 1,459.28 | +15.28% [来源](citation://cit_product) |"
+        ),
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+    evidence = {
+        "kind": "text",
+        "quote": (
+            "单位：万元 币种：人民币\n"
+            "产品档次 产量（吨） 同比（%） 销量（吨） 同比（%） "
+            "销售收入 同比（%）\n"
+            "茅台酒 56,271.99 -1.63 46,412.95 10.22 "
+            "14,592,807.60 15.28 贵州茅台酒"
+        ),
+    }
+
+    assert [claim.exact for claim in claims] == [
+        "茅台酒 — 2024年收入（亿元）: 1,459.28",
+        "茅台酒 — 同比增速: +15.28%",
+    ]
+    assert all(
+        verify_evidence_support(claim, evidence, semantics=_FINANCE_SEMANTICS).status == "supported"
+        for claim in claims
+    )
+
+
+def test_text_table_cell_header_unit_matches_base_currency_filing_excerpt() -> None:
+    claims = extract_claims(
+        (
+            "| 渠道 | 2024年收入（亿元） | 同比增速 |\n"
+            "| --- | --- | --- |\n"
+            "| 直销 | 748.43 | +11.32% [来源](citation://cit_channel) |"
+        ),
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+    evidence = {
+        "kind": "text",
+        "quote": (
+            "| 按销售渠道 | 营业收入 | 营业收入比上年增减（%） |\n"
+            "| --- | --- | --- |\n"
+            "| 直销 | 74,843,327,030.79 | 11.32 |"
+        ),
+    }
+
+    assert all(
+        verify_evidence_support(claim, evidence, semantics=_FINANCE_SEMANTICS).status == "supported"
+        for claim in claims
+    )
+
+
+def test_same_document_duplicate_chunks_choose_the_tightest_supported_excerpt() -> None:
+    claim = extract_claims(
+        "DRAM 合约价上涨 58–63%。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    shared_source = {
+        "providerId": "valuz-search",
+        "sourceType": "document",
+        "documentId": "trendforce-2026-q2",
+        "title": "TrendForce DRAM pricing update",
+    }
+    broad = {
+        "evidenceHandle": "ev_broad_chunk_12345678",
+        "source": shared_source,
+        "evidence": {
+            "kind": "text",
+            "quote": "DRAM 合约价上涨 58–63%，NAND Flash 合约价上涨 81–86%。",
+        },
+    }
+    focused = {
+        "evidenceHandle": "ev_focused_chunk_12345678",
+        "source": shared_source,
+        "evidence": {"kind": "text", "quote": "DRAM 合约价上涨 58–63%。"},
+    }
+
+    match = match_available_evidence(
+        claim,
+        [broad, focused],
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert match.status == "exact"
+    assert match.handles == ("ev_focused_chunk_12345678",)
+
+
+def test_text_document_period_metadata_rejects_cross_quarter_binding() -> None:
+    claim = extract_claims(
+        "Microsoft 2026 Q3 revenue was 65.6 USDm.",
+        mode="strict-domain",
+    )[0]
+    citation = {
+        "source": {
+            "providerId": "valuz-search",
+            "sourceType": "document",
+            "documentId": "msft-fy2026-q1",
+            "title": "Microsoft FY2026 Q1 earnings call transcript",
+        },
+        "evidence": {
+            "kind": "text",
+            "quote": "Microsoft revenue was 65.6 USDm.",
+        },
+    }
+
+    assert verify_evidence_support(claim, citation).status == "contradicted"
+
+
+def test_currency_prefix_billion_matches_localized_hundred_million_usd() -> None:
+    claim = extract_claims(
+        "Microsoft Cloud 季度收入超过 540 亿美元，同比增长 29%。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    citation = {
+        "source": {
+            "title": "Microsoft FY2026 Q3 earnings call transcript",
+        },
+        "evidence": {
+            "kind": "text",
+            "quote": (
+                "Microsoft Cloud exceeded $54 billion in revenue, "
+                "up 29% year-over-year."
+            ),
+        },
+    }
+
+    assert (
+        verify_evidence_support(
+            claim,
+            citation,
+            semantics=_FINANCE_SEMANTICS,
+        ).status
+        == "supported"
+    )
+
+
+def test_annual_report_title_q4_does_not_contradict_full_year_quote() -> None:
+    claim = extract_claims(
+        "2024年度营业总收入为1,741.44亿元，同比增长15.66%。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    citation = {
+        "source": {
+            "providerId": "valuz-search",
+            "sourceType": "document",
+            "documentId": "600519-2024",
+            "title": "贵州茅台(600519) - 2024 Q4 - 年度财报",
+        },
+        "evidence": {
+            "kind": "text",
+            "quote": ("年度内公司实现营业总收入 1,741.44 亿元，同比增长 15.66%。"),
+        },
+    }
+
+    assert (
+        verify_evidence_support(
+            claim,
+            citation,
+            semantics=_FINANCE_SEMANTICS,
+        ).status
+        == "supported"
+    )
+
+
+def test_publication_date_does_not_conflict_with_filing_reporting_period() -> None:
+    claim = extract_claims(
+        "审计报告出具日期为2025年4月1日。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    citation = {
+        "source": {
+            "providerId": "valuz-search",
+            "sourceType": "document",
+            "documentId": "600519-2024",
+            "title": "贵州茅台(600519) - 2024 Q4 - 年度财报",
+        },
+        "evidence": {
+            "kind": "text",
+            "quote": "审计报告出具日期为二〇二五年四月一日。",
+        },
+    }
+
+    support = verify_evidence_support(
+        claim,
+        citation,
+        semantics=_FINANCE_SEMANTICS,
+    )
+    assert support.status != "contradicted"
+
+
+def test_table_claims_inherit_a_dedicated_source_column_binding() -> None:
+    answer = (
+        "| Metric | 2024 | Source |\n"
+        "|---|---:|---|\n"
+        "| Revenue | 120 USD | [1](evidence://ev_revenue_table_12345678) |"
+    )
+
+    claims = extract_claims(answer, mode="strict-domain")
+
+    assert [claim.exact for claim in claims] == ["Revenue — 2024: 120 USD"]
+    assert claims[0].attached_evidence_handles == ("ev_revenue_table_12345678",)
+
+
 def test_generic_market_quote_with_all_numbers_is_supported_without_metric_ontology() -> None:
     claim = extract_claims(
         (
@@ -768,6 +1828,164 @@ def test_generic_numeric_quote_does_not_match_unrelated_subject_with_same_values
 
     assert (
         verify_evidence_support(claim, evidence, semantics=_FINANCE_SEMANTICS).status != "supported"
+    )
+
+
+def test_composite_text_auto_bind_covers_cross_document_numeric_claim() -> None:
+    answer = "Microsoft AI 容量增长 80%，dock-to-live 缩短 20%，Copilot 吞吐提升 4 倍。"
+    records = [
+        {
+            "evidenceHandle": f"ev_msft_q{index}_12345678",
+            "source": {
+                "sourceId": f"msft-q{index}",
+                "providerId": "valuz-search",
+                "sourceType": "document",
+                "title": f"Microsoft FY2026 Q{index} earnings call",
+            },
+            "evidence": {
+                "kind": "text",
+                "quote": quote,
+            },
+        }
+        for index, quote in enumerate(
+            (
+                "Microsoft AI capacity will grow by more than 80%。",
+                "Microsoft shortened dock-to-live time by 20%。",
+                "Microsoft Copilot throughput improved by 4 倍。",
+            ),
+            start=1,
+        )
+    ]
+
+    result = auto_bind_composite_text_claims(
+        answer,
+        records,
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert result.text.count("evidence://") == 3
+    assert len(next(iter(result.claim_handles.values()))) == 3
+
+
+def test_composite_text_auto_bind_keeps_two_agreeing_summary_sources() -> None:
+    answer = "通用 DRAM 2026 年第一季度合约价环比上涨 90%～95%。"
+    records = [
+        {
+            "evidenceHandle": f"ev_dram_summary_{index}_12345678",
+            "source": {
+                "sourceId": f"dram-source-{index}",
+                "providerId": "valuz-search",
+                "sourceType": "web",
+                "title": title,
+            },
+            "evidence": {
+                "kind": "text",
+                "quote": quote,
+            },
+        }
+        for index, (title, quote) in enumerate(
+            (
+                (
+                    "TrendForce memory outlook",
+                    "2026年第一季度通用 DRAM 合约价环比上涨 90%～95%。",
+                ),
+                (
+                    "Memory market report",
+                    "通用 DRAM 在 2026 Q1 的合约价环比涨幅为 90%～95%。",
+                ),
+                (
+                    "Repeated market summary",
+                    "2026 Q1 通用 DRAM 合约价格环比上涨 90%～95%。",
+                ),
+            ),
+            start=1,
+        )
+    ]
+
+    result = auto_bind_composite_text_claims(
+        answer,
+        records,
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert result.text.count("evidence://") == 2
+    assert next(iter(result.claim_handles.values())) == (
+        "ev_dram_summary_1_12345678",
+        "ev_dram_summary_2_12345678",
+    )
+
+
+def test_composite_text_auto_bind_requires_every_claim_amount() -> None:
+    answer = "Microsoft AI 容量增长 80%，dock-to-live 缩短 20%，Copilot 吞吐提升 4 倍。"
+    records = [
+        {
+            "evidenceHandle": "ev_msft_q1_12345678",
+            "source": {
+                "sourceId": "msft-q1",
+                "providerId": "valuz-search",
+                "sourceType": "document",
+            },
+            "evidence": {
+                "kind": "text",
+                "quote": "Microsoft AI capacity will grow by more than 80%。",
+            },
+        },
+        {
+            "evidenceHandle": "ev_msft_q2_12345678",
+            "source": {
+                "sourceId": "msft-q2",
+                "providerId": "valuz-search",
+                "sourceType": "document",
+            },
+            "evidence": {
+                "kind": "text",
+                "quote": "Microsoft shortened dock-to-live time by 20%。",
+            },
+        },
+    ]
+
+    result = auto_bind_composite_text_claims(
+        answer,
+        records,
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert result.text == answer
+    assert result.claim_handles == {}
+
+
+def test_single_page_number_never_supports_or_auto_binds_a_numeric_claim() -> None:
+    answer = "贵州茅台 2024 年营业收入为 1,741.44 亿元。"
+    claim = extract_claims(
+        answer,
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    record = {
+        "evidenceHandle": "ev_page_number_12345678",
+        "source": {"sourceId": "document-1", "sourceType": "document"},
+        "evidence": {"kind": "text", "quote": "2", "page": 2},
+    }
+
+    assert (
+        verify_evidence_support(
+            claim,
+            record["evidence"],
+            semantics=_FINANCE_SEMANTICS,
+        ).status
+        == "not-found"
+    )
+    assert (
+        auto_bind_unique_claims(
+            answer,
+            [record],
+            mode="strict-domain",
+            semantics=_FINANCE_SEMANTICS,
+        ).text
+        == answer
     )
 
 
@@ -819,3 +2037,118 @@ def test_auto_bind_keeps_each_citation_before_its_clause_punctuation() -> None:
         ("ev_revenue_clause_12345678",),
         ("ev_profit_clause_12345678",),
     ]
+
+
+def test_prior_year_table_column_overrides_current_annual_report_title() -> None:
+    claim = extract_claims(
+        "2023年归属于上市公司股东的净利润为74,734,000,000.00元。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    citation = {
+        "source": {
+            "providerId": "valuz-search",
+            "sourceType": "document",
+            "documentId": "600519-2024",
+            "title": "贵州茅台(600519) - 2024 Q4 - 年度财报",
+        },
+        "evidence": {
+            "kind": "text",
+            "quote": (
+                "项目 | 2024年 | 2023年 | 增减变动幅度\n"
+                "归属于上市公司股东的净利润 | 86,228,146,421.62 | "
+                "74,734,000,000.00 | 15.38%"
+            ),
+        },
+    }
+
+    assert (
+        verify_evidence_support(
+            claim,
+            citation,
+            semantics=_FINANCE_SEMANTICS,
+        ).status
+        == "supported"
+    )
+
+
+def test_reported_growth_cell_uses_metric_dependency_and_comparison_header() -> None:
+    claim = extract_claims(
+        "营业收入同比增长15.71%。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    citation = {
+        "kind": "text",
+        "quote": (
+            "项目 | 2024年 | 2023年 | 本期比上年同期增减(%)\n"
+            "营业收入 | 170,899,152,276.34 | 147,693,604,994.14 | 15.71"
+        ),
+    }
+
+    assert (
+        verify_evidence_support(
+            claim,
+            citation,
+            semantics=_FINANCE_SEMANTICS,
+        ).status
+        == "supported"
+    )
+
+
+def test_educational_definition_formula_and_hypothetical_are_not_external_claims() -> None:
+    claims = extract_claims(
+        (
+            "ROE（Return on Equity，净资产收益率）衡量公司用股东权益创造净利润的效率。\n\n"
+            "$$ROE = \\frac{净利润}{平均股东权益} \\times 100\\%$$\n\n"
+            "平均股东权益 = （期初股东权益 + 期末股东权益）÷ 2。\n\n"
+            "示例：某公司净利润 10 亿元，平均股东权益 50 亿元，则 ROE 为 20%。"
+        ),
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert [claim.kind for claim in claims] == [
+        "definition",
+        "reasoning",
+        "reasoning",
+        "reasoning",
+    ]
+    assert all(not claim.citation_required for claim in claims)
+
+
+def test_plain_language_analogy_and_hypothetical_scope_need_no_external_source() -> None:
+    claims = extract_claims(
+        (
+            "通俗理解：股东每投入 1 元钱，公司一年能赚回多少钱。\n\n"
+            "- 股东权益：资产总额减去负债后属于股东的那部分，通常取期初与期末的平均值\n\n"
+            "**举个例子**\n\n"
+            "某公司股东投入了 10 亿元，当年赚了 2 亿元净利润。\n\n"
+            "意思是：股东每投 100 元，这一年赚回了 20 元。"
+        ),
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert [claim.kind for claim in claims] == [
+        "reasoning",
+        "definition",
+        "reasoning",
+        "reasoning",
+    ]
+    assert all(not claim.citation_required for claim in claims)
+
+
+def test_definition_heading_without_verb_is_not_an_external_claim() -> None:
+    claims = extract_claims(
+        (
+            "**净资产收益率（ROE，Return on Equity）**\n\n"
+            "衡量公司利用股东权益创造净利润的效率。\n\n"
+            "$$ROE = \\frac{\\text{净利润}}{\\text{平均股东权益}} \\times 100\\%$$"
+        ),
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert claims[0].kind == "definition"
+    assert all(not claim.citation_required for claim in claims)

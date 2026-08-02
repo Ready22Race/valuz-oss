@@ -58,9 +58,10 @@ const TAB_ICON_MAP: Record<string, ReactNode> = {
 const readStoredTab = (): string => {
   try {
     const raw = localStorage.getItem(SETTINGS_TAB_STORAGE_KEY);
-    if (raw === "personalize" || raw === "appearance" || raw === "shortcuts") {
+    if (raw === "appearance" || raw === "shortcuts") {
       return "general";
     }
+    if (raw === "memory" || raw === "personalize") return "personalization";
     if (raw) {
       const ids = useRegistryStore.getState().settingsSections.map((s) => s.id);
       if (ids.includes(raw)) return raw;
@@ -76,6 +77,7 @@ const SECTION_MAP: Record<string, React.ComponentType> = {
   connectors: ConnectorsSection,
   general: GeneralSection,
   memory: MemorySection,
+  personalization: MemorySection,
   browser: BrowserSection,
   parsing: ParsingSection,
   backup: BackupSection,
@@ -111,6 +113,7 @@ export const SettingsPage = () => {
   const [tab, setTabState] = useState<string>(() => {
     const fromUrl = searchParams.get("tab");
     if (fromUrl) {
+      if (fromUrl === "memory") return "personalization";
       const ids = useRegistryStore.getState().settingsSections.map((s) => s.id);
       if (ids.includes(fromUrl)) return fromUrl;
     }

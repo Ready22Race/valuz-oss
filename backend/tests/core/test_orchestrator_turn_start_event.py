@@ -157,7 +157,21 @@ class _CitationRepairRuntime:
             )
             answer = "Revenue declined."
         else:
-            answer = "Revenue increased [1](evidence://ev_repair_12345678)."
+            context = json.loads(
+                user_message.text.split("Restricted repair context (JSON):\n", 1)[1]
+            )
+            answer = json.dumps(
+                {
+                    "version": "citation-claim-patch-v1",
+                    "patches": [
+                        {
+                            "claimId": context["claimIssues"][0]["claimId"],
+                            "replacementText": "Revenue increased by 12%.",
+                            "evidenceHandles": ["ev_repair_12345678"],
+                        }
+                    ],
+                }
+            )
         await self.sink.emit(Event(type="assistant_message", data={"text": answer}))
         session.status = "idle"
         session.stop_reason = EndTurn()
@@ -184,6 +198,7 @@ async def test_run_turn_performs_one_hidden_citation_repair(tmp_path, monkeypatc
         user_id="owner-1",
         status="created",
         skills=("/bundled/skills/citation",),
+        metadata={"valuz": {"citation_verification_enabled": True}},
     )
     store = _FakeStore(session)
     orch = SessionOrchestrator(store)  # type: ignore[arg-type]
@@ -205,10 +220,61 @@ async def test_run_turn_performs_one_hidden_citation_repair(tmp_path, monkeypatc
     assert len(runtimes) == 1
     assert len(runtimes[0].prompts) == 2
     assert runtimes[0].prompts[0] == "Answer with citations"
-    assert "previous draft was withheld" in runtimes[0].prompts[1]
+    assert "sealed draft has claim-local citation issues" in runtimes[0].prompts[1]
     assert '"claimIssues"' in runtimes[0].prompts[1]
     assert '"evidenceHandle":"ev_repair_12345678"' in runtimes[0].prompts[1]
     assert message.assistant_message is not None
     assert "citation://cit_" in message.assistant_message
     assert [event.type for event in store.appended].count("assistant_message") == 1
     assert [event.type for event in store.appended].count("session_idle") == 1
+
+
+async def test_hidden_citation_repair_rebuilds_runtime_after_credential_refresh(
+    tmp_path, monkeypatch
+) -> None:
+    agent = AgentConfig(id="agent-1", name="tester")
+    session = Session(
+        id="sess-refresh",
+        agent_config=agent,
+        cwd=str(tmp_path),
+        user_id="owner-1",
+        status="created",
+        skills=("/bundled/skills/citation",),
+        metadata={"valuz": {"citation_verification_enabled": True}},
+    )
+    store = _FakeStore(session)
+    orch = SessionOrchestrator(store)  # type: ignore[arg-type]
+    runtimes: list[_CitationRepairRuntime] = []
+    refresh_calls: list[tuple[str, str]] = []
+
+    async def refresh(user_id: str, session_id: str) -> bool:
+        refresh_calls.append((user_id, session_id))
+        return True
+
+    orch.set_citation_repair_refresh_hook(refresh)
+
+    def create_runtime(*args, **kwargs) -> _CitationRepairRuntime:  # noqa: ANN002, ANN003
+        runtime = _CitationRepairRuntime(args[2])
+        if runtimes:
+            # The fixture selects its repaired response on a later invocation.
+            # A rebuilt runtime has no local call history, so seed the shared
+            # logical phase without weakening the production assertion that a
+            # distinct runtime instance was constructed.
+            runtime.prompts.append("__initial-run-was-on-previous-runtime__")
+        runtimes.append(runtime)
+        return runtime
+
+    monkeypatch.setattr("src.runtimes.factory.create_runtime", create_runtime)
+
+    message = await orch.run_turn(
+        "owner-1",
+        "sess-refresh",
+        UserMessage(text="Answer with citations"),
+    )
+
+    assert refresh_calls == [("owner-1", "sess-refresh")]
+    assert len(runtimes) == 2
+    assert runtimes[0].prompts == ["Answer with citations"]
+    assert "sealed draft has claim-local citation issues" in runtimes[1].prompts[-1]
+    assert message.assistant_message is not None
+    assert "citation://cit_" in message.assistant_message

@@ -1,9 +1,7 @@
 import {
   memo,
   useCallback,
-  useEffect,
   useMemo,
-  useRef,
   useState,
   type AnchorHTMLAttributes,
 } from "react";
@@ -29,7 +27,6 @@ import {
   Copy,
   Download,
   ExternalLink,
-  Info,
   Loader2,
   Maximize,
   RotateCcw,
@@ -51,15 +48,13 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import { Button } from "../ui/button";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "../ui/popover";
+import { HoverCard, HoverCardContent, HoverCardTrigger } from "../ui/hover-card";
 import { useI18n } from "../../hooks/use-i18n";
 import {
   citationDisplayOrder,
   citationIdFromHref,
+  citationOccurrences,
+  citationOffsetFromHref,
   CitationPill,
   CitationSourceCards,
   rewriteCitationMarkdownLinks,
@@ -96,54 +91,54 @@ interface LocalizedClaimQualityEntry {
   issues: CitationQualityDisplayIssue[];
 }
 
+const CRITICAL_CITATION_ISSUE_CODES = new Set([
+  "claim_evidence_conflict",
+  "claim_source_entity_conflict",
+  "structured_source_conflict",
+  "cross_source_value_conflict",
+  "conflicting_values_must_not_be_averaged",
+  "calculation_result_mismatch",
+  "calculation_input_value_mismatch",
+  "calculation_input_unit_mismatch",
+  "calculation_input_metric_mismatch",
+  "calculation_input_entity_mismatch",
+  "calculation_input_scope_mismatch",
+  "calculation_input_basis_mismatch",
+  "calculation_input_period_mismatch",
+  "claim_before_evidence_coverage",
+  "claim_after_evidence_coverage",
+]);
+
+function qualityIssueTone(
+  issue: CitationQualityIssueV1,
+): CitationQualityDisplayIssue["tone"] {
+  return CRITICAL_CITATION_ISSUE_CODES.has(issue.code)
+    ? "critical"
+    : "advisory";
+}
+
 function ClaimQualityMarker({ entry }: { entry: LocalizedClaimQualityEntry }) {
   const { t } = useI18n();
-  const [open, setOpen] = useState(false);
-  const closeTimerRef = useRef<number | null>(null);
   const label = entry.issues.map((issue) => issue.label).join("；");
-  const cancelScheduledClose = useCallback(() => {
-    if (closeTimerRef.current === null) return;
-    window.clearTimeout(closeTimerRef.current);
-    closeTimerRef.current = null;
-  }, []);
-  const showCard = useCallback(() => {
-    cancelScheduledClose();
-    setOpen(true);
-  }, [cancelScheduledClose]);
-  const scheduleClose = useCallback(() => {
-    cancelScheduledClose();
-    closeTimerRef.current = window.setTimeout(() => {
-      closeTimerRef.current = null;
-      setOpen(false);
-    }, 150);
-  }, [cancelScheduledClose]);
-
-  useEffect(() => cancelScheduledClose, [cancelScheduledClose]);
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
+    <HoverCard openDelay={0} closeDelay={180}>
+      <HoverCardTrigger asChild>
         <button
           type="button"
           data-citation-claim-quality
           data-quality-claim-id={entry.targetId}
           aria-label={`${t("ui.citation.qualityNeedsReview")} · ${label}`}
           className="relative -top-px mx-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full border border-warning/50 bg-warning-light/70 align-middle text-warning-text no-underline transition hover:bg-warning-light focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warning/20"
-          onMouseEnter={showCard}
-          onMouseLeave={scheduleClose}
-          onFocus={showCard}
-          onBlur={scheduleClose}
         >
           <AlertTriangle className="h-2.5 w-2.5" aria-hidden="true" />
         </button>
-      </PopoverTrigger>
-      <PopoverContent
+      </HoverCardTrigger>
+      <HoverCardContent
         data-citation-claim-quality-card
         side="bottom"
         sideOffset={8}
         className="w-[min(380px,calc(100vw-32px))] rounded-lg border-surface-border bg-surface p-3 text-xs text-ink-body shadow-xl"
-        onMouseEnter={cancelScheduledClose}
-        onMouseLeave={scheduleClose}
       >
         <div className="flex items-center gap-1.5 font-medium text-warning-text">
           <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
@@ -159,8 +154,8 @@ function ClaimQualityMarker({ entry }: { entry: LocalizedClaimQualityEntry }) {
             </li>
           ))}
         </ul>
-      </PopoverContent>
-    </Popover>
+      </HoverCardContent>
+    </HoverCard>
   );
 }
 
@@ -207,7 +202,7 @@ function selectUserFacingQualityIssues(
     ) {
       return false;
     }
-    const key = `${issue.claimId ?? ""}\0${issue.label}\0${issue.severity}`;
+    const key = `${issue.claimId ?? ""}\0${issue.label}\0${issue.severity}\0${issue.tone}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -227,6 +222,10 @@ function claimSourceEnd(location?: ClaimLocationV1): number | undefined {
   return location && location.kind !== "legacy" ? location.sourceEnd : undefined;
 }
 
+function citationOccurrenceKey(citationId: string, sourceOffset: number): string {
+  return `${citationId}\0${sourceOffset}`;
+}
+
 function stripProtocolSourcePlaceholders(content: string): string {
   return content
     .split("\n")
@@ -243,6 +242,37 @@ function stripProtocolSourcePlaceholders(content: string): string {
     })
     .join("\n")
     .trimEnd();
+}
+
+function stripStandaloneCitationLines(content: string): string {
+  const citationOnlyLine =
+    /^\s*(?:\[[^\]\n]+\]\(<?citation:\/\/[^)>\s]+>?\)[\s,，;；]*)+\s*$/;
+  return content
+    .split("\n")
+    .filter((line) => !citationOnlyLine.test(line))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trimEnd();
+}
+
+function stripDecorativeHeadingCitations(content: string): string {
+  const citationLink = String.raw`\[[^\]\n]+\]\(<?citation:\/\/[^)>\s]+>?\)`;
+  const boldHeading = new RegExp(
+    String.raw`^(\s*(?:\*\*|__)([^*_\n]{1,80})(?:\*\*|__))\s*(?:${citationLink}\s*)+$`,
+  );
+  const markdownHeading = new RegExp(
+    String.raw`^(\s*#{1,6}\s+([^\n]{1,80}?))\s*(?:${citationLink}\s*)+$`,
+  );
+  return content
+    .split("\n")
+    .map((line) => {
+      for (const pattern of [boldHeading, markdownHeading]) {
+        const match = line.match(pattern);
+        if (match && !/\d/.test(match[2] ?? "")) return match[1] ?? line;
+      }
+      return line;
+    })
+    .join("\n");
 }
 
 function safeQualityMarkerInsertion(
@@ -450,15 +480,19 @@ const RICH_TEXT_OVERRIDES = [
   "[&_[data-streamdown='table-wrapper']]:gap-0",
   "[&_[data-streamdown='table-wrapper']]:text-[13px]",
   // Toolbar region — overlay only, so it does not create a second header row.
-  "[&_[data-streamdown='table-wrapper']>div:has(button)]:absolute",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)]:right-2",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)]:top-1.5",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)]:z-10",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)]:h-5",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)]:bg-transparent",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)]:border-0",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)]:p-0",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)]:items-center",
+  // Do not identify it merely by the presence of a button: citation-quality
+  // markers inside table cells are buttons too.  Streamdown's data region is
+  // the direct child that owns ``[data-streamdown='table']``; the toolbar is
+  // the other direct child.
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))]:absolute",
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))]:right-2",
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))]:top-1.5",
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))]:z-10",
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))]:h-5",
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))]:bg-transparent",
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))]:border-0",
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))]:p-0",
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))]:items-center",
   // Table region — flat white, no inner border, bottom rounded.
   "[&_[data-streamdown='table-wrapper']>div:has([data-streamdown='table'])]:border-0",
   "[&_[data-streamdown='table-wrapper']>div:has([data-streamdown='table'])]:rounded-none",
@@ -489,31 +523,31 @@ const RICH_TEXT_OVERRIDES = [
   "[&_[data-streamdown='table-cell']]:text-right",
   "[&_[data-streamdown='table-cell']:first-child]:text-left",
   // Dropdown items (Markdown / CSV / TSV) inside copy/download dropdowns.
-  "[&_[data-streamdown='table-wrapper']>div:has(button)>div>div>button:hover]:bg-surface-muted",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)>div>div>button]:cursor-default",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)>div>div>button]:text-ink-heading",
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))>div>div>button:hover]:bg-surface-muted",
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))>div>div>button]:cursor-default",
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))>div>div>button]:text-ink-heading",
   // Toolbar icons — direct-button case (fullscreen).
-  "[&_[data-streamdown='table-wrapper']>div:has(button)>button]:flex",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)>button]:h-5",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)>button]:w-5",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)>button]:items-center",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)>button]:justify-center",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)>button]:p-0",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)>button]:cursor-default",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)>button]:text-ink-muted",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)>button>svg]:h-3",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)>button>svg]:w-3",
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))>button]:flex",
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))>button]:h-5",
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))>button]:w-5",
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))>button]:items-center",
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))>button]:justify-center",
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))>button]:p-0",
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))>button]:cursor-default",
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))>button]:text-ink-muted",
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))>button>svg]:h-3",
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))>button>svg]:w-3",
   // Wrapped-button case (copy / download dropdowns).
-  "[&_[data-streamdown='table-wrapper']>div:has(button)>div>button]:flex",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)>div>button]:h-5",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)>div>button]:w-5",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)>div>button]:items-center",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)>div>button]:justify-center",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)>div>button]:p-0",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)>div>button]:cursor-default",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)>div>button]:text-ink-muted",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)>div>button>svg]:h-3",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)>div>button>svg]:w-3",
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))>div>button]:flex",
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))>div>button]:h-5",
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))>div>button]:w-5",
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))>div>button]:items-center",
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))>div>button]:justify-center",
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))>div>button]:p-0",
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))>div>button]:cursor-default",
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))>div>button]:text-ink-muted",
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))>div>button>svg]:h-3",
+  "[&_[data-streamdown='table-wrapper']>div:not(:has([data-streamdown='table']))>div>button>svg]:w-3",
 
   // ── Lists ──────────────────────────────────────────────────────
   // Streamdown's default list margins / line-height produce a
@@ -845,14 +879,19 @@ export const MarkdownContent = memo(function MarkdownContent({
 }: MarkdownContentProps) {
   const { t } = useI18n();
   const [pendingUrl, setPendingUrl] = useState<string | null>(null);
-  const publicationBlocked =
-    citationBundle?.integrity?.publicationBlocked === true ||
-    citationBundle?.quality?.publishStatus === "blocked";
-  const displayContent = stripProtocolSourcePlaceholders(
-    publicationBlocked ? t("ui.citation.publicationBlocked") : content,
+  // Citation verification is additive guidance. Even legacy messages marked
+  // ``blocked`` must keep the answer the user already paid and waited for;
+  // the UI communicates concrete issues at the relevant citation instead of
+  // replacing the entire response with a generic failure sentence.
+  const displayContent = stripStandaloneCitationLines(
+    stripDecorativeHeadingCitations(stripProtocolSourcePlaceholders(content)),
   );
   const citationOrder = useMemo(
     () => citationDisplayOrder(displayContent),
+    [displayContent],
+  );
+  const citationOccurrenceOffsets = useMemo(
+    () => citationOccurrences(displayContent),
     [displayContent],
   );
   const citationsById = useMemo(
@@ -951,11 +990,19 @@ export const MarkdownContent = memo(function MarkdownContent({
           ? t("ui.citation.qualityCoverageEnded", { date: coverageEnd })
           : t("ui.citation.qualityIssueFreshness");
       }
-      if (
-        code.includes("conflict") ||
-        code.includes("ambiguous") ||
-        code === "low_tier_without_cross_check"
-      ) {
+      if (code === "low_tier_without_cross_check") {
+        return t("ui.citation.qualityIssueLowTier");
+      }
+      if (code === "claim_source_entity_conflict") {
+        return t("ui.citation.qualityIssueEntityConflict");
+      }
+      if (code.includes("conflict")) {
+        return t("ui.citation.qualityIssueConflict");
+      }
+      if (code.includes("ambiguous")) {
+        return t("ui.citation.qualityIssueAmbiguous");
+      }
+      if (code.includes("cross_check")) {
         return t("ui.citation.qualityIssueCrossCheck");
       }
       if (
@@ -1003,6 +1050,10 @@ export const MarkdownContent = memo(function MarkdownContent({
   );
   const qualityIssuePlacement = useMemo(() => {
     const byCitationId = new Map<string, CitationQualityDisplayIssue[]>();
+    const byCitationOccurrence = new Map<
+      string,
+      CitationQualityDisplayIssue[]
+    >();
     const claimEntriesById = new Map<string, LocalizedClaimQualityEntry>();
     const unlocalized: CitationQualityIssueV1[] = [];
     const auditedClaims = citationBundle?.quality?.claims ?? [];
@@ -1023,8 +1074,16 @@ export const MarkdownContent = memo(function MarkdownContent({
         claimId: auditedClaim?.claimId ?? issue.claimId,
         label: qualityIssueLabel(issue),
         severity: issue.severity,
+        tone: qualityIssueTone(issue),
       };
       if (!localIds.length) {
+        // Missing or weak support is not itself proof that a statement is
+        // wrong. Without a citation card that can show evidence, suppress the
+        // advisory marker; only a concrete conflict remains prominent.
+        if (displayIssue.tone !== "critical") {
+          unlocalized.push(issue);
+          continue;
+        }
         const exact = (auditedClaim?.exact ?? issue.claim?.exact)?.trim();
         const location = issue.location ?? auditedClaim?.location;
         const sourceEnd = claimSourceEnd(location);
@@ -1064,6 +1123,34 @@ export const MarkdownContent = memo(function MarkdownContent({
         continue;
       }
       for (const citationId of localIds) {
+        const location = issue.location ?? auditedClaim?.location;
+        const sourceStart =
+          location && location.kind !== "legacy" ? location.sourceStart : undefined;
+        const sourceEnd = claimSourceEnd(location);
+        const offsets = citationOccurrenceOffsets.get(citationId) ?? [];
+        const scopedOffsets =
+          Number.isInteger(sourceStart) && Number.isInteger(sourceEnd)
+            ? offsets.filter(
+                (offset) => offset >= sourceStart! && offset < sourceEnd!,
+              )
+            : [];
+        if (scopedOffsets.length > 0) {
+          for (const offset of scopedOffsets) {
+            const key = citationOccurrenceKey(citationId, offset);
+            const current = byCitationOccurrence.get(key) ?? [];
+            if (
+              !current.some(
+                (item) =>
+                  item.label === displayIssue.label &&
+                  item.severity === displayIssue.severity,
+              )
+            ) {
+              current.push(displayIssue);
+            }
+            byCitationOccurrence.set(key, current);
+          }
+          continue;
+        }
         const current = byCitationId.get(citationId) ?? [];
         if (
           !current.some(
@@ -1083,6 +1170,12 @@ export const MarkdownContent = memo(function MarkdownContent({
         selectUserFacingQualityIssues(citationIssues),
       );
     }
+    for (const [key, citationIssues] of byCitationOccurrence) {
+      byCitationOccurrence.set(
+        key,
+        selectUserFacingQualityIssues(citationIssues),
+      );
+    }
     const claimEntries = Array.from(claimEntriesById.values())
       .map((entry) => ({
         ...entry,
@@ -1099,6 +1192,7 @@ export const MarkdownContent = memo(function MarkdownContent({
       });
     return {
       byCitationId,
+      byCitationOccurrence,
       claimEntries,
       unlocalized,
     };
@@ -1106,28 +1200,10 @@ export const MarkdownContent = memo(function MarkdownContent({
     citationBundle?.quality?.claims,
     citationBundle?.quality?.issues,
     citationOrder,
+    citationOccurrenceOffsets,
     citationsById,
     displayContent,
     qualityIssueLabel,
-  ]);
-  const hasLocalizedQualityIssues =
-    qualityIssuePlacement.byCitationId.size > 0 ||
-    qualityIssuePlacement.claimEntries.length > 0;
-  const unlocalizedQualityStatus = useMemo(() => {
-    const quality = citationBundle?.quality;
-    if (hasLocalizedQualityIssues) return null;
-    if (!quality || quality.status === "passed") return null;
-    if (!quality.issues?.length) return quality.status;
-    if (!qualityIssuePlacement.unlocalized.length) return null;
-    return qualityIssuePlacement.unlocalized.every(
-      (issue) => issue.severity === "unverified",
-    )
-      ? "unverified"
-      : "degraded";
-  }, [
-    citationBundle?.quality,
-    hasLocalizedQualityIssues,
-    qualityIssuePlacement.unlocalized,
   ]);
   const claimQualityById = useMemo(
     () =>
@@ -1184,13 +1260,23 @@ export const MarkdownContent = memo(function MarkdownContent({
         }
         const citationId = citationIdFromHref(href);
         if (citationId) {
+          const sourceOffset = citationOffsetFromHref(href);
+          const occurrenceIssues =
+            sourceOffset === null
+              ? undefined
+              : qualityIssuePlacement.byCitationOccurrence.get(
+                  citationOccurrenceKey(citationId, sourceOffset),
+                );
           return (
             <CitationPill
               citationId={citationId}
               displayIndex={citationOrder.get(citationId)}
               citation={citationsById.get(citationId)}
               citationById={citationsById}
-              qualityIssues={qualityIssuePlacement.byCitationId.get(citationId)}
+              qualityIssues={
+                occurrenceIssues ??
+                qualityIssuePlacement.byCitationId.get(citationId)
+              }
               messageId={messageId}
               onCitationClick={onCitationClick}
             />
@@ -1244,6 +1330,7 @@ export const MarkdownContent = memo(function MarkdownContent({
       onCitationClick,
       onLocalFileLinkClick,
       qualityIssuePlacement.byCitationId,
+      qualityIssuePlacement.byCitationOccurrence,
     ],
   );
 
@@ -1272,43 +1359,6 @@ export const MarkdownContent = memo(function MarkdownContent({
           {renderedContent}
         </Streamdown>
       </div>
-      {!publicationBlocked &&
-      !hasLocalizedQualityIssues &&
-      citationBundle?.integrity?.status === "degraded" ? (
-        <div
-          role="status"
-          data-citation-integrity="degraded"
-          className="mt-2 flex items-center gap-1.5 text-xs leading-5 text-ink-meta"
-        >
-          <Info
-            className="relative top-px h-3.5 w-3.5 shrink-0 text-ink-muted"
-            aria-hidden="true"
-          />
-          <span>{t("ui.citation.integrityDegraded")}</span>
-        </div>
-      ) : null}
-      {!publicationBlocked &&
-      !hasLocalizedQualityIssues &&
-      citationBundle?.integrity?.status !== "degraded" &&
-      unlocalizedQualityStatus ? (
-        <div
-          role="status"
-          data-citation-quality-warning={unlocalizedQualityStatus}
-          className="mt-2 flex items-center gap-1.5 text-xs leading-5 text-ink-meta"
-        >
-          <Info
-            className="relative top-px h-3.5 w-3.5 shrink-0 text-ink-muted"
-            aria-hidden="true"
-          />
-          <span>
-            {t(
-              unlocalizedQualityStatus === "unverified"
-                ? "ui.citation.qualityUnverified"
-                : "ui.citation.qualityDegraded",
-            )}
-          </span>
-        </div>
-      ) : null}
       <CitationSourceCards
         content={displayContent}
         citationBundle={citationBundle}

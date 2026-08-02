@@ -1282,6 +1282,43 @@ paths:
                     items:
                       $ref: "#/components/schemas/RuntimeListItem"
 
+  # ── Personalization preferences ─────────────────────────────────────
+
+  /v1/settings/preferences:
+    get:
+      summary: Get user personalization preferences
+      operationId: getPreferences
+      tags: [settings]
+      responses:
+        "200":
+          description: Current personalization preferences
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PreferencesResponse"
+    patch:
+      summary: Update user personalization preferences
+      operationId: patchPreferences
+      tags: [settings]
+      description: |
+        Only supplied fields are updated. Conversation citations default on;
+        citation verification defaults off because it can add latency and model
+        usage. Verification requires citations. Disabling citations also
+        disables verification.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PreferencesPatch"
+      responses:
+        "200":
+          description: Updated personalization preferences
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PreferencesResponse"
+
   # ── Memory (inspect / prune / toggle the agent memory system) ────────
 
   /v1/memory:
@@ -4084,6 +4121,39 @@ components:
     MemoryTarget:
       type: string
       enum: [user, global, project]
+    PreferencesResponse:
+      type: object
+      required:
+        - default_timezone
+        - default_locale
+        - detected_timezone
+        - theme
+        - font_size
+        - conversation_citations_enabled
+        - conversation_verification_enabled
+      properties:
+        default_timezone: {type: string}
+        default_locale: {type: string}
+        detected_timezone: {type: string}
+        theme: {type: string}
+        font_size: {type: string}
+        conversation_citations_enabled:
+          type: boolean
+          default: true
+          description: Render canonical citation indices when source evidence is available.
+        conversation_verification_enabled:
+          type: boolean
+          default: false
+          description: Run claim and citation quality verification before publishing a reply.
+    PreferencesPatch:
+      type: object
+      properties:
+        default_timezone: {type: string, nullable: true}
+        default_locale: {type: string, nullable: true}
+        theme: {type: string, nullable: true}
+        font_size: {type: string, nullable: true}
+        conversation_citations_enabled: {type: boolean}
+        conversation_verification_enabled: {type: boolean}
     MemoryView:
       type: object
       required: [enabled, auto_extract, custom_instructions, entries]

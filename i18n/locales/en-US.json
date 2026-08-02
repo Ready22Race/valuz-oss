@@ -1183,6 +1183,15 @@
       "loadFailed": "Failed to load memory",
       "saveFailed": "Action failed"
     },
+    "personalization": {
+      "conversationTitle": "Conversation",
+      "citationsLabel": "Show citations",
+      "citationsDesc": "Show clickable citation indices when an answer uses traceable sources.",
+      "verificationLabel": "Verify citations",
+      "verificationDesc": "Check facts, numbers, and citation consistency before publishing; this may add latency and model usage.",
+      "memoryTitle": "Memory",
+      "saveFailed": "Failed to save personalization settings"
+    },
     "onboarding": {
       "title": "Onboarding",
       "rerunLabel": "Re-run onboarding",
@@ -1609,6 +1618,10 @@
         "desc": "Inspect and control memory",
         "label": "Memory"
       },
+      "personalization": {
+        "desc": "Citations, verification, and memory",
+        "label": "Personalization"
+      },
       "browser": {
         "desc": "Connect and manage the controlled browser",
         "label": "Browser"
@@ -2003,14 +2016,20 @@
       "documentAddressUnavailable": "The document address is temporarily unavailable. Please try again.",
       "documentDialog": "Citation document",
       "evidenceTitle": "Cited content",
+      "documentCoverageComplete": "The full document was checked; it does not disclose this specific information.",
       "integrityDegraded": "Some citations could not be located or verified. Check the relevant content against the original source.",
       "publicationBlocked": "Citation verification failed. The unverified answer was not published. Please retry.",
       "noReadableDocument": "This source has no previewable document. Return to the chat to review its source details.",
       "openSource": "Open source",
       "viewEvidence": "View evidence",
       "qualityCheckTitle": "Review note",
+      "qualityCheckSuggested": "Check against the source",
       "qualityDegraded": "Some conclusions lack sufficient citation support. Verify the corresponding sources before use.",
       "qualityIssueCrossCheck": "The source lacks cross-checking or conflicts with another source",
+      "qualityIssueLowTier": "This statement is mainly supported by public secondary sources and has not yet been cross-checked against a higher-authority source.",
+      "qualityIssueEntityConflict": "The company named in this statement does not match the cited source. Check the original material for the intended company.",
+      "qualityIssueConflict": "This statement differs from a value or key fact in the cited evidence. Use the original material as the authority.",
+      "qualityIssueAmbiguous": "Several sources may correspond to this statement, so the most accurate evidence cannot yet be determined.",
       "qualityIssueEvidence": "Citation evidence is incomplete",
       "qualityIssueFreshness": "The citation time range or verification state needs review",
       "qualityIssueGeneric": "Citation quality needs review",
@@ -2018,8 +2037,8 @@
       "qualityIssueNumeric": "A number or calculation did not pass validation",
       "qualityIssueSource": "The source tier or authority is insufficient",
       "qualityClaimNoSource": "This content has no corresponding source that can be opened, so it cannot be verified automatically. Check it against the original material, or regenerate the answer and request supporting sources.",
-      "qualityClaimSourceMissing": "No source was found for checking this statement. Use it with caution.",
-      "qualityClaimMismatch": "The citation may not support this statement. Check it against the cited evidence.",
+      "qualityClaimSourceMissing": "No corresponding source was found. This statement may be model-generated and cannot currently be verified; do not treat it as confirmed fact.",
+      "qualityClaimMismatch": "The connection between this statement and the cited evidence is unclear. Review the original source if needed.",
       "qualityClaimStructuredMismatch": "The cited field “{field}” has the value {value}, which may not match this statement. Please check it.",
       "qualityClaimPartial": "The citation supports only part of this statement. The remaining content may lack evidence.",
       "qualityStructuredValueMismatch": "The cited value is {value}, which may not match this statement. Please check it.",

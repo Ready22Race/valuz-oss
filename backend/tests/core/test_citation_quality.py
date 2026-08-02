@@ -301,6 +301,66 @@ def test_policy_rejects_real_structured_citation_with_wrong_field_semantics() ->
     assert "claim_evidence_mismatch" in {issue["code"] for issue in result["quality"]["issues"]}
 
 
+def test_policy_distinguishes_explicit_evidence_conflict_from_unmatched_support() -> None:
+    citation = _structured()
+    citation["evidence"]["entityId"] = "600519"
+
+    result = evaluate_citation_quality(
+        "000858 revenue was 120 USDm [source](citation://cit_revenue).",
+        {
+            "version": 1,
+            "citations": [citation],
+            "integrity": _integrity(),
+        },
+        _policy(),
+    )
+
+    claim = result["quality"]["claims"][0]
+    assert claim["status"] == "unverified"
+    assert claim["bindings"][0]["supportStatus"] == "contradicted"
+    assert "claim_evidence_conflict" in claim["issueCodes"]
+    assert "claim_evidence_mismatch" not in claim["issueCodes"]
+    assert "claim_evidence_conflict" in {issue["code"] for issue in result["quality"]["issues"]}
+
+
+def test_text_chunk_numeric_miss_is_advisory_not_a_confirmed_conflict() -> None:
+    citation = {
+        "citationId": "cit_product_table",
+        "source": {
+            "sourceId": "annual-report",
+            "providerId": "documents",
+            "sourceType": "document",
+            "documentId": "annual-report",
+            "title": "Annual report",
+            "retrievedAt": "2026-08-01T10:00:00Z",
+        },
+        "evidence": {
+            "kind": "text",
+            "quote": (
+                "茅台酒营业收入145,928,075,955.31元，比上年增长15.28%；"
+                "系列酒营业收入24,683,762,096.71元，比上年增长19.65%。"
+            ),
+            "snippet": "",
+            "capturedAt": "2026-08-01T10:00:00Z",
+        },
+    }
+
+    result = evaluate_citation_quality(
+        "2023年茅台酒收入1,265.89亿元 [source](citation://cit_product_table)。",
+        {
+            "version": 1,
+            "citations": [citation],
+            "integrity": _integrity(),
+        },
+        _policy(),
+    )
+
+    claim = result["quality"]["claims"][0]
+    assert claim["status"] == "unverified"
+    assert "claim_evidence_mismatch" in claim["issueCodes"]
+    assert "claim_evidence_conflict" not in claim["issueCodes"]
+
+
 def test_policy_recomputes_calculation_and_checks_input_provenance() -> None:
     left = _structured("cit_left")
     left["evidence"]["field"] = "current"
@@ -409,6 +469,7 @@ def test_low_tier_claim_without_primary_cross_check_is_unverified() -> None:
     )
 
     assert result["quality"]["status"] == "unverified"
+    assert result["quality"]["publishStatus"] == "ready"
     assert result["quality"]["issues"][0]["code"] == "low_tier_without_cross_check"
     assert result["citations"][0]["annotations"]["quality"]["status"] == "unverified"
 
@@ -473,6 +534,514 @@ def test_calculation_text_input_must_contain_the_claimed_value() -> None:
         issue["code"] for issue in result["quality"]["issues"]
     }
     assert result["quality"]["publishStatus"] == "draft-only"
+
+
+def test_calculation_accepts_scaled_structured_input_units() -> None:
+    policy = _policy()
+    policy["config"]["semantics"] = {
+        "unit_ontology": {
+            "units": {
+                "yuan": {"canonical": "CNY", "aliases": ["元", "CNY"], "scale": 1},
+                "hundred-million": {
+                    "canonical": "CNY",
+                    "aliases": ["亿元"],
+                    "scale": 100_000_000,
+                },
+            }
+        }
+    }
+    source = _structured("cit_source")
+    source["evidence"].update(
+        {
+            "value": 174_144_069_958.25,
+            "unit": "CNY",
+            "field": "operating_revenue",
+        }
+    )
+    calculation = {
+        "citationId": "cit_calc",
+        "source": {
+            "sourceId": "calculation-1",
+            "providerId": "runtime",
+            "sourceType": "tool-result",
+            "title": "Display conversion",
+            "retrievedAt": "2026-07-30T10:00:00Z",
+        },
+        "evidence": {
+            "kind": "calculation",
+            "expression": "current",
+            "inputs": [
+                {
+                    "name": "current",
+                    "citationId": "cit_source",
+                    "value": 1741.44,
+                    "unit": "亿元",
+                }
+            ],
+            "result": 1741.44,
+            "unit": "亿元",
+            "rounding": "2dp",
+            "calculatedAt": "2026-07-30T10:00:00Z",
+        },
+    }
+
+    result = evaluate_citation_quality(
+        "营业收入为 1,741.44 亿元 [calc](citation://cit_calc).",
+        {
+            "version": 1,
+            "citations": [source, calculation],
+            "integrity": _integrity(),
+        },
+        policy,
+    )
+    codes = {issue["code"] for issue in result["quality"]["issues"]}
+
+    assert "calculation_input_value_mismatch" not in codes
+    assert "calculation_input_unit_mismatch" not in codes
+
+
+def test_structured_preflight_preserves_markdown_table_header_unit() -> None:
+    policy = _policy()
+    policy["config"]["semantics"] = {
+        "metric_ontology": {
+            "metrics": {
+                "operating_revenue": {
+                    "aliases": ["营业收入"],
+                    "fields": ["operating_revenue"],
+                }
+            }
+        },
+        "unit_ontology": {
+            "units": {
+                "yuan": {"canonical": "CNY", "aliases": ["CNY", "元"], "scale": 1},
+                "hundred-million": {
+                    "canonical": "CNY",
+                    "aliases": ["亿元"],
+                    "scale": 100_000_000,
+                },
+            }
+        },
+    }
+    citation = _structured()
+    citation["evidence"].update(
+        {
+            "field": "operating_revenue",
+            "value": 170_899_152_276,
+            "unit": "CNY",
+            "period": "2024 FY",
+            "entityName": "贵州茅台",
+        }
+    )
+    result = evaluate_citation_quality(
+        "| 公司 | 营业收入（亿元） |\n"
+        "|---|---:|\n"
+        "| 贵州茅台 | 1,708.99 [1](citation://cit_revenue) |",
+        {
+            "version": 1,
+            "citations": [citation],
+            "integrity": _integrity(),
+        },
+        policy,
+    )
+
+    assert "structured_value_not_present_in_answer" not in {
+        issue["code"] for issue in result["quality"]["issues"]
+    }
+    assert result["quality"]["status"] == "passed"
+
+
+def test_structured_preflight_accepts_usd_hundred_million_alias() -> None:
+    policy = _policy()
+    policy["config"]["semantics"] = {
+        "metric_ontology": {
+            "metrics": {
+                "operating_revenue": {
+                    "aliases": ["营业收入"],
+                    "fields": ["operating_revenue"],
+                }
+            }
+        },
+        "unit_ontology": {
+            "units": {
+                "usd": {"canonical": "USD", "aliases": ["USD"], "scale": 1},
+                "usd_hundred_million": {
+                    "canonical": "USD",
+                    "aliases": ["亿美元"],
+                    "scale": 100_000_000,
+                },
+            }
+        },
+    }
+    citation = _structured()
+    citation["evidence"].update(
+        {
+            "field": "operating_revenue",
+            "value": 5_950_000_000,
+            "unit": "USD",
+            "period": "FY2025",
+            "entityName": "美光科技",
+        }
+    )
+
+    result = evaluate_citation_quality(
+        "美光科技 FY2025 营业收入为 59.50 亿美元 [1](citation://cit_revenue)。",
+        {
+            "version": 1,
+            "citations": [citation],
+            "integrity": _integrity(),
+        },
+        policy,
+    )
+
+    assert "structured_value_not_present_in_answer" not in {
+        issue["code"] for issue in result["quality"]["issues"]
+    }
+
+
+def test_company_source_mismatch_is_a_concrete_entity_conflict() -> None:
+    sandisk = {
+        "citationId": "cit_sandisk",
+        "source": {
+            "sourceId": "sandisk-filing",
+            "providerId": "filings",
+            "sourceType": "document",
+            "title": "Sandisk (SNDK) FY2025 annual report",
+            "retrievedAt": "2026-08-01T08:00:00Z",
+        },
+        "evidence": {
+            "kind": "text",
+            "quote": "Sandisk revenue was 7.2 billion USD.",
+            "capturedAt": "2026-08-01T08:00:00Z",
+        },
+    }
+    micron = {
+        "citationId": "cit_micron",
+        "source": {
+            "sourceId": "micron-filing",
+            "providerId": "filings",
+            "sourceType": "document",
+            "title": "Micron Technology (MU) FY2025 annual report",
+            "retrievedAt": "2026-08-01T08:00:00Z",
+        },
+        "evidence": {
+            "kind": "text",
+            "quote": "Micron revenue was 37.4 billion USD.",
+            "capturedAt": "2026-08-01T08:00:00Z",
+        },
+    }
+    answer = (
+        "| 公司 | 营业收入 |\n"
+        "|---|---:|\n"
+        "| 闪迪（SNDK） | 72 亿美元 [1](citation://cit_micron) |\n"
+        "| 美光科技（MU） | 374 亿美元 [2](citation://cit_micron) |"
+    )
+
+    result = evaluate_citation_quality(
+        answer,
+        {
+            "version": 1,
+            "citations": [sandisk, micron],
+            "integrity": _integrity(),
+        },
+        _policy(),
+    )
+
+    conflicts = [
+        issue
+        for issue in result["quality"]["issues"]
+        if issue["code"] == "claim_source_entity_conflict"
+    ]
+    assert len(conflicts) == 1
+    assert conflicts[0]["citationIds"] == ["cit_micron"]
+    assert "闪迪" in conflicts[0]["claim"]["exact"]
+
+
+def test_metric_acronym_in_parentheses_is_not_a_company_identifier() -> None:
+    microsoft = {
+        "citationId": "cit_msft",
+        "source": {
+            "sourceId": "msft-q3",
+            "providerId": "valuz-search",
+            "sourceType": "document",
+            "title": "Microsoft (MSFT) FY2026 Q3 earnings call transcript",
+            "retrievedAt": "2026-08-02T08:00:00Z",
+        },
+        "evidence": {
+            "kind": "text",
+            "quote": "Our AI business surpassed $37 billion ARR, up 123%.",
+            "capturedAt": "2026-08-02T08:00:00Z",
+        },
+    }
+    result = evaluate_citation_quality(
+        "Microsoft AI 业务年化收入（ARR）突破 370 亿美元，同比增长 123% "
+        "[1](citation://cit_msft)。",
+        {
+            "version": 1,
+            "citations": [microsoft],
+            "integrity": _integrity(),
+        },
+        _policy(),
+    )
+
+    assert "claim_source_entity_conflict" not in {
+        issue["code"] for issue in result["quality"]["issues"]
+    }
+
+
+def test_calculation_does_not_compare_entity_name_to_ticker_id() -> None:
+    source = _structured("cit_source")
+    source["evidence"].update(
+        {
+            "value": 120,
+            "unit": "USDm",
+            "entityId": "600519",
+        }
+    )
+    calculation = {
+        "citationId": "cit_calc",
+        "source": {
+            "sourceId": "calculation-1",
+            "providerId": "runtime",
+            "sourceType": "tool-result",
+            "title": "Calculation",
+            "retrievedAt": "2026-07-30T10:00:00Z",
+        },
+        "evidence": {
+            "kind": "calculation",
+            "expression": "current",
+            "inputs": [
+                {
+                    "name": "current",
+                    "citationId": "cit_source",
+                    "value": 120,
+                    "unit": "USDm",
+                }
+            ],
+            "result": 120,
+            "unit": "USDm",
+            "rounding": "0dp",
+            "calculatedAt": "2026-07-30T10:00:00Z",
+            "entityName": "贵州茅台",
+        },
+    }
+
+    result = evaluate_citation_quality(
+        "Revenue was 120 USDm [calc](citation://cit_calc).",
+        {
+            "version": 1,
+            "citations": [source, calculation],
+            "integrity": _integrity(),
+        },
+        _policy(),
+    )
+
+    assert "calculation_input_entity_mismatch" not in {
+        issue["code"] for issue in result["quality"]["issues"]
+    }
+
+
+def test_calculation_inputs_cover_dimension_not_repeated_on_result() -> None:
+    policy = _policy()
+    policy["config"]["source_tiers"][0]["match"]["source_types"].append("tool-result")
+    policy["config"]["source_tiers"][0]["match"]["tools"].append("runtime.calculation")
+    policy["config"]["semantics"] = {
+        "metric_ontology": {
+            "metrics": {
+                "net_margin": {
+                    "aliases": ["归母净利率"],
+                    "fields": ["net_margin"],
+                }
+            }
+        },
+        "dimensions": {
+            "basis": {
+                "attributable": ["归母", "attributable to parent"],
+            }
+        },
+    }
+    profit = _structured("cit_profit")
+    profit["evidence"].update(
+        {
+            "field": "parent_net_profit",
+            "metric": "parent_net_profit",
+            "value": 120,
+            "unit": "USDm",
+            "basis": "attributable",
+        }
+    )
+    revenue = _structured("cit_revenue")
+    revenue["evidence"].update(
+        {
+            "field": "revenue",
+            "metric": "revenue",
+            "value": 200,
+            "unit": "USDm",
+        }
+    )
+    calculation = {
+        "citationId": "cit_calc",
+        "source": {
+            "sourceId": "calculation-1",
+            "providerId": "runtime",
+            "sourceType": "tool-result",
+            "title": "Calculation",
+            "retrievedAt": "2026-07-30T10:00:00Z",
+        },
+        "evidence": {
+            "kind": "calculation",
+            "toolName": "runtime.calculation",
+            "expression": "(profit / revenue) * 100",
+            "inputs": [
+                {
+                    "name": "profit",
+                    "citationId": "cit_profit",
+                    "value": 120,
+                    "unit": "USDm",
+                },
+                {
+                    "name": "revenue",
+                    "citationId": "cit_revenue",
+                    "value": 200,
+                    "unit": "USDm",
+                },
+            ],
+            "result": 60,
+            "unit": "%",
+            "rounding": "2dp",
+            "calculatedAt": "2026-07-30T10:00:00Z",
+            "metric": "net_margin",
+            # ``basis`` is intentionally omitted: the structured profit input
+            # already carries the attributable-to-parent basis.
+        },
+    }
+
+    result = evaluate_citation_quality(
+        "归母净利率 = 120 USDm / 200 USDm = 60% [calc](citation://cit_calc).",
+        {
+            "version": 1,
+            "citations": [profit, revenue, calculation],
+            "integrity": _integrity(),
+        },
+        policy,
+    )
+
+    codes = {issue["code"] for issue in result["quality"]["issues"]}
+    assert "claim_partially_supported" not in codes
+    assert result["quality"]["status"] == "passed", result["quality"]["issues"]
+
+
+def test_calculation_text_input_matches_comma_formatted_number() -> None:
+    text_input = {
+        "citationId": "cit_text",
+        "source": {
+            "sourceId": "filing-1",
+            "providerId": "documents",
+            "sourceType": "document",
+            "sourceCategory": "filings",
+            "title": "Issuer filing",
+            "retrievedAt": "2026-07-30T10:00:00Z",
+        },
+        "evidence": {
+            "kind": "text",
+            "quote": "归属于母公司所有者的净利润 86,228,146,421.62 元。",
+            "capturedAt": "2026-07-30T10:00:00Z",
+        },
+        "annotations": {"provenance": {"toolName": "search.filings_search"}},
+    }
+    calculation = {
+        "citationId": "cit_calc",
+        "source": {
+            "sourceId": "calculation-1",
+            "providerId": "runtime",
+            "sourceType": "tool-result",
+            "title": "Calculation",
+            "retrievedAt": "2026-07-30T10:00:00Z",
+        },
+        "evidence": {
+            "kind": "calculation",
+            "expression": "profit",
+            "inputs": [
+                {
+                    "name": "profit",
+                    "citationId": "cit_text",
+                    "value": 86228146421.62,
+                    "unit": "CNY",
+                }
+            ],
+            "result": 86228146421.62,
+            "unit": "CNY",
+            "rounding": "2dp",
+            "calculatedAt": "2026-07-30T10:00:00Z",
+        },
+    }
+
+    result = evaluate_citation_quality(
+        "归母净利润为 86,228,146,421.62 CNY [calc](citation://cit_calc).",
+        {
+            "version": 1,
+            "citations": [text_input, calculation],
+            "integrity": _integrity(),
+        },
+        _policy(),
+    )
+
+    assert "calculation_input_text_value_unverified" not in {
+        issue["code"] for issue in result["quality"]["issues"]
+    }
+
+
+def test_calculation_result_matches_number_adjacent_to_chinese_text() -> None:
+    source = _structured("cit_source")
+    source["evidence"].update(
+        {
+            "field": "net_profit_growth",
+            "value": 15.38,
+            "unit": "%",
+            "period": "FY2024",
+        }
+    )
+    calculation = {
+        "citationId": "cit_calc",
+        "source": {
+            "sourceId": "calculation-1",
+            "providerId": "runtime",
+            "sourceType": "tool-result",
+            "title": "Calculation",
+            "retrievedAt": "2026-07-30T10:00:00Z",
+        },
+        "evidence": {
+            "kind": "calculation",
+            "expression": "growth",
+            "inputs": [
+                {
+                    "name": "growth",
+                    "citationId": "cit_source",
+                    "value": 15.38,
+                    "unit": "%",
+                }
+            ],
+            "result": 15.38,
+            "unit": "%",
+            "rounding": "2dp",
+            "calculatedAt": "2026-07-30T10:00:00Z",
+        },
+    }
+    policy = _policy()
+    policy["config"]["rules"]["derived_value"]["require_result_in_answer"] = True
+
+    result = evaluate_citation_quality(
+        "归母净利润同比增长15.38% [计算](citation://cit_calc)。",
+        {
+            "version": 1,
+            "citations": [source, calculation],
+            "integrity": _integrity(),
+        },
+        policy,
+    )
+
+    assert "calculation_result_not_present_in_answer" not in {
+        issue["code"] for issue in result["quality"]["issues"]
+    }
 
 
 def test_document_category_tiers_fetched_chunk_not_generic_fetch_tool() -> None:
@@ -573,6 +1142,4 @@ def test_quality_bundle_exposes_claim_audit_truncation() -> None:
     )
 
     assert result["quality"]["metrics"]["claimAuditTruncated"] is True
-    assert "claim_audit_truncated" in {
-        issue["code"] for issue in result["quality"]["issues"]
-    }
+    assert "claim_audit_truncated" in {issue["code"] for issue in result["quality"]["issues"]}

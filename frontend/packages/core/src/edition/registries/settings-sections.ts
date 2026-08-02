@@ -16,9 +16,9 @@ export const personalSettingsSections: SettingsSectionModule[] = [
     edition: "personal",
   },
   {
-    id: "memory",
-    label: "settings.tab.memory.label",
-    description: "settings.tab.memory.desc",
+    id: "personalization",
+    label: "settings.tab.personalization.label",
+    description: "settings.tab.personalization.desc",
     icon: "brain",
     edition: "personal",
   },

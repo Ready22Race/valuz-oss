@@ -14,6 +14,7 @@ def test_citation_policy_is_appended_without_changing_user_sections() -> None:
     assert result.startswith(original)
     assert f'<citation-system-policy revision="{CITATION_POLICY_REVISION}">' in result
     assert "evidence://<evidenceHandle>" in result
+    assert "Do not answer those claims from model memory" in result
     assert "Never write a\n`citation://` link yourself" in result
 
 

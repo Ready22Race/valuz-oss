@@ -41,6 +41,12 @@ KEY_DEFAULT_PROVIDER_ID = "model.default_provider_id"
 KEY_DEFAULT_MODEL = "model.default_model"
 KEY_THEME = "ui.theme"
 KEY_FONT_SIZE = "ui.font_size"
+# Conversation trust controls. Citation rendering remains on by default so
+# source-bearing answers keep their inspectable indices. Verification is an
+# explicit opt-in because claim audit and the optional hidden repair can add
+# latency and model usage.
+KEY_CONVERSATION_CITATIONS_ENABLED = "conversation.citations_enabled"
+KEY_CONVERSATION_VERIFICATION_ENABLED = "conversation.verification_enabled"
 # Memory system toggles (memory-system-design §11). ``memory.enabled`` is the
 # product master switch (gates injection, the foreground tool, and the
 # background extractor); ``memory.auto_extract`` gates ONLY the background
@@ -375,6 +381,52 @@ async def _read_bool(
     if raw is None:
         return default
     return raw == "true"
+
+
+async def get_conversation_citations_enabled(
+    db: AsyncSession, user_id: str | None = None
+) -> bool:
+    """Whether normal conversation replies render canonical citations."""
+    return await _read_bool(
+        db,
+        KEY_CONVERSATION_CITATIONS_ENABLED,
+        True,
+        user_id=user_id,
+    )
+
+
+async def set_conversation_citations_enabled(
+    db: AsyncSession, value: bool, user_id: str | None = None
+) -> None:
+    await _write(
+        db,
+        KEY_CONVERSATION_CITATIONS_ENABLED,
+        "true" if value else "false",
+        user_id=user_id,
+    )
+
+
+async def get_conversation_verification_enabled(
+    db: AsyncSession, user_id: str | None = None
+) -> bool:
+    """Whether claim/citation verification runs for normal conversations."""
+    return await _read_bool(
+        db,
+        KEY_CONVERSATION_VERIFICATION_ENABLED,
+        False,
+        user_id=user_id,
+    )
+
+
+async def set_conversation_verification_enabled(
+    db: AsyncSession, value: bool, user_id: str | None = None
+) -> None:
+    await _write(
+        db,
+        KEY_CONVERSATION_VERIFICATION_ENABLED,
+        "true" if value else "false",
+        user_id=user_id,
+    )
 
 
 async def get_memory_enabled(db: AsyncSession, user_id: str | None = None) -> bool:

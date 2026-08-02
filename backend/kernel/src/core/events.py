@@ -12,6 +12,12 @@ OutboundEventType = Literal[
     "assistant_message",
     "tool_use",
     "tool_result",
+    # Runtime-private evidence replay. Some graph middleware enriches the
+    # persisted ToolMessage only after the underlying tool's ``on_tool_end``
+    # callback has fired. The runtime replays that private sidecar before
+    # ``session_idle`` so Citation Guard sees the exact evidence the model saw;
+    # the orchestrator consumes this event without persisting/broadcasting it.
+    "citation_evidence",
     "tool_input_delta",
     "tool_output_delta",
     "thinking",

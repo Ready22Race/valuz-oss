@@ -27,7 +27,15 @@ from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
 from src.core.citation_quality import evaluate_citation_quality
-from src.core.claim_audit import auto_bind_unique_claims, rebind_unique_mismatched_claims
+from src.core.claim_audit import (
+    auto_bind_composite_text_claims,
+    auto_bind_unique_claims,
+    canonical_evidence_metric,
+    extract_claims,
+    rebind_unique_mismatched_claims,
+    structured_units_compatible,
+    structured_values_equivalent,
+)
 
 POLICY_REVISION = "citation-v1"
 EVIDENCE_ENVELOPE_KEY = "_valuz_evidence"
@@ -37,6 +45,13 @@ _MARKDOWN_LINK_RE = re.compile(
     r"\[([^\]\n]{0,240})\]\((evidence|citation)://([A-Za-z0-9_-]{1,160})\)"
 )
 _BARE_EVIDENCE_RE = re.compile(r"(?<![\w/])evidence://([A-Za-z0-9_-]{1,160})")
+_INTRA_NUMBER_CITATION_RE = re.compile(
+    r"(?P<prefix>(?<![\d,])\d{1,3}(?:,\d{3})*,\d{1,2})[ \t]*"
+    r"(?P<link>\[[^\]\n]{1,240}\]\((?:citation|evidence)://[A-Za-z0-9_-]{1,160}\))"
+    r"(?P<suffix>\d(?:\.\d+)?)"
+    r"(?P<unit>[ \t]*(?:%|bp|bps|百万元|亿元|万元|元|倍|CNY|USD|EUR|GBP|JPY|HKD))?",
+    re.IGNORECASE,
+)
 _REPAIR_MARKER_RE = re.compile(
     r"(?:\[\[evidence:([A-Za-z0-9_-]{1,160})\]\]|"
     r"<evidence:([A-Za-z0-9_-]{1,160})>)"
@@ -59,6 +74,12 @@ _EXPLICIT_CITATION_RE = re.compile(
     r"according to (?:the )?(?:document|file|report))",
     re.IGNORECASE,
 )
+_NEGATED_CITATION_RE = re.compile(
+    r"(?:不要|无需|无须|不必|禁止|不需要).{0,12}"
+    r"(?:引用|引文|出处|来源|核验|citation|citations|cite|sources?)|"
+    r"\b(?:do not|don't|without|no need to)\s+(?:cite|citations?|sources?)\b",
+    re.IGNORECASE,
+)
 
 _SOURCE_TYPES = {"document", "web", "dataset", "tool-result", "conversation"}
 _EVIDENCE_KINDS = {"text", "structured-data", "calculation"}
@@ -73,6 +94,17 @@ _MAX_CONTEXT_CHARS = 512
 _MAX_STRUCTURED_STRING_CHARS = 4_096
 _MAX_CALCULATION_INPUTS = 128
 _MAX_RECTS = 128
+_MAX_MODEL_TEXT_EVIDENCE_ITEMS = 12
+_MAX_MODEL_TEXT_EXCERPT_CHARS = 700
+_BULK_TEXT_RESULT_KEYS = {
+    "chunks",
+    "content",
+    "html",
+    "markdown",
+    "metadatas",
+    "raw_content",
+    "text",
+}
 _SECRET_QUERY_KEYS = {
     "access_token",
     "api_key",
@@ -212,6 +244,26 @@ class EvidenceRegistry:
     def get(self, handle: str) -> EvidenceRecord | None:
         return self._records.get(handle)
 
+    def resolve(self, handle: str) -> EvidenceRecord | None:
+        """Resolve an exact handle or a uniquely matching digest alias.
+
+        Models occasionally preserve the immutable 24-hex evidence digest but
+        rewrite the descriptive prefix (for example ``ev_grep_*`` to
+        ``ev_rpt_*``). The suffix still names the exact registered snapshot.
+        Accept that alias only when it resolves to one record; never guess from
+        titles, ordinals, values, or partial hashes.
+        """
+
+        exact = self._records.get(handle)
+        if exact is not None:
+            return exact
+        match = re.fullmatch(r"ev_[A-Za-z0-9_]+_([0-9a-f]{24})", handle)
+        if match is None:
+            return None
+        suffix = f"_{match.group(1)}"
+        candidates = [record for key, record in self._records.items() if key.endswith(suffix)]
+        return candidates[0] if len(candidates) == 1 else None
+
     def values(self) -> Iterable[EvidenceRecord]:
         return self._records.values()
 
@@ -255,13 +307,20 @@ class CitationGuard:
         policy_available: bool,
         quality_policy: dict[str, Any] | None = None,
         force_required: bool = False,
+        enabled: bool = True,
+        verification_enabled: bool = True,
     ) -> None:
         self._registry = registry
         self._message_id = message_id
-        self._explicitly_requested = bool(_EXPLICIT_CITATION_RE.search(user_prompt or ""))
+        prompt_without_negated_citation = _NEGATED_CITATION_RE.sub("", user_prompt or "")
+        self._explicitly_requested = bool(
+            _EXPLICIT_CITATION_RE.search(prompt_without_negated_citation)
+        )
         self._policy_available = policy_available
         self._quality_policy = quality_policy
         self._force_required = force_required
+        self._enabled = enabled
+        self._verification_enabled = verification_enabled
 
     @property
     def requires_citation(self) -> bool:
@@ -272,7 +331,7 @@ class CitationGuard:
         answer deltas provisional once source-bearing evidence is available.
         """
 
-        return (
+        return self._enabled and (
             self._force_required
             or self._registry.had_evidence_activity
             or self._explicitly_requested
@@ -288,15 +347,18 @@ class CitationGuard:
         plain labels so the client can never resolve them as trusted sources.
         """
 
-        required = self.requires_citation
-        if not required and "evidence://" not in text and "citation://" not in text:
-            return GuardResult(text=text, bundle=None)
+        if not self._enabled:
+            plain_text = _MARKDOWN_LINK_RE.sub(
+                lambda match: _untrusted_link_label(match.group(1)),
+                text,
+            )
+            plain_text = _BARE_EVIDENCE_RE.sub("", plain_text)
+            plain_text = _REPAIR_MARKER_RE.sub("", plain_text)
+            return GuardResult(
+                text=_strip_protocol_source_placeholders(plain_text).strip(),
+                bundle=None,
+            )
 
-        repaired_text, repaired_handles = self._repair_markers(text)
-        repair_attempts = max(
-            1 if repaired_handles else 0,
-            min(max(int(repair_attempts), 0), 1),
-        )
         policy_mode = (
             self._quality_policy.get("mode")
             if isinstance(self._quality_policy, dict)
@@ -308,6 +370,34 @@ class CitationGuard:
         policy_config = policy_config if isinstance(policy_config, dict) else {}
         semantics = policy_config.get("semantics")
         semantics = semantics if isinstance(semantics, dict) else None
+        required = self.requires_citation
+        has_protocol_binding = "evidence://" in text or "citation://" in text
+        if (
+            not has_protocol_binding
+            and self._force_required
+            and not self._registry.had_evidence_activity
+            and not self._explicitly_requested
+        ):
+            claims = extract_claims(
+                text,
+                mode=str(policy_mode or "required-on-evidence"),
+                semantics=semantics,
+            )
+            # A distribution-wide strict switch must not manufacture an empty
+            # citation failure for educational definitions, symbolic formulas,
+            # hypothetical examples, limitations, or presentation prose that
+            # the claim auditor has explicitly classified as non-evidentiary.
+            if not any(claim.citation_required for claim in claims):
+                return GuardResult(text=text, bundle=None)
+        if not required and not has_protocol_binding:
+            return GuardResult(text=text, bundle=None)
+
+        repaired_text, repaired_handles = self._repair_markers(text)
+        repaired_text = _move_citation_after_split_number(repaired_text)
+        repair_attempts = max(
+            1 if repaired_handles else 0,
+            min(max(int(repair_attempts), 0), 1),
+        )
         rebind_result = rebind_unique_mismatched_claims(
             repaired_text,
             self._registry.values(),
@@ -322,9 +412,19 @@ class CitationGuard:
             semantics=semantics,
         )
         repaired_text = auto_bind_result.text
+        composite_bind_result = auto_bind_composite_text_claims(
+            repaired_text,
+            self._registry.values(),
+            mode=str(policy_mode or "required-on-evidence"),
+            semantics=semantics,
+        )
+        repaired_text = composite_bind_result.text
         auto_bound_claims_by_handle: dict[str, list[str]] = {}
         for claim_id, handle in auto_bind_result.claim_handles.items():
             auto_bound_claims_by_handle.setdefault(handle, []).append(claim_id)
+        for claim_id, handles in composite_bind_result.claim_handles.items():
+            for handle in handles:
+                auto_bound_claims_by_handle.setdefault(handle, []).append(claim_id)
         auto_rebound_claims_by_handle: dict[str, list[str]] = {}
         for claim_id, handle in rebind_result.claim_handles.items():
             auto_rebound_claims_by_handle.setdefault(handle, []).append(claim_id)
@@ -338,7 +438,9 @@ class CitationGuard:
         }
 
         def append_handle(identifier: str) -> str | None:
-            record = self._registry.get(identifier)
+            record = self._registry.resolve(identifier)
+            if record is not None:
+                identifier = record.handle
             if record is None:
                 handle = canonical_to_handle.get(identifier)
                 record = self._registry.get(handle) if handle else None
@@ -365,6 +467,8 @@ class CitationGuard:
                         item,
                         current_handle=input_ref,
                         records=self._registry.values(),
+                        calculation=evidence,
+                        semantics=semantics,
                     )
                     if resolved_ref != input_ref:
                         calculation_input_auto_bindings.append(
@@ -403,7 +507,10 @@ class CitationGuard:
                 citation["annotations"] = annotations
             if record.locator is not None:
                 citation["locator"] = copy.deepcopy(record.locator)
-            elif record.source.get("sourceType") == "document":
+            elif (
+                record.source.get("sourceType") == "document"
+                and not _is_complete_document_coverage_evidence(record.evidence)
+            ):
                 citation["resolutionStatus"] = "degraded"
                 missing_locator_ids.append(citation_id)
             citations.append(citation)
@@ -420,7 +527,7 @@ class CitationGuard:
             citation_id = append_handle(identifier)
             if citation_id is None:
                 return _untrusted_link_label(label)
-            return f"[{label or 'source'}](citation://{citation_id})"
+            return f"[{_citation_display_number(citations, citation_id)}](citation://{citation_id})"
 
         numbered_bindings = _numbered_evidence_bindings(repaired_text)
         canonical_text = _MARKDOWN_LINK_RE.sub(replace_link, repaired_text)
@@ -434,7 +541,7 @@ class CitationGuard:
             # repair can safely wrap a known handle without inventing evidence.
             nonlocal repair_attempts
             repair_attempts = 1
-            return f"[source](citation://{citation_id})"
+            return f"[{_citation_display_number(citations, citation_id)}](citation://{citation_id})"
 
         canonical_text = _BARE_EVIDENCE_RE.sub(replace_bare, canonical_text)
 
@@ -509,12 +616,14 @@ class CitationGuard:
                 "evidenceOverflowReasons": list(self._registry.overflow_reasons),
             },
         }
-        bundle = evaluate_citation_quality(
-            canonical_text,
-            bundle,
-            self._quality_policy,
-            available_evidence=self._registry.values(),
-        )
+        if self._verification_enabled:
+            bundle = evaluate_citation_quality(
+                canonical_text,
+                bundle,
+                self._quality_policy,
+                available_evidence=self._registry.values(),
+            )
+            _focus_text_citation_snippets(bundle)
         return GuardResult(text=canonical_text, bundle=bundle)
 
     def _repair_markers(self, text: str) -> tuple[str, list[str]]:
@@ -532,11 +641,22 @@ class CitationGuard:
         return f"cit_{digest}"
 
 
+def _citation_display_number(citations: list[dict[str, Any]], citation_id: str) -> int:
+    """Return the stable one-based marker for a canonical citation."""
+
+    for index, citation in enumerate(citations, start=1):
+        if citation.get("citationId") == citation_id:
+            return index
+    return len(citations) + 1
+
+
 def _resolve_calculation_input_handle(
     item: dict[str, Any],
     *,
     current_handle: str,
     records: Iterable[EvidenceRecord],
+    calculation: dict[str, Any] | None = None,
+    semantics: dict[str, Any] | None = None,
 ) -> str:
     """Return a unique structured field matching one calculation input.
 
@@ -549,31 +669,68 @@ def _resolve_calculation_input_handle(
 
     available = list(records)
     current = next((record for record in available if record.handle == current_handle), None)
-    if current is not None and _structured_record_matches_calculation_input(current, item):
+    if current is not None and _structured_record_matches_calculation_input(
+        current,
+        item,
+        semantics=semantics,
+    ):
         return current_handle
     candidates = [
-        record.handle
+        record
         for record in available
-        if _structured_record_matches_calculation_input(record, item)
+        if _structured_record_matches_calculation_input(record, item, semantics=semantics)
     ]
-    unique = list(dict.fromkeys(candidates))
+    if len(candidates) > 1 and isinstance(calculation, dict) and isinstance(semantics, dict):
+        calculation_metric = canonical_evidence_metric(calculation, semantics)
+        dependencies = semantics.get("calculation_dependencies")
+        dependencies = dependencies if isinstance(dependencies, dict) else {}
+        allowed_metrics = dependencies.get(calculation_metric)
+        if isinstance(allowed_metrics, list) and allowed_metrics:
+            allowed = {str(value) for value in allowed_metrics if str(value)}
+            semantic_candidates = [
+                record
+                for record in candidates
+                if canonical_evidence_metric(record.evidence, semantics) in allowed
+            ]
+            if semantic_candidates:
+                candidates = semantic_candidates
+    unique = list(dict.fromkeys(record.handle for record in candidates))
     return unique[0] if len(unique) == 1 else current_handle
+
+
+def _is_complete_document_coverage_evidence(evidence: dict[str, Any]) -> bool:
+    """Return whether a locator-free item intentionally proves whole-doc coverage."""
+
+    return (
+        evidence.get("kind") == "structured-data"
+        and evidence.get("field") == "document_coverage_complete"
+        and evidence.get("basis") == "full-document"
+        and evidence.get("value") is True
+    )
 
 
 def _structured_record_matches_calculation_input(
     record: EvidenceRecord,
     item: dict[str, Any],
+    *,
+    semantics: dict[str, Any] | None = None,
 ) -> bool:
     evidence = record.evidence
     if evidence.get("kind") != "structured-data":
         return False
-    input_value = _decimal_scalar(item.get("value"))
-    evidence_value = _decimal_scalar(evidence.get("value"))
-    if input_value is None or evidence_value is None or input_value != evidence_value:
-        return False
-    input_unit = _normalized_unit(item.get("unit"))
-    evidence_unit = _normalized_unit(evidence.get("unit") or evidence.get("currency"))
-    return not (input_unit or evidence_unit) or input_unit == evidence_unit
+    input_unit = str(item.get("unit") or "")
+    evidence_unit = str(evidence.get("unit") or evidence.get("currency") or "")
+    return structured_units_compatible(
+        input_unit,
+        evidence_unit,
+        semantics=semantics,
+    ) and structured_values_equivalent(
+        item.get("value"),
+        input_unit,
+        evidence.get("value"),
+        evidence_unit,
+        semantics=semantics,
+    )
 
 
 def _decimal_scalar(value: Any) -> Decimal | None:
@@ -648,6 +805,11 @@ def _untrusted_link_label(label: str) -> str:
     """Keep prose labels but never publish citation protocol placeholders."""
 
     normalized = re.sub(r"\s+", "", label).casefold()
+    # Numeric labels are citation ordinals, not prose. Keeping the label from
+    # several rejected model-minted links would otherwise leak a meaningless
+    # suffix such as ``12345`` after their destinations are removed.
+    if re.fullmatch(r"[\[(（【]?[0-9]{1,3}[\])）】]?", normalized):
+        return ""
     if normalized in {
         "source",
         "sources",
@@ -668,7 +830,7 @@ def _strip_protocol_source_placeholders(text: str) -> str:
 
     output: list[str] = []
     suffix = re.compile(
-        r"(?:[ \t]+|(?<=[。！？；;]))source([.!?。！？；;]?)\s*$",
+        r"(?:[ \t]+|(?<=[。！？；;]))source([.!?。！？；;]?)([ \t]*\|)?\s*$",
         re.IGNORECASE,
     )
     for line in text.splitlines(keepends=True):
@@ -683,9 +845,112 @@ def _strip_protocol_source_placeholders(text: str) -> str:
             re.search(r"[\u4e00-\u9fff]", body[: match.start()])
             or "citation://" in body[: match.start()]
         ):
-            body = f"{body[: match.start()].rstrip()}{match.group(1)}"
+            table_boundary = match.group(2) or ""
+            body = f"{body[: match.start()].rstrip()}{match.group(1)}{table_boundary}"
         output.append(f"{body}{newline}")
     return "".join(output).rstrip()
+
+
+def _focus_text_citation_snippets(bundle: dict[str, Any]) -> None:
+    """Move long text-evidence previews near the claim they support.
+
+    Verification continues to use the complete trusted ``quote``.  Only the
+    display ``snippet`` is narrowed, so a citation to a table row does not open
+    on the unrelated first rows of a long chunk while the matching row sits
+    below the card's visible area.
+    """
+
+    quality = bundle.get("quality")
+    claims = quality.get("claims") if isinstance(quality, dict) else None
+    if not isinstance(claims, list):
+        return
+    claim_text_by_citation: dict[str, list[str]] = {}
+    for claim in claims:
+        if not isinstance(claim, dict):
+            continue
+        exact = claim.get("exact")
+        citation_ids = claim.get("citationIds")
+        if not isinstance(exact, str) or not isinstance(citation_ids, list):
+            continue
+        for citation_id in citation_ids:
+            if isinstance(citation_id, str):
+                claim_text_by_citation.setdefault(citation_id, []).append(exact)
+
+    citations = bundle.get("citations")
+    if not isinstance(citations, list):
+        return
+    for citation in citations:
+        if not isinstance(citation, dict):
+            continue
+        citation_id = citation.get("citationId")
+        evidence = citation.get("evidence")
+        if (
+            not isinstance(citation_id, str)
+            or not isinstance(evidence, dict)
+            or evidence.get("kind") != "text"
+        ):
+            continue
+        quote = evidence.get("quote")
+        if not isinstance(quote, str) or len(quote) <= 800:
+            continue
+        focused = _focused_quote_excerpt(
+            quote,
+            claim_text_by_citation.get(citation_id, []),
+        )
+        if focused is not None:
+            evidence["snippet"] = focused
+
+
+def _focused_quote_excerpt(quote: str, claim_texts: list[str]) -> str | None:
+    normalized_quote, offsets = _normalized_numeric_search_text(quote)
+    candidates: set[str] = set()
+    for claim_text in claim_texts:
+        candidates.update(
+            match.group(0)
+            for match in re.finditer(r"[-+]?\d[\d,]*(?:\.\d+)?", claim_text)
+            if len(match.group(0).replace(",", "").lstrip("+-")) >= 3
+        )
+    ordered = sorted(
+        candidates,
+        key=lambda value: (
+            "," in value,
+            "." in value,
+            len(value.replace(",", "")),
+        ),
+        reverse=True,
+    )
+    anchor: int | None = None
+    for candidate in ordered:
+        normalized_candidate = re.sub(r"[\s,+]", "", candidate)
+        index = normalized_quote.find(normalized_candidate)
+        if index >= 0 and index < len(offsets):
+            anchor = offsets[index]
+            break
+    if anchor is None or anchor < 500:
+        return None
+    start = max(0, anchor - 420)
+    end = min(len(quote), anchor + 720)
+    line_start = quote.find("\n", start, anchor)
+    if line_start >= 0:
+        start = line_start + 1
+    line_end = quote.rfind("\n", anchor, end)
+    if line_end > anchor:
+        end = line_end
+    excerpt = quote[start:end].strip()
+    if not excerpt:
+        return None
+    return f"…\n{excerpt}" if start else excerpt
+
+
+def _normalized_numeric_search_text(value: str) -> tuple[str, list[int]]:
+    chars: list[str] = []
+    offsets: list[int] = []
+    for index, char in enumerate(value):
+        if char.isspace() or char in {",", "+"}:
+            continue
+        chars.append(char)
+        offsets.append(index)
+    return "".join(chars), offsets
 
 
 def _decode_json_payload(content: Any, *, max_chars: int) -> Any | None:
@@ -703,7 +968,11 @@ def _decode_json_payload(content: Any, *, max_chars: int) -> Any | None:
     return parsed if isinstance(parsed, (dict, list)) else None
 
 
-def compact_citation_tool_content(content: Any) -> Any | None:
+def compact_citation_tool_content(
+    content: Any,
+    *,
+    max_text_evidence_items: int = _MAX_MODEL_TEXT_EVIDENCE_ITEMS,
+) -> Any | None:
     """Return a model/history-safe view of source-bearing tool content.
 
     The full validated envelopes remain available to the turn Registry, while
@@ -712,11 +981,18 @@ def compact_citation_tool_content(content: Any) -> Any | None:
     and callers should preserve the original value unchanged.
     """
 
-    compacted, changed = _compact_citation_value(content)
+    compacted, changed = _compact_citation_value(
+        content,
+        max_text_evidence_items=max(1, max_text_evidence_items),
+    )
     return compacted if changed else None
 
 
-def _compact_citation_value(value: Any) -> tuple[Any, bool]:
+def _compact_citation_value(
+    value: Any,
+    *,
+    max_text_evidence_items: int,
+) -> tuple[Any, bool]:
     if isinstance(value, str):
         if EVIDENCE_ENVELOPE_KEY not in value:
             return value, False
@@ -724,7 +1000,10 @@ def _compact_citation_value(value: Any) -> tuple[Any, bool]:
             parsed = json.loads(value)
         except (json.JSONDecodeError, TypeError, ValueError):
             return value, False
-        compacted, changed = _compact_citation_value(parsed)
+        compacted, changed = _compact_citation_value(
+            parsed,
+            max_text_evidence_items=max_text_evidence_items,
+        )
         if not changed:
             return value, False
         return json.dumps(compacted, ensure_ascii=False, separators=(",", ":")), True
@@ -732,7 +1011,10 @@ def _compact_citation_value(value: Any) -> tuple[Any, bool]:
         output: list[Any] = []
         changed = False
         for item in value:
-            compacted, item_changed = _compact_citation_value(item)
+            compacted, item_changed = _compact_citation_value(
+                item,
+                max_text_evidence_items=max_text_evidence_items,
+            )
             output.append(compacted)
             changed = changed or item_changed
         return output, changed
@@ -743,14 +1025,31 @@ def _compact_citation_value(value: Any) -> tuple[Any, bool]:
     if EVIDENCE_ENVELOPE_KEY in output:
         raw = output[EVIDENCE_ENVELOPE_KEY]
         items = raw if isinstance(raw, list) else [raw]
-        output[EVIDENCE_ENVELOPE_KEY] = [
+        compact_items = [
             item for item in (_compact_citation_envelope(item) for item in items) if item
         ]
+        text_evidence = bool(compact_items) and all(
+            item.get("kind") == "text" for item in compact_items
+        )
+        if text_evidence:
+            original_count = len(compact_items)
+            compact_items = compact_items[:max_text_evidence_items]
+            for key in _BULK_TEXT_RESULT_KEYS:
+                output.pop(key, None)
+            output["_valuz_compaction"] = {
+                "evidenceReturned": original_count,
+                "evidenceShown": len(compact_items),
+                "bulkTextOmitted": True,
+            }
+        output[EVIDENCE_ENVELOPE_KEY] = compact_items
         changed = True
     for key, item in list(output.items()):
         if key == EVIDENCE_ENVELOPE_KEY:
             continue
-        compacted, item_changed = _compact_citation_value(item)
+        compacted, item_changed = _compact_citation_value(
+            item,
+            max_text_evidence_items=max_text_evidence_items,
+        )
         if item_changed:
             output[key] = compacted
             changed = True
@@ -761,7 +1060,31 @@ def _compact_citation_envelope(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict) or not isinstance(value.get("evidenceHandle"), str):
         return None
     evidence = value.get("evidence")
-    evidence = evidence if isinstance(evidence, dict) else {}
+    if not isinstance(evidence, dict):
+        # PostToolUse projections can pass through more than one runtime layer.
+        # Preserve an already compacted envelope instead of compacting it a
+        # second time down to only the opaque handle and hiding the excerpt the
+        # model needs to bind the correct claim.
+        compact = {
+            key: value[key]
+            for key in (
+                "evidenceHandle",
+                "kind",
+                "field",
+                "metric",
+                "value",
+                "unit",
+                "period",
+                "recordKey",
+                "sourceTitle",
+            )
+            if key in value and value[key] is not None and value[key] != ""
+        }
+        compact["citationLink"] = f"[source](evidence://{value['evidenceHandle']})"
+        excerpt = value.get("excerpt")
+        if isinstance(excerpt, str) and excerpt:
+            compact["excerpt"] = _compact_model_text_excerpt(excerpt)
+        return compact
     source = value.get("source")
     source = source if isinstance(source, dict) else {}
     compact = {
@@ -779,11 +1102,56 @@ def _compact_citation_envelope(value: Any) -> dict[str, Any] | None:
         }.items()
         if item is not None and item != ""
     }
+    compact["citationLink"] = f"[source](evidence://{value['evidenceHandle']})"
     if evidence.get("kind") == "text":
-        excerpt = evidence.get("snippet") or evidence.get("quote")
+        quote = evidence.get("quote")
+        snippet = evidence.get("snippet")
+        prefix = evidence.get("prefix")
+        suffix = evidence.get("suffix")
+        # A document chunk can contain one complete Markdown table.  Keeping
+        # only its first N characters hides the final rows from the model even
+        # though the private Registry still holds and can resolve them.  For a
+        # long table, retain a bounded head and tail so headers and trailing
+        # rows are both available for answer construction.  Prose keeps the
+        # existing focused-snippet-first behaviour.
+        excerpt = (
+            quote
+            if isinstance(quote, str) and _looks_like_markdown_table(quote)
+            else snippet or quote
+        )
         if isinstance(excerpt, str) and excerpt:
-            compact["excerpt"] = excerpt[:2_000]
+            # Indexed document chunks can begin immediately after a sentence
+            # boundary while the requested fact lives in the trusted prefix
+            # context (and the next fact can similarly live in the suffix).
+            # The Registry already validates all three fields together, so
+            # retain the bounded context in the model view as well.  Without
+            # it, a model can read the whole document yet incorrectly report
+            # a boundary sentence as undisclosed.
+            contextual_excerpt = "\n".join(
+                part.strip()
+                for part in (prefix, excerpt, suffix)
+                if isinstance(part, str) and part.strip()
+            )
+            compact["excerpt"] = _compact_model_text_excerpt(contextual_excerpt)
     return compact
+
+
+def _looks_like_markdown_table(value: str) -> bool:
+    return value.count("|") >= 12 and "\n" in value
+
+
+def _compact_model_text_excerpt(value: str) -> str:
+    if len(value) <= _MAX_MODEL_TEXT_EXCERPT_CHARS:
+        return value
+    separator = (
+        "\n…\n"
+        if _looks_like_markdown_table(value)
+        else "\n…\n"
+    )
+    available = _MAX_MODEL_TEXT_EXCERPT_CHARS - len(separator)
+    head_chars = available // 2
+    tail_chars = available - head_chars
+    return f"{value[:head_chars].rstrip()}{separator}{value[-tail_chars:].lstrip()}"
 
 
 def _contains_evidence_marker(content: Any) -> bool:
@@ -1137,6 +1505,26 @@ def _safe_scalar(
     if isinstance(value, str):
         return max_string_chars is None or len(value) <= max_string_chars
     return isinstance(value, (str, int, bool))
+
+
+def _move_citation_after_split_number(value: str) -> str:
+    """Repair a citation link accidentally inserted inside a grouped number.
+
+    A link is metadata, not visible business text.  Models occasionally place
+    it before the final digit group of a comma-formatted amount, which both
+    breaks rendering and makes the deterministic numeric verifier see two
+    values.  The narrow grammar requires a malformed final comma group, so
+    ordinary adjacent years such as ``2024 [1] 2023`` are never merged.
+    """
+
+    return _INTRA_NUMBER_CITATION_RE.sub(
+        lambda match: (
+            f"{match.group('prefix')}{match.group('suffix')}"
+            f"{match.group('unit') or ''} "
+            f"{match.group('link')}"
+        ),
+        value,
+    )
 
 
 def _append_unique(items: list[str], value: str) -> None:

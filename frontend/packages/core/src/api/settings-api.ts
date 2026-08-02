@@ -67,6 +67,8 @@ export interface PreferencesResponse {
   detected_timezone: string;
   theme: string;
   font_size: string;
+  conversation_citations_enabled: boolean;
+  conversation_verification_enabled: boolean;
 }
 
 export interface PreferencesPatchPayload {
@@ -74,6 +76,8 @@ export interface PreferencesPatchPayload {
   default_locale?: string | null;
   theme?: string | null;
   font_size?: string | null;
+  conversation_citations_enabled?: boolean;
+  conversation_verification_enabled?: boolean;
 }
 
 /**
