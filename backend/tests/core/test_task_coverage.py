@@ -694,6 +694,41 @@ def test_single_document_period_scope_applies_to_all_prose_slots() -> None:
     assert {item["answerStatus"] for item in structured} == {"fulfilled"}
 
 
+def test_categorical_value_can_label_the_slot_without_repeating_metric_name() -> None:
+    policy = _finance_like_policy()
+    contract = parse_task_contract(
+        "请根据贵州茅台2024年年度报告，分别列出审计意见、营业总收入和营业收入，"
+        "并逐项引用对应的年度报告原文。",
+        policy_snapshot=policy,
+    )
+    tracker = TaskCoverageTracker(contract, policy_snapshot=policy)
+
+    audit = tracker.evaluate(
+        "根据贵州茅台酒股份有限公司**2024年年度报告**，三项数据如下：\n\n"
+        "---\n\n"
+        "**标准无保留意见**\n\n"
+        "> 天健会计师事务所为本公司出具了标准无保留意见的审计报告。\n\n"
+        "---\n\n"
+        "**营业总收入：174,144,069,958.25 元**\n\n"
+        "---\n\n"
+        "**营业收入：170,899,152,276.34 元**"
+    )
+
+    metrics_by_requirement = {
+        item.requirement_id: item.slots["metric"]
+        for item in contract.requirements
+        if item.kind == "structured-slot"
+    }
+    structured = [item for item in audit["requirements"] if item["kind"] == "structured-slot"]
+    assert {
+        metrics_by_requirement[item["requirementId"]]: item["answerStatus"] for item in structured
+    } == {
+        "audit_opinion": "fulfilled",
+        "total_operating_revenue": "fulfilled",
+        "operating_revenue": "fulfilled",
+    }
+
+
 def test_prose_slot_keeps_section_heading_across_an_introductory_line() -> None:
     policy = _finance_like_policy()
     contract = parse_task_contract(

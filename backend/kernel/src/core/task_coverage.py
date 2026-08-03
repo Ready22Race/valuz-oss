@@ -3864,6 +3864,7 @@ def _structured_answer_status(
     )
     metric = str(requirement.slots.get("metric") or "")
     aliases = requirement.aliases.get("metric", ()) or (metric,)
+    value_aliases = requirement.aliases.get("value", ())
     dimension_alias_groups = _requirement_dimension_aliases(requirement)
     period = str(requirement.slots.get("period") or expected_period or "")
     period_required = require_expected_period
@@ -3932,7 +3933,15 @@ def _structured_answer_status(
         scoped_chunk = _scoped_answer_chunk(chunks, chunk_index)
         if entity and not _contains_alias(scoped_chunk, entity):
             continue
-        if not any(_contains_alias(scoped_chunk, alias) for alias in aliases):
+        has_metric_alias = any(_contains_alias(scoped_chunk, alias) for alias in aliases)
+        has_categorical_value = bool(value_aliases) and any(
+            _contains_alias(scoped_chunk, alias) for alias in value_aliases
+        )
+        # Finite policy-owned categorical values are themselves unambiguous
+        # answers to their slot.  A model may use ``标准无保留意见`` as the
+        # heading without redundantly spelling out ``审计意见``; requiring both
+        # aliases turns a complete answer into a false coverage miss.
+        if not has_metric_alias and not has_categorical_value:
             continue
         if any(
             not any(_contains_alias(scoped_chunk, alias) for alias in member_aliases)
@@ -3944,16 +3953,12 @@ def _structured_answer_status(
             scoped_chunk,
             required=period_required,
         ):
-            if any(_contains_alias(chunk, alias) for alias in aliases):
+            if has_metric_alias or has_categorical_value:
                 mismatched_period = True
             continue
         has_number = re.search(
             r"(?<![A-Za-z0-9_])[-+]?\d[\d,]*(?:\.\d+)?",
             chunk,
-        )
-        value_aliases = requirement.aliases.get("value", ())
-        has_categorical_value = bool(value_aliases) and any(
-            _contains_alias(scoped_chunk, alias) for alias in value_aliases
         )
         if has_number or has_categorical_value or _LIMITATION_RE.search(chunk):
             return "fulfilled", ["requested-prose-slot-present"]
