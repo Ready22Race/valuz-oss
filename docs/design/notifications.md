@@ -85,6 +85,9 @@ durable 表 `valuz_notification`:
   kickoff capability-gap)本就 append `task_blocked`/`kickoff_failed`。在同一处
   调 `ingest(task_failed, f:{event_id}, action=resume, route=/tasks/{task_id})`。
   - 可选:`resumed`/`abandoned` → `resolve` 对应失败通知。
+- **完成源**:`finalize_task(status=completed)` 写入终态事件后调用
+  `ingest(task_completed, c:{event_id}, action=none, urgency=info,
+  route=/tasks/{task_id})`。摘要取终态事件 payload，幂等键绑定该完成事件。
 - **未来**:automation 失败、长任务完成…… 各加一个 projector,不动投递层。
 
 kernel 仍是"提问是否还 pending"的真相源;通知行只镜像它 + 增加读状态。开机
