@@ -6,10 +6,12 @@ retired, :func:`run_session_to_idle`'s only caller is the chat ``send`` path
 ``SESSION_FINISHED``, billing hook) and lives here now.
 
 Shared turn semantics (:func:`_resolve_turn_status` — elevate an idle-but-
-errored turn, detect user interrupts; :func:`_restamp_always_on_mcp` — re-pin
-always-on MCP servers before every turn) are consumed by BOTH this driver and
-the task actor loop (``tasks/actor_runner.ActorRunner`` imports them from
-here).
+errored turn, detect user interrupts) are consumed by BOTH this driver and the
+task actor loop (``tasks/actor_runner.ActorRunner`` imports them from here).
+Per-turn capability convergence lives in ``sessions/pre_turn`` and is handed to
+``kernel_client.run_turn`` as its ``pre_turn`` hook — it must run AFTER the
+turn's kernel is allocated, so no turn-driving primitive may call a refresher
+itself.
 """
 
 # ruff: noqa: I001
@@ -23,44 +25,9 @@ from valuz_agent.adapters import kernel_client
 from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.infra.lifecycle import is_draining
+from valuz_agent.modules.sessions.pre_turn import PreTurnHook, always_on_mcp_hook
 
 logger = logging.getLogger(__name__)
-
-
-async def _restamp_always_on_mcp(session_id: str, user_id: str) -> None:
-    """Refresh the always-on in-process MCP token before driving a turn.
-
-    A session re-driven after a backend restart — task **resume / recovery**,
-    the persistent actor loop, a sync kickoff — can carry *stale* always-on MCP
-    headers in its persisted ``mcp_servers``. The in-process MCP gate then 403s
-    every request and the runtime parks the ``harness`` server in ``needsAuth``,
-    hiding ALL its tools — both the base set (memory / submit_skill) and, for a
-    lead, the orchestration set (dispatch / review_subtask / finish_task /
-    await_members / send / get_plan). The symptom: a re-launched lead reports it
-    "has no orchestration tools" and only the runtime's built-ins remain.
-
-    ``internal_mcp_token`` is now DERIVED from the stable owner id so it no
-    longer rotates across restarts (the historical root cause); the re-stamp
-    stays to converge the other drift-prone header bits (``backend_base_url`` /
-    ``session_id``, an ``internal_mcp_token_override`` change).
-
-    The chat path already self-heals this in ``send_message`` /
-    ``send_message_sync``; the task/actor turn path had no equivalent. Re-stamp
-    here so every turn-driving primitive converges. Best-effort — the re-stamp
-    is idempotent (a no-op when the token already matches, keeping the prompt
-    cache warm) and must never block the turn.
-    """
-    try:
-        from valuz_agent.modules.sessions.capabilities import (
-            refresh_always_on_mcp_for_session,
-        )
-
-        if user_id is None:
-            return
-
-        await refresh_always_on_mcp_for_session(session_id, user_id)
-    except Exception:  # noqa: BLE001 — never block a turn on a re-stamp failure
-        logger.warning("always-on MCP re-stamp failed for session %s", session_id, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +42,7 @@ async def _restamp_always_on_mcp(session_id: str, user_id: str) -> None:
 # are resumable intent — never a subtask failure (mirrors
 # ``recovery.classify_member``).
 _INTERRUPT_CATEGORIES = ("user_interrupt", "interrupted")
+
 
 def _resolve_turn_status(message: Any) -> str:
     """Classify a just-run turn onto the actor-loop ``final_status`` from the
@@ -138,6 +106,7 @@ async def run_session_to_idle(
     on_message: Any | None = None,
     *,
     queued_attachments: list[dict[str, Any]] | None = None,
+    pre_turn: PreTurnHook | None = None,
     user_id: str,
 ) -> str:
     """Drive one agent turn to completion and return the final session status.
@@ -161,6 +130,12 @@ async def run_session_to_idle(
     the files already left the staging area at enqueue — and the additional
     context announces these snapshotted files instead. ``None`` (the default)
     keeps the existing pending-set behaviour byte-identical for task paths.
+
+    ``pre_turn`` is the capability-convergence hook forwarded to
+    ``kernel_client.run_turn`` (which runs it AFTER allocating the turn's
+    kernel — see that docstring). Defaults to the credential re-stamp alone,
+    which is what the task lead / member paths need; the chat paths pass the
+    full ``chat_capability_hook``.
 
     Used by:
       - dispatch handler via asyncio.create_task (sibling task, not recursive)
@@ -235,12 +210,6 @@ async def run_session_to_idle(
         except Exception:  # noqa: BLE001
             additional_context = ""
 
-        # Heal a stale in-process MCP token (rotates per process) before the
-        # turn — see ``_restamp_always_on_mcp``. Load-bearing for task lead /
-        # member runs re-driven after a backend restart, which otherwise lose
-        # the whole ``harness`` toolset to a 403.
-        await _restamp_always_on_mcp(session_id, user_id)
-
         try:
             message = await kernel_client.run_turn(
                 user_id,
@@ -251,6 +220,10 @@ async def run_session_to_idle(
                     for source, parsed in attachment_specs
                 ],
                 additional_context=additional_context,
+                # Converge capabilities INSIDE run_turn — after the turn's
+                # kernel is allocated, so the write reaches the instance that
+                # runs the turn instead of only the durable.
+                pre_turn=pre_turn or always_on_mcp_hook(session_id, user_id),
             )
             # The turn's outcome comes from the AUTHORITATIVE run_turn result
             # (``message``), never a re-read of the lagging durable session — see

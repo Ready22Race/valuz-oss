@@ -24,6 +24,7 @@ import valuz_agent.boot.kernel  # noqa: F401
 from valuz_agent.adapters import kernel_client
 from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.infra.eventbus import EventBus
+from valuz_agent.modules.sessions.pre_turn import chat_capability_hook
 from valuz_agent.modules.sessions.turn_driver import run_session_to_idle
 
 logger = logging.getLogger(__name__)
@@ -109,6 +110,7 @@ def _chat_billing_meter(session_id: str, user_id: str | None = None) -> Any:
     Shared by the initial turn and every drained queue item so each metered
     turn bills identically.
     """
+
     async def _meter(message: Any, after_run: Any) -> None:
         if message.input_tokens is not None or message.output_tokens is not None:
             from valuz_agent.ports.billing import MeterEvent
@@ -173,6 +175,7 @@ async def _run_agent_background(
         content,
         event_bus,
         on_message=meter,
+        pre_turn=chat_capability_hook(session_id, owner_user_id),
         user_id=owner_user_id,
     )
     await _drain_queue_after_turn(
@@ -280,9 +283,7 @@ async def _drain_queue_after_turn(
                 if isinstance(wt_snapshot, dict):
                     await worktree_service.heal_from_snapshot(wt_snapshot)
             except Exception:  # noqa: BLE001
-                logger.warning(
-                    "drain: worktree heal failed for %s", session_id, exc_info=True
-                )
+                logger.warning("drain: worktree heal failed for %s", session_id, exc_info=True)
 
             # Point at the head BEFORE it flips to ``dispatched`` so there is
             # no instant where the item is gone from ``list_queued`` but not
@@ -298,6 +299,11 @@ async def _drain_queue_after_turn(
                     event_bus,
                     on_message=on_message,
                     queued_attachments=attachments,
+                    # A queued follow-up is a chat turn like any other, and it
+                    # can run arbitrarily long after the send that enqueued it
+                    # — so it needs the same per-turn convergence, not just the
+                    # credential re-stamp the default would give it.
+                    pre_turn=chat_capability_hook(session_id, owner_user_id),
                     user_id=owner_user_id,
                 )
             finally:
@@ -480,9 +486,7 @@ async def _finalize_session(
             category = stop_reason.get("category") or stop_reason.get("type")
             message = stop_reason.get("message")
         else:
-            category = getattr(stop_reason, "category", None) or getattr(
-                stop_reason, "type", None
-            )
+            category = getattr(stop_reason, "category", None) or getattr(stop_reason, "type", None)
             message = getattr(stop_reason, "message", None)
         if category is not None or message is not None:
             error_event = EventPayload(

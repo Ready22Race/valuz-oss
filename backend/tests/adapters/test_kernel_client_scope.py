@@ -8,7 +8,9 @@ Pins the on-demand start/stop seam:
   ops on the same session route to the SAME scope;
 - the bound resolver maps task sessions to ``task:{task_id}``;
 - pre-scope allocators (no ``scope`` kwarg) keep working untouched;
-- ``subscribe_session_events_existing`` / ``emit_live_event`` NEVER provision.
+- ``subscribe_session_events_existing`` / ``emit_live_event`` NEVER provision;
+- ``run_turn``'s ``pre_turn`` hook runs AFTER allocation, with control writes
+  pinned to the instance that is about to serve the turn.
 """
 
 # ruff: noqa: I001 — kernel bootstrap side-effect import must precede src/app
@@ -179,6 +181,136 @@ async def test_emit_live_event_noops_without_live_kernel(monkeypatch) -> None:
 
     await kc.emit_live_event("u1", "s1", "todo_update", {"todos": []})
     assert alloc.ensured == []  # never provisions just to broadcast a live frame
+
+
+# ── pre_turn: capability convergence reaches the turn's kernel ──────────────
+
+
+class _RecordingKernel:
+    """A turn's sandbox kernel: records the control writes it receives."""
+
+    def __init__(self, name: str, order: list[str]) -> None:
+        self.name = name
+        self.updates: list[str] = []
+        self._order = order
+
+    async def update_session(self, user_id, session_id, req):  # noqa: ANN001
+        self.updates.append(session_id)
+        self._order.append(f"update:{self.name}")
+        return "SESSION"
+
+    async def run_turn(self, *a, **k):  # noqa: ANN002, ANN003
+        self._order.append("run_turn")
+        return "MSG"
+
+
+async def test_pre_turn_hook_runs_after_allocation_and_before_the_turn(monkeypatch) -> None:
+    order: list[str] = []
+    alloc = _ScopedAllocator()
+
+    async def _ensure(*, owner_user_id, scope=None, new_turn=False):  # noqa: ANN001
+        order.append("ensure")
+        return await _ScopedAllocator.ensure(
+            alloc, owner_user_id=owner_user_id, scope=scope, new_turn=new_turn
+        )
+
+    monkeypatch.setattr(alloc, "ensure", _ensure)
+    monkeypatch.setattr(ext, "sandbox_allocator", alloc)
+    monkeypatch.setattr(
+        kc, "_endpoint_clients", {"https://session:s1.pool": _RecordingKernel("live", order)}
+    )
+
+    async def _hook() -> None:
+        order.append("hook")
+
+    await kc.run_turn("u1", "s1", "hi", pre_turn=_hook)
+    assert order == ["ensure", "hook", "run_turn"]
+
+
+async def test_pre_turn_control_writes_land_on_the_turns_kernel(monkeypatch) -> None:
+    """The regression this seam exists for.
+
+    The scope has NO live instance when the turn starts (``peek`` → None: the
+    previous per-turn sandbox was reclaimed during a long idle). Without the
+    pin, the hook's ``update_session`` would resolve through ``peek`` and fall
+    back to the durable — and the freshly-seeded sandbox, which has no remote
+    read path, would run the turn on its stale snapshot. That is how a resumed
+    conversation 401'd every external MCP call: the refreshed OAuth bearer only
+    ever reached the durable.
+    """
+    order: list[str] = []
+    alloc = _ScopedAllocator()
+    alloc.live = False  # nothing live for this scope — cold boot
+    monkeypatch.setattr(ext, "sandbox_allocator", alloc)
+    live = _RecordingKernel("live", order)
+    durable = _RecordingKernel("durable", order)
+    monkeypatch.setattr(kc, "_endpoint_clients", {"https://session:s1.pool": live})
+    monkeypatch.setattr(kc, "_host_data_client", durable)
+
+    async def _hook() -> None:
+        await kc.update_session("u1", "s1", object())
+
+    await kc.run_turn("u1", "s1", "hi", pre_turn=_hook)
+
+    assert live.updates == ["s1"], "the refresh must reach the instance serving the turn"
+    assert durable.updates == [], "and must not be diverted to the durable"
+    assert order == ["update:live", "run_turn"]
+
+
+async def test_pre_turn_pin_is_scoped_to_its_own_session(monkeypatch) -> None:
+    """A hook that touches a DIFFERENT session must not inherit the pin."""
+    order: list[str] = []
+    alloc = _ScopedAllocator()
+    alloc.live = False
+    monkeypatch.setattr(ext, "sandbox_allocator", alloc)
+    live = _RecordingKernel("live", order)
+    durable = _RecordingKernel("durable", order)
+    monkeypatch.setattr(kc, "_endpoint_clients", {"https://session:s1.pool": live})
+    monkeypatch.setattr(kc, "_host_data_client", durable)
+
+    async def _hook() -> None:
+        await kc.update_session("u1", "other-session", object())
+
+    await kc.run_turn("u1", "s1", "hi", pre_turn=_hook)
+
+    assert live.updates == []
+    assert durable.updates == ["other-session"]  # routed normally, not pinned
+
+
+async def test_pre_turn_pin_is_released_after_the_hook(monkeypatch) -> None:
+    alloc = _ScopedAllocator()
+    alloc.live = False
+    monkeypatch.setattr(ext, "sandbox_allocator", alloc)
+    order: list[str] = []
+    durable = _RecordingKernel("durable", order)
+    monkeypatch.setattr(
+        kc, "_endpoint_clients", {"https://session:s1.pool": _RecordingKernel("live", order)}
+    )
+    monkeypatch.setattr(kc, "_host_data_client", durable)
+
+    await kc.run_turn("u1", "s1", "hi", pre_turn=lambda: _noop())
+    # Post-turn control writes route normally again (at-rest → durable).
+    await kc.update_session("u1", "s1", object())
+    assert durable.updates == ["s1"]
+
+
+async def _noop() -> None:
+    return None
+
+
+async def test_a_failing_pre_turn_hook_never_sinks_the_turn(monkeypatch) -> None:
+    alloc = _ScopedAllocator()
+    monkeypatch.setattr(ext, "sandbox_allocator", alloc)
+    order: list[str] = []
+    monkeypatch.setattr(
+        kc, "_endpoint_clients", {"https://session:s1.pool": _RecordingKernel("live", order)}
+    )
+
+    async def _boom() -> None:
+        raise RuntimeError("connector resolver down")
+
+    assert await kc.run_turn("u1", "s1", "hi", pre_turn=_boom) == "MSG"
+    assert order == ["run_turn"]
 
 
 # ── ephemeral review reuse (memory review inside the source's warm sandbox) ──
