@@ -2380,6 +2380,33 @@ def _append_claim(
         normalized["unit"] = exact_normalized["unit"]
     if "unitBase" in exact_normalized:
         normalized["unitBase"] = exact_normalized["unitBase"]
+    # Inherited headings and narrative establish defaults, but an explicit
+    # dimension on the claim itself is more specific.  For example, under a
+    # ``2024 年营业收入`` heading the row ``财年：2024 FY`` describes the
+    # reporting-period field, not another operating-revenue value.  Letting
+    # the inherited metric win makes a correctly bound fiscal-year Evidence
+    # look like a cross-metric mismatch.  Apply the same local precedence to
+    # period, scope, and basis so nested tables/lists remain compositional.
+    if _claim_metric_candidates(exact, semantics) and (
+        "metric" in exact_normalized or "metricCandidates" in exact_normalized
+    ):
+        normalized.pop("metric", None)
+        normalized.pop("metricCandidates", None)
+        if "metric" in exact_normalized:
+            normalized["metric"] = exact_normalized["metric"]
+        if "metricCandidates" in exact_normalized:
+            normalized["metricCandidates"] = exact_normalized["metricCandidates"]
+    for key, candidates_key in (
+        ("scope", "scopeCandidates"),
+        ("basis", "basisCandidates"),
+    ):
+        if key in exact_normalized or candidates_key in exact_normalized:
+            normalized.pop(key, None)
+            normalized.pop(candidates_key, None)
+            if key in exact_normalized:
+                normalized[key] = exact_normalized[key]
+            if candidates_key in exact_normalized:
+                normalized[candidates_key] = exact_normalized[candidates_key]
 
     output.append(
         ClaimCandidate(
