@@ -37,7 +37,7 @@ _FINANCE_SEMANTICS = {
                 "fields": ["audit_opinion_type"],
             },
             "reporting_period": {
-                "aliases": ["报告期"],
+                "aliases": ["报告期", "财年"],
                 "fields": ["fiscal_year"],
             },
             "filing_date": {
@@ -587,6 +587,21 @@ def test_period_and_unit_banner_is_presentation_context() -> None:
     assert claims[0].kind == "presentation"
     assert claims[0].citation_required is False
     assert claims[1].citation_required is True
+
+
+def test_appended_period_metadata_does_not_replace_primary_structured_metric() -> None:
+    claims = extract_claims(
+        (
+            "**170,899,152,276**，单位：**人民币元（CNY）**，"
+            "期间：**2024 财年（截至 2024-12-31）** "
+            "[1](citation://cit_revenue)"
+        ),
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert len(claims) == 1
+    assert "metric" not in claims[0].normalized
 
 
 def test_company_period_title_with_explicit_date_range_is_presentation_context() -> None:

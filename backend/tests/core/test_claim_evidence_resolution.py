@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 import src.core.claim_evidence_resolution as resolution_module
 import yaml
-from src.core.claim_audit import ClaimCandidate
+from src.core.claim_audit import ClaimCandidate, extract_claims
 from src.core.claim_evidence_resolution import (
     EvidenceCandidate,
     EvidenceCandidateIndex,
@@ -96,6 +96,58 @@ def test_bounded_semantic_verifier_can_resolve_paraphrase() -> None:
     assert resolution.status == "verified"
     assert resolution.binding_action == "auto-bind"
     assert resolution.selected_handles == ("ev_oss_doc_paraphrase",)
+
+
+def test_explicit_structured_binding_accepts_appended_period_metadata() -> None:
+    semantics = copy.deepcopy(_SEMANTICS)
+    semantics["metric_ontology"] = {
+        "metrics": {
+            "operating_revenue": {
+                "aliases": ["营业收入"],
+                "fields": ["operating_revenue"],
+            },
+            "reporting_period": {
+                "aliases": ["财年", "报告期"],
+                "fields": ["fiscal_year"],
+            },
+        }
+    }
+    handle = "ev_context_revenue_2024"
+    claim = extract_claims(
+        (
+            "170,899,152,276，单位：人民币元（CNY），"
+            "期间：2024 财年（截至 2024-12-31） "
+            f"[1](evidence://{handle})"
+        ),
+        mode="strict-domain",
+        semantics=semantics,
+    )[0]
+    evidence_pool = [
+        {
+            "evidenceHandle": handle,
+            "source": {"providerId": "reportify", "sourceType": "dataset"},
+            "evidence": {
+                "kind": "structured-data",
+                "field": "/data/0/total_revenue/operating_revenue",
+                "metric": "operating_revenue",
+                "value": 170899152276,
+                "unit": "CNY",
+                "period": "2024 annual",
+                "asOf": "2024-12-31",
+            },
+        }
+    ]
+
+    resolution = resolve_claim_evidence(
+        claim,
+        evidence_pool,
+        semantics=semantics,
+    )
+
+    assert "metric" not in claim.normalized
+    assert resolution.status == "verified"
+    assert resolution.binding_action == "keep"
+    assert resolution.selected_handles == (handle,)
 
 
 def test_unresolved_claim_never_requests_repair() -> None:
