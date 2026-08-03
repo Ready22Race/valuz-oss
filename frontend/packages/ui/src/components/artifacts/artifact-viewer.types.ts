@@ -65,6 +65,12 @@ export interface ArtifactViewerShellProps {
   error?: string | null;
   /** Draw the viewer's own panel frame. Disable when embedded in a framed host. */
   framed?: boolean;
+  /**
+   * Collapse the header to a single metadata row. Use when the host already
+   * names the document above the shell (e.g. a tab strip) — the tall title
+   * block would just repeat the tab label and eat the content area.
+   */
+  compactHeader?: boolean;
   onReload?: () => void;
   onClose?: () => void;
   onCopyContent?: () => void;

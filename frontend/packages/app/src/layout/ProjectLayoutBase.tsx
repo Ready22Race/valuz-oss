@@ -94,6 +94,7 @@ import {
 } from "../components/ProjectLocationFields";
 import { OriginIcon } from "../components/ExecutionLocationPicker";
 import { outletTransitionKey } from "./outlet-key";
+import { resolveRightPanelAutoFold } from "./right-panel-autofold";
 import type { ProjectOutletContext } from "./types";
 
 export type DirectoryFieldMode = "input" | "picker" | "managed";
@@ -299,17 +300,38 @@ export function ProjectLayoutBase({
     return () => mq.removeEventListener("change", handler);
   }, []);
 
+  // See resolveRightPanelAutoFold for the fold/unfold rule; the ref carries the
+  // "this collapse was ours" claim across width changes.
+  const autoCollapsedRef = useRef(false);
   useEffect(() => {
     const mq = window.matchMedia("(max-width: 1400px)");
-    const setCollapsed = usePanelStore.getState().setCollapsed;
     const sync = (matches: boolean) => {
-      if (matches) setCollapsed(true);
+      const { collapsed, setCollapsed } = usePanelStore.getState();
+      const action = resolveRightPanelAutoFold({
+        narrow: matches,
+        collapsed,
+        autoCollapsed: autoCollapsedRef.current,
+      });
+      autoCollapsedRef.current = action.autoCollapsed;
+      if (action.setCollapsed !== null) setCollapsed(action.setCollapsed);
     };
     sync(mq.matches);
     const handler = (event: MediaQueryListEvent) => sync(event.matches);
     mq.addEventListener("change", handler);
     return () => mq.removeEventListener("change", handler);
   }, []);
+
+  // Any deliberate re-open drops our claim, so a later manual close can't be
+  // undone by a resize.
+  useEffect(
+    () =>
+      usePanelStore.subscribe((state, previous) => {
+        if (previous.collapsed && !state.collapsed) {
+          autoCollapsedRef.current = false;
+        }
+      }),
+    [],
+  );
 
   useEffect(() => {
     const idx = (window.history.state as { idx?: number } | null)?.idx ?? 0;

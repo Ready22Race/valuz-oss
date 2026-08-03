@@ -98,6 +98,7 @@ import {
   cn,
   Composer,
   KnowledgeFileTreePicker,
+  ArtifactTabBar,
   ProjectDetailContextPanel,
   ResizableHandle,
   ResizablePanel,
@@ -181,8 +182,16 @@ const ARTIFACT_PANEL_ID = "artifact";
  *  open starts at an even 50/50 — the drag is a per-viewing adjustment, not a
  *  remembered preference, so opening a document is always predictable. */
 const ARTIFACT_SPLIT_DEFAULT = 50;
-const ARTIFACT_SPLIT_MIN = 25;
-const ARTIFACT_SPLIT_MAX = 75;
+
+/**
+ * Floors for the two columns, in px rather than percentages: what makes a
+ * column unusable is an absolute width, not a share of whatever the window
+ * happens to be. Below their sum there is no split worth showing, so the
+ * preview folds away entirely and the conversation takes the pane back.
+ */
+const CONVERSATION_MIN_PX = 480;
+const ARTIFACT_MIN_PX = 360;
+const SPLIT_MIN_PX = CONVERSATION_MIN_PX + ARTIFACT_MIN_PX;
 
 /** Frames to wait for the artifact panel to register with the Group before
  *  giving up on resetting the split. Registration lands on the next frame in
@@ -1533,8 +1542,15 @@ export const ConversationPage = () => {
       sessionId: selectedSessionId ?? undefined,
       projectId: artifactProjectId ?? undefined,
     },
+    // The preview pane carries a tab strip, so opening a second document adds
+    // to the set instead of replacing what's on screen.
+    multiTab: true,
   });
   const {
+    tabs: artifactTabs,
+    activePath: activeArtifactPath,
+    activate: activateArtifactTab,
+    closeTab: closeArtifactTab,
     selectedPath: selectedArtifactPath,
     artifact,
     content: artifactContent,
@@ -6029,9 +6045,22 @@ export const ConversationPage = () => {
     panelSetCollapsed,
   ]);
 
-  const artifactViewerOpen = Boolean(
-    selectedArtifactPath || artifactLoading || artifactError,
-  );
+  // Measure the pane itself instead of the viewport: the sidebar collapses at
+  // its own breakpoint and the right panel at another, so the same window
+  // width leaves wildly different room here. Folding when the two columns no
+  // longer fit keeps the open tabs in state — widen again and they return.
+  const splitGroupElRef = useRef<HTMLDivElement | null>(null);
+  const [splitFits, setSplitFits] = useState(true);
+  useEffect(() => {
+    const element = splitGroupElRef.current;
+    if (!element) return;
+    const observer = new ResizeObserver(([entry]) => {
+      setSplitFits(entry.contentRect.width >= SPLIT_MIN_PX);
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  const artifactViewerOpen = artifactTabs.length > 0 && splitFits;
 
   // Force the even split on every open. The Group remembers each panel's size
   // by id across mount/unmount, so the artifact panel's ``defaultSize`` only
@@ -6076,10 +6105,11 @@ export const ConversationPage = () => {
       <ResizablePanelGroup
         className="min-h-0 bg-surface"
         groupRef={splitGroupRef}
+        elementRef={splitGroupElRef}
       >
         <ResizablePanel
           id={CONVERSATION_PANEL_ID}
-          minSize={`${100 - ARTIFACT_SPLIT_MAX}%`}
+          minSize={`${CONVERSATION_MIN_PX}px`}
           style={{ overflow: "hidden" }}
         >
           <div className="relative flex h-full min-h-0 flex-col bg-surface">
@@ -6864,27 +6894,44 @@ export const ConversationPage = () => {
             <ResizablePanel
               id={ARTIFACT_PANEL_ID}
               defaultSize={`${ARTIFACT_SPLIT_DEFAULT}%`}
-              minSize={`${ARTIFACT_SPLIT_MIN}%`}
-              maxSize={`${ARTIFACT_SPLIT_MAX}%`}
+              minSize={`${ARTIFACT_MIN_PX}px`}
               style={{ overflow: "hidden" }}
             >
               <div
-                className="h-full min-h-0 overflow-hidden overscroll-contain bg-surface"
+                className="flex h-full min-h-0 flex-col overflow-hidden overscroll-contain bg-surface"
                 onWheel={(event) => event.stopPropagation()}
                 onTouchMove={(event) => event.stopPropagation()}
               >
-                <ArtifactViewerShell
-                  artifact={artifact}
-                  content={artifactContent}
-                  target={artifactTarget}
-                  loading={artifactLoading}
-                  error={artifactError}
-                  framed={false}
-                  onReload={handleArtifactReload}
-                  onClose={handleArtifactClose}
-                  onCopyContent={handleArtifactCopy}
-                  onOpenExternal={handleArtifactOpenExternal}
+                {/* Tab strip names the open documents, so the shell below runs
+                    its compact header — otherwise the file name would appear
+                    twice and cost a row of content in a half-width pane. */}
+                <ArtifactTabBar
+                  tabs={artifactTabs.map((tab) => ({
+                    path: tab.path,
+                    name: tab.name,
+                    previewKind: tab.artifact?.previewKind ?? null,
+                    loading: tab.loading,
+                    error: Boolean(tab.error),
+                  }))}
+                  activePath={activeArtifactPath}
+                  onActivate={activateArtifactTab}
+                  onClose={closeArtifactTab}
                 />
+                <div className="min-h-0 flex-1">
+                  <ArtifactViewerShell
+                    artifact={artifact}
+                    content={artifactContent}
+                    target={artifactTarget}
+                    loading={artifactLoading}
+                    error={artifactError}
+                    framed={false}
+                    compactHeader
+                    onReload={handleArtifactReload}
+                    onClose={handleArtifactClose}
+                    onCopyContent={handleArtifactCopy}
+                    onOpenExternal={handleArtifactOpenExternal}
+                  />
+                </div>
               </div>
             </ResizablePanel>
           </>

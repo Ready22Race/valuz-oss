@@ -122,7 +122,7 @@ function formatModified(value?: string | null): string | null {
   return date.toLocaleString();
 }
 
-function ArtifactIcon({ kind }: { kind: ArtifactPreviewKind }) {
+export function ArtifactIcon({ kind }: { kind: ArtifactPreviewKind }) {
   if (kind === "markdown" || kind === "plain") {
     return <FileText className="h-4 w-4 text-ink-meta" />;
   }
@@ -761,6 +761,7 @@ export function ArtifactViewerShell({
   loading = false,
   error = null,
   framed = true,
+  compactHeader = false,
   onReload,
   onClose,
   onCopyContent,
@@ -800,6 +801,9 @@ export function ArtifactViewerShell({
   const fullscreenSupported =
     typeof Element !== "undefined" &&
     typeof Element.prototype.requestFullscreen === "function";
+  // Compact mode answers "where is this, how big" only — the tab strip above
+  // already carries the name, and the kind is obvious from the tab's icon.
+  const compactSize = formatBytes(artifact?.size);
   const metadata = useMemo(() => {
     if (!artifact) return [];
     return [
@@ -877,29 +881,50 @@ export function ArtifactViewerShell({
       onKeyDown={handleKeyDown}
     >
       <header className="shrink-0 border-b border-surface-border bg-surface">
-        <div className="flex items-start gap-4 px-5 py-4">
-          <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-surface-soft">
-            {artifact ? (
-              <ArtifactIcon kind={artifact.previewKind} />
-            ) : (
-              <Loader2 className="h-4 w-4 animate-spin text-ink-meta" />
-            )}
-          </div>
-          <div className="min-w-0 flex-1">
-            <h2 className="truncate text-lg font-medium text-ink-heading">
-              {artifact?.name ?? t("ui.artifact.readingFileName")}
-            </h2>
-            <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-body">
-              {artifact?.path && artifact.path !== artifact.name ? (
-                <span className="min-w-0 max-w-full truncate">{artifact.path}</span>
+        <div
+          className={
+            compactHeader
+              ? "flex items-center gap-3 px-3 py-1"
+              : "flex items-start gap-4 px-5 py-4"
+          }
+        >
+          {compactHeader ? (
+            // One line: the tab strip above carries the name and the kind is
+            // already in its icon, so this row only answers "where, how big".
+            <div className="flex min-w-0 flex-1 items-center gap-2 text-xs text-ink-body">
+              <span className="min-w-0 truncate">
+                {artifact?.path ?? t("ui.artifact.readingFileName")}
+              </span>
+              {compactSize ? (
+                <span className="shrink-0 text-ink-meta">{compactSize}</span>
               ) : null}
-              {metadata.map((item) => (
-                <Badge key={item} variant="outline">
-                  {item}
-                </Badge>
-              ))}
             </div>
-          </div>
+          ) : (
+            <>
+              <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-surface-soft">
+                {artifact ? (
+                  <ArtifactIcon kind={artifact.previewKind} />
+                ) : (
+                  <Loader2 className="h-4 w-4 animate-spin text-ink-meta" />
+                )}
+              </div>
+              <div className="min-w-0 flex-1">
+                <h2 className="truncate text-lg font-medium text-ink-heading">
+                  {artifact?.name ?? t("ui.artifact.readingFileName")}
+                </h2>
+                <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-body">
+                  {artifact?.path && artifact.path !== artifact.name ? (
+                    <span className="min-w-0 max-w-full truncate">{artifact.path}</span>
+                  ) : null}
+                  {metadata.map((item) => (
+                    <Badge key={item} variant="outline">
+                      {item}
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
           <div className="flex shrink-0 items-center gap-1">
             {artifact?.previewKind === "image" ? (
               <>

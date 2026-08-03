@@ -24,7 +24,10 @@ import type {
   PlatformCapabilities,
   ResolvedFileDescriptor,
 } from "@valuz/core";
-import { useArtifactFile } from "./use-artifact-file";
+import {
+  MAX_OPEN_ARTIFACT_TABS,
+  useArtifactFile,
+} from "./use-artifact-file";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -87,7 +90,7 @@ function response(name: string): ArtifactFileResponse {
   };
 }
 
-const renderArtifactHook = (baseRef?: ApiBaseRef) =>
+const renderArtifactHook = (baseRef?: ApiBaseRef, multiTab = false) =>
   renderHook(() =>
     useArtifactFile({
       projectId: "p1",
@@ -98,8 +101,13 @@ const renderArtifactHook = (baseRef?: ApiBaseRef) =>
       }),
       missingErrorMessage: "missing",
       baseRef,
+      multiTab,
     }),
   );
+
+const renderTabbedHook = () => renderArtifactHook(undefined, true);
+
+const tabNames = (tabs: { path: string }[]) => tabs.map((tab) => tab.path);
 
 beforeEach(() => {
   resolveOne.mockReset();
@@ -197,5 +205,95 @@ describe("useArtifactFile", () => {
 
     act(() => result.current.close());
     expect(result.current.target).toBeNull();
+  });
+
+  it("replaces the single tab when multiTab is off", async () => {
+    resolveOne.mockImplementation(async (ref: string) =>
+      descriptor(ref.split("/").pop() ?? ""),
+    );
+    const { result } = renderArtifactHook();
+
+    await act(async () => result.current.open("a.txt"));
+    await act(async () => result.current.open("b.txt"));
+
+    expect(tabNames(result.current.tabs)).toEqual(["b.txt"]);
+    expect(result.current.activePath).toBe("b.txt");
+  });
+
+  it("keeps each opened document as its own tab and focuses the newest", async () => {
+    resolveOne.mockImplementation(async (ref: string) =>
+      descriptor(ref.split("/").pop() ?? ""),
+    );
+    const { result } = renderTabbedHook();
+
+    await act(async () => result.current.open("a.txt"));
+    await act(async () => result.current.open("b.txt"));
+
+    expect(tabNames(result.current.tabs)).toEqual(["a.txt", "b.txt"]);
+    expect(result.current.activePath).toBe("b.txt");
+    expect(result.current.artifact?.name).toBe("b.txt");
+  });
+
+  it("focuses an already-open document instead of refetching it", async () => {
+    resolveOne.mockImplementation(async (ref: string) =>
+      descriptor(ref.split("/").pop() ?? ""),
+    );
+    const { result } = renderTabbedHook();
+
+    await act(async () => result.current.open("a.txt"));
+    await act(async () => result.current.open("b.txt"));
+    expect(resolveOne).toHaveBeenCalledTimes(2);
+
+    await act(async () => result.current.open("a.txt"));
+
+    expect(tabNames(result.current.tabs)).toEqual(["a.txt", "b.txt"]);
+    expect(result.current.activePath).toBe("a.txt");
+    expect(resolveOne).toHaveBeenCalledTimes(2);
+  });
+
+  it("moves focus to the right neighbour when the active tab closes", async () => {
+    resolveOne.mockImplementation(async (ref: string) =>
+      descriptor(ref.split("/").pop() ?? ""),
+    );
+    const { result } = renderTabbedHook();
+
+    for (const name of ["a.txt", "b.txt", "c.txt"]) {
+      await act(async () => result.current.open(name));
+    }
+    act(() => result.current.activate("b.txt"));
+
+    act(() => result.current.closeTab("b.txt"));
+    expect(tabNames(result.current.tabs)).toEqual(["a.txt", "c.txt"]);
+    expect(result.current.activePath).toBe("c.txt");
+
+    // Nothing to the right of the last tab — fall back to the left one.
+    act(() => result.current.closeTab("c.txt"));
+    expect(result.current.activePath).toBe("a.txt");
+
+    act(() => result.current.closeTab("a.txt"));
+    expect(result.current.tabs).toEqual([]);
+    expect(result.current.activePath).toBeNull();
+  });
+
+  it("evicts the least-recently-viewed tab once the ceiling is reached", async () => {
+    resolveOne.mockImplementation(async (ref: string) =>
+      descriptor(ref.split("/").pop() ?? ""),
+    );
+    const { result } = renderTabbedHook();
+
+    for (let i = 0; i < MAX_OPEN_ARTIFACT_TABS; i += 1) {
+      await act(async () => result.current.open(`f${i}.txt`));
+    }
+    expect(result.current.tabs).toHaveLength(MAX_OPEN_ARTIFACT_TABS);
+
+    // Re-view the oldest tab so it is no longer the eviction candidate; the
+    // next-oldest (f1) should go instead.
+    act(() => result.current.activate("f0.txt"));
+    await act(async () => result.current.open("overflow.txt"));
+
+    expect(result.current.tabs).toHaveLength(MAX_OPEN_ARTIFACT_TABS);
+    expect(tabNames(result.current.tabs)).toContain("f0.txt");
+    expect(tabNames(result.current.tabs)).not.toContain("f1.txt");
+    expect(result.current.activePath).toBe("overflow.txt");
   });
 });
