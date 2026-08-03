@@ -154,6 +154,7 @@ import {
 } from "./conversation-loading";
 import { createConversationBootstrapGuard } from "./conversation-bootstrap";
 import { canSendProjectHandoff } from "./conversation-project-handoff";
+import { dropHandoffFromHistory } from "./conversation-handoff-history";
 import { LiveTaskCard } from "../components/LiveTaskCard";
 import { QueuedInputsBar } from "../components/QueuedInputsBar";
 import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
@@ -1438,10 +1439,7 @@ export const ConversationPage = () => {
     // Consume the state out of history so a reload cannot replay it. Only the
     // handing-over navigation sets ``handoff`` and it carries nothing else, so
     // clearing the whole entry is safe here.
-    navigate(location.pathname + location.search, {
-      replace: true,
-      state: null,
-    });
+    dropHandoffFromHistory();
   }, [id, location.state, location.pathname, location.search, navigate]);
 
   const [availableSkills, setAvailableSkills] = useState<SkillView[]>([]);
@@ -2632,10 +2630,23 @@ export const ConversationPage = () => {
   );
 
   const firstUserText = turns[0]?.userText;
+  // A draft page that has already accepted a send. The session does not exist
+  // yet — it is minted behind the optimistic turn — but everything the header
+  // displays is already decided: the project, the agent, the execution
+  // origin, and the fact that no run has started. Without this the whole
+  // header stayed blank for the entire mint + startup window and then popped
+  // in, which on a cloud project is several seconds of a page that looks like
+  // it lost the message.
+  const draftSendInFlight = isNewSession && effectiveTurns.length > 0;
+  // The agent this conversation runs as: bound on an existing session, and the
+  // composer's pick while the session is still being minted (it is what
+  // ``ensureSession`` will freeze into it).
+  const headerAgentSlug =
+    sessionAgentSlug ?? (draftSendInFlight ? selectedAgentSlug : null);
   const headerTitle =
     selectedSession?.name ||
     firstUserText?.slice(0, 40) ||
-    (isNewSession
+    (isNewSession && !draftSendInFlight
       ? null
       : t("conversation.newChat" as Parameters<typeof t>[0]));
 
@@ -3289,6 +3300,9 @@ export const ConversationPage = () => {
         setLoading(true);
       }
       setError(null);
+      // A fresh bootstrap invalidates the previous page's settle: the handoff
+      // must not fire against state this run is about to tear down.
+      setDraftBootstrapSettled(false);
       try {
         const wsResponse = await projectsApi.list();
         if (!isCurrent()) return;
@@ -3337,6 +3351,10 @@ export const ConversationPage = () => {
           // away from any session" path — it nulls every per-session
           // ref + state synchronously.
           await refreshEvents(null);
+          // Everything this branch tears down is now rebuilt, so an optimistic
+          // turn created from here on will survive. This is what releases the
+          // project-detail send handoff.
+          setDraftBootstrapSettled(true);
           return;
         }
 
@@ -4822,6 +4840,12 @@ export const ConversationPage = () => {
   //
   // Placed after ``performSend`` so the reference is not a forward one.
   const consumedProjectSendRef = useRef(false);
+  // Set when bootstrap's ``/conversation/new`` branch has run to completion.
+  // The handoff waits on it because that branch binds the project BEFORE it
+  // clears per-session state — sending in between created the optimistic turn
+  // and then had it wiped, so the message went out with no bubble and no
+  // runtime-startup header. Cleared whenever a fresh bootstrap starts.
+  const [draftBootstrapSettled, setDraftBootstrapSettled] = useState(false);
   // True from the moment this page is entered by a project-detail send until
   // the send has produced its optimistic turn. Suppresses the new-chat
   // welcome for exactly that window.
@@ -4885,6 +4909,7 @@ export const ConversationPage = () => {
       !canSendProjectHandoff({
         projectParam: searchParams.get("project"),
         selectedProjectId,
+        draftBootstrapSettled,
       })
     )
       return;
@@ -4903,10 +4928,7 @@ export const ConversationPage = () => {
     if (send?.projectId && send?.execOrigin) {
       recordEntityOrigin(send.projectId, send.execOrigin);
     }
-    navigate(location.pathname + location.search, {
-      replace: true,
-      state: null,
-    });
+    dropHandoffFromHistory();
     // Held until the send settles, so the flag outlives the ``state: null``
     // navigation above; the ``finally`` also covers a failed send, which
     // would otherwise suppress the welcome on this page forever.
@@ -4925,6 +4947,7 @@ export const ConversationPage = () => {
     navigate,
     searchParams,
     selectedProjectId,
+    draftBootstrapSettled,
   ]);
 
   const handleInterrupt = async () => {
@@ -6136,7 +6159,13 @@ export const ConversationPage = () => {
                 )
               ) : null}
               <SessionStatusPill
-                status={selectedSession?.status}
+                // ``created`` is exactly the state a not-yet-minted session is
+                // in: accepted, not running. It is the same pill the promoted
+                // page shows a beat later, so nothing changes on handover.
+                status={
+                  selectedSession?.status ??
+                  (draftSendInFlight ? "created" : undefined)
+                }
                 cancelled={
                   effectiveTurns[effectiveTurns.length - 1]?.cancelled === true
                 }
@@ -6152,11 +6181,22 @@ export const ConversationPage = () => {
               {/* Execution origin (multi-target editions): where this
                   session's backend lives. Locked at creation; renders
                   nothing on single-target builds. */}
-              <OriginBadge entityId={selectedSessionId} kind="session" />
-              {sessionAgentSlug ? (
+              <OriginBadge
+                entityId={selectedSessionId}
+                kind="session"
+                // No session id to observe yet; the session is minted on the
+                // project's origin, so show that. ``origin`` short-circuits
+                // the lookup, and single-target builds still render nothing.
+                origin={
+                  !selectedSessionId && draftSendInFlight
+                    ? selectedProjectOrigin
+                    : undefined
+                }
+              />
+              {headerAgentSlug ? (
                 <Badge variant="metaBrand" className="shrink-0">
                   <Bot className="h-3 w-3" />
-                  {agentNameBySlug.get(sessionAgentSlug) ?? sessionAgentSlug}
+                  {agentNameBySlug.get(headerAgentSlug) ?? headerAgentSlug}
                 </Badge>
               ) : null}
               {selectedSession?.worktree ? (
