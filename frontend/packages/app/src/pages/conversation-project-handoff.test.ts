@@ -1,30 +1,56 @@
 import { describe, expect, it } from "vitest";
 import { canSendProjectHandoff } from "./conversation-project-handoff";
 
+const READY = {
+  projectParam: "A",
+  selectedProjectId: "A",
+  draftBootstrapSettled: true,
+};
+
 describe("canSendProjectHandoff", () => {
-  it("holds the send until bootstrap has bound the project", () => {
-    // The regression: firing here mints a quick chat on the default backend
-    // instead of a project conversation on the project's own origin.
+  it("sends once the project is bound and bootstrap has settled", () => {
+    expect(canSendProjectHandoff(READY)).toBe(true);
+  });
+
+  it("holds while bootstrap is still running, even with the project bound", () => {
+    // The regression this exists for: bootstrap binds the project several
+    // statements BEFORE it clears per-session state, so a send fired on the
+    // binding alone had its optimistic turn wiped moments later — message
+    // sent, but no bubble and no runtime-startup header.
     expect(
-      canSendProjectHandoff({ projectParam: "A", selectedProjectId: null }),
+      canSendProjectHandoff({ ...READY, draftBootstrapSettled: false }),
     ).toBe(false);
   });
 
-  it("sends once the binding matches the URL", () => {
+  it("holds until bootstrap has bound the project", () => {
     expect(
-      canSendProjectHandoff({ projectParam: "A", selectedProjectId: "A" }),
-    ).toBe(true);
-  });
-
-  it("keeps holding while a previous project is still bound", () => {
-    expect(
-      canSendProjectHandoff({ projectParam: "A", selectedProjectId: "B" }),
+      canSendProjectHandoff({ ...READY, selectedProjectId: null }),
     ).toBe(false);
   });
 
-  it("does not wait when the entry carries no project", () => {
+  it("keeps holding while a different project is still bound", () => {
+    expect(canSendProjectHandoff({ ...READY, selectedProjectId: "B" })).toBe(
+      false,
+    );
+  });
+
+  it("does not wait on a binding when the entry carries no project", () => {
     expect(
-      canSendProjectHandoff({ projectParam: null, selectedProjectId: null }),
+      canSendProjectHandoff({
+        projectParam: null,
+        selectedProjectId: null,
+        draftBootstrapSettled: true,
+      }),
     ).toBe(true);
+  });
+
+  it("still waits for bootstrap when there is no project", () => {
+    expect(
+      canSendProjectHandoff({
+        projectParam: null,
+        selectedProjectId: null,
+        draftBootstrapSettled: false,
+      }),
+    ).toBe(false);
   });
 });
