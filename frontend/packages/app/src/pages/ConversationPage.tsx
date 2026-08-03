@@ -3289,6 +3289,9 @@ export const ConversationPage = () => {
         setLoading(true);
       }
       setError(null);
+      // A fresh bootstrap invalidates the previous page's settle: the handoff
+      // must not fire against state this run is about to tear down.
+      setDraftBootstrapSettled(false);
       try {
         const wsResponse = await projectsApi.list();
         if (!isCurrent()) return;
@@ -3337,6 +3340,10 @@ export const ConversationPage = () => {
           // away from any session" path — it nulls every per-session
           // ref + state synchronously.
           await refreshEvents(null);
+          // Everything this branch tears down is now rebuilt, so an optimistic
+          // turn created from here on will survive. This is what releases the
+          // project-detail send handoff.
+          setDraftBootstrapSettled(true);
           return;
         }
 
@@ -4822,6 +4829,12 @@ export const ConversationPage = () => {
   //
   // Placed after ``performSend`` so the reference is not a forward one.
   const consumedProjectSendRef = useRef(false);
+  // Set when bootstrap's ``/conversation/new`` branch has run to completion.
+  // The handoff waits on it because that branch binds the project BEFORE it
+  // clears per-session state — sending in between created the optimistic turn
+  // and then had it wiped, so the message went out with no bubble and no
+  // runtime-startup header. Cleared whenever a fresh bootstrap starts.
+  const [draftBootstrapSettled, setDraftBootstrapSettled] = useState(false);
   // True from the moment this page is entered by a project-detail send until
   // the send has produced its optimistic turn. Suppresses the new-chat
   // welcome for exactly that window.
@@ -4885,6 +4898,7 @@ export const ConversationPage = () => {
       !canSendProjectHandoff({
         projectParam: searchParams.get("project"),
         selectedProjectId,
+        draftBootstrapSettled,
       })
     )
       return;
@@ -4925,6 +4939,7 @@ export const ConversationPage = () => {
     navigate,
     searchParams,
     selectedProjectId,
+    draftBootstrapSettled,
   ]);
 
   const handleInterrupt = async () => {
