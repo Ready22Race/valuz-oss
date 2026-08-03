@@ -20,7 +20,7 @@ import hashlib
 import json
 import math
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -49,6 +49,19 @@ _MARKDOWN_LINK_RE = re.compile(
     r"\[([^\]\n]{0,240})\]\((evidence|citation)://([A-Za-z0-9_-]{1,160})"
     r"(#[^\s)\n]{1,2048})?\)"
 )
+_MALFORMED_PROTOCOL_LINK_PREFIX_RE = re.compile(
+    r"\[([^\]\n]{0,240})\]\((?:evidence|citation):(?!//)",
+    re.IGNORECASE,
+)
+_MALFORMED_BARE_PROTOCOL_PREFIX_RE = re.compile(
+    r"(?<![\w/])(?:evidence|citation):(?!//)",
+    re.IGNORECASE,
+)
+_REDUNDANT_VALUE_LIMITATION_RE = re.compile(
+    r"(?:原文|当前(?:资料|材料)|该(?:报告|资料|文档))\s*(?:中\s*)?"
+    r"(?:未披露|未提供|未列示)(?:该项|对应)?(?:的)?(?:具体)?(?:数字|数值|数据)?",
+    re.IGNORECASE,
+)
 _BARE_EVIDENCE_RE = re.compile(
     r"(?<![\w/])evidence://([A-Za-z0-9_-]{1,160})(#[^\s)\]\n]{1,2048})?"
 )
@@ -56,6 +69,13 @@ _INTRA_NUMBER_CITATION_RE = re.compile(
     r"(?P<prefix>(?<![\d,])\d{1,3}(?:,\d{3})*,\d{1,2})[ \t]*"
     r"(?P<link>\[[^\]\n]{1,240}\]\((?:citation|evidence)://[A-Za-z0-9_-]{1,160}\))"
     r"(?P<suffix>\d(?:\.\d+)?)"
+    r"(?P<unit>[ \t]*(?:%|bp|bps|百万元|亿元|万元|元|倍|CNY|USD|EUR|GBP|JPY|HKD))?",
+    re.IGNORECASE,
+)
+_INTRA_DECIMAL_CITATION_RE = re.compile(
+    r"(?P<prefix>(?<![\d,])[-+]?\d{1,3}(?:,\d{3})*\.)[ \t]*"
+    r"(?P<link>\[[^\]\n]{1,240}\]\((?:citation|evidence)://[A-Za-z0-9_-]{1,160}\))"
+    r"[ \t]*(?P<suffix>\d+)"
     r"(?P<unit>[ \t]*(?:%|bp|bps|百万元|亿元|万元|元|倍|CNY|USD|EUR|GBP|JPY|HKD))?",
     re.IGNORECASE,
 )
@@ -73,6 +93,9 @@ _SOURCE_SECTION_HEADING_RE = re.compile(
     r"(?im)^[ \t]*(?:#{1,6}[ \t]+)?(?:\*\*|__)?[ \t]*"
     r"(?:sources?|references?|citations?|来源|参考来源|引用来源|参考资料)"
     r"[ \t]*[:：]?[ \t]*(?:\*\*|__)?[ \t]*$"
+)
+_TRAILING_INLINE_SOURCE_NOTE_RE = re.compile(
+    r"(?im)^[ \t]*(?:数据|资料|信息)?来源\s*[:：][\s\S]*$"
 )
 _CANONICAL_CITATION_URI_RE = re.compile(r"citation://([A-Za-z0-9_-]{1,160})")
 _MARKDOWN_DESTINATION_RE = re.compile(r"\]\(([^)\n]+)\)")
@@ -574,7 +597,14 @@ class CitationGuard:
             or self._explicitly_requested
         )
 
-    def finalize(self, text: str, *, repair_attempts: int = 0) -> GuardResult:
+    def finalize(
+        self,
+        text: str,
+        *,
+        repair_attempts: int = 0,
+        preserve_registered_citation_ids: bool = False,
+        entity_aliases: Mapping[str, Iterable[str]] | None = None,
+    ) -> GuardResult:
         """Return a safe canonical body and its ``CitationBundleV1``.
 
         Expected ``evidence://`` links are normal protocol binding and do not
@@ -591,6 +621,7 @@ class CitationGuard:
             )
             plain_text = _BARE_EVIDENCE_RE.sub("", plain_text)
             plain_text = _REPAIR_MARKER_RE.sub("", plain_text)
+            plain_text, _ = _strip_malformed_protocol_syntax(plain_text)
             return GuardResult(
                 text=_strip_protocol_source_placeholders(plain_text).strip(),
                 bundle=None,
@@ -635,7 +666,9 @@ class CitationGuard:
         # ``evidence://`` handles.  Preserve only ids that map back to this
         # turn's immutable registry during that host-controlled second pass.
         # The first pass still rejects every model-minted canonical id.
-        allow_registered_citation_ids = int(repair_attempts) > 0
+        allow_registered_citation_ids = (
+            int(repair_attempts) > 0 or preserve_registered_citation_ids
+        )
         repaired_text, repaired_handles = self._repair_markers(text)
         repaired_text = self._materialize_collection_addresses(repaired_text)
         repaired_text = _move_citation_after_split_number(repaired_text)
@@ -659,6 +692,7 @@ class CitationGuard:
             self._registry.values(),
             mode=str(policy_mode or "required-on-evidence"),
             semantics=semantics,
+            entity_aliases=entity_aliases,
         )
         repaired_text = rebind_result.text
         auto_bind_result = auto_bind_unique_claims(
@@ -666,6 +700,7 @@ class CitationGuard:
             self._registry.values(),
             mode=str(policy_mode or "required-on-evidence"),
             semantics=semantics,
+            entity_aliases=entity_aliases,
         )
         repaired_text = auto_bind_result.text
         composite_bind_result = auto_bind_composite_text_claims(
@@ -673,6 +708,7 @@ class CitationGuard:
             self._registry.values(),
             mode=str(policy_mode or "required-on-evidence"),
             semantics=semantics,
+            entity_aliases=entity_aliases,
         )
         repaired_text = composite_bind_result.text
         propagated_bind_result = propagate_equivalent_claim_bindings(
@@ -682,6 +718,11 @@ class CitationGuard:
             semantics=semantics,
         )
         repaired_text = propagated_bind_result.text
+        # Auto/rebinding can insert a trusted link after the first boundary
+        # normalization pass.  Normalize once more before canonicalizing the
+        # links and calculating claim locations so a citation can never split
+        # a business number in the published text.
+        repaired_text = _move_citation_after_split_number(repaired_text)
         auto_bound_claims_by_handle: dict[str, list[str]] = {}
         for claim_id, handle in auto_bind_result.claim_handles.items():
             auto_bound_claims_by_handle.setdefault(handle, []).append(claim_id)
@@ -847,6 +888,11 @@ class CitationGuard:
             return f"[{_citation_display_number(citations, citation_id)}](citation://{citation_id})"
 
         canonical_text = _BARE_EVIDENCE_RE.sub(replace_bare, canonical_text)
+        canonical_text, malformed_protocol_count = _strip_malformed_protocol_syntax(
+            canonical_text
+        )
+        canonical_text = _normalize_markdown_table_citation_suffixes(canonical_text)
+        canonical_text = _strip_redundant_table_value_limitations(canonical_text)
 
         # Models occasionally render the requested visual form (``[1]``)
         # beside claims but put the trusted evidence link only in a numbered
@@ -888,6 +934,7 @@ class CitationGuard:
 
         degraded = (
             bool(unknown_ids)
+            or malformed_protocol_count > 0
             or bool(missing_locator_ids)
             or (required and not citations)
             or (required and not self._policy_available)
@@ -910,6 +957,11 @@ class CitationGuard:
             "integrity": {
                 "status": status,
                 "unknownCitationIds": unknown_ids,
+                **(
+                    {"malformedProtocolBindingCount": malformed_protocol_count}
+                    if malformed_protocol_count
+                    else {}
+                ),
                 "unusedCitationIds": unused_ids,
                 "missingLocatorCitationIds": missing_locator_ids,
                 "repairAttempts": repair_attempts,
@@ -931,6 +983,7 @@ class CitationGuard:
                 bundle,
                 self._quality_policy,
                 available_evidence=self._registry.values(),
+                entity_aliases=entity_aliases,
             )
             _focus_text_citation_snippets(bundle)
         return GuardResult(text=canonical_text, bundle=bundle)
@@ -1104,6 +1157,22 @@ def _strip_redundant_source_section(text: str) -> str:
     cleanup can never hide the only copy of an unregistered source.
     """
 
+    inline_notes = list(_TRAILING_INLINE_SOURCE_NOTE_RE.finditer(text))
+    if inline_notes:
+        note = inline_notes[-1]
+        body = text[: note.start()].rstrip()
+        bibliography = text[note.start() :]
+        bibliography_ids = set(_CANONICAL_CITATION_URI_RE.findall(bibliography))
+        destinations = _MARKDOWN_DESTINATION_RE.findall(bibliography)
+        body_ids = set(_CANONICAL_CITATION_URI_RE.findall(body))
+        if (
+            bibliography_ids
+            and destinations
+            and all(destination.startswith("citation://") for destination in destinations)
+            and bibliography_ids.issubset(body_ids)
+        ):
+            return body
+
     matches = list(_SOURCE_SECTION_HEADING_RE.finditer(text))
     if not matches:
         return text
@@ -1156,6 +1225,99 @@ def _untrusted_link_label(label: str) -> str:
     }:
         return ""
     return label
+
+
+def _strip_malformed_protocol_syntax(text: str) -> tuple[str, int]:
+    """Remove incomplete internal citation syntax while preserving user text.
+
+    A model can truncate ``[source](evidence://HANDLE)`` into a prefix such as
+    ``[source](evidence:``.  It is neither a valid Markdown link nor a trusted
+    binding, so publishing it only exposes protocol internals and can break a
+    table row.  Strip the malformed prefix, retain any following business
+    limitation text, and report the count in the private integrity sidecar.
+    """
+
+    count = 0
+
+    def replace_link(match: re.Match[str]) -> str:
+        nonlocal count
+        count += 1
+        return _untrusted_link_label(match.group(1))
+
+    cleaned = _MALFORMED_PROTOCOL_LINK_PREFIX_RE.sub(replace_link, text)
+
+    def replace_bare(_match: re.Match[str]) -> str:
+        nonlocal count
+        count += 1
+        return ""
+
+    cleaned = _MALFORMED_BARE_PROTOCOL_PREFIX_RE.sub(replace_bare, cleaned)
+    return cleaned, count
+
+
+def _strip_redundant_table_value_limitations(text: str) -> str:
+    """Drop a generic missing-value suffix when the same cell has a value.
+
+    This is deliberately table-cell local and requires both a numeric value
+    before the suffix and a trusted canonical citation somewhere in the cell.
+    Specific scope caveats such as "only nine-month cash flow was disclosed"
+    remain intact; only contradictory generic text such as
+    "79.3 trillion, the source did not disclose a specific number" is removed.
+    """
+
+    lines = text.splitlines()
+    for line_index, line in enumerate(lines):
+        stripped = line.strip()
+        if not (stripped.startswith("|") and stripped.endswith("|")):
+            continue
+        cells = line.split("|")
+        changed = False
+        for cell_index in range(1, len(cells) - 1):
+            cell = cells[cell_index]
+            if "citation://" not in cell:
+                continue
+            match = _REDUNDANT_VALUE_LIMITATION_RE.search(cell)
+            if match is None or not re.search(r"\d", cell[: match.start()]):
+                continue
+            cells[cell_index] = (
+                cell[: match.start()].rstrip() + " " + cell[match.end() :].lstrip()
+            ).rstrip()
+            changed = True
+        if changed:
+            lines[line_index] = "|".join(cells)
+    result = "\n".join(lines)
+    return result + ("\n" if text.endswith("\n") else "")
+
+
+def _normalize_markdown_table_citation_suffixes(text: str) -> str:
+    """Move citations emitted after a table row boundary into the last cell.
+
+    A model may close the Markdown row and then append an evidence link, for
+    example ``| value | formula |[source](evidence://...)``. After canonical
+    citation sealing that suffix would be parsed as an extra column. Keep the
+    binding on the same row while restoring a stable column count.
+    """
+
+    suffix = re.compile(
+        r"^(?P<row>\s*\|.*\|)"
+        r"(?P<citations>(?:\s*\[[^\]\n]{1,240}\]"
+        r"\(citation://[A-Za-z0-9_-]{1,160}\))+)[ \t]*$"
+    )
+    output: list[str] = []
+    for line in text.splitlines(keepends=True):
+        newline = ""
+        body = line
+        if body.endswith("\r\n"):
+            body, newline = body[:-2], "\r\n"
+        elif body.endswith("\n"):
+            body, newline = body[:-1], "\n"
+        match = suffix.match(body)
+        if match is not None:
+            row = match.group("row")[:-1].rstrip()
+            citations = match.group("citations").strip()
+            body = f"{row} {citations} |"
+        output.append(f"{body}{newline}")
+    return "".join(output)
 
 
 def _strip_protocol_source_placeholders(text: str) -> str:
@@ -2305,7 +2467,13 @@ def _materialize_collection_address(
         unit = currency
 
     fiscal_year = context.get("fiscal_year") or context.get("fiscalYear")
-    period_part = context.get("period")
+    period_part = (
+        context.get("fiscal_quarter")
+        or context.get("fiscalQuarter")
+        or context.get("fiscal_period")
+        or context.get("fiscalPeriod")
+        or context.get("period")
+    )
     period = str(collection.common.get("period") or "")
     if not period and fiscal_year is not None:
         period = f"{fiscal_year} {period_part or ''}".strip()
@@ -2724,7 +2892,15 @@ def _move_citation_after_split_number(value: str) -> str:
     ordinary adjacent years such as ``2024 [1] 2023`` are never merged.
     """
 
-    return _INTRA_NUMBER_CITATION_RE.sub(
+    value = _INTRA_NUMBER_CITATION_RE.sub(
+        lambda match: (
+            f"{match.group('prefix')}{match.group('suffix')}"
+            f"{match.group('unit') or ''} "
+            f"{match.group('link')}"
+        ),
+        value,
+    )
+    return _INTRA_DECIMAL_CITATION_RE.sub(
         lambda match: (
             f"{match.group('prefix')}{match.group('suffix')}"
             f"{match.group('unit') or ''} "

@@ -65,7 +65,8 @@ export const MemorySection = () => {
   const toggleConversation = async (
     key:
       | "conversation_citations_enabled"
-      | "conversation_verification_enabled",
+      | "conversation_verification_enabled"
+      | "conversation_task_coverage_enabled",
     value: boolean,
   ) => {
     try {
@@ -118,6 +119,8 @@ export const MemorySection = () => {
   const citationsOn = preferences?.conversation_citations_enabled ?? true;
   const verificationOn =
     preferences?.conversation_verification_enabled ?? false;
+  const taskCoverageOn =
+    preferences?.conversation_task_coverage_enabled ?? true;
 
   return (
     <SettingsSection
@@ -152,6 +155,22 @@ export const MemorySection = () => {
               disabled={!citationsOn}
               onCheckedChange={(value) =>
                 void toggleConversation("conversation_verification_enabled", value)
+              }
+            />
+          </SettingsRow>
+          <div className="my-5 h-px bg-surface-border" />
+          <SettingsRow
+            className="px-0 py-0"
+            label={t("settings.personalization.taskCoverageLabel")}
+            desc={t("settings.personalization.taskCoverageDesc")}
+          >
+            <Switch
+              checked={taskCoverageOn}
+              onCheckedChange={(value) =>
+                void toggleConversation(
+                  "conversation_task_coverage_enabled",
+                  value,
+                )
               }
             />
           </SettingsRow>

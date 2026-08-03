@@ -115,6 +115,7 @@ def retrieve_evidence_candidates(
     records: Iterable[Any],
     *,
     semantics: Mapping[str, Any] | None = None,
+    entity_aliases: Mapping[str, Iterable[str]] | None = None,
     limit: int = DEFAULT_CANDIDATE_LIMIT,
 ) -> tuple[EvidenceCandidate, ...]:
     """Return a bounded union of independently retrieved Evidence candidates."""
@@ -132,6 +133,7 @@ def retrieve_evidence_candidates(
             evidence,
             explicit=explicit,
             semantics=semantics,
+            entity_aliases=entity_aliases,
         )
         # Keep a low-score registry fallback in the bounded ranking.  This is
         # important when an adapter omitted one canonical dimension: unknown
@@ -168,6 +170,7 @@ def resolve_claim_evidence(
     records: Iterable[Any],
     *,
     semantics: Mapping[str, Any] | None = None,
+    entity_aliases: Mapping[str, Iterable[str]] | None = None,
     semantic_verifier: SemanticVerifierPort | None = None,
     limit: int = DEFAULT_CANDIDATE_LIMIT,
 ) -> ClaimResolution:
@@ -177,6 +180,7 @@ def resolve_claim_evidence(
         claim,
         records,
         semantics=semantics,
+        entity_aliases=entity_aliases,
         limit=limit,
     )
     requested_explicit = tuple(dict.fromkeys(claim.attached_evidence_handles))
@@ -421,6 +425,8 @@ def _deterministic_support(
     candidate: EvidenceCandidate,
     semantics: Mapping[str, Any] | None,
 ) -> EvidenceSupport:
+    if "entity" in candidate.hard_conflicts:
+        return EvidenceSupport("contradicted", 4)
     support = verify_evidence_support(
         claim,
         {"source": candidate.source, "evidence": candidate.evidence},
@@ -468,7 +474,7 @@ def _deterministic_support(
                 and evidence_period
                 and not evidence_periods_compatible(claim_period, evidence_period)
             )
-            and not _entity_conflicts(claim.semantic_text, evidence)
+            and "entity" not in candidate.hard_conflicts
             and not (
                 claim_unit
                 and evidence_unit
@@ -496,7 +502,7 @@ def _deterministic_support(
         evidence_period,
     ):
         return support
-    if _entity_conflicts(claim.semantic_text, evidence):
+    if "entity" in candidate.hard_conflicts:
         return support
     claim_value = claim.normalized.get("value")
     evidence_value = evidence.get("value")
@@ -529,6 +535,7 @@ def _candidate_signals(
     *,
     explicit: set[str],
     semantics: Mapping[str, Any] | None,
+    entity_aliases: Mapping[str, Iterable[str]] | None,
 ) -> tuple[list[CandidateSignal], list[str]]:
     signals: list[CandidateSignal] = []
     conflicts: list[str] = []
@@ -547,7 +554,15 @@ def _candidate_signals(
             semantics=semantics,
         ):
             signals.append(CandidateSignal("value-equivalent", 40.0))
-        _add_structured_identity_signals(claim, evidence, signals, conflicts, semantics)
+        _add_structured_identity_signals(
+            claim,
+            source,
+            evidence,
+            signals,
+            conflicts,
+            semantics,
+            entity_aliases,
+        )
     elif kind == "text":
         quote = _text_evidence(evidence)
         normalized_claim = _normalize_text(claim.exact)
@@ -562,6 +577,16 @@ def _candidate_signals(
         quote_numbers = set(_number_tokens(quote))
         if claim_numbers and claim_numbers.issubset(quote_numbers):
             signals.append(CandidateSignal("value-equivalent", 25.0, "all-number-tokens"))
+        entity_relation = _entity_relation(
+            claim.semantic_text,
+            source,
+            evidence,
+            entity_aliases,
+        )
+        if entity_relation == "conflict":
+            conflicts.append("entity")
+        elif entity_relation == "match":
+            signals.append(CandidateSignal("entity-match", 20.0))
 
     source_identity = str(
         source.get("documentId") or source.get("sourceId") or source.get("url") or ""
@@ -573,10 +598,12 @@ def _candidate_signals(
 
 def _add_structured_identity_signals(
     claim: ClaimCandidate,
+    source: Mapping[str, Any],
     evidence: Mapping[str, Any],
     signals: list[CandidateSignal],
     conflicts: list[str],
     semantics: Mapping[str, Any] | None,
+    entity_aliases: Mapping[str, Iterable[str]] | None,
 ) -> None:
     raw_claim_metric = claim.normalized.get("metric", "")
     claim_metric = (
@@ -608,9 +635,15 @@ def _add_structured_identity_signals(
         else:
             conflicts.append("period")
 
-    if _entity_conflicts(claim.semantic_text, evidence):
+    entity_relation = _entity_relation(
+        claim.semantic_text,
+        source,
+        evidence,
+        entity_aliases,
+    )
+    if entity_relation == "conflict":
         conflicts.append("entity")
-    elif _entity_ids(claim.semantic_text) and _entity_ids(_evidence_entity_text(evidence)):
+    elif entity_relation == "match":
         signals.append(CandidateSignal("entity-match", 20.0))
 
     claim_unit = claim.normalized.get("unit", "")
@@ -670,13 +703,84 @@ def _entity_ids(value: str) -> set[str]:
     return set(re.findall(r"(?<!\d)\d{5,6}(?!\d)", value))
 
 
-def _evidence_entity_text(evidence: Mapping[str, Any]) -> str:
+def _evidence_entity_text(
+    source: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> str:
     return " ".join(
-        str(evidence.get(key) or "") for key in ("entityId", "entityName", "recordKey")
+        str(value or "")
+        for value in (
+            evidence.get("entityId"),
+            evidence.get("entityName"),
+            evidence.get("recordKey"),
+            source.get("title"),
+            source.get("organization"),
+            source.get("sourceId"),
+        )
     )
 
 
-def _entity_conflicts(claim_text: str, evidence: Mapping[str, Any]) -> bool:
+def _normalize_entity_alias(value: Any) -> str:
+    return re.sub(r"[^a-z0-9\u3400-\u9fff]+", "", str(value).casefold())
+
+
+def _alias_is_present(value: str, alias: str) -> bool:
+    normalized = _normalize_entity_alias(alias)
+    if len(normalized) < 2:
+        return False
+    if re.fullmatch(r"[a-z0-9]{2,12}", normalized):
+        return bool(
+            re.search(
+                rf"(?<![A-Za-z0-9]){re.escape(normalized)}(?![A-Za-z0-9])",
+                value,
+                re.IGNORECASE,
+            )
+        )
+    return normalized in _normalize_entity_alias(value)
+
+
+def _canonical_entities(
+    value: str,
+    entity_aliases: Mapping[str, Iterable[str]] | None,
+) -> set[str]:
+    if not entity_aliases:
+        return set()
+    output: set[str] = set()
+    for canonical, aliases in entity_aliases.items():
+        canonical_key = _normalize_entity_alias(canonical)
+        if not canonical_key:
+            continue
+        values = (canonical, *tuple(str(alias) for alias in aliases))
+        if any(_alias_is_present(value, alias) for alias in values):
+            output.add(canonical_key)
+    return output
+
+
+def _entity_relation(
+    claim_text: str,
+    source: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+    entity_aliases: Mapping[str, Iterable[str]] | None,
+) -> Literal["match", "conflict", "unknown"]:
+    evidence_text = _evidence_entity_text(source, evidence)
+    claim_entities = _canonical_entities(claim_text, entity_aliases)
+    evidence_entities = _canonical_entities(evidence_text, entity_aliases)
+    if len(claim_entities) == 1 and evidence_entities:
+        return "match" if not claim_entities.isdisjoint(evidence_entities) else "conflict"
+
     claim_ids = _entity_ids(claim_text)
-    evidence_ids = _entity_ids(_evidence_entity_text(evidence))
-    return bool(claim_ids and evidence_ids and claim_ids.isdisjoint(evidence_ids))
+    evidence_ids = _entity_ids(evidence_text)
+    if claim_ids and evidence_ids:
+        return "match" if not claim_ids.isdisjoint(evidence_ids) else "conflict"
+    return "unknown"
+
+
+def evidence_entity_conflicts(
+    claim_text: str,
+    source: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+    entity_aliases: Mapping[str, Iterable[str]] | None = None,
+) -> bool:
+    """Return only turn-locally provable cross-entity conflicts."""
+
+    return _entity_relation(claim_text, source, evidence, entity_aliases) == "conflict"

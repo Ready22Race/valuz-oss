@@ -1,0 +1,266 @@
+{
+  "version": 1,
+  "owner_layer": "oss",
+  "resolverRevision": "task-coverage-resolver-v1",
+  "generated_case_families": ["content-mappings"],
+  "cases": [
+  {
+    "task_coverage_case_id": "OSS-TASK-CONTRACT-001",
+      "business_group": "explicit-fields-complete",
+      "prompt": "只列出响应时间和错误率两个数字。",
+      "tools": [
+        {
+          "name": "service_lookup",
+          "input": {"fields": ["响应时间", "错误率"]},
+          "result": "响应时间 120 ms；错误率 0.2%。"
+        }
+      ],
+      "answer": "响应时间：120 ms\n错误率：0.2%",
+      "expected_contract": {
+        "requirement_count": 3,
+        "required_count": 3,
+        "kind_counts": {"structured-slot": 2, "output-shape": 1},
+        "enforceable": true
+      },
+      "expected_retrieval_plan": {
+        "step_count": 1,
+        "strategy_counts": {"structured-fetch": 1},
+        "entity_step_count": 0,
+        "planner_revision": "task-retrieval-planner-v1"
+      },
+      "expected_coverage": {
+        "status": "complete",
+        "answer_missing_count": 0,
+        "revision_requested": false
+      },
+      "policy_refs": [
+        "task_coverage.contract.requirement_kinds.structured-slot",
+        "task_coverage.contract.output_constraints.exact-count"
+      ]
+    },
+    {
+      "task_coverage_case_id": "OSS-TASK-CONTRACT-002",
+      "business_group": "explicit-field-omission",
+      "prompt": "只列出响应时间和错误率两个数字。",
+      "tools": [
+        {
+          "name": "service_lookup",
+          "input": {"fields": ["响应时间", "错误率"]},
+          "result": "响应时间 120 ms；错误率 0.2%。"
+        }
+      ],
+      "answer": "响应时间：120 ms",
+      "expected_contract": {"required_count": 3, "enforceable": true},
+      "expected_coverage": {
+        "status": "partial",
+        "answer_missing_count": 1,
+        "revision_requested": true
+      },
+      "expected_missing_descriptions": ["错误率"],
+      "policy_refs": [
+        "task_coverage.answer.structure_rules.required-columns",
+        "task_coverage.remediation.allowed_actions.patch-answer"
+      ]
+    },
+    {
+      "task_coverage_case_id": "OSS-TASK-RETRIEVAL-001",
+      "business_group": "discovery-is-not-content",
+      "prompt": "只列出响应时间和错误率两个数字。",
+      "tools": [
+        {
+          "name": "service_search",
+          "input": {"query": "响应时间 错误率"},
+          "result": [{"title": "服务运行报告"}]
+        }
+      ],
+      "answer": "响应时间：120 ms\n错误率：0.2%",
+      "expected_contract": {"required_count": 3},
+      "expected_coverage": {
+        "status": "partial",
+        "retrieval_available_count": 0,
+        "model_input_visible_count": 1,
+        "answer_missing_count": 0,
+        "revision_requested": true
+      },
+      "policy_refs": [
+        "task_coverage.retrieval.candidate_selection.required-parts-covered"
+      ]
+    },
+    {
+      "task_coverage_case_id": "OSS-TASK-OUTPUT-001",
+      "business_group": "required-markdown-table",
+      "prompt": "只用 Markdown 表格列出响应时间和错误率两个数字。",
+      "tools": [
+        {
+          "name": "service_lookup",
+          "input": {"fields": ["响应时间", "错误率"]},
+          "result": "响应时间 120 ms；错误率 0.2%。"
+        }
+      ],
+      "answer": "响应时间：120 ms；错误率：0.2%。",
+      "expected_contract": {
+        "kind_counts": {"structured-slot": 2, "output-shape": 1},
+        "enforceable": true
+      },
+      "expected_coverage": {
+        "status": "partial",
+        "answer_missing_count": 1,
+        "revision_requested": true
+      },
+      "expected_missing_descriptions": ["Markdown table"],
+      "policy_refs": [
+        "task_coverage.contract.output_constraints.table",
+        "task_coverage.answer.structure_rules.markdown-table"
+      ]
+    },
+    {
+      "task_coverage_case_id": "OSS-TASK-CALC-001",
+      "business_group": "user-input-calculation",
+      "prompt": "计算 100 相比 80 的增幅。",
+      "tools": [],
+      "answer": "增幅为 25%。",
+      "expected_contract": {
+        "task_type": "calculation",
+        "requirement_count": 1,
+        "kind_counts": {"calculation": 1},
+        "enforceable": true
+      },
+      "expected_coverage": {
+        "status": "complete",
+        "answer_missing_count": 0,
+        "revision_requested": false
+      },
+      "policy_refs": [
+        "task_coverage.contract.requirement_kinds.calculation"
+      ]
+    },
+  {
+    "task_coverage_case_id": "OSS-TASK-PERIOD-001",
+      "business_group": "period-groups-not-collapsed",
+      "prompt": "总结最近两个季度的报告，并按季度分组。",
+      "tools": [
+        {
+          "name": "report_search",
+          "input": {"sort": "date_desc"},
+          "result": [
+            {"id": "doc-q2", "title": "Service 2025 Q2 Report"},
+            {"id": "doc-q1", "title": "Service 2025 Q1 Report"}
+          ]
+        },
+        {
+          "name": "report_read",
+          "input": {"document_id": "doc-q2"},
+          "result": {"title": "Service 2025 Q2 Report", "text": "Availability improved."}
+        }
+      ],
+      "answer": "## 2025 Q2\n可用性改善。\n\n## 2025 Q1\n当前资料未覆盖。",
+      "expected_contract": {
+        "requirement_count": 3,
+        "kind_counts": {"topic": 2, "output-shape": 1},
+        "entities": [],
+        "enforceable": true
+      },
+      "expected_retrieval_plan": {
+        "step_count": 2,
+        "strategy_counts": {"document-discovery": 2},
+        "period_step_count": 2,
+        "planner_revision": "task-retrieval-planner-v1"
+      },
+      "expected_coverage": {
+        "status": "partial",
+        "answer_missing_count": 0,
+        "retrieval_available_count": 1,
+        "revision_requested": true
+      },
+      "policy_refs": [
+        "task_coverage.contract.dimensions.period",
+        "task_coverage.answer.structure_rules.section-count"
+      ]
+    },
+    {
+      "task_coverage_case_id": "OSS-TASK-DOC-001",
+      "business_group": "locked-document-summary",
+      "prompt": "总结当前文档。",
+      "document_ids": ["document-a"],
+      "tools": [
+        {
+          "name": "document_read",
+          "input": {"document_id": "document-a"},
+          "result": "document-a: The launch completed successfully."
+        }
+      ],
+      "answer": "document-a 说明发布已经成功完成。",
+      "expected_contract": {
+        "task_type": "document-summary",
+        "requirement_count": 1,
+        "kind_counts": {"document-section": 1},
+        "enforceable": false
+      },
+      "expected_coverage": {
+        "status": "complete",
+        "answer_missing_count": 0,
+        "revision_requested": false
+      },
+      "policy_refs": [
+        "task_coverage.contract.requirement_kinds.document-section",
+        "task_coverage.retrieval.source_constraints.explicit-document-scope"
+      ]
+    },
+    {
+      "task_coverage_case_id": "OSS-TASK-OPEN-001",
+      "business_group": "casual-knowledge-no-false-contract",
+      "prompt": "什么是复利？",
+      "tools": [],
+      "answer": "复利是本金与此前累计收益共同产生后续收益的计息方式。",
+      "expected_contract": {
+        "task_type": "open-research",
+        "requirement_count": 0,
+        "enforceable": false
+      },
+      "expected_coverage": {
+        "status": "complete",
+        "answer_missing_count": 0,
+        "revision_requested": false
+      },
+      "policy_refs": [
+        "task_coverage.contract.selectors.explicit"
+      ]
+    },
+    {
+      "task_coverage_case_id": "OSS-TASK-DOC-002",
+      "business_group": "locked-document-rejects-index-leakage",
+      "prompt": "总结当前文档。",
+      "document_ids": ["document-a"],
+      "tools": [
+        {
+          "name": "kb_search",
+          "input": {"doc_id": "document-a", "query": "发布结果"},
+          "result": {
+            "chunks": [
+              {
+                "id": "wrong-chunk",
+                "content": "Unrelated document says the deployment failed.",
+                "doc": {"doc_id": "document-b", "title": "Other document"}
+              }
+            ]
+          }
+        }
+      ],
+      "answer": "当前文档说明部署失败。",
+      "expected_contract": {
+        "task_type": "document-summary",
+        "requirement_count": 1,
+        "kind_counts": {"document-section": 1},
+        "enforceable": false
+      },
+      "expected_coverage": {
+        "status": "partial",
+        "retrieval_available_count": 0,
+        "revision_requested": false
+      },
+      "policy_refs": [
+        "task_coverage.retrieval.source_constraints.explicit-document-scope"
+      ]
+    }
+  ]
+}

@@ -219,6 +219,61 @@ def test_structured_batch_registers_one_collection_and_materializes_used_address
     assert result.bundle["citations"][0]["evidence"]["metric"] == "operating_revenue"
 
 
+def test_materialized_structured_period_prefers_fiscal_quarter_over_frequency() -> None:
+    item = _item("ev_legacy_quarter_revenue_12345678")
+    item["source"].update({"sourceType": "dataset"})
+    item["evidence"] = {
+        "kind": "structured-data",
+        "datasetId": "financials",
+        "toolName": "company_income_statement",
+        "recordKey": "SNDK|2026 Q3",
+        "entityId": "SNDK",
+        "field": "operating_revenue",
+        "metric": "operating_revenue",
+        "value": 5_950_000_000,
+        "unit": "USD",
+        "capturedAt": "2026-08-03T08:00:00Z",
+    }
+    raw = {
+        "data": [
+            {
+                "symbol": "SNDK",
+                "fiscal_year": 2026,
+                "fiscal_quarter": "Q3",
+                "period": "quarterly",
+                "operating_revenue": 5_950_000_000,
+            }
+        ],
+        "_valuz_evidence": [item],
+    }
+
+    visible = compact_citation_tool_content(raw)
+    private = private_citation_tool_content(raw)
+
+    assert visible is not None and private is not None
+    hint = visible["_valuz_evidence_hint"]
+    registry = EvidenceRegistry()
+    assert registry.register_tool_projection(
+        visible,
+        private,
+        tool_name="company_income_statement",
+        trusted_private=True,
+    ) == 1
+    result = CitationGuard(
+        registry,
+        message_id="msg-quarter-period",
+        user_prompt="Cite quarterly revenue",
+        policy_available=True,
+        verification_enabled=False,
+    ).finalize(
+        "2026 Q3 revenue was USD 5950000000 "
+        f"[source](evidence://{hint['collectionHandle']}#/data/0/operating_revenue)."
+    )
+
+    assert result.bundle is not None
+    assert result.bundle["citations"][0]["evidence"]["period"] == "2026 Q3"
+
+
 def test_multi_period_legacy_batch_collapses_repeated_fields_into_one_collection() -> None:
     source = {
         "sourceId": "financials:600519",
@@ -995,6 +1050,26 @@ def test_guard_removes_redundant_chinese_source_section_and_divider() -> None:
     assert result.text.count("citation://") == 1
 
 
+def test_guard_removes_redundant_inline_data_source_note() -> None:
+    registry = _registry(_item(locator={"kind": "chunk", "chunkId": "chunk-1"}))
+    guard = CitationGuard(
+        registry,
+        message_id="msg-1",
+        user_prompt="比较两家公司并引用年报",
+        policy_available=True,
+    )
+
+    result = guard.finalize(
+        "| 公司 | 营业收入 |\n"
+        "|---|---:|\n"
+        "| 示例公司 | 100 [年报](evidence://ev_revenue_2025) |\n\n"
+        "数据来源：示例公司年度报告 [年报](evidence://ev_revenue_2025)。"
+    )
+
+    assert "数据来源" not in result.text
+    assert result.text.count("citation://") == 1
+
+
 def test_guard_preserves_partial_source_section_with_external_links() -> None:
     registry = _registry(_item(locator={"kind": "chunk", "chunkId": "chunk-1"}))
     guard = CitationGuard(
@@ -1063,6 +1138,77 @@ def test_guard_never_promotes_unknown_model_minted_source() -> None:
     ]
 
 
+def test_guard_preserves_registered_canonical_ids_only_for_host_owned_patch() -> None:
+    registry = _registry(_item(locator={"kind": "chunk", "chunkId": "chunk-1"}))
+    guard = CitationGuard(
+        registry,
+        message_id="msg-1",
+        user_prompt="请给出引用",
+        policy_available=True,
+        verification_enabled=False,
+    )
+    first = guard.finalize(
+        "Revenue increased by 12% [source](evidence://ev_revenue_2025)."
+    )
+    assert "citation://" in first.text
+
+    preserved = guard.finalize(
+        first.text,
+        preserve_registered_citation_ids=True,
+    )
+    rejected_as_model_authored = guard.finalize(first.text)
+
+    assert preserved.text == first.text
+    assert preserved.bundle is not None
+    assert len(preserved.bundle["citations"]) == 1
+    assert "citation://" not in rejected_as_model_authored.text
+
+
+def test_guard_strips_truncated_protocol_prefix_without_dropping_limitation_text() -> None:
+    registry = _registry(_item(locator={"kind": "chunk", "chunkId": "chunk-1"}))
+    guard = CitationGuard(
+        registry,
+        message_id="msg-1",
+        user_prompt="请给出引用",
+        policy_available=True,
+    )
+
+    result = guard.finalize(
+        "收入为 100。[source](evidence:原文未披露其他数字 "
+        "[source](evidence://ev_revenue_2025)。"
+    )
+
+    assert "evidence:" not in result.text
+    assert "source" not in result.text
+    assert "原文未披露其他数字" in result.text
+    assert "citation://" in result.text
+    assert result.bundle is not None
+    assert result.bundle["integrity"]["status"] == "degraded"
+    assert result.bundle["integrity"]["malformedProtocolBindingCount"] == 1
+
+
+def test_guard_drops_contradictory_generic_limitation_from_cited_value_cell() -> None:
+    registry = _registry(_item(locator={"kind": "chunk", "chunkId": "chunk-1"}))
+    guard = CitationGuard(
+        registry,
+        message_id="msg-1",
+        user_prompt="只输出 Markdown 表格并引用",
+        policy_available=True,
+    )
+
+    result = guard.finalize(
+        "| 公司 | 营业收入 |\n"
+        "|---|---:|\n"
+        "| SK海力士 | 79.3187万亿韩元 [source](evidence:原文未披露具体数字 "
+        "[source](evidence://ev_revenue_2025) |"
+    )
+
+    assert "79.3187万亿韩元" in result.text
+    assert "原文未披露具体数字" not in result.text
+    assert "evidence:" not in result.text
+    assert "citation://" in result.text
+
+
 def test_guard_preserves_its_registered_citation_ids_during_hidden_repair() -> None:
     registry = _registry(_item(locator={"kind": "chunk", "chunkId": "chunk-1"}))
     guard = CitationGuard(
@@ -1125,6 +1271,25 @@ def test_guard_moves_citation_out_of_a_split_grouped_number() -> None:
     assert result.text.index("citation://") > result.text.index("170,899,152,276.34")
 
 
+def test_guard_moves_citation_out_of_a_split_decimal_fraction() -> None:
+    registry = _registry(_item(locator={"kind": "chunk", "chunkId": "chunk-1"}))
+    guard = CitationGuard(
+        registry,
+        message_id="msg-1",
+        user_prompt="请引用年报原文",
+        policy_available=True,
+    )
+
+    result = guard.finalize(
+        "营业收入为 170,899,152,276. "
+        "[source](evidence://ev_revenue_2025)34 元。"
+    )
+
+    assert "170,899,152,276.34 元" in result.text
+    assert "276. " not in result.text
+    assert result.text.index("citation://") > result.text.index("170,899,152,276.34")
+
+
 def test_guard_removes_protocol_source_placeholders_from_markdown_table_cells() -> None:
     registry = _registry(_item(locator={"kind": "chunk", "chunkId": "chunk-1"}))
     guard = CitationGuard(
@@ -1144,6 +1309,29 @@ def test_guard_removes_protocol_source_placeholders_from_markdown_table_cells() 
     assert "citation://cit_" in result.text
     assert ") source |" not in result.text
     assert "The primary source is the annual report." in result.text
+
+
+def test_guard_moves_citation_after_table_boundary_into_last_cell() -> None:
+    registry = _registry(_item(locator={"kind": "chunk", "chunkId": "chunk-1"}))
+    guard = CitationGuard(
+        registry,
+        message_id="msg-1",
+        user_prompt="请用表格列出数据和计算公式",
+        policy_available=True,
+    )
+
+    result = guard.finalize(
+        "| 项目 | 数值 | 计算公式 |\n"
+        "| --- | ---: | --- |\n"
+        "| 营业收入 | 100亿元 | 100 ÷ 100 |"
+        "[1](evidence://ev_revenue_2025)"
+    )
+
+    data_row = result.text.splitlines()[2]
+    assert data_row.endswith(" |")
+    assert data_row.count("|") == 4
+    assert "|[" not in data_row
+    assert "citation://cit_" in data_row
 
 
 def test_guard_focuses_long_text_preview_on_the_cited_table_row() -> None:

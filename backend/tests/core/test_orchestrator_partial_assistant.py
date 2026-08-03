@@ -13,7 +13,9 @@ from src.adapters.persist_then_broadcast_sink import PersistThenBroadcastSink
 from src.core.events import Event
 from src.core.orchestrator import (
     _MessageObserverSink,
+    _attach_markdown_footnote_citations,
     _attach_standalone_citation_lines,
+    _normalize_inline_citation_boundaries,
     _sanitize_citation_repair_prose,
     _strip_empty_markdown_labels,
     _strip_empty_markdown_tables,
@@ -21,11 +23,13 @@ from src.core.orchestrator import (
     _strip_unrequested_cross_period_recap,
     _strip_unrequested_period_leadin,
     _strip_leading_assistant_progress,
+    _strip_requested_primary_markdown_table,
     _strip_strict_scope_leadin,
     _strip_strict_table_trailing_blocks,
     _strip_unrequested_source_excerpt,
     _strip_unrequested_retrieval_internals,
 )
+from src.core.task_coverage import parse_task_contract
 
 
 def test_strict_table_answer_drops_unrequested_formula_recap() -> None:
@@ -46,6 +50,79 @@ def test_strict_table_answer_drops_unrequested_formula_recap() -> None:
     assert result == "\n".join(text.splitlines()[:5])
 
 
+def test_strict_single_table_keeps_most_complete_duplicate() -> None:
+    text = """| 公司 | 营业收入 | 净利润 |
+|---|---:|---:|
+| 甲公司 | 100 | 20 |
+| 乙公司 | 90 | 18 |
+
+| 公司 | 营业收入 | 净利润 |
+|---|---:|---:|
+| 甲公司 | 100 | 20 |
+| 乙公司 | 90 |
+"""
+
+    result = _strip_strict_scope_leadin(
+        text,
+        "严格只输出一个 Markdown 表格。",
+    )
+
+    assert result.count("| 公司 | 营业收入 | 净利润 |") == 1
+    assert "| 乙公司 | 90 | 18 |" in result
+    assert "| 乙公司 | 90 |\n" not in result
+
+
+def test_strict_exact_items_drop_cited_verification_preamble() -> None:
+    text = """两项数据均已从2025年度财报原文核实 [1](citation://intro)。
+
+---
+
+**海吉亚医疗（2025年度财报）**
+报告期：截至2025年12月31日止年度
+
+| 指标 | 金额（人民币千元） |
+|---|---:|
+| 扣非净利润 | 当前资料未披露 |
+| 商誉 | 3,441,128 [2](citation://goodwill) |
+"""
+
+    result = _strip_strict_scope_leadin(
+        text,
+        "只列出扣非净利润和商誉两个数字，注明报告期和单位。",
+    )
+
+    assert "两项数据均已" not in result
+    assert result.startswith("**海吉亚医疗（2025年度财报）**")
+    assert "报告期：截至2025年12月31日止年度" in result
+    assert "| 商誉 | 3,441,128 [2](citation://goodwill) |" in result
+
+
+def test_strict_exact_items_keep_canonical_table_not_duplicate_cited_bullets() -> None:
+    text = """- **非IFRS经调整净利润**：455,480千元 [1](citation://adjusted)
+- **商誉账面值**：3,441,128千元 [2](citation://goodwill)
+
+---
+
+**海吉亚医疗（06078.HK）2025年度**（报告期：截至2025年12月31日）
+
+| 指标 | 金额（人民币） |
+|---|---:|
+| 扣非净利润 | 当前资料未披露 |
+| 商誉账面值 | 3,441,128千元 [2](citation://goodwill) |
+"""
+
+    result = _strip_strict_scope_leadin(
+        text,
+        "只列出扣非净利润和商誉金额两个数字，注明报告期和单位。",
+    )
+
+    assert "非IFRS经调整净利润" not in result
+    assert not result.startswith("-")
+    assert result.startswith("**海吉亚医疗（06078.HK）2025年度**")
+    assert result.count("| 扣非净利润 |") == 1
+    assert result.count("| 商誉账面值 |") == 1
+
+
 def test_blockquote_citation_only_line_attaches_to_the_quoted_claim() -> None:
     text = (
         "> \"Demand continues to increase.\"\n"
@@ -61,6 +138,44 @@ def test_blockquote_citation_only_line_attaches_to_the_quoted_claim() -> None:
         "> [source](evidence://ev_decorative_12345678)"
     )
 
+
+def test_plain_citation_only_line_after_blockquote_is_folded_without_duplication() -> None:
+    text = (
+        "> 天健会计师事务所出具了标准无保留意见 "
+        "[2](citation://cit_audit)；\n\n"
+        "[2](citation://cit_audit)"
+    )
+
+    assert _attach_standalone_citation_lines(text) == (
+        "> 天健会计师事务所出具了标准无保留意见 "
+        "[2](citation://cit_audit)；"
+    )
+
+
+def test_inline_citations_move_after_complete_number_and_currency_unit() -> None:
+    text = (
+        "营业总收入为174,144,069,958 [1](citation://cit_total).25元，"
+        "约1,741.44亿 [2](citation://cit_total_billion)元；"
+        "营业收入为170,899,152,276 [3](evidence://ev_revenue).34元。"
+    )
+
+    assert _normalize_inline_citation_boundaries(text) == (
+        "营业总收入为174,144,069,958.25元 [1](citation://cit_total)，"
+        "约1,741.44亿元 [2](citation://cit_total_billion)；"
+        "营业收入为170,899,152,276.34元 [3](evidence://ev_revenue)。"
+    )
+
+
+def test_inline_citation_does_not_split_final_group_of_comma_number() -> None:
+    text = (
+        "> 其中：营业收入　170,899,152,27 "
+        "[3](citation://cit_revenue)6.34"
+    )
+
+    assert _normalize_inline_citation_boundaries(text) == (
+        "> 其中：营业收入　170,899,152,276.34 "
+        "[3](citation://cit_revenue)"
+    )
 
 def test_cited_introduction_attaches_source_to_following_blockquote() -> None:
     text = (
@@ -342,6 +457,39 @@ def test_final_answer_strips_collected_data_progress_leadin() -> None:
     )
 
     assert _strip_leading_assistant_progress(text).startswith("## 存储产品与涨价幅度")
+
+
+def test_final_answer_strips_completed_source_collection_transition() -> None:
+    text = (
+        "所有数据均已从年度报告原文取得，现在输出结果。\n\n"
+        "| 公司 | 营业收入 |\n|---|---:|\n| 示例公司 | 100 |"
+    )
+
+    assert _strip_leading_assistant_progress(text).startswith("| 公司 | 营业收入 |")
+
+
+def test_primary_markdown_table_keeps_footnote_evidence_in_owning_cells() -> None:
+    text = (
+        "已有足够原文证据，可以输出结果。\n\n"
+        "- 示例公司利润为20。 [利润](evidence://ev_profit_12345678)\n\n"
+        "| 公司 | 收入 | 利润 |\n"
+        "|---|---:|---:|\n"
+        "| 示例公司 | 100[^1] | 20[^2] |\n\n"
+        "[^1]: 年报收入 [收入](evidence://ev_revenue_12345678)\n"
+        "[^2]: 年报利润 [利润](evidence://ev_profit_12345678)"
+    )
+
+    attached = _attach_markdown_footnote_citations(text)
+    result = _strip_requested_primary_markdown_table(
+        attached,
+        "比较示例公司，用 Markdown 表格，每家公司一行。",
+    )
+
+    assert result.startswith("| 公司 | 收入 | 利润 |")
+    assert "[^" not in result
+    assert "evidence://ev_revenue_12345678" in result
+    assert "evidence://ev_profit_12345678" in result
+    assert "已有足够原文证据" not in result
 
 
 def test_final_answer_strips_english_ready_to_compile_progress() -> None:
@@ -761,6 +909,23 @@ def test_strict_list_request_drops_claimed_verification_leadin() -> None:
     ).startswith("**按产品划分**")
 
 
+def test_strict_list_request_drops_source_verified_exact_item_leadin() -> None:
+    text = (
+        "两个数据均在年度财报原文中直接核实。\n\n"
+        "**报告期：2025 财年｜单位：人民币千元**\n\n"
+        "- **扣非净利润**：当前资料未披露\n"
+        "- **商誉账面净值**：3,441,128 千元 [1](evidence://ev_goodwill_12345678)"
+    )
+
+    result = _strip_strict_scope_leadin(
+        text,
+        "只列出扣非净利润和商誉金额两个数字，并注明报告期和单位。",
+    )
+
+    assert result.startswith("**报告期：2025 财年")
+    assert "两个数据均在" not in result
+
+
 def test_citation_request_keeps_concise_restatement_instead_of_duplicate_excerpt() -> None:
     text = (
         "据年度报告披露 [1](evidence://ev_intro_12345678)：\n\n"
@@ -787,6 +952,30 @@ def test_explicit_verbatim_request_preserves_source_excerpt() -> None:
         _strip_unrequested_source_excerpt(
             text,
             "请逐字引用并给出年度报告原文段落。",
+        )
+        == text
+    )
+
+
+def test_per_item_original_text_request_preserves_all_cited_sections() -> None:
+    text = (
+        "以下均引自贵州茅台2024年年度报告原文：\n\n"
+        "---\n\n**一、审计意见**\n\n"
+        "> 标准无保留意见 [1](evidence://ev_audit_12345678)\n\n"
+        "---\n\n**二、营业总收入**\n\n"
+        "> 营业总收入 174,144,069,958.25 元 "
+        "[2](evidence://ev_total_12345678)\n\n"
+        "即约 1,741.44 亿元 [2](evidence://ev_total_12345678)。\n\n"
+        "---\n\n**三、营业收入**\n\n"
+        "> 营业收入 170,899,152,276.34 元 "
+        "[3](evidence://ev_revenue_12345678)"
+    )
+
+    assert (
+        _strip_unrequested_source_excerpt(
+            text,
+            "请根据贵州茅台2024年年度报告，分别列出审计意见、营业总收入和营业收入，"
+            "并逐项引用对应的年度报告原文。",
         )
         == text
     )
@@ -921,6 +1110,28 @@ def test_progress_strip_removes_innocent_preamble_around_internal_handle_list() 
     )
 
 
+def test_progress_strip_preserves_period_structure_before_first_citation() -> None:
+    text = (
+        "已有四个季度的原文 chunks 及 evidenceHandle。以下是完整对比。\n\n"
+        "---\n\n"
+        "## 四季度对比\n\n"
+        "### FY2026 Q1\n\n"
+        "**AI 算力需求**\n\n"
+        "需求保持强劲 [1](evidence://ev_q1_12345678)。\n\n"
+        "### FY2026 Q2\n\n"
+        "**AI 算力需求**\n\n"
+        "需求继续增长 [2](evidence://ev_q2_12345678)。"
+    )
+    prompt = "请按季度分节覆盖最近四个季度。"
+
+    stripped = _strip_leading_assistant_progress(text)
+    normalized = _strip_unrequested_period_leadin(stripped, prompt)
+
+    assert normalized.startswith("### FY2026 Q1")
+    assert "### FY2026 Q2" in normalized
+    assert "已有四个季度" not in normalized
+
+
 def _observer() -> tuple[_FakeStore, _RecordingSink, _MessageObserverSink]:
     store = _FakeStore()
     live = _RecordingSink()
@@ -979,6 +1190,39 @@ def _observer_with_strict_policy() -> tuple[_FakeStore, _RecordingSink, _Message
     return store, live, observer
 
 
+def _task_coverage_policy() -> dict:
+    return {
+        "revision": "task-test-v1",
+        "mode": "required-on-evidence",
+        "config": {
+            "semantics": {
+                "metric_ontology": {
+                    "metrics": {
+                        "operating_revenue": {"aliases": ["营业收入"]},
+                        "operating_cash_flow": {"aliases": ["经营现金流"]},
+                    }
+                }
+            },
+            "task_coverage": {
+                "retrieval": {
+                    "content_mappings": [
+                        {
+                            "id": "discovery",
+                            "role": "candidate",
+                            "tool_patterns": ["*earnings_search"],
+                        },
+                        {
+                            "id": "content",
+                            "role": "content",
+                            "tool_patterns": ["*kb_search"],
+                        },
+                    ]
+                }
+            },
+        },
+    }
+
+
 def _claim_patch_json(
     observer: _MessageObserverSink,
     *,
@@ -1000,6 +1244,524 @@ def _claim_patch_json(
             ],
         },
         ensure_ascii=False,
+    )
+
+
+async def test_task_coverage_withholds_partial_matrix_and_accepts_improved_revision() -> None:
+    store = _FakeStore()
+    live = _RecordingSink()
+    db = DatabaseEventSink(store, "owner-1", "sess-1", "msg-1")
+    coalesced = DeltaCoalescingSink(PersistThenBroadcastSink(db, live))
+    prompt = (
+        "对比甲公司和乙公司最近一期已发布财报的营业收入和经营现金流，"
+        "只输出 Markdown 表格。"
+    )
+    policy = _task_coverage_policy()
+    contract = parse_task_contract(prompt, policy_snapshot=policy)
+    observer = _MessageObserverSink(
+        coalesced,
+        message_id="msg-1",
+        user_prompt=prompt,
+        citation_quality_policy=policy,
+        citation_enabled=False,
+        task_contract=contract,
+        task_coverage_enabled=True,
+    )
+
+    await observer.emit(
+        Event(
+            type="tool_use",
+            data={"id": "search-1", "name": "earnings_search", "input": {"q": "甲乙"}},
+        )
+    )
+    await observer.emit(
+        Event(
+            type="tool_result",
+            data={
+                "id": "search-1",
+                "content": "甲公司财报；乙公司财报",
+            },
+        )
+    )
+    await observer.emit(
+        Event(
+            type="tool_use",
+            data={
+                "id": "content-a",
+                "name": "kb_search",
+                "input": {"doc": "甲公司", "q": "营业收入 经营现金流"},
+            },
+        )
+    )
+    await observer.emit(
+        Event(
+            type="tool_result",
+            data={"id": "content-a", "content": "甲公司营业收入100，经营现金流20"},
+        )
+    )
+    await observer.emit(
+        Event(
+            type="assistant_message",
+            data={
+                "text": (
+                    "| 公司 | 报告期 | 营业收入 | 经营现金流 |\n"
+                    "|---|---|---:|---:|\n"
+                    "| 甲公司 | 2025 Q1 | 100 | 20 |\n"
+                    "| 乙公司 | 2025 Q1 | 90 | — |"
+                )
+            },
+        )
+    )
+    await observer.emit(
+        Event(type="session_idle", data={"num_turns": 1, "stop_reason": {"type": "end_turn"}})
+    )
+
+    assert observer.task_coverage_revision_requested is True
+    assert "乙公司 / latest-published / operating_cash_flow" in (
+        observer.task_coverage_revision_prompt
+    )
+    revision_context = json.loads(
+        observer.task_coverage_revision_prompt.split(
+            "Restricted task-coverage context (JSON):\n", 1
+        )[1]
+    )
+    assert revision_context["candidateEvidence"] == []
+    assert observer.assistant_text is None
+
+    observer.begin_task_coverage_revision()
+    await observer.emit(
+        Event(
+            type="tool_use",
+            data={
+                "id": "content-b",
+                "name": "kb_search",
+                "input": {"doc": "乙公司", "q": "营业收入 经营现金流"},
+            },
+        )
+    )
+    await observer.emit(
+        Event(
+            type="tool_result",
+            data={"id": "content-b", "content": "乙公司营业收入90，经营现金流10"},
+        )
+    )
+    await observer.emit(
+        Event(
+            type="assistant_message",
+            data={
+                "text": (
+                    "| 公司 | 报告期 | 营业收入 | 经营现金流 |\n"
+                    "|---|---|---:|---:|\n"
+                    "| 甲公司 | 2025 Q1 | 100 | 20 |\n"
+                    "| 乙公司 | 2025 Q1 | 90 | 10 |"
+                )
+            },
+        )
+    )
+    await observer.emit(
+        Event(type="session_idle", data={"num_turns": 1, "stop_reason": {"type": "end_turn"}})
+    )
+
+    assert observer.assistant_text is not None
+    assert "| 乙公司 | 2025 Q1 | 90 | 10 |" in observer.assistant_text
+    assert observer.task_coverage is not None
+    assert observer.task_coverage["status"] == "complete"
+    assert observer.task_coverage["revisionOutcome"] == "accepted"
+
+
+async def test_task_coverage_revision_carries_compact_evidence_into_fresh_runtime() -> None:
+    store = _FakeStore()
+    live = _RecordingSink()
+    db = DatabaseEventSink(store, "owner-1", "sess-1", "msg-1")
+    coalesced = DeltaCoalescingSink(PersistThenBroadcastSink(db, live))
+    prompt = "只用 Markdown 表格列出甲公司 2025 年营业收入。"
+    policy = _task_coverage_policy()
+    contract = parse_task_contract(prompt, policy_snapshot=policy)
+    observer = _MessageObserverSink(
+        coalesced,
+        message_id="msg-1",
+        user_prompt=prompt,
+        citation_quality_policy=policy,
+        citation_enabled=True,
+        task_contract=contract,
+        task_coverage_enabled=True,
+    )
+    handle = "ev_company_revenue_1234567890abcdef12345678"
+    tool_result = {
+        "result": "甲公司 2025 年营业收入为 100 亿元。",
+        "_valuz_evidence": {
+            "evidenceHandle": handle,
+            "source": {
+                "sourceId": "company-a-2025",
+                "providerId": "finance-api",
+                "sourceType": "dataset",
+                "title": "甲公司 2025 年财务数据",
+                "retrievedAt": "2026-08-03T00:00:00Z",
+            },
+            "evidence": {
+                "kind": "structured-data",
+                "datasetId": "income-statement",
+                "toolName": "income_statement",
+                "recordKey": "/2025/revenue",
+                "entityId": "甲公司",
+                "field": "revenue",
+                "metric": "operating_revenue",
+                "value": 100,
+                "unit": "亿元",
+                "period": "2025 FY",
+                "capturedAt": "2026-08-03T00:00:00Z",
+            },
+        },
+    }
+
+    await observer.emit(
+        Event(type="tool_use", data={"id": "content-a", "name": "kb_search"})
+    )
+    await observer.emit(
+        Event(
+            type="tool_result",
+            data={"id": "content-a", "content": json.dumps(tool_result, ensure_ascii=False)},
+        )
+    )
+    await observer.emit(
+        Event(
+            type="assistant_message",
+            data={
+                "text": (
+                    "| 公司 | 报告期 | 营业收入 |\n"
+                    "|---|---|---:|\n"
+                    "| 甲公司 | 2025年 | — |"
+                )
+            },
+        )
+    )
+    await observer.emit(
+        Event(type="session_idle", data={"num_turns": 1, "stop_reason": {"type": "end_turn"}})
+    )
+
+    assert observer.task_coverage_revision_requested is True
+    revision_context = json.loads(
+        observer.task_coverage_revision_prompt.split(
+            "Restricted task-coverage context (JSON):\n", 1
+        )[1]
+    )
+    assert revision_context["answerPatchOnly"]
+    assert revision_context["responseProtocol"] == "task-coverage-patch-v1"
+    assert observer.task_coverage_revision_uses_local_patch is True
+    assert [item["evidenceHandle"] for item in revision_context["candidateEvidence"]] == [
+        handle
+    ]
+    assert revision_context["candidateEvidence"][0]["value"] == 100
+
+
+async def test_task_coverage_local_patch_preserves_draft_and_adds_validated_citation() -> None:
+    store = _FakeStore()
+    live = _RecordingSink()
+    db = DatabaseEventSink(store, "owner-1", "sess-1", "msg-1")
+    coalesced = DeltaCoalescingSink(PersistThenBroadcastSink(db, live))
+    prompt = "只用 Markdown 表格列出甲公司 2025 年营业收入。"
+    policy = _task_coverage_policy()
+    contract = parse_task_contract(prompt, policy_snapshot=policy)
+    observer = _MessageObserverSink(
+        coalesced,
+        message_id="msg-1",
+        user_prompt=prompt,
+        citation_quality_policy=policy,
+        citation_enabled=True,
+        task_contract=contract,
+        task_coverage_enabled=True,
+    )
+    handle = "ev_company_revenue_local_patch_12345678"
+    tool_result = {
+        "result": "甲公司 2025 年营业收入为 100 亿元。",
+        "_valuz_evidence": {
+            "evidenceHandle": handle,
+            "source": {
+                "sourceId": "company-a-2025",
+                "providerId": "finance-api",
+                "sourceType": "dataset",
+                "title": "甲公司 2025 年财务数据",
+                "retrievedAt": "2026-08-03T00:00:00Z",
+            },
+            "evidence": {
+                "kind": "structured-data",
+                "datasetId": "income-statement",
+                "toolName": "income_statement",
+                "recordKey": "/2025/revenue",
+                "entityId": "甲公司",
+                "field": "revenue",
+                "metric": "operating_revenue",
+                "value": 100,
+                "unit": "亿元",
+                "period": "2025 FY",
+                "capturedAt": "2026-08-03T00:00:00Z",
+            },
+        },
+    }
+    await observer.emit(Event(type="tool_use", data={"id": "content-a", "name": "kb_search"}))
+    await observer.emit(
+        Event(
+            type="tool_result",
+            data={"id": "content-a", "content": json.dumps(tool_result, ensure_ascii=False)},
+        )
+    )
+    baseline = (
+        "| 公司 | 报告期 | 营业收入 |\n"
+        "|---|---|---:|\n"
+        "| 甲公司 | 2025年 | — |"
+    )
+    await observer.emit(Event(type="assistant_message", data={"text": baseline}))
+    await observer.emit(
+        Event(type="session_idle", data={"num_turns": 1, "stop_reason": {"type": "end_turn"}})
+    )
+    context = json.loads(
+        observer.task_coverage_revision_prompt.split(
+            "Restricted task-coverage context (JSON):\n", 1
+        )[1]
+    )
+    requirement_id = context["answerPatchOnly"][0]
+
+    observer.begin_task_coverage_revision()
+    await observer.emit(
+        Event(
+            type="assistant_message",
+            data={
+                "text": json.dumps(
+                    {
+                        "version": "task-coverage-patch-v1",
+                        "patches": [
+                            {
+                                "requirementId": requirement_id,
+                                "replacementText": "100亿元",
+                                "evidenceHandles": [handle],
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+            },
+        )
+    )
+    await observer.emit(
+        Event(type="session_idle", data={"num_turns": 1, "stop_reason": {"type": "end_turn"}})
+    )
+
+    assert observer.assistant_text is not None
+    assert baseline.splitlines()[0] in observer.assistant_text
+    assert "100亿元 [1](citation://" in observer.assistant_text
+    assert observer.citation_bundle is not None
+    assert len(observer.citation_bundle["citations"]) == 1
+    assert observer.task_coverage is not None
+    assert observer.task_coverage["status"] == "complete"
+    assert observer.task_coverage["revisionOutcome"] == "accepted"
+    assert observer.task_coverage["deterministicPatch"]["strategy"] == (
+        "verified-evidence-answer-cell"
+    )
+
+
+async def test_task_coverage_patches_explicit_unavailable_table_cell_without_revision() -> None:
+    store = _FakeStore()
+    live = _RecordingSink()
+    db = DatabaseEventSink(store, "owner-1", "sess-1", "msg-1")
+    coalesced = DeltaCoalescingSink(PersistThenBroadcastSink(db, live))
+    prompt = (
+        "对比甲公司和乙公司最近一期已发布财报的营业收入和经营现金流，"
+        "只输出 Markdown 表格。"
+    )
+    policy = _task_coverage_policy()
+    contract = parse_task_contract(prompt, policy_snapshot=policy)
+    observer = _MessageObserverSink(
+        coalesced,
+        message_id="msg-1",
+        user_prompt=prompt,
+        citation_quality_policy=policy,
+        citation_enabled=False,
+        task_contract=contract,
+        task_coverage_enabled=True,
+    )
+
+    for tool_id, company, content in (
+        ("content-a", "甲公司", "甲公司营业收入100，经营现金流20"),
+        ("content-b", "乙公司", "乙公司营业收入90，当前资料未披露经营现金流"),
+    ):
+        await observer.emit(
+            Event(
+                type="tool_use",
+                data={
+                    "id": tool_id,
+                    "name": "kb_search",
+                    "input": {"doc": company, "q": "营业收入 经营现金流"},
+                },
+            )
+        )
+        await observer.emit(
+            Event(type="tool_result", data={"id": tool_id, "content": content})
+        )
+    await observer.emit(
+        Event(
+            type="assistant_message",
+            data={
+                "text": (
+                    "| 公司 | 报告期 | 营业收入 | 经营现金流 |\n"
+                    "|---|---|---:|---:|\n"
+                    "| 甲公司 | 2025 Q1 | 100 | 20 |\n"
+                    "| 乙公司 | 2025 Q1 | 90 |"
+                )
+            },
+        )
+    )
+    await observer.emit(
+        Event(type="session_idle", data={"num_turns": 1, "stop_reason": {"type": "end_turn"}})
+    )
+
+    assert observer.task_coverage_revision_requested is False
+    assert observer.assistant_text is not None
+    assert "| 乙公司 | 2025 Q1 | 90 | 当前资料未披露 |" in observer.assistant_text
+    assert observer.task_coverage is not None
+    assert observer.task_coverage["deterministicPatch"]["strategy"] == (
+        "explicit-unavailable-exact-item"
+    )
+
+
+async def test_task_coverage_reorders_exact_dimension_table_without_revision() -> None:
+    store = _FakeStore()
+    live = _RecordingSink()
+    db = DatabaseEventSink(store, "owner-1", "sess-1", "msg-1")
+    coalesced = DeltaCoalescingSink(PersistThenBroadcastSink(db, live))
+    prompt = (
+        "只列出甲公司2024年直销和批发代理两个渠道的营业收入。"
+        "严格只输出一个 Markdown 表格，恰好2行数据和2列：渠道、营业收入。"
+    )
+    policy = _task_coverage_policy()
+    policy["config"]["task_coverage"]["contract"] = {
+        "dimension_ontology": {
+            "dimensions": {
+                "sales_channel": {
+                    "aliases": ["渠道", "销售渠道"],
+                    "members": {
+                        "direct": {"aliases": ["直销"]},
+                        "wholesale_agency": {"aliases": ["批发代理", "批发"]},
+                    },
+                }
+            }
+        }
+    }
+    contract = parse_task_contract(prompt, policy_snapshot=policy)
+    observer = _MessageObserverSink(
+        coalesced,
+        message_id="msg-1",
+        user_prompt=prompt,
+        citation_quality_policy=policy,
+        citation_enabled=False,
+        task_contract=contract,
+        task_coverage_enabled=True,
+    )
+
+    await observer.emit(
+        Event(
+            type="tool_use",
+            data={
+                "id": "content-a",
+                "name": "kb_search",
+                "input": {"company": "甲公司", "year": 2024, "query": "渠道 营业收入"},
+            },
+        )
+    )
+    await observer.emit(
+        Event(
+            type="tool_result",
+            data={
+                "id": "content-a",
+                "content": "甲公司2024年渠道营业收入：直销75亿元；批发代理96亿元。",
+            },
+        )
+    )
+    await observer.emit(
+        Event(
+            type="assistant_message",
+            data={
+                "text": (
+                    "| 渠道 | 营业收入 |\n"
+                    "|---|---:|\n"
+                    "| 批发代理 | 96亿元 |\n"
+                    "| 直销 | 75亿元 |"
+                )
+            },
+        )
+    )
+    await observer.emit(
+        Event(type="session_idle", data={"num_turns": 1, "stop_reason": {"type": "end_turn"}})
+    )
+
+    assert observer.task_coverage_revision_requested is False
+    assert observer.assistant_text is not None
+    assert observer.assistant_text.index("| 直销 |") < observer.assistant_text.index(
+        "| 批发代理 |"
+    )
+    assert observer.task_coverage is not None
+    assert observer.task_coverage["status"] == "complete"
+    assert observer.task_coverage["deterministicPatch"]["strategy"] == (
+        "requested-table-row-order"
+    )
+
+
+async def test_task_coverage_restores_explicit_period_without_model_revision() -> None:
+    store = _FakeStore()
+    live = _RecordingSink()
+    db = DatabaseEventSink(store, "owner-1", "sess-1", "msg-1")
+    coalesced = DeltaCoalescingSink(PersistThenBroadcastSink(db, live))
+    prompt = (
+        "只列出甲公司2025年营业收入和经营现金流两个数字，"
+        "并注明报告期和单位。"
+    )
+    policy = _task_coverage_policy()
+    contract = parse_task_contract(prompt, policy_snapshot=policy)
+    observer = _MessageObserverSink(
+        coalesced,
+        message_id="msg-1",
+        user_prompt=prompt,
+        citation_quality_policy=policy,
+        citation_enabled=False,
+        task_contract=contract,
+        task_coverage_enabled=True,
+    )
+
+    await observer.emit(
+        Event(
+            type="tool_use",
+            data={
+                "id": "content-a",
+                "name": "kb_search",
+                "input": {"company": "甲公司", "year": 2025},
+            },
+        )
+    )
+    await observer.emit(
+        Event(
+            type="tool_result",
+            data={
+                "id": "content-a",
+                "content": "甲公司2025年营业收入100亿元，经营现金流20亿元。",
+            },
+        )
+    )
+    await observer.emit(
+        Event(
+            type="assistant_message",
+            data={"text": "- 营业收入：100亿元\n- 经营现金流：20亿元"},
+        )
+    )
+    await observer.emit(
+        Event(type="session_idle", data={"num_turns": 1, "stop_reason": {"type": "end_turn"}})
+    )
+
+    assert observer.task_coverage_revision_requested is False
+    assert observer.assistant_text is not None
+    assert observer.assistant_text.startswith("**报告期：2025 财年**")
+    assert observer.task_coverage is not None
+    assert observer.task_coverage["status"] == "complete"
+    assert observer.task_coverage["deterministicPatch"]["strategy"] == (
+        "requested-output-metadata"
     )
 
 
@@ -1030,6 +1792,48 @@ async def test_interrupted_turn_persists_partial_assistant_text_before_idle() ->
     assert "seq" not in live.events[0].data
     assert live.events[1].data["seq"] == 101
     assert live.events[2].data["seq"] == 102
+
+
+async def test_empty_end_turn_requests_one_final_answer_recovery() -> None:
+    store, _live, observer = _observer()
+
+    await observer.emit(Event(type="assistant_message", data={"text": ""}))
+    await observer.emit(
+        Event(
+            type="session_idle",
+            data={"stop_reason": {"type": "end_turn"}, "num_turns": 1},
+        )
+    )
+
+    assert observer.final_answer_recovery_requested is True
+    assert observer.assistant_text is None
+    assert all(event.type != "session_idle" for event in store.appended)
+    assert "Do not call any more tools" in observer.final_answer_recovery_prompt
+
+
+async def test_second_empty_end_turn_publishes_nontechnical_fallback() -> None:
+    store, _live, observer = _observer()
+
+    await observer.emit(Event(type="assistant_message", data={"text": ""}))
+    await observer.emit(
+        Event(
+            type="session_idle",
+            data={"stop_reason": {"type": "end_turn"}, "num_turns": 1},
+        )
+    )
+    observer.begin_final_answer_recovery()
+    await observer.emit(Event(type="assistant_message", data={"text": ""}))
+    await observer.emit(
+        Event(
+            type="session_idle",
+            data={"stop_reason": {"type": "end_turn"}, "num_turns": 1},
+        )
+    )
+
+    assistants = [event for event in store.appended if event.type == "assistant_message"]
+    assert len(assistants) == 1
+    assert "未能生成完整回答" in assistants[0].data["text"]
+    assert [event.type for event in store.appended][-1] == "session_idle"
 
 
 async def test_final_assistant_message_wins_over_streamed_delta() -> None:
@@ -1100,6 +1904,58 @@ async def test_citation_turn_preserves_complete_stream_when_canonical_is_only_ep
     assert "FY2026 Q4" in assistant.data["text"]
     assert "citation://cit_" in assistant.data["text"]
     assert len(assistant.data["text"]) > len(epilogue) * 2
+
+
+async def test_bookkeeping_tool_after_complete_cited_answer_does_not_discard_it() -> None:
+    store, _live, observer = _observer_with_citations()
+    evidence = {
+        "_valuz_evidence": {
+            "evidenceHandle": "ev_q1_12345678",
+            "source": {
+                "sourceId": "transcript-q1",
+                "providerId": "reportify",
+                "documentId": "transcript-q1",
+                "sourceType": "document",
+                "title": "FY2026 Q1 earnings call",
+                "retrievedAt": "2026-08-01T10:00:00Z",
+            },
+            "evidence": {
+                "kind": "text",
+                "quote": "Demand remained strong.",
+                "snippet": "Demand remained strong.",
+                "capturedAt": "2026-08-01T10:00:00Z",
+            },
+            "locator": {"kind": "chunk", "chunkId": "chunk-q1"},
+        }
+    }
+    await observer.emit(Event(type="tool_use", data={"id": "search-1", "name": "search"}))
+    await observer.emit(
+        Event(type="tool_result", data={"id": "search-1", "content": json.dumps(evidence)})
+    )
+    full_answer = (
+        "## FY2026 Q1\n\n"
+        "Demand remained strong [1](evidence://ev_q1_12345678)。\n\n"
+        + "季度范围与来源保持一致。" * 30
+    )
+    await observer.emit(
+        Event(type="assistant_message", data={"text": full_answer})
+    )
+    await observer.emit(
+        Event(type="tool_use", data={"id": "todo-1", "name": "write_todos"})
+    )
+    await observer.emit(
+        Event(type="tool_result", data={"id": "todo-1", "content": "updated"})
+    )
+    await observer.emit(
+        Event(type="assistant_message", data={"text": "以上为完整对比。"})
+    )
+    await observer.emit(Event(type="session_idle", data={"num_turns": 1}))
+
+    assistants = [event for event in store.appended if event.type == "assistant_message"]
+    assert len(assistants) == 1
+    assert "FY2026 Q1" in assistants[0].data["text"]
+    assert "citation://cit_" in assistants[0].data["text"]
+    assert "以上为完整对比" not in assistants[0].data["text"]
 
 
 async def test_internal_compaction_handoff_is_not_persisted_or_broadcast() -> None:
@@ -1355,6 +2211,96 @@ async def test_private_citation_content_is_registered_but_not_forwarded() -> Non
     assistant = next(event for event in store.appended if event.type == "assistant_message")
     assert "citation://cit_" in assistant.data["text"]
     assert len(assistant.data["citation_bundle"]["citations"]) == 1
+
+
+async def test_task_coverage_uses_private_full_result_for_candidate_scope() -> None:
+    store = _FakeStore()
+    live = _RecordingSink()
+    db = DatabaseEventSink(store, "owner-1", "sess-1", "msg-1")
+    coalesced = DeltaCoalescingSink(PersistThenBroadcastSink(db, live))
+    prompt = (
+        "总结微软最近四个季度电话会中管理层对 AI 算力需求、资本开支和"
+        "供需约束的表述，并按季度引用。"
+    )
+    policy = _task_coverage_policy()
+    policy["config"]["task_coverage"]["contract"] = {
+        "topic_ontology": {
+            "topics": {
+                "ai_compute_demand": {"aliases": ["AI 算力需求"]},
+                "capital_expenditure": {"aliases": ["资本开支"]},
+                "supply_constraints": {"aliases": ["供需约束", "供应约束"]},
+            }
+        }
+    }
+    policy["config"]["task_coverage"]["retrieval"]["content_mappings"].append(
+        {
+            "id": "conference-discovery",
+            "role": "candidate",
+            "tool_patterns": ["*conferences_search"],
+        }
+    )
+    contract = parse_task_contract(prompt, policy_snapshot=policy)
+    observer = _MessageObserverSink(
+        coalesced,
+        message_id="msg-1",
+        user_prompt=prompt,
+        citation_policy_available=True,
+        citation_quality_policy=policy,
+        task_contract=contract,
+        task_coverage_enabled=True,
+    )
+    private_result = {
+        "docs": [
+            {"doc_id": "doc-q4", "title": "Microsoft FY2026 Q4 Earnings Call"},
+            {"doc_id": "doc-q3", "title": "Microsoft FY2026 Q3 Earnings Call"},
+            {"doc_id": "doc-q2", "title": "Microsoft FY2026 Q2 Earnings Call"},
+            {"doc_id": "doc-q1", "title": "Microsoft FY2026 Q1 Earnings Call"},
+        ]
+    }
+    await observer.emit(
+        Event(
+            type="tool_use",
+            data={
+                "id": "search-1",
+                "name": "conferences_search",
+                "input": {"query": "微软", "fiscal_quarter": "Q4"},
+            },
+        )
+    )
+    await observer.emit(
+        Event(
+            type="tool_result",
+            data={
+                "id": "search-1",
+                "content": "<persisted-output>4 documents</persisted-output>",
+                "_citation_content": json.dumps(private_result, ensure_ascii=False),
+            },
+        )
+    )
+
+    assert observer._task_coverage_tracker is not None
+    audit = observer._task_coverage_tracker.evaluate(  # noqa: SLF001
+        "\n\n".join(
+            f"## FY2026 Q{quarter}\nAI 算力需求；资本开支；供应约束。"
+            for quarter in (4, 3, 2, 1)
+        )
+    )
+    topic_rows = [row for row in audit["requirements"] if row["kind"] == "topic"]
+    periods = {
+        ordinal: {
+            row["selectorResolution"]["period"]
+            for row in topic_rows
+            if f"relative period {ordinal}" in row["description"]
+        }
+        for ordinal in range(1, 5)
+    }
+
+    assert periods == {
+        1: {"2026-q4"},
+        2: {"2026-q3"},
+        3: {"2026-q2"},
+        4: {"2026-q1"},
+    }
 
 
 async def test_large_private_citation_content_registers_evidence_without_forwarding() -> None:
@@ -1658,6 +2604,99 @@ def test_verbose_repair_may_remove_only_unsupported_scope_expansion() -> None:
     )
 
     assert _MessageObserverSink._repair_improves(baseline, candidate) is True
+
+
+def test_task_coverage_revision_compares_quality_rates_not_problem_totals() -> None:
+    unsupported = {
+        "citationRequired": True,
+        "status": "unsupported",
+        "issueCodes": ["claim_without_citation"],
+    }
+    passed = {"citationRequired": True, "status": "passed", "issueCodes": []}
+    unverified = {
+        "citationRequired": True,
+        "status": "unverified",
+        "issueCodes": ["citation_evidence_incomplete"],
+    }
+    baseline = Event(
+        type="assistant_message",
+        data={
+            "citation_bundle": {
+                "integrity": {},
+                "quality": {
+                    "metrics": {"unsourcedClaimCount": 3},
+                    "claims": [unsupported for _ in range(3)],
+                },
+            },
+            "task_coverage": {
+                "metrics": {"answerRequirementFulfilledCount": 0},
+            },
+        },
+    )
+    candidate = Event(
+        type="assistant_message",
+        data={
+            "citation_bundle": {
+                "integrity": {},
+                "quality": {
+                    "metrics": {"unverifiedClaimCount": 6},
+                    "claims": [passed for _ in range(12)]
+                    + [unverified for _ in range(6)],
+                },
+            },
+            "task_coverage": {
+                "metrics": {"answerRequirementFulfilledCount": 13},
+            },
+        },
+    )
+
+    assert (
+        _MessageObserverSink._task_coverage_candidate_preserves_citation_quality(
+            baseline,
+            candidate,
+        )
+        is True
+    )
+
+
+def test_task_coverage_revision_rejects_equally_unsupported_expansion() -> None:
+    unsupported = {
+        "citationRequired": True,
+        "status": "unsupported",
+        "issueCodes": ["claim_without_citation"],
+    }
+    baseline = Event(
+        type="assistant_message",
+        data={
+            "citation_bundle": {
+                "integrity": {},
+                "quality": {
+                    "metrics": {"unsourcedClaimCount": 3},
+                    "claims": [unsupported for _ in range(3)],
+                },
+            }
+        },
+    )
+    candidate = Event(
+        type="assistant_message",
+        data={
+            "citation_bundle": {
+                "integrity": {},
+                "quality": {
+                    "metrics": {"unsourcedClaimCount": 18},
+                    "claims": [unsupported for _ in range(18)],
+                },
+            }
+        },
+    )
+
+    assert (
+        _MessageObserverSink._task_coverage_candidate_preserves_citation_quality(
+            baseline,
+            candidate,
+        )
+        is False
+    )
 
 
 def test_repair_can_replace_unknown_markers_with_fewer_explicit_mismatches() -> None:

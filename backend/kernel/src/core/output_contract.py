@@ -9,6 +9,7 @@ from typing import Any
 _STRICT_RE = re.compile(
     r"(?:只列出|只输出|只返回|只展示|只给出|仅列出|仅输出|仅返回|"
     r"只用\s*[一二两三四五六七八九十\d]+\s*行|"
+    r"(?:只|仅)\s*(?:用|以)\s*(?:Markdown\s*)?表格\s*(?:列出|输出|返回|展示)|"
     r"不要添加其他内容|\bonly\s+(?:list|output|return|show)\b|"
     r"\bnothing\s+else\b)",
     re.IGNORECASE,
@@ -21,7 +22,20 @@ _ZH_FIELDS_RE = re.compile(
     r"(?:只|仅)(?:需要|要|列出|输出|返回|展示|给出)?\s*"
     r"(?P<fields>[^。；\n]{2,180}?)"
     r"(?P<count>[一二两三四五六七八九十\d]+)个"
-    r"(?:数字|字段|指标|项目|项)(?:[。；\n]|$)",
+    r"(?:数字|字段|指标|项目|项)(?=[，,。；;\n]|$)",
+    re.IGNORECASE,
+)
+_ZH_UNCOUNTED_FIELDS_RE = re.compile(
+    r"(?:只|仅)\s*(?:(?:用|以)\s*(?:Markdown\s*)?表格\s*)?"
+    r"(?:列出|输出|返回|展示|给出)\s*"
+    r"(?P<fields>[^。；\n]{2,240}?)"
+    r"(?=(?:[，,]\s*)?(?:并(?:计算|注明|标明|说明)|注明|标明|说明|"
+    r"不要|不得|禁止)|[。；\n]|$)",
+    re.IGNORECASE,
+)
+_UNCOUNTED_OUTPUT_INSTRUCTION_RE = re.compile(
+    r"(?:Markdown\s*)?表格|每(?:家|个)?(?:公司|企业|实体)?\s*[一二两三四五六七八九十\d]+\s*行|"
+    r"\b(?:markdown\s+table|rows?\s+per\s+(?:company|entity))\b",
     re.IGNORECASE,
 )
 _EN_FIELDS_RE = re.compile(
@@ -32,7 +46,30 @@ _EN_FIELDS_RE = re.compile(
 _FIELD_SPLIT_RE = re.compile(r"\s*(?:、|，|,|/|以及|及|与|和|\band\b)\s*", re.IGNORECASE)
 _TABLE_ONLY_RE = re.compile(
     r"(?:只|仅).{0,16}(?:输出|返回|列出).{0,16}(?:Markdown\s*)?表格|"
+    r"(?:只|仅)\s*(?:用|以)\s*(?:Markdown\s*)?表格\s*(?:列出|输出|返回|展示)|"
     r"\bonly\s+(?:output|return)\b.{0,24}\bmarkdown\s+table\b",
+    re.IGNORECASE,
+)
+_ZH_TABLE_COLUMNS_RE = re.compile(
+    r"(?P<count>[一二两三四五六七八九十\d]+)\s*列\s*[:：]\s*"
+    r"(?P<columns>[^。；;\n]{1,180})",
+    re.IGNORECASE,
+)
+_EN_TABLE_COLUMNS_RE = re.compile(
+    r"(?:(?:exactly|only)\s+)?(?P<count>one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+"
+    r"columns?\s*[:：]\s*(?P<columns>[^.;\n]{1,180})",
+    re.IGNORECASE,
+)
+_ZH_TABLE_ROW_COUNT_RE = re.compile(
+    r"(?<!每家公司)(?<!每个公司)(?<!每个企业)(?<!每个实体)"
+    r"(?:恰好|严格|只(?:要|有|输出)?|仅(?:要|有|输出)?)?\s*"
+    r"(?P<count>[一二两三四五六七八九十\d]+)\s*行"
+    r"(?:公司|企业|表格)?(?:数据|记录|结果)?",
+    re.IGNORECASE,
+)
+_EN_TABLE_ROW_COUNT_RE = re.compile(
+    r"(?:(?:exactly|only)\s+)(?P<count>one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+"
+    r"(?:data\s+)?rows?\b",
     re.IGNORECASE,
 )
 _GENERATED_UI_RE = re.compile(
@@ -40,8 +77,44 @@ _GENERATED_UI_RE = re.compile(
     r"interactive\s+(?:ui|interface))",
     re.IGNORECASE,
 )
+_NEGATED_GENERATED_UI_RE = re.compile(
+    r"(?:不要|无需|无须|不必|禁止|不需要).{0,12}"
+    r"(?:生成|创建|添加|展示)?(?:任何)?\s*"
+    r"(?:图表|仪表盘|可视化|交互(?:页面|界面)|dashboard|chart|visuali[sz]ation)|"
+    r"\b(?:do not|don't|without|no need to)\b.{0,20}"
+    r"(?:dashboard|chart|visuali[sz]ation|interactive\s+(?:ui|interface))",
+    re.IGNORECASE,
+)
+_NEGATED_METADATA_RE = re.compile(
+    r"(?:不要|无需|无须|不必|禁止|不需要).{0,12}"
+    r"(?:注明|标明|列明|说明|附上|显示|提供)?[^。；;\n]{0,20}"
+    r"(?:报告期|期间|财年|单位)|"
+    r"\b(?:do\s+not|don't|without|no\s+need\s+to)\b.{0,24}"
+    r"(?:reporting\s+period|fiscal\s+(?:year|period)|unit)",
+    re.IGNORECASE,
+)
+_REPORTING_PERIOD_METADATA_RE = re.compile(
+    r"(?:注明|标明|列明|说明|附上|显示|提供)[^。；;\n]{0,32}"
+    r"(?:报告期|期间|财年)|"
+    r"\b(?:indicate|show|include|state|provide)\b[^.;\n]{0,32}"
+    r"(?:reporting\s+period|fiscal\s+(?:year|period))",
+    re.IGNORECASE,
+)
+_UNIT_METADATA_RE = re.compile(
+    r"(?:注明|标明|列明|说明|附上|显示|提供)[^。；;\n]{0,32}单位|"
+    r"\b(?:indicate|show|include|state|provide)\b[^.;\n]{0,32}\bunit\b",
+    re.IGNORECASE,
+)
+_CALCULATION_FORMULA_RE = re.compile(
+    r"(?:注明|标明|列明|说明|附上|显示|提供|列出|给出)[^。；;\n]{0,32}"
+    r"(?:计算)?公式|"
+    r"\b(?:indicate|show|include|state|provide|list|give)\b[^.;\n]{0,32}"
+    r"\bformula\b",
+    re.IGNORECASE,
+)
 _ZH_PERIOD_COUNT_RE = re.compile(
     r"(?:最近|近|过去|此前|前)\s*(?P<count>[一二两三四五六七八九十\d]+)\s*个?"
+    r"\s*(?:(?:已(?:披露|发布|公布|公开)|公开(?:披露|发布)|连续|完整|可得|可获取)\s*)?"
     r"(?:季度|财季|报告期)",
     re.IGNORECASE,
 )
@@ -85,8 +158,14 @@ class OutputContract:
     requested_item_count: int | None = None
     requested_line_count: int | None = None
     requested_period_count: int | None = None
+    requested_table_columns: tuple[str, ...] = ()
+    requested_table_column_count: int | None = None
+    requested_table_row_count: int | None = None
     table_only: bool = False
     generated_ui_allowed: bool = False
+    reporting_period_required: bool = False
+    unit_required: bool = False
+    calculation_formula_required: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -95,8 +174,14 @@ class OutputContract:
             "requestedItemCount": self.requested_item_count,
             "requestedLineCount": self.requested_line_count,
             "requestedPeriodCount": self.requested_period_count,
+            "requestedTableColumns": list(self.requested_table_columns),
+            "requestedTableColumnCount": self.requested_table_column_count,
+            "requestedTableRowCount": self.requested_table_row_count,
             "tableOnly": self.table_only,
             "generatedUiAllowed": self.generated_ui_allowed,
+            "reportingPeriodRequired": self.reporting_period_required,
+            "unitRequired": self.unit_required,
+            "calculationFormulaRequired": self.calculation_formula_required,
         }
 
     def required_fields_for_claim(self, exact: str) -> tuple[str, ...]:
@@ -116,6 +201,25 @@ def parse_output_contract(user_prompt: str) -> OutputContract:
         if english is not None:
             requested_fields = _split_fields(english.group("fields"))
             requested_count = len(requested_fields) or None
+        else:
+            uncounted = _ZH_UNCOUNTED_FIELDS_RE.search(user_prompt)
+            if uncounted is not None:
+                raw_fields = uncounted.group("fields")
+                parsed_fields = _split_fields(raw_fields)
+                # Uncounted lists are accepted only when punctuation makes a
+                # field enumeration explicit.  This prevents phrases such as
+                # "只输出 Markdown 表格" or a dimension clause from becoming
+                # fabricated metric names.
+                if (
+                    len(parsed_fields) >= 2
+                    and re.search(r"[、，,/]", raw_fields)
+                    and not any(
+                        _UNCOUNTED_OUTPUT_INSTRUCTION_RE.search(field)
+                        for field in parsed_fields
+                    )
+                ):
+                    requested_fields = parsed_fields
+                    requested_count = len(requested_fields)
     if requested_count is not None and len(requested_fields) > requested_count:
         requested_fields = requested_fields[-requested_count:]
     zh_period = _ZH_PERIOD_COUNT_RE.search(user_prompt)
@@ -128,6 +232,34 @@ def parse_output_contract(user_prompt: str) -> OutputContract:
         requested_period_count = (
             int(raw_count) if raw_count.isdigit() else _EN_NUMBERS.get(raw_count)
         )
+    generated_ui_prompt = _NEGATED_GENERATED_UI_RE.sub("", user_prompt)
+    metadata_prompt = _NEGATED_METADATA_RE.sub("", user_prompt)
+    table_columns_match = _ZH_TABLE_COLUMNS_RE.search(user_prompt)
+    if table_columns_match is not None:
+        requested_table_columns = _split_fields(table_columns_match.group("columns"))
+        requested_table_column_count = _parse_count(table_columns_match.group("count"))
+    else:
+        english_columns = _EN_TABLE_COLUMNS_RE.search(user_prompt)
+        if english_columns is not None:
+            requested_table_columns = _split_fields(english_columns.group("columns"))
+            raw_count = english_columns.group("count").lower()
+            requested_table_column_count = (
+                int(raw_count) if raw_count.isdigit() else _EN_NUMBERS.get(raw_count)
+            )
+        else:
+            requested_table_columns = ()
+            requested_table_column_count = None
+    table_row_match = _ZH_TABLE_ROW_COUNT_RE.search(user_prompt)
+    english_rows = _EN_TABLE_ROW_COUNT_RE.search(user_prompt) if table_row_match is None else None
+    if table_row_match is not None:
+        requested_table_row_count = _parse_count(table_row_match.group("count"))
+    elif english_rows is not None:
+        raw_count = english_rows.group("count").lower()
+        requested_table_row_count = (
+            int(raw_count) if raw_count.isdigit() else _EN_NUMBERS.get(raw_count)
+        )
+    else:
+        requested_table_row_count = None
     return OutputContract(
         strict=bool(_STRICT_RE.search(user_prompt)),
         requested_fields=requested_fields,
@@ -138,8 +270,14 @@ def parse_output_contract(user_prompt: str) -> OutputContract:
             else None
         ),
         requested_period_count=requested_period_count,
+        requested_table_columns=requested_table_columns,
+        requested_table_column_count=requested_table_column_count,
+        requested_table_row_count=requested_table_row_count,
         table_only=bool(_TABLE_ONLY_RE.search(user_prompt)),
-        generated_ui_allowed=bool(_GENERATED_UI_RE.search(user_prompt)),
+        generated_ui_allowed=bool(_GENERATED_UI_RE.search(generated_ui_prompt)),
+        reporting_period_required=bool(_REPORTING_PERIOD_METADATA_RE.search(metadata_prompt)),
+        unit_required=bool(_UNIT_METADATA_RE.search(metadata_prompt)),
+        calculation_formula_required=bool(_CALCULATION_FORMULA_RE.search(user_prompt)),
     )
 
 

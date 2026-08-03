@@ -4131,6 +4131,7 @@ components:
         - font_size
         - conversation_citations_enabled
         - conversation_verification_enabled
+        - conversation_task_coverage_enabled
       properties:
         default_timezone: {type: string}
         default_locale: {type: string}
@@ -4145,6 +4146,10 @@ components:
           type: boolean
           default: false
           description: Run claim and citation quality verification before publishing a reply.
+        conversation_task_coverage_enabled:
+          type: boolean
+          default: true
+          description: Check explicit task completeness and repair bounded omissions before publishing a reply.
     PreferencesPatch:
       type: object
       properties:
@@ -4154,6 +4159,7 @@ components:
         font_size: {type: string, nullable: true}
         conversation_citations_enabled: {type: boolean}
         conversation_verification_enabled: {type: boolean}
+        conversation_task_coverage_enabled: {type: boolean}
     MemoryView:
       type: object
       required: [enabled, auto_extract, custom_instructions, entries]

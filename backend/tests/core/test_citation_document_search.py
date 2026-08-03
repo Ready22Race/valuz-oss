@@ -3,6 +3,7 @@ import json
 from src.core.citation import EvidenceRegistry, compact_citation_tool_content
 from src.core.citation_document_search import (
     augment_indexed_document_evidence,
+    constrain_indexed_document_scope,
     request_search_terms,
     targeted_document_evidence,
 )
@@ -58,6 +59,32 @@ def test_existing_connector_evidence_is_not_rewritten() -> None:
         )
         is None
     )
+
+
+def test_indexed_document_scope_discards_global_search_leakage() -> None:
+    result = constrain_indexed_document_scope(
+        {
+            "chunks": [
+                {
+                    "id": "wanted",
+                    "content": "Requested source passage.",
+                    "doc": {"doc_id": "sk-q2"},
+                },
+                {
+                    "id": "wrong",
+                    "content": "Unrelated operating cash flow.",
+                    "doc": {"doc_id": "nvda-q2"},
+                },
+            ]
+        },
+        document_ids=("sk-q2",),
+    )
+
+    assert [chunk["id"] for chunk in result["chunks"]] == ["wanted"]
+    assert result["_valuz_scope"] == {
+        "documentIds": ["sk-q2"],
+        "discardedOutOfScopeChunks": 1,
+    }
 
 
 def test_transcript_boilerplate_does_not_consume_evidence_slots() -> None:

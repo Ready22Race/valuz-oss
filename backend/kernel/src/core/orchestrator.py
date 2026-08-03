@@ -48,6 +48,14 @@ from src.core.runtime_port import RuntimePort
 from src.core.session_approval_cache import SessionApprovalCache, SessionRule
 from src.core.session_bus import SessionEventBus
 from src.core.store_port import StorePort
+from src.core.task_coverage import (
+    TaskContract,
+    TaskCoverageTracker,
+    build_task_retrieval_plan,
+    parse_task_contract,
+    task_contract_prompt,
+    task_coverage_improves,
+)
 from src.core.time_utils import now_ms
 from src.core.types import (
     BARE_COMPLETION_METADATA_KEY,
@@ -88,6 +96,7 @@ def _citation_output_scope_context(user_prompt: str) -> str:
         "- Once the required periods have evidence, stop searching and compose the "
         "answer from the collected evidence handles."
     )
+
 
 _CITATION_REPAIR_PROMPT = f"""The sealed draft has claim-local citation issues.
 Do not rewrite the answer. Return only a JSON claim patch with this exact shape:
@@ -168,6 +177,15 @@ _INTERNAL_HANDOFF_RE = re.compile(
     r"[\s\S]*?^##\s+ARTIFACTS\b[\s\S]*?^##\s+NEXT STEPS\b",
     re.IGNORECASE | re.MULTILINE,
 )
+_BOOKKEEPING_TOOL_NAMES = frozenset(
+    {
+        "write_todos",
+        "todo_write",
+        "update_todos",
+        "update_plan",
+        "modify_plan",
+    }
+)
 _LEADING_PROGRESS_RE = re.compile(
     r"^(?:"
     r".{0,48}(?:找到(?:了)?|均?已找到|已取得|已获取|已充分|已齐全)"
@@ -176,7 +194,8 @@ _LEADING_PROGRESS_RE = re.compile(
     r"(?:获取|读取|检索|查找|查证|核验).{0,48}"
     r"(?:原文|资料|来源|数据|财报|年报|证据|句柄|chunk).{0,80}|"
     r".{0,48}(?:原文|资料|来源|数据|财报|年报|证据|chunk|结果|报告)"
-    r".{0,64}(?:找到(?:了)?|均?已找到|已取得|已获取|数据一致|现引用).{0,80}|"
+    r".{0,64}(?:找到(?:了)?|均?已找到|已取得|取得|已获取|数据一致|现引用)"
+    r".{0,80}|"
     r"(?:现在|接下来|下面)(?:开始|将|直接)?.{0,32}"
     r"(?:读取|检索|查找|整合|汇总|整理|撰写|生成|计算|核验|验证).{0,160}|"
     r"(?:均?)?已(?:完整)?(?:阅读|查看|检查|核对).{0,64}"
@@ -186,6 +205,8 @@ _LEADING_PROGRESS_RE = re.compile(
     r"(?:数据|资料|来源|信息).{0,64}(?:以下|下面).{0,32}"
     r"(?:结果|答案).{0,16}|"
     r"(?:现在)?(?:可以|将要)?给出.{0,48}(?:答案|结果).{0,80}|"
+    r"(?:已有|已获得|已具备).{0,32}(?:足够|充分).{0,32}"
+    r"(?:原文|证据|数据|资料).{0,64}(?:输出|给出|生成).{0,16}(?:结果|答案)|"
     r"以下是.{0,32}(?:完整)?答案\s*[:：]?|"
     r"(?:I|we)(?: now)?(?: have|'ve)? (?:found|retrieved|collected).{0,80}|"
     r"(?:I|we)(?: now)?(?: have|'ve) (?:all|enough|the needed).{0,32}"
@@ -203,6 +224,8 @@ _LEADING_PROGRESS_INTERNAL_RE = re.compile(
 _EXPLICIT_EXCERPT_REQUEST_RE = re.compile(
     r"(?:摘录|逐字(?:引用|摘录)|给出.{0,16}原文(?:段落|内容)|"
     r"展示.{0,16}原文(?:段落|内容)|\bverbatim\b|"
+    r"(?:逐项|逐条|逐行|分别).{0,8}引用.{0,32}原文|"
+    r"引用.{0,16}对应(?:的)?.{0,16}原文|"
     r"\bquote\b.{0,24}\b(?:passage|excerpt|text)\b|"
     r"\bshow\b.{0,24}\bexcerpt\b)",
     re.IGNORECASE,
@@ -235,6 +258,17 @@ _NO_RETRIEVAL_REQUEST_RE = re.compile(
 _STRICT_MARKDOWN_TABLE_REQUEST_RE = re.compile(
     r"(?:只|仅).{0,16}(?:输出|返回|列出).{0,16}(?:Markdown\s*)?表格|"
     r"\bonly\s+(?:output|return)\b.{0,24}\bmarkdown\s+table\b",
+    re.IGNORECASE,
+)
+_SINGLE_MARKDOWN_TABLE_REQUEST_RE = re.compile(
+    r"(?:一个|单个|一张|仅一张|唯一(?:一个|一张)?)\s*(?:Markdown\s*)?表格|"
+    r"\b(?:one|a\s+single|single)\s+markdown\s+table\b",
+    re.IGNORECASE,
+)
+_PRIMARY_MARKDOWN_TABLE_REQUEST_RE = re.compile(
+    r"(?:用|使用|以)\s*(?:Markdown\s*)?表格|"
+    r"(?:Markdown\s*)?表格.{0,12}(?:呈现|展示|输出|返回|列出)|"
+    r"\b(?:use|in|as)\s+(?:a\s+)?markdown\s+table\b",
     re.IGNORECASE,
 )
 _PERIOD_BY_PERIOD_REQUEST_RE = re.compile(
@@ -312,6 +346,14 @@ _SCOPE_LEADIN_RE = re.compile(
     r"(?:所有|以上)?.{0,40}(?:已核实|已确认).{0,80}以下是.{0,120}(?:数据|结果|项目|项)\s*[:：]?|"
     r"(?:note:\s*)?[\s\S]{0,260}(?:now\s+)?(?:i|we)\s+have\s+"
     r"(?:everything|all(?:\s+the)?\s+(?:data|information|evidence))\s+needed[.!]?)\s*$",
+    re.IGNORECASE,
+)
+_STRICT_VERIFICATION_LEADIN_RE = re.compile(
+    r"^(?:(?:这|以上|以下|上述)\s*)?"
+    r"(?:[一二两三四五六七八九十\d]+\s*(?:项|个))?\s*"
+    r"(?:数据|信息|项目|数字|内容).{0,96}"
+    r"(?:(?:均?已|已经).{0,48}|均(?:在|从).{0,48}(?:原文|资料).{0,48})"
+    r"(?:核实|核对|确认|查证).{0,96}[。.!]?$",
     re.IGNORECASE,
 )
 _STRICT_TRAILING_RECAP_RE = re.compile(
@@ -433,7 +475,28 @@ def _strip_leading_assistant_progress(text: str) -> str:
             None,
         )
         if cited_answer_index is not None:
-            cleaned = "\n\n".join(blocks[cited_answer_index:]).strip()
+            # Preserve an answer's structural headings between the private
+            # worklog and its first citation.  Dropping straight to the cited
+            # sentence erases the first period/entity section; the later
+            # period-leadin normalizer then mistakes that content for a
+            # preamble and removes an entire requested group.
+            structural_heading_index = next(
+                (
+                    i
+                    for i in range(internal_index + 1, cited_answer_index)
+                    if any(line.lstrip().startswith("#") for line in blocks[i].splitlines())
+                ),
+                None,
+            )
+            answer_start = cited_answer_index
+            if structural_heading_index is not None:
+                answer_start = structural_heading_index
+                while (
+                    answer_start > internal_index + 1
+                    and blocks[answer_start - 1].strip() in {"---", "***", "___"}
+                ):
+                    answer_start -= 1
+            cleaned = "\n\n".join(blocks[answer_start:]).strip()
             return cleaned or text.strip()
 
     # A common failed-research shape is: worklog -> provisional bullet recap
@@ -595,9 +658,7 @@ def _strip_unrequested_period_leadin(text: str, user_prompt: str) -> str:
     if _EXPLICIT_CROSS_PERIOD_RECAP_RE.search(user_prompt):
         return text
     lines = text.splitlines()
-    heading_indexes = [
-        index for index, line in enumerate(lines) if _PERIOD_HEADING_RE.match(line)
-    ]
+    heading_indexes = [index for index, line in enumerate(lines) if _PERIOD_HEADING_RE.match(line)]
     if len(heading_indexes) < 2 or heading_indexes[0] == 0:
         return text
     return "\n".join(lines[heading_indexes[0] :]).strip()
@@ -608,6 +669,15 @@ def _strip_strict_scope_leadin(text: str, user_prompt: str) -> str:
 
     if not _STRICT_OUTPUT_SCOPE_RE.search(user_prompt):
         return text
+    blocks = re.split(r"\n[ \t]*\n", text)
+    while blocks:
+        probe = _INLINE_EVIDENCE_LINK_RE.sub("", blocks[0]).strip()
+        if not _STRICT_VERIFICATION_LEADIN_RE.match(probe):
+            break
+        blocks.pop(0)
+        while blocks and blocks[0].strip() in {"", "---", "***", "___"}:
+            blocks.pop(0)
+    text = "\n\n".join(blocks).strip()
     # Claude can occasionally emit an English provisional answer and then the
     # requested Chinese answer in the same final block.  For a strict Chinese
     # output contract, discard that leading worklog/duplicate only when the
@@ -645,6 +715,7 @@ def _strip_strict_scope_leadin(text: str, user_prompt: str) -> str:
     ]
     if leadin_indexes:
         text = "\n\n".join(blocks[leadin_indexes[-1] + 1 :]).strip()
+    text = _strip_exact_item_duplicate_prelude(text, user_prompt)
     text = _STRICT_TRAILING_RECAP_RE.sub("", text).strip()
     text = _STRICT_TRAILING_ADVICE_RE.sub("", text).strip()
     text = _STRICT_TRAILING_SOURCE_NOTE_RE.sub("", text).strip()
@@ -652,6 +723,69 @@ def _strip_strict_scope_leadin(text: str, user_prompt: str) -> str:
     text = _strict_markdown_tables_only(text, user_prompt)
     text = _strip_strict_table_trailing_blocks(text, user_prompt)
     return _enforce_requested_line_count(text, user_prompt)
+
+
+def _strip_exact_item_duplicate_prelude(text: str, user_prompt: str) -> str:
+    """Keep one exact-item table and its nearest requested scope labels.
+
+    A coverage revision can restate the same values as bullets and then as a
+    canonical table.  For a strict exact-item request, the table is the stable
+    structure; retain only its nearest entity/period context and discard the
+    duplicate research recap.  Cell content is not rewritten here.
+    """
+
+    contract = parse_output_contract(user_prompt)
+    item_count = contract.requested_item_count
+    if not contract.strict or item_count is None or item_count < 1:
+        return text
+    lines = text.splitlines()
+    tables: list[tuple[int, int, int]] = []
+    index = 0
+    while index + 1 < len(lines):
+        if not lines[index].strip().startswith("|"):
+            index += 1
+            continue
+        start = index
+        while index < len(lines) and lines[index].strip().startswith("|"):
+            index += 1
+        block = lines[start:index]
+        if len(block) < 3 or not re.fullmatch(
+            r"\s*\|(?:\s*:?-{3,}:?\s*\|)+\s*",
+            block[1],
+        ):
+            continue
+        tables.append((start, index, len(block) - 2))
+    if len(tables) != 1:
+        return text
+    table_start, table_end, row_count = tables[0]
+    if row_count != item_count:
+        return text
+
+    keep_start = table_start
+    divider = next(
+        (
+            line_index
+            for line_index in range(table_start - 1, -1, -1)
+            if lines[line_index].strip() in {"---", "***", "___"}
+        ),
+        None,
+    )
+    if divider is not None:
+        keep_start = divider + 1
+        while keep_start < table_start and not lines[keep_start].strip():
+            keep_start += 1
+    else:
+        for line_index in range(table_start - 1, max(-1, table_start - 10), -1):
+            line = lines[line_index].strip()
+            if re.match(r"^(?:#{1,6}\s+|\*\*.+\*\*.*$)", line):
+                keep_start = line_index
+                break
+    kept = lines[keep_start:table_end]
+    while kept and not kept[0].strip():
+        kept.pop(0)
+    while kept and not kept[-1].strip():
+        kept.pop()
+    return "\n".join(kept).strip() if kept else text
 
 
 def _strip_strict_table_trailing_blocks(text: str, user_prompt: str) -> str:
@@ -754,7 +888,135 @@ def _strict_markdown_tables_only(text: str, user_prompt: str) -> str:
             block[1],
         )
     ]
-    return "\n\n".join(tables) if tables else text
+    if not tables:
+        return text
+    if len(tables) > 1 and _SINGLE_MARKDOWN_TABLE_REQUEST_RE.search(user_prompt):
+        # A model may emit a provisional table followed by a refined one.
+        # Select the structurally most complete table without rewriting any
+        # cell; malformed/short duplicate tables cannot survive a strict
+        # single-table output contract.  Ties prefer the later table because
+        # it is normally the model's final corrected rendering.
+        return max(
+            enumerate(tables),
+            key=lambda item: (*_markdown_table_completeness(item[1]), item[0]),
+        )[1]
+    return "\n\n".join(tables)
+
+
+def _markdown_table_completeness(table: str) -> tuple[int, int, int, int]:
+    lines = table.splitlines()
+    header = _table_cells(lines[0]) if lines else ()
+    expected_columns = len(header)
+    complete_rows = 0
+    meaningful_cells = 0
+    malformed_rows = 0
+    for line in lines[2:]:
+        cells = _table_cells(line)
+        if len(cells) != expected_columns:
+            malformed_rows += 1
+            continue
+        present = sum(bool(re.search(r"[A-Za-z0-9\u3400-\u9fff]", cell)) for cell in cells)
+        meaningful_cells += present
+        if present == expected_columns:
+            complete_rows += 1
+    citation_count = len(_INLINE_EVIDENCE_LINK_RE.findall(table))
+    return complete_rows, meaningful_cells, citation_count, -malformed_rows
+
+
+def _table_cells(line: str) -> tuple[str, ...]:
+    stripped = line.strip()
+    if not stripped.startswith("|"):
+        return ()
+    if stripped.endswith("|"):
+        stripped = stripped[1:-1]
+    else:
+        stripped = stripped[1:]
+    return tuple(cell.strip() for cell in stripped.split("|"))
+
+
+def _strip_requested_primary_markdown_table(text: str, user_prompt: str) -> str:
+    """Keep one requested comparison table as the primary answer structure."""
+
+    if (
+        not _PRIMARY_MARKDOWN_TABLE_REQUEST_RE.search(user_prompt)
+        or _EXPLANATION_REQUEST_RE.search(user_prompt)
+    ):
+        return text
+    lines = text.splitlines()
+    tables: list[str] = []
+    index = 0
+    while index + 1 < len(lines):
+        if not lines[index].strip().startswith("|"):
+            index += 1
+            continue
+        start = index
+        while index < len(lines) and lines[index].strip().startswith("|"):
+            index += 1
+        block = lines[start:index]
+        if len(block) >= 3 and re.fullmatch(
+            r"\s*\|(?:\s*:?-{3,}:?\s*\|)+\s*",
+            block[1],
+        ):
+            tables.append("\n".join(block).strip())
+    return tables[0] if len(tables) == 1 else text
+
+
+def _attach_markdown_footnote_citations(text: str) -> str:
+    """Move simple evidence footnotes into their owning table cells."""
+
+    definition_re = re.compile(
+        r"^[ \t]*\[\^(?P<id>[A-Za-z0-9_-]{1,32})\]:[^\n]*?"
+        r"(?P<link>\[[^\]\n]{0,240}\]\((?:evidence|citation)://[^)\n]+\))[^\n]*$",
+        re.IGNORECASE,
+    )
+    marker_re = re.compile(r"\[\^(?P<id>[A-Za-z0-9_-]{1,32})\]")
+    lines = text.splitlines()
+    definitions: dict[str, str] = {}
+    for line in lines:
+        match = definition_re.fullmatch(line)
+        if match is not None:
+            definitions[match.group("id")] = match.group("link")
+    if not definitions:
+        return text
+
+    output: list[str] = []
+    for line in lines:
+        if definition_re.fullmatch(line) is not None:
+            continue
+        if line.strip().startswith("|") and line.strip().endswith("|"):
+            cells = line.split("|")
+            for cell_index in range(1, len(cells) - 1):
+                cell = cells[cell_index]
+
+                def replace_cell_marker(
+                    match: re.Match[str],
+                    cell_text: str = cell,
+                ) -> str:
+                    link = definitions.get(match.group("id"))
+                    if link is None:
+                        return match.group(0)
+                    if _INLINE_EVIDENCE_LINK_RE.search(cell_text):
+                        return ""
+                    return f" {link}"
+
+                cells[cell_index] = marker_re.sub(replace_cell_marker, cell)
+            output.append("|".join(cells))
+            continue
+
+        def replace_marker(
+            match: re.Match[str],
+            line_text: str = line,
+        ) -> str:
+            link = definitions.get(match.group("id"))
+            if link is None:
+                return match.group(0)
+            if _INLINE_EVIDENCE_LINK_RE.search(line_text):
+                return ""
+            return f" {link}"
+
+        output.append(marker_re.sub(replace_marker, line))
+    result = "\n".join(output)
+    return re.sub(r"\n{3,}", "\n\n", result).strip()
 
 
 def _attach_standalone_citation_lines(text: str) -> str:
@@ -784,9 +1046,7 @@ def _attach_standalone_citation_lines(text: str) -> str:
         r"\((?:evidence|citation)://[^)\n]+\)\s*)+)$",
         re.IGNORECASE,
     )
-    table_delimiter = re.compile(
-        r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$"
-    )
+    table_delimiter = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$")
     table_bound: list[str] = []
     for line in lines:
         match = plain_citation_only.fullmatch(line)
@@ -818,9 +1078,8 @@ def _attach_standalone_citation_lines(text: str) -> str:
             if delimiter_index is not None
             else []
         )
-        if (
-            len(data_rows) != len(links)
-            or any(_INLINE_EVIDENCE_LINK_RE.search(table_bound[index]) for index in data_rows)
+        if len(data_rows) != len(links) or any(
+            _INLINE_EVIDENCE_LINK_RE.search(table_bound[index]) for index in data_rows
         ):
             table_bound.append(line)
             continue
@@ -832,7 +1091,9 @@ def _attach_standalone_citation_lines(text: str) -> str:
     output: list[str] = []
     for line in lines:
         match = citation_only.fullmatch(line)
-        if match is None:
+        plain_match = plain_citation_only.fullmatch(line)
+        selected = match or plain_match
+        if selected is None:
             output.append(line)
             continue
         previous_index = len(output) - 1
@@ -841,9 +1102,17 @@ def _attach_standalone_citation_lines(text: str) -> str:
         if previous_index < 0 or not output[previous_index].lstrip().startswith(">"):
             output.append(line)
             continue
-        output[previous_index] = (
-            f"{output[previous_index].rstrip()} {match.group('links').strip()}"
-        )
+        existing = set(_INLINE_EVIDENCE_LINK_RE.findall(output[previous_index]))
+        missing = [
+            link
+            for link in _INLINE_EVIDENCE_LINK_RE.findall(selected.group("links"))
+            if link not in existing
+        ]
+        if missing:
+            output[previous_index] = (
+                f"{output[previous_index].rstrip()} {' '.join(missing)}"
+            )
+        del output[previous_index + 1 :]
     # A cited introduction ending in a colon commonly owns the literal block
     # quote that follows. Propagate only to the first uncited quote line; this
     # keeps source attribution local and does not spread citations across
@@ -863,6 +1132,79 @@ def _attach_standalone_citation_lines(text: str) -> str:
         if citations:
             output[index] = f"{line.rstrip()} {citations[-1]}"
     return "\n".join(output)
+
+
+def _normalize_inline_citation_boundaries(text: str) -> str:
+    """Move inline citations outside complete numeric tokens and units.
+
+    Models occasionally place a handle between an integer and its decimal
+    fraction, or between a Chinese scale and currency suffix.  The citation
+    still binds the same local claim, but rendering it there corrupts the
+    visible value.  This deterministic pass changes only adjacency; it never
+    creates, removes, or rebinds a citation.
+    """
+
+    # The regex fragments are written separately because verbose inline
+    # groups make it too easy to consume punctuation belonging to the claim.
+    link_group = (
+        r"(?P<links>(?:\s*\[[^\]\n]{0,240}\]"
+        r"\((?:evidence|citation)://[^)\n]+\))+)"
+    )
+
+    def compact(value: str) -> str:
+        return " ".join(_INLINE_EVIDENCE_LINK_RE.findall(value))
+
+    grouped_number_split = re.compile(
+        r"(?P<number>[-+]?\d{1,3}(?:,\d{3})*,\d{1,2})"
+        + link_group
+        + r"\s*(?P<suffix>\d(?:\.\d+)?)\s*"
+        r"(?P<unit>[%％A-Za-z\u3400-\u9fff]{0,12})"
+    )
+    decimal_split = re.compile(
+        r"(?P<number>[-+]?\d[\d,]*)"
+        + link_group
+        + r"(?P<fraction>\.\d+)\s*(?P<unit>[%％A-Za-z\u3400-\u9fff]{0,12})"
+    )
+    compound_unit = re.compile(
+        r"(?P<number>[-+]?\d[\d,]*(?:\.\d+)?)\s*"
+        r"(?P<scale>万|亿|兆)"
+        + link_group
+        + r"(?P<unit>元|美元|港元|人民币|日元|欧元|英镑|韩元)"
+    )
+    simple_unit = re.compile(
+        r"(?P<number>[-+]?\d[\d,]*(?:\.\d+)?)"
+        + link_group
+        + r"(?P<unit>亿元|万元|千元|百万元|十亿元|美元|港元|人民币|日元|"
+        r"欧元|英镑|韩元|元|%|％|个百分点|年|月|日)"
+    )
+    text = grouped_number_split.sub(
+        lambda match: (
+            f"{match.group('number')}{match.group('suffix')}{match.group('unit')} "
+            f"{compact(match.group('links'))}"
+        ),
+        text,
+    )
+    text = decimal_split.sub(
+        lambda match: (
+            f"{match.group('number')}{match.group('fraction')}{match.group('unit')} "
+            f"{compact(match.group('links'))}"
+        ),
+        text,
+    )
+    text = compound_unit.sub(
+        lambda match: (
+            f"{match.group('number')}{match.group('scale')}{match.group('unit')} "
+            f"{compact(match.group('links'))}"
+        ),
+        text,
+    )
+    return simple_unit.sub(
+        lambda match: (
+            f"{match.group('number')}{match.group('unit')} "
+            f"{compact(match.group('links'))}"
+        ),
+        text,
+    )
 
 
 def _strip_unrequested_retrieval_internals(text: str, user_prompt: str) -> str:
@@ -1307,6 +1649,17 @@ def _session_citation_verification_enabled(session: Session) -> bool:
     return value if isinstance(value, bool) else False
 
 
+def _session_task_coverage_enabled(session: Session) -> bool:
+    """Task Coverage is independent from citation display/verification."""
+
+    metadata = session.metadata if isinstance(session.metadata, dict) else {}
+    valuz = metadata.get("valuz")
+    if not isinstance(valuz, dict):
+        return True
+    value = valuz.get("task_coverage_enabled")
+    return value if isinstance(value, bool) else True
+
+
 def _session_document_scope(session: Session) -> set[str] | None:
     """Return the host-stamped locked document scope, if present."""
 
@@ -1348,6 +1701,8 @@ class _MessageObserverSink:
         force_citation_required: bool = False,
         citation_enabled: bool = True,
         citation_verification_enabled: bool = True,
+        task_contract: TaskContract | None = None,
+        task_coverage_enabled: bool = True,
     ) -> None:
         self._inner = inner
         self._user_prompt = user_prompt
@@ -1355,12 +1710,22 @@ class _MessageObserverSink:
         self._assistant_delta_chunks: list[str] = []
         self._pending_assistant: Event | None = None
         self._tool_names: dict[str, str] = {}
+        self._tool_inputs: dict[str, Any] = {}
         self._evidence_registry = EvidenceRegistry(
             allowed_document_ids=allowed_document_ids,
         )
         self._citation_quality_policy = citation_quality_policy
         self._citation_enabled = citation_enabled
         self._citation_verification_enabled = citation_verification_enabled
+        self._task_coverage_enabled = task_coverage_enabled
+        self._task_coverage_tracker = (
+            TaskCoverageTracker(
+                task_contract,
+                policy_snapshot=citation_quality_policy,
+            )
+            if task_coverage_enabled and task_contract is not None
+            else None
+        )
         self._citation_guard = CitationGuard(
             self._evidence_registry,
             message_id=message_id,
@@ -1386,6 +1751,14 @@ class _MessageObserverSink:
         self._citation_repair_attempts = 0
         self._usage_before_citation_repair: dict[str, int] | None = None
         self._citation_repair_baseline_event: Event | None = None
+        self._task_coverage_revision_requested = False
+        self._task_coverage_revision_prompt: str | None = None
+        self._task_coverage_revision_attempts = 0
+        self._task_coverage_baseline_event: Event | None = None
+        self._task_coverage_revision_allowed_handles: tuple[str, ...] = ()
+        self._task_coverage_revision_uses_local_patch = False
+        self._final_answer_recovery_requested = False
+        self._final_answer_recovery_attempts = 0
         self.num_turns: int = 0
         self.error_payload: dict[str, Any] | None = None
         self.usage: dict[str, int] | None = None
@@ -1394,6 +1767,7 @@ class _MessageObserverSink:
         # Runtimes/guards emit it once with the sealed answer; the orchestrator
         # copies it into Message.metadata during finalization.
         self.citation_bundle: dict[str, Any] | None = None
+        self.task_coverage: dict[str, Any] | None = None
         # Last `todo_update` payload observed in this turn. None means the
         # agent did not touch the TODO list. An empty list is a meaningful
         # "all done" signal from the SDK and is preserved.
@@ -1428,9 +1802,36 @@ class _MessageObserverSink:
             # Hold only the latest top-level block until we know whether a
             # continuation follows.  This lets the Citation Guard seal the one
             # final block before either persistence or broadcast.
-            if self._pending_assistant is not None:
-                await self._flush_pending_assistant(final=False)
             canonical_text = str(event.data.get("text") or event.data.get("content") or "")
+            if self._pending_assistant is not None:
+                if self._citation_guard.requires_citation:
+                    pending_text = str(
+                        self._pending_assistant.data.get("text")
+                        or self._pending_assistant.data.get("content")
+                        or ""
+                    )
+                    pending_bindings = len(_INLINE_EVIDENCE_LINK_RE.findall(pending_text))
+                    canonical_bindings = len(_INLINE_EVIDENCE_LINK_RE.findall(canonical_text))
+                    preserve_pending = (
+                        pending_bindings > 0
+                        and canonical_bindings == 0
+                        and len(pending_text) > len(canonical_text)
+                    ) or len(pending_text) >= max(400, len(canonical_text) * 2)
+                    if preserve_pending:
+                        self._assistant_delta_chunks.clear()
+                        logger.warning(
+                            "citation_guard preserved complete pending answer over short "
+                            "post-tool block pending=%d canonical=%d",
+                            len(pending_text),
+                            len(canonical_text),
+                        )
+                        return
+                    # Citation-bearing candidates remain private until one
+                    # final block is guarded. Replacing the weaker candidate
+                    # must not persist it as an unsealed assistant message.
+                    self._pending_assistant = None
+                else:
+                    await self._flush_pending_assistant(final=False)
             streamed_text = self.partial_assistant_text or ""
             # Claude can occasionally report only the last paragraph in its
             # canonical AssistantMessage even though the immediately preceding
@@ -1441,9 +1842,8 @@ class _MessageObserverSink:
             # "以上即为……".  The stream is safe to promote only when it is a
             # materially longer superset containing the canonical block; tool
             # boundaries already clear research preambles from this buffer.
-            if (
-                self._citation_guard.requires_citation
-                and len(streamed_text) >= max(400, len(canonical_text) * 2)
+            if self._citation_guard.requires_citation and len(streamed_text) >= max(
+                400, len(canonical_text) * 2
             ):
                 event = Event(
                     type=event.type,
@@ -1473,12 +1873,17 @@ class _MessageObserverSink:
             and is_top_level
             and event.type in {"text_delta", "tool_use"}
         ):
-            await self._flush_pending_assistant(
-                final=False,
-                suppress_user_visible=(
-                    event.type == "tool_use" or self._citation_guard.requires_citation
-                ),
+            tool_name = str(event.data.get("name") or "").strip().casefold()
+            keep_through_bookkeeping = (
+                event.type == "tool_use" and tool_name in _BOOKKEEPING_TOOL_NAMES
             )
+            if not keep_through_bookkeeping:
+                await self._flush_pending_assistant(
+                    final=False,
+                    suppress_user_visible=(
+                        event.type == "tool_use" or self._citation_guard.requires_citation
+                    ),
+                )
 
         if event.type == "assistant_message":
             # Subagent text is an out-of-band flow and must not take ownership
@@ -1499,6 +1904,11 @@ class _MessageObserverSink:
             tool_name = event.data.get("name")
             if isinstance(tool_use_id, str) and isinstance(tool_name, str):
                 self._tool_names[tool_use_id] = tool_name
+                self._tool_inputs[tool_use_id] = (
+                    event.data.get("input")
+                    if "input" in event.data
+                    else event.data.get("arguments")
+                )
         elif event.type == "tool_result":
             tool_use_id = event.data.get("id")
             tool_name = self._tool_names.get(tool_use_id) if isinstance(tool_use_id, str) else None
@@ -1521,6 +1931,23 @@ class _MessageObserverSink:
                         private_projection is not None or compacted_content is not None
                     ),
                 )
+            if self._task_coverage_tracker is not None:
+                # Citation transport may externalize or compact the model-
+                # visible result.  Coverage needs the private full projection
+                # to retain document/period/content-unit metadata; it is still
+                # turn-private and is never persisted or broadcast here.
+                coverage_content = (
+                    citation_content
+                    if isinstance(citation_content, str)
+                    else compacted_content
+                    if compacted_content is not None
+                    else visible_content
+                )
+                self._task_coverage_tracker.record_tool_result(
+                    tool_name,
+                    self._tool_inputs.get(tool_use_id) if isinstance(tool_use_id, str) else None,
+                    coverage_content,
+                )
             if "_citation_content" in event.data or compacted_content is not None:
                 # The full evidence payload is turn-private: the Registry has
                 # consumed it, so persist/broadcast only the compact model
@@ -1537,15 +1964,31 @@ class _MessageObserverSink:
         elif event.type == "session_idle":
             raw = event.data.get("num_turns")
             if isinstance(raw, int) and raw > 0:
-                if self._citation_repair_attempts:
+                if self._citation_repair_attempts or self._task_coverage_revision_attempts:
                     self.num_turns += raw
                 else:
                     self.num_turns = raw
             stop_reason = event.data.get("stop_reason")
-            allow_repair = not (
-                isinstance(stop_reason, dict)
-                and stop_reason.get("type") in {"error", "user_interrupt", "budget_exhausted"}
+            allow_repair = (
+                self._final_answer_recovery_attempts == 0
+                and not (
+                    isinstance(stop_reason, dict)
+                    and stop_reason.get("type")
+                    in {"error", "user_interrupt", "budget_exhausted"}
+                )
             )
+            task_revision_aborted = self._task_coverage_revision_attempts > 0 and not allow_repair
+            if task_revision_aborted:
+                reason = (
+                    str(stop_reason.get("type") or "error")
+                    if isinstance(stop_reason, dict)
+                    else "error"
+                )
+                published_baseline = await self.publish_task_coverage_baseline_on_abort(
+                    reason=reason
+                )
+                if not published_baseline:
+                    await self.ensure_partial_assistant_message(allow_repair=False)
             repair_aborted = self._citation_repair_attempts > 0 and not allow_repair
             if repair_aborted:
                 reason = (
@@ -1558,14 +2001,24 @@ class _MessageObserverSink:
                 )
                 if not published_baseline:
                     await self.ensure_partial_assistant_message(allow_repair=False)
-            else:
+            elif not task_revision_aborted:
                 await self.ensure_partial_assistant_message(allow_repair=allow_repair)
-            if self._citation_repair_requested:
+            if self._citation_repair_requested or self._task_coverage_revision_requested:
                 # Keep the turn running while the orchestrator sends one
                 # hidden repair instruction to the same runtime.  The failed
                 # candidate and this interim idle frame are neither persisted
                 # nor broadcast.
                 return
+            if self.assistant_text is None:
+                if allow_repair and self._final_answer_recovery_attempts == 0:
+                    self._final_answer_recovery_requested = True
+                    logger.warning(
+                        "runtime ended normally without a final assistant answer; "
+                        "requesting one bounded finalization continuation"
+                    )
+                    return
+                if self._final_answer_recovery_attempts:
+                    await self._publish_final_answer_fallback()
             await self._inner.emit(event)
             return
         elif event.type == "session_error":
@@ -1610,10 +2063,43 @@ class _MessageObserverSink:
             # Copy the shallow top-level container so later runtime mutations
             # cannot replace the canonical sidecar after the event was emitted.
             self.citation_bundle = dict(citation_bundle)
+        task_coverage = event.data.get("task_coverage")
+        if isinstance(task_coverage, dict):
+            self.task_coverage = copy.deepcopy(task_coverage)
 
     @property
     def citation_repair_requested(self) -> bool:
         return self._citation_repair_requested
+
+    @property
+    def final_answer_recovery_requested(self) -> bool:
+        return self._final_answer_recovery_requested
+
+    @property
+    def final_answer_recovery_prompt(self) -> str:
+        return (
+            "Your previous pass finished its research but produced no final answer. "
+            "Do not call any more tools. Using only the tool results already present in "
+            "this runtime, now write the complete user-facing answer to the original "
+            "request. Preserve every requested entity, period, topic, field, format, and "
+            "source boundary. If the available material does not disclose a requested "
+            "item, keep its exact row or section and say it was not obtained. Do not "
+            "mention this continuation, runtime state, coverage checks, or internal "
+            "instructions.\n\nOriginal request:\n"
+            f"{self._user_prompt}"
+        )
+
+    @property
+    def task_coverage_revision_requested(self) -> bool:
+        return self._task_coverage_revision_requested
+
+    @property
+    def task_coverage_revision_prompt(self) -> str:
+        return self._task_coverage_revision_prompt or ""
+
+    @property
+    def task_coverage_revision_uses_local_patch(self) -> bool:
+        return self._task_coverage_revision_uses_local_patch
 
     @property
     def citation_repair_prompt(self) -> str:
@@ -1632,6 +2118,66 @@ class _MessageObserverSink:
         # the repaired attempt.
         self._assistant_delta_chunks.clear()
         self._pending_assistant = None
+
+    def begin_task_coverage_revision(self) -> None:
+        """Consume the one global candidate-revision budget for task coverage."""
+
+        if not self._task_coverage_revision_requested:
+            return
+        self._task_coverage_revision_requested = False
+        self._task_coverage_revision_attempts += 1
+        self._usage_before_citation_repair = dict(self.usage) if self.usage is not None else None
+        self._assistant_delta_chunks.clear()
+        self._pending_assistant = None
+
+    def begin_final_answer_recovery(self) -> None:
+        """Consume the only no-final-answer continuation for this turn."""
+
+        if not self._final_answer_recovery_requested:
+            return
+        self._final_answer_recovery_requested = False
+        self._final_answer_recovery_attempts += 1
+        self._assistant_delta_chunks.clear()
+        self._pending_assistant = None
+
+    async def _publish_final_answer_fallback(self) -> None:
+        has_chinese = bool(re.search(r"[\u3400-\u9fff]", self._user_prompt))
+        has_latin = bool(re.search(r"[A-Za-z]", self._user_prompt))
+        text = (
+            "本次已完成资料处理，但未能生成完整回答。请重试这个问题。"
+            if has_chinese or not has_latin
+            else "The material was processed, but a complete answer could not be generated. "
+            "Please retry this request."
+        )
+        event = self._build_final_assistant_event(text, allow_repair=False)
+        if event is None:
+            event = Event(type="assistant_message", data={"text": text})
+        self._record_assistant_message(event)
+        await self._inner.emit(event)
+        logger.error("published nontechnical fallback after empty finalization continuation")
+
+    async def publish_task_coverage_baseline_on_abort(self, *, reason: str) -> bool:
+        baseline = self._task_coverage_baseline_event
+        if baseline is None:
+            return False
+        self._pending_assistant = None
+        self._assistant_delta_chunks.clear()
+        self._task_coverage_revision_requested = False
+        published = copy.deepcopy(baseline)
+        coverage = published.data.get("task_coverage")
+        if isinstance(coverage, dict):
+            coverage = copy.deepcopy(coverage)
+            coverage["revisionOutcome"] = "aborted"
+            coverage["revisionAbortReason"] = reason
+            published.data["task_coverage"] = coverage
+        self._task_coverage_baseline_event = None
+        self._record_assistant_message(published)
+        await self._inner.emit(published)
+        logger.warning(
+            "task_coverage published sealed baseline after revision abort reason=%s",
+            reason,
+        )
+        return True
 
     async def publish_citation_repair_baseline_on_abort(self, *, reason: str) -> bool:
         """Discard an interrupted repair and publish the sealed first draft.
@@ -1743,24 +2289,20 @@ class _MessageObserverSink:
         timestamp: int | None = None,
         allow_repair: bool,
     ) -> Event | None:
+        task_revision_patch_ids: tuple[str, ...] = ()
+        task_revision_used_local_patch = False
         if self._citation_repair_attempts and self._citation_repair_baseline_event is not None:
             baseline = self._citation_repair_baseline_event
             baseline_text = baseline.data.get("text")
             baseline_bundle = baseline.data.get("citation_bundle")
             output_contract = parse_output_contract(self._user_prompt)
-            quality = (
-                baseline_bundle.get("quality")
-                if isinstance(baseline_bundle, dict)
-                else None
-            )
+            quality = baseline_bundle.get("quality") if isinstance(baseline_bundle, dict) else None
             raw_claims = quality.get("claims") if isinstance(quality, dict) else None
             baseline_for_contract = baseline_text if isinstance(baseline_text, str) else ""
             required_fields_by_claim = {
                 str(claim.get("claimId")): output_contract.required_fields_for_claim(
                     baseline_for_contract[
-                        int(claim["location"]["sourceStart"]):int(
-                            claim["location"]["sourceEnd"]
-                        )
+                        int(claim["location"]["sourceStart"]) : int(claim["location"]["sourceEnd"])
                     ]
                 )
                 for claim in (raw_claims if isinstance(raw_claims, list) else [])
@@ -1772,9 +2314,7 @@ class _MessageObserverSink:
             }
             patch_result = apply_citation_claim_patch(
                 baseline_text=baseline_text if isinstance(baseline_text, str) else "",
-                baseline_bundle=(
-                    baseline_bundle if isinstance(baseline_bundle, dict) else None
-                ),
+                baseline_bundle=(baseline_bundle if isinstance(baseline_bundle, dict) else None),
                 response_text=raw_text,
                 allowed_claim_ids=repairable_claim_ids(
                     baseline_bundle if isinstance(baseline_bundle, dict) else None,
@@ -1798,22 +2338,124 @@ class _MessageObserverSink:
                 )
                 return rejected
             raw_text = patch_result.text
+        if (
+            self._task_coverage_revision_attempts
+            and self._task_coverage_revision_uses_local_patch
+            and self._task_coverage_baseline_event is not None
+            and self._task_coverage_tracker is not None
+        ):
+            baseline = self._task_coverage_baseline_event
+            baseline_text = baseline.data.get("text")
+            baseline_audit = baseline.data.get("task_coverage")
+            patch_result = self._task_coverage_tracker.apply_local_revision_patch(
+                baseline_text=baseline_text if isinstance(baseline_text, str) else "",
+                response_text=raw_text,
+                audit=baseline_audit if isinstance(baseline_audit, dict) else {},
+                allowed_evidence_handles=self._task_coverage_revision_allowed_handles,
+            )
+            if not patch_result.accepted or patch_result.text is None:
+                rejected = copy.deepcopy(baseline)
+                rejected_coverage = rejected.data.get("task_coverage")
+                if isinstance(rejected_coverage, dict):
+                    rejected_coverage = copy.deepcopy(rejected_coverage)
+                    rejected_coverage["revisionOutcome"] = (
+                        f"rejected-protocol-{patch_result.code or 'invalid'}"
+                    )
+                    rejected.data["task_coverage"] = rejected_coverage
+                self._task_coverage_baseline_event = None
+                logger.warning(
+                    "task_coverage rejected local patch reason=%s and published baseline",
+                    patch_result.code,
+                )
+                return rejected
+            raw_text = patch_result.text
+            task_revision_patch_ids = patch_result.requirement_ids
+            task_revision_used_local_patch = True
         raw_text = _strip_leading_assistant_progress(raw_text)
         if not raw_text.strip():
             return None
         raw_text = _attach_standalone_citation_lines(raw_text)
+        raw_text = _normalize_inline_citation_boundaries(raw_text)
+        raw_text = _attach_markdown_footnote_citations(raw_text)
         raw_text = _strip_strict_scope_leadin(raw_text, self._user_prompt)
         raw_text = _strip_unrequested_source_excerpt(raw_text, self._user_prompt)
         raw_text = _strip_unrequested_derived_restatement(raw_text, self._user_prompt)
         raw_text = _strip_unrequested_period_leadin(raw_text, self._user_prompt)
         raw_text = _strip_unrequested_cross_period_recap(raw_text, self._user_prompt)
         raw_text = _strip_unrequested_retrieval_internals(raw_text, self._user_prompt)
+        raw_text = _strip_requested_primary_markdown_table(raw_text, self._user_prompt)
         raw_text = _strip_empty_markdown_labels(raw_text)
         raw_text = _strip_empty_markdown_tables(raw_text)
         raw_text = raw_text.strip()
+        task_coverage_patch_ids: tuple[str, ...] = task_revision_patch_ids
+        task_coverage_patch_strategy: str | None = (
+            "verified-evidence-answer-cell" if task_revision_patch_ids else None
+        )
+        if self._task_coverage_tracker is not None:
+            pre_guard_coverage = self._task_coverage_tracker.evaluate(raw_text)
+            raw_text, ordered_patch_ids = (
+                self._task_coverage_tracker.patch_ordered_table_rows(
+                    raw_text,
+                    pre_guard_coverage,
+                )
+            )
+            if ordered_patch_ids:
+                pre_guard_coverage = self._task_coverage_tracker.evaluate(raw_text)
+            raw_text, unavailable_patch_ids = (
+                self._task_coverage_tracker.patch_unavailable_table_slots(
+                    raw_text,
+                    pre_guard_coverage,
+                )
+            )
+            if unavailable_patch_ids:
+                pre_guard_coverage = self._task_coverage_tracker.evaluate(raw_text)
+            raw_text, calculation_patch_ids = (
+                self._task_coverage_tracker.patch_required_calculation_formula(
+                    raw_text,
+                    pre_guard_coverage,
+                )
+            )
+            if calculation_patch_ids:
+                pre_guard_coverage = self._task_coverage_tracker.evaluate(raw_text)
+            raw_text, metadata_patch_ids = (
+                self._task_coverage_tracker.patch_required_metadata(
+                    raw_text,
+                    pre_guard_coverage,
+                )
+            )
+            task_coverage_patch_ids = tuple(
+                dict.fromkeys(
+                    (
+                        *task_revision_patch_ids,
+                        *ordered_patch_ids,
+                        *unavailable_patch_ids,
+                        *calculation_patch_ids,
+                        *metadata_patch_ids,
+                    )
+                )
+            )
+            patch_strategies = [
+                name
+                for active, name in (
+                    (task_revision_patch_ids, "verified-evidence-answer-cell"),
+                    (ordered_patch_ids, "requested-table-row-order"),
+                    (unavailable_patch_ids, "explicit-unavailable-exact-item"),
+                    (calculation_patch_ids, "requested-calculation-formula"),
+                    (metadata_patch_ids, "requested-output-metadata"),
+                )
+                if active
+            ]
+            if patch_strategies:
+                task_coverage_patch_strategy = "-and-".join(patch_strategies)
         result = self._citation_guard.finalize(
             raw_text,
             repair_attempts=self._citation_repair_attempts,
+            preserve_registered_citation_ids=task_revision_used_local_patch,
+            entity_aliases=(
+                self._task_coverage_tracker.entity_aliases_snapshot()
+                if self._task_coverage_tracker is not None
+                else None
+            ),
         )
         data = dict(base_data or {})
         data["text"] = result.text
@@ -1841,11 +2483,108 @@ class _MessageObserverSink:
                     metrics.get("unverifiedClaimCount", 0),
                 )
 
+        coverage_audit: dict[str, Any] | None = None
+        if self._task_coverage_tracker is not None:
+            coverage_audit = self._task_coverage_tracker.evaluate(
+                result.text,
+                citation_bundle=result.bundle,
+            )
+            if task_coverage_patch_ids:
+                coverage_audit["deterministicPatch"] = {
+                    "strategy": task_coverage_patch_strategy,
+                    "requirementIds": list(task_coverage_patch_ids),
+                }
+            data["task_coverage"] = coverage_audit
+            logger.info(
+                "task_coverage contract=%s status=%s required=%s fulfilled=%s attempts=%s",
+                coverage_audit.get("contract", {}).get("contractId"),
+                coverage_audit.get("status"),
+                coverage_audit.get("metrics", {}).get("taskRequirementRequiredCount", 0),
+                coverage_audit.get("metrics", {}).get("answerRequirementFulfilledCount", 0),
+                coverage_audit.get("metrics", {}).get("retrievalAttemptCount", 0),
+            )
+
         event = Event(
             type="assistant_message",
             data=data,
             **({"timestamp": timestamp} if timestamp is not None else {}),
         )
+
+        if self._task_coverage_revision_attempts:
+            baseline = self._task_coverage_baseline_event
+            baseline_audit = baseline.data.get("task_coverage") if baseline is not None else None
+            if (
+                baseline is not None
+                and isinstance(baseline_audit, dict)
+                and isinstance(coverage_audit, dict)
+                and (
+                    not task_coverage_improves(baseline_audit, coverage_audit)
+                    or not self._task_coverage_candidate_preserves_citation_quality(
+                        baseline,
+                        event,
+                    )
+                )
+            ):
+                rejected = copy.deepcopy(baseline)
+                rejected_coverage = rejected.data.get("task_coverage")
+                if isinstance(rejected_coverage, dict):
+                    rejected_coverage = copy.deepcopy(rejected_coverage)
+                    rejected_coverage["revisionOutcome"] = (
+                        "rejected-quality-regression"
+                        if task_coverage_improves(baseline_audit, coverage_audit)
+                        else "rejected-no-improvement"
+                    )
+                    rejected.data["task_coverage"] = rejected_coverage
+                self._task_coverage_baseline_event = None
+                logger.warning(
+                    "task_coverage rejected candidate revision because coverage did not improve"
+                )
+                return rejected
+            if isinstance(coverage_audit, dict):
+                coverage_audit["revisionOutcome"] = "accepted"
+                data["task_coverage"] = coverage_audit
+            self._task_coverage_baseline_event = None
+        elif (
+            allow_repair
+            and isinstance(coverage_audit, dict)
+            and self._task_coverage_tracker is not None
+            and self._task_coverage_tracker.should_request_revision(coverage_audit)
+        ):
+            self._task_coverage_baseline_event = copy.deepcopy(event)
+            self._task_coverage_revision_requested = True
+            candidate_records: list[Any] = []
+            seen_candidate_handles: set[str] = set()
+            for record in (
+                *self._request_relevant_repair_evidence_records(),
+                *self._diverse_repair_evidence_records(),
+            ):
+                handle = str(getattr(record, "handle", "") or "")
+                if not handle or handle in seen_candidate_handles:
+                    continue
+                seen_candidate_handles.add(handle)
+                candidate_records.append(record)
+                if len(candidate_records) >= _MAX_CITATION_REPAIR_EVIDENCE:
+                    break
+            self._task_coverage_revision_prompt = self._task_coverage_tracker.revision_prompt(
+                coverage_audit,
+                result.text,
+                self._user_prompt,
+                candidate_evidence=(
+                    self._repair_evidence_summary(record)
+                    for record in candidate_records
+                ),
+            )
+            self._task_coverage_revision_allowed_handles = tuple(
+                record.handle for record in candidate_records
+            )
+            self._task_coverage_revision_uses_local_patch = (
+                self._task_coverage_tracker.uses_local_patch_protocol(coverage_audit)
+            )
+            logger.warning(
+                "task_coverage withheld incomplete draft and requested one candidate revision"
+            )
+            return None
+
         needs_repair = self._citation_publication_needs_repair(result.bundle)
         if allow_repair and needs_repair and self._citation_repair_attempts == 0:
             repair_prompt = self._build_citation_repair_prompt(
@@ -1958,6 +2697,11 @@ class _MessageObserverSink:
                     extracted_claim,
                     registry_records,
                     semantics=semantics,
+                    entity_aliases=(
+                        self._task_coverage_tracker.entity_aliases_snapshot()
+                        if self._task_coverage_tracker is not None
+                        else None
+                    ),
                 )
                 if resolution.binding_action == "auto-rebind":
                     candidate_handles = list(resolution.selected_handles)
@@ -2164,9 +2908,7 @@ class _MessageObserverSink:
                 repair_context = {}
             if not isinstance(repair_context, dict):
                 repair_context = {}
-            if not repair_context.get("claimIssues") or not repair_context.get(
-                "candidateEvidence"
-            ):
+            if not repair_context.get("claimIssues") or not repair_context.get("candidateEvidence"):
                 return "no-actionable-resolution"
         citations = bundle.get("citations") if isinstance(bundle, dict) else None
         if (
@@ -2342,6 +3084,43 @@ class _MessageObserverSink:
             )
         )
 
+    @classmethod
+    def _task_coverage_candidate_preserves_citation_quality(
+        cls,
+        baseline: Event,
+        candidate: Event,
+    ) -> bool:
+        """A completeness revision may add claims, but may not dilute trust.
+
+        Task Coverage and Citation share one candidate-revision budget.  If a
+        replacement fills a missing row by inventing unsupported values, a
+        later citation repair will intentionally not get a second model pass.
+        Compare support/problem *rates* when the replacement adds legitimate
+        scope: absolute issue counts otherwise reward tiny, incomplete drafts
+        merely because they contain fewer factual claims.
+        """
+
+        before = cls._repair_metrics(baseline)
+        after = cls._repair_metrics(candidate)
+        before_problem_rate = before["problem"] / max(1, before["required"])
+        after_problem_rate = after["problem"] / max(1, after["required"])
+        problem_quality_preserved = after["problem"] <= before["problem"] or (
+            after["supported"] > before["supported"]
+            and after["required"] > 0
+            and (
+                before["required"] == 0
+                and after_problem_rate < 1
+                or before["required"] > 0
+                and after_problem_rate < before_problem_rate
+            )
+        )
+        return (
+            problem_quality_preserved
+            and after["unknown"] <= before["unknown"]
+            and after["mismatch"] <= before["mismatch"]
+            and after["supported"] >= before["supported"]
+        )
+
     @staticmethod
     def _mark_repair_outcome(
         event: Event,
@@ -2376,6 +3155,12 @@ class _MessageObserverSink:
         # Otherwise merely enabling citation display can double latency and
         # token usage even though the user explicitly disabled verification.
         if not self._citation_verification_enabled:
+            return False
+        # Task Coverage and Citation share one candidate-revision budget. A
+        # deterministic citation rebind may still happen inside Guard, but a
+        # second hidden model pass after a coverage revision would reintroduce
+        # the repair loop and cost amplification this coordinator prevents.
+        if self._task_coverage_revision_attempts:
             return False
         # A generated bundle means this turn crossed the citation boundary.
         # Missing retrieval and unresolved support are not actionable local
@@ -2680,6 +3465,9 @@ class SessionOrchestrator:
         from src.adapters.persist_then_broadcast_sink import PersistThenBroadcastSink
 
         session, agent = await self._load_session(user_id, session_id)
+        citation_policy_snapshot = _session_citation_quality_policy(session)
+        document_scope = _session_document_scope(session)
+        task_coverage_enabled = _session_task_coverage_enabled(session)
 
         # Slice 3 of session-modes (broadened in slice 6 simplification):
         # both Claude and Codex process ``/plan <text>`` / ``/goal <text>``
@@ -2696,18 +3484,42 @@ class SessionOrchestrator:
         if wrapped_text != user_message.text:
             user_message = dataclasses.replace(user_message, text=wrapped_text)
 
+        context_blocks: list[str] = []
         if _session_citation_enabled(session):
             scope_context = _citation_output_scope_context(user_message.text)
             if scope_context:
-                existing_context = user_message.additional_context.strip()
-                user_message = dataclasses.replace(
-                    user_message,
-                    additional_context=(
-                        f"{existing_context}\n\n{scope_context}"
-                        if existing_context
-                        else scope_context
-                    ),
-                )
+                context_blocks.append(scope_context)
+        task_contract = (
+            parse_task_contract(
+                user_message.text,
+                policy_snapshot=citation_policy_snapshot,
+                document_ids=document_scope,
+            )
+            if task_coverage_enabled
+            else None
+        )
+        if task_contract is not None:
+            retrieval_plan = build_task_retrieval_plan(
+                task_contract,
+                policy_snapshot=citation_policy_snapshot,
+            )
+            coverage_context = task_contract_prompt(
+                task_contract,
+                retrieval_plan=retrieval_plan,
+            )
+            if coverage_context:
+                context_blocks.append(coverage_context)
+        if context_blocks:
+            existing_context = user_message.additional_context.strip()
+            joined_context = "\n\n".join(context_blocks)
+            user_message = dataclasses.replace(
+                user_message,
+                additional_context=(
+                    f"{existing_context}\n\n{joined_context}"
+                    if existing_context
+                    else joined_context
+                ),
+            )
 
         message = Message(
             id=str(uuid.uuid4()),
@@ -2749,7 +3561,6 @@ class SessionOrchestrator:
         # count without changing the canonical assistant_message/thinking
         # record.
         coalesced: EventSink = DeltaCoalescingSink(persist_then_live)
-        document_scope = _session_document_scope(session)
         no_research_scope = (
             document_scope is None
             and not user_message.attachments
@@ -2761,15 +3572,15 @@ class SessionOrchestrator:
             message_id=message.id,
             user_prompt=user_message.text,
             citation_policy_available=any(Path(path).name == "citation" for path in session.skills),
-            citation_quality_policy=_session_citation_quality_policy(session),
+            citation_quality_policy=citation_policy_snapshot,
             allowed_document_ids=document_scope,
-            force_citation_required=(
-                document_scope is not None and citation_enabled
-            ),
+            force_citation_required=(document_scope is not None and citation_enabled),
             citation_enabled=citation_enabled,
             citation_verification_enabled=(
                 _session_citation_verification_enabled(session) and not no_research_scope
             ),
+            task_contract=task_contract,
+            task_coverage_enabled=task_coverage_enabled,
         )
 
         # Sessions are self-sufficient: ``session.cwd`` is required at
@@ -2812,6 +3623,96 @@ class SessionOrchestrator:
                 )
             )
             await runtime.run(session, user_message)
+            if (
+                observer.final_answer_recovery_requested
+                and getattr(session.stop_reason, "type", None) == "end_turn"
+            ):
+                observer.begin_final_answer_recovery()
+                session.status = "running"
+                session.stop_reason = None
+                logger.warning(
+                    "continuing message=%s session=%s once to recover missing final answer",
+                    message.id,
+                    session.id,
+                )
+                await runtime.run(
+                    session,
+                    UserMessage(
+                        text=observer.final_answer_recovery_prompt,
+                        additional_context=user_message.additional_context,
+                    ),
+                )
+            if (
+                observer.task_coverage_revision_requested
+                and getattr(session.stop_reason, "type", None) == "end_turn"
+            ):
+                observer.begin_task_coverage_revision()
+                session.status = "running"
+                if self._citation_repair_refresh_hook is not None:
+                    try:
+                        await self._citation_repair_refresh_hook(user_id, session_id)
+                    except Exception:
+                        logger.warning(
+                            "task coverage credential refresh failed for session %s",
+                            session_id,
+                            exc_info=True,
+                        )
+
+                # Run the one candidate revision in a fresh full-capability
+                # runtime. It can retrieve only missing requirements without
+                # replaying the original agent's very large research history;
+                # the user's native thread id remains owned by ``session``.
+                await self._evict_runtime(session_id)
+                if observer.task_coverage_revision_uses_local_patch:
+                    revision_metadata = copy.deepcopy(session.metadata)
+                    revision_metadata[BARE_COMPLETION_METADATA_KEY] = True
+                    revision_session = dataclasses.replace(
+                        session,
+                        instructions="",
+                        skills=(),
+                        mcp_servers=(),
+                        mode="default",
+                        status="running",
+                        stop_reason=None,
+                        metadata=revision_metadata,
+                        runtime_session_id=None,
+                        todos=None,
+                    )
+                else:
+                    revision_session = dataclasses.replace(
+                        session,
+                        mode="default",
+                        status="running",
+                        stop_reason=None,
+                        runtime_session_id=None,
+                        todos=None,
+                    )
+                runtime = await self._ensure_runtime(
+                    session_id,
+                    agent,
+                    revision_session,
+                    observer,
+                    revision_session.cwd,
+                )
+                self._active[session_id] = runtime
+                logger.warning(
+                    "task_coverage retrying message=%s session=%s",
+                    message.id,
+                    session.id,
+                )
+                try:
+                    await runtime.run(
+                        revision_session,
+                        UserMessage(
+                            text=observer.task_coverage_revision_prompt,
+                            additional_context=user_message.additional_context,
+                        ),
+                    )
+                    session.status = revision_session.status
+                    session.stop_reason = revision_session.stop_reason
+                finally:
+                    await self._evict_runtime(session_id)
+                    self._active.pop(session_id, None)
             if (
                 observer.citation_repair_requested
                 and getattr(session.stop_reason, "type", None) == "end_turn"
@@ -2957,6 +3858,11 @@ class SessionOrchestrator:
             message.metadata = {
                 **message.metadata,
                 "citation_bundle": observer.citation_bundle,
+            }
+        if observer.task_coverage is not None:
+            message.metadata = {
+                **message.metadata,
+                "task_coverage": observer.task_coverage,
             }
         message.total_turns = observer.num_turns or 1
         message.stop_reason = session.stop_reason

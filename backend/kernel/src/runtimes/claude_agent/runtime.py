@@ -2396,6 +2396,21 @@ class ClaudeAgentRuntime:
     ) -> dict[str, Any] | None:
         simple_name = tool_name.rsplit("__", 1)[-1]
         input_mapping = dict(_tool_input_mapping(tool_input))
+        if simple_name == "kb_search":
+            singular_document_id = str(
+                input_mapping.get("doc_id")
+                or input_mapping.get("document_id")
+                or ""
+            ).strip()
+            if (
+                singular_document_id
+                and not input_mapping.get("doc_ids")
+                and not input_mapping.get("document_ids")
+            ):
+                input_mapping.pop("doc_id", None)
+                input_mapping.pop("document_id", None)
+                input_mapping["doc_ids"] = [singular_document_id]
+                return input_mapping
         if (
             simple_name in TRANSCRIPT_DISCOVERY_TOOLS
             and (self._citation_requested_period_count or 0) > 1
@@ -3468,7 +3483,12 @@ def _tool_input_mapping(value: Any) -> Mapping[str, Any]:
 
 
 def _tool_document_ids(value: Mapping[str, Any]) -> tuple[str, ...]:
-    raw = value.get("doc_ids") or value.get("document_ids")
+    raw = (
+        value.get("doc_ids")
+        or value.get("document_ids")
+        or value.get("doc_id")
+        or value.get("document_id")
+    )
     candidates = raw if isinstance(raw, list) else [raw]
     return tuple(
         document_id

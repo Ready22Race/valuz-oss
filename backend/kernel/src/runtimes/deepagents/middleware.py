@@ -27,6 +27,7 @@ from src.core.citation import (
 )
 from src.core.citation_document_search import (
     augment_indexed_document_evidence,
+    constrain_indexed_document_scope,
 )
 from src.core.citation_document_search import (
     extract_raw_document as _extract_raw_document,
@@ -276,6 +277,23 @@ class ResearchToolBudgetMiddleware(AgentMiddleware):
         args = tool_call.get("args")
         args = args if isinstance(args, dict) else {}
         normalized_tool_name = tool_name.rsplit("__", 1)[-1]
+        if normalized_tool_name == "kb_search":
+            singular_document_id = str(
+                args.get("doc_id") or args.get("document_id") or ""
+            ).strip()
+            if (
+                singular_document_id
+                and not args.get("doc_ids")
+                and not args.get("document_ids")
+            ):
+                args = {
+                    key: value
+                    for key, value in args.items()
+                    if key not in {"doc_id", "document_id"}
+                }
+                args["doc_ids"] = [singular_document_id]
+                request = request.override(tool_call={**tool_call, "args": args})
+                tool_call = request.tool_call
         if (
             normalized_tool_name in _FINANCIAL_STATEMENT_TOOLS
             and str(args.get("period") or "").casefold() in {"annual", "yearly", "fy"}
@@ -494,7 +512,12 @@ def _discovery_document_ids(content: Any) -> set[str]:
 
 
 def _tool_document_ids(args: Mapping[str, Any]) -> tuple[str, ...]:
-    raw = args.get("doc_ids") or args.get("document_ids")
+    raw = (
+        args.get("doc_ids")
+        or args.get("document_ids")
+        or args.get("doc_id")
+        or args.get("document_id")
+    )
     candidates = raw if isinstance(raw, list) else [raw]
     return tuple(
         document_id
@@ -605,6 +628,14 @@ class CitationEvidenceCompactionMiddleware(AgentMiddleware):
         tool_args = request_call.get("args")
         tool_args = tool_args if isinstance(tool_args, dict) else {}
         captured_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+        if str(tool_name or "").rsplit("__", 1)[-1] == "kb_search":
+            constrained = constrain_indexed_document_scope(
+                result.content,
+                document_ids=_tool_document_ids(tool_args),
+            )
+            if constrained is not result.content:
+                result = result.model_copy(update={"content": constrained})
 
         if tool_name == "document_raw_content":
             raw_document = _extract_raw_document(result.content)

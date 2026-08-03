@@ -113,6 +113,64 @@ def test_unresolved_claim_never_requests_repair() -> None:
     assert resolution.repair_action == "none"
 
 
+def test_turn_local_entity_aliases_rebind_cross_company_source() -> None:
+    claim = ClaimCandidate(
+        claim_id="entity-alias-rebind",
+        exact="闪迪 FY2026 Q3 营业收入为5,950,000,000 USD。",
+        segment_index=0,
+        kind="financial-fact",
+        citation_required=True,
+        attached_citation_ids=(),
+        normalized={
+            "metric": "operating_revenue",
+            "period": "2026 Q3",
+            "value": "5950000000",
+            "unit": "USD",
+        },
+        location={"kind": "fixture", "blockIndex": 0, "start": 0, "end": 28},
+        semantic_text="闪迪 FY2026 Q3 营业收入为5,950,000,000 USD。",
+        insertion_offset=28,
+        attached_evidence_handles=("ev_wrong_sk_doc",),
+    )
+    evidence_pool = [
+        {
+            "evidenceHandle": "ev_wrong_sk_doc",
+            "source": {"title": "SK海力士(000660) - 2026 Q3 Quarterly Results"},
+            "evidence": {
+                "kind": "text",
+                "quote": "FY2026 Q3 营业收入为5,950,000,000 USD。",
+            },
+        },
+        {
+            "evidenceHandle": "ev_sndk_revenue",
+            "source": {"title": "Company income statement · SNDK"},
+            "evidence": {
+                "kind": "structured-data",
+                "entityId": "SNDK",
+                "metric": "operating_revenue",
+                "period": "2026 Q3",
+                "value": 5_950_000_000,
+                "unit": "USD",
+            },
+        },
+    ]
+
+    resolution = resolve_claim_evidence(
+        claim,
+        evidence_pool,
+        semantics=_SEMANTICS,
+        entity_aliases={
+            "闪迪": ("闪迪", "SNDK"),
+            "SK海力士": ("SK海力士", "000660"),
+        },
+    )
+
+    assert resolution.status == "verified"
+    assert resolution.binding_action == "auto-rebind"
+    assert resolution.selected_handles == ("ev_sndk_revenue",)
+    assert resolution.support_by_handle["ev_wrong_sk_doc"] == "contradicted"
+
+
 def test_added_distribution_ontology_does_not_weaken_unknown_base_metric() -> None:
     case = copy.deepcopy(
         next(

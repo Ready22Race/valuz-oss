@@ -244,6 +244,90 @@ async def test_indexed_chunks_gain_evidence_before_deepagents_compaction() -> No
     assert registry.register_tool_result(private, trusted_private=True) == 1
 
 
+async def test_singular_kb_document_scope_is_normalized_before_provider_call() -> None:
+    middleware = ResearchToolBudgetMiddleware()
+    middleware.before_agent(None, None)
+    handled_args: list[dict[str, Any]] = []
+
+    class Request:
+        def __init__(self, tool_call: dict[str, Any]) -> None:
+            self.tool_call = tool_call
+
+        def override(self, **updates: Any) -> Request:
+            return Request(updates.get("tool_call", self.tool_call))
+
+    async def handler(request: ToolCallRequest) -> ToolMessage:
+        handled_args.append(dict(request.tool_call["args"]))
+        return ToolMessage(
+            content=json.dumps({"chunks": []}),
+            tool_call_id=request.tool_call["id"],
+            name=request.tool_call["name"],
+        )
+
+    await middleware.awrap_tool_call(
+        cast(
+            ToolCallRequest,
+            Request(
+                {
+                    "id": "kb-singular",
+                    "name": "kb_search",
+                    "args": {"doc_id": "sk-q2", "query": "operating cash flow"},
+                }
+            ),
+        ),
+        handler,
+    )
+
+    assert handled_args == [
+        {"query": "operating cash flow", "doc_ids": ["sk-q2"]}
+    ]
+
+
+async def test_compaction_does_not_register_out_of_scope_indexed_chunks() -> None:
+    original = ToolMessage(
+        content=json.dumps(
+            {
+                "chunks": [
+                    {
+                        "id": "wrong",
+                        "content": "Unrelated operating cash flow was 29,833.",
+                        "doc": {"doc_id": "nvda-q2", "title": "NVIDIA Q2"},
+                    }
+                ]
+            }
+        ),
+        tool_call_id="kb-scope",
+        name="kb_search",
+    )
+
+    async def handler(_request: ToolCallRequest) -> ToolMessage:
+        return original
+
+    request = cast(
+        Any,
+        type(
+            "Request",
+            (),
+            {
+                "tool_call": {
+                    "id": "kb-scope",
+                    "name": "kb_search",
+                    "args": {"doc_id": "sk-q2", "query": "operating cash flow"},
+                }
+            },
+        )(),
+    )
+    result = await CitationEvidenceCompactionMiddleware().awrap_tool_call(
+        request,
+        handler,
+    )
+
+    assert isinstance(result, ToolMessage)
+    payload = json.loads(str(result.content))
+    assert payload["chunks"] == []
+    assert citation_artifact_content(result) is None
+
+
 async def test_document_text_evidence_preserves_selected_chunks_and_aligns_handles() -> None:
     envelopes = [
         {

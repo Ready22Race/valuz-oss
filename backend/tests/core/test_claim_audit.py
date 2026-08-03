@@ -7,6 +7,7 @@ from src.core.claim_audit import (
     _claim_amounts,
     auto_bind_composite_text_claims,
     auto_bind_unique_claims,
+    calculation_formula_matches_evidence,
     extract_claims,
     extract_claims_with_status,
     match_available_evidence,
@@ -20,7 +21,7 @@ _FINANCE_SEMANTICS = {
     "metric_ontology": {
         "metrics": {
             "operating_revenue": {
-                "aliases": ["营业收入", "销售收入", "operating revenue"],
+                "aliases": ["营业收入", "销售收入", "revenue", "operating revenue"],
                 "fields": ["operating_revenue"],
             },
             "net_profit": {
@@ -79,10 +80,42 @@ _FINANCE_SEMANTICS = {
                 "aliases": ["美元", "USD"],
                 "scale": 1,
             },
+            "usd_million": {
+                "canonical": "USD",
+                "aliases": ["百万美元", "USD million", "USDm"],
+                "scale": 1_000_000,
+            },
             "usd_billion": {
                 "canonical": "USD",
                 "aliases": ["十亿美元", "USD billion", "USD bn"],
                 "scale": 1_000_000_000,
+            },
+            "krw": {
+                "canonical": "KRW",
+                "aliases": ["韩元", "KRW"],
+                "scale": 1,
+            },
+            "krw_million": {
+                "canonical": "KRW",
+                "aliases": [
+                    "百万韩元",
+                    "KRW million",
+                    "KRWm",
+                    "million KRW",
+                    "millions of Korean won",
+                    "In millions of Korean won",
+                ],
+                "scale": 1_000_000,
+            },
+            "krw_hundred_million": {
+                "canonical": "KRW",
+                "aliases": ["亿韩元", "KRW 100m"],
+                "scale": 100_000_000,
+            },
+            "krw_trillion": {
+                "canonical": "KRW",
+                "aliases": ["万亿韩元", "KRW trillion"],
+                "scale": 1_000_000_000_000,
             },
         }
     },
@@ -436,6 +469,38 @@ def test_current_source_coverage_note_is_excluded_from_claim_audit() -> None:
     )
 
     assert claims == []
+
+
+def test_period_and_unit_banner_with_vertical_separator_is_presentation() -> None:
+    claims = extract_claims(
+        "报告期：2025 财年（截至 2025 年 12 月 31 日）｜单位：人民币千元",
+        mode="strict-domain",
+    )
+
+    assert len(claims) == 1
+    assert claims[0].kind == "presentation"
+    assert claims[0].citation_required is False
+
+
+def test_current_material_unavailable_is_a_local_limitation_not_a_source_claim() -> None:
+    claims = extract_claims(
+        "扣非净利润：当前资料未披露。",
+        mode="strict-domain",
+    )
+
+    assert len(claims) == 1
+    assert claims[0].kind == "limitation"
+    assert claims[0].citation_required is False
+
+
+def test_report_non_disclosure_remains_a_source_claim() -> None:
+    claims = extract_claims(
+        "年度报告未披露扣非净利润。",
+        mode="strict-domain",
+    )
+
+    assert len(claims) == 1
+    assert claims[0].citation_required is True
 
 
 def test_bold_only_subsection_labels_are_context_not_claims() -> None:
@@ -895,6 +960,51 @@ def test_structured_cny_value_matches_markdown_table_header_unit() -> None:
     )
 
 
+def test_structured_value_inherits_unit_from_sibling_period_cell() -> None:
+    answer = (
+        "| 公司 | 报告期 | 营业收入 | 净利润 |\n"
+        "|---|---|---:|---:|\n"
+        "| 闪迪 | FY2026 Q3；单位：百万美元 | 5,950 | 3,615 |"
+    )
+    claims = extract_claims(
+        answer,
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+    revenue = next(claim for claim in claims if "营业收入" in claim.exact)
+
+    assert revenue.normalized["unit"] == "百万美元"
+    assert revenue.normalized["unitBase"] == "USD"
+    assert (
+        verify_evidence_support(
+            revenue,
+            {
+                "source": {"title": "Company income statement · SNDK"},
+                "evidence": {
+                    "kind": "structured-data",
+                    "entityId": "SNDK",
+                    "entityName": "闪迪",
+                    "field": "revenue",
+                    "metric": "operating_revenue",
+                    "value": 5_950_000_000,
+                    "unit": "USD",
+                    "period": "2026 Q3",
+                },
+            },
+            semantics=_FINANCE_SEMANTICS,
+        ).status
+        == "supported"
+    )
+    assert structured_value_present(
+        5_950_000_000,
+        "USD",
+        answer,
+        field="revenue",
+        metric="operating_revenue",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+
 def test_calculation_inherits_entity_and_period_from_presentation_preface() -> None:
     claims = extract_claims(
         "贵州茅台 2024 年全年财务数据如下：\n\n"
@@ -969,6 +1079,33 @@ def test_calculation_formula_with_all_inputs_is_direct_support() -> None:
 
     assert (
         verify_evidence_support(claim, evidence, semantics=_FINANCE_SEMANTICS).status == "supported"
+    )
+
+
+def test_latex_formula_is_safely_recomputed_against_calculation_evidence() -> None:
+    evidence = {
+        "kind": "calculation",
+        "expression": "((current - prior) / prior) * 100",
+        "inputs": [
+            {"name": "current", "value": 170_899_152_276, "unit": "CNY"},
+            {"name": "prior", "value": 147_693_604_994, "unit": "CNY"},
+        ],
+        "result": "15.71",
+        "unit": "%",
+        "rounding": "2dp",
+    }
+    formula = (
+        r"$$\frac{170{,}899{,}152{,}276 - 147{,}693{,}604{,}994}"
+        r"{147{,}693{,}604{,}994} \times 100\%$$"
+    )
+
+    assert calculation_formula_matches_evidence(formula, evidence) is True
+    assert (
+        calculation_formula_matches_evidence(
+            formula.replace(" - ", " + "),
+            evidence,
+        )
+        is False
     )
 
 
@@ -1968,6 +2105,45 @@ def test_text_table_with_currency_and_percent_columns_supports_both_values() -> 
 
     assert (
         verify_evidence_support(claim, evidence, semantics=_FINANCE_SEMANTICS).status == "supported"
+    )
+
+
+def test_text_table_inherited_million_krw_unit_supports_scaled_display_value() -> None:
+    correct_claim = extract_claims(
+        "SK海力士 2026 Q1 营业收入为52.576287万亿韩元。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    wrong_claim = extract_claims(
+        "SK海力士 2026 Q1 营业收入为52,576,287亿韩元。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    evidence = {
+        "kind": "text",
+        "quote": (
+            "Three-month periods ended March 31, 2026 and 2025\n"
+            "(In millions of Korean won, except per share data)\n"
+            "Revenue 52,576,287 17,639,092\n"
+            "Gross profit 41,679,414 10,997,539"
+        ),
+    }
+
+    assert (
+        verify_evidence_support(
+            correct_claim,
+            evidence,
+            semantics=_FINANCE_SEMANTICS,
+        ).status
+        == "supported"
+    )
+    assert (
+        verify_evidence_support(
+            wrong_claim,
+            evidence,
+            semantics=_FINANCE_SEMANTICS,
+        ).status
+        == "contradicted"
     )
 
 

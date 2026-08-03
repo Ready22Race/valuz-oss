@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from valuz_agent.ports.citation_quality import (
     CitationQualityPolicyRegistry,
     CitationQualityPolicySnapshot,
+    load_citation_policy_document,
     merge_citation_quality_policy_snapshots,
 )
 
@@ -86,6 +89,266 @@ def test_merge_rejects_out_of_order_or_duplicate_layers() -> None:
         )
     with pytest.raises(ValueError, match="fixed-order"):
         merge_citation_quality_policy_snapshots([_snapshot("oss"), _snapshot("oss")])
+
+
+def test_task_coverage_policy_merges_all_layers_additively() -> None:
+    merged = merge_citation_quality_policy_snapshots(
+        [
+            _snapshot(
+                "oss",
+                config={
+                    "task_coverage": {
+                        "contract": {
+                            "dimensions": ["entity", "period"],
+                            "selectors": ["explicit"],
+                        },
+                        "remediation": {"allowed_actions": ["regenerate"]},
+                    }
+                },
+            ),
+            _snapshot(
+                "commercial",
+                config={
+                    "task_coverage": {
+                        "contract": {
+                            "dimensions": ["connector-scope"],
+                            "selectors": ["locked-resource"],
+                        }
+                    }
+                },
+            ),
+            _snapshot(
+                "distribution",
+                config={
+                    "task_coverage": {
+                        "contract": {
+                            "dimensions": ["financial-metric"],
+                            "selectors": ["latest-published"],
+                        }
+                    }
+                },
+            ),
+        ]
+    )
+
+    assert merged.config["task_coverage"]["contract"] == {
+        "dimensions": ["entity", "period", "connector-scope", "financial-metric"],
+        "selectors": ["explicit", "locked-resource", "latest-published"],
+    }
+    assert merged.config["task_coverage"]["remediation"]["allowed_actions"] == [
+        "regenerate"
+    ]
+
+
+def test_policy_loader_accepts_task_coverage_identity_mapping(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policy.yaml"
+    policy_path.write_text(
+        """policy_id: test-policy
+layer: distribution
+version: test-policy-v1
+activation:
+  default_mode: required-on-evidence
+task_coverage:
+  retrieval:
+    identity_mappings:
+      - id: company-identity
+        tool_patterns: [\"*company_search*\"]
+        query_fields: [query]
+        result_fields: [symbol, ticker, name]
+""",
+        encoding="utf-8",
+    )
+
+    loaded = load_citation_policy_document(
+        policy_path,
+        expected_policy_id="test-policy",
+        expected_layer="distribution",
+        revision_prefix="test-policy-v",
+    )
+
+    mapping = loaded["task_coverage"]["retrieval"]["identity_mappings"][0]
+    assert mapping["id"] == "company-identity"
+
+
+def test_policy_loader_rejects_unknown_identity_mapping_key(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policy.yaml"
+    policy_path.write_text(
+        """policy_id: test-policy
+layer: distribution
+version: test-policy-v1
+activation:
+  default_mode: required-on-evidence
+task_coverage:
+  retrieval:
+    identity_mappings:
+      - id: company-identity
+        tool_patterns: [\"*company_search*\"]
+        typo_fields: [symbol]
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="identity mapping requires"):
+        load_citation_policy_document(
+            policy_path,
+            expected_policy_id="test-policy",
+            expected_layer="distribution",
+            revision_prefix="test-policy-v",
+        )
+
+
+def test_policy_loader_accepts_task_coverage_topic_ontology(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policy.yaml"
+    policy_path.write_text(
+        """policy_id: test-policy
+layer: distribution
+version: test-policy-v1
+activation:
+  default_mode: required-on-evidence
+task_coverage:
+  contract:
+    topic_ontology:
+      revision: test-topics-v1
+      topics:
+        capital_expenditure:
+          aliases:
+            - capital expenditure
+            - gigawatt of capacity
+""",
+        encoding="utf-8",
+    )
+
+    loaded = load_citation_policy_document(
+        policy_path,
+        expected_policy_id="test-policy",
+        expected_layer="distribution",
+        revision_prefix="test-policy-v",
+    )
+
+    topic = loaded["task_coverage"]["contract"]["topic_ontology"]["topics"][
+        "capital_expenditure"
+    ]
+    assert topic["aliases"] == ["capital expenditure", "gigawatt of capacity"]
+
+
+@pytest.mark.parametrize(
+    "topic_ontology",
+    [
+        "[]",
+        "{revision: test-topics-v1, topics: []}",
+        "{revision: test-topics-v1, topics: {capital_expenditure: {aliases: []}}}",
+        "{revision: test-topics-v1, topics: {capital_expenditure: {aliases: [capex], typo: true}}}",
+    ],
+)
+def test_policy_loader_rejects_invalid_task_coverage_topic_ontology(
+    tmp_path: Path,
+    topic_ontology: str,
+) -> None:
+    policy_path = tmp_path / "policy.yaml"
+    policy_path.write_text(
+        f"""policy_id: test-policy
+layer: distribution
+version: test-policy-v1
+activation:
+  default_mode: required-on-evidence
+task_coverage:
+  contract:
+    topic_ontology: {topic_ontology}
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="topic ontology"):
+        load_citation_policy_document(
+            policy_path,
+            expected_policy_id="test-policy",
+            expected_layer="distribution",
+            revision_prefix="test-policy-v",
+        )
+
+
+def test_policy_loader_accepts_task_coverage_dimension_ontology(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policy.yaml"
+    policy_path.write_text(
+        """policy_id: test-policy
+layer: distribution
+version: test-policy-v1
+activation:
+  default_mode: required-on-evidence
+task_coverage:
+  contract:
+    dimension_ontology:
+      revision: test-dimensions-v1
+      dimensions:
+        sales_channel:
+          aliases: [channel, sales channel]
+          members:
+            direct:
+              aliases: [direct, direct sales]
+            wholesale:
+              aliases: [wholesale]
+""",
+        encoding="utf-8",
+    )
+
+    loaded = load_citation_policy_document(
+        policy_path,
+        expected_policy_id="test-policy",
+        expected_layer="distribution",
+        revision_prefix="test-policy-v",
+    )
+
+    dimension = loaded["task_coverage"]["contract"]["dimension_ontology"][
+        "dimensions"
+    ]["sales_channel"]
+    assert dimension["members"]["direct"]["aliases"] == ["direct", "direct sales"]
+
+
+@pytest.mark.parametrize(
+    "dimension_ontology",
+    [
+        "[]",
+        "{revision: test-dimensions-v1, dimensions: []}",
+        (
+            "{revision: test-dimensions-v1, dimensions: "
+            "{sales_channel: {aliases: [], members: {direct: {aliases: [direct]}}}}}"
+        ),
+        (
+            "{revision: test-dimensions-v1, dimensions: "
+            "{sales_channel: {aliases: [channel], members: {direct: {aliases: []}}}}}"
+        ),
+        (
+            "{revision: test-dimensions-v1, dimensions: "
+            "{sales_channel: {aliases: [channel], members: "
+            "{direct: {aliases: [direct], typo: true}}}}}"
+        ),
+    ],
+)
+def test_policy_loader_rejects_invalid_task_coverage_dimension_ontology(
+    tmp_path: Path,
+    dimension_ontology: str,
+) -> None:
+    policy_path = tmp_path / "policy.yaml"
+    policy_path.write_text(
+        f"""policy_id: test-policy
+layer: distribution
+version: test-policy-v1
+activation:
+  default_mode: required-on-evidence
+task_coverage:
+  contract:
+    dimension_ontology: {dimension_ontology}
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="dimension ontology"):
+        load_citation_policy_document(
+            policy_path,
+            expected_policy_id="test-policy",
+            expected_layer="distribution",
+            revision_prefix="test-policy-v",
+        )
 
 
 async def test_registry_preserves_available_layers_when_commercial_fails() -> None:

@@ -29,12 +29,13 @@ async def refresh_citation_policy_for_session(
     *,
     citation_enabled_override: bool | None = None,
     verification_enabled_override: bool | None = None,
+    task_coverage_enabled_override: bool | None = None,
 ) -> bool:
-    """Apply the user's citation and verification preferences to a session.
+    """Apply citation, verification and task-coverage preferences to a session.
 
     Existing conversations converge lazily before every turn. Internal
-    document-summary runs may override the two values so summaries always keep
-    inspectable citation indices without paying for claim-quality verification.
+    document-summary runs may override citation/verification values so summaries
+    keep inspectable citation indices without paying for claim-quality verification.
     """
 
     from valuz_agent.adapters.capability_resolver import citation_skill_dir
@@ -45,6 +46,7 @@ async def refresh_citation_policy_for_session(
     )
     from valuz_agent.modules.settings.preferences import (
         get_conversation_citations_enabled,
+        get_conversation_task_coverage_enabled,
         get_conversation_verification_enabled,
     )
 
@@ -55,7 +57,11 @@ async def refresh_citation_policy_for_session(
     skill_dir = citation_skill_dir(session.user_id)
     skill_path = str(skill_dir.resolve(strict=False))
     current_skills = list(session.skills or ())
-    if citation_enabled_override is None or verification_enabled_override is None:
+    if (
+        citation_enabled_override is None
+        or verification_enabled_override is None
+        or task_coverage_enabled_override is None
+    ):
         async with async_unit_of_work(commit=False) as db:
             citation_enabled = (
                 await get_conversation_citations_enabled(db, user_id=user_id)
@@ -67,9 +73,15 @@ async def refresh_citation_policy_for_session(
                 if verification_enabled_override is None
                 else verification_enabled_override
             )
+            task_coverage_enabled = (
+                await get_conversation_task_coverage_enabled(db, user_id=user_id)
+                if task_coverage_enabled_override is None
+                else task_coverage_enabled_override
+            )
     else:
         citation_enabled = citation_enabled_override
         verification_enabled = verification_enabled_override
+        task_coverage_enabled = task_coverage_enabled_override
     verification_enabled = bool(citation_enabled and verification_enabled)
 
     if citation_enabled:
@@ -85,20 +97,26 @@ async def refresh_citation_policy_for_session(
     old_revision = valuz.get("citation_policy_revision")
     old_citation_enabled = valuz.get("citation_enabled")
     old_verification_enabled = valuz.get("citation_verification_enabled")
+    old_task_coverage_enabled = valuz.get("task_coverage_enabled")
     if citation_enabled:
         valuz["citation_policy_revision"] = CITATION_POLICY_REVISION
     else:
         valuz.pop("citation_policy_revision", None)
     valuz["citation_enabled"] = bool(citation_enabled)
     valuz["citation_verification_enabled"] = verification_enabled
+    valuz["task_coverage_enabled"] = bool(task_coverage_enabled)
     old_quality_policy = valuz.get("citation_quality_policy")
     from valuz_agent.ports.extensions import ext
 
-    if verification_enabled:
+    # The effective policy now serves two independent consumers. Claim
+    # verification may be off while Task Coverage still needs Finance metric,
+    # selector and content-mapping policy.
+    policy_metadata = {**metadata, "valuz": valuz}
+    if verification_enabled or task_coverage_enabled:
         try:
             quality_snapshot = await ext.citation_quality_policies.resolve(
                 user_id,
-                session_metadata=metadata,
+                session_metadata=policy_metadata,
             )
         except Exception:  # noqa: BLE001 — an enabled domain gate fails closed
             logger.exception(
@@ -127,11 +145,11 @@ async def refresh_citation_policy_for_session(
     if (
         new_skills == current_skills
         and new_instructions == (session.instructions or "")
-        and old_revision
-        == (CITATION_POLICY_REVISION if citation_enabled else None)
+        and old_revision == (CITATION_POLICY_REVISION if citation_enabled else None)
         and old_quality_policy == quality_policy
         and old_citation_enabled == bool(citation_enabled)
         and old_verification_enabled == verification_enabled
+        and old_task_coverage_enabled == bool(task_coverage_enabled)
     ):
         return False
 
@@ -153,10 +171,11 @@ async def refresh_citation_policy_for_session(
     )
     logger.info(
         "Refreshed citation policy on session %s "
-        "(enabled=%s verification=%s skill=%s revision=%s quality=%s)",
+        "(enabled=%s verification=%s task_coverage=%s skill=%s revision=%s quality=%s)",
         session_id,
         citation_enabled,
         verification_enabled,
+        task_coverage_enabled,
         citation_enabled and skill_path not in current_skills and skill_dir.is_dir(),
         CITATION_POLICY_REVISION if citation_enabled else "disabled",
         quality_policy.get("revision") if quality_policy else "none",

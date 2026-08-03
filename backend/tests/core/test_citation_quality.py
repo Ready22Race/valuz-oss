@@ -149,6 +149,43 @@ def test_policy_passes_structured_data_and_adds_stable_annotations() -> None:
     assert "annotations" not in bundle["citations"][0]
 
 
+def test_same_field_address_for_different_entities_is_not_a_source_conflict() -> None:
+    citations = []
+    for citation_id, entity_id, value in (
+        ("cit_sndk", "SNDK", 5_950_000_000),
+        ("cit_mu", "MU", 41_456_000_000),
+    ):
+        citation = _structured(citation_id)
+        citation["source"]["sourceId"] = f"financials:{entity_id}"
+        citation["evidence"].update(
+            {
+                "recordKey": "/data/0/revenue",
+                "field": "/data/0/revenue",
+                "metric": "revenue",
+                "entityId": entity_id,
+                "value": value,
+                "unit": "USD",
+                "period": "2026 quarterly",
+                "asOf": "2026-05-28",
+            }
+        )
+        citations.append(citation)
+
+    result = evaluate_citation_quality(
+        "SNDK revenue was 5950000000 USD [source](citation://cit_sndk). "
+        "MU revenue was 41456000000 USD [source](citation://cit_mu).",
+        {
+            "version": 1,
+            "citations": citations,
+            "integrity": _integrity(),
+        },
+        _policy(),
+    )
+
+    codes = {issue["code"] for issue in result["quality"]["issues"]}
+    assert "structured_source_conflict" not in codes
+
+
 def test_policy_degrades_missing_unit_period_and_out_of_range_date() -> None:
     citation = _structured()
     citation["evidence"].pop("unit")
@@ -473,6 +510,81 @@ def test_policy_recomputes_calculation_and_checks_input_provenance() -> None:
     assert result["quality"]["layers"]["L4"] == "degraded"
 
 
+def test_displayed_formula_inherits_the_adjacent_calculation_evidence() -> None:
+    """A formula and its result are one calculation presentation, not two sources."""
+    policy = _policy()
+    policy["config"]["source_tiers"][0]["match"]["source_types"].append("tool-result")
+    policy["config"]["source_tiers"][0]["match"]["tools"].append("runtime.calculation")
+    current = _structured("cit_current")
+    current["evidence"].update(
+        {"field": "current_revenue", "value": 120, "period": "FY2025"}
+    )
+    prior = _structured("cit_prior")
+    prior["evidence"].update(
+        {"field": "prior_revenue", "value": 100, "period": "FY2024"}
+    )
+    calculation = {
+        "citationId": "cit_growth",
+        "source": {
+            "sourceId": "calculation-1",
+            "providerId": "runtime",
+            "sourceType": "tool-result",
+            "title": "Growth calculation",
+            "retrievedAt": "2026-07-30T10:00:00Z",
+        },
+        "evidence": {
+            "kind": "calculation",
+            "toolName": "runtime.calculation",
+            "expression": "((current - prior) / prior) * 100",
+            "inputs": [
+                {
+                    "name": "current",
+                    "citationId": "cit_current",
+                    "value": 120,
+                    "unit": "USDm",
+                },
+                {
+                    "name": "prior",
+                    "citationId": "cit_prior",
+                    "value": 100,
+                    "unit": "USDm",
+                },
+            ],
+            "result": 20,
+            "unit": "%",
+            "rounding": "2dp",
+            "calculatedAt": "2026-07-30T10:00:00Z",
+        },
+    }
+
+    result = evaluate_citation_quality(
+        "\n".join(
+            [
+                "2025 revenue: 120 USDm [current](citation://cit_current)",
+                "2024 revenue: 100 USDm [prior](citation://cit_prior)",
+                "",
+                "Calculation formula: (120 - 100) / 100",
+                "",
+                "Growth rate: 20% [calculation](citation://cit_growth)",
+            ]
+        ),
+        {
+            "version": 1,
+            "citations": [current, prior, calculation],
+            "integrity": _integrity(),
+        },
+        policy,
+    )
+
+    formula = next(
+        claim for claim in result["quality"]["claims"] if "Calculation formula" in claim["exact"]
+    )
+    assert formula["citationIds"] == ["cit_growth"]
+    assert formula["status"] == "auto-bound"
+    assert formula["issueCodes"] == []
+    assert result["quality"]["status"] == "passed", result["quality"]["issues"]
+
+
 def test_derived_claim_requires_calculation_evidence_not_only_input_citations() -> None:
     current = _structured("cit_current")
     current["evidence"]["field"] = "current_revenue"
@@ -708,6 +820,60 @@ def test_structured_preflight_preserves_markdown_table_header_unit() -> None:
     assert result["quality"]["status"] == "passed"
 
 
+def test_structured_preflight_inherits_unit_from_sibling_period_cell() -> None:
+    policy = _policy()
+    policy["config"]["semantics"] = {
+        "metric_ontology": {
+            "metrics": {
+                "operating_revenue": {
+                    "aliases": ["营业收入"],
+                    "fields": ["revenue", "operating_revenue"],
+                }
+            }
+        },
+        "unit_ontology": {
+            "units": {
+                "usd": {"canonical": "USD", "aliases": ["USD", "美元"], "scale": 1},
+                "usd-million": {
+                    "canonical": "USD",
+                    "aliases": ["百万美元", "USD million"],
+                    "scale": 1_000_000,
+                },
+            }
+        },
+    }
+    citation = _structured()
+    citation["source"]["title"] = "Company income statement · SNDK"
+    citation["evidence"].update(
+        {
+            "field": "revenue",
+            "metric": "operating_revenue",
+            "value": 5_950_000_000,
+            "unit": "USD",
+            "period": "2026 Q3",
+            "entityId": "SNDK",
+            "entityName": "闪迪",
+        }
+    )
+    result = evaluate_citation_quality(
+        "| 公司 | 报告期 | 营业收入 |\n"
+        "|---|---|---:|\n"
+        "| 闪迪 | FY2026 Q3；单位：百万美元 | "
+        "5,950 [1](citation://cit_revenue) |",
+        {
+            "version": 1,
+            "citations": [citation],
+            "integrity": _integrity(),
+        },
+        policy,
+    )
+    codes = {issue["code"] for issue in result["quality"]["issues"]}
+
+    assert "structured_value_not_present_in_answer" not in codes
+    assert "claim_evidence_mismatch" not in codes
+    assert result["quality"]["status"] == "passed"
+
+
 def test_structured_preflight_accepts_usd_hundred_million_alias() -> None:
     policy = _policy()
     policy["config"]["semantics"] = {
@@ -812,6 +978,40 @@ def test_company_source_mismatch_is_a_concrete_entity_conflict() -> None:
     assert len(conflicts) == 1
     assert conflicts[0]["citationIds"] == ["cit_micron"]
     assert "闪迪" in conflicts[0]["claim"]["exact"]
+
+
+def test_opaque_structured_ticker_is_unknown_not_cross_company_conflict() -> None:
+    citation = _structured("cit_sandisk")
+    citation["source"]["title"] = "Company income statement · SNDK"
+    citation["evidence"].update(
+        {
+            "entityId": "SNDK",
+            "metric": "operating_revenue",
+            "period": "FY2026 Q3",
+            "value": 5_950_000_000,
+            "unit": "USD",
+        }
+    )
+    answer = (
+        "| 公司 | 报告期 | 营业收入 |\n"
+        "|---|---|---:|\n"
+        "| 闪迪 | FY2026 Q3 | 59.50亿美元 [1](citation://cit_sandisk) |"
+    )
+
+    result = evaluate_citation_quality(
+        answer,
+        {
+            "version": 1,
+            "citations": [citation],
+            "integrity": _integrity(),
+        },
+        _policy(),
+        entity_aliases={"闪迪": ("闪迪",)},
+    )
+
+    assert "claim_source_entity_conflict" not in {
+        issue["code"] for issue in result["quality"]["issues"]
+    }
 
 
 def test_metric_acronym_in_parentheses_is_not_a_company_identifier() -> None:

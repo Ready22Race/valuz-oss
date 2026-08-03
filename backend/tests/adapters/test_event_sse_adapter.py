@@ -137,6 +137,27 @@ def test_should_propagate_citation_bundle_on_final_assistant_frames():
     assert json.loads(payload["citation_bundle"]) == bundle
 
 
+def test_should_propagate_task_coverage_on_final_assistant_frames():
+    coverage = {
+        "version": 1,
+        "status": "partial",
+        "metrics": {
+            "taskRequirementRequiredCount": 12,
+            "answerRequirementFulfilledCount": 10,
+        },
+    }
+
+    result = _translate_kernel_event(
+        "assistant_message",
+        {"text": "answer", "task_coverage": coverage},
+    )
+
+    assert result is not None
+    legacy_type, payload = result
+    assert legacy_type == "message.assistant.delta"
+    assert json.loads(payload["task_coverage"]) == coverage
+
+
 def test_should_translate_thinking_delta_when_kernel_streams_reasoning_chunks():
     # Reasoning content streams in incrementally (V5+streaming) so the
     # frontend can render a live "Thinking..." preview before the full

@@ -20,6 +20,90 @@ _REQUEST_TERM_TRIM_RE = re.compile(
 )
 
 
+def constrain_indexed_document_scope(
+    content: Any,
+    *,
+    document_ids: tuple[str, ...],
+) -> Any:
+    """Remove indexed chunks that escaped an explicit document scope.
+
+    Some remote search providers accept an unknown singular ``doc_id`` field
+    but silently execute a global search. Returned chunks still carry stable
+    document ids, so enforce the requested scope before either the model or
+    Evidence Registry sees them.
+    """
+
+    allowed = {str(item).strip() for item in document_ids if str(item).strip()}
+    if not allowed:
+        return content
+    if isinstance(content, str):
+        try:
+            decoded = json.loads(content)
+        except (TypeError, ValueError):
+            return content
+        constrained = constrain_indexed_document_scope(
+            decoded,
+            document_ids=tuple(allowed),
+        )
+        return json.dumps(constrained, ensure_ascii=False, separators=(",", ":"))
+    if isinstance(content, list):
+        output: list[Any] = []
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "text":
+                output.append(block)
+                continue
+            text = block.get("text")
+            if not isinstance(text, str):
+                output.append(block)
+                continue
+            output.append(
+                {
+                    **block,
+                    "text": constrain_indexed_document_scope(
+                        text,
+                        document_ids=tuple(allowed),
+                    ),
+                }
+            )
+        return output
+    if not isinstance(content, dict) or not isinstance(content.get("chunks"), list):
+        return content
+    identified_chunks = [
+        chunk
+        for chunk in content["chunks"]
+        if isinstance(chunk, dict) and _indexed_chunk_document_id(chunk)
+    ]
+    if not identified_chunks:
+        # Some internal/legacy adapters return already-scoped plain strings.
+        # There is no contrary document identity to prove leakage, so preserve
+        # them. Scope enforcement activates only on explicit returned ids.
+        return content
+    chunks = [
+        chunk
+        for chunk in identified_chunks
+        if _indexed_chunk_document_id(chunk) in allowed
+    ]
+    result = {**content, "chunks": chunks}
+    if len(chunks) != len(content["chunks"]):
+        result["_valuz_scope"] = {
+            "documentIds": sorted(allowed),
+            "discardedOutOfScopeChunks": len(content["chunks"]) - len(chunks),
+        }
+    return result
+
+
+def _indexed_chunk_document_id(chunk: dict[str, Any]) -> str:
+    document = chunk.get("doc")
+    document = document if isinstance(document, dict) else {}
+    return str(
+        document.get("doc_id")
+        or document.get("document_id")
+        or chunk.get("doc_id")
+        or chunk.get("document_id")
+        or ""
+    ).strip()
+
+
 def augment_indexed_document_evidence(
     content: Any,
     *,
@@ -135,12 +219,7 @@ def _indexed_chunk_evidence(
     quote = str(chunk.get("content") or "").strip()
     document = chunk.get("doc")
     document = document if isinstance(document, dict) else {}
-    document_id = str(
-        document.get("doc_id")
-        or document.get("document_id")
-        or chunk.get("doc_id")
-        or ""
-    ).strip()
+    document_id = _indexed_chunk_document_id(chunk)
     chunk_id = str(chunk.get("id") or chunk.get("chunk_id") or "").strip()
     if not quote or not document_id or not chunk_id:
         return None

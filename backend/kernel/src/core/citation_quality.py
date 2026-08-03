@@ -14,6 +14,7 @@ import copy
 import fnmatch
 import re
 from collections import Counter, defaultdict
+from collections.abc import Iterable, Mapping
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -22,6 +23,7 @@ from src.core.claim_audit import (
     CLAIM_EXTRACTOR_REVISION,
     CLAIM_VERIFIER_REVISION,
     ClaimCandidate,
+    calculation_formula_matches_evidence,
     canonical_evidence_dimension,
     canonical_evidence_metric,
     canonical_evidence_period,
@@ -78,6 +80,7 @@ def evaluate_citation_quality(
     policy_snapshot: dict[str, Any] | None,
     *,
     available_evidence: Any = (),
+    entity_aliases: Mapping[str, Iterable[str]] | None = None,
 ) -> dict[str, Any]:
     """Return a copy of *bundle* decorated with quality annotations."""
 
@@ -198,7 +201,7 @@ def evaluate_citation_quality(
     semantics = semantics if isinstance(semantics, dict) else None
 
     structured_groups: dict[
-        tuple[str, str, str, str],
+        tuple[str, str, str, str, str],
         list[tuple[str, Any]],
     ] = defaultdict(list)
     cross_source_groups: dict[
@@ -238,10 +241,10 @@ def evaluate_citation_quality(
                 evidence.get("period") or evidence.get("asOf"),
                 "",
             )
-            structured_groups[(dataset_id, record_key, field, period)].append(
+            subject = _structured_subject(citation, evidence) or ""
+            structured_groups[(subject, dataset_id, record_key, field, period)].append(
                 (citation_id, evidence.get("value"))
             )
-            subject = _structured_subject(citation, evidence)
             if subject and field and period:
                 cross_source_groups[(subject, field, period)].append(
                     (
@@ -398,6 +401,7 @@ def evaluate_citation_quality(
         issue=issue,
         integrity=integrity,
         semantics=semantics,
+        entity_aliases=entity_aliases,
     )
     unsourced_marker_count = len(_UNSOURCED_RE.findall(answer))
     unsourced_count = unsourced_marker_count + claim_metrics["unsupported"]
@@ -491,6 +495,7 @@ def _audit_claims(
     issue: Any,
     integrity: dict[str, Any],
     semantics: dict[str, Any] | None,
+    entity_aliases: Mapping[str, Iterable[str]] | None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     claims, extraction_truncated = extract_claims_with_status(
         answer,
@@ -511,8 +516,12 @@ def _audit_claims(
     }
     if extraction_truncated:
         issue("claim_audit_truncated", "L0")
-    entity_aliases = _entity_alias_context(answer, citation_by_id)
-    for claim in claims:
+    canonical_entity_aliases = _entity_alias_context(
+        answer,
+        citation_by_id,
+        provided=entity_aliases,
+    )
+    for claim_index, claim in enumerate(claims):
         required = claim.citation_required if enabled else bool(claim.attached_citation_ids)
         if required:
             metrics["required"] += 1
@@ -521,10 +530,22 @@ def _audit_claims(
             for citation_id in claim.attached_citation_ids
             if citation_id in citation_by_id
         ]
+        adjacent_calculation_ids = _adjacent_calculation_citation_ids(
+            claim,
+            claim_index=claim_index,
+            claims=claims,
+            citation_by_id=citation_by_id,
+        )
+        if not citation_ids and adjacent_calculation_ids:
+            citation_ids = adjacent_calculation_ids
         issue_codes: list[str] = []
         bindings: list[dict[str, str]] = []
         status = "passed"
-        auto_bound = _claim_was_auto_bound(claim, citation_ids, citation_by_id)
+        auto_bound = bool(adjacent_calculation_ids) or _claim_was_auto_bound(
+            claim,
+            citation_ids,
+            citation_by_id,
+        )
         equivalent_bound = _claim_was_equivalent_bound(
             claim,
             citation_ids,
@@ -543,6 +564,7 @@ def _audit_claims(
                 claim,
                 available_evidence,
                 semantics=semantics,
+                entity_aliases=entity_aliases,
             )
             if match.status == "ambiguous":
                 code = "claim_evidence_ambiguous"
@@ -583,7 +605,11 @@ def _audit_claims(
             support_rows: list[tuple[str, str, int]] = []
             for citation_id in citation_ids:
                 citation = citation_by_id[citation_id]
-                if _citation_entity_conflicts(claim, citation, entity_aliases):
+                if _citation_entity_conflicts(
+                    claim,
+                    citation,
+                    canonical_entity_aliases,
+                ):
                     support_rows.append((citation_id, "entity-conflict", 4))
                 else:
                     support = verify_evidence_support(
@@ -822,10 +848,22 @@ def _entity_pairs(value: str) -> list[tuple[str, str]]:
 def _entity_alias_context(
     answer: str,
     citation_by_id: dict[str, dict[str, Any]],
+    *,
+    provided: Mapping[str, Iterable[str]] | None = None,
 ) -> dict[str, str]:
     """Build turn-local company-name aliases from explicit name/code pairs."""
 
     aliases: dict[str, str] = {}
+    if provided:
+        for canonical, values in provided.items():
+            canonical_key = _normalize_entity_alias(canonical)
+            if not canonical_key:
+                continue
+            aliases[canonical_key] = canonical_key
+            for value in values:
+                alias = _normalize_entity_alias(value)
+                if len(alias) >= 2:
+                    aliases[alias] = canonical_key
     pair_sources = [answer]
     for citation in citation_by_id.values():
         source = citation.get("source")
@@ -835,14 +873,19 @@ def _entity_alias_context(
         evidence = evidence if isinstance(evidence, dict) else {}
         entity_id = _normalize_entity_alias(evidence.get("entityId") or "")
         entity_name = _normalize_entity_alias(evidence.get("entityName") or "")
-        if entity_id:
-            aliases[entity_id] = entity_id
-            if len(entity_name) >= 2:
-                aliases[entity_name] = entity_id
+        if entity_id and len(entity_name) >= 2:
+            # A structured identifier only becomes comparable with a claim
+            # entity when the adapter also supplies a name that this turn can
+            # resolve.  Treating an otherwise opaque ticker as its own company
+            # used to turn translated names such as ``闪迪`` vs ``SNDK`` into
+            # a false cross-company conflict.  Unknown is not conflict.
+            canonical = aliases.get(entity_name)
+            if canonical:
+                aliases.setdefault(entity_id, canonical)
     for value in pair_sources:
         for label, identifier in _entity_pairs(value):
-            aliases[identifier] = identifier
-            aliases[label] = identifier
+            aliases.setdefault(identifier, identifier)
+            aliases.setdefault(label, aliases[identifier])
     return aliases
 
 
@@ -875,8 +918,8 @@ def _citation_entities(
     output: set[str] = set()
     for raw in (evidence.get("entityId"), evidence.get("entityName")):
         normalized = _normalize_entity_alias(raw or "")
-        if normalized:
-            output.add(aliases.get(normalized, normalized))
+        if normalized in aliases:
+            output.add(aliases[normalized])
     title = str(source.get("title") or "")
     output.update(identifier for _label, identifier in _entity_pairs(title))
     output.update(_canonical_entities_in_text(title, aliases))
@@ -926,6 +969,41 @@ def _claim_was_equivalent_bound(
         if isinstance(claim_ids, list) and claim.claim_id in claim_ids:
             return True
     return False
+
+
+def _adjacent_calculation_citation_ids(
+    claim: ClaimCandidate,
+    *,
+    claim_index: int,
+    claims: list[ClaimCandidate],
+    citation_by_id: dict[str, dict[str, Any]],
+) -> list[str]:
+    """Bind a formula block to the immediately adjacent cited result.
+
+    The calculation Evidence still has to prove the displayed arithmetic;
+    adjacency alone never creates a binding. This keeps a common two-block
+    presentation atomic without allowing an unrelated nearby citation to
+    satisfy the formula.
+    """
+    if claim.kind != "calculation" or claim.attached_citation_ids:
+        return []
+    neighbors = []
+    if claim_index > 0:
+        neighbors.append(claims[claim_index - 1])
+    if claim_index + 1 < len(claims):
+        neighbors.append(claims[claim_index + 1])
+    inherited: list[str] = []
+    for neighbor in neighbors:
+        if abs(neighbor.segment_index - claim.segment_index) != 1:
+            continue
+        for citation_id in neighbor.attached_citation_ids:
+            citation = citation_by_id.get(citation_id)
+            evidence = citation.get("evidence") if isinstance(citation, dict) else None
+            if not isinstance(evidence, dict):
+                continue
+            if calculation_formula_matches_evidence(claim.exact, evidence):
+                inherited.append(citation_id)
+    return list(dict.fromkeys(inherited))
 
 
 def _calculation_input_bindings(
@@ -1213,6 +1291,10 @@ def _structured_subject(
     source = citation.get("source")
     source = source if isinstance(source, dict) else {}
     dataset_id = _clean_text(evidence.get("datasetId"), "")
+    for raw in (evidence.get("entityId"), evidence.get("entityName")):
+        subject = _clean_text(raw, "")
+        if subject:
+            return subject
     for raw in (source.get("sourceId"), evidence.get("recordKey")):
         value = _clean_text(raw, "")
         if not value:

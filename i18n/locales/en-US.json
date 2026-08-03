@@ -1189,6 +1189,8 @@
       "citationsDesc": "Show clickable citation indices when an answer uses traceable sources.",
       "verificationLabel": "Verify citations",
       "verificationDesc": "Check facts, numbers, and citation consistency before publishing; this may add latency and model usage.",
+      "taskCoverageLabel": "Check task completeness",
+      "taskCoverageDesc": "Check whether the answer covers explicitly requested entities, metrics, periods, and output formats; filling omissions may add one revision step.",
       "memoryTitle": "Memory",
       "saveFailed": "Failed to save personalization settings"
     },

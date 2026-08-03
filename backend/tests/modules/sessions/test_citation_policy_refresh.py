@@ -25,6 +25,7 @@ def _session(*, skill_path: str | None = None, current_policy: bool = False) -> 
         metadata["valuz"]["citation_policy_revision"] = CITATION_POLICY_REVISION
         metadata["valuz"]["citation_enabled"] = True
         metadata["valuz"]["citation_verification_enabled"] = True
+        metadata["valuz"]["task_coverage_enabled"] = True
     return SimpleNamespace(
         id="session-1",
         user_id="owner-1",
@@ -68,6 +69,7 @@ async def test_refresh_adds_skill_policy_and_revision_without_losing_metadata(
         "owner-1",
         citation_enabled_override=True,
         verification_enabled_override=True,
+        task_coverage_enabled_override=True,
     )
 
     assert changed is True
@@ -77,6 +79,7 @@ async def test_refresh_adds_skill_policy_and_revision_without_losing_metadata(
     assert body.instructions.count("<citation-system-policy") == 1
     assert body.metadata["other"] == {"keep": True}
     assert body.metadata["valuz"]["citation_policy_revision"] == CITATION_POLICY_REVISION
+    assert body.metadata["valuz"]["task_coverage_enabled"] is True
 
 
 async def test_refresh_is_idempotent(
@@ -104,6 +107,7 @@ async def test_refresh_is_idempotent(
         "owner-1",
         citation_enabled_override=True,
         verification_enabled_override=True,
+        task_coverage_enabled_override=True,
     )
 
     assert changed is False
@@ -136,6 +140,7 @@ async def test_missing_skill_still_upgrades_policy_and_fails_closed_at_guard(
         "owner-1",
         citation_enabled_override=True,
         verification_enabled_override=True,
+        task_coverage_enabled_override=True,
     )
 
     assert changed is True
@@ -206,6 +211,7 @@ async def test_refresh_stamps_trusted_quality_policy_and_replaces_user_value(
         "owner-1",
         citation_enabled_override=True,
         verification_enabled_override=True,
+        task_coverage_enabled_override=True,
     )
 
     assert changed is True
@@ -263,6 +269,7 @@ async def test_refresh_disables_citation_skill_prompt_and_quality(
         "owner-1",
         citation_enabled_override=False,
         verification_enabled_override=True,
+        task_coverage_enabled_override=False,
     )
 
     assert changed is True
@@ -271,4 +278,40 @@ async def test_refresh_disables_citation_skill_prompt_and_quality(
     assert "<citation-system-policy" not in body.instructions
     assert body.metadata["valuz"]["citation_enabled"] is False
     assert body.metadata["valuz"]["citation_verification_enabled"] is False
+    assert body.metadata["valuz"]["task_coverage_enabled"] is False
     assert "citation_quality_policy" not in body.metadata["valuz"]
+
+
+async def test_task_coverage_keeps_effective_policy_when_citations_are_disabled(
+    citation_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _session(skill_path=str(citation_dir.resolve()), current_policy=True)
+    updates: list[object] = []
+
+    async def get_session(user_id: str, session_id: str) -> object:
+        return session
+
+    async def update_session(user_id: str, session_id: str, body: object) -> object:
+        updates.append(body)
+        return session
+
+    monkeypatch.setattr(capabilities.kernel_client, "get_session", get_session)
+    monkeypatch.setattr(capabilities.kernel_client, "update_session", update_session)
+
+    changed = await capabilities.refresh_citation_policy_for_session(
+        "session-1",
+        "owner-1",
+        citation_enabled_override=False,
+        verification_enabled_override=False,
+        task_coverage_enabled_override=True,
+    )
+
+    assert changed is True
+    body = updates[0]
+    assert body.skills == []
+    assert "<citation-system-policy" not in body.instructions
+    assert body.metadata["valuz"]["citation_enabled"] is False
+    assert body.metadata["valuz"]["citation_verification_enabled"] is False
+    assert body.metadata["valuz"]["task_coverage_enabled"] is True
+    assert body.metadata["valuz"]["citation_quality_policy"]["policy_id"]

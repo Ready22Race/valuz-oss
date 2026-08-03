@@ -1189,6 +1189,8 @@
       "citationsDesc": "在回答使用了可追溯来源时，显示可点击的引用索引。",
       "verificationLabel": "核查引用",
       "verificationDesc": "检查回答中的事实、数字与引用是否一致；可能增加等待时间和模型用量。",
+      "taskCoverageLabel": "检查任务完整性",
+      "taskCoverageDesc": "检查回答是否覆盖问题中明确要求的实体、指标、期间和输出格式；发现遗漏时可能增加一次补充处理。",
       "memoryTitle": "记忆",
       "saveFailed": "保存个性化设置失败"
     },
