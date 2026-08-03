@@ -150,6 +150,72 @@ def test_explicit_structured_binding_accepts_appended_period_metadata() -> None:
     assert resolution.selected_handles == (handle,)
 
 
+@pytest.mark.parametrize(
+    "claim_text",
+    (
+        "数值：170,899,152,276 [1](evidence://ev_context_revenue_2024)",
+        (
+            "170,899,152,276 元（人民币），约 1,708.99 亿元 "
+            "[1](evidence://ev_context_revenue_2024)"
+        ),
+    ),
+)
+def test_generic_value_and_unit_labels_do_not_create_false_metric_conflicts(
+    claim_text: str,
+) -> None:
+    semantics = {
+        "metric_ontology": {
+            "metrics": {
+                "operating_revenue": {
+                    "aliases": ["营业收入"],
+                    "fields": ["operating_revenue"],
+                }
+            }
+        },
+        "unit_ontology": {
+            "units": {
+                "yuan": {
+                    "canonical": "CNY",
+                    "aliases": ["元", "人民币元", "CNY"],
+                    "scale": 1,
+                },
+                "hundred-million": {
+                    "canonical": "CNY",
+                    "aliases": ["亿元"],
+                    "scale": 100_000_000,
+                },
+            }
+        },
+    }
+    handle = "ev_context_revenue_2024"
+    claim = extract_claims(
+        claim_text,
+        mode="strict-domain",
+        semantics=semantics,
+    )[0]
+    resolution = resolve_claim_evidence(
+        claim,
+        [
+            {
+                "evidenceHandle": handle,
+                "source": {"providerId": "reportify", "sourceType": "dataset"},
+                "evidence": {
+                    "kind": "structured-data",
+                    "field": "/data/0/total_revenue/operating_revenue",
+                    "metric": "operating_revenue",
+                    "value": 170899152276,
+                    "unit": "CNY",
+                },
+            }
+        ],
+        semantics=semantics,
+    )
+
+    assert "metric" not in claim.normalized
+    assert resolution.status == "verified"
+    assert resolution.selected_handles == (handle,)
+
+
 def test_unresolved_claim_never_requests_repair() -> None:
     case = next(
         item
