@@ -1567,6 +1567,8 @@ def _collection_hint(collection: EvidenceCollectionRecord) -> dict[str, Any]:
         hint["metricMode"] = "field-name"
     if "fieldSchemaRef" in collection.addressing:
         hint["fieldSchemaRef"] = copy.deepcopy(collection.addressing["fieldSchemaRef"])
+    if "allowedItemPaths" in collection.addressing:
+        hint["allowedItemPaths"] = list(collection.addressing["allowedItemPaths"])
     return hint
 
 
@@ -2303,27 +2305,50 @@ def _normalize_collection_addressing(value: Any) -> dict[str, Any] | None:
         )
     ):
         return None
-    allowed_roots = value.get("allowedPathRoots", [content_root])
+    raw_item_paths = value.get("allowedItemPaths", [])
+    if (
+        not isinstance(raw_item_paths, list)
+        or len(raw_item_paths) > 64
+        or any(
+            not isinstance(item, str) or not item or _json_pointer_tokens(item) is None
+            for item in raw_item_paths
+        )
+    ):
+        return None
+    raw_roots = value.get("allowedPathRoots")
+    allowed_roots = [content_root] if raw_roots is None and not raw_item_paths else raw_roots or []
     if (
         not isinstance(allowed_roots, list)
-        or not allowed_roots
         or len(allowed_roots) > 32
         or any(
             not isinstance(item, str) or _json_pointer_tokens(item) is None
             for item in allowed_roots
         )
+        or (not allowed_roots and not raw_item_paths)
     ):
         return None
+    items_pointer = value.get("itemsPointer")
+    if items_pointer is not None and (
+        not isinstance(items_pointer, str) or _json_pointer_tokens(items_pointer) is None
+    ):
+        return None
+    if raw_item_paths and not isinstance(items_pointer, str):
+        return None
+    if raw_item_paths:
+        content_tokens = _json_pointer_tokens(content_root) or []
+        item_tokens = _json_pointer_tokens(items_pointer) or []
+        if item_tokens[: len(content_tokens)] != content_tokens:
+            return None
     result: dict[str, Any] = {
         "mode": value["mode"],
         "contentRoot": content_root,
         "identityFields": list(identity_fields),
-        "allowedPathRoots": list(allowed_roots),
     }
-    items_pointer = value.get("itemsPointer")
+    if allowed_roots:
+        result["allowedPathRoots"] = list(allowed_roots)
+    if raw_item_paths:
+        result["allowedItemPaths"] = list(raw_item_paths)
     if items_pointer is not None:
-        if not isinstance(items_pointer, str) or _json_pointer_tokens(items_pointer) is None:
-            return None
         result["itemsPointer"] = items_pointer
     schema_ref = value.get("fieldSchemaRef")
     if isinstance(schema_ref, dict) and all(
@@ -2370,15 +2395,13 @@ def _normalize_collection_semantics(value: Any) -> dict[str, Any] | None:
                 pointer
                 for raw in value_roots
                 if isinstance(raw, str)
-                and (pointer := raw if _json_pointer_tokens(raw) is not None else None)
-                is not None
+                and (pointer := raw if _json_pointer_tokens(raw) is not None else None) is not None
             ]
             normalized_excluded = [
                 pointer
                 for raw in excluded
                 if isinstance(raw, str)
-                and (pointer := raw if _json_pointer_tokens(raw) is not None else None)
-                is not None
+                and (pointer := raw if _json_pointer_tokens(raw) is not None else None) is not None
             ]
             if len(normalized_roots) != len(value_roots) or len(normalized_excluded) != len(
                 excluded
@@ -2416,7 +2439,6 @@ def _normalize_collection_sparse_overrides(
     if not isinstance(value, list) or len(value) > _MAX_COLLECTION_SPARSE_OVERRIDES:
         return None
     content_root = str(addressing["contentRoot"])
-    allowed_roots = list(addressing.get("allowedPathRoots", [content_root]))
     output: dict[str, dict[str, Any]] = {}
     for item in value:
         if not isinstance(item, dict) or not isinstance(item.get("selector"), dict):
@@ -2425,7 +2447,7 @@ def _normalize_collection_sparse_overrides(
         if (
             not isinstance(pointer, str)
             or _json_pointer_tokens(pointer) is None
-            or not _pointer_is_allowed(pointer, allowed_roots)
+            or not _collection_pointer_is_allowed(addressing, pointer)
         ):
             return None
         if pointer == content_root:
@@ -2638,14 +2660,51 @@ def _pointer_is_allowed(pointer: str, roots: list[str]) -> bool:
     return any(pointer == root or pointer.startswith(f"{root.rstrip('/')}/") for root in roots)
 
 
+def _pointer_matches_allowed_item_path(
+    pointer: str,
+    *,
+    items_pointer: str,
+    allowed_item_paths: list[str],
+) -> bool:
+    pointer_tokens = _json_pointer_tokens(pointer)
+    items_tokens = _json_pointer_tokens(items_pointer)
+    if pointer_tokens is None or items_tokens is None:
+        return False
+    if pointer_tokens[: len(items_tokens)] != items_tokens:
+        return False
+    remainder = pointer_tokens[len(items_tokens) :]
+    # The first remaining token selects one concrete list/map item.  Paths
+    # after that selector must exactly match a policy-owned relative field;
+    # descendants and sibling fields are not implicitly authorized.
+    if len(remainder) < 2:
+        return False
+    field_tokens = remainder[1:]
+    return any(_json_pointer_tokens(item) == field_tokens for item in allowed_item_paths)
+
+
+def _collection_pointer_is_allowed(addressing: Mapping[str, Any], pointer: str) -> bool:
+    allowed_roots = addressing.get("allowedPathRoots")
+    if isinstance(allowed_roots, list) and _pointer_is_allowed(pointer, allowed_roots):
+        return True
+    allowed_item_paths = addressing.get("allowedItemPaths")
+    items_pointer = addressing.get("itemsPointer")
+    return bool(
+        isinstance(allowed_item_paths, list)
+        and isinstance(items_pointer, str)
+        and _pointer_matches_allowed_item_path(
+            pointer,
+            items_pointer=items_pointer,
+            allowed_item_paths=allowed_item_paths,
+        )
+    )
+
+
 def _materialize_collection_address(
     collection: EvidenceCollectionRecord,
     pointer: str,
 ) -> EvidenceRecord | None:
     content_root = str(collection.addressing.get("contentRoot") or "")
-    allowed_roots = collection.addressing.get("allowedPathRoots")
-    allowed_roots = allowed_roots if isinstance(allowed_roots, list) else [content_root]
-    if not _pointer_is_allowed(pointer, allowed_roots):
+    if not _collection_pointer_is_allowed(collection.addressing, pointer):
         return None
     pointer_tokens = _json_pointer_tokens(pointer)
     if pointer_tokens is None or any(
@@ -2815,9 +2874,7 @@ def _materialize_collection_address(
         keys=("basis",),
     )
 
-    fiscal_year = (
-        semantic_fiscal_year or context.get("fiscal_year") or context.get("fiscalYear")
-    )
+    fiscal_year = semantic_fiscal_year or context.get("fiscal_year") or context.get("fiscalYear")
     period_part = (
         semantic_period
         or context.get("fiscal_quarter")
@@ -2976,11 +3033,15 @@ def _collection_semantic_value(
         if not isinstance(pointer, str):
             continue
         found, value = _resolve_json_pointer(record, pointer)
-        if found and _safe_scalar(
-            value,
-            allow_none=True,
-            max_string_chars=_MAX_STRUCTURED_STRING_CHARS,
-        ) and value not in (None, ""):
+        if (
+            found
+            and _safe_scalar(
+                value,
+                allow_none=True,
+                max_string_chars=_MAX_STRUCTURED_STRING_CHARS,
+            )
+            and value not in (None, "")
+        ):
             return value
     return None
 

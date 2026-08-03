@@ -480,15 +480,28 @@ def _structured_collection_envelope(
         return None
     if addressing.get("mode") != "json-pointer":
         return None
+    items_pointer = _pointer(resource.get("itemsPointer")) or root_pointer
+    if not _pointer_inside(items_pointer, root_pointer):
+        return None
     allowed_roots = addressing.get("allowedPathRoots")
-    if not isinstance(allowed_roots, list) or not allowed_roots:
+    allowed_item_paths = addressing.get("allowedItemPaths")
+    if not (
+        (isinstance(allowed_roots, list) and allowed_roots)
+        or (isinstance(allowed_item_paths, list) and allowed_item_paths)
+    ):
         return None
     normalized_roots: list[str] = []
-    for root in allowed_roots:
+    for root in allowed_roots if isinstance(allowed_roots, list) else []:
         pointer = _pointer(root)
         if pointer is None or not _pointer_inside(pointer, root_pointer):
             return None
         normalized_roots.append(pointer)
+    normalized_item_paths: list[str] = []
+    for item_path in allowed_item_paths if isinstance(allowed_item_paths, list) else []:
+        pointer = _pointer(item_path)
+        if pointer in {None, ""}:
+            return None
+        normalized_item_paths.append(pointer)
     dataset_id = _bounded_string(dataset.get("id"), 512)
     resource_id = _bounded_string(resource.get("resourceId"), 512)
     if not dataset_id or not resource_id:
@@ -529,12 +542,15 @@ def _structured_collection_envelope(
     collection_addressing: dict[str, Any] = {
         "mode": "json-pointer",
         "contentRoot": root_pointer,
-        "itemsPointer": _pointer(resource.get("itemsPointer")) or root_pointer,
+        "itemsPointer": items_pointer,
         "identityFields": [
             pointer for value in identity_fields[:32] if (pointer := _pointer(value)) is not None
         ],
-        "allowedPathRoots": normalized_roots,
     }
+    if normalized_roots:
+        collection_addressing["allowedPathRoots"] = normalized_roots
+    if normalized_item_paths:
+        collection_addressing["allowedItemPaths"] = normalized_item_paths
     if normalized_schema:
         collection_addressing["fieldSchemaRef"] = normalized_schema
     return {
@@ -586,19 +602,18 @@ def _discovery_metadata_collection_envelope(
     else:
         return None
 
-    allowed_roots: list[str] = []
-    for item_pointer, item in indexed_items:
-        for key in _DISCOVERY_CITABLE_MAPPING_KEYS:
-            relative = _pointer(mapping.get(key))
-            if relative is None:
-                continue
+    allowed_item_paths: list[str] = []
+    for key in _DISCOVERY_CITABLE_MAPPING_KEYS:
+        relative = _pointer(mapping.get(key))
+        if relative in {None, ""}:
+            continue
+        for _item_pointer, item in indexed_items:
             found, value = _resolve_pointer(item, relative)
             if not found or value is None:
                 continue
-            absolute = f"{item_pointer}{relative}" if relative else item_pointer
-            if absolute not in allowed_roots:
-                allowed_roots.append(absolute)
-    if not allowed_roots:
+            allowed_item_paths.append(relative)
+            break
+    if not allowed_item_paths:
         return None
 
     provider = descriptor.get("provider")
@@ -625,7 +640,7 @@ def _discovery_metadata_collection_envelope(
         "semantics": {},
         "addressing": {
             "mode": "json-pointer",
-            "allowedPathRoots": allowed_roots,
+            "allowedItemPaths": allowed_item_paths,
         },
     }
     return _structured_collection_envelope(
