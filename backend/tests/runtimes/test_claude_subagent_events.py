@@ -54,6 +54,7 @@ def _make_runtime() -> ClaudeAgentRuntime:
     rt._todo_tool_use_ids = set()
     rt._workflow_tool_use_ids = set()
     rt._live_bg_tasks = {}
+    rt._citation_tool_result_sidecars = {}
     rt._emitted = emitted  # test handle
     return rt
 
