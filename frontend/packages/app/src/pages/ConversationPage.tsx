@@ -154,6 +154,7 @@ import {
 } from "./conversation-loading";
 import { createConversationBootstrapGuard } from "./conversation-bootstrap";
 import { canSendProjectHandoff } from "./conversation-project-handoff";
+import { dropHandoffFromHistory } from "./conversation-handoff-history";
 import { LiveTaskCard } from "../components/LiveTaskCard";
 import { QueuedInputsBar } from "../components/QueuedInputsBar";
 import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
@@ -1438,10 +1439,7 @@ export const ConversationPage = () => {
     // Consume the state out of history so a reload cannot replay it. Only the
     // handing-over navigation sets ``handoff`` and it carries nothing else, so
     // clearing the whole entry is safe here.
-    navigate(location.pathname + location.search, {
-      replace: true,
-      state: null,
-    });
+    dropHandoffFromHistory();
   }, [id, location.state, location.pathname, location.search, navigate]);
 
   const [availableSkills, setAvailableSkills] = useState<SkillView[]>([]);
@@ -4917,10 +4915,7 @@ export const ConversationPage = () => {
     if (send?.projectId && send?.execOrigin) {
       recordEntityOrigin(send.projectId, send.execOrigin);
     }
-    navigate(location.pathname + location.search, {
-      replace: true,
-      state: null,
-    });
+    dropHandoffFromHistory();
     // Held until the send settles, so the flag outlives the ``state: null``
     // navigation above; the ``finally`` also covers a failed send, which
     // would otherwise suppress the welcome on this page forever.
