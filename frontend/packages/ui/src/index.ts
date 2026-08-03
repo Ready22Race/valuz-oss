@@ -10,6 +10,7 @@ export * from "./components/Composer";
 export * from "./components/ContextPanel";
 export * from "./components/SectionCard";
 export * from "./components/ToolCallCard";
+export * from "./components/artifacts/ArtifactTabBar";
 export * from "./components/artifacts/ArtifactViewerShell";
 export * from "./components/reader/DocumentReaderView";
 export type * from "./components/reader/document-reader.types";

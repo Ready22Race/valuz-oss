@@ -2131,6 +2131,7 @@
     "artifact": {
       "audioUnsupported": "当前环境不支持音频预览。",
       "close": "关闭",
+      "closeTab": "关闭",
       "copied": "已复制",
       "copy": "复制",
       "copyContent": "复制内容",
@@ -2156,6 +2157,7 @@
       "loadingRenderer": "正在加载预览器",
       "mediaFailed": "无法加载媒体文件",
       "nextMatch": "下一个",
+      "openDocuments": "已打开的文档",
       "openExternal": "外部打开",
       "openLocally": "本地打开",
       "pdfLoadFailed": "无法加载 PDF",

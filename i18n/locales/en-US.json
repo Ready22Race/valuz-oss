@@ -2131,6 +2131,7 @@
     "artifact": {
       "audioUnsupported": "Audio preview is not supported in this environment.",
       "close": "Close",
+      "closeTab": "Close tab",
       "copied": "Copied",
       "copy": "Copy",
       "copyContent": "Copy content",
@@ -2156,6 +2157,7 @@
       "loadingRenderer": "Loading the preview renderer",
       "mediaFailed": "Cannot load media file",
       "nextMatch": "Next",
+      "openDocuments": "Open documents",
       "openExternal": "Open externally",
       "openLocally": "Open locally",
       "pdfLoadFailed": "Cannot load PDF",
