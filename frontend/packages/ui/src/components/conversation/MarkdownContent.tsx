@@ -94,6 +94,7 @@ interface LocalizedClaimQualityEntry {
 const CRITICAL_CITATION_ISSUE_CODES = new Set([
   "claim_evidence_conflict",
   "claim_source_entity_conflict",
+  "claim_source_period_conflict",
   "structured_source_conflict",
   "cross_source_value_conflict",
   "conflicting_values_must_not_be_averaged",
@@ -998,6 +999,9 @@ export const MarkdownContent = memo(function MarkdownContent({
       }
       if (code === "claim_source_entity_conflict") {
         return t("ui.citation.qualityIssueEntityConflict");
+      }
+      if (code === "claim_source_period_conflict") {
+        return t("ui.citation.qualityIssuePeriodConflict");
       }
       if (code.includes("conflict")) {
         return t("ui.citation.qualityIssueConflict");

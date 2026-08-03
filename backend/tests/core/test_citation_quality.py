@@ -258,8 +258,7 @@ def test_policy_requires_coverage_for_a_claimed_time_range() -> None:
     citation["evidence"].pop("coverage")
 
     result = evaluate_citation_quality(
-        "Revenue trend from 2024-01-01 to 2025-12-31 was stable "
-        "[source](citation://cit_revenue).",
+        "Revenue trend from 2024-01-01 to 2025-12-31 was stable [source](citation://cit_revenue).",
         {
             "version": 1,
             "citations": [citation],
@@ -417,6 +416,42 @@ def test_text_chunk_numeric_miss_is_advisory_not_a_confirmed_conflict() -> None:
     assert "claim_evidence_conflict" not in claim["issueCodes"]
 
 
+def test_explicit_text_source_period_mismatch_is_a_concrete_conflict() -> None:
+    citation = {
+        "citationId": "cit_msft_q4",
+        "source": {
+            "sourceId": "msft-q4",
+            "providerId": "reportify",
+            "sourceType": "document",
+            "title": "Microsoft (MSFT) - FY2026 Q4 - Earnings Call Transcript",
+            "retrievedAt": "2026-08-03T08:00:00Z",
+        },
+        "evidence": {
+            "kind": "text",
+            "quote": "We added another gigawatt of capacity this quarter.",
+            "capturedAt": "2026-08-03T08:00:00Z",
+        },
+    }
+    result = evaluate_citation_quality(
+        "Q2 — 当季新增产能：单季约 1 GW [1](citation://cit_msft_q4)。",
+        {
+            "version": 1,
+            "citations": [citation],
+            "integrity": _integrity(),
+        },
+        _policy(),
+    )
+
+    claim = result["quality"]["claims"][0]
+    assert "claim_source_period_conflict" in claim["issueCodes"]
+    issue = next(
+        item
+        for item in result["quality"]["issues"]
+        if item["code"] == "claim_source_period_conflict"
+    )
+    assert issue["severity"] == "degraded"
+
+
 def test_cross_language_paraphrase_is_not_reported_as_evidence_mismatch() -> None:
     citation = {
         "citationId": "cit_transcript",
@@ -439,8 +474,7 @@ def test_cross_language_paraphrase_is_not_reported_as_evidence_mismatch() -> Non
     }
 
     result = evaluate_citation_quality(
-        "管理层表示人工智能平台的需求正在持续增长 "
-        "[source](citation://cit_transcript)。",
+        "管理层表示人工智能平台的需求正在持续增长 [source](citation://cit_transcript)。",
         {
             "version": 1,
             "citations": [citation],
@@ -516,13 +550,9 @@ def test_displayed_formula_inherits_the_adjacent_calculation_evidence() -> None:
     policy["config"]["source_tiers"][0]["match"]["source_types"].append("tool-result")
     policy["config"]["source_tiers"][0]["match"]["tools"].append("runtime.calculation")
     current = _structured("cit_current")
-    current["evidence"].update(
-        {"field": "current_revenue", "value": 120, "period": "FY2025"}
-    )
+    current["evidence"].update({"field": "current_revenue", "value": 120, "period": "FY2025"})
     prior = _structured("cit_prior")
-    prior["evidence"].update(
-        {"field": "prior_revenue", "value": 100, "period": "FY2024"}
-    )
+    prior["evidence"].update({"field": "prior_revenue", "value": 100, "period": "FY2024"})
     calculation = {
         "citationId": "cit_growth",
         "source": {
@@ -1014,6 +1044,38 @@ def test_opaque_structured_ticker_is_unknown_not_cross_company_conflict() -> Non
     }
 
 
+def test_unlinked_translated_company_name_is_unknown_not_cross_company_conflict() -> None:
+    citation = {
+        "citationId": "cit_msft_q1",
+        "source": {
+            "sourceId": "msft-q1",
+            "providerId": "reportify",
+            "sourceType": "document",
+            "title": "Microsoft (MSFT) - FY2026 Q1 - Earnings Call Transcript",
+            "retrievedAt": "2026-08-03T08:00:00Z",
+        },
+        "evidence": {
+            "kind": "text",
+            "quote": "Microsoft Cloud revenue surpassed $49 billion, up 26% year-over-year.",
+            "capturedAt": "2026-08-03T08:00:00Z",
+        },
+    }
+    result = evaluate_citation_quality(
+        "微软云收入超过490亿美元，同比增长26% [1](citation://cit_msft_q1)。",
+        {
+            "version": 1,
+            "citations": [citation],
+            "integrity": _integrity(),
+        },
+        _policy(),
+        entity_aliases={"微软": ("微软",)},
+    )
+
+    assert "claim_source_entity_conflict" not in {
+        issue["code"] for issue in result["quality"]["issues"]
+    }
+
+
 def test_metric_acronym_in_parentheses_is_not_a_company_identifier() -> None:
     microsoft = {
         "citationId": "cit_msft",
@@ -1031,8 +1093,7 @@ def test_metric_acronym_in_parentheses_is_not_a_company_identifier() -> None:
         },
     }
     result = evaluate_citation_quality(
-        "Microsoft AI 业务年化收入（ARR）突破 370 亿美元，同比增长 123% "
-        "[1](citation://cit_msft)。",
+        "Microsoft AI 业务年化收入（ARR）突破 370 亿美元，同比增长 123% [1](citation://cit_msft)。",
         {
             "version": 1,
             "citations": [microsoft],

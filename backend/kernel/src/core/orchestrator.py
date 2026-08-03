@@ -77,6 +77,15 @@ CitationRepairRefreshHook = Callable[[str, str], Awaitable[bool]]
 logger = logging.getLogger(__name__)
 
 
+def _is_externalized_tool_content(value: Any) -> bool:
+    """Recognize runtime placeholders whose full result lives in a sidecar."""
+
+    if not isinstance(value, str):
+        return False
+    stripped = value.strip()
+    return stripped.startswith("<persisted-output") or stripped.startswith("/large_tool_results/")
+
+
 def _citation_output_scope_context(user_prompt: str) -> str:
     """Return a small host contract for multi-period sourced answers."""
 
@@ -188,6 +197,11 @@ _BOOKKEEPING_TOOL_NAMES = frozenset(
 )
 _LEADING_PROGRESS_RE = re.compile(
     r"^(?:"
+    r"(?:已?获得|获得了).{0,160}(?:现在|接下来|随后).{0,40}"
+    r"(?:读取|检索|查找|整合|汇总|整理|撰写|生成).{0,160}|"
+    r"(?:现已|已经|已).{0,32}(?:收集|获取|整理|汇总).{0,80}"
+    r"(?:数据|资料|来源|信息).{0,48}(?:现在|接下来|随后).{0,40}"
+    r"(?:读取|检索|查找|整合|汇总|整理|撰写|生成).{0,120}|"
     r".{0,48}(?:找到(?:了)?|均?已找到|已取得|已获取|已充分|已齐全)"
     r".{0,48}(?:原文|资料|来源|数据|财报|年报|证据|句柄|chunk|结果|报告).{0,80}|"
     r"(?:需要|需|还要|必须).{0,48}(?:从|先|再)?.{0,32}"
@@ -1934,17 +1948,18 @@ class _MessageObserverSink:
                     ),
                 )
             if self._task_coverage_tracker is not None:
-                # Citation transport may externalize or compact the model-
-                # visible result.  Coverage needs the private full projection
-                # to retain document/period/content-unit metadata; it is still
-                # turn-private and is never persisted or broadcast here.
+                # Coverage must evaluate what the model could actually use.
+                # New Collection sidecars intentionally contain descriptors,
+                # not a second copy of the result, so prefer the compact model
+                # projection.  Legacy externally persisted results keep their
+                # private full projection for scope reconstruction.
                 coverage_content = (
-                    citation_content
-                    if isinstance(citation_content, str)
-                    else compacted_content
-                    if compacted_content is not None
-                    else visible_content
+                    compacted_content if compacted_content is not None else visible_content
                 )
+                if isinstance(citation_content, str) and _is_externalized_tool_content(
+                    visible_content
+                ):
+                    coverage_content = citation_content
                 self._task_coverage_tracker.record_tool_result(
                     tool_name,
                     self._tool_inputs.get(tool_use_id) if isinstance(tool_use_id, str) else None,
@@ -3105,8 +3120,7 @@ class _MessageObserverSink:
         before_problem_rate = before["problem"] / max(1, before["required"])
         after_problem_rate = after["problem"] / max(1, after["required"])
         scope_expanded = (
-            after["supported"] > before["supported"]
-            and after["required"] > before["required"]
+            after["supported"] > before["supported"] and after["required"] > before["required"]
         )
 
         def issue_rate_preserved(key: str) -> bool:
@@ -3114,10 +3128,7 @@ class _MessageObserverSink:
                 return True
             if not scope_expanded or before["required"] <= 0:
                 return False
-            return (
-                after[key] / max(1, after["required"])
-                < before[key] / before["required"]
-            )
+            return after[key] / max(1, after["required"]) < before[key] / before["required"]
 
         problem_quality_preserved = after["problem"] <= before["problem"] or (
             scope_expanded

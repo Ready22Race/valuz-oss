@@ -72,7 +72,7 @@ def test_transport_preserves_meta_and_restores_original_structured_content() -> 
     assert restored == {"structured_content": structured, "existing": True}
 
 
-def test_discovery_metadata_never_creates_summary_evidence() -> None:
+def test_discovery_metadata_creates_bounded_collection_without_summary_addresses() -> None:
     payload = {
         "docs": [
             {
@@ -116,9 +116,23 @@ def test_discovery_metadata_never_creates_summary_evidence() -> None:
 
     assert adapted is not None
     assert adapted.discovery_only is True
-    assert adapted.citable is False
-    assert adapted.model_content == payload
-    assert "_valuz_evidence" not in adapted.model_content
+    assert adapted.citable is True
+    envelope = adapted.model_content["_valuz_evidence"][0]
+    assert envelope["kind"] == "structured-evidence-collection"
+    assert envelope["addressing"]["allowedPathRoots"] == [
+        "/docs/0/doc_id",
+        "/docs/0/title",
+        "/docs/0/url",
+    ]
+
+    compacted = compact_citation_tool_content(adapted.model_content)
+    private = private_citation_tool_content(adapted.model_content)
+    assert compacted is not None and private is not None
+    registry = EvidenceRegistry()
+    assert registry.register_tool_projection(compacted, private, trusted_private=True) == 1
+    handle = envelope["collectionHandle"]
+    assert registry.materialize_reference(handle, "#/docs/0/title") is not None
+    assert registry.materialize_reference(handle, "#/docs/0/summary") is None
 
 
 def test_document_chunks_create_direct_evidence_with_pdf_locator() -> None:
@@ -273,9 +287,7 @@ def test_large_structured_result_registers_one_collection_and_materializes_one_a
     assert compacted is not None and private is not None
     assert len(compacted["data"]) == 1_000
     assert "_valuz_evidence" not in compacted
-    assert compacted["_valuz_evidence_hint"]["collectionHandle"] == collection[
-        "collectionHandle"
-    ]
+    assert compacted["_valuz_evidence_hint"]["collectionHandle"] == collection["collectionHandle"]
 
     registry = EvidenceRegistry()
     assert registry.register_tool_projection(compacted, private, trusted_private=True) == 1

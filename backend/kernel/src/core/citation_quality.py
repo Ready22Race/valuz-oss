@@ -602,7 +602,7 @@ def _audit_claims(
             )
         else:
             metrics["bound"] += 1
-            support_rows: list[tuple[str, str, int]] = []
+            support_rows: list[tuple[str, str, int, str]] = []
             for citation_id in citation_ids:
                 citation = citation_by_id[citation_id]
                 if _citation_entity_conflicts(
@@ -610,16 +610,18 @@ def _audit_claims(
                     citation,
                     canonical_entity_aliases,
                 ):
-                    support_rows.append((citation_id, "entity-conflict", 4))
+                    support_rows.append((citation_id, "entity-conflict", 4, "entity-conflict"))
                 else:
                     support = verify_evidence_support(
                         claim,
                         citation,
                         semantics=semantics,
                     )
-                    support_rows.append((citation_id, support.status, support.directness))
+                    support_rows.append(
+                        (citation_id, support.status, support.directness, support.reason)
+                    )
             primary_id = _select_primary_citation(support_rows, citation_by_id)
-            for citation_id, support_status, _directness in support_rows:
+            for citation_id, support_status, _directness, _reason in support_rows:
                 if support_status == "supported":
                     role = "primary" if citation_id == primary_id else "corroborating"
                 elif support_status == "partially-supported":
@@ -644,20 +646,22 @@ def _audit_claims(
             supported = [row for row in support_rows if row[1] == "supported"]
             partial = [row for row in support_rows if row[1] == "partially-supported"]
             contradicted = [row for row in support_rows if row[1] == "contradicted"]
+            period_conflicted = [row for row in contradicted if row[3] == "period-conflict"]
             confirmed_contradicted = [
                 row
                 for row in contradicted
+                if row not in period_conflicted
                 if citation_by_id[row[0]].get("evidence", {}).get("kind")
                 in {"structured-data", "calculation"}
             ]
             advisory_contradicted = [
-                row for row in contradicted if row not in confirmed_contradicted
+                row
+                for row in contradicted
+                if row not in confirmed_contradicted and row not in period_conflicted
             ]
             entity_conflicted = [row for row in support_rows if row[1] == "entity-conflict"]
             missing = [row for row in support_rows if row[1] == "not-found"]
-            verification_gap_ids = [
-                row[0] for row in partial + missing + advisory_contradicted
-            ]
+            verification_gap_ids = [row[0] for row in partial + missing + advisory_contradicted]
             cross_language_gap = _cross_language_text_evidence_gap(
                 claim,
                 verification_gap_ids,
@@ -691,6 +695,21 @@ def _audit_claims(
                     code,
                     "L4",
                     citation_ids=[row[0] for row in entity_conflicted],
+                    claim=claim.exact,
+                    claim_id=claim.claim_id,
+                    location=claim.location,
+                    severity="degraded",
+                )
+            elif period_conflicted:
+                code = "claim_source_period_conflict"
+                issue_codes.append(code)
+                status = "unverified"
+                metrics["mismatch"] += 1
+                metrics["unverified"] += 1
+                issue(
+                    code,
+                    "L4",
+                    citation_ids=[row[0] for row in period_conflicted],
                     claim=claim.exact,
                     claim_id=claim.claim_id,
                     location=claim.location,
@@ -864,11 +883,18 @@ def _entity_alias_context(
                 alias = _normalize_entity_alias(value)
                 if len(alias) >= 2:
                     aliases[alias] = canonical_key
-    pair_sources = [answer]
+    # A pair written in the answer (for example ``闪迪（SNDK）``) explicitly
+    # establishes a turn-local identity and is safe to use for mismatch
+    # detection.  A source title alone must not invent a second company when
+    # its translated name/ticker has not been linked to the requested entity;
+    # ``微软`` versus ``Microsoft (MSFT)`` is unknown, not a proven conflict.
+    for label, identifier in _entity_pairs(answer):
+        canonical = aliases.get(label) or aliases.get(identifier) or identifier
+        aliases.setdefault(identifier, canonical)
+        aliases.setdefault(label, canonical)
     for citation in citation_by_id.values():
         source = citation.get("source")
         source = source if isinstance(source, dict) else {}
-        pair_sources.append(str(source.get("title") or ""))
         evidence = citation.get("evidence")
         evidence = evidence if isinstance(evidence, dict) else {}
         entity_id = _normalize_entity_alias(evidence.get("entityId") or "")
@@ -882,10 +908,11 @@ def _entity_alias_context(
             canonical = aliases.get(entity_name)
             if canonical:
                 aliases.setdefault(entity_id, canonical)
-    for value in pair_sources:
-        for label, identifier in _entity_pairs(value):
-            aliases.setdefault(identifier, identifier)
-            aliases.setdefault(label, aliases[identifier])
+        for label, identifier in _entity_pairs(str(source.get("title") or "")):
+            canonical = aliases.get(label) or aliases.get(identifier)
+            if canonical:
+                aliases.setdefault(identifier, canonical)
+                aliases.setdefault(label, canonical)
     return aliases
 
 
@@ -921,7 +948,10 @@ def _citation_entities(
         if normalized in aliases:
             output.add(aliases[normalized])
     title = str(source.get("title") or "")
-    output.update(identifier for _label, identifier in _entity_pairs(title))
+    for label, identifier in _entity_pairs(title):
+        canonical = aliases.get(identifier) or aliases.get(label)
+        if canonical:
+            output.add(canonical)
     output.update(_canonical_entities_in_text(title, aliases))
     return output
 
@@ -931,11 +961,46 @@ def _citation_entity_conflicts(
     citation: dict[str, Any],
     aliases: dict[str, str],
 ) -> bool:
+    claim_identifiers = {identifier for _label, identifier in _entity_pairs(claim.semantic_text)}
+    if claim_identifiers:
+        evidence = citation.get("evidence")
+        evidence = evidence if isinstance(evidence, dict) else {}
+        source = citation.get("source")
+        source = source if isinstance(source, dict) else {}
+        citation_identifiers = {
+            identifier for _label, identifier in _entity_pairs(str(source.get("title") or ""))
+        }
+        raw_entity_id = _normalize_entity_alias(evidence.get("entityId") or "")
+        if raw_entity_id:
+            citation_identifiers.add(raw_entity_id)
+        if citation_identifiers and not any(
+            _entity_identifiers_compatible(claim_id, citation_id)
+            for claim_id in claim_identifiers
+            for citation_id in citation_identifiers
+        ):
+            # Explicit identifiers on both sides are deterministic even when
+            # their natural-language labels have not been linked.  This keeps
+            # real 600519-vs-000858 mistakes severe while leaving a Chinese
+            # company name versus an otherwise opaque SNDK identifier unknown.
+            return True
     claim_entities = _canonical_entities_in_text(claim.semantic_text, aliases)
     if len(claim_entities) != 1:
         return False
     citation_entities = _citation_entities(citation, aliases)
     return bool(citation_entities and claim_entities.isdisjoint(citation_entities))
+
+
+def _entity_identifiers_compatible(left: str, right: str) -> bool:
+    left_value = _normalize_entity_alias(left)
+    right_value = _normalize_entity_alias(right)
+    if left_value == right_value:
+        return True
+
+    def bare(value: str) -> str:
+        match = re.fullmatch(r"(?:cn|sh|sz|hk|us|kr)?([a-z]{1,6}|\d{5,6})", value)
+        return match.group(1) if match is not None else value
+
+    return bare(left_value) == bare(right_value)
 
 
 def _claim_was_auto_bound(
@@ -1106,15 +1171,15 @@ def _calculation_components_cover_claim(
 
 
 def _select_primary_citation(
-    support_rows: list[tuple[str, str, int]],
+    support_rows: list[tuple[str, str, int, str]],
     citation_by_id: dict[str, dict[str, Any]],
 ) -> str | None:
     supported = [row for row in support_rows if row[1] == "supported"]
     if not supported:
         return None
 
-    def key(row: tuple[str, str, int]) -> tuple[int, int, int, str]:
-        citation_id, _status, directness = row
+    def key(row: tuple[str, str, int, str]) -> tuple[int, int, int, str]:
+        citation_id, _status, directness, _reason = row
         citation = citation_by_id[citation_id]
         annotations = citation.get("annotations")
         annotations = annotations if isinstance(annotations, dict) else {}
@@ -1156,8 +1221,7 @@ def _cross_language_text_evidence_gap(
         if not isinstance(evidence, dict) or evidence.get("kind") != "text":
             return False
         evidence_text = " ".join(
-            str(evidence.get(key) or "")
-            for key in ("prefix", "quote", "suffix", "snippet")
+            str(evidence.get(key) or "") for key in ("prefix", "quote", "suffix", "snippet")
         ).strip()
         if not evidence_text:
             return False
@@ -1170,9 +1234,7 @@ def _cross_language_text_evidence_gap(
     for evidence_text in unresolved_texts:
         evidence_cjk = len(_CJK_CHAR_RE.findall(evidence_text))
         evidence_latin = len(_LATIN_WORD_RE.findall(evidence_text))
-        opposite_script = (
-            claim_cjk >= 4 and evidence_cjk < 2 and evidence_latin >= 4
-        ) or (
+        opposite_script = (claim_cjk >= 4 and evidence_cjk < 2 and evidence_latin >= 4) or (
             claim_latin >= 4 and evidence_latin < 2 and evidence_cjk >= 4
         )
         if not opposite_script:
@@ -1687,9 +1749,7 @@ def _claim_requires_range_coverage(claim_text: str) -> bool:
         return True
 
     temporal_values = {
-        value
-        for value in _ISO_DATE_RE.findall(claim_text)
-        if isinstance(value, str) and value
+        value for value in _ISO_DATE_RE.findall(claim_text) if isinstance(value, str) and value
     }
     return len(temporal_values) > 1
 

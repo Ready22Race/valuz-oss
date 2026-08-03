@@ -31,6 +31,13 @@ _SUPPORTED_RESOURCE_KINDS = {
     "structured-collection",
     "operational",
 }
+_DISCOVERY_CITABLE_MAPPING_KEYS = (
+    "sourceId",
+    "title",
+    "url",
+    "publishedAt",
+    "providerCategory",
+)
 
 
 @dataclass(frozen=True)
@@ -40,6 +47,7 @@ class McpSourceAdaptation:
     model_content: Any
     resource_kinds: frozenset[str]
     provider_id: str
+    evidence_count: int = 0
 
     @property
     def discovery_only(self) -> bool:
@@ -50,10 +58,7 @@ class McpSourceAdaptation:
 
     @property
     def citable(self) -> bool:
-        return bool(
-            self.resource_kinds
-            & {"document-chunks", "structured-collection"}
-        )
+        return self.evidence_count > 0
 
 
 def wrap_mcp_result_metadata_for_transport(
@@ -192,6 +197,15 @@ def adapt_mcp_source_result(
             if chunk_envelopes is None:
                 return None
             envelopes.extend(chunk_envelopes)
+        elif kind == "document-discovery":
+            collection = _discovery_metadata_collection_envelope(
+                target,
+                descriptor=descriptor,
+                resource=raw_resource,
+                captured_at=captured_at,
+            )
+            if collection is not None:
+                envelopes.append(collection)
         elif kind == "structured-collection":
             collection = _structured_collection_envelope(
                 target,
@@ -216,6 +230,7 @@ def adapt_mcp_source_result(
         model_content=model_content,
         resource_kinds=frozenset(kinds),
         provider_id=provider_id,
+        evidence_count=len(envelopes),
     )
 
 
@@ -243,8 +258,10 @@ def _structured_content_from_wire(value: Any) -> Any | None:
 
 
 def _content_from_wire(value: Any) -> Any:
-    if isinstance(value, Mapping) and "content" in value and (
-        "_meta" in value or "meta" in value or "structuredContent" in value
+    if (
+        isinstance(value, Mapping)
+        and "content" in value
+        and ("_meta" in value or "meta" in value or "structuredContent" in value)
     ):
         return value["content"]
     return value
@@ -514,9 +531,7 @@ def _structured_collection_envelope(
         "contentRoot": root_pointer,
         "itemsPointer": _pointer(resource.get("itemsPointer")) or root_pointer,
         "identityFields": [
-            pointer
-            for value in identity_fields[:32]
-            if (pointer := _pointer(value)) is not None
+            pointer for value in identity_fields[:32] if (pointer := _pointer(value)) is not None
         ],
         "allowedPathRoots": normalized_roots,
     }
@@ -536,6 +551,89 @@ def _structured_collection_envelope(
         "semantics": semantics,
         "contentHash": _content_hash(snapshot),
     }
+
+
+def _discovery_metadata_collection_envelope(
+    target: Any,
+    *,
+    descriptor: Mapping[str, Any],
+    resource: Mapping[str, Any],
+    captured_at: str,
+) -> dict[str, Any] | None:
+    """Expose citable result metadata without making summaries authoritative.
+
+    A discovery row can prove that a document with a particular title, date,
+    URL, or provider id was returned.  It cannot prove claims copied from the
+    provider summary.  Generate concrete allowed JSON pointers for only those
+    metadata fields so the original result remains visible once while summary
+    addresses are rejected by the Registry.
+    """
+
+    root_pointer = _pointer(resource.get("rootPointer"))
+    items_pointer = _pointer(resource.get("itemsPointer"))
+    mapping = resource.get("mapping")
+    if root_pointer is None or items_pointer is None or not isinstance(mapping, Mapping):
+        return None
+    found, items = _resolve_pointer(target, items_pointer)
+    if not found:
+        return None
+    if isinstance(items, list):
+        indexed_items = [
+            (f"{items_pointer}/{index}", item) for index, item in enumerate(items[:_MAX_ITEMS])
+        ]
+    elif isinstance(items, Mapping) or isinstance(items, str):
+        indexed_items = [(items_pointer, items)]
+    else:
+        return None
+
+    allowed_roots: list[str] = []
+    for item_pointer, item in indexed_items:
+        for key in _DISCOVERY_CITABLE_MAPPING_KEYS:
+            relative = _pointer(mapping.get(key))
+            if relative is None:
+                continue
+            found, value = _resolve_pointer(item, relative)
+            if not found or value is None:
+                continue
+            absolute = f"{item_pointer}{relative}" if relative else item_pointer
+            if absolute not in allowed_roots:
+                allowed_roots.append(absolute)
+    if not allowed_roots:
+        return None
+
+    provider = descriptor.get("provider")
+    provider = provider if isinstance(provider, Mapping) else {}
+    operation = descriptor.get("operation")
+    operation = operation if isinstance(operation, Mapping) else {}
+    source_id_pointer = _pointer(mapping.get("sourceId"))
+    synthetic = {
+        "resourceId": f"{resource.get('resourceId') or 'discovery'}-metadata",
+        "kind": "structured-collection",
+        "authority": "derived",
+        # Freeze only the result rows.  A root pointer of ``""`` would hash
+        # the synthetic ``_valuz_evidence`` envelope after it is attached and
+        # invalidate the otherwise immutable collection during registration.
+        "rootPointer": items_pointer,
+        "itemsPointer": items_pointer,
+        "dataset": {
+            "id": (
+                f"{provider.get('id') or 'mcp'}:{operation.get('toolName') or 'discovery'}:metadata"
+            ),
+            "sourceCategory": "document_discovery_metadata",
+        },
+        "identity": {"fields": [source_id_pointer] if source_id_pointer is not None else []},
+        "semantics": {},
+        "addressing": {
+            "mode": "json-pointer",
+            "allowedPathRoots": allowed_roots,
+        },
+    }
+    return _structured_collection_envelope(
+        target,
+        descriptor=descriptor,
+        resource=synthetic,
+        captured_at=captured_at,
+    )
 
 
 def _shift_root_envelopes(envelopes: list[dict[str, Any]]) -> list[dict[str, Any]]:

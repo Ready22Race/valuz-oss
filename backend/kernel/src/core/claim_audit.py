@@ -324,6 +324,7 @@ class EvidenceSupport:
         "not-found",
     ]
     directness: int
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -1587,7 +1588,7 @@ def verify_evidence_support(
                 for evidence_period in evidence_periods
             )
         ):
-            return EvidenceSupport("contradicted", 2)
+            return EvidenceSupport("contradicted", 2, "period-conflict")
         evidence_unit = _canonical_unit(
             str(evidence_container.get("unit") or ""),
             semantics,
@@ -1640,7 +1641,7 @@ def verify_evidence_support(
         # an annual filing stored as ``2024 Q4`` can contradict its own 2024
         # annual-report quote.
         if _text_source_period_conflicts(claim, source, evidence_container, semantics):
-            return EvidenceSupport("contradicted", 2)
+            return EvidenceSupport("contradicted", 2, "period-conflict")
         if _text_numeric_supports_claim(
             claim,
             support_text,
@@ -2958,7 +2959,8 @@ def _text_source_period_conflicts(
     """Reject a document chunk whose explicit period contradicts the claim."""
 
     claim_period = claim.normalized.get("period", "")
-    if not claim_period:
+    claim_quarter = _bare_quarter(claim.exact)
+    if not claim_period and not claim_quarter:
         return False
     metric = claim.normalized.get("metric", "")
     definition = _metric_ontology(semantics).get(metric)
@@ -2973,6 +2975,11 @@ def _text_source_period_conflicts(
         " ".join(str(evidence.get(key) or "") for key in ("quote", "snippet"))
     )
     if any(_periods_compatible(claim_period, period) for period in quote_periods):
+        return False
+    quote_quarter = _bare_quarter(
+        " ".join(str(evidence.get(key) or "") for key in ("quote", "snippet"))
+    )
+    if claim_quarter and quote_quarter == claim_quarter:
         return False
     # Financial tables commonly label comparison columns as ``2024年`` and
     # ``2023年`` without spelling out ``年度``.  That bare year is direct local
@@ -3000,8 +3007,24 @@ def _text_source_period_conflicts(
             continue
         evidence_period = _period_key(candidate, semantics)
         if evidence_period:
-            return not _periods_compatible(evidence_period, claim_period)
+            if claim_period:
+                return not _periods_compatible(evidence_period, claim_period)
+            evidence_quarter = _bare_quarter(evidence_period)
+            if claim_quarter and evidence_quarter:
+                return claim_quarter != evidence_quarter
     return False
+
+
+def _bare_quarter(value: str) -> str:
+    match = re.search(
+        r"(?:\bQ\s*([1-4])\b|第?\s*([一二三四1-4])\s*季度)",
+        value,
+        re.IGNORECASE,
+    )
+    if match is None:
+        return ""
+    raw = match.group(1) or match.group(2) or ""
+    return {"一": "Q1", "二": "Q2", "三": "Q3", "四": "Q4"}.get(raw, f"Q{raw}")
 
 
 def _text_source_period_matches(

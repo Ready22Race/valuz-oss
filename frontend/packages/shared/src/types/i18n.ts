@@ -2439,6 +2439,7 @@ export type KnownI18nKey =
   | "ui.citation.qualityIssueConflict"
   | "ui.citation.qualityIssueCrossCheck"
   | "ui.citation.qualityIssueEntityConflict"
+  | "ui.citation.qualityIssuePeriodConflict"
   | "ui.citation.qualityIssueEvidence"
   | "ui.citation.qualityIssueFreshness"
   | "ui.citation.qualityIssueGeneric"

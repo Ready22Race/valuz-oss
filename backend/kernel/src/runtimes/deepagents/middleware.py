@@ -164,9 +164,7 @@ class ResearchToolBudgetMiddleware(AgentMiddleware):
         self._model_calls = 0
         self._repair_catalog_locked = _state_has_repair_evidence_catalog(state)
         self._forced_finalization_attempts = 0
-        self._no_research_scope = is_stable_general_knowledge_query(
-            _state_last_human_text(state)
-        )
+        self._no_research_scope = is_stable_general_knowledge_query(_state_last_human_text(state))
         prompt = _state_last_human_text(state)
         self._requested_period_count = parse_output_contract(prompt).requested_period_count
         self._requested_years = tuple(
@@ -216,10 +214,8 @@ class ResearchToolBudgetMiddleware(AgentMiddleware):
                     "progress, todos, or an internal error."
                 )
             )
-            if (
-                self._forced_finalization_attempts
-                < RESEARCH_FINALIZATION_ATTEMPT_LIMIT
-                and hasattr(request, "override")
+            if self._forced_finalization_attempts < RESEARCH_FINALIZATION_ATTEMPT_LIMIT and hasattr(
+                request, "override"
             ):
                 self._forced_finalization_attempts += 1
                 messages = list(getattr(request, "messages", None) or [])
@@ -282,14 +278,8 @@ class ResearchToolBudgetMiddleware(AgentMiddleware):
         args = args if isinstance(args, dict) else {}
         normalized_tool_name = tool_name.rsplit("__", 1)[-1]
         if normalized_tool_name == "kb_search":
-            singular_document_id = str(
-                args.get("doc_id") or args.get("document_id") or ""
-            ).strip()
-            if (
-                singular_document_id
-                and not args.get("doc_ids")
-                and not args.get("document_ids")
-            ):
+            singular_document_id = str(args.get("doc_id") or args.get("document_id") or "").strip()
+            if singular_document_id and not args.get("doc_ids") and not args.get("document_ids"):
                 args = {
                     key: value
                     for key, value in args.items()
@@ -350,14 +340,10 @@ class ResearchToolBudgetMiddleware(AgentMiddleware):
             tool_call = request.tool_call
         document_ids = _tool_document_ids(args)
         if tool_name == "kb_search" and any(
-            document_id in self._transcript_document_ids
-            for document_id in document_ids
+            document_id in self._transcript_document_ids for document_id in document_ids
         ):
             requested_num = args.get("num")
-            if (
-                not isinstance(requested_num, int)
-                or requested_num > TRANSCRIPT_INDEXED_CHUNK_LIMIT
-            ):
+            if not isinstance(requested_num, int) or requested_num > TRANSCRIPT_INDEXED_CHUNK_LIMIT:
                 args = {**args, "num": TRANSCRIPT_INDEXED_CHUNK_LIMIT}
                 request = request.override(
                     tool_call={**tool_call, "args": args},
@@ -373,17 +359,11 @@ class ResearchToolBudgetMiddleware(AgentMiddleware):
                 )
             return await handler(request)
         if tool_name == "document_raw_content":
-            doc_id = (
-                str(args.get("doc_id") or "").strip()
-                if isinstance(args, dict)
-                else ""
-            )
+            doc_id = str(args.get("doc_id") or "").strip() if isinstance(args, dict) else ""
             if doc_id in self._transcript_document_ids:
                 return _transcript_original_read_denial(
                     tool_call,
-                    searched=(
-                        doc_id in self._research_budget.indexed_document_search_ids
-                    ),
+                    searched=(doc_id in self._research_budget.indexed_document_search_ids),
                 )
             if doc_id and doc_id in self._research_budget.complete_document_ids:
                 return ToolMessage(
@@ -405,9 +385,7 @@ class ResearchToolBudgetMiddleware(AgentMiddleware):
                 if doc_id in self._transcript_document_ids:
                     return _transcript_original_read_denial(
                         tool_call,
-                        searched=(
-                            doc_id in self._research_budget.indexed_document_search_ids
-                        ),
+                        searched=(doc_id in self._research_budget.indexed_document_search_ids),
                     )
                 requested_offset = args.get("chunk_offset")
                 normalized_offset = (
@@ -524,9 +502,7 @@ def _tool_document_ids(args: Mapping[str, Any]) -> tuple[str, ...]:
     )
     candidates = raw if isinstance(raw, list) else [raw]
     return tuple(
-        document_id
-        for candidate in candidates
-        if (document_id := str(candidate or "").strip())
+        document_id for candidate in candidates if (document_id := str(candidate or "").strip())
     )
 
 
@@ -555,9 +531,7 @@ def _transcript_original_read_denial(
 
 def _state_has_repair_evidence_catalog(state: Any) -> bool:
     messages = (
-        state.get("messages")
-        if isinstance(state, Mapping)
-        else getattr(state, "messages", None)
+        state.get("messages") if isinstance(state, Mapping) else getattr(state, "messages", None)
     )
     if not isinstance(messages, list):
         return False
@@ -573,9 +547,7 @@ def _state_has_repair_evidence_catalog(state: Any) -> bool:
 
 def _state_last_human_text(state: Any) -> str:
     messages = (
-        state.get("messages")
-        if isinstance(state, Mapping)
-        else getattr(state, "messages", None)
+        state.get("messages") if isinstance(state, Mapping) else getattr(state, "messages", None)
     )
     if not isinstance(messages, list):
         return ""
@@ -628,9 +600,7 @@ class CitationEvidenceCompactionMiddleware(AgentMiddleware):
         if not isinstance(result, ToolMessage):
             return result
         fallback_request_name = request_call.get("name") if not result.name else None
-        tool_name = result.name or (
-            str(fallback_request_name) if fallback_request_name else None
-        )
+        tool_name = result.name or (str(fallback_request_name) if fallback_request_name else None)
         tool_args = request_call.get("args")
         tool_args = tool_args if isinstance(tool_args, dict) else {}
         captured_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
@@ -669,6 +639,15 @@ class CitationEvidenceCompactionMiddleware(AgentMiddleware):
                 )
                 if compacted is None:
                     compacted = adaptation.model_content
+                if "document-discovery" in adaptation.resource_kinds:
+                    discovery = _compact_discovery_tool_content(
+                        compacted,
+                        tool_name,
+                        tool_args=tool_args,
+                        allow_summary_evidence=False,
+                    )
+                    if discovery is not None:
+                        compacted = discovery[0]
                 private_content = private_citation_tool_content(adaptation.model_content)
                 if private_content is not None:
                     artifact[_CITATION_ARTIFACT_KEY] = private_content
@@ -1025,8 +1004,7 @@ def _append_document_coverage_evidence_to_payload(
     existing = payload.get("_valuz_evidence")
     if isinstance(existing, list):
         if not any(
-            isinstance(item, dict) and item.get("evidenceHandle") == handle
-            for item in existing
+            isinstance(item, dict) and item.get("evidenceHandle") == handle for item in existing
         ):
             existing.append(evidence)
     elif isinstance(existing, dict):
@@ -1171,20 +1149,12 @@ def _augment_structured_json_text(
                 continue
             output.append({**block, "text": nested})
             changed = True
-        return (
-            json.dumps(output, ensure_ascii=False, separators=(",", ":"))
-            if changed
-            else None
-        )
+        return json.dumps(output, ensure_ascii=False, separators=(",", ":")) if changed else None
     if not isinstance(payload, dict) or not isinstance(payload.get("data"), (dict, list)):
         return None
     existing = payload.get("_valuz_evidence")
     existing_items = (
-        existing
-        if isinstance(existing, list)
-        else [existing]
-        if isinstance(existing, dict)
-        else []
+        existing if isinstance(existing, list) else [existing] if isinstance(existing, dict) else []
     )
     valid_existing = [
         item
@@ -1243,9 +1213,7 @@ def _structured_fallback_collection(
     except (TypeError, ValueError):
         return None
     content_hash = f"sha256:{hashlib.sha256(serialized.encode()).hexdigest()}"
-    digest = hashlib.sha256(
-        f"{source_id}\0{tool_name}\0{content_hash}".encode()
-    ).hexdigest()[:24]
+    digest = hashlib.sha256(f"{source_id}\0{tool_name}\0{content_hash}".encode()).hexdigest()[:24]
     common: dict[str, Any] = {
         "datasetId": f"tool-result:{tool_name}",
         "toolName": tool_name,
@@ -1558,9 +1526,7 @@ def _discovery_doc_matches_requested_primary_symbol(
         else []
     )
     requested_symbols = {
-        str(value).strip().upper()
-        for value in requested_values
-        if str(value or "").strip()
+        str(value).strip().upper() for value in requested_values if str(value or "").strip()
     }
     if not requested_symbols:
         return True
@@ -1574,8 +1540,7 @@ def _discovery_doc_matches_requested_primary_symbol(
                 primary_symbols = {
                     str(stock.get("symbol") or "").strip().upper()
                     for stock in stocks
-                    if isinstance(stock, Mapping)
-                    and str(stock.get("symbol") or "").strip()
+                    if isinstance(stock, Mapping) and str(stock.get("symbol") or "").strip()
                 }
                 if primary_symbols:
                     return bool(primary_symbols & requested_symbols)
@@ -1603,9 +1568,7 @@ def _discovery_summary_evidence(
     # model citation would become unknown. Identity fields stay stable across
     # compaction and retries; the immutable quote itself still lives in the
     # private envelope protected by first-writer-wins Registry semantics.
-    digest = hashlib.sha256(
-        f"{raw_source_id}\0{url}\0{title}".encode()
-    ).hexdigest()[:24]
+    digest = hashlib.sha256(f"{raw_source_id}\0{url}\0{title}".encode()).hexdigest()[:24]
     source: dict[str, Any] = {
         "sourceId": (raw_source_id or digest)[:512],
         "providerId": "valuz-search",

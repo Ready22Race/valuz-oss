@@ -2030,6 +2030,7 @@
       "qualityIssueCrossCheck": "来源缺少交叉验证或存在冲突",
       "qualityIssueLowTier": "当前表述主要由公开二手来源支持，尚未获得更高等级来源的交叉确认。",
       "qualityIssueEntityConflict": "当前表述中的公司与引用来源不一致，请核对对应公司的原始资料。",
+      "qualityIssuePeriodConflict": "当前表述的期间与引用来源不一致，请核对对应期间的原始资料。",
       "qualityIssueConflict": "当前表述与引用中的数值或关键信息不一致，请以原始资料为准。",
       "qualityIssueAmbiguous": "有多个来源可能对应这项表述，暂时无法确定最准确的依据。",
       "qualityIssueEvidence": "引用证据不完整",
