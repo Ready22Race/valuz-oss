@@ -2595,7 +2595,9 @@ def _normalize_claim(
         result["metricCandidates"] = "|".join(metric_candidates)
     elif not context_metric_only:
         metric_tokens = sorted(
-            token for token in _semantic_tokens(text) if not _is_period_semantic_token(token)
+            token
+            for token in _semantic_tokens(text)
+            if not _is_context_semantic_token(token, semantics)
         )
         if metric_tokens:
             result["metric"] = " ".join(metric_tokens)
@@ -2637,6 +2639,45 @@ def _is_period_semantic_token(token: str) -> bool:
         re.fullmatch(r"(?:q[1-4](?:ytd)?|h[12]|fy|ytd)", normalized)
         or re.fullmatch(r"(?:年)?(?:一|二|三|四)季(?:度|报)", normalized)
     )
+
+
+def _is_context_semantic_token(
+    token: str,
+    semantics: Mapping[str, Any] | None,
+) -> bool:
+    """Exclude units and generic display labels from fallback metric names."""
+
+    if _is_period_semantic_token(token):
+        return True
+    normalized = _normalize_prose(token).replace(" ", "")
+    if normalized in {
+        "值",
+        "数值",
+        "数额",
+        "金额",
+        "单位",
+        "期间",
+        "value",
+        "amount",
+        "unit",
+        "period",
+        "asof",
+    }:
+        return True
+    if not normalized:
+        return False
+    for _unit_id, terms, _scale in _unit_definitions(semantics):
+        for term in terms:
+            normalized_term = _normalize_prose(term).replace(" ", "")
+            if not normalized_term:
+                continue
+            if normalized == normalized_term:
+                return True
+            if re.search(r"[\u3400-\u9fff]", normalized) and (
+                normalized in normalized_term or normalized_term in normalized
+            ):
+                return True
+    return False
 
 
 def _binding_refs(text: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
