@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import threading
 
@@ -2246,6 +2247,90 @@ async def test_private_citation_content_is_registered_but_not_forwarded() -> Non
     assistant = next(event for event in store.appended if event.type == "assistant_message")
     assert "citation://cit_" in assistant.data["text"]
     assert len(assistant.data["citation_bundle"]["citations"]) == 1
+
+
+async def test_checkpoint_citation_replay_registers_collection_with_visible_snapshot() -> None:
+    store, _live, observer = _observer_with_citations()
+    snapshot = [{"symbol": "600519", "revenue": 170899152276}]
+    content_hash = "sha256:" + hashlib.sha256(
+        json.dumps(
+            snapshot,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    handle = "evc_mcp_replay1234"
+    visible = {
+        "data": snapshot,
+        "_valuz_evidence_hint": {
+            "collectionHandle": handle,
+            "contentRoot": "/data",
+            "addressing": "json-pointer",
+            "identityFields": ["/symbol"],
+            "citationTemplate": f"evidence://{handle}#{{json-pointer}}",
+        },
+    }
+    private = {
+        "_valuz_evidence": [
+            {
+                "version": 1,
+                "kind": "structured-evidence-collection",
+                "collectionHandle": handle,
+                "source": {
+                    "sourceId": "reportify-income-statement:test",
+                    "providerId": "reportify",
+                    "sourceType": "dataset",
+                    "sourceCategory": "structured_financials",
+                    "title": "Reportify · income_statement",
+                    "retrievedAt": "2026-08-03T10:00:00Z",
+                },
+                "common": {
+                    "datasetId": "reportify-income-statement",
+                    "toolName": "income_statement",
+                    "capturedAt": "2026-08-03T10:00:00Z",
+                },
+                "addressing": {
+                    "mode": "json-pointer",
+                    "contentRoot": "/data",
+                    "itemsPointer": "/data",
+                    "identityFields": ["/symbol"],
+                    "allowedPathRoots": ["/data"],
+                },
+                "semantics": {"metric": {"mode": "field-name", "valueRoots": [""]}},
+                "contentHash": content_hash,
+            }
+        ]
+    }
+    await observer.emit(
+        Event(
+            type="citation_evidence",
+            data={
+                "tool_name": "income_statement",
+                "model_content": json.dumps(visible, ensure_ascii=False),
+                "content": json.dumps(private, ensure_ascii=False),
+            },
+        )
+    )
+    await observer.emit(
+        Event(
+            type="assistant_message",
+            data={
+                "text": (
+                    "贵州茅台 2024 年营业收入为 170899152276 元 "
+                    f"[1](evidence://{handle}#/data/0/revenue)。"
+                )
+            },
+        )
+    )
+    await observer.emit(Event(type="session_idle", data={"num_turns": 1}))
+
+    assistant = next(event for event in store.appended if event.type == "assistant_message")
+    bundle = assistant.data["citation_bundle"]
+    assert bundle["integrity"]["evidenceCollectionCount"] == 1
+    assert bundle["integrity"]["evidenceMaterializedCount"] == 1
+    assert bundle["integrity"]["unknownCitationIds"] == []
+    assert bundle["citations"][0]["evidence"]["value"] == 170899152276
 
 
 async def test_task_coverage_uses_private_full_result_for_candidate_scope() -> None:

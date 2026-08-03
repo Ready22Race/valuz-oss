@@ -82,12 +82,18 @@ def test_state_citation_artifacts_replays_final_middleware_tool_sidecar() -> Non
     message = SimpleNamespace(
         tool_call_id="tool-call-1",
         name="revenue_breakdown",
+        content='{"data":[{"revenue":42}],"_valuz_evidence_hint":{"collectionHandle":"evc_test","contentRoot":"/data"}}',
         artifact={"_valuz_citation_content": '{"_valuz_evidence":[]}'},
     )
     state = SimpleNamespace(values={"messages": [message]})
 
     assert _state_citation_artifacts(state) == [
-        ("tool-call-1", "revenue_breakdown", '{"_valuz_evidence":[]}')
+        (
+            "tool-call-1",
+            "revenue_breakdown",
+            message.content,
+            '{"_valuz_evidence":[]}',
+        )
     ]
 
 
