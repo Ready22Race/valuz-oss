@@ -65,7 +65,18 @@ def test_generated_ui_requires_explicit_visual_request() -> None:
     chart = parse_output_contract("请生成一个交互式图表展示三家公司的核心产品。")
 
     assert plain.generated_ui_allowed is False
+    assert plain.requested_item_count == 3
     assert chart.generated_ui_allowed is True
+
+
+def test_parses_direct_recommendation_count_but_not_approximate_bound() -> None:
+    exact = parse_output_contract("推荐 10 家国内 A 股 AI 应用公司。")
+    english = parse_output_contract("Recommend exactly 10 listed companies.")
+    lower_bound = parse_output_contract("至少推荐 10 家国内 A 股公司。")
+
+    assert exact.requested_item_count == 10
+    assert english.requested_item_count == 10
+    assert lower_bound.requested_item_count is None
 
 
 def test_parses_explicit_two_line_contract() -> None:
@@ -102,3 +113,13 @@ def test_parses_exact_table_rows_and_explicit_columns() -> None:
     assert contract.requested_table_column_count == 3
     assert contract.requested_table_columns == ("公司", "营业收入", "归母净利润")
     assert contract.to_dict()["requestedTableRowCount"] == 2
+
+
+def test_nested_strategy_instruction_is_not_parsed_as_requested_fields() -> None:
+    contract = parse_output_contract(
+        "对 A 股全量股票执行筛选：总市值大于 50 亿元。"
+        "只输出同时满足全部条件的股票，并列出每个条件的输入和是否通过。"
+    )
+
+    assert contract.requested_fields == ()
+    assert contract.requested_item_count is None

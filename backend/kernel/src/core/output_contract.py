@@ -35,12 +35,34 @@ _ZH_UNCOUNTED_FIELDS_RE = re.compile(
 )
 _UNCOUNTED_OUTPUT_INSTRUCTION_RE = re.compile(
     r"(?:Markdown\s*)?表格|每(?:家|个)?(?:公司|企业|实体)?\s*[一二两三四五六七八九十\d]+\s*行|"
+    r"(?:并|且|同时)?\s*(?:列出|输出|返回|展示|说明)\s*每(?:个|项|条)?|"
     r"\b(?:markdown\s+table|rows?\s+per\s+(?:company|entity))\b",
     re.IGNORECASE,
 )
 _EN_FIELDS_RE = re.compile(
     r"\bonly\s+(?:list|output|return|show)\s+(?P<fields>[^.\n]{2,180}?)"
     r"(?:\s+and\s+nothing\s+else)?(?:[.\n]|$)",
+    re.IGNORECASE,
+)
+_ZH_EXACT_ITEM_COUNT_RE = re.compile(
+    r"(?:推荐|筛选|挑选|选出|列出|给出|提供)\s*"
+    r"(?:恰好|正好|严格)?\s*"
+    r"(?P<count>[一二两三四五六七八九十\d]+)\s*"
+    r"(?:家|个|项|条|种|份|位)(?:公司|企业|股票|案例|方案|策略|产品|标的)?",
+    re.IGNORECASE,
+)
+_EN_EXACT_ITEM_COUNT_RE = re.compile(
+    r"\b(?:recommend|list|select|choose|provide|give(?:\s+me)?)\s+"
+    r"(?:exactly\s+)?"
+    r"(?P<count>one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+"
+    r"(?:[A-Za-z][A-Za-z-]*\s+){0,3}"
+    r"(?:items?|companies|stocks?|cases?|options?|strateg(?:y|ies)|products?|names?)\b",
+    re.IGNORECASE,
+)
+_APPROXIMATE_COUNT_PREFIX_RE = re.compile(
+    r"(?:至少|不少于|最多|至多|约|大约|不超过|多于|少于)\s*$|"
+    r"\b(?:at\s+least|no\s+fewer\s+than|up\s+to|at\s+most|about|approximately|"
+    r"more\s+than|fewer\s+than)\s*$",
     re.IGNORECASE,
 )
 _FIELD_SPLIT_RE = re.compile(r"\s*(?:、|，|,|/|以及|及|与|和|\band\b)\s*", re.IGNORECASE)
@@ -156,6 +178,7 @@ class OutputContract:
     strict: bool
     requested_fields: tuple[str, ...] = ()
     requested_item_count: int | None = None
+    requested_result_count: int | None = None
     requested_line_count: int | None = None
     requested_period_count: int | None = None
     requested_table_columns: tuple[str, ...] = ()
@@ -172,6 +195,7 @@ class OutputContract:
             "strict": self.strict,
             "requestedFields": list(self.requested_fields),
             "requestedItemCount": self.requested_item_count,
+            "requestedResultCount": self.requested_result_count,
             "requestedLineCount": self.requested_line_count,
             "requestedPeriodCount": self.requested_period_count,
             "requestedTableColumns": list(self.requested_table_columns),
@@ -220,6 +244,10 @@ def parse_output_contract(user_prompt: str) -> OutputContract:
                 ):
                     requested_fields = parsed_fields
                     requested_count = len(requested_fields)
+    requested_result_count = None
+    if requested_count is None:
+        requested_result_count = _parse_explicit_item_count(user_prompt)
+        requested_count = requested_result_count
     if requested_count is not None and len(requested_fields) > requested_count:
         requested_fields = requested_fields[-requested_count:]
     zh_period = _ZH_PERIOD_COUNT_RE.search(user_prompt)
@@ -264,6 +292,7 @@ def parse_output_contract(user_prompt: str) -> OutputContract:
         strict=bool(_STRICT_RE.search(user_prompt)),
         requested_fields=requested_fields,
         requested_item_count=requested_count,
+        requested_result_count=requested_result_count,
         requested_line_count=(
             _parse_count(line_match.group("count"))
             if (line_match := _LINE_COUNT_RE.search(user_prompt)) is not None
@@ -295,6 +324,21 @@ def _parse_count(value: str) -> int | None:
     if value.isdigit():
         return int(value)
     return _ZH_NUMBERS.get(value)
+
+
+def _parse_explicit_item_count(user_prompt: str) -> int | None:
+    """Parse an exact requested result cardinality, never an approximate bound."""
+
+    for pattern in (_ZH_EXACT_ITEM_COUNT_RE, _EN_EXACT_ITEM_COUNT_RE):
+        for match in pattern.finditer(user_prompt):
+            prefix = user_prompt[max(0, match.start() - 24) : match.start()]
+            if _APPROXIMATE_COUNT_PREFIX_RE.search(prefix):
+                continue
+            raw_count = match.group("count").lower()
+            if raw_count.isdigit():
+                return int(raw_count)
+            return _ZH_NUMBERS.get(raw_count) or _EN_NUMBERS.get(raw_count)
+    return None
 
 
 def _fold(value: str) -> str:

@@ -43,6 +43,7 @@ from langgraph.types import Command
 from src.core.agent_config import AgentConfig, SubAgentDef
 from src.core.approval_rule_matcher import ExactArgsRuleMatcher, RuntimeApprovalRuleMatcher
 from src.core.events import AVAILABLE_DECISIONS_EDITABLE_WITH_SESSION, Event, EventSink
+from src.core.mcp_source_metadata import wrap_mcp_result_metadata_for_transport
 from src.core.rule_canonicalize import reduce_args_for_subject
 from src.core.session_approval_cache import SessionRule
 from src.core.tools import ExecContext, ToolDef, ToolKit, ToolResult
@@ -75,6 +76,16 @@ from src.runtimes.interruption import describe_exception, is_runtime_interruptio
 from src.runtimes.mcp_env import resolve_stdio_env
 
 logger = logging.getLogger(__name__)
+
+
+async def _preserve_mcp_source_metadata(request: Any, handler: Any) -> Any:
+    """Keep result-level MCP citation metadata through LangChain conversion."""
+
+    result = await handler(request)
+    return wrap_mcp_result_metadata_for_transport(
+        result,
+        server_name=str(getattr(request, "server_name", "") or "unknown"),
+    )
 
 # Apply third-party deepagents shims once, before any graph is built. See
 # ``_patches`` — raises *subagents* above langgraph's default 25-step recursion
@@ -1341,7 +1352,10 @@ class DeepAgentsRuntime:
 
         if not spec:
             return []
-        client = MultiServerMCPClient(spec)  # type: ignore[arg-type]
+        client = MultiServerMCPClient(
+            spec,  # type: ignore[arg-type]
+            tool_interceptors=[_preserve_mcp_source_metadata],
+        )
         # Load per server instead of one ``get_tools()`` over everything: the
         # aggregate call fails the WHOLE turn when any single server is
         # unreachable. The CLI runtimes degrade to "server unavailable, tools

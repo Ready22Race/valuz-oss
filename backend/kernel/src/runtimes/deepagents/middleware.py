@@ -46,6 +46,10 @@ from src.core.citation_research_budget import (
     is_stable_general_knowledge_query,
     prioritize_discovery_documents,
 )
+from src.core.mcp_source_metadata import (
+    adapt_mcp_source_result,
+    unwrap_mcp_source_transport,
+)
 from src.core.output_contract import parse_output_contract
 
 logger = logging.getLogger(__name__)
@@ -623,11 +627,57 @@ class CitationEvidenceCompactionMiddleware(AgentMiddleware):
         result = await handler(request)
         if not isinstance(result, ToolMessage):
             return result
-        request_name = request_call.get("name") if not result.name else None
-        tool_name = result.name or (str(request_name) if request_name else None)
+        fallback_request_name = request_call.get("name") if not result.name else None
+        tool_name = result.name or (
+            str(fallback_request_name) if fallback_request_name else None
+        )
         tool_args = request_call.get("args")
         tool_args = tool_args if isinstance(tool_args, dict) else {}
         captured_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+        descriptor, structured_content, restored_artifact = unwrap_mcp_source_transport(
+            result.artifact
+        )
+        if descriptor is not None:
+            adaptation = adapt_mcp_source_result(
+                result.content,
+                tool_name=str(tool_name or "") or None,
+                descriptor=descriptor,
+                structured_content=structured_content,
+            )
+            if adaptation is not None:
+                artifact = restored_artifact or {}
+                if not adaptation.citable:
+                    if adaptation.resource_kinds == {"operational"}:
+                        return result.model_copy(update={"artifact": artifact or None})
+                    discovery = _compact_discovery_tool_content(
+                        adaptation.model_content,
+                        tool_name,
+                        tool_args=tool_args,
+                        allow_summary_evidence=False,
+                    )
+                    visible = discovery[0] if discovery is not None else adaptation.model_content
+                    return result.model_copy(
+                        update={"content": visible, "artifact": artifact or None}
+                    )
+                compacted = compact_citation_tool_content(
+                    adaptation.model_content,
+                    max_text_evidence_items=80,
+                )
+                if compacted is None:
+                    compacted = adaptation.model_content
+                private_content = private_citation_tool_content(adaptation.model_content)
+                if private_content is not None:
+                    artifact[_CITATION_ARTIFACT_KEY] = private_content
+                    self._evidence_registry.register_tool_projection(
+                        compacted,
+                        private_content,
+                        tool_name=str(tool_name or "") or None,
+                        trusted_private=True,
+                    )
+                return result.model_copy(
+                    update={"content": compacted, "artifact": artifact or None}
+                )
 
         if str(tool_name or "").rsplit("__", 1)[-1] == "kb_search":
             constrained = constrain_indexed_document_scope(
@@ -1236,6 +1286,7 @@ def _compact_discovery_tool_content(
     tool_name: str | None,
     *,
     tool_args: Mapping[str, Any] | None = None,
+    allow_summary_evidence: bool = True,
 ) -> tuple[Any, list[dict[str, Any]]] | None:
     """Bound search rows and expose traceable summary-level fallback handles.
 
@@ -1259,7 +1310,17 @@ def _compact_discovery_tool_content(
             name,
             captured_at,
             tool_args=tool_args,
+            allow_summary_evidence=allow_summary_evidence,
         )
+    if isinstance(content, dict):
+        compacted_payload = _compact_discovery_payload(
+            content,
+            name,
+            captured_at,
+            tool_args=tool_args,
+            allow_summary_evidence=allow_summary_evidence,
+        )
+        return compacted_payload
     if not isinstance(content, list):
         return None
     changed = False
@@ -1270,21 +1331,22 @@ def _compact_discovery_tool_content(
             output.append(block)
             continue
         raw_text = block.get("text")
-        compacted = (
+        compacted_text = (
             _compact_discovery_json_text(
                 raw_text,
                 name,
                 captured_at,
                 tool_args=tool_args,
+                allow_summary_evidence=allow_summary_evidence,
             )
             if isinstance(raw_text, str)
             else None
         )
-        if compacted is None:
+        if compacted_text is None:
             output.append(block)
             continue
-        compacted_text, block_evidence = compacted
-        output.append({**block, "text": compacted_text})
+        compacted_value, block_evidence = compacted_text
+        output.append({**block, "text": compacted_value})
         evidence.extend(block_evidence)
         changed = True
     return (output, evidence) if changed else None
@@ -1296,6 +1358,7 @@ def _compact_discovery_json_text(
     captured_at: str,
     *,
     tool_args: Mapping[str, Any] | None = None,
+    allow_summary_evidence: bool = True,
 ) -> tuple[str, list[dict[str, Any]]] | None:
     try:
         payload = json.loads(raw_text)
@@ -1319,6 +1382,7 @@ def _compact_discovery_json_text(
                     tool_name,
                     captured_at,
                     tool_args=tool_args,
+                    allow_summary_evidence=allow_summary_evidence,
                 )
                 if isinstance(text, str)
                 else None
@@ -1333,7 +1397,30 @@ def _compact_discovery_json_text(
         if not changed:
             return None
         return json.dumps(blocks, ensure_ascii=False, separators=(",", ":")), evidence
-    if not isinstance(payload, dict) or not isinstance(payload.get("docs"), list):
+    if not isinstance(payload, dict):
+        return None
+    compacted = _compact_discovery_payload(
+        payload,
+        tool_name,
+        captured_at,
+        tool_args=tool_args,
+        allow_summary_evidence=allow_summary_evidence,
+    )
+    if compacted is None:
+        return None
+    compacted_payload, evidence = compacted
+    return json.dumps(compacted_payload, ensure_ascii=False, separators=(",", ":")), evidence
+
+
+def _compact_discovery_payload(
+    payload: dict[str, Any],
+    tool_name: str,
+    captured_at: str,
+    *,
+    tool_args: Mapping[str, Any] | None,
+    allow_summary_evidence: bool,
+) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
+    if not isinstance(payload.get("docs"), list):
         return None
     raw_docs = [doc for doc in payload["docs"] if isinstance(doc, dict)]
     primary_docs = [
@@ -1362,7 +1449,7 @@ def _compact_discovery_json_text(
             # original-document evidence and must never become answer facts.
             # The one scoped kb_search that follows supplies traceable chunks.
             doc.pop("summary", None)
-        elif isinstance(summary, str) and summary.strip():
+        elif allow_summary_evidence and isinstance(summary, str) and summary.strip():
             envelope = _discovery_summary_evidence(
                 doc,
                 summary=summary,
@@ -1388,12 +1475,12 @@ def _compact_discovery_json_text(
         "summariesTruncated": not transcript_discovery,
         "citationEvidence": (
             "original-indexed-chunk-required"
-            if transcript_discovery
+            if transcript_discovery or not allow_summary_evidence
             else "summary-fallback"
         ),
         "originalDocumentPreferred": True,
     }
-    return json.dumps(compacted, ensure_ascii=False, separators=(",", ":")), evidence
+    return compacted, evidence
 
 
 def _deduplicate_discovery_docs(

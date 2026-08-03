@@ -98,6 +98,7 @@ from src.core.events import (
     EventSink,
 )
 from src.core.hooks import Hooks
+from src.core.mcp_source_metadata import adapt_mcp_source_result
 from src.core.output_contract import parse_output_contract
 from src.core.rule_canonicalize import reduce_args_for_subject
 from src.core.session_approval_cache import SessionRule
@@ -2136,6 +2137,15 @@ class ClaudeAgentRuntime:
                     if persisted_tool_response is not None
                     else tool_response
                 )
+                source_adaptation = adapt_mcp_source_result(
+                    effective_tool_response,
+                    tool_name=tool_name or None,
+                )
+                source_metadata_handled = source_adaptation is not None
+                if source_adaptation is not None and source_adaptation.resource_kinds != {
+                    "operational"
+                }:
+                    effective_tool_response = source_adaptation.model_content
                 self._record_citation_discovery_documents(
                     tool_name=tool_name,
                     tool_response=effective_tool_response,
@@ -2236,13 +2246,14 @@ class ClaudeAgentRuntime:
                                 output_key: visible,
                             }
                         )
-                augmented_indexed_content = augment_indexed_document_evidence(
-                    effective_tool_response,
-                    tool_name=tool_name,
-                    captured_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-                )
-                if augmented_indexed_content is not None:
-                    effective_tool_response = augmented_indexed_content
+                if not source_metadata_handled:
+                    augmented_indexed_content = augment_indexed_document_evidence(
+                        effective_tool_response,
+                        tool_name=tool_name,
+                        captured_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                    )
+                    if augmented_indexed_content is not None:
+                        effective_tool_response = augmented_indexed_content
                 private_citation_content = private_citation_tool_content(
                     effective_tool_response
                 )

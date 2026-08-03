@@ -81,6 +81,30 @@ _POSSESSIVE_ENTITY_RE = re.compile(
     r"(?:last|latest|recent|previous|past)\s+",
     re.IGNORECASE,
 )
+_ZH_DIRECT_ENTITY_RE = re.compile(
+    r"(?:对比|比较|列出|查询|检索|检查|分析|总结|归纳|研究|梳理)\s*"
+    r"(?P<body>[^，,。；;\n]{1,180})",
+    re.IGNORECASE,
+)
+_ZH_CALCULATION_ENTITY_RE = re.compile(
+    r"(?:^|[，,。；;\n]|请|并|再|然后|需要|要求|分别|逐项)\s*"
+    r"(?:帮我)?计算(?:一下)?\s*(?P<body>[^，,。；;\n]{1,180})",
+    re.IGNORECASE,
+)
+_ZH_SECONDARY_ENTITY_RE = re.compile(
+    r"(?:并|同时)?(?:与|和)\s*(?P<body>[\u3400-\u9fffA-Za-z0-9 .&-]{1,64}?)\s*"
+    r"(?=(?:同季|同期|同一(?:季度|期间)|进行)?(?:数据)?(?:比较|对比))",
+    re.IGNORECASE,
+)
+_ENTITY_SCOPE_BOUNDARY_RE = re.compile(
+    r"(?:最近|最新|过去|此前|前|近)\s*[一二两三四五六七八九十\d]*\s*个?"
+    r"(?:已(?:披露|发布|公布|公开)|公开(?:披露|发布)|连续|完整|可得|可获取)?\s*"
+    r"(?:季度|财季|报告期|月|年|一期|两期)|"
+    r"(?:19|20)\d{2}\s*年?|"
+    r"(?:单季|当季|本季|同季|同期|年度|季度)(?=[\u3400-\u9fffA-Za-z])|"
+    r"(?:财报|年报|报告|电话会|业绩发布|业绩)(?:的|中|里)?",
+    re.IGNORECASE,
+)
 _ZH_DOCUMENT_SCOPE_ENTITY_RE = re.compile(
     r"(?:根据|基于|使用|查阅|查找|查询|检索)\s*(?P<body>.{1,80}?)"
     r"(?=(?:19|20)\d{2}\s*年?(?:年度)?(?:报告|财报|年报))",
@@ -112,6 +136,15 @@ _ENTITY_STOP_WORDS = {
     "字段",
     "指标",
     "结果",
+    "公式",
+    "输入",
+    "阈值",
+    "当前状态",
+    "还需连续观察",
+    "目标公司",
+    "目标企业",
+    "该公司",
+    "该企业",
 }
 _ZH_TOPIC_RE = re.compile(
     r"电话会(?:中)?(?:管理层)?(?:对|关于)?\s*"
@@ -125,6 +158,13 @@ _EN_TOPIC_RE = re.compile(
     re.IGNORECASE,
 )
 _TOPIC_SPLIT_RE = re.compile(r"\s*(?:、|，|,|；|;|以及|及|与|和|\band\b)\s*", re.I)
+_GENERAL_TOPIC_INTENT_RE = re.compile(
+    r"(?:分析|研究|总结|梳理|归纳|拆解|解释|给出|寻找|查找|筛选|"
+    r"方向|候选|趋势|走势|驱动|基本面|风险|催化)|"
+    r"\b(?:analy[sz]e|research|summari[sz]e|explain|identify|find|screen|"
+    r"trend|driver|fundamental|risk|catalyst|candidate)\b",
+    re.IGNORECASE,
+)
 _YEAR_RANGE_RE = re.compile(
     r"(?P<start>(?:19|20)\d{2})\s*(?:[-–—至到])\s*"
     r"(?P<end>(?:19|20)\d{2})\s*年?"
@@ -147,7 +187,9 @@ _LATEST_COMPLETE_RE = re.compile(
     re.IGNORECASE,
 )
 _TABLE_RE = re.compile(
-    r"(?:Markdown\s*)?表格|\bmarkdown\s+table\b|\bin\s+a\s+table\b",
+    r"(?:Markdown\s*)?表格|(?:列|制|做|整理)成(?:一?张)?(?:Markdown\s*)?表|"
+    r"以(?:Markdown\s*)?表(?:格)?(?:形式)?(?:列出|呈现|展示)|"
+    r"\bmarkdown\s+table\b|\bin\s+a\s+table\b",
     re.IGNORECASE,
 )
 _SINGLE_TABLE_RE = re.compile(
@@ -156,7 +198,9 @@ _SINGLE_TABLE_RE = re.compile(
     re.IGNORECASE,
 )
 _CALCULATION_RE = re.compile(
-    r"(?:计算|算出|求出|复算|增幅|变化率|占比|合计|差额|"
+    r"(?:(?:^|[，,。；;\n]|请|并|再|然后|需要|要求|分别|逐项)\s*"
+    r"(?:帮我)?计算(?:一下)?|"
+    r"算出|求出|复算|增幅|变化率|占比|合计|差额|"
     r"\bcalculate\b|\bcompute\b|\brecalculate\b|\bchange rate\b)",
     re.IGNORECASE,
 )
@@ -291,7 +335,17 @@ class TaskContract:
         explicit_calculation = any(
             item.kind == "calculation" for item in self.required_requirements
         )
-        return bool(substantive and (explicit_calculation or len(substantive) > 1 or shaped))
+        exact_item_count = any(
+            item.kind == "output-shape"
+            and isinstance(item.slots.get("exactItemCount"), int)
+            and int(item.slots["exactItemCount"]) > 0
+            and item.slots.get("exactItemCountSubject") == "results"
+            for item in self.required_requirements
+        )
+        return bool(
+            exact_item_count
+            or (substantive and (explicit_calculation or len(substantive) > 1 or shaped))
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -399,6 +453,11 @@ def parse_task_contract(
     task_policy = config.get("task_coverage")
     task_policy = task_policy if isinstance(task_policy, Mapping) else {}
     topics = _extract_topics(user_prompt, semantics, task_policy)
+    period_scoped_topics = (
+        topics
+        if _ZH_TOPIC_RE.search(user_prompt) or _EN_TOPIC_RE.search(user_prompt)
+        else ()
+    )
     dimension_groups = _extract_dimension_members(user_prompt, task_policy)
     period_count = output.requested_period_count
     relative_period_granularity = (
@@ -411,6 +470,7 @@ def parse_task_contract(
         non_entity_terms=(
             *output.requested_fields,
             *(alias for _metric, aliases, _policy_ref in metrics for alias in aliases),
+            *(alias for _topic, aliases in topics for alias in aliases),
         ),
     )
     periods = _extract_periods(user_prompt)
@@ -435,11 +495,13 @@ def parse_task_contract(
     requirements: list[TaskRequirement] = []
 
     if metrics:
-        period_slots: tuple[str | None, ...]
+        period_slots: tuple[tuple[str | None, int | None], ...]
         if periods:
-            period_slots = tuple(periods)
+            period_slots = tuple((period, None) for period in periods)
+        elif period_count and period_count > 0:
+            period_slots = tuple((None, ordinal) for ordinal in range(period_count))
         else:
-            period_slots = (None,)
+            period_slots = ((None, None),)
         entity_slots: tuple[str | None, ...] = tuple(entities) if entities else (None,)
         dimension_combinations = (
             tuple(product(*(members for _dimension, members in dimension_groups)))
@@ -447,7 +509,7 @@ def parse_task_contract(
             else ((),)
         )
         for entity in entity_slots:
-            for period in period_slots:
+            for period, period_ordinal in period_slots:
                 for metric, aliases, policy_ref in metrics:
                     for dimension_combination in dimension_combinations:
                         selected_dimensions = {
@@ -462,16 +524,44 @@ def parse_task_contract(
                             slots["entityName"] = entity
                         if period is not None:
                             slots["period"] = period
+                        if period_ordinal is not None:
+                            slots["periodOrdinal"] = period_ordinal
+                            if relative_period_granularity:
+                                slots["periodGranularity"] = relative_period_granularity
                         selectors: dict[str, Any] = {}
-                        if period is None and latest_selector is not None:
-                            selectors["period"] = {"kind": latest_selector}
+                        if period is None and (
+                            latest_selector is not None or period_ordinal is not None
+                        ):
+                            selectors["period"] = {
+                                "kind": latest_selector or "latest-published",
+                                **(
+                                    {"ordinal": period_ordinal}
+                                    if period_ordinal is not None
+                                    else {}
+                                ),
+                                **(
+                                    {"granularity": relative_period_granularity}
+                                    if relative_period_granularity
+                                    else {}
+                                ),
+                            }
                         dimension_description = " / ".join(
                             f"{dimension_groups[index][0]}={member[0]}"
                             for index, member in enumerate(dimension_combination)
                         )
+                        period_description = (
+                            period
+                            or (
+                                f"relative period {period_ordinal + 1}"
+                                if period_ordinal is not None
+                                else None
+                            )
+                            or latest_selector
+                            or "requested period"
+                        )
                         description = (
                             f"{entity + ' / ' if entity else ''}"
-                            f"{period or latest_selector or 'requested period'} / "
+                            f"{period_description} / "
                             f"{dimension_description + ' / ' if dimension_description else ''}"
                             f"{metric}"
                         )
@@ -511,8 +601,12 @@ def parse_task_contract(
                             )
                         )
 
-    if period_count and period_count > 0:
-        requested_topics = topics or (("requested-summary", ("requested-summary",)),)
+    if period_count and period_count > 0 and (
+        period_scoped_topics or (not metrics and not topics)
+    ):
+        requested_topics = period_scoped_topics or (
+            ("requested-summary", ("requested-summary",)),
+        )
         entity_scopes: tuple[str | None, ...] = tuple(entities) if entities else (None,)
         for entity in entity_scopes:
             for ordinal in range(period_count):
@@ -551,6 +645,28 @@ def parse_task_contract(
                             policy_refs=(topic_policy_ref,) if topic_policy_ref else (),
                         )
                     )
+
+    if topics and not period_scoped_topics:
+        entity_scopes = tuple(entities) if entities else (None,)
+        for entity in entity_scopes:
+            for topic, aliases in topics:
+                topic_policy_ref = _topic_policy_ref(topic, task_policy)
+                requirements.append(
+                    _requirement(
+                        "topic",
+                        f"{entity + ' / ' if entity else ''}{topic}",
+                        slots={
+                            "topic": topic,
+                            **({"entityName": entity} if entity else {}),
+                            **({"periodCount": period_count} if period_count else {}),
+                        },
+                        aliases={
+                            "topic": aliases,
+                            **({"entity": (entity,)} if entity else {}),
+                        },
+                        policy_refs=(topic_policy_ref,) if topic_policy_ref else (),
+                    )
+                )
 
     if len(entities) > 1:
         requirements.append(
@@ -677,6 +793,15 @@ def parse_task_contract(
                         else {}
                     ),
                     **(
+                        {
+                            "exactItemCountSubject": (
+                                "results" if output.requested_result_count is not None else "fields"
+                            )
+                        }
+                        if output.requested_item_count is not None
+                        else {}
+                    ),
+                    **(
                         {"exactLineCount": output.requested_line_count}
                         if output.requested_line_count is not None
                         else {}
@@ -757,6 +882,15 @@ def parse_task_contract(
         "allowAdditionalSections": not output.strict,
         **(
             {"exactItemCount": output.requested_item_count}
+            if output.requested_item_count is not None
+            else {}
+        ),
+        **(
+            {
+                "exactItemCountSubject": (
+                    "results" if output.requested_result_count is not None else "fields"
+                )
+            }
             if output.requested_item_count is not None
             else {}
         ),
@@ -2473,17 +2607,34 @@ def _extract_entities(
     *,
     non_entity_terms: Iterable[str] = (),
 ) -> tuple[str, ...]:
+    terms = tuple(str(term) for term in non_entity_terms if str(term).strip())
     scoped_bodies = [
         match.group("body") for match in _ZH_DOCUMENT_SCOPE_ENTITY_RE.finditer(prompt)
     ]
-    bodies = list(scoped_bodies)
-    if not bodies:
+    direct_bodies: list[str] = []
+    for match in _ZH_DIRECT_ENTITY_RE.finditer(prompt):
+        prefix = prompt[max(0, match.start() - 16) : match.start()]
+        if re.search(r"(?:不要|无需|无须|不必|禁止|不需要)\s*$", prefix):
+            continue
+        body = _trim_entity_body(match.group("body"), terms)
+        if body:
+            direct_bodies.append(body)
+    for match in _ZH_CALCULATION_ENTITY_RE.finditer(prompt):
+        body = _trim_entity_body(match.group("body"), terms)
+        if body:
+            direct_bodies.append(body)
+    if scoped_bodies:
+        bodies = list(scoped_bodies)
+    elif direct_bodies:
+        bodies = direct_bodies
+    else:
         bodies = [match.group("body") for match in _ZH_ENTITY_TRIGGER_RE.finditer(prompt)]
         bodies.extend(match.group("body") for match in _EN_ENTITY_TRIGGER_RE.finditer(prompt))
+    bodies.extend(match.group("body") for match in _ZH_SECONDARY_ENTITY_RE.finditer(prompt))
     possessive = _POSSESSIVE_ENTITY_RE.search(prompt)
     if possessive is not None:
         bodies.append(possessive.group("body"))
-    excluded = {_fold(str(term)) for term in non_entity_terms if str(term).strip()}
+    excluded = {_fold(term) for term in terms}
     entities: list[str] = []
     for body in bodies:
         body = re.sub(r"^(?:请|帮我|一下|the\s+)", "", body.strip(), flags=re.I)
@@ -2507,6 +2658,31 @@ def _extract_entities(
             if entity not in entities:
                 entities.append(entity)
     return tuple(entities)
+
+
+def _trim_entity_body(body: str, non_entity_terms: tuple[str, ...]) -> str:
+    """Keep the grammatical subject before period, metric, or topic clauses.
+
+    The previous regex searched forward for any later ``列出`` instruction and
+    could turn output labels such as ``输入、阈值、当前状态`` into entities.
+    This parser only accepts the clause immediately following a subject verb
+    and cuts it at deterministic policy/period boundaries.
+    """
+
+    candidate = body.strip()
+    boundaries = [
+        match.start()
+        for match in _ENTITY_SCOPE_BOUNDARY_RE.finditer(candidate)
+    ]
+    for term in non_entity_terms:
+        if not term.strip():
+            continue
+        match = re.search(re.escape(term), candidate, re.IGNORECASE)
+        if match is not None:
+            boundaries.append(match.start())
+    if boundaries:
+        candidate = candidate[: min(boundaries)]
+    return candidate.strip(" `*'\"：:()（）.的")
 
 
 def _extract_metrics(
@@ -2781,9 +2957,35 @@ def _extract_topics(
     semantics: Mapping[str, Any],
     task_policy: Mapping[str, Any],
 ) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    definitions = _topic_definitions(semantics, task_policy)
     match = _ZH_TOPIC_RE.search(prompt) or _EN_TOPIC_RE.search(prompt)
     if match is None:
-        return ()
+        if not _GENERAL_TOPIC_INTENT_RE.search(prompt):
+            return ()
+        discovered: list[tuple[int, str, tuple[str, ...]]] = []
+        for key, definition in definitions.items():
+            if not isinstance(definition, Mapping):
+                continue
+            candidates = [str(key)]
+            raw_aliases = definition.get("aliases")
+            if isinstance(raw_aliases, list):
+                candidates.extend(str(alias) for alias in raw_aliases if str(alias).strip())
+            spans = [
+                span
+                for candidate in candidates
+                for span in _alias_spans(prompt, candidate)
+            ]
+            if spans:
+                discovered.append(
+                    (
+                        min(start for start, _end in spans),
+                        str(key),
+                        tuple(dict.fromkeys(candidates)),
+                    )
+                )
+        discovered.sort(key=lambda item: item[0])
+        return tuple((key, aliases) for _offset, key, aliases in discovered)
+
     topics: list[tuple[str, tuple[str, ...]]] = []
     for raw in _TOPIC_SPLIT_RE.split(match.group("body")):
         topic = raw.strip(" `*'\"：:()（）.的")
@@ -2791,16 +2993,6 @@ def _extract_topics(
             continue
         canonical_topic = topic
         aliases = [topic]
-        contract = task_policy.get("contract")
-        contract = contract if isinstance(contract, Mapping) else {}
-        ontology = contract.get("topic_ontology")
-        if not isinstance(ontology, Mapping):
-            # Compatibility for an early design snapshot that placed the
-            # Task-Coverage-only ontology under shared Resolver semantics.
-            ontology = semantics.get("topic_ontology")
-        ontology = ontology if isinstance(ontology, Mapping) else {}
-        definitions = ontology.get("topics")
-        definitions = definitions if isinstance(definitions, Mapping) else {}
         for key, definition in definitions.items():
             if not isinstance(definition, Mapping):
                 continue
@@ -2825,6 +3017,22 @@ def _extract_topics(
             break
         topics.append((canonical_topic, tuple(dict.fromkeys(aliases))))
     return tuple(topics)
+
+
+def _topic_definitions(
+    semantics: Mapping[str, Any],
+    task_policy: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    contract = task_policy.get("contract")
+    contract = contract if isinstance(contract, Mapping) else {}
+    ontology = contract.get("topic_ontology")
+    if not isinstance(ontology, Mapping):
+        # Compatibility for an early design snapshot that placed the
+        # Task-Coverage-only ontology under shared Resolver semantics.
+        ontology = semantics.get("topic_ontology")
+    ontology = ontology if isinstance(ontology, Mapping) else {}
+    definitions = ontology.get("topics")
+    return definitions if isinstance(definitions, Mapping) else {}
 
 
 def _topic_policy_ref(topic: str, task_policy: Mapping[str, Any]) -> str:
@@ -3813,9 +4021,9 @@ def _output_shape_status(
         if len(visible_lines) != exact_lines:
             return "missing", ["exact-line-count-mismatch"]
     exact_items = slots.get("exactItemCount")
-    if isinstance(exact_items, int):
-        list_items = re.findall(r"(?m)^\s*(?:[-*+] |\d+[.)]\s+)", manifest.text)
-        if list_items and len(list_items) != exact_items:
+    if isinstance(exact_items, int) and slots.get("exactItemCountSubject") != "fields":
+        item_count = _count_output_items(manifest)
+        if item_count != exact_items:
             return "missing", ["exact-item-count-mismatch"]
     required_metadata = slots.get("requiredMetadata")
     if isinstance(required_metadata, list):
@@ -3824,6 +4032,30 @@ def _output_shape_status(
         if "unit" in required_metadata and not _ANSWER_UNIT_RE.search(manifest.text):
             return "missing", ["required-unit-missing"]
     return "fulfilled", ["requested-output-shape-present"]
+
+
+def _count_output_items(manifest: AnswerManifest) -> int:
+    """Count one top-level result shape without including nested details."""
+
+    text = manifest.text
+    numbered_headings = re.findall(
+        r"(?m)^\s{0,3}#{1,6}\s+(?:\d+[.)、]|[一二三四五六七八九十]+[、.)])\s*",
+        text,
+    )
+    if numbered_headings:
+        return len(numbered_headings)
+
+    numbered_items = re.findall(r"(?m)^\s{0,3}\d+[.)、]\s+", text)
+    if numbered_items:
+        return len(numbered_items)
+
+    bullet_rows = re.findall(r"(?m)^(?P<indent>[ \t]*)(?:[-*+])\s+", text)
+    if bullet_rows:
+        shallowest = min(len(indent.expandtabs(4)) for indent in bullet_rows)
+        return sum(len(indent.expandtabs(4)) == shallowest for indent in bullet_rows)
+
+    table_rows = sum(len(table.rows) for table in manifest.tables)
+    return table_rows
 
 
 def _remediation(retrieval: str, model_input: str, answer: str) -> str:

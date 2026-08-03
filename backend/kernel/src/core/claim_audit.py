@@ -16,6 +16,7 @@ import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
+from functools import lru_cache
 from typing import Any, Literal
 
 from markdown_it import MarkdownIt
@@ -24,6 +25,17 @@ from src.core.calculation import evaluate_decimal_expression
 CLAIM_EXTRACTOR_REVISION = "claim-extractor-v2"
 CLAIM_VERIFIER_REVISION = "claim-verifier-local-v2"
 MAX_CLAIMS_PER_ANSWER = 1_000
+
+# Policy snapshots are immutable for the lifetime of one turn. Keep a small
+# identity cache for their normalized unit ontology so hot verification paths
+# do not rebuild the same Decimal/alias tuples hundreds of thousands of times.
+# The original mapping and raw units object are retained in each entry, which
+# prevents Python object-id reuse from returning a different policy's data.
+_UNIT_DEFINITIONS_BY_POLICY: dict[
+    int,
+    tuple[Mapping[str, Any], Any, tuple[tuple[str, tuple[str, ...], Decimal], ...]],
+] = {}
+_MAX_UNIT_DEFINITION_POLICIES = 32
 
 _CITATION_LINK_RE = re.compile(
     r"\[([^\]\n]{0,240})\]\((citation|evidence)://([A-Za-z0-9_-]{1,160})\)"
@@ -329,6 +341,15 @@ class CompositeAutoBindResult:
 
 
 @dataclass(frozen=True)
+class ClaimBindingResult:
+    """All safe deterministic binding edits from one claim-extraction pass."""
+
+    text: str
+    auto_bound_claim_handles: dict[str, tuple[str, ...]]
+    rebound_claim_handles: dict[str, str]
+
+
+@dataclass(frozen=True)
 class _TableCell:
     content: str
     absolute_start: int
@@ -567,31 +588,50 @@ def match_available_evidence(
 ) -> EvidenceMatch:
     """Return the Resolver's safe binding decision through the legacy API."""
 
-    available = list(records)
+    # Build once per turn in the caller when possible.  The compatibility
+    # entrypoint still accepts a plain iterable for isolated tests and legacy
+    # callers, but all expensive verification is restricted to the index's
+    # bounded high-recall union rather than the entire Registry.
+    from src.core.claim_evidence_resolution import (
+        ensure_evidence_candidate_index,
+        resolve_claim_evidence,
+    )
+
+    candidate_index = ensure_evidence_candidate_index(records, semantics=semantics)
+    cached_match = candidate_index.cached_match(claim, entity_aliases)
+    if isinstance(cached_match, EvidenceMatch):
+        return cached_match
+
+    def finish(match: EvidenceMatch) -> EvidenceMatch:
+        candidate_index.store_match(claim, entity_aliases, match)
+        return match
+
+    available = tuple(
+        sorted(
+            candidate_index.candidate_records(claim),
+            key=lambda record: candidate_index.record_position(_evidence_parts(record)[0]),
+        )
+    )
     legacy = _legacy_match_available_evidence(
         claim,
         available,
         semantics=semantics,
         entity_aliases=entity_aliases,
+        support_index=candidate_index,
     )
     if legacy.status == "exact":
         # The previous exact path is already a high-precision verifier and has
         # a stable same-document specificity tie-break. Keep that safe result;
         # the Resolver extends the cases where the old matcher returned none.
-        return legacy
-    # Local import avoids a module cycle: the Resolver reuses this module's
-    # canonical deterministic verifier, while this compatibility facade lets
-    # existing Guard/Audit callers adopt Resolver decisions incrementally.
-    from src.core.claim_evidence_resolution import resolve_claim_evidence
-
+        return finish(legacy)
     resolution = resolve_claim_evidence(
         claim,
-        available,
+        candidate_index,
         semantics=semantics,
         entity_aliases=entity_aliases,
     )
     if resolution.status == "verified" and len(resolution.selected_handles) == 1:
-        return EvidenceMatch("exact", resolution.selected_handles)
+        return finish(EvidenceMatch("exact", resolution.selected_handles))
     if resolution.status == "ambiguous":
         supported = tuple(
             handle
@@ -603,19 +643,19 @@ def match_available_evidence(
         # independently supported item as ambiguous; this legacy helper is a
         # safe deterministic tie-break until source grouping moves into v2.
         if legacy.status == "exact":
-            return legacy
+            return finish(legacy)
         if legacy.status == "ambiguous":
-            return legacy
-        return EvidenceMatch("ambiguous", supported)
+            return finish(legacy)
+        return finish(EvidenceMatch("ambiguous", supported))
     if resolution.status in {"contradicted", "calculation-invalid"}:
-        return EvidenceMatch("conflict", resolution.selected_handles)
+        return finish(EvidenceMatch("conflict", resolution.selected_handles))
 
     # Detect a set-level structured conflict without converting an unbound
     # conflict into an automatic repair. Existing callers use this only as an
     # advisory match state; the Resolver remains the authority for actions.
     if legacy.status == "conflict":
-        return legacy
-    return EvidenceMatch("none")
+        return finish(legacy)
+    return finish(EvidenceMatch("none"))
 
 
 def _legacy_match_available_evidence(
@@ -624,6 +664,7 @@ def _legacy_match_available_evidence(
     *,
     semantics: Mapping[str, Any] | None = None,
     entity_aliases: Mapping[str, Iterable[str]] | None = None,
+    support_index: Any | None = None,
 ) -> EvidenceMatch:
     """Previous exact matcher retained only for deterministic tie/conflict compatibility."""
 
@@ -646,10 +687,15 @@ def _legacy_match_available_evidence(
             entity_aliases,
         ):
             continue
-        support = verify_evidence_support(
-            claim,
-            {"source": source, "evidence": evidence},
-            semantics=semantics,
+        support_for = getattr(support_index, "support_for", None)
+        support = (
+            support_for(claim, handle, source, evidence)
+            if callable(support_for)
+            else verify_evidence_support(
+                claim,
+                {"source": source, "evidence": evidence},
+                semantics=semantics,
+            )
         )
         if support.status == "supported":
             exact.append((handle, source, evidence, support))
@@ -723,7 +769,10 @@ def auto_bind_unique_claims(
     the single repair/publication decision.
     """
 
-    available = list(records)
+    from src.core.claim_evidence_resolution import ensure_evidence_candidate_index
+
+    candidate_index = ensure_evidence_candidate_index(records, semantics=semantics)
+    available = list(candidate_index)
     insertions: list[tuple[int, str]] = []
     claim_handles: dict[str, str] = {}
     for claim in extract_claims(answer, mode=mode, semantics=semantics):
@@ -740,7 +789,7 @@ def auto_bind_unique_claims(
             if disclosure_handle is not None
             else match_available_evidence(
                 claim,
-                available,
+                candidate_index,
                 semantics=semantics,
                 entity_aliases=entity_aliases,
             )
@@ -911,7 +960,10 @@ def auto_bind_composite_text_claims(
     selected excerpt may contradict the claim period.
     """
 
-    available = list(records)
+    from src.core.claim_evidence_resolution import ensure_evidence_candidate_index
+
+    candidate_index = ensure_evidence_candidate_index(records, semantics=semantics)
+    available = list(candidate_index)
     records_by_handle = {
         handle: (source, evidence)
         for record in available
@@ -937,7 +989,7 @@ def auto_bind_composite_text_claims(
         # to different metrics/scopes despite superficial agreement.
         exact_match = match_available_evidence(
             claim,
-            available,
+            candidate_index,
             semantics=semantics,
             entity_aliases=entity_aliases,
         )
@@ -969,7 +1021,7 @@ def auto_bind_composite_text_claims(
                 continue
         handles = match_composite_text_evidence(
             claim,
-            available,
+            candidate_index.candidate_records(claim),
             semantics=semantics,
         )
         if len(handles) < 2:
@@ -1064,10 +1116,7 @@ def propagate_equivalent_claim_bindings(
         insertions.append(
             (
                 claim.insertion_offset,
-                " "
-                + " ".join(
-                    f"[source](evidence://{handle})" for handle in propagated_handles
-                ),
+                " " + " ".join(f"[source](evidence://{handle})" for handle in propagated_handles),
             )
         )
         claim_handles[claim.claim_id] = propagated_handles
@@ -1140,10 +1189,7 @@ def _equivalent_claim_propagation_score(
     subject_overlap = _generic_text_subject_overlap(target_body, source_body)
 
     metric_equal = int(
-        bool(
-            target_canonical_metric
-            and target_canonical_metric == source_canonical_metric
-        )
+        bool(target_canonical_metric and target_canonical_metric == source_canonical_metric)
     )
     if target_amounts:
         if not (metric_equal or contains or subject_overlap):
@@ -1274,6 +1320,155 @@ def match_composite_text_evidence(
     return tuple(row[0] for row in selected)
 
 
+def bind_claims_to_evidence(
+    answer: str,
+    records: Iterable[Any],
+    *,
+    mode: str = "required-on-evidence",
+    semantics: Mapping[str, Any] | None = None,
+    entity_aliases: Mapping[str, Iterable[str]] | None = None,
+) -> ClaimBindingResult:
+    """Apply safe rebind, unique-bind and composite-bind edits in one pass.
+
+    These policies previously reparsed the complete Markdown answer and
+    resolved every still-unbound claim independently.  Besides wasting CPU,
+    that made each policy observe a slightly different claim boundary after
+    the previous policy inserted citation markup.  One immutable extraction
+    gives all deterministic policies the same claim identity and one shared
+    Resolver/cache while preserving their conservative action gates.
+    """
+
+    from src.core.claim_evidence_resolution import ensure_evidence_candidate_index
+
+    candidate_index = ensure_evidence_candidate_index(records, semantics=semantics)
+    available = list(candidate_index)
+    records_by_handle = {
+        handle: (source, evidence)
+        for record in available
+        for handle, source, evidence in [_evidence_parts(record)]
+        if handle and isinstance(evidence, Mapping)
+    }
+    edits: list[tuple[int, int, str]] = []
+    auto_bound: dict[str, tuple[str, ...]] = {}
+    rebound: dict[str, str] = {}
+
+    for claim in extract_claims(answer, mode=mode, semantics=semantics):
+        if not claim.citation_required:
+            continue
+        if claim.attached_citation_ids:
+            # Canonical citation ids can only enter this path from the host's
+            # sealed baseline. They are already bound and must never receive
+            # an additional provisional evidence link during hidden repair.
+            continue
+
+        attached = claim.attached_evidence_handles
+        if attached:
+            if len(attached) != 1 or _EXPLICIT_ATTRIBUTION_RE.search(claim.exact):
+                continue
+            current_handle = attached[0]
+            current = records_by_handle.get(current_handle)
+            if current is not None:
+                support = candidate_index.support_for(
+                    claim,
+                    current_handle,
+                    current[0],
+                    current[1],
+                )
+                if support.status == "supported":
+                    continue
+            match = match_available_evidence(
+                claim,
+                candidate_index,
+                semantics=semantics,
+                entity_aliases=entity_aliases,
+            )
+            if (
+                match.status != "exact"
+                or len(match.handles) != 1
+                or match.handles[0] == current_handle
+            ):
+                continue
+            source_start = claim.location.get("sourceStart")
+            source_end = claim.location.get("sourceEnd")
+            if not isinstance(source_start, int) or not isinstance(source_end, int):
+                continue
+            source_slice = answer[source_start:source_end]
+            marker_offset = source_slice.find(f"evidence://{current_handle}")
+            if marker_offset < 0:
+                continue
+            replacement_start = source_start + marker_offset + len("evidence://")
+            replacement_end = replacement_start + len(current_handle)
+            target_handle = match.handles[0]
+            edits.append((replacement_start, replacement_end, target_handle))
+            rebound[claim.claim_id] = target_handle
+            continue
+
+        attributed = bool(_EXPLICIT_ATTRIBUTION_RE.search(claim.exact))
+        disclosure_handle = _unique_negative_disclosure_handle(claim, available)
+        match = (
+            EvidenceMatch("exact", (disclosure_handle,))
+            if disclosure_handle is not None
+            else match_available_evidence(
+                claim,
+                candidate_index,
+                semantics=semantics,
+                entity_aliases=entity_aliases,
+            )
+        )
+        handles: tuple[str, ...] = ()
+        if match.status == "exact" and len(match.handles) == 1:
+            handle = match.handles[0]
+            if attributed and disclosure_handle is None:
+                matching_record = records_by_handle.get(handle)
+                if matching_record is None or not _named_attribution_supported(
+                    claim.exact,
+                    matching_record[0],
+                    matching_record[1],
+                ):
+                    continue
+            handles = (handle,)
+        elif not attributed and match.status == "ambiguous":
+            agreeing: list[str] = []
+            source_ids: set[str] = set()
+            for handle in match.handles:
+                source, evidence = records_by_handle.get(handle, ({}, {}))
+                if evidence.get("kind") != "text":
+                    agreeing = []
+                    break
+                source_id = _source_identity(source)
+                if source_id and source_id in source_ids:
+                    continue
+                agreeing.append(handle)
+                if source_id:
+                    source_ids.add(source_id)
+                if len(agreeing) == 2:
+                    break
+            if len(agreeing) >= 2:
+                handles = tuple(agreeing)
+        if not handles and not attributed:
+            handles = match_composite_text_evidence(
+                claim,
+                candidate_index.candidate_records(claim),
+                semantics=semantics,
+            )
+            if len(handles) < 2:
+                handles = ()
+        if not handles:
+            continue
+        replacement = " ".join(f"[source](evidence://{handle})" for handle in handles)
+        edits.append((claim.insertion_offset, claim.insertion_offset, f" {replacement}"))
+        auto_bound[claim.claim_id] = handles
+
+    text = answer
+    for start, end, replacement in sorted(edits, reverse=True):
+        text = f"{text[:start]}{replacement}{text[end:]}"
+    return ClaimBindingResult(
+        text=text,
+        auto_bound_claim_handles=auto_bound,
+        rebound_claim_handles=rebound,
+    )
+
+
 def rebind_unique_mismatched_claims(
     answer: str,
     records: Iterable[Any],
@@ -1292,7 +1487,10 @@ def rebind_unique_mismatched_claims(
     for the normal quality/repair path.
     """
 
-    available = list(records)
+    from src.core.claim_evidence_resolution import ensure_evidence_candidate_index
+
+    candidate_index = ensure_evidence_candidate_index(records, semantics=semantics)
+    available = list(candidate_index)
     evidence_by_handle = {
         handle: {"source": source, "evidence": evidence}
         for record in available
@@ -1316,7 +1514,7 @@ def rebind_unique_mismatched_claims(
                 continue
         match = match_available_evidence(
             claim,
-            available,
+            candidate_index,
             semantics=semantics,
             entity_aliases=entity_aliases,
         )
@@ -1368,16 +1566,26 @@ def verify_evidence_support(
         entity_status = _entity_support_status(claim, evidence_container)
         if entity_status == "contradicted":
             return EvidenceSupport("contradicted", 2)
-        evidence_period = _period_key(
-            str(evidence_container.get("period") or evidence_container.get("asOf") or ""),
-            semantics,
+        evidence_periods = tuple(
+            dict.fromkeys(
+                period
+                for raw_period in (
+                    evidence_container.get("period"),
+                    evidence_container.get("asOf"),
+                )
+                for period in [_period_key(str(raw_period or ""), semantics)]
+                if period
+            )
         )
         claim_period = claim.normalized.get("period", "")
         if (
             semantic_options.get("date_role") != "publication"
             and claim_period
-            and evidence_period
-            and not _periods_compatible(claim_period, evidence_period)
+            and evidence_periods
+            and not any(
+                _periods_compatible(claim_period, evidence_period)
+                for evidence_period in evidence_periods
+            )
         ):
             return EvidenceSupport("contradicted", 2)
         evidence_unit = _canonical_unit(
@@ -1625,15 +1833,22 @@ def structured_components_cover_claim(
             continue
         if _entity_support_status(claim, evidence) == "contradicted":
             continue
-        evidence_period = _period_key(
-            str(evidence.get("period") or evidence.get("asOf") or ""),
-            semantics,
+        evidence_periods = tuple(
+            dict.fromkeys(
+                period
+                for raw_period in (evidence.get("period"), evidence.get("asOf"))
+                for period in [_period_key(str(raw_period or ""), semantics)]
+                if period
+            )
         )
         claim_period = claim.normalized.get("period", "")
         if (
             claim_period
-            and evidence_period
-            and not _periods_compatible(claim_period, evidence_period)
+            and evidence_periods
+            and not any(
+                _periods_compatible(claim_period, evidence_period)
+                for evidence_period in evidence_periods
+            )
         ):
             continue
         for index, amount in enumerate(amounts):
@@ -2207,8 +2422,7 @@ def _classify_claim(text: str) -> str:
     if _NUMBER_RE.search(text) is None and _DEFINITION_HEADING_RE.search(text.strip()):
         return "definition"
     if _NUMBER_RE.search(text) is None and (
-        _DEFINITION_RE.search(text.strip())
-        or _LABELED_DEFINITION_RE.search(text.strip())
+        _DEFINITION_RE.search(text.strip()) or _LABELED_DEFINITION_RE.search(text.strip())
     ):
         return "definition"
     if _FINANCIAL_NUMBER_RE.search(text):
@@ -2806,6 +3020,7 @@ def _metric_terms(
     return tuple(dict.fromkeys(values))
 
 
+@lru_cache(maxsize=32_768)
 def _term_in_text(term: str, text: str) -> bool:
     normalized_term = _normalize_prose(term.replace("_", " "))
     normalized_text = _normalize_prose(text.replace("_", " "))
@@ -2946,12 +3161,16 @@ def _generic_derived_claim_accepts_calculation_metric(
 
 def _unit_definitions(
     semantics: Mapping[str, Any] | None,
-) -> list[tuple[str, tuple[str, ...], Decimal]]:
+) -> tuple[tuple[str, tuple[str, ...], Decimal], ...]:
     if not isinstance(semantics, Mapping):
-        return []
+        return ()
     ontology = semantics.get("unit_ontology")
     ontology = ontology if isinstance(ontology, Mapping) else semantics
     raw_units = ontology.get("units") if isinstance(ontology, Mapping) else None
+    cache_key = id(semantics)
+    cached = _UNIT_DEFINITIONS_BY_POLICY.get(cache_key)
+    if cached is not None and cached[0] is semantics and cached[1] is raw_units:
+        return cached[2]
     definitions: list[tuple[str, tuple[str, ...], Decimal]] = []
     if isinstance(raw_units, Mapping):
         iterable = [
@@ -2983,17 +3202,29 @@ def _unit_definitions(
         if isinstance(aliases, list):
             terms.extend(str(item) for item in aliases if isinstance(item, str) and item)
         definitions.append((unit_id, tuple(dict.fromkeys(terms)), scale))
-    return definitions
+    result = tuple(definitions)
+    if len(_UNIT_DEFINITIONS_BY_POLICY) >= _MAX_UNIT_DEFINITION_POLICIES:
+        _UNIT_DEFINITIONS_BY_POLICY.pop(next(iter(_UNIT_DEFINITIONS_BY_POLICY)))
+    _UNIT_DEFINITIONS_BY_POLICY[cache_key] = (semantics, raw_units, result)
+    return result
 
 
 def _resolve_unit(
     raw_unit: str,
     semantics: Mapping[str, Any] | None,
 ) -> tuple[str, Decimal] | None:
+    return _resolve_unit_from_definitions(raw_unit, _unit_definitions(semantics))
+
+
+@lru_cache(maxsize=4_096)
+def _resolve_unit_from_definitions(
+    raw_unit: str,
+    definitions: tuple[tuple[str, tuple[str, ...], Decimal], ...],
+) -> tuple[str, Decimal] | None:
     normalized = _normalize_prose(raw_unit).replace(" ", "")
     if not normalized:
         return None
-    for unit_id, aliases, scale in _unit_definitions(semantics):
+    for unit_id, aliases, scale in definitions:
         if any(_normalize_prose(alias).replace(" ", "") == normalized for alias in aliases):
             return unit_id, scale
     return None
@@ -3019,8 +3250,21 @@ def _claim_amounts(
     text: str,
     semantics: Mapping[str, Any] | None,
 ) -> list[tuple[str, str, Decimal | None, str]]:
+    # The same claim/evidence text is verified in rebind, auto-bind,
+    # composite-bind and final quality-audit passes.  Amount extraction only
+    # depends on the text and normalized unit ontology, so share that work
+    # instead of repeating thousands of regex scans per answer.
+    unit_definitions = _unit_definitions(semantics)
+    return list(_claim_amounts_cached(text, unit_definitions))
+
+
+@lru_cache(maxsize=8_192)
+def _claim_amounts_cached(
+    text: str,
+    unit_definitions: tuple[tuple[str, tuple[str, ...], Decimal], ...],
+) -> tuple[tuple[str, str, Decimal | None, str], ...]:
     unit_terms: list[tuple[str, str, Decimal]] = []
-    for unit_id, aliases, scale in _unit_definitions(semantics):
+    for unit_id, aliases, scale in unit_definitions:
         unit_terms.extend((alias, unit_id, scale) for alias in aliases)
     unit_terms.sort(key=lambda item: len(item[0]), reverse=True)
     amounts: list[tuple[int, tuple[str, str, Decimal | None, str]]] = []
@@ -3047,7 +3291,7 @@ def _claim_amounts(
             "m": "million",
         }.get(scale_token, "")
         raw_unit = f"USD {scale_name}".strip()
-        resolved = _resolve_unit(raw_unit, semantics)
+        resolved = _resolve_unit_from_definitions(raw_unit, unit_definitions)
         raw_value = match.group("value")
         decimal = _as_decimal(raw_value)
         occupied.append(match.span())
@@ -3139,7 +3383,7 @@ def _claim_amounts(
             )
         )
 
-    period = _period_key(text, semantics)
+    period = _period_key(text)
     temporal_spans = [
         match.span()
         for match in re.finditer(
@@ -3170,7 +3414,7 @@ def _claim_amounts(
         ):
             continue
         amounts.append((match.start(), (raw_value, "", None, "")))
-    return [item for _offset, item in sorted(amounts)]
+    return tuple(item for _offset, item in sorted(amounts))
 
 
 def _number_is_temporal_component(
@@ -3218,9 +3462,7 @@ def _number_is_locator_component(text: str, start: int, end: int) -> bool:
     chinese_suffix = re.match(r"\s*(?:页|章|节|段|行|条|图|表|附注)", suffix)
     if chinese_prefix and chinese_suffix:
         return True
-    return bool(
-        re.search(r"\b(?:page|p\.?|section|sec\.?|line|chunk)\s*#?\s*$", prefix, re.I)
-    )
+    return bool(re.search(r"\b(?:page|p\.?|section|sec\.?|line|chunk)\s*#?\s*$", prefix, re.I))
 
 
 def _normalize_range_value(text: str, start: int, raw_value: str) -> str:
@@ -3300,8 +3542,7 @@ def _structured_value_matches_claim(
         evidence_decimal = _as_decimal(evidence_value)
         if (
             evidence_decimal is not None
-            and evidence_semantic_options(evidence, semantics).get("value_transform")
-            == "absolute"
+            and evidence_semantic_options(evidence, semantics).get("value_transform") == "absolute"
         ):
             evidence_value = abs(evidence_decimal)
         if structured_values_equivalent(
@@ -3846,8 +4087,7 @@ def _semantic_value_key(
     decimal = _as_decimal(value)
     if (
         decimal is not None
-        and evidence_semantic_options(evidence, semantics).get("value_transform")
-        == "absolute"
+        and evidence_semantic_options(evidence, semantics).get("value_transform") == "absolute"
     ):
         decimal = abs(decimal)
     resolved = _resolve_unit(str(evidence.get("unit") or ""), semantics)

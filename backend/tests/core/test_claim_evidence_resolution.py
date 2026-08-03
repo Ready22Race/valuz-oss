@@ -6,10 +6,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import src.core.claim_evidence_resolution as resolution_module
 import yaml
 from src.core.claim_audit import ClaimCandidate
 from src.core.claim_evidence_resolution import (
     EvidenceCandidate,
+    EvidenceCandidateIndex,
     SemanticVerificationResult,
     resolve_claim_evidence,
 )
@@ -111,6 +113,70 @@ def test_unresolved_claim_never_requests_repair() -> None:
 
     assert resolution.status == "unresolved"
     assert resolution.repair_action == "none"
+
+
+def test_turn_local_index_bounds_large_registry_verification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    records = [
+        {
+            "evidenceHandle": f"ev_large_registry_{index:04d}",
+            "source": {"providerId": "fixture"},
+            "evidence": {
+                "kind": "structured-data",
+                "entityId": f"{index:06d}",
+                "metric": "operating_revenue",
+                "period": "2025 FY",
+                "value": 100_000_000 + index,
+                "unit": "CNY",
+            },
+        }
+        for index in range(2_000)
+    ]
+    candidate_index = EvidenceCandidateIndex(records, semantics=_SEMANTICS)
+    signal_calls = 0
+    original_signals = resolution_module._candidate_signals
+
+    def count_signals(*args: Any, **kwargs: Any) -> Any:
+        nonlocal signal_calls
+        signal_calls += 1
+        return original_signals(*args, **kwargs)
+
+    monkeypatch.setattr(resolution_module, "_candidate_signals", count_signals)
+    for index in range(40):
+        value = 100_000_000 + index
+        claim = ClaimCandidate(
+            claim_id=f"large-registry-{index}",
+            exact=f"{index:06d} 2025 年营业收入为 {value} CNY。",
+            segment_index=index,
+            kind="structured-fact",
+            citation_required=True,
+            attached_citation_ids=(),
+            normalized={
+                "metric": "operating_revenue",
+                "period": "2025 FY",
+                "value": str(value),
+                "unit": "CNY",
+            },
+            location={"kind": "fixture", "blockIndex": index, "start": 0, "end": 30},
+            semantic_text=f"{index:06d} 2025 年营业收入为 {value} CNY。",
+            insertion_offset=30,
+            attached_evidence_handles=(),
+        )
+
+        resolution = resolve_claim_evidence(
+            claim,
+            candidate_index,
+            semantics=_SEMANTICS,
+        )
+
+        assert resolution.status in {"verified", "supported-with-limits"}
+        assert resolution.candidate_handles[0] == f"ev_large_registry_{index:04d}"
+
+    # Forty claims against 2,000 records previously performed at least 80,000
+    # expensive signal evaluations in each pipeline pass.  The turn-local
+    # prefilter caps the work before deterministic verification.
+    assert signal_calls <= 40 * candidate_index.prefilter_limit
 
 
 def test_turn_local_entity_aliases_rebind_cross_company_source() -> None:

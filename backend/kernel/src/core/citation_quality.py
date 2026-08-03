@@ -392,7 +392,7 @@ def evaluate_citation_quality(
     claim_audits, claim_metrics = _audit_claims(
         answer,
         citation_by_id,
-        list(available_evidence),
+        available_evidence,
         mode=mode,
         enabled=(
             isinstance(rules.get("factual_claim"), dict)
@@ -488,7 +488,7 @@ def evaluate_citation_quality(
 def _audit_claims(
     answer: str,
     citation_by_id: dict[str, dict[str, Any]],
-    available_evidence: list[Any],
+    available_evidence: Iterable[Any],
     *,
     mode: str,
     enabled: bool,

@@ -3,6 +3,7 @@
 # ruff: noqa: I001 — kernel bootstrap side-effect import must precede src.*
 from __future__ import annotations
 
+import hashlib
 import json
 
 import valuz_agent.boot.kernel  # noqa: F401
@@ -162,6 +163,90 @@ async def test_post_tool_hook_standardizes_indexed_chunks_into_evidence() -> Non
         "Demand continues to exceed available supply."
     )
     sidecar = json.loads(runtime._citation_tool_result_sidecars["kb-chunk"])
+    assert sidecar["_valuz_evidence"][0]["locator"]["page"] == 9
+
+
+async def test_post_tool_hook_builds_document_evidence_from_mcp_result_meta() -> None:
+    runtime = ClaudeAgentRuntime(AgentConfig(id="a", name="a"), "", _RecordingSink())
+    hook = runtime._map_hooks()["PostToolUse"][0].hooks[0]
+    payload = {
+        "doc_id": "msft-q1",
+        "title": "Microsoft FY2026 Q1 transcript",
+        "url": "https://reportify.cn/transcripts/msft-q1",
+        "document_version": "v1",
+        "chunks": [
+            {
+                "id": "chunk-1",
+                "content": "Demand continues to exceed available supply.",
+                "metadata": {"document_page": 9},
+            }
+        ],
+        "total_chunks": 1,
+        "chunk_offset": 0,
+        "next_chunk_offset": None,
+    }
+    digest = hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    raw_result = {
+        "content": [{"type": "text", "text": json.dumps(payload)}],
+        "structuredContent": payload,
+        "_meta": {
+            "cn.valuz/citation-source": {
+                "version": 1,
+                "provider": {"id": "reportify", "name": "Reportify"},
+                "operation": {"toolName": "document_fetch"},
+                "result": {
+                    "target": "structuredContent",
+                    "hash": {"algorithm": "sha256", "value": digest},
+                    "capturedAt": "2026-08-03T00:00:00Z",
+                },
+                "resources": [
+                    {
+                        "resourceId": "document-fetch-chunks",
+                        "kind": "document-chunks",
+                        "authority": "authoritative",
+                        "rootPointer": "",
+                        "document": {
+                            "scope": "resource",
+                            "sourceId": "/doc_id",
+                            "documentId": "/doc_id",
+                            "documentVersion": "/document_version",
+                            "title": "/title",
+                            "url": "/url",
+                        },
+                        "itemsPointer": "/chunks",
+                        "mapping": {
+                            "chunkId": "/id",
+                            "text": "/content",
+                            "page": "/metadata/document_page",
+                        },
+                    }
+                ],
+            }
+        },
+    }
+
+    output = await hook(
+        {
+            "tool_name": "mcp__reportify__document_fetch",
+            "tool_input": {"doc_id": "msft-q1"},
+            "tool_response": raw_result,
+        },
+        "mcp-meta-document",
+        None,  # type: ignore[arg-type]
+    )
+
+    compacted = output["hookSpecificOutput"]["updatedMCPToolOutput"]
+    assert compacted["chunks"][0]["content"] == payload["chunks"][0]["content"]
+    assert compacted["chunks"][0]["evidenceHandle"].startswith("ev_mcp_")
+    sidecar = json.loads(runtime._citation_tool_result_sidecars["mcp-meta-document"])
+    assert sidecar["_valuz_evidence"][0]["source"]["providerId"] == "reportify"
     assert sidecar["_valuz_evidence"][0]["locator"]["page"] == 9
 
 

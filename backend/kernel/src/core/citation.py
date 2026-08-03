@@ -28,16 +28,15 @@ from urllib.parse import parse_qsl, unquote, urlsplit
 
 from src.core.citation_quality import evaluate_citation_quality
 from src.core.claim_audit import (
-    auto_bind_composite_text_claims,
-    auto_bind_unique_claims,
+    bind_claims_to_evidence,
     canonical_evidence_metric,
     extract_claims,
     propagate_equivalent_claim_bindings,
-    rebind_unique_mismatched_claims,
     structured_units_compatible,
     structured_value_present,
     structured_values_equivalent,
 )
+from src.core.claim_evidence_resolution import EvidenceCandidateIndex
 
 POLICY_REVISION = "citation-v1"
 EVIDENCE_ENVELOPE_KEY = "_valuz_evidence"
@@ -62,9 +61,7 @@ _REDUNDANT_VALUE_LIMITATION_RE = re.compile(
     r"(?:未披露|未提供|未列示)(?:该项|对应)?(?:的)?(?:具体)?(?:数字|数值|数据)?",
     re.IGNORECASE,
 )
-_BARE_EVIDENCE_RE = re.compile(
-    r"(?<![\w/])evidence://([A-Za-z0-9_-]{1,160})(#[^\s)\]\n]{1,2048})?"
-)
+_BARE_EVIDENCE_RE = re.compile(r"(?<![\w/])evidence://([A-Za-z0-9_-]{1,160})(#[^\s)\]\n]{1,2048})?")
 _INTRA_NUMBER_CITATION_RE = re.compile(
     r"(?P<prefix>(?<![\d,])\d{1,3}(?:,\d{3})*,\d{1,2})[ \t]*"
     r"(?P<link>\[[^\]\n]{1,240}\]\((?:citation|evidence)://[A-Za-z0-9_-]{1,160}\))"
@@ -94,9 +91,7 @@ _SOURCE_SECTION_HEADING_RE = re.compile(
     r"(?:sources?|references?|citations?|来源|参考来源|引用来源|参考资料)"
     r"[ \t]*[:：]?[ \t]*(?:\*\*|__)?[ \t]*$"
 )
-_TRAILING_INLINE_SOURCE_NOTE_RE = re.compile(
-    r"(?im)^[ \t]*(?:数据|资料|信息)?来源\s*[:：][\s\S]*$"
-)
+_TRAILING_INLINE_SOURCE_NOTE_RE = re.compile(r"(?im)^[ \t]*(?:数据|资料|信息)?来源\s*[:：][\s\S]*$")
 _CANONICAL_CITATION_URI_RE = re.compile(r"citation://([A-Za-z0-9_-]{1,160})")
 _MARKDOWN_DESTINATION_RE = re.compile(r"\]\(([^)\n]+)\)")
 _EXPLICIT_CITATION_RE = re.compile(
@@ -124,6 +119,7 @@ _MAX_SNIPPET_CHARS = 4_000
 _MAX_CONTEXT_CHARS = 512
 _MAX_STRUCTURED_STRING_CHARS = 4_096
 _MAX_CALCULATION_INPUTS = 128
+_MAX_COLLECTION_SPARSE_OVERRIDES = 256
 _MAX_RECTS = 128
 _MAX_MODEL_TEXT_EVIDENCE_ITEMS = 12
 _MAX_MODEL_TEXT_EXCERPT_CHARS = 700
@@ -171,10 +167,12 @@ class EvidenceCollectionRecord:
     source: dict[str, Any]
     common: dict[str, Any]
     addressing: dict[str, Any]
+    semantics: dict[str, Any]
     content_hash: str
     snapshot: Any
     tool_name: str | None
     scalar_index: dict[str, tuple[str, ...]]
+    sparse_overrides: dict[str, dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -666,9 +664,7 @@ class CitationGuard:
         # ``evidence://`` handles.  Preserve only ids that map back to this
         # turn's immutable registry during that host-controlled second pass.
         # The first pass still rejects every model-minted canonical id.
-        allow_registered_citation_ids = (
-            int(repair_attempts) > 0 or preserve_registered_citation_ids
-        )
+        allow_registered_citation_ids = int(repair_attempts) > 0 or preserve_registered_citation_ids
         repaired_text, repaired_handles = self._repair_markers(text)
         repaired_text = self._materialize_collection_addresses(repaired_text)
         repaired_text = _move_citation_after_split_number(repaired_text)
@@ -687,33 +683,21 @@ class CitationGuard:
             mode=str(policy_mode or "required-on-evidence"),
             semantics=semantics,
         )
-        rebind_result = rebind_unique_mismatched_claims(
-            repaired_text,
+        candidate_index = EvidenceCandidateIndex(
             self._registry.values(),
+            semantics=semantics,
+        )
+        binding_result = bind_claims_to_evidence(
+            repaired_text,
+            candidate_index,
             mode=str(policy_mode or "required-on-evidence"),
             semantics=semantics,
             entity_aliases=entity_aliases,
         )
-        repaired_text = rebind_result.text
-        auto_bind_result = auto_bind_unique_claims(
-            repaired_text,
-            self._registry.values(),
-            mode=str(policy_mode or "required-on-evidence"),
-            semantics=semantics,
-            entity_aliases=entity_aliases,
-        )
-        repaired_text = auto_bind_result.text
-        composite_bind_result = auto_bind_composite_text_claims(
-            repaired_text,
-            self._registry.values(),
-            mode=str(policy_mode or "required-on-evidence"),
-            semantics=semantics,
-            entity_aliases=entity_aliases,
-        )
-        repaired_text = composite_bind_result.text
+        repaired_text = binding_result.text
         propagated_bind_result = propagate_equivalent_claim_bindings(
             repaired_text,
-            self._registry.values(),
+            candidate_index,
             mode=str(policy_mode or "required-on-evidence"),
             semantics=semantics,
         )
@@ -724,9 +708,7 @@ class CitationGuard:
         # a business number in the published text.
         repaired_text = _move_citation_after_split_number(repaired_text)
         auto_bound_claims_by_handle: dict[str, list[str]] = {}
-        for claim_id, handle in auto_bind_result.claim_handles.items():
-            auto_bound_claims_by_handle.setdefault(handle, []).append(claim_id)
-        for claim_id, handles in composite_bind_result.claim_handles.items():
+        for claim_id, handles in binding_result.auto_bound_claim_handles.items():
             for handle in handles:
                 auto_bound_claims_by_handle.setdefault(handle, []).append(claim_id)
         equivalent_claims_by_handle: dict[str, list[str]] = {}
@@ -734,7 +716,7 @@ class CitationGuard:
             for handle in handles:
                 equivalent_claims_by_handle.setdefault(handle, []).append(claim_id)
         auto_rebound_claims_by_handle: dict[str, list[str]] = {}
-        for claim_id, handle in rebind_result.claim_handles.items():
+        for claim_id, handle in binding_result.rebound_claim_handles.items():
             auto_rebound_claims_by_handle.setdefault(handle, []).append(claim_id)
 
         citations: list[dict[str, Any]] = []
@@ -833,10 +815,9 @@ class CitationGuard:
                 citation["annotations"] = annotations
             if record.locator is not None:
                 citation["locator"] = copy.deepcopy(record.locator)
-            elif (
-                record.source.get("sourceType") == "document"
-                and not _is_complete_document_coverage_evidence(record.evidence)
-            ):
+            elif record.source.get(
+                "sourceType"
+            ) == "document" and not _is_complete_document_coverage_evidence(record.evidence):
                 citation["resolutionStatus"] = "degraded"
                 missing_locator_ids.append(citation_id)
             citations.append(citation)
@@ -888,9 +869,7 @@ class CitationGuard:
             return f"[{_citation_display_number(citations, citation_id)}](citation://{citation_id})"
 
         canonical_text = _BARE_EVIDENCE_RE.sub(replace_bare, canonical_text)
-        canonical_text, malformed_protocol_count = _strip_malformed_protocol_syntax(
-            canonical_text
-        )
+        canonical_text, malformed_protocol_count = _strip_malformed_protocol_syntax(canonical_text)
         canonical_text = _normalize_markdown_table_citation_suffixes(canonical_text)
         canonical_text = _strip_redundant_table_value_limitations(canonical_text)
 
@@ -982,7 +961,7 @@ class CitationGuard:
                 canonical_text,
                 bundle,
                 self._quality_policy,
-                available_evidence=self._registry.values(),
+                available_evidence=candidate_index,
                 entity_aliases=entity_aliases,
             )
             _focus_text_citation_snippets(bundle)
@@ -1018,7 +997,9 @@ class CitationGuard:
             if fragment is None:
                 return match.group(0)
             record = self._registry.materialize_reference(identifier, fragment)
-            return f"evidence://{record.handle}" if record is not None else f"evidence://{identifier}"
+            return (
+                f"evidence://{record.handle}" if record is not None else f"evidence://{identifier}"
+            )
 
         return _BARE_EVIDENCE_RE.sub(replace_bare, materialized)
 
@@ -1537,9 +1518,7 @@ def private_citation_tool_content(content: Any) -> str | None:
                     private_items.append(copy.deepcopy(candidate))
                     seen.add(handle)
             stack.extend(
-                (item, depth + 1)
-                for key, item in node.items()
-                if key != EVIDENCE_ENVELOPE_KEY
+                (item, depth + 1) for key, item in node.items() if key != EVIDENCE_ENVELOPE_KEY
             )
         elif isinstance(node, list):
             stack.extend((item, depth + 1) for item in node)
@@ -1560,15 +1539,19 @@ def private_citation_tool_content(content: Any) -> str | None:
 
 
 def _collection_descriptor(collection: EvidenceCollectionRecord) -> dict[str, Any]:
-    return {
+    descriptor = {
         "version": 1,
         "kind": "structured-evidence-collection",
         "collectionHandle": collection.handle,
         "source": copy.deepcopy(collection.source),
         "common": copy.deepcopy(collection.common),
         "addressing": copy.deepcopy(collection.addressing),
+        "semantics": copy.deepcopy(collection.semantics),
         "contentHash": collection.content_hash,
     }
+    if collection.sparse_overrides:
+        descriptor["sparseOverrides"] = copy.deepcopy(list(collection.sparse_overrides.values()))
+    return descriptor
 
 
 def _collection_hint(collection: EvidenceCollectionRecord) -> dict[str, Any]:
@@ -1579,6 +1562,9 @@ def _collection_hint(collection: EvidenceCollectionRecord) -> dict[str, Any]:
         "identityFields": list(collection.addressing.get("identityFields", [])),
         "citationTemplate": f"evidence://{collection.handle}#{{json-pointer}}",
     }
+    metric_semantics = collection.semantics.get("metric")
+    if isinstance(metric_semantics, dict) and metric_semantics.get("mode") == "field-name":
+        hint["metricMode"] = "field-name"
     if "fieldSchemaRef" in collection.addressing:
         hint["fieldSchemaRef"] = copy.deepcopy(collection.addressing["fieldSchemaRef"])
     return hint
@@ -1721,8 +1707,7 @@ def _compact_citation_value(
             if item
         ]
         text_evidence = bool(direct_items) and all(
-            isinstance(item.get("evidence"), dict)
-            and item["evidence"].get("kind") == "text"
+            isinstance(item.get("evidence"), dict) and item["evidence"].get("kind") == "text"
             for item in direct_items
         )
         has_model_content = any(key in output for key in _BULK_TEXT_RESULT_KEYS)
@@ -1738,9 +1723,7 @@ def _compact_citation_value(
                 if isinstance(output.get(key), str)
             )
             compact_excerpt = (
-                str(compact_items[0].get("excerpt") or "")
-                if len(compact_items) == 1
-                else ""
+                str(compact_items[0].get("excerpt") or "") if len(compact_items) == 1 else ""
             )
             if (
                 len(compact_items) == 1
@@ -1865,11 +1848,7 @@ def _looks_like_markdown_table(value: str) -> bool:
 def _compact_model_text_excerpt(value: str) -> str:
     if len(value) <= _MAX_MODEL_TEXT_EXCERPT_CHARS:
         return value
-    separator = (
-        "\n…\n"
-        if _looks_like_markdown_table(value)
-        else "\n…\n"
-    )
+    separator = "\n…\n" if _looks_like_markdown_table(value) else "\n…\n"
     available = _MAX_MODEL_TEXT_EXCERPT_CHARS - len(separator)
     head_chars = available // 2
     tail_chars = available - head_chars
@@ -1968,71 +1947,199 @@ def _field_to_json_pointer(field: str, *, content_root: str) -> str | None:
     return "/" + "/".join(_escape_json_pointer_token(token) for token in tokens)
 
 
+@dataclass(frozen=True)
+class _LegacyScalarPointer:
+    """One scalar in a legacy structured result and its row-local identity."""
+
+    pointer: str
+    tokens: tuple[str, ...]
+    value: Any
+    entity: str
+    period: str
+
+
+class _LegacyStructuredPointerIndex:
+    """Single-pass address index for legacy per-field Evidence envelopes.
+
+    Legacy adapters can return one Evidence envelope per result row.  Looking
+    up every envelope by walking the complete result made conversion quadratic
+    (1,000 rows took several seconds per projection).  Build the scalar and
+    row-context index once, then resolve every envelope from the bounded leaf
+    bucket.
+    """
+
+    def __init__(self, snapshot: Any) -> None:
+        self._by_pointer: dict[str, _LegacyScalarPointer] = {}
+        by_leaf: dict[str, list[_LegacyScalarPointer]] = {}
+        by_leaf_value: dict[tuple[str, tuple[str, str]], list[_LegacyScalarPointer]] = {}
+        by_leaf_entity: dict[tuple[str, str], list[_LegacyScalarPointer]] = {}
+        by_leaf_value_entity: dict[
+            tuple[str, tuple[str, str], str], list[_LegacyScalarPointer]
+        ] = {}
+        stack: list[tuple[Any, str, tuple[str, ...], int, str, str]] = [
+            (snapshot, "/data", ("data",), 0, "", "")
+        ]
+        visited = 0
+        while stack and visited < EvidenceRegistry._MAX_VISITED_NODES:
+            node, pointer, tokens, depth, entity, period = stack.pop()
+            visited += 1
+            if depth > EvidenceRegistry._MAX_DEPTH:
+                continue
+            if isinstance(node, dict):
+                node_entity = (
+                    str(
+                        node.get("entityId")
+                        or node.get("entity_id")
+                        or node.get("symbol")
+                        or node.get("ticker")
+                        or node.get("code")
+                        or entity
+                        or ""
+                    )
+                    .strip()
+                    .casefold()
+                )
+                period_parts = [
+                    node.get(key)
+                    for key in (
+                        "fiscal_year",
+                        "fiscalYear",
+                        "fiscal_quarter",
+                        "fiscalQuarter",
+                        "period",
+                        "end_date",
+                        "endDate",
+                        "as_of",
+                        "asOf",
+                    )
+                    if node.get(key) not in (None, "")
+                ]
+                node_period = " ".join(str(item) for item in period_parts).strip() or period
+                for key, item in reversed(tuple(node.items())):
+                    token = str(key)
+                    stack.append(
+                        (
+                            item,
+                            f"{pointer}/{_escape_json_pointer_token(token)}",
+                            (*tokens, token),
+                            depth + 1,
+                            node_entity,
+                            node_period,
+                        )
+                    )
+                continue
+            if isinstance(node, list):
+                for position in range(len(node) - 1, -1, -1):
+                    item = node[position]
+                    token = str(position)
+                    stack.append(
+                        (
+                            item,
+                            f"{pointer}/{token}",
+                            (*tokens, token),
+                            depth + 1,
+                            entity,
+                            period,
+                        )
+                    )
+                continue
+            if not _safe_scalar(
+                node,
+                allow_none=True,
+                max_string_chars=_MAX_STRUCTURED_STRING_CHARS,
+            ):
+                continue
+            record = _LegacyScalarPointer(
+                pointer=pointer,
+                tokens=tokens,
+                value=node,
+                entity=entity,
+                period=period,
+            )
+            self._by_pointer[pointer] = record
+            if tokens:
+                leaf = tokens[-1]
+                by_leaf.setdefault(leaf, []).append(record)
+                value_key = _legacy_scalar_index_key(node)
+                by_leaf_value.setdefault((leaf, value_key), []).append(record)
+                if entity:
+                    by_leaf_entity.setdefault((leaf, entity), []).append(record)
+                    by_leaf_value_entity.setdefault((leaf, value_key, entity), []).append(record)
+        self._by_leaf = {key: tuple(records) for key, records in by_leaf.items()}
+        self._by_leaf_value = {key: tuple(records) for key, records in by_leaf_value.items()}
+        self._by_leaf_entity = {key: tuple(records) for key, records in by_leaf_entity.items()}
+        self._by_leaf_value_entity = {
+            key: tuple(records) for key, records in by_leaf_value_entity.items()
+        }
+
+    def resolve(
+        self,
+        field: str,
+        *,
+        evidence: dict[str, Any] | None,
+    ) -> str | None:
+        direct = _field_to_json_pointer(field, content_root="/data")
+        if direct is not None and direct in self._by_pointer:
+            return direct
+
+        field_pointer = _field_to_json_pointer(field, content_root="")
+        suffix_tokens = tuple(_json_pointer_tokens(field_pointer or "") or ())
+        if not suffix_tokens:
+            return None
+        leaf = suffix_tokens[-1]
+        matches = [
+            record
+            for record in self._by_leaf.get(leaf, ())
+            if record.tokens[-len(suffix_tokens) :] == suffix_tokens
+        ]
+        if len(matches) == 1:
+            return matches[0].pointer
+        if not matches or not isinstance(evidence, dict):
+            return None
+
+        expected_value = evidence.get("value")
+        value_key = _legacy_scalar_index_key(expected_value)
+        value_matches = [
+            record
+            for record in self._by_leaf_value.get((leaf, value_key), ())
+            if record.tokens[-len(suffix_tokens) :] == suffix_tokens
+        ]
+        candidates = value_matches if value_matches else matches
+        if len(candidates) == 1:
+            return candidates[0].pointer
+        expected_entity = str(evidence.get("entityId") or "").strip().casefold()
+        if expected_entity:
+            entity_bucket = (
+                self._by_leaf_value_entity.get((leaf, value_key, expected_entity), ())
+                if value_matches
+                else self._by_leaf_entity.get((leaf, expected_entity), ())
+            )
+            entity_matches = [
+                record
+                for record in entity_bucket
+                if record.tokens[-len(suffix_tokens) :] == suffix_tokens
+            ]
+            if entity_matches:
+                candidates = entity_matches
+            if len(candidates) == 1:
+                return candidates[0].pointer
+        contextual = [
+            record
+            for record in candidates
+            if _legacy_pointer_context_matches_evidence(record, evidence)
+        ]
+        return contextual[0].pointer if len(contextual) == 1 else None
+
+
 def _unique_pointer_for_legacy_field(
     container: dict[str, Any],
     field: str,
     *,
     evidence: dict[str, Any] | None = None,
+    pointer_index: _LegacyStructuredPointerIndex | None = None,
 ) -> str | None:
-    direct = _field_to_json_pointer(field, content_root="/data")
-    if direct is not None:
-        found, value = _resolve_json_pointer(container, direct)
-        if found and _safe_scalar(
-            value,
-            allow_none=True,
-            max_string_chars=_MAX_STRUCTURED_STRING_CHARS,
-        ):
-            return direct
-    field_pointer = _field_to_json_pointer(field, content_root="")
-    suffix_tokens = _json_pointer_tokens(field_pointer or "")
-    if not suffix_tokens:
-        return None
-    matches: list[str] = []
-    stack: list[tuple[Any, str, int]] = [(container.get("data"), "/data", 0)]
-    while stack and len(matches) <= _MAX_REGISTRY_RECORDS:
-        node, pointer, depth = stack.pop()
-        if depth > EvidenceRegistry._MAX_DEPTH:
-            continue
-        if isinstance(node, dict):
-            for key, item in node.items():
-                stack.append(
-                    (item, f"{pointer}/{_escape_json_pointer_token(str(key))}", depth + 1)
-                )
-        elif isinstance(node, list):
-            for index, item in enumerate(node):
-                stack.append((item, f"{pointer}/{index}", depth + 1))
-        else:
-            pointer_tokens = _json_pointer_tokens(pointer) or []
-            if pointer_tokens[-len(suffix_tokens) :] == suffix_tokens:
-                matches.append(pointer)
-    if len(matches) == 1:
-        return matches[0]
-    if not matches or not isinstance(evidence, dict):
-        return None
-
-    # A multi-period result repeats the same field path once per row.  Legacy
-    # producers already attach the exact scalar value and period/entity
-    # identity to each envelope, so map each envelope back to one pointer
-    # before replacing N leaf handles with one Collection.  Ambiguity remains
-    # a hard stop: equal values with no distinguishing identity stay direct.
-    expected_value = evidence.get("value")
-    value_matches = [
-        pointer
-        for pointer in matches
-        if _legacy_scalar_values_equal(
-            _resolve_json_pointer(container, pointer)[1],
-            expected_value,
-        )
-    ]
-    candidates = value_matches if value_matches else matches
-    if len(candidates) == 1:
-        return candidates[0]
-    contextual_matches = [
-        pointer
-        for pointer in candidates
-        if _legacy_pointer_row_matches_evidence(container, pointer, evidence)
-    ]
-    return contextual_matches[0] if len(contextual_matches) == 1 else None
+    index = pointer_index or _LegacyStructuredPointerIndex(container.get("data"))
+    return index.resolve(field, evidence=evidence)
 
 
 def _legacy_scalar_values_equal(left: Any, right: Any) -> bool:
@@ -2043,58 +2150,41 @@ def _legacy_scalar_values_equal(left: Any, right: Any) -> bool:
     return type(left) is type(right) and left == right
 
 
-def _legacy_pointer_row_matches_evidence(
-    container: dict[str, Any],
-    pointer: str,
+def _legacy_scalar_index_key(value: Any) -> tuple[str, str]:
+    decimal = _decimal_scalar(value)
+    if decimal is not None:
+        return "number", format(decimal.normalize(), "f")
+    if value is None:
+        return "none", ""
+    if isinstance(value, bool):
+        return "bool", "true" if value else "false"
+    return type(value).__name__, str(value)
+
+
+def _legacy_pointer_context_matches_evidence(
+    record: _LegacyScalarPointer,
     evidence: dict[str, Any],
 ) -> bool:
-    tokens = _json_pointer_tokens(pointer) or []
-    data = container.get("data")
-    if len(tokens) < 2 or tokens[0] != "data" or not tokens[1].isdigit():
-        return False
-    index = int(tokens[1])
-    if not isinstance(data, list) or index >= len(data) or not isinstance(data[index], dict):
-        return False
-    row = data[index]
-
     expected_entity = str(evidence.get("entityId") or "").strip().casefold()
-    row_entity = str(
-        row.get("entityId")
-        or row.get("entity_id")
-        or row.get("symbol")
-        or row.get("ticker")
-        or row.get("code")
-        or ""
-    ).strip().casefold()
+    row_entity = record.entity
     if expected_entity and row_entity and expected_entity != row_entity:
         return False
 
-    expected_period = " ".join(
-        str(evidence.get(key) or "") for key in ("period", "asOf")
-    )
-    row_period = " ".join(
-        str(row.get(key) or "")
-        for key in (
-            "fiscal_year",
-            "fiscalYear",
-            "fiscal_quarter",
-            "fiscalQuarter",
-            "period",
-            "end_date",
-            "endDate",
-            "as_of",
-            "asOf",
-        )
-    )
+    expected_period = " ".join(str(evidence.get(key) or "") for key in ("period", "asOf"))
+    row_period = record.period
     expected_years = set(re.findall(r"(?:19|20)\d{2}", expected_period))
     row_years = set(re.findall(r"(?:19|20)\d{2}", row_period))
     if expected_years and row_years and expected_years.isdisjoint(row_years):
         return False
     expected_quarters = set(re.findall(r"\b(?:FY|Q[1-4])\b", expected_period, re.I))
     row_quarters = set(re.findall(r"\b(?:FY|Q[1-4])\b", row_period, re.I))
-    if expected_quarters and row_quarters and {
-        item.upper() for item in expected_quarters
-    }.isdisjoint({item.upper() for item in row_quarters}):
+    if (
+        expected_quarters
+        and row_quarters
+        and {item.upper() for item in expected_quarters}.isdisjoint(
+            {item.upper() for item in row_quarters}
+        )
+    ):
         return False
     return bool(expected_entity or expected_years or expected_quarters)
 
@@ -2230,6 +2320,11 @@ def _normalize_collection_addressing(value: Any) -> dict[str, Any] | None:
         "identityFields": list(identity_fields),
         "allowedPathRoots": list(allowed_roots),
     }
+    items_pointer = value.get("itemsPointer")
+    if items_pointer is not None:
+        if not isinstance(items_pointer, str) or _json_pointer_tokens(items_pointer) is None:
+            return None
+        result["itemsPointer"] = items_pointer
     schema_ref = value.get("fieldSchemaRef")
     if isinstance(schema_ref, dict) and all(
         _bounded_nonempty_string(schema_ref.get(key), _MAX_SOURCE_ID_CHARS)
@@ -2242,6 +2337,134 @@ def _normalize_collection_addressing(value: Any) -> dict[str, Any] | None:
     return result
 
 
+def _normalize_collection_semantics(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return {}
+    if not isinstance(value, dict) or len(value) > 16:
+        return None
+    output: dict[str, Any] = {}
+    for group, mapping in value.items():
+        if group not in {
+            "entity",
+            "metric",
+            "period",
+            "asOf",
+            "unit",
+            "scale",
+            "currency",
+            "scope",
+            "basis",
+        } or not isinstance(mapping, dict):
+            return None
+        if group == "metric" and mapping.get("mode") == "field-name":
+            value_roots = mapping.get("valueRoots", [""])
+            excluded = mapping.get("excludedFields", [])
+            if (
+                not isinstance(value_roots, list)
+                or not isinstance(excluded, list)
+                or len(value_roots) > 32
+                or len(excluded) > 256
+            ):
+                return None
+            normalized_roots = [
+                pointer
+                for raw in value_roots
+                if isinstance(raw, str)
+                and (pointer := raw if _json_pointer_tokens(raw) is not None else None)
+                is not None
+            ]
+            normalized_excluded = [
+                pointer
+                for raw in excluded
+                if isinstance(raw, str)
+                and (pointer := raw if _json_pointer_tokens(raw) is not None else None)
+                is not None
+            ]
+            if len(normalized_roots) != len(value_roots) or len(normalized_excluded) != len(
+                excluded
+            ):
+                return None
+            output[group] = {
+                "mode": "field-name",
+                "valueRoots": normalized_roots,
+                "excludedFields": normalized_excluded,
+            }
+            continue
+        if len(mapping) > 32:
+            return None
+        normalized_mapping: dict[str, str] = {}
+        for key, pointer in mapping.items():
+            if (
+                not _bounded_nonempty_string(key, _MAX_SOURCE_TEXT_CHARS)
+                or not isinstance(pointer, str)
+                or _json_pointer_tokens(pointer) is None
+            ):
+                return None
+            normalized_mapping[str(key)] = pointer
+        output[group] = normalized_mapping
+    return output
+
+
+def _normalize_collection_sparse_overrides(
+    value: Any,
+    *,
+    addressing: dict[str, Any],
+    snapshot: Any,
+) -> dict[str, dict[str, Any]] | None:
+    if value is None:
+        return {}
+    if not isinstance(value, list) or len(value) > _MAX_COLLECTION_SPARSE_OVERRIDES:
+        return None
+    content_root = str(addressing["contentRoot"])
+    allowed_roots = list(addressing.get("allowedPathRoots", [content_root]))
+    output: dict[str, dict[str, Any]] = {}
+    for item in value:
+        if not isinstance(item, dict) or not isinstance(item.get("selector"), dict):
+            return None
+        pointer = item["selector"].get("path")
+        if (
+            not isinstance(pointer, str)
+            or _json_pointer_tokens(pointer) is None
+            or not _pointer_is_allowed(pointer, allowed_roots)
+        ):
+            return None
+        if pointer == content_root:
+            relative = ""
+        elif pointer.startswith(f"{content_root.rstrip('/')}/"):
+            relative = pointer[len(content_root) :]
+        else:
+            return None
+        found, raw_value = _resolve_json_pointer(snapshot, relative)
+        if not found:
+            return None
+        normalized: dict[str, Any] = {"selector": {"path": pointer}}
+        canonical_value = item.get("canonicalValue")
+        if "canonicalValue" in item:
+            if not _safe_scalar(
+                canonical_value,
+                allow_none=True,
+                max_string_chars=_MAX_STRUCTURED_STRING_CHARS,
+            ):
+                return None
+            raw_decimal = _decimal_key(raw_value)
+            canonical_decimal = _decimal_key(canonical_value)
+            if raw_decimal is not None or canonical_decimal is not None:
+                if raw_decimal != canonical_decimal:
+                    return None
+            elif str(raw_value).strip() != str(canonical_value).strip():
+                return None
+            normalized["canonicalValue"] = canonical_value
+        for key in ("unit", "period", "asOf", "scope", "basis"):
+            candidate = item.get(key)
+            if candidate is None:
+                continue
+            if not _bounded_nonempty_string(candidate, _MAX_SOURCE_TEXT_CHARS):
+                return None
+            normalized[key] = candidate
+        output.setdefault(pointer, normalized)
+    return output
+
+
 def _validate_evidence_collection(
     item: dict[str, Any],
     *,
@@ -2250,9 +2473,11 @@ def _validate_evidence_collection(
     tool_name: str | None,
 ) -> EvidenceCollectionRecord | None:
     handle = item.get("collectionHandle")
-    source = _normalize_source(item.get("source")) if isinstance(item.get("source"), dict) else None
+    raw_source = item.get("source")
+    source = _normalize_source(raw_source) if isinstance(raw_source, dict) else None
     common = _normalize_collection_common(item.get("common"))
     addressing = _normalize_collection_addressing(item.get("addressing"))
+    semantics = _normalize_collection_semantics(item.get("semantics"))
     content_hash = item.get("contentHash")
     if (
         item.get("version") != 1
@@ -2262,6 +2487,7 @@ def _validate_evidence_collection(
         or source is None
         or common is None
         or addressing is None
+        or semantics is None
         or not isinstance(content_hash, str)
         or len(content_hash) > 128
     ):
@@ -2278,17 +2504,26 @@ def _validate_evidence_collection(
         actual_hash = _content_hash(snapshot)
     if actual_hash != content_hash:
         return None
+    sparse_overrides = _normalize_collection_sparse_overrides(
+        item.get("sparseOverrides"),
+        addressing=addressing,
+        snapshot=snapshot,
+    )
+    if sparse_overrides is None:
+        return None
     return EvidenceCollectionRecord(
         handle=handle,
         source=source,
         common=common,
         addressing=addressing,
+        semantics=semantics,
         content_hash=content_hash,
         snapshot=copy.deepcopy(snapshot),
         tool_name=(
             tool_name if _bounded_nonempty_string(tool_name, _MAX_SOURCE_TEXT_CHARS) else None
         ),
         scalar_index=_build_scalar_index(snapshot, content_root=content_root),
+        sparse_overrides=sparse_overrides,
     )
 
 
@@ -2301,6 +2536,7 @@ def _legacy_collection_records(
 ) -> list[tuple[EvidenceCollectionRecord, set[int]]]:
     if "data" not in container or not isinstance(container.get("data"), (dict, list)):
         return []
+    pointer_index = _LegacyStructuredPointerIndex(container["data"])
     groups: dict[str, list[tuple[int, EvidenceRecord, str]]] = {}
     for index, candidate in enumerate(candidates):
         if index in consumed:
@@ -2316,6 +2552,7 @@ def _legacy_collection_records(
             container,
             field,
             evidence=record.evidence,
+            pointer_index=pointer_index,
         )
         if pointer is None:
             continue
@@ -2334,6 +2571,7 @@ def _legacy_collection_records(
     output: list[tuple[EvidenceCollectionRecord, set[int]]] = []
     snapshot = container["data"]
     content_hash = _content_hash(snapshot)
+    scalar_index = _build_scalar_index(snapshot, content_root="/data")
     for group_key, items in groups.items():
         first = items[0][1]
         evidence = first.evidence
@@ -2383,10 +2621,12 @@ def _legacy_collection_records(
                     source=copy.deepcopy(first.source),
                     common=common,
                     addressing=addressing,
+                    semantics={},
                     content_hash=content_hash,
                     snapshot=copy.deepcopy(snapshot),
                     tool_name=first.tool_name,
-                    scalar_index=_build_scalar_index(snapshot, content_root="/data"),
+                    scalar_index=scalar_index,
+                    sparse_overrides={},
                 ),
                 {index for index, _, _ in items},
             )
@@ -2429,12 +2669,28 @@ def _materialize_collection_address(
         return None
 
     tokens = _json_pointer_tokens(relative) or []
+    record, record_pointer = _collection_record_for_pointer(
+        collection,
+        pointer=pointer,
+    )
     context: dict[str, Any] = {}
+    metadata_context_keys = {
+        "units",
+        "field_units",
+        "currencies",
+        "field_currencies",
+        "scales",
+        "field_scales",
+        "scopes",
+        "field_scopes",
+        "bases",
+        "field_bases",
+    }
     current = collection.snapshot
     for token in tokens[:-1]:
         if isinstance(current, dict):
             for key, value in current.items():
-                if not isinstance(value, (dict, list)):
+                if not isinstance(value, (dict, list)) or key in metadata_context_keys:
                     context[str(key)] = value
             current = current.get(token)
         elif isinstance(current, list) and token.isdigit() and int(token) < len(current):
@@ -2443,32 +2699,128 @@ def _materialize_collection_address(
             break
     if isinstance(current, dict):
         for key, value in current.items():
-            if not isinstance(value, (dict, list)):
+            if not isinstance(value, (dict, list)) or key in metadata_context_keys:
                 context[str(key)] = value
 
     field = tokens[-1] if tokens else pointer.rsplit("/", 1)[-1]
-    value = raw_value
-    unit = str(context.get("unit") or "")
+    sparse_override = collection.sparse_overrides.get(pointer, {})
+    value = sparse_override.get("canonicalValue", raw_value)
+    metadata_maps = {
+        "unit": ("units", "field_units"),
+        "currency": ("currencies", "field_currencies"),
+        "scale": ("scales", "field_scales"),
+        "scope": ("scopes", "field_scopes"),
+        "basis": ("bases", "field_bases"),
+    }
+
+    def context_metadata(dimension: str) -> Any:
+        direct = context.get(f"{field}_{dimension}")
+        if direct not in (None, ""):
+            return direct
+        for map_name in metadata_maps[dimension]:
+            values = context.get(map_name)
+            if isinstance(values, dict) and values.get(field) not in (None, ""):
+                return values[field]
+        return context.get(dimension)
+
+    unit = str(sparse_override.get("unit") or context_metadata("unit") or "")
     normalized_field = field.casefold()
     numeric = _decimal_key(raw_value)
-    if (
-        numeric is not None
-        and any(term in normalized_field for term in ("rate", "ratio", "margin", "yoy", "growth"))
+    if numeric is not None and any(
+        term in normalized_field for term in ("rate", "ratio", "margin", "yoy", "growth")
     ):
         decimal = Decimal(numeric)
         if abs(decimal) <= 1:
             value = float(decimal * 100)
         unit = unit or "percent"
-    currency = str(context.get("currency") or collection.common.get("currency") or "")
-    if not unit and currency and any(
-        term in normalized_field
-        for term in ("revenue", "cost", "profit", "asset", "liabil", "cash", "income")
+    currency = str(context_metadata("currency") or collection.common.get("currency") or "")
+    if (
+        not unit
+        and currency
+        and any(
+            term in normalized_field
+            for term in ("revenue", "cost", "profit", "asset", "liabil", "cash", "income")
+        )
     ):
         unit = currency
 
-    fiscal_year = context.get("fiscal_year") or context.get("fiscalYear")
+    semantic_entity_id = _collection_semantic_value(
+        collection,
+        record,
+        group="entity",
+        keys=("id", "symbol", "ticker"),
+    )
+    semantic_entity_name = _collection_semantic_value(
+        collection,
+        record,
+        group="entity",
+        keys=("name",),
+    )
+    semantic_fiscal_year = _collection_semantic_value(
+        collection,
+        record,
+        group="period",
+        keys=("fiscalYear", "year"),
+    )
+    semantic_period = _collection_semantic_value(
+        collection,
+        record,
+        group="period",
+        keys=("period", "fiscalQuarter", "quarter"),
+    )
+    semantic_as_of = _collection_semantic_value(
+        collection,
+        record,
+        group="asOf",
+        keys=("date", "asOf"),
+    )
+    semantic_unit = _collection_semantic_value(
+        collection,
+        record,
+        group="unit",
+        keys=("unit",),
+    )
+    semantic_currency = _collection_semantic_value(
+        collection,
+        record,
+        group="currency",
+        keys=("currency",),
+    ) or _collection_semantic_value(
+        collection,
+        record,
+        group="unit",
+        keys=("currency",),
+    )
+    semantic_scale = _collection_semantic_value(
+        collection,
+        record,
+        group="scale",
+        keys=("scale",),
+    ) or _collection_semantic_value(
+        collection,
+        record,
+        group="unit",
+        keys=("scale",),
+    )
+    semantic_scope = _collection_semantic_value(
+        collection,
+        record,
+        group="scope",
+        keys=("scope",),
+    )
+    semantic_basis = _collection_semantic_value(
+        collection,
+        record,
+        group="basis",
+        keys=("basis",),
+    )
+
+    fiscal_year = (
+        semantic_fiscal_year or context.get("fiscal_year") or context.get("fiscalYear")
+    )
     period_part = (
-        context.get("fiscal_quarter")
+        semantic_period
+        or context.get("fiscal_quarter")
         or context.get("fiscalQuarter")
         or context.get("fiscal_period")
         or context.get("fiscalPeriod")
@@ -2481,6 +2833,7 @@ def _materialize_collection_address(
         period = str(period_part)
     entity_id = (
         collection.common.get("entityId")
+        or semantic_entity_id
         or context.get("entityId")
         or context.get("entity_id")
         or context.get("symbol")
@@ -2489,21 +2842,25 @@ def _materialize_collection_address(
     )
     entity_name = (
         collection.common.get("entityName")
+        or semantic_entity_name
         or context.get("entityName")
         or context.get("entity_name")
         or context.get("name")
     )
     identity_values: list[str] = []
     for identity_pointer in collection.addressing.get("identityFields", []):
-        identity_relative = (
-            identity_pointer[len(content_root) :]
-            if identity_pointer.startswith(content_root)
-            else identity_pointer
-        )
-        identity_found, identity_value = _resolve_json_pointer(
-            collection.snapshot,
-            identity_relative,
-        )
+        if record is not None:
+            identity_found, identity_value = _resolve_json_pointer(record, identity_pointer)
+        else:
+            identity_relative = (
+                identity_pointer[len(content_root) :]
+                if content_root and identity_pointer.startswith(content_root)
+                else identity_pointer
+            )
+            identity_found, identity_value = _resolve_json_pointer(
+                collection.snapshot,
+                identity_relative,
+            )
         if identity_found and _safe_scalar(
             identity_value,
             allow_none=True,
@@ -2515,7 +2872,7 @@ def _materialize_collection_address(
         "kind": "structured-data",
         "datasetId": collection.common["datasetId"],
         "toolName": collection.common["toolName"],
-        "recordKey": "|".join(identity_values) or pointer,
+        "recordKey": "|".join(identity_values) or record_pointer or pointer,
         "field": pointer,
         "metric": field,
         "value": value,
@@ -2524,13 +2881,29 @@ def _materialize_collection_address(
     for key, candidate in {
         "entityId": entity_id,
         "entityName": entity_name,
-        "unit": unit,
-        "currency": currency,
-        "scale": collection.common.get("scale") or context.get("scale"),
-        "period": period,
-        "asOf": collection.common.get("asOf") or context.get("asOf") or context.get("end_date"),
-        "scope": collection.common.get("scope") or context.get("scope"),
-        "basis": collection.common.get("basis") or context.get("basis"),
+        "unit": semantic_unit or unit,
+        "currency": semantic_currency or currency,
+        "scale": semantic_scale or context_metadata("scale") or collection.common.get("scale"),
+        "period": sparse_override.get("period") or period,
+        "asOf": (
+            sparse_override.get("asOf")
+            or semantic_as_of
+            or collection.common.get("asOf")
+            or context.get("asOf")
+            or context.get("end_date")
+        ),
+        "scope": (
+            sparse_override.get("scope")
+            or semantic_scope
+            or context_metadata("scope")
+            or collection.common.get("scope")
+        ),
+        "basis": (
+            sparse_override.get("basis")
+            or semantic_basis
+            or context_metadata("basis")
+            or collection.common.get("basis")
+        ),
     }.items():
         if candidate not in (None, ""):
             evidence[key] = candidate
@@ -2547,6 +2920,69 @@ def _materialize_collection_address(
         locator=None,
         tool_name=collection.tool_name or str(collection.common.get("toolName") or "") or None,
     )
+
+
+def _collection_record_for_pointer(
+    collection: EvidenceCollectionRecord,
+    *,
+    pointer: str,
+) -> tuple[Any | None, str | None]:
+    """Resolve the structured record that owns one absolute field address."""
+
+    content_root = str(collection.addressing.get("contentRoot") or "")
+    items_pointer = str(collection.addressing.get("itemsPointer") or content_root)
+    if items_pointer == content_root:
+        items_relative = ""
+    elif content_root and items_pointer.startswith(f"{content_root.rstrip('/')}/"):
+        items_relative = items_pointer[len(content_root) :]
+    elif not content_root:
+        items_relative = items_pointer
+    else:
+        return None, None
+    found, items = _resolve_json_pointer(collection.snapshot, items_relative)
+    if not found:
+        return None, None
+    if pointer == items_pointer:
+        field_relative = ""
+    elif pointer.startswith(f"{items_pointer.rstrip('/')}/"):
+        field_relative = pointer[len(items_pointer) :]
+    else:
+        return None, None
+    field_tokens = _json_pointer_tokens(field_relative) or []
+    if isinstance(items, list):
+        if not field_tokens or not field_tokens[0].isdigit():
+            return None, None
+        index = int(field_tokens[0])
+        if index >= len(items):
+            return None, None
+        return items[index], f"{items_pointer}/{index}"
+    if isinstance(items, dict):
+        return items, items_pointer
+    return None, None
+
+
+def _collection_semantic_value(
+    collection: EvidenceCollectionRecord,
+    record: Any,
+    *,
+    group: str,
+    keys: tuple[str, ...],
+) -> Any:
+    mapping = collection.semantics.get(group)
+    if not isinstance(mapping, dict) or record is None:
+        return None
+    for key in keys:
+        pointer = mapping.get(key)
+        if not isinstance(pointer, str):
+            continue
+        found, value = _resolve_json_pointer(record, pointer)
+        if found and _safe_scalar(
+            value,
+            allow_none=True,
+            max_string_chars=_MAX_STRUCTURED_STRING_CHARS,
+        ) and value not in (None, ""):
+            return value
+    return None
 
 
 def _validate_evidence_item(
@@ -2962,7 +3398,7 @@ def _move_calculation_citations_to_value_cells(
         link = source_match.group(0)
         source_cell = cells[source_index]
         cells[source_index] = (
-            f"{source_cell[:source_match.start()]}{source_cell[source_match.end():]}"
+            f"{source_cell[: source_match.start()]}{source_cell[source_match.end() :]}"
         ).rstrip()
         cells[target_index] = f"{cells[target_index].rstrip()} {link} "
         lines[line_index] = "|".join(cells)

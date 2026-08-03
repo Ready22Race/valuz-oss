@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import time
 
 from src.core.citation import (
     CitationGuard,
@@ -78,9 +80,7 @@ def test_guard_accepts_unique_evidence_digest_when_model_rewrites_prefix() -> No
         message_id="message-1",
         user_prompt="cite the source",
         policy_available=True,
-    ).finalize(
-        f"Revenue increased by 12% [1](evidence://ev_rpt_{digest})."
-    )
+    ).finalize(f"Revenue increased by 12% [1](evidence://ev_rpt_{digest}).")
 
     assert result.bundle is not None
     assert len(result.bundle["citations"]) == 1
@@ -185,24 +185,22 @@ def test_structured_batch_registers_one_collection_and_materializes_used_address
     assert hint["citationTemplate"].endswith("#{json-pointer}")
     private_payload = json.loads(private)
     assert len(private_payload["_valuz_evidence"]) == 1
-    assert private_payload["_valuz_evidence"][0]["kind"] == (
-        "structured-evidence-collection"
-    )
+    assert private_payload["_valuz_evidence"][0]["kind"] == ("structured-evidence-collection")
 
     registry = EvidenceRegistry()
-    assert registry.register_tool_projection(
-        visible,
-        private,
-        tool_name="company_income_statement",
-        trusted_private=True,
-    ) == 1
+    assert (
+        registry.register_tool_projection(
+            visible,
+            private,
+            tool_name="company_income_statement",
+            trusted_private=True,
+        )
+        == 1
+    )
     assert registry.collection_count == 1
     assert len(registry) == 0
 
-    address = (
-        f"evidence://{hint['collectionHandle']}"
-        "#/data/0/operating_revenue"
-    )
+    address = f"evidence://{hint['collectionHandle']}#/data/0/operating_revenue"
     result = CitationGuard(
         registry,
         message_id="msg-collection",
@@ -217,6 +215,106 @@ def test_structured_batch_registers_one_collection_and_materializes_used_address
     assert result.bundle["integrity"]["evidenceMaterializedCount"] == 1
     assert len(result.bundle["citations"]) == 1
     assert result.bundle["citations"][0]["evidence"]["metric"] == "operating_revenue"
+
+
+def test_native_reportify_collection_materializes_only_addressed_field() -> None:
+    data = [
+        {
+            "symbol": "600519",
+            "fiscal_year": 2024,
+            "fiscal_quarter": "FY",
+            "end_date": "2024-12-31",
+            "currency": "CNY",
+            "scale": "yuan",
+            "operating_revenue": 170_899_152_276,
+            "net_profit": 86_228_146_422,
+        }
+    ]
+    raw_hash = json.dumps(
+        data,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    collection_handle = "evc_rpt_native_12345678"
+    raw = {
+        "data": data,
+        "_valuz_evidence": [
+            {
+                "version": 1,
+                "kind": "structured-evidence-collection",
+                "collectionHandle": collection_handle,
+                "source": {
+                    "sourceId": "reportify-financial-income-statement:600519",
+                    "providerId": "valuz-stock",
+                    "sourceType": "dataset",
+                    "sourceCategory": "structured_financials",
+                    "title": "Company income statement · 600519",
+                    "retrievedAt": "2026-08-03T08:00:00Z",
+                },
+                "common": {
+                    "datasetId": "reportify-financial-income-statement",
+                    "toolName": "company_income_statement",
+                    "entityId": "600519",
+                    "currency": "CNY",
+                    "scale": "yuan",
+                    "capturedAt": "2026-08-03T08:00:00Z",
+                },
+                "addressing": {
+                    "mode": "json-pointer",
+                    "contentRoot": "/data",
+                    "identityFields": [],
+                    "fieldSchemaRef": {
+                        "schemaId": "reportify-financial-income-statement",
+                        "revision": "1",
+                    },
+                    "allowedPathRoots": ["/data"],
+                },
+                "contentHash": (f"sha256:{hashlib.sha256(raw_hash.encode('utf-8')).hexdigest()}"),
+                "sparseOverrides": [
+                    {
+                        "selector": {"path": "/data/0/operating_revenue"},
+                        "unit": "CNY yuan",
+                    }
+                ],
+            }
+        ],
+    }
+
+    visible = compact_citation_tool_content(raw)
+    private = private_citation_tool_content(raw)
+
+    assert visible is not None and private is not None
+    assert visible["data"] == data
+    assert visible["_valuz_evidence_hint"]["collectionHandle"] == collection_handle
+    assert len(json.loads(private)["_valuz_evidence"]) == 1
+    registry = EvidenceRegistry()
+    assert (
+        registry.register_tool_projection(
+            visible,
+            private,
+            tool_name="company_income_statement",
+            trusted_private=True,
+        )
+        == 1
+    )
+    assert registry.collection_count == 1
+    assert len(registry) == 0
+
+    revenue = registry.materialize_reference(
+        collection_handle,
+        "#/data/0/operating_revenue",
+    )
+
+    assert revenue is not None
+    assert len(registry) == 1
+    assert revenue.evidence["entityId"] == "600519"
+    assert revenue.evidence["period"] == "2024 FY"
+    assert revenue.evidence["metric"] == "operating_revenue"
+    assert revenue.evidence["value"] == 170_899_152_276
+    assert revenue.evidence["unit"] == "CNY yuan"
+    assert revenue.evidence["scale"] == "yuan"
 
 
 def test_materialized_structured_period_prefers_fiscal_quarter_over_frequency() -> None:
@@ -253,12 +351,15 @@ def test_materialized_structured_period_prefers_fiscal_quarter_over_frequency() 
     assert visible is not None and private is not None
     hint = visible["_valuz_evidence_hint"]
     registry = EvidenceRegistry()
-    assert registry.register_tool_projection(
-        visible,
-        private,
-        tool_name="company_income_statement",
-        trusted_private=True,
-    ) == 1
+    assert (
+        registry.register_tool_projection(
+            visible,
+            private,
+            tool_name="company_income_statement",
+            trusted_private=True,
+        )
+        == 1
+    )
     result = CitationGuard(
         registry,
         message_id="msg-quarter-period",
@@ -330,9 +431,7 @@ def test_multi_period_legacy_batch_collapses_repeated_fields_into_one_collection
     hint = visible["_valuz_evidence_hint"]
     private_payload = json.loads(private)
     assert len(private_payload["_valuz_evidence"]) == 1
-    assert private_payload["_valuz_evidence"][0]["kind"] == (
-        "structured-evidence-collection"
-    )
+    assert private_payload["_valuz_evidence"][0]["kind"] == ("structured-evidence-collection")
 
     registry = EvidenceRegistry()
     registry.register_tool_projection(visible, private, trusted_private=True)
@@ -357,6 +456,63 @@ def test_multi_period_legacy_batch_collapses_repeated_fields_into_one_collection
     assert result.bundle["integrity"]["evidenceRegisteredCount"] == 4
     assert len(result.bundle["integrity"]["unusedCitationIds"]) == 2
     assert len(result.bundle["citations"]) == 2
+
+
+def test_large_nested_legacy_batch_is_indexed_once_and_collapses_to_collection() -> None:
+    source = {
+        "sourceId": "index-constituents:000905",
+        "providerId": "valuz-stock",
+        "sourceType": "dataset",
+        "title": "Index constituents · 000905",
+        "retrievedAt": "2026-08-03T05:00:00Z",
+    }
+    rows = [{"market": "cn", "symbol": f"{position:06d}"} for position in range(1_000)]
+    evidence = [
+        {
+            "evidenceHandle": f"ev_constituent_{position:08d}",
+            "source": source,
+            "evidence": {
+                "kind": "structured-data",
+                "datasetId": "index-constituents",
+                "toolName": "index_constituents",
+                "recordKey": f"000905|{row['symbol']}",
+                "entityId": row["symbol"],
+                "field": "market",
+                "metric": "market",
+                "value": row["market"],
+                "unit": "",
+                "capturedAt": "2026-08-03T05:00:00Z",
+            },
+        }
+        for position, row in enumerate(rows)
+    ]
+    raw = {"data": {"items": rows}, "_valuz_evidence": evidence}
+
+    started = time.perf_counter()
+    visible = compact_citation_tool_content(raw)
+    private = private_citation_tool_content(raw)
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 3.0
+    assert visible is not None and private is not None
+    hint = visible["_valuz_evidence_hint"]
+    assert len(json.loads(private)["_valuz_evidence"]) == 1
+    registry = EvidenceRegistry()
+    assert (
+        registry.register_tool_projection(
+            visible,
+            private,
+            tool_name="index_constituents",
+            trusted_private=True,
+        )
+        == 1
+    )
+    record = registry.materialize_reference(
+        hint["collectionHandle"],
+        "#/data/items/999/market",
+    )
+    assert record is not None
+    assert record.evidence["value"] == "cn"
 
 
 def test_calculation_citation_moves_from_period_cell_to_matching_result_cell() -> None:
@@ -535,13 +691,12 @@ def test_calculation_inputs_resolve_structured_collection_addresses() -> None:
     assert result.bundle is not None
     citations = result.bundle["citations"]
     calculation_citation = next(
-        citation
-        for citation in citations
-        if citation["evidence"]["kind"] == "calculation"
+        citation for citation in citations if citation["evidence"]["kind"] == "calculation"
     )
-    assert [
-        item["citationId"] for item in calculation_citation["evidence"]["inputs"]
-    ] == [citations[0]["citationId"], citations[1]["citationId"]]
+    assert [item["citationId"] for item in calculation_citation["evidence"]["inputs"]] == [
+        citations[0]["citationId"],
+        citations[1]["citationId"],
+    ]
     assert result.bundle["integrity"]["unknownCitationIds"] == []
     assert result.bundle["quality"]["status"] == "passed", result.bundle["quality"]
     # The two calculation inputs are materialized first. Claim candidate
@@ -751,8 +906,7 @@ def test_complete_document_coverage_is_ready_without_fake_page_locator() -> None
         user_prompt="What was not disclosed?",
         policy_available=True,
     ).finalize(
-        "The document did not disclose the value "
-        "[source](evidence://ev_doc_coverage_12345678)."
+        "The document did not disclose the value [source](evidence://ev_doc_coverage_12345678)."
     )
 
     assert result.bundle is not None
@@ -787,9 +941,7 @@ def test_complete_document_coverage_auto_binds_when_verification_policy_is_absen
     assert "citation://" in result.text
     assert result.bundle is not None
     assert len(result.bundle["citations"]) == 1
-    assert result.bundle["citations"][0]["evidence"]["field"] == (
-        "document_coverage_complete"
-    )
+    assert result.bundle["citations"][0]["evidence"]["field"] == ("document_coverage_complete")
 
 
 def test_registry_rejects_oversized_snapshots_and_locator_geometry() -> None:
@@ -904,9 +1056,7 @@ def test_guard_can_render_citations_without_running_quality_verification() -> No
         verification_enabled=False,
     )
 
-    result = guard.finalize(
-        "Revenue increased [Annual Report](evidence://ev_revenue_2025)."
-    )
+    result = guard.finalize("Revenue increased [Annual Report](evidence://ev_revenue_2025).")
 
     assert result.bundle is not None
     assert result.bundle["integrity"]["status"] == "passed"
@@ -925,9 +1075,7 @@ def test_disabled_guard_removes_protocol_links_without_rendering_indices() -> No
         verification_enabled=False,
     )
 
-    result = guard.finalize(
-        "Revenue increased [Annual Report](evidence://ev_revenue_2025)."
-    )
+    result = guard.finalize("Revenue increased [Annual Report](evidence://ev_revenue_2025).")
 
     assert result.bundle is None
     assert result.text == "Revenue increased Annual Report."
@@ -1147,9 +1295,7 @@ def test_guard_preserves_registered_canonical_ids_only_for_host_owned_patch() ->
         policy_available=True,
         verification_enabled=False,
     )
-    first = guard.finalize(
-        "Revenue increased by 12% [source](evidence://ev_revenue_2025)."
-    )
+    first = guard.finalize("Revenue increased by 12% [source](evidence://ev_revenue_2025).")
     assert "citation://" in first.text
 
     preserved = guard.finalize(
@@ -1174,8 +1320,7 @@ def test_guard_strips_truncated_protocol_prefix_without_dropping_limitation_text
     )
 
     result = guard.finalize(
-        "收入为 100。[source](evidence:原文未披露其他数字 "
-        "[source](evidence://ev_revenue_2025)。"
+        "收入为 100。[source](evidence:原文未披露其他数字 [source](evidence://ev_revenue_2025)。"
     )
 
     assert "evidence:" not in result.text
@@ -1217,9 +1362,7 @@ def test_guard_preserves_its_registered_citation_ids_during_hidden_repair() -> N
         user_prompt="请给出引用",
         policy_available=True,
     )
-    sealed = guard.finalize(
-        "Revenue increased by 12% [source](evidence://ev_revenue_2025)."
-    )
+    sealed = guard.finalize("Revenue increased by 12% [source](evidence://ev_revenue_2025).")
 
     assert sealed.bundle is not None
     assert sealed.bundle["integrity"]["unknownCitationIds"] == []
@@ -1262,8 +1405,7 @@ def test_guard_moves_citation_out_of_a_split_grouped_number() -> None:
     )
 
     result = guard.finalize(
-        "营业收入为 170,899,152,27 "
-        "[source](evidence://ev_revenue_2025)6.34 元。"
+        "营业收入为 170,899,152,27 [source](evidence://ev_revenue_2025)6.34 元。"
     )
 
     assert "170,899,152,276.34 元" in result.text
@@ -1281,8 +1423,7 @@ def test_guard_moves_citation_out_of_a_split_decimal_fraction() -> None:
     )
 
     result = guard.finalize(
-        "营业收入为 170,899,152,276. "
-        "[source](evidence://ev_revenue_2025)34 元。"
+        "营业收入为 170,899,152,276. [source](evidence://ev_revenue_2025)34 元。"
     )
 
     assert "170,899,152,276.34 元" in result.text
@@ -1355,8 +1496,7 @@ def test_guard_focuses_long_text_preview_on_the_cited_table_row() -> None:
     )
 
     result = guard.finalize(
-        "直销营业收入为74,843,327,030.79元，同比增长11.32% "
-        "[1](evidence://ev_revenue_2025)。"
+        "直销营业收入为74,843,327,030.79元，同比增长11.32% [1](evidence://ev_revenue_2025)。"
     )
 
     assert result.bundle is not None
@@ -1389,8 +1529,7 @@ def test_guard_drops_unknown_numeric_citation_labels_without_leaking_digits() ->
     )
 
     result = guard.finalize(
-        "Claim [1](evidence://W11111111)[2](evidence://W22222222)"
-        "[3](evidence://W33333333)."
+        "Claim [1](evidence://W11111111)[2](evidence://W22222222)[3](evidence://W33333333)."
     )
 
     assert result.text == "Claim."
@@ -1678,9 +1817,7 @@ def test_guard_audits_equivalent_recap_binding_as_transitive_support() -> None:
     citation = result.bundle["citations"][0]
     assert citation["annotations"]["binding"]["equivalentClaimIds"]
     required_claims = [
-        claim
-        for claim in result.bundle["quality"]["claims"]
-        if claim["citationRequired"]
+        claim for claim in result.bundle["quality"]["claims"] if claim["citationRequired"]
     ]
     assert [claim["status"] for claim in required_claims] == ["passed", "auto-bound"]
     assert required_claims[1]["bindings"][0]["supportStatus"] == "equivalent-claim"
@@ -1892,9 +2029,7 @@ def test_guard_uses_calculation_dependencies_to_disambiguate_equal_input_values(
                         }
                     }
                 },
-                "calculation_dependencies": {
-                    "revenue_growth": ["operating_revenue"]
-                },
+                "calculation_dependencies": {"revenue_growth": ["operating_revenue"]},
             }
         },
     }

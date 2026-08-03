@@ -8,7 +8,8 @@ items are verified; they never prove support or trigger a repair by themselves.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping
+from collections import defaultdict
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
@@ -27,6 +28,7 @@ from src.core.claim_audit import (
 
 RESOLVER_REVISION = "claim-evidence-resolver-v1"
 DEFAULT_CANDIDATE_LIMIT = 8
+DEFAULT_PREFILTER_LIMIT = 64
 
 CandidateSignalName = Literal[
     "explicit-binding",
@@ -110,6 +112,275 @@ class ClaimResolution:
     resolver_revision: str = RESOLVER_REVISION
 
 
+class EvidenceCandidateIndex:
+    """Turn-local inverted index for bounded Claim-to-Evidence retrieval.
+
+    The previous compatibility path evaluated every Evidence record for every
+    claim and repeated that scan in auto-bind, composite-bind, rebind, and
+    quality audit.  A wide structured tool result can contain 2,000 records,
+    so one otherwise ordinary answer could monopolize the single API worker
+    for minutes.  This index performs the expensive normalization once and
+    returns a high-recall, bounded union for each claim.
+
+    Candidate membership is never treated as proof.  The existing
+    deterministic verifier still owns support/conflict decisions after the
+    prefilter, preserving the Resolver's precision boundary.
+    """
+
+    def __init__(
+        self,
+        records: Iterable[Any],
+        *,
+        semantics: Mapping[str, Any] | None = None,
+        prefilter_limit: int = DEFAULT_PREFILTER_LIMIT,
+    ) -> None:
+        self.records = tuple(records)
+        self.semantics = semantics
+        self.prefilter_limit = max(DEFAULT_CANDIDATE_LIMIT, int(prefilter_limit))
+        self._by_handle: dict[str, int] = {}
+        self._by_number: dict[str, list[int]] = defaultdict(list)
+        self._by_metric: dict[str, list[int]] = defaultdict(list)
+        self._by_period: dict[str, list[int]] = defaultdict(list)
+        self._by_entity_id: dict[str, list[int]] = defaultdict(list)
+        self._by_token: dict[str, list[int]] = defaultdict(list)
+        self._candidate_cache: dict[str, tuple[Any, ...]] = {}
+        self._support_cache: dict[tuple[str, str], EvidenceSupport] = {}
+        self._match_cache: dict[tuple[str, int], Any] = {}
+
+        for index, record in enumerate(self.records):
+            handle, source, evidence = _evidence_parts(record)
+            if not handle or not isinstance(evidence, Mapping):
+                continue
+            self._by_handle.setdefault(handle, index)
+
+            kind = str(evidence.get("kind") or "")
+            if kind == "structured-data":
+                number_text = " ".join(
+                    str(evidence.get(key) or "") for key in ("value", "unit", "scale")
+                )
+                metric = canonical_evidence_metric(evidence, semantics)
+                if metric:
+                    self._append(self._by_metric, metric, index)
+                period = canonical_evidence_period(
+                    str(evidence.get("period") or evidence.get("asOf") or ""),
+                    semantics,
+                )
+                if period:
+                    self._append(self._by_period, period, index)
+            elif kind == "calculation":
+                number_text = " ".join(
+                    str(evidence.get(key) or "") for key in ("result", "unit", "rounding")
+                )
+            else:
+                number_text = _text_evidence(evidence)
+
+            for number in set(_number_tokens(number_text)):
+                self._append(self._by_number, number, index)
+
+            entity_text = _evidence_entity_text(source, evidence)
+            for entity_id in _entity_ids(entity_text):
+                self._append(self._by_entity_id, entity_id, index)
+
+            retrieval_text = " ".join(
+                (
+                    entity_text,
+                    str(evidence.get("field") or ""),
+                    str(evidence.get("metric") or ""),
+                    str(evidence.get("period") or evidence.get("asOf") or ""),
+                    _text_evidence(evidence) if kind == "text" else "",
+                )
+            )
+            # A pathological full document can contain tens of thousands of
+            # tokens.  Indexing the first 512 distinct terms is sufficient for
+            # source/entity/metric retrieval and keeps the turn-local index
+            # bounded; numeric, metric, period, and explicit channels remain
+            # independent of this cap.
+            for token in sorted(_retrieval_tokens(retrieval_text))[:512]:
+                self._append(self._by_token, token, index)
+
+    @staticmethod
+    def _append(index: dict[str, list[int]], key: str, record_index: int) -> None:
+        rows = index[key]
+        if not rows or rows[-1] != record_index:
+            rows.append(record_index)
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter(self.records)
+
+    def __len__(self) -> int:
+        return len(self.records)
+
+    def record_position(self, handle: str) -> int:
+        """Return Registry insertion order for deterministic legacy tie-breaks."""
+
+        return self._by_handle.get(handle, len(self.records))
+
+    def support_for(
+        self,
+        claim: ClaimCandidate,
+        handle: str,
+        source: Mapping[str, Any],
+        evidence: Mapping[str, Any],
+    ) -> EvidenceSupport:
+        """Verify one immutable claim/handle pair at most once per turn.
+
+        The finalization pipeline deliberately applies several conservative
+        binding policies, but those policies must share the expensive
+        deterministic support verdict.  A Registry handle is immutable, and
+        citation markup does not change the underlying claim, so the cache
+        key removes protocol links while preserving every asserted value and
+        normalized semantic dimension.
+        """
+
+        claim_key = self.claim_cache_key(claim)
+        cache_key = (claim_key, handle)
+        cached = self._support_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        support = verify_evidence_support(
+            claim,
+            {"source": source, "evidence": evidence},
+            semantics=self.semantics,
+        )
+        self._support_cache[cache_key] = support
+        return support
+
+    @staticmethod
+    def claim_cache_key(claim: ClaimCandidate) -> str:
+        """Return a markup-insensitive identity for one asserted claim."""
+
+        claim_text = re.sub(
+            r"\[[^\]\n]{0,240}\]\((?:citation|evidence)://[A-Za-z0-9_-]{1,160}\)",
+            "",
+            claim.exact,
+        )
+        return "\x1f".join(
+            (
+                re.sub(r"\s+", " ", claim_text).strip(),
+                "|".join(f"{key}={value}" for key, value in sorted(claim.normalized.items())),
+            )
+        )
+
+    def cached_match(
+        self,
+        claim: ClaimCandidate,
+        entity_aliases: Mapping[str, Iterable[str]] | None,
+    ) -> Any | None:
+        return self._match_cache.get((self.claim_cache_key(claim), id(entity_aliases)))
+
+    def store_match(
+        self,
+        claim: ClaimCandidate,
+        entity_aliases: Mapping[str, Iterable[str]] | None,
+        match: Any,
+    ) -> None:
+        self._match_cache[(self.claim_cache_key(claim), id(entity_aliases))] = match
+
+    def candidate_records(
+        self,
+        claim: ClaimCandidate,
+        *,
+        limit: int | None = None,
+    ) -> tuple[Any, ...]:
+        """Return the bounded union of independent retrieval channels."""
+
+        requested_limit = self.prefilter_limit if limit is None else max(1, int(limit))
+        cache_key = "\x1f".join(
+            (
+                claim.claim_id,
+                claim.exact,
+                claim.semantic_text,
+                "|".join(claim.attached_evidence_handles),
+                str(requested_limit),
+            )
+        )
+        cached = self._candidate_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        scores: dict[int, float] = defaultdict(float)
+        explicit_indices: set[int] = set()
+        for handle in claim.attached_evidence_handles:
+            record_index = self._by_handle.get(handle)
+            if record_index is not None:
+                explicit_indices.add(record_index)
+                scores[record_index] += 1_000.0
+
+        for number in set(_number_tokens(claim.exact)):
+            for record_index in self._by_number.get(number, ()):
+                scores[record_index] += 40.0
+
+        metric_values = {
+            value
+            for value in (
+                claim.normalized.get("metric", ""),
+                *claim.normalized.get("metricCandidates", "").split("|"),
+            )
+            if value
+        }
+        for metric_value in metric_values:
+            metric = canonical_evidence_metric({"metric": metric_value}, self.semantics)
+            if not metric:
+                continue
+            for record_index in self._by_metric.get(metric, ()):
+                scores[record_index] += 25.0
+
+        period = canonical_evidence_period(
+            claim.normalized.get("period", ""),
+            self.semantics,
+        )
+        if period:
+            for record_index in self._by_period.get(period, ()):
+                scores[record_index] += 20.0
+
+        for entity_id in _entity_ids(claim.semantic_text):
+            for record_index in self._by_entity_id.get(entity_id, ()):
+                scores[record_index] += 30.0
+
+        total_records = max(1, len(self.records))
+        for token in _retrieval_tokens(claim.semantic_text):
+            posting = self._by_token.get(token, ())
+            if not posting:
+                continue
+            # Very common words such as "公司" or "report" do not narrow a
+            # large Registry. Ignore them when other channels exist; a bounded
+            # fallback below still preserves an unresolved path.
+            if len(posting) > max(256, total_records // 4):
+                continue
+            token_weight = max(0.25, min(5.0, total_records / len(posting)))
+            for record_index in posting:
+                scores[record_index] += token_weight
+
+        if not scores:
+            fallback_count = min(requested_limit, len(self.records))
+            result = self.records[:fallback_count]
+            self._candidate_cache[cache_key] = result
+            return result
+
+        ranked_indices = sorted(
+            scores,
+            key=lambda record_index: (
+                record_index not in explicit_indices,
+                -scores[record_index],
+                record_index,
+            ),
+        )
+        kept = ranked_indices[: max(requested_limit, len(explicit_indices))]
+        result = tuple(self.records[record_index] for record_index in kept)
+        self._candidate_cache[cache_key] = result
+        return result
+
+
+def ensure_evidence_candidate_index(
+    records: Iterable[Any],
+    *,
+    semantics: Mapping[str, Any] | None = None,
+) -> EvidenceCandidateIndex:
+    if isinstance(records, EvidenceCandidateIndex):
+        return records
+    return EvidenceCandidateIndex(records, semantics=semantics)
+
+
 def retrieve_evidence_candidates(
     claim: ClaimCandidate,
     records: Iterable[Any],
@@ -120,9 +391,10 @@ def retrieve_evidence_candidates(
 ) -> tuple[EvidenceCandidate, ...]:
     """Return a bounded union of independently retrieved Evidence candidates."""
 
+    candidate_index = ensure_evidence_candidate_index(records, semantics=semantics)
     explicit = set(claim.attached_evidence_handles)
     candidates: list[EvidenceCandidate] = []
-    for index, record in enumerate(records):
+    for index, record in enumerate(candidate_index.candidate_records(claim)):
         handle, source, evidence = _evidence_parts(record)
         if not handle or not isinstance(evidence, Mapping):
             continue
@@ -176,9 +448,10 @@ def resolve_claim_evidence(
 ) -> ClaimResolution:
     """Resolve one claim without mutating answer text or triggering repair."""
 
+    candidate_index = ensure_evidence_candidate_index(records, semantics=semantics)
     candidates = retrieve_evidence_candidates(
         claim,
-        records,
+        candidate_index,
         semantics=semantics,
         entity_aliases=entity_aliases,
         limit=limit,
@@ -189,12 +462,15 @@ def resolve_claim_evidence(
         for handle in requested_explicit
         if any(candidate.handle == handle for candidate in candidates)
     )
-    missing_explicit = tuple(
-        handle for handle in requested_explicit if handle not in explicit
-    )
+    missing_explicit = tuple(handle for handle in requested_explicit if handle not in explicit)
     support_by_handle: dict[str, str] = {}
     for candidate in candidates:
-        support = _deterministic_support(claim, candidate, semantics)
+        support = _deterministic_support(
+            claim,
+            candidate,
+            semantics,
+            candidate_index=candidate_index,
+        )
         support_by_handle[candidate.handle] = support.status
 
     semantic_result: SemanticVerificationResult | None = None
@@ -207,9 +483,7 @@ def resolve_claim_evidence(
     if semantic_verifier is not None and semantic_candidates:
         semantic_result = semantic_verifier.verify(claim, semantic_candidates)
         allowed = {candidate.handle for candidate in semantic_candidates}
-        selected = tuple(
-            handle for handle in semantic_result.evidence_handles if handle in allowed
-        )
+        selected = tuple(handle for handle in semantic_result.evidence_handles if handle in allowed)
         mapped_status = {
             "entailed": "supported",
             "partially-entailed": "partially-supported",
@@ -328,11 +602,7 @@ def resolve_claim_evidence(
             "none",
             "none",
             support_by_handle,
-            (
-                "explicit-binding-missing"
-                if missing_explicit
-                else "explicit-binding-unresolved",
-            ),
+            ("explicit-binding-missing" if missing_explicit else "explicit-binding-unresolved",),
         )
     if partial:
         return _resolution(
@@ -359,9 +629,7 @@ def resolve_claim_evidence(
             ("unbound-conflict-not-actionable",),
         )
     reason = (
-        "semantic-verifier-unresolved"
-        if semantic_result is not None
-        else "no-verified-candidate"
+        "semantic-verifier-unresolved" if semantic_result is not None else "no-verified-candidate"
     )
     return _resolution(
         claim,
@@ -387,8 +655,7 @@ def _composite_text_support(
             "evidence": candidate.evidence,
         }
         for candidate in candidates
-        if candidate.evidence.get("kind") == "text"
-        and not candidate.hard_conflicts
+        if candidate.evidence.get("kind") == "text" and not candidate.hard_conflicts
     ]
     handles = match_composite_text_evidence(
         claim,
@@ -424,13 +691,16 @@ def _deterministic_support(
     claim: ClaimCandidate,
     candidate: EvidenceCandidate,
     semantics: Mapping[str, Any] | None,
+    *,
+    candidate_index: EvidenceCandidateIndex,
 ) -> EvidenceSupport:
     if "entity" in candidate.hard_conflicts:
         return EvidenceSupport("contradicted", 4)
-    support = verify_evidence_support(
+    support = candidate_index.support_for(
         claim,
-        {"source": candidate.source, "evidence": candidate.evidence},
-        semantics=semantics,
+        candidate.handle,
+        candidate.source,
+        candidate.evidence,
     )
     if support.status != "not-found" or candidate.evidence.get("kind") != "structured-data":
         return support
@@ -441,9 +711,7 @@ def _deterministic_support(
     evidence = candidate.evidence
     claim_metric = claim.normalized.get("metric", "")
     canonical_claim_metric = (
-        canonical_evidence_metric({"metric": claim_metric}, semantics)
-        if claim_metric
-        else ""
+        canonical_evidence_metric({"metric": claim_metric}, semantics) if claim_metric else ""
     )
     evidence_metric = canonical_evidence_metric(evidence, semantics)
     # Compact calculation workups frequently repeat an already displayed
@@ -497,9 +765,13 @@ def _deterministic_support(
         str(evidence.get("period") or evidence.get("asOf") or ""),
         semantics,
     )
-    if claim_period and evidence_period and not evidence_periods_compatible(
-        claim_period,
-        evidence_period,
+    if (
+        claim_period
+        and evidence_period
+        and not evidence_periods_compatible(
+            claim_period,
+            evidence_period,
+        )
     ):
         return support
     if "entity" in candidate.hard_conflicts:
@@ -510,10 +782,14 @@ def _deterministic_support(
         return support
     claim_unit = claim.normalized.get("unit", "")
     evidence_unit = str(evidence.get("unit") or "")
-    if claim_unit and evidence_unit and not structured_units_compatible(
-        claim_unit,
-        evidence_unit,
-        semantics=semantics,
+    if (
+        claim_unit
+        and evidence_unit
+        and not structured_units_compatible(
+            claim_unit,
+            evidence_unit,
+            semantics=semantics,
+        )
     ):
         return support
     if not structured_values_equivalent(
@@ -697,6 +973,18 @@ def _number_tokens(value: str) -> tuple[str, ...]:
         token.replace(",", "")
         for token in re.findall(r"(?<![A-Za-z0-9_])[-+]?\d[\d,]*(?:\.\d+)?", value)
     )
+
+
+def _retrieval_tokens(value: str) -> set[str]:
+    """Return stable Latin words and CJK bigrams for lexical retrieval."""
+
+    output = {token.casefold() for token in re.findall(r"[A-Za-z][A-Za-z0-9_-]{1,63}", value)}
+    for run in re.findall(r"[\u3400-\u9fff]{2,}", value):
+        if len(run) == 2:
+            output.add(run)
+            continue
+        output.update(run[index : index + 2] for index in range(len(run) - 1))
+    return output
 
 
 def _entity_ids(value: str) -> set[str]:

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import time
 from typing import Any, cast
 
 from langchain.agents.middleware.types import ToolCallRequest
@@ -12,6 +14,7 @@ from src.core.citation_research_budget import (
     CitationResearchBudget,
     is_stable_general_knowledge_query,
 )
+from src.core.mcp_source_metadata import MCP_SOURCE_TRANSPORT_KEY
 from src.runtimes.deepagents.middleware import (
     CitationEvidenceCompactionMiddleware,
     ResearchToolBudgetMiddleware,
@@ -79,6 +82,78 @@ async def test_citation_evidence_is_compacted_for_model_and_preserved_privately(
     assert private_items[0]["kind"] == "structured-evidence-collection"
     assert private_items[0]["collectionHandle"] == hint["collectionHandle"]
     assert "data" not in json.loads(private_content)
+
+
+async def test_large_nested_legacy_result_compacts_before_filesystem_eviction() -> None:
+    source = {
+        "sourceId": "index-constituents:000905",
+        "providerId": "valuz-stock",
+        "sourceType": "dataset",
+        "title": "Index constituents · 000905",
+        "retrievedAt": "2026-08-03T05:00:00Z",
+    }
+    rows = [{"market": "cn", "symbol": f"{position:06d}"} for position in range(1_000)]
+    payload = {
+        "data": {"items": rows},
+        "_valuz_evidence": [
+            {
+                "evidenceHandle": f"ev_constituent_{position:08d}",
+                "source": source,
+                "evidence": {
+                    "kind": "structured-data",
+                    "datasetId": "index-constituents",
+                    "toolName": "index_constituents",
+                    "recordKey": f"000905|{row['symbol']}",
+                    "entityId": row["symbol"],
+                    "field": "market",
+                    "metric": "market",
+                    "value": row["market"],
+                    "unit": "",
+                    "capturedAt": "2026-08-03T05:00:00Z",
+                },
+            }
+            for position, row in enumerate(rows)
+        ],
+    }
+    original_content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    original = ToolMessage(
+        content=original_content,
+        tool_call_id="large-index",
+        name="index_constituents",
+    )
+
+    async def handler(_request: ToolCallRequest) -> ToolMessage:
+        return original
+
+    request = cast(
+        Any,
+        type(
+            "Request",
+            (),
+            {
+                "tool_call": {
+                    "id": "large-index",
+                    "name": "index_constituents",
+                    "args": {"index": "000905"},
+                }
+            },
+        )(),
+    )
+    started = time.perf_counter()
+    result = await CitationEvidenceCompactionMiddleware().awrap_tool_call(
+        request,
+        handler,
+    )
+    elapsed = time.perf_counter() - started
+
+    assert isinstance(result, ToolMessage)
+    assert elapsed < 3.0
+    assert len(str(result.content)) < len(original_content) / 4
+    private_content = citation_artifact_content(result)
+    assert private_content is not None
+    private_items = json.loads(private_content)["_valuz_evidence"]
+    assert len(private_items) == 1
+    assert private_items[0]["kind"] == "structured-evidence-collection"
 
 
 async def test_calculation_rejects_value_that_does_not_match_collection_address() -> None:
@@ -235,9 +310,7 @@ async def test_indexed_chunks_gain_evidence_before_deepagents_compaction() -> No
     assert isinstance(result, ToolMessage)
     compacted = json.loads(str(result.content))
     assert compacted["chunks"][0]["evidenceHandle"].startswith("ev_chunk_")
-    assert "Demand continues to exceed available supply." in compacted["chunks"][0][
-        "content"
-    ]
+    assert "Demand continues to exceed available supply." in compacted["chunks"][0]["content"]
     private = citation_artifact_content(result)
     assert private is not None
     registry = EvidenceRegistry()
@@ -278,9 +351,7 @@ async def test_singular_kb_document_scope_is_normalized_before_provider_call() -
         handler,
     )
 
-    assert handled_args == [
-        {"query": "operating cash flow", "doc_ids": ["sk-q2"]}
-    ]
+    assert handled_args == [{"query": "operating cash flow", "doc_ids": ["sk-q2"]}]
 
 
 async def test_compaction_does_not_register_out_of_scope_indexed_chunks() -> None:
@@ -351,10 +422,7 @@ async def test_document_text_evidence_preserves_selected_chunks_and_aligns_handl
     full_payload = {
         "doc_id": "doc-1",
         "title": "Earnings call transcript",
-        "chunks": [
-            {"id": f"chunk-{index}", "text": "detail " * 500}
-            for index in range(100)
-        ],
+        "chunks": [{"id": f"chunk-{index}", "text": "detail " * 500} for index in range(100)],
         "metadatas": [{"chunk": index} for index in range(100)],
         "_valuz_evidence": envelopes,
     }
@@ -431,9 +499,7 @@ async def test_document_table_compaction_keeps_headers_and_trailing_rows() -> No
 
     compacted = json.loads(result.content[0]["text"])
     assert compacted["chunks"][0]["text"] == table
-    assert compacted["chunks"][0]["evidenceHandle"] == (
-        "ev_channel_table_12345678"
-    )
+    assert compacted["chunks"][0]["evidenceHandle"] == ("ev_channel_table_12345678")
     assert "_valuz_evidence" not in compacted
 
 
@@ -498,6 +564,180 @@ async def test_non_citation_tool_result_is_unchanged() -> None:
     assert citation_artifact_content(result) is None
 
 
+async def test_reportify_mcp_metadata_builds_lazy_collection_without_per_field_evidence() -> None:
+    payload = {
+        "data": [
+            {
+                "ticker": "600519",
+                "fiscal_year": 2024,
+                "period": "FY",
+                "revenue": 174_144_000_000,
+                "currency": "CNY",
+            }
+        ]
+    }
+    digest = hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    descriptor = {
+        "version": 1,
+        "provider": {"id": "reportify", "name": "Reportify"},
+        "operation": {"toolName": "company_income_statement"},
+        "result": {
+            "target": "structuredContent",
+            "hash": {"algorithm": "sha256", "value": digest},
+            "capturedAt": "2026-08-03T00:00:00Z",
+        },
+        "resources": [
+            {
+                "resourceId": "income-statement",
+                "kind": "structured-collection",
+                "authority": "authoritative",
+                "rootPointer": "/data",
+                "itemsPointer": "/data",
+                "dataset": {
+                    "id": "reportify.company_income_statement",
+                    "sourceCategory": "structured_financials",
+                },
+                "identity": {"fields": ["/ticker", "/fiscal_year", "/period"]},
+                "semantics": {
+                    "entity": {"ticker": "/ticker"},
+                    "period": {"fiscalYear": "/fiscal_year", "period": "/period"},
+                    "unit": {"currency": "/currency"},
+                    "metric": {
+                        "mode": "field-name",
+                        "valueRoots": [""],
+                        "excludedFields": [
+                            "/ticker",
+                            "/fiscal_year",
+                            "/period",
+                            "/currency",
+                        ],
+                    },
+                },
+                "addressing": {
+                    "mode": "json-pointer",
+                    "allowedPathRoots": ["/data"],
+                },
+            }
+        ],
+    }
+    original = ToolMessage(
+        content=[{"type": "text", "text": json.dumps(payload)}],
+        artifact={
+            "structured_content": {
+                MCP_SOURCE_TRANSPORT_KEY: {
+                    "serverName": "reportify",
+                    "descriptor": descriptor,
+                    "hasStructuredContent": True,
+                    "structuredContent": payload,
+                }
+            }
+        },
+        tool_call_id="call-reportify",
+        name="company_income_statement",
+    )
+
+    async def handler(_request: ToolCallRequest) -> ToolMessage:
+        return original
+
+    request = cast(
+        Any,
+        type(
+            "Request",
+            (),
+            {
+                "tool_call": {
+                    "id": "call-reportify",
+                    "name": "company_income_statement",
+                    "args": {},
+                }
+            },
+        )(),
+    )
+    result = await CitationEvidenceCompactionMiddleware().awrap_tool_call(request, handler)
+
+    assert isinstance(result, ToolMessage)
+    assert isinstance(result.content, dict)
+    assert result.content["data"] == payload["data"]
+    assert "_valuz_evidence" not in result.content
+    hint = result.content["_valuz_evidence_hint"]
+    assert hint["collectionHandle"].startswith("evc_mcp_")
+    assert result.artifact["structured_content"] == payload
+    private = citation_artifact_content(result)
+    assert private is not None
+    private_payload = json.loads(private)
+    assert len(private_payload["_valuz_evidence"]) == 1
+    assert private_payload["_valuz_evidence"][0]["kind"] == "structured-evidence-collection"
+
+
+async def test_reportify_discovery_metadata_does_not_expose_summary_handle() -> None:
+    payload = {"docs": [{"doc_id": "d1", "title": "One", "summary": "Revenue 100"}]}
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    descriptor = {
+        "version": 1,
+        "provider": {"id": "reportify"},
+        "operation": {"toolName": "reports_search"},
+        "result": {
+            "target": "structuredContent",
+            "hash": {"algorithm": "sha256", "value": digest},
+            "capturedAt": "2026-08-03T00:00:00Z",
+        },
+        "resources": [
+            {
+                "resourceId": "search",
+                "kind": "document-discovery",
+                "authority": "discovery-only",
+                "rootPointer": "",
+                "itemsPointer": "/docs",
+                "mapping": {"sourceId": "/doc_id", "title": "/title"},
+            }
+        ],
+    }
+    original = ToolMessage(
+        content="wire content",
+        artifact={
+            "structured_content": {
+                MCP_SOURCE_TRANSPORT_KEY: {
+                    "descriptor": descriptor,
+                    "hasStructuredContent": True,
+                    "structuredContent": payload,
+                }
+            }
+        },
+        tool_call_id="call-search",
+        name="reports_search",
+    )
+
+    async def handler(_request: ToolCallRequest) -> ToolMessage:
+        return original
+
+    request = cast(
+        Any,
+        type(
+            "Request",
+            (),
+            {"tool_call": {"id": "call-search", "name": "reports_search", "args": {}}},
+        )(),
+    )
+    result = await CitationEvidenceCompactionMiddleware().awrap_tool_call(request, handler)
+
+    assert isinstance(result, ToolMessage)
+    assert isinstance(result.content, dict)
+    assert "evidenceHandle" not in result.content["docs"][0]
+    assert result.content["_valuz_discovery"]["citationEvidence"] == (
+        "original-indexed-chunk-required"
+    )
+    assert citation_artifact_content(result) is None
+
+
 async def test_discovery_search_summaries_are_bounded_for_model_history() -> None:
     payload = {
         "docs": [
@@ -552,9 +792,7 @@ async def test_discovery_search_summaries_are_bounded_for_model_history() -> Non
 
 async def test_discovery_compaction_uses_request_name_when_tool_message_omits_it() -> None:
     original = ToolMessage(
-        content=json.dumps(
-            {"docs": [{"doc_id": "W1", "title": "One", "summary": "x" * 2_000}]}
-        ),
+        content=json.dumps({"docs": [{"doc_id": "W1", "title": "One", "summary": "x" * 2_000}]}),
         tool_call_id="call-1",
     )
 
@@ -642,9 +880,7 @@ async def test_transcript_discovery_excludes_secondary_company_mentions() -> Non
     assert "summary" not in compacted["docs"][0]
     assert compacted["_valuz_discovery"]["filteredOut"] == 1
     assert compacted["_valuz_discovery"]["duplicatesRemoved"] == 0
-    assert compacted["_valuz_discovery"]["citationEvidence"] == (
-        "original-indexed-chunk-required"
-    )
+    assert compacted["_valuz_discovery"]["citationEvidence"] == ("original-indexed-chunk-required")
     assert citation_artifact_content(result) is None
 
 
@@ -843,12 +1079,15 @@ async def test_financial_status_only_result_gets_addressable_collection() -> Non
     private_content = citation_artifact_content(result)
     assert private_content is not None
     registry = EvidenceRegistry()
-    assert registry.register_tool_projection(
-        result.content,
-        private_content,
-        tool_name="revenue_breakdown",
-        trusted_private=True,
-    ) == 1
+    assert (
+        registry.register_tool_projection(
+            result.content,
+            private_content,
+            tool_name="revenue_breakdown",
+            trusted_private=True,
+        )
+        == 1
+    )
     assert registry.collection_count == 1
     revenue = registry.materialize_reference(
         hint["collectionHandle"],
@@ -906,10 +1145,7 @@ async def test_grep_over_raw_document_returns_traceable_focused_evidence() -> No
     await middleware.awrap_tool_call(raw_request, raw_handler)
 
     grep_result = ToolMessage(
-        content=(
-            "/large_tool_results/toolu-raw-document:\n"
-            "  1: stored document matched pattern"
-        ),
+        content=("/large_tool_results/toolu-raw-document:\n  1: stored document matched pattern"),
         tool_call_id="toolu-grep",
         name="grep",
     )
@@ -992,11 +1228,7 @@ async def test_document_discovery_calls_are_bounded_per_agent_turn() -> None:
 async def test_annual_statement_limit_reaches_oldest_requested_year() -> None:
     middleware = ResearchToolBudgetMiddleware()
     middleware.before_agent(
-        {
-            "messages": [
-                HumanMessage(content="查询 2024 年和 2023 年营业收入并计算同比增速")
-            ]
-        },
+        {"messages": [HumanMessage(content="查询 2024 年和 2023 年营业收入并计算同比增速")]},
         None,
     )
     seen_args: list[dict[str, Any]] = []
@@ -1206,7 +1438,8 @@ async def test_complete_document_registers_document_level_coverage_evidence() ->
     )
     assert coverage["evidence"]["value"] is True
     assert coverage["evidence"]["basis"] == "full-document"
-    assert f'evidence://{coverage["evidenceHandle"]}' in str(result.content[-1]["text"])
+    assert f"evidence://{coverage['evidenceHandle']}" in str(result.content[-1]["text"])
+
 
 async def test_hidden_repair_with_candidate_catalog_cannot_restart_research() -> None:
     middleware = ResearchToolBudgetMiddleware()
@@ -1535,15 +1768,11 @@ async def test_transcript_uses_one_indexed_search_and_blocks_original_reads() ->
     assert "exactly one kb_search" in str(raw_result.content)
     assert first_search.status != "error"
     assert repeated_search.status == "error"
-    assert "already had its one targeted indexed search" in str(
-        repeated_search.content
-    )
+    assert "already had its one targeted indexed search" in str(repeated_search.content)
     assert fetch_result.status == "error"
     assert "Use the returned chunks" in str(fetch_result.content)
     assert handled_tools == ["kb_search"]
-    assert handled_args == [
-        {"doc_ids": ["doc-1"], "query": "AI demand capex", "num": 10}
-    ]
+    assert handled_args == [{"doc_ids": ["doc-1"], "query": "AI demand capex", "num": 10}]
 
 
 async def test_filing_fetch_blocks_adjacent_sequential_window() -> None:
@@ -1664,9 +1893,7 @@ async def test_non_research_model_loop_is_not_bounded_by_research_budget() -> No
 
 
 def test_stable_general_knowledge_scope_is_conservative() -> None:
-    assert is_stable_general_knowledge_query(
-        "ROE 是什么意思？计算公式是什么？请用通俗语言解释。"
-    )
+    assert is_stable_general_knowledge_query("ROE 是什么意思？计算公式是什么？请用通俗语言解释。")
     assert is_stable_general_knowledge_query(
         "What is free cash flow? Explain the formula in plain language."
     )
@@ -1674,9 +1901,7 @@ def test_stable_general_knowledge_scope_is_conservative() -> None:
         "ROE 是什么意思？为什么银行和制造业不能直接用同一个 ROE 阈值比较？"
         "用通俗语言回答，不需要查询具体公司数据。"
     )
-    assert not is_stable_general_knowledge_query(
-        "请查询贵州茅台 2024 年 ROE 并引用年报。"
-    )
+    assert not is_stable_general_knowledge_query("请查询贵州茅台 2024 年 ROE 并引用年报。")
     assert not is_stable_general_knowledge_query(
         "What is Microsoft's current ROE? Cite the latest filing."
     )
@@ -1685,11 +1910,7 @@ def test_stable_general_knowledge_scope_is_conservative() -> None:
 async def test_stable_general_knowledge_turn_disables_tools_for_model() -> None:
     middleware = ResearchToolBudgetMiddleware()
     state = {
-        "messages": [
-            HumanMessage(
-                content="ROE 是什么意思？计算公式是什么？请用通俗语言解释。"
-            )
-        ]
+        "messages": [HumanMessage(content="ROE 是什么意思？计算公式是什么？请用通俗语言解释。")]
     }
     middleware.before_agent(state, None)
     seen: dict[str, Any] = {}

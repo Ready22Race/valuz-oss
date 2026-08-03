@@ -204,6 +204,9 @@ _LEADING_PROGRESS_RE = re.compile(
     r"(?:现已|已经|已).{0,24}(?:收集|汇总|整合).{0,24}"
     r"(?:数据|资料|来源|信息).{0,64}(?:以下|下面).{0,32}"
     r"(?:结果|答案).{0,16}|"
+    r"(?:现已|已经|已).{0,24}(?:收集|获取|整理).{0,24}"
+    r"(?:充足|充分|足够).{0,24}(?:数据|资料|来源|信息).{0,32}"
+    r"(?:现在|接下来|下面)?.{0,16}(?:撰写|整理|输出|生成).{0,32}|"
     r"(?:现在)?(?:可以|将要)?给出.{0,48}(?:答案|结果).{0,80}|"
     r"(?:已有|已获得|已具备).{0,32}(?:足够|充分).{0,32}"
     r"(?:原文|证据|数据|资料).{0,64}(?:输出|给出|生成).{0,16}(?:结果|答案)|"
@@ -491,10 +494,11 @@ def _strip_leading_assistant_progress(text: str) -> str:
             answer_start = cited_answer_index
             if structural_heading_index is not None:
                 answer_start = structural_heading_index
-                while (
-                    answer_start > internal_index + 1
-                    and blocks[answer_start - 1].strip() in {"---", "***", "___"}
-                ):
+                while answer_start > internal_index + 1 and blocks[answer_start - 1].strip() in {
+                    "---",
+                    "***",
+                    "___",
+                }:
                     answer_start -= 1
             cleaned = "\n\n".join(blocks[answer_start:]).strip()
             return cleaned or text.strip()
@@ -937,9 +941,8 @@ def _table_cells(line: str) -> tuple[str, ...]:
 def _strip_requested_primary_markdown_table(text: str, user_prompt: str) -> str:
     """Keep one requested comparison table as the primary answer structure."""
 
-    if (
-        not _PRIMARY_MARKDOWN_TABLE_REQUEST_RE.search(user_prompt)
-        or _EXPLANATION_REQUEST_RE.search(user_prompt)
+    if not _PRIMARY_MARKDOWN_TABLE_REQUEST_RE.search(user_prompt) or _EXPLANATION_REQUEST_RE.search(
+        user_prompt
     ):
         return text
     lines = text.splitlines()
@@ -1109,9 +1112,7 @@ def _attach_standalone_citation_lines(text: str) -> str:
             if link not in existing
         ]
         if missing:
-            output[previous_index] = (
-                f"{output[previous_index].rstrip()} {' '.join(missing)}"
-            )
+            output[previous_index] = f"{output[previous_index].rstrip()} {' '.join(missing)}"
         del output[previous_index + 1 :]
     # A cited introduction ending in a colon commonly owns the literal block
     # quote that follows. Propagate only to the first uncited quote line; this
@@ -1167,9 +1168,7 @@ def _normalize_inline_citation_boundaries(text: str) -> str:
     )
     compound_unit = re.compile(
         r"(?P<number>[-+]?\d[\d,]*(?:\.\d+)?)\s*"
-        r"(?P<scale>万|亿|兆)"
-        + link_group
-        + r"(?P<unit>元|美元|港元|人民币|日元|欧元|英镑|韩元)"
+        r"(?P<scale>万|亿|兆)" + link_group + r"(?P<unit>元|美元|港元|人民币|日元|欧元|英镑|韩元)"
     )
     simple_unit = re.compile(
         r"(?P<number>[-+]?\d[\d,]*(?:\.\d+)?)"
@@ -1200,8 +1199,7 @@ def _normalize_inline_citation_boundaries(text: str) -> str:
     )
     return simple_unit.sub(
         lambda match: (
-            f"{match.group('number')}{match.group('unit')} "
-            f"{compact(match.group('links'))}"
+            f"{match.group('number')}{match.group('unit')} {compact(match.group('links'))}"
         ),
         text,
     )
@@ -1812,11 +1810,10 @@ class _MessageObserverSink:
                     )
                     pending_bindings = len(_INLINE_EVIDENCE_LINK_RE.findall(pending_text))
                     canonical_bindings = len(_INLINE_EVIDENCE_LINK_RE.findall(canonical_text))
-                    preserve_pending = (
-                        pending_bindings > 0
-                        and canonical_bindings == 0
-                        and len(pending_text) > len(canonical_text)
-                    ) or len(pending_text) >= max(400, len(canonical_text) * 2)
+                    preserve_pending = len(pending_text) >= max(
+                        400,
+                        len(canonical_text) * 2,
+                    ) and (pending_bindings > 0 or canonical_bindings == 0)
                     if preserve_pending:
                         self._assistant_delta_chunks.clear()
                         logger.warning(
@@ -1877,7 +1874,10 @@ class _MessageObserverSink:
             keep_through_bookkeeping = (
                 event.type == "tool_use" and tool_name in _BOOKKEEPING_TOOL_NAMES
             )
-            if not keep_through_bookkeeping:
+            keep_through_citation_continuation = (
+                event.type == "text_delta" and self._citation_guard.requires_citation
+            )
+            if not keep_through_bookkeeping and not keep_through_citation_continuation:
                 await self._flush_pending_assistant(
                     final=False,
                     suppress_user_visible=(
@@ -1969,13 +1969,9 @@ class _MessageObserverSink:
                 else:
                     self.num_turns = raw
             stop_reason = event.data.get("stop_reason")
-            allow_repair = (
-                self._final_answer_recovery_attempts == 0
-                and not (
-                    isinstance(stop_reason, dict)
-                    and stop_reason.get("type")
-                    in {"error", "user_interrupt", "budget_exhausted"}
-                )
+            allow_repair = self._final_answer_recovery_attempts == 0 and not (
+                isinstance(stop_reason, dict)
+                and stop_reason.get("type") in {"error", "user_interrupt", "budget_exhausted"}
             )
             task_revision_aborted = self._task_coverage_revision_attempts > 0 and not allow_repair
             if task_revision_aborted:
@@ -2149,7 +2145,7 @@ class _MessageObserverSink:
             else "The material was processed, but a complete answer could not be generated. "
             "Please retry this request."
         )
-        event = self._build_final_assistant_event(text, allow_repair=False)
+        event = await self._build_final_assistant_event(text, allow_repair=False)
         if event is None:
             event = Event(type="assistant_message", data={"text": text})
         self._record_assistant_message(event)
@@ -2223,7 +2219,7 @@ class _MessageObserverSink:
         text = self.partial_assistant_text
         if not text:
             return False
-        event = self._build_final_assistant_event(
+        event = await self._build_final_assistant_event(
             text,
             allow_repair=allow_repair,
         )
@@ -2267,7 +2263,7 @@ class _MessageObserverSink:
         }
         data["text"] = str(raw_text)
         if final:
-            event = self._build_final_assistant_event(
+            event = await self._build_final_assistant_event(
                 str(raw_text),
                 base_data=data,
                 timestamp=pending.timestamp,
@@ -2281,7 +2277,7 @@ class _MessageObserverSink:
         await self._inner.emit(event)
         return True
 
-    def _build_final_assistant_event(
+    async def _build_final_assistant_event(
         self,
         raw_text: str,
         *,
@@ -2393,11 +2389,9 @@ class _MessageObserverSink:
         )
         if self._task_coverage_tracker is not None:
             pre_guard_coverage = self._task_coverage_tracker.evaluate(raw_text)
-            raw_text, ordered_patch_ids = (
-                self._task_coverage_tracker.patch_ordered_table_rows(
-                    raw_text,
-                    pre_guard_coverage,
-                )
+            raw_text, ordered_patch_ids = self._task_coverage_tracker.patch_ordered_table_rows(
+                raw_text,
+                pre_guard_coverage,
             )
             if ordered_patch_ids:
                 pre_guard_coverage = self._task_coverage_tracker.evaluate(raw_text)
@@ -2417,11 +2411,9 @@ class _MessageObserverSink:
             )
             if calculation_patch_ids:
                 pre_guard_coverage = self._task_coverage_tracker.evaluate(raw_text)
-            raw_text, metadata_patch_ids = (
-                self._task_coverage_tracker.patch_required_metadata(
-                    raw_text,
-                    pre_guard_coverage,
-                )
+            raw_text, metadata_patch_ids = self._task_coverage_tracker.patch_required_metadata(
+                raw_text,
+                pre_guard_coverage,
             )
             task_coverage_patch_ids = tuple(
                 dict.fromkeys(
@@ -2447,7 +2439,14 @@ class _MessageObserverSink:
             ]
             if patch_strategies:
                 task_coverage_patch_strategy = "-and-".join(patch_strategies)
-        result = self._citation_guard.finalize(
+        # Claim/Evidence verification is deliberately deterministic and can
+        # still be CPU-heavy for a long research answer.  Running it on the
+        # FastAPI event-loop thread made unrelated session/list/notification
+        # requests appear unavailable during finalization.  The turn's
+        # Registry is immutable at this boundary, so isolate the synchronous
+        # guard in the worker pool while the local service remains responsive.
+        result = await asyncio.to_thread(
+            self._citation_guard.finalize,
             raw_text,
             repair_attempts=self._citation_repair_attempts,
             preserve_registered_citation_ids=task_revision_used_local_patch,
@@ -2570,8 +2569,7 @@ class _MessageObserverSink:
                 result.text,
                 self._user_prompt,
                 candidate_evidence=(
-                    self._repair_evidence_summary(record)
-                    for record in candidate_records
+                    self._repair_evidence_summary(record) for record in candidate_records
                 ),
             )
             self._task_coverage_revision_allowed_handles = tuple(
@@ -3104,9 +3102,23 @@ class _MessageObserverSink:
         after = cls._repair_metrics(candidate)
         before_problem_rate = before["problem"] / max(1, before["required"])
         after_problem_rate = after["problem"] / max(1, after["required"])
-        problem_quality_preserved = after["problem"] <= before["problem"] or (
+        scope_expanded = (
             after["supported"] > before["supported"]
-            and after["required"] > 0
+            and after["required"] > before["required"]
+        )
+
+        def issue_rate_preserved(key: str) -> bool:
+            if after[key] <= before[key]:
+                return True
+            if not scope_expanded or before["required"] <= 0:
+                return False
+            return (
+                after[key] / max(1, after["required"])
+                < before[key] / before["required"]
+            )
+
+        problem_quality_preserved = after["problem"] <= before["problem"] or (
+            scope_expanded
             and (
                 before["required"] == 0
                 and after_problem_rate < 1
@@ -3116,8 +3128,8 @@ class _MessageObserverSink:
         )
         return (
             problem_quality_preserved
-            and after["unknown"] <= before["unknown"]
-            and after["mismatch"] <= before["mismatch"]
+            and issue_rate_preserved("unknown")
+            and issue_rate_preserved("mismatch")
             and after["supported"] >= before["supported"]
         )
 

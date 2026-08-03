@@ -24,6 +24,10 @@ def _finance_like_policy() -> dict:
                             "aliases": ["毛利率", "gross margin"],
                             "fields": ["gross_margin"],
                         },
+                        "operating_margin": {
+                            "aliases": ["营业利润率", "运营利润率", "operating margin"],
+                            "fields": ["operating_margin"],
+                        },
                         "gross_profit": {
                             "aliases": ["毛利润", "毛利", "gross profit"],
                             "fields": ["gross_profit"],
@@ -124,6 +128,24 @@ def _finance_like_policy() -> dict:
                                     "supply constraint",
                                     "capacity constraint",
                                 ]
+                            },
+                            "price_trend": {
+                                "aliases": ["价格趋势", "价格走势", "走势"]
+                            },
+                            "industry_fundamentals": {
+                                "aliases": ["行业基本面", "基本面"]
+                            },
+                            "technical_directions": {
+                                "aliases": ["技术方向", "相关方向"]
+                            },
+                            "candidate_companies": {
+                                "aliases": ["候选公司", "相关公司"]
+                            },
+                            "trend_analysis": {
+                                "aliases": ["趋势", "变化趋势"]
+                            },
+                            "drivers": {
+                                "aliases": ["驱动", "主要驱动", "驱动因素"]
                             },
                         }
                     }
@@ -275,6 +297,37 @@ def test_unscoped_metric_explanation_does_not_create_retrieval_or_repair_contrac
     assert contract.requirements == ()
     assert contract.enforceable is False
     assert task_contract_prompt(contract) == ""
+
+
+def test_direct_recommendation_count_is_enforceable_and_requires_visible_items() -> None:
+    policy = _finance_like_policy()
+    contract = parse_task_contract(
+        "推荐 10 家国内 A 股 AI 应用公司，并简述各自核心产品。",
+        policy_snapshot=policy,
+    )
+
+    output = next(item for item in contract.requirements if item.kind == "output-shape")
+    assert output.slots["exactItemCount"] == 10
+    assert contract.enforceable is True
+
+    short_result = TaskCoverageTracker(contract, policy_snapshot=policy).evaluate(
+        "数据已充分。现在整合所有来源，撰写综合报告。"
+    )
+    short_output = next(
+        item for item in short_result["requirements"] if item["kind"] == "output-shape"
+    )
+    assert short_output["answerStatus"] == "missing"
+    assert short_output["reasonCodes"] == ["exact-item-count-mismatch"]
+
+    complete = "\n\n".join(
+        f"### {index}. 公司 {index}\n\n核心产品：AI 应用 {index}。"
+        for index in range(1, 11)
+    )
+    complete_result = TaskCoverageTracker(contract, policy_snapshot=policy).evaluate(complete)
+    complete_output = next(
+        item for item in complete_result["requirements"] if item["kind"] == "output-shape"
+    )
+    assert complete_output["answerStatus"] == "fulfilled"
 
 
 def test_scoped_metric_calculation_still_creates_a_strict_contract() -> None:
@@ -2320,3 +2373,93 @@ def test_unavailable_fallback_is_metric_local_within_shared_document() -> None:
         if item.requirement_id == requirement_ids[0]
     )
     assert requirement.slots.get("metric") == "operating_cash_flow"
+
+
+def test_nominal_quantum_computing_topic_is_not_a_calculation_task() -> None:
+    contract = parse_task_contract(
+        "只参考当前公司汇报中涉及的量子计算方向，给出相关方向和候选公司。",
+        policy_snapshot=_finance_like_policy(),
+        document_ids=("current-report",),
+    )
+
+    assert contract.task_type == "document-qa"
+    assert not [item for item in contract.requirements if item.kind == "calculation"]
+    assert {
+        item.slots.get("topic")
+        for item in contract.requirements
+        if item.kind == "topic"
+    } == {"technical_directions", "candidate_companies"}
+    assert contract.enforceable is True
+
+
+def test_open_research_topics_are_derived_from_policy_ontology() -> None:
+    contract = parse_task_contract(
+        "分析 A 股有色金属 ETF 的走势和行业基本面。",
+        policy_snapshot=_finance_like_policy(),
+    )
+
+    topics = [item for item in contract.requirements if item.kind == "topic"]
+    assert {item.slots.get("topic") for item in topics} == {
+        "price_trend",
+        "industry_fundamentals",
+    }
+    assert all(item.policy_refs for item in topics)
+    assert contract.enforceable is True
+
+
+def test_multi_period_structured_query_expands_metric_period_matrix_and_topics_once() -> None:
+    contract = parse_task_contract(
+        "查询微软过去四个季度的单季毛利率和运营利润率，逐季列成表，"
+        "解释趋势并拆解驱动。",
+        policy_snapshot=_finance_like_policy(),
+    )
+
+    structured = [item for item in contract.requirements if item.kind == "structured-slot"]
+    assert len(structured) == 8
+    assert {item.slots.get("entityName") for item in structured} == {"微软"}
+    assert {item.slots.get("metric") for item in structured} == {
+        "gross_margin",
+        "operating_margin",
+    }
+    assert {item.slots.get("periodOrdinal") for item in structured} == {0, 1, 2, 3}
+    assert all(item.selectors["period"]["kind"] == "latest-published" for item in structured)
+    assert all(item.selectors["period"]["granularity"] == "quarter" for item in structured)
+
+    topics = [item for item in contract.requirements if item.kind == "topic"]
+    assert {item.slots.get("topic") for item in topics} == {"trend_analysis", "drivers"}
+    assert len(topics) == 2
+
+    output = next(item for item in contract.requirements if item.kind == "output-shape")
+    assert output.slots["format"] == "table"
+    assert output.slots["periodGroupCount"] == 4
+
+
+def test_generic_subject_parser_keeps_only_compared_companies() -> None:
+    contract = parse_task_contract(
+        "用最新完整财季检查中际旭创单季营收同比增速，并与新易盛同季数据比较；"
+        "按用户给定的连续季度阈值判断红/黄/绿灯。逐项列出输入、阈值、当前状态"
+        "和还需连续观察的季度数。",
+        policy_snapshot=_finance_like_policy(),
+    )
+
+    assert contract.declared_scope.get("entities") == ["中际旭创", "新易盛"]
+    assert not {
+        "输入",
+        "阈值",
+        "当前状态",
+        "还需连续观察",
+    } & set(contract.declared_scope.get("entities", []))
+
+
+def test_placeholder_subject_is_not_registered_as_a_literal_entity() -> None:
+    contract = parse_task_contract(
+        "列出目标公司最近两期的商誉余额，只要报告期、商誉和币种。",
+        policy_snapshot=_finance_like_policy(),
+    )
+
+    assert contract.declared_scope.get("entities", []) == []
+    assert all(
+        item.slots.get("entityName") is None
+        for item in contract.requirements
+        if item.kind == "structured-slot"
+    )

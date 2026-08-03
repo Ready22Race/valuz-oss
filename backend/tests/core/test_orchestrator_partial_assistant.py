@@ -3,13 +3,16 @@
 # ruff: noqa: I001 — kernel bootstrap side-effect import must precede src.*
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 
 import valuz_agent.boot.kernel  # noqa: F401
 
 from src.adapters.database_sink import DatabaseEventSink
 from src.adapters.delta_coalescing_sink import DeltaCoalescingSink
 from src.adapters.persist_then_broadcast_sink import PersistThenBroadcastSink
+from src.core.citation import GuardResult
 from src.core.events import Event
 from src.core.orchestrator import (
     _MessageObserverSink,
@@ -125,14 +128,14 @@ def test_strict_exact_items_keep_canonical_table_not_duplicate_cited_bullets() -
 
 def test_blockquote_citation_only_line_attaches_to_the_quoted_claim() -> None:
     text = (
-        "> \"Demand continues to increase.\"\n"
+        '> "Demand continues to increase."\n'
         "> [source](evidence://ev_quote_12345678)\n\n"
         "## Next section\n"
         "> [source](evidence://ev_decorative_12345678)"
     )
 
     assert _attach_standalone_citation_lines(text) == (
-        "> \"Demand continues to increase.\" "
+        '> "Demand continues to increase." '
         "[source](evidence://ev_quote_12345678)\n\n"
         "## Next section\n"
         "> [source](evidence://ev_decorative_12345678)"
@@ -147,8 +150,7 @@ def test_plain_citation_only_line_after_blockquote_is_folded_without_duplication
     )
 
     assert _attach_standalone_citation_lines(text) == (
-        "> 天健会计师事务所出具了标准无保留意见 "
-        "[2](citation://cit_audit)；"
+        "> 天健会计师事务所出具了标准无保留意见 [2](citation://cit_audit)；"
     )
 
 
@@ -167,27 +169,24 @@ def test_inline_citations_move_after_complete_number_and_currency_unit() -> None
 
 
 def test_inline_citation_does_not_split_final_group_of_comma_number() -> None:
-    text = (
-        "> 其中：营业收入　170,899,152,27 "
-        "[3](citation://cit_revenue)6.34"
-    )
+    text = "> 其中：营业收入　170,899,152,27 [3](citation://cit_revenue)6.34"
 
     assert _normalize_inline_citation_boundaries(text) == (
-        "> 其中：营业收入　170,899,152,276.34 "
-        "[3](citation://cit_revenue)"
+        "> 其中：营业收入　170,899,152,276.34 [3](citation://cit_revenue)"
     )
+
 
 def test_cited_introduction_attaches_source_to_following_blockquote() -> None:
     text = (
         "与 OpenAI 的合作范围包括持续训练与推理能力 "
         "[source](evidence://ev_openai_12345678)：\n\n"
-        "> \"The partnership runs through 2030 and includes models through 2032.\""
+        '> "The partnership runs through 2030 and includes models through 2032."'
     )
 
     assert _attach_standalone_citation_lines(text) == (
         "与 OpenAI 的合作范围包括持续训练与推理能力 "
         "[source](evidence://ev_openai_12345678)：\n\n"
-        "> \"The partnership runs through 2030 and includes models through 2032.\" "
+        '> "The partnership runs through 2030 and includes models through 2032." '
         "[source](evidence://ev_openai_12345678)"
     )
 
@@ -242,12 +241,9 @@ def test_empty_markdown_table_shell_is_removed_without_touching_real_table() -> 
     )
 
     assert _strip_empty_markdown_tables(text) == (
-        "**资本开支**\n\n"
-        "**供需约束**\n\n"
-        "| 季度 | 变化 |\n"
-        "|---|---|\n"
-        "| Q4 | 改善 |"
+        "**资本开支**\n\n**供需约束**\n\n| 季度 | 变化 |\n|---|---|\n| Q4 | 改善 |"
     )
+
 
 def test_uncited_trailing_calculation_restatement_is_removed_unless_requested() -> None:
     text = (
@@ -320,10 +316,13 @@ def test_unrequested_horizontal_summary_is_removed() -> None:
         "## 横向小结\n\n| 维度 | Q1 | Q2 |\n|---|---|---|\n| 产能 | — | +1 GW |"
     )
 
-    assert _strip_unrequested_cross_period_recap(
-        text,
-        "请总结最近两个季度的表述，并按季度引用原文。",
-    ) == "## FY2026 Q1\n\n需求扩散。\n\n## FY2026 Q2\n\n新增近 1 GW。"
+    assert (
+        _strip_unrequested_cross_period_recap(
+            text,
+            "请总结最近两个季度的表述，并按季度引用原文。",
+        )
+        == "## FY2026 Q1\n\n需求扩散。\n\n## FY2026 Q2\n\n新增近 1 GW。"
+    )
 
 
 def test_requested_cross_period_recap_table_is_preserved() -> None:
@@ -333,10 +332,13 @@ def test_requested_cross_period_recap_table_is_preserved() -> None:
         "### 跨季度趋势概览\n\n| 维度 | Q1 | Q2 |\n|---|---|---|\n| 需求 | 扩散 | 加速 |"
     )
 
-    assert _strip_unrequested_cross_period_recap(
-        text,
-        "请按季度总结，并增加跨季度趋势表。",
-    ) == text
+    assert (
+        _strip_unrequested_cross_period_recap(
+            text,
+            "请按季度总结，并增加跨季度趋势表。",
+        )
+        == text
+    )
 
 
 def test_period_by_period_answer_starts_at_first_period_heading() -> None:
@@ -348,35 +350,39 @@ def test_period_by_period_answer_starts_at_first_period_heading() -> None:
         "### FY2026 Q2\n\n需求加速。"
     )
 
-    assert _strip_unrequested_period_leadin(
-        text,
-        "请按季度总结最近两个季度的电话会。",
-    ) == "### FY2026 Q1\n\n需求扩散。\n\n### FY2026 Q2\n\n需求加速。"
+    assert (
+        _strip_unrequested_period_leadin(
+            text,
+            "请按季度总结最近两个季度的电话会。",
+        )
+        == "### FY2026 Q1\n\n需求扩散。\n\n### FY2026 Q2\n\n需求加速。"
+    )
 
 
 def test_explicit_cross_period_overview_keeps_period_leadin() -> None:
-    text = (
-        "## 跨季度概览\n\n"
-        "### FY2026 Q1\n\n需求扩散。\n\n"
-        "### FY2026 Q2\n\n需求加速。"
-    )
+    text = "## 跨季度概览\n\n### FY2026 Q1\n\n需求扩散。\n\n### FY2026 Q2\n\n需求加速。"
 
-    assert _strip_unrequested_period_leadin(
-        text,
-        "请按季度总结并提供跨季度概览。",
-    ) == text
+    assert (
+        _strip_unrequested_period_leadin(
+            text,
+            "请按季度总结并提供跨季度概览。",
+        )
+        == text
+    )
 
 
 def test_retrieval_block_narration_is_removed_without_dangling_emphasis() -> None:
     text = (
-        "*本季度检索块以管理层开场陈述为主，具体资本开支指引数字"
-        "未在本次来源块中披露。*\n\n结论。"
+        "*本季度检索块以管理层开场陈述为主，具体资本开支指引数字未在本次来源块中披露。*\n\n结论。"
     )
 
-    assert _strip_unrequested_retrieval_internals(
-        text,
-        "请总结电话会。",
-    ) == "结论。"
+    assert (
+        _strip_unrequested_retrieval_internals(
+            text,
+            "请总结电话会。",
+        )
+        == "结论。"
+    )
 
 
 class _FakeStore:
@@ -1053,14 +1059,16 @@ def test_retrieval_cleanup_does_not_match_chunk_inside_evidence_handle() -> None
 
 def test_retrieval_cleanup_hides_incomplete_transcript_transport_wording() -> None:
     text = (
-        "*本季度电话会检索到的原文未涉及具体季度资本开支金额，"
-        "Amy Hood 的财务指引部分未完整收录。*"
+        "*本季度电话会检索到的原文未涉及具体季度资本开支金额，Amy Hood 的财务指引部分未完整收录。*"
     )
 
-    assert _strip_unrequested_retrieval_internals(
-        text,
-        "请按季度总结资本开支。",
-    ) == "当前来源未包含具体数字。"
+    assert (
+        _strip_unrequested_retrieval_internals(
+            text,
+            "请按季度总结资本开支。",
+        )
+        == "当前来源未包含具体数字。"
+    )
 
 
 def test_progress_strip_removes_doc_id_and_numeric_chunk_worklog() -> None:
@@ -1160,6 +1168,35 @@ def _observer_with_citations(
     return store, live, observer
 
 
+async def test_final_citation_audit_does_not_block_the_event_loop() -> None:
+    _store, _live, observer = _observer_with_citations()
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_finalize(_text: str, **_kwargs: object) -> GuardResult:
+        started.set()
+        assert release.wait(timeout=1)
+        return GuardResult(text="final", bundle=None)
+
+    observer._citation_guard.finalize = slow_finalize  # type: ignore[method-assign]  # noqa: SLF001
+    finalize_task = asyncio.create_task(
+        observer._build_final_assistant_event(  # noqa: SLF001
+            "draft",
+            allow_repair=False,
+        )
+    )
+    assert await asyncio.to_thread(started.wait, 1)
+
+    # This timer can complete only if the audit is running outside the event
+    # loop thread. The worker remains deliberately blocked until afterwards.
+    await asyncio.wait_for(asyncio.sleep(0.01), timeout=0.1)
+    release.set()
+    event = await finalize_task
+
+    assert event is not None
+    assert event.data["text"] == "final"
+
+
 def _observer_with_strict_policy() -> tuple[_FakeStore, _RecordingSink, _MessageObserverSink]:
     store = _FakeStore()
     live = _RecordingSink()
@@ -1252,10 +1289,7 @@ async def test_task_coverage_withholds_partial_matrix_and_accepts_improved_revis
     live = _RecordingSink()
     db = DatabaseEventSink(store, "owner-1", "sess-1", "msg-1")
     coalesced = DeltaCoalescingSink(PersistThenBroadcastSink(db, live))
-    prompt = (
-        "对比甲公司和乙公司最近一期已发布财报的营业收入和经营现金流，"
-        "只输出 Markdown 表格。"
-    )
+    prompt = "对比甲公司和乙公司最近一期已发布财报的营业收入和经营现金流，只输出 Markdown 表格。"
     policy = _task_coverage_policy()
     contract = parse_task_contract(prompt, policy_snapshot=policy)
     observer = _MessageObserverSink(
@@ -1414,9 +1448,7 @@ async def test_task_coverage_revision_carries_compact_evidence_into_fresh_runtim
         },
     }
 
-    await observer.emit(
-        Event(type="tool_use", data={"id": "content-a", "name": "kb_search"})
-    )
+    await observer.emit(Event(type="tool_use", data={"id": "content-a", "name": "kb_search"}))
     await observer.emit(
         Event(
             type="tool_result",
@@ -1427,11 +1459,7 @@ async def test_task_coverage_revision_carries_compact_evidence_into_fresh_runtim
         Event(
             type="assistant_message",
             data={
-                "text": (
-                    "| 公司 | 报告期 | 营业收入 |\n"
-                    "|---|---|---:|\n"
-                    "| 甲公司 | 2025年 | — |"
-                )
+                "text": ("| 公司 | 报告期 | 营业收入 |\n|---|---|---:|\n| 甲公司 | 2025年 | — |")
             },
         )
     )
@@ -1448,9 +1476,7 @@ async def test_task_coverage_revision_carries_compact_evidence_into_fresh_runtim
     assert revision_context["answerPatchOnly"]
     assert revision_context["responseProtocol"] == "task-coverage-patch-v1"
     assert observer.task_coverage_revision_uses_local_patch is True
-    assert [item["evidenceHandle"] for item in revision_context["candidateEvidence"]] == [
-        handle
-    ]
+    assert [item["evidenceHandle"] for item in revision_context["candidateEvidence"]] == [handle]
     assert revision_context["candidateEvidence"][0]["value"] == 100
 
 
@@ -1505,11 +1531,7 @@ async def test_task_coverage_local_patch_preserves_draft_and_adds_validated_cita
             data={"id": "content-a", "content": json.dumps(tool_result, ensure_ascii=False)},
         )
     )
-    baseline = (
-        "| 公司 | 报告期 | 营业收入 |\n"
-        "|---|---|---:|\n"
-        "| 甲公司 | 2025年 | — |"
-    )
+    baseline = "| 公司 | 报告期 | 营业收入 |\n|---|---|---:|\n| 甲公司 | 2025年 | — |"
     await observer.emit(Event(type="assistant_message", data={"text": baseline}))
     await observer.emit(
         Event(type="session_idle", data={"num_turns": 1, "stop_reason": {"type": "end_turn"}})
@@ -1564,10 +1586,7 @@ async def test_task_coverage_patches_explicit_unavailable_table_cell_without_rev
     live = _RecordingSink()
     db = DatabaseEventSink(store, "owner-1", "sess-1", "msg-1")
     coalesced = DeltaCoalescingSink(PersistThenBroadcastSink(db, live))
-    prompt = (
-        "对比甲公司和乙公司最近一期已发布财报的营业收入和经营现金流，"
-        "只输出 Markdown 表格。"
-    )
+    prompt = "对比甲公司和乙公司最近一期已发布财报的营业收入和经营现金流，只输出 Markdown 表格。"
     policy = _task_coverage_policy()
     contract = parse_task_contract(prompt, policy_snapshot=policy)
     observer = _MessageObserverSink(
@@ -1594,9 +1613,7 @@ async def test_task_coverage_patches_explicit_unavailable_table_cell_without_rev
                 },
             )
         )
-        await observer.emit(
-            Event(type="tool_result", data={"id": tool_id, "content": content})
-        )
+        await observer.emit(Event(type="tool_result", data={"id": tool_id, "content": content}))
     await observer.emit(
         Event(
             type="assistant_message",
@@ -1681,10 +1698,7 @@ async def test_task_coverage_reorders_exact_dimension_table_without_revision() -
             type="assistant_message",
             data={
                 "text": (
-                    "| 渠道 | 营业收入 |\n"
-                    "|---|---:|\n"
-                    "| 批发代理 | 96亿元 |\n"
-                    "| 直销 | 75亿元 |"
+                    "| 渠道 | 营业收入 |\n|---|---:|\n| 批发代理 | 96亿元 |\n| 直销 | 75亿元 |"
                 )
             },
         )
@@ -1695,14 +1709,10 @@ async def test_task_coverage_reorders_exact_dimension_table_without_revision() -
 
     assert observer.task_coverage_revision_requested is False
     assert observer.assistant_text is not None
-    assert observer.assistant_text.index("| 直销 |") < observer.assistant_text.index(
-        "| 批发代理 |"
-    )
+    assert observer.assistant_text.index("| 直销 |") < observer.assistant_text.index("| 批发代理 |")
     assert observer.task_coverage is not None
     assert observer.task_coverage["status"] == "complete"
-    assert observer.task_coverage["deterministicPatch"]["strategy"] == (
-        "requested-table-row-order"
-    )
+    assert observer.task_coverage["deterministicPatch"]["strategy"] == ("requested-table-row-order")
 
 
 async def test_task_coverage_restores_explicit_period_without_model_revision() -> None:
@@ -1710,10 +1720,7 @@ async def test_task_coverage_restores_explicit_period_without_model_revision() -
     live = _RecordingSink()
     db = DatabaseEventSink(store, "owner-1", "sess-1", "msg-1")
     coalesced = DeltaCoalescingSink(PersistThenBroadcastSink(db, live))
-    prompt = (
-        "只列出甲公司2025年营业收入和经营现金流两个数字，"
-        "并注明报告期和单位。"
-    )
+    prompt = "只列出甲公司2025年营业收入和经营现金流两个数字，并注明报告期和单位。"
     policy = _task_coverage_policy()
     contract = parse_task_contract(prompt, policy_snapshot=policy)
     observer = _MessageObserverSink(
@@ -1760,9 +1767,7 @@ async def test_task_coverage_restores_explicit_period_without_model_revision() -
     assert observer.assistant_text.startswith("**报告期：2025 财年**")
     assert observer.task_coverage is not None
     assert observer.task_coverage["status"] == "complete"
-    assert observer.task_coverage["deterministicPatch"]["strategy"] == (
-        "requested-output-metadata"
-    )
+    assert observer.task_coverage["deterministicPatch"]["strategy"] == ("requested-output-metadata")
 
 
 async def test_interrupted_turn_persists_partial_assistant_text_before_idle() -> None:
@@ -1809,6 +1814,39 @@ async def test_empty_end_turn_requests_one_final_answer_recovery() -> None:
     assert observer.assistant_text is None
     assert all(event.type != "session_idle" for event in store.appended)
     assert "Do not call any more tools" in observer.final_answer_recovery_prompt
+
+
+async def test_progress_only_bookkeeping_block_requests_final_answer_recovery() -> None:
+    store, _live, observer = _observer_with_citations()
+
+    await observer.emit(
+        Event(
+            type="assistant_message",
+            data={"text": "已收集了充足的资料，现在撰写完整报告："},
+        )
+    )
+    await observer.emit(
+        Event(
+            type="tool_use",
+            data={"id": "todos-1", "name": "write_todos", "input": {}},
+        )
+    )
+    await observer.emit(
+        Event(
+            type="tool_result",
+            data={"id": "todos-1", "content": "Updated todo list"},
+        )
+    )
+    await observer.emit(
+        Event(
+            type="session_idle",
+            data={"stop_reason": {"type": "end_turn"}, "num_turns": 1},
+        )
+    )
+
+    assert observer.final_answer_recovery_requested is True
+    assert observer.assistant_text is None
+    assert all(event.type != "assistant_message" for event in store.appended)
 
 
 async def test_second_empty_end_turn_publishes_nontechnical_fallback() -> None:
@@ -1935,20 +1973,17 @@ async def test_bookkeeping_tool_after_complete_cited_answer_does_not_discard_it(
     full_answer = (
         "## FY2026 Q1\n\n"
         "Demand remained strong [1](evidence://ev_q1_12345678)。\n\n"
-        + "季度范围与来源保持一致。" * 30
+        + "季度范围与来源保持一致。"
+        * 30
     )
-    await observer.emit(
-        Event(type="assistant_message", data={"text": full_answer})
-    )
-    await observer.emit(
-        Event(type="tool_use", data={"id": "todo-1", "name": "write_todos"})
-    )
-    await observer.emit(
-        Event(type="tool_result", data={"id": "todo-1", "content": "updated"})
-    )
-    await observer.emit(
-        Event(type="assistant_message", data={"text": "以上为完整对比。"})
-    )
+    await observer.emit(Event(type="assistant_message", data={"text": full_answer}))
+    await observer.emit(Event(type="tool_use", data={"id": "todo-1", "name": "write_todos"}))
+    await observer.emit(Event(type="tool_result", data={"id": "todo-1", "content": "updated"}))
+    # DeepAgents streams the post-bookkeeping epilogue before emitting its
+    # canonical assistant block.  That delta must not flush and suppress the
+    # already complete citation-bearing answer.
+    await observer.emit(Event(type="text_delta", data={"text": "以上为完整对比。"}))
+    await observer.emit(Event(type="assistant_message", data={"text": "以上为完整对比。"}))
     await observer.emit(Event(type="session_idle", data={"num_turns": 1}))
 
     assistants = [event for event in store.appended if event.type == "assistant_message"]
@@ -2219,8 +2254,7 @@ async def test_task_coverage_uses_private_full_result_for_candidate_scope() -> N
     db = DatabaseEventSink(store, "owner-1", "sess-1", "msg-1")
     coalesced = DeltaCoalescingSink(PersistThenBroadcastSink(db, live))
     prompt = (
-        "总结微软最近四个季度电话会中管理层对 AI 算力需求、资本开支和"
-        "供需约束的表述，并按季度引用。"
+        "总结微软最近四个季度电话会中管理层对 AI 算力需求、资本开支和供需约束的表述，并按季度引用。"
     )
     policy = _task_coverage_policy()
     policy["config"]["task_coverage"]["contract"] = {
@@ -2281,8 +2315,7 @@ async def test_task_coverage_uses_private_full_result_for_candidate_scope() -> N
     assert observer._task_coverage_tracker is not None
     audit = observer._task_coverage_tracker.evaluate(  # noqa: SLF001
         "\n\n".join(
-            f"## FY2026 Q{quarter}\nAI 算力需求；资本开支；供应约束。"
-            for quarter in (4, 3, 2, 1)
+            f"## FY2026 Q{quarter}\nAI 算力需求；资本开支；供应约束。" for quarter in (4, 3, 2, 1)
         )
     )
     topic_rows = [row for row in audit["requirements"] if row["kind"] == "topic"]
@@ -2640,8 +2673,7 @@ def test_task_coverage_revision_compares_quality_rates_not_problem_totals() -> N
                 "integrity": {},
                 "quality": {
                     "metrics": {"unverifiedClaimCount": 6},
-                    "claims": [passed for _ in range(12)]
-                    + [unverified for _ in range(6)],
+                    "claims": [passed for _ in range(12)] + [unverified for _ in range(6)],
                 },
             },
             "task_coverage": {
@@ -2696,6 +2728,53 @@ def test_task_coverage_revision_rejects_equally_unsupported_expansion() -> None:
             candidate,
         )
         is False
+    )
+
+
+def test_task_coverage_revision_accepts_lower_mismatch_rate_when_scope_expands() -> None:
+    passed = {"citationRequired": True, "status": "passed", "issueCodes": []}
+    mismatched = {
+        "citationRequired": True,
+        "status": "unverified",
+        "issueCodes": ["claim_evidence_mismatch"],
+    }
+    baseline = Event(
+        type="assistant_message",
+        data={
+            "citation_bundle": {
+                "integrity": {},
+                "quality": {
+                    "metrics": {
+                        "unverifiedClaimCount": 1,
+                        "claimSemanticMismatchCount": 1,
+                    },
+                    "claims": [passed for _ in range(3)] + [mismatched],
+                },
+            }
+        },
+    )
+    candidate = Event(
+        type="assistant_message",
+        data={
+            "citation_bundle": {
+                "integrity": {},
+                "quality": {
+                    "metrics": {
+                        "unverifiedClaimCount": 2,
+                        "claimSemanticMismatchCount": 2,
+                    },
+                    "claims": [passed for _ in range(18)] + [mismatched for _ in range(2)],
+                },
+            }
+        },
+    )
+
+    assert (
+        _MessageObserverSink._task_coverage_candidate_preserves_citation_quality(
+            baseline,
+            candidate,
+        )
+        is True
     )
 
 
@@ -3242,6 +3321,7 @@ async def test_non_actionable_repair_context_excludes_registry_records() -> None
         == "no-actionable-resolution"
     )
 
+
 async def test_repair_claim_budget_still_blocks_pathological_drafts() -> None:
     _store, _live, observer = _observer_with_citations()
     bundle = {
@@ -3303,8 +3383,7 @@ async def test_repair_claim_budget_uses_quality_metrics_when_claim_list_is_parti
 async def test_advisory_translation_rows_do_not_consume_repair_claim_budget() -> None:
     _store, _live, observer = _observer_with_citations()
     repairable = [
-        {"citationRequired": True, "issueCodes": ["claim_without_citation"]}
-        for _ in range(3)
+        {"citationRequired": True, "issueCodes": ["claim_without_citation"]} for _ in range(3)
     ]
     advisory = [
         {
