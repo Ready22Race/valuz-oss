@@ -85,6 +85,9 @@ durable 表 `valuz_notification`:
   kickoff capability-gap)本就 append `task_blocked`/`kickoff_failed`。在同一处
   调 `ingest(task_failed, f:{event_id}, action=resume, route=/tasks/{task_id})`。
   - 可选:`resumed`/`abandoned` → `resolve` 对应失败通知。
+- **完成源**:`finalize_task(status=completed)` 写入终态事件后调用
+  `ingest(task_completed, c:{event_id}, action=none, urgency=info,
+  route=/tasks/{task_id})`。摘要取终态事件 payload，幂等键绑定该完成事件。
 - **未来**:automation 失败、长任务完成…… 各加一个 projector,不动投递层。
 
 kernel 仍是"提问是否还 pending"的真相源;通知行只镜像它 + 增加读状态。开机
@@ -110,6 +113,11 @@ resolved(和今天 aggregator 的 hydrate 同精神)。
 - `POST /v1/notifications/{id}:dismiss`
 - 动作本身走各自领域端点（答复 → `/sessions/{id}/actions`，恢复 →
   `/tasks/{id}:intervene action=resume`）；这些成功后经来源 `resolve` 消解通知。
+
+扩展事件：`NotificationService.ingest()` 首次创建账本行后，以 best effort 发布
+`notification.created`。稳定 payload 为 `owner_user_id` + 完整 `notification` wire
+对象；幂等 upsert 返回既有行时不重复发布。它只供 overlay 接外部系统通知等副作用，
+不能替代持久账本或 DB-poll SSE，也不承诺跨进程重放。
 
 `/v1/decisions/*` 与 `/v1/tasks/attention` 退役（前者的能力被 question-kind 覆盖，
 后者被 stream 覆盖）。
