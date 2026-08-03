@@ -20,17 +20,26 @@ import valuz_agent.boot.kernel  # noqa: F401 — sys.path side-effect
 import pytest
 
 from src.core.types import McpHttpServerConfig, McpStdioServerConfig
-from src.runtimes.deepagents.runtime import DeepAgentsRuntime
+from src.runtimes.deepagents.runtime import (
+    DeepAgentsRuntime,
+    _preserve_mcp_source_metadata,
+)
 
 
 class _FakeClient:
     """Stands in for ``MultiServerMCPClient``; per-server canned behavior."""
 
-    instances: list["_FakeClient"] = []
+    instances: list[_FakeClient] = []
     behaviors: dict[str, object] = {}
 
-    def __init__(self, spec: dict[str, dict[str, object]]) -> None:
+    def __init__(
+        self,
+        spec: dict[str, dict[str, object]],
+        *,
+        tool_interceptors: list[object] | None = None,
+    ) -> None:
         self.spec = spec
+        self.tool_interceptors = tool_interceptors
         type(self).instances.append(self)
 
     async def get_tools(self, *, server_name: str | None = None) -> list[object]:
@@ -84,6 +93,9 @@ async def test_should_keep_stdio_server_whose_command_exists(fake_client) -> Non
 
     assert tools == ["tool-b"]
     assert fake_client.instances[0].spec["local"]["command"] == sys.executable
+    # The MCP result-metadata interceptor must reach the client — it is what
+    # keeps citation metadata alive through LangChain's result conversion.
+    assert fake_client.instances[0].tool_interceptors == [_preserve_mcp_source_metadata]
 
 
 async def test_should_drop_only_the_failing_server_and_keep_the_rest(fake_client) -> None:
