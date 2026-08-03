@@ -27,6 +27,7 @@ class CitationDocumentResolverPort(Protocol):
         *,
         owner_user_id: str,
         source: dict[str, Any],
+        evidence: dict[str, Any],
         locator: dict[str, Any] | None,
     ) -> ResolvedCitationDocument | None:
         """Resolve one canonical citation for the current owner.

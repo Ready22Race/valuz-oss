@@ -235,19 +235,13 @@ def test_persisted_tool_result_is_loaded_only_from_matching_claude_tool_path(tmp
         '{"_valuz_evidence":{"evidenceHandle":"ev_example_12345678"}}',
         encoding="utf-8",
     )
-    notice = (
-        "<persisted-output>\n"
-        f"Output too large (250KB). Full output saved to: {result_path}\n"
-    )
+    notice = f"<persisted-output>\nOutput too large (250KB). Full output saved to: {result_path}\n"
 
-    assert (
-        _load_persisted_tool_result_content(
-            notice,
-            tool_use_id="tool-1",
-            projects_root=projects_root,
-        )
-        == result_path.read_text(encoding="utf-8")
-    )
+    assert _load_persisted_tool_result_content(
+        notice,
+        tool_use_id="tool-1",
+        projects_root=projects_root,
+    ) == result_path.read_text(encoding="utf-8")
     assert (
         _load_persisted_tool_result_content(
             notice,
@@ -258,6 +252,24 @@ def test_persisted_tool_result_is_loaded_only_from_matching_claude_tool_path(tmp
     )
 
 
+def test_persisted_citation_result_accepts_bounded_multi_megabyte_payload(tmp_path) -> None:
+    projects_root = tmp_path / "projects"
+    result_path = projects_root / "project-a" / "session-a" / "tool-results" / "tool-1.txt"
+    result_path.parent.mkdir(parents=True)
+    payload = '{"padding":"' + ("x" * 2_100_000) + '"}'
+    result_path.write_text(payload, encoding="utf-8")
+    notice = f"<persisted-output>\nOutput too large (2MB). Full output saved to: {result_path}\n"
+
+    assert (
+        _load_persisted_tool_result_content(
+            notice,
+            tool_use_id="tool-1",
+            projects_root=projects_root,
+        )
+        == payload
+    )
+
+
 def test_persisted_tool_result_rejects_symlink(tmp_path) -> None:
     projects_root = tmp_path / "projects"
     target = tmp_path / "outside.txt"
@@ -265,10 +277,7 @@ def test_persisted_tool_result_rejects_symlink(tmp_path) -> None:
     result_path = projects_root / "project-a" / "session-a" / "tool-results" / "tool-1.txt"
     result_path.parent.mkdir(parents=True)
     result_path.symlink_to(target)
-    notice = (
-        "<persisted-output>\n"
-        f"Output too large (250KB). Full output saved to: {result_path}\n"
-    )
+    notice = f"<persisted-output>\nOutput too large (250KB). Full output saved to: {result_path}\n"
 
     assert (
         _load_persisted_tool_result_content(

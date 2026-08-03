@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any
 
 from src.core import ToolDef, ToolResult
@@ -34,6 +35,11 @@ logger = logging.getLogger(__name__)
 GENERATIVE_UI_TOOL_NAME = "generate_ui"
 _GENERATION_MAX_ATTEMPTS = 2
 _GENERATION_RETRY_DELAY_SECONDS = 0.5
+_EXPLICIT_VISUAL_REQUEST_RE = re.compile(
+    r"(?:可视化|图表|画图|绘图|仪表盘|数据看板|交互(?:式)?(?:界面|图)|"
+    r"\b(?:dashboard|chart|plot|graph|visuali[sz](?:e|ation)|interactive\s+ui)\b)",
+    re.IGNORECASE,
+)
 
 _PARAMS = {
     "type": "object",
@@ -103,9 +109,31 @@ async def _generate_ui_handler(args: dict[str, Any], ctx: ExecContext) -> ToolRe
     if not request or not str(request).strip():
         return ToolResult(content="generate_ui: 'request' is required", is_error=True)
 
-    source = (
-        await kernel_client.get_session(user_id, ctx.session_id) if ctx.session_id else None
-    )
+    # The tool request is authored by the agent and therefore cannot grant its
+    # own permission to expand the user's scope. Gate against the persisted
+    # current user message so "列出..." cannot silently become a dashboard.
+    try:
+        messages = (
+            await kernel_client.list_messages(user_id, ctx.session_id, limit=1)
+            if ctx.session_id
+            else []
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("generate_ui: user-intent lookup failed", exc_info=True)
+        messages = []
+    latest = messages[0] if messages else None
+    user_message = getattr(latest, "user_message", None)
+    user_text = getattr(user_message, "text", "")
+    if not isinstance(user_text, str) or not _EXPLICIT_VISUAL_REQUEST_RE.search(user_text):
+        return ToolResult(
+            content=(
+                "generate_ui: the current user message did not explicitly request "
+                "a chart, dashboard, visualization, or interactive UI"
+            ),
+            is_error=True,
+        )
+
+    source = await kernel_client.get_session(user_id, ctx.session_id) if ctx.session_id else None
     if source is None:
         return ToolResult(
             content="generate_ui: no active session to resolve a model from",
@@ -130,9 +158,7 @@ async def _generate_ui_handler(args: dict[str, Any], ctx: ExecContext) -> ToolRe
         )
     except Exception as exc:  # noqa: BLE001
         logger.debug("generate_ui: provider resolve failed", exc_info=True)
-        return ToolResult(
-            content=f"generate_ui: model channel unavailable ({exc})", is_error=True
-        )
+        return ToolResult(content=f"generate_ui: model channel unavailable ({exc})", is_error=True)
 
     tool_use_id = await resolve_tool_use_id(
         user_id=user_id, session_id=ctx.session_id, arguments=args
@@ -156,9 +182,7 @@ async def _generate_ui_handler(args: dict[str, Any], ctx: ExecContext) -> ToolRe
 
     openui = (openui or "").strip()
     if not openui:
-        return ToolResult(
-            content="generate_ui: model returned no OpenUI Lang", is_error=True
-        )
+        return ToolResult(content="generate_ui: model returned no OpenUI Lang", is_error=True)
     return ToolResult(content=openui, is_error=False)
 
 

@@ -15,8 +15,6 @@ from typing import TYPE_CHECKING, Any, Literal
 from app.schemas import ImportMessageRequest, UpdateSessionRequest
 
 import valuz_agent.boot.kernel  # noqa: F401 — app/src import path bootstrap
-from src.core.citation_quality import evaluate_citation_quality
-
 from valuz_agent.adapters import kernel_client
 from valuz_agent.adapters.system_prompt_builder import CITATION_POLICY_REVISION
 from valuz_agent.infra.time_utils import now_ms
@@ -340,6 +338,8 @@ class DocumentResearchService:
                 research.session_id,
                 _summary_prompt(detail, profile=profile),
                 user_id=user_id,
+                citation_enabled_override=True,
+                citation_verification_enabled_override=False,
             )
             messages = await kernel_client.list_messages(
                 user_id,
@@ -742,7 +742,7 @@ def _summary_from_row(
     force_status: Literal["stale"] | None = None,
 ) -> DocumentSummaryArtifact:
     try:
-        bundle = json.loads(row.citation_bundle_json or "{}")
+        bundle = _citation_only_bundle(json.loads(row.citation_bundle_json or "{}"))
     except (json.JSONDecodeError, TypeError):
         bundle = {}
     generated_at = (
@@ -751,6 +751,20 @@ def _summary_from_row(
         else None
     )
     status = force_status or row.status
+    error_parts = [
+        part.strip()
+        for part in str(row.error_message or "").split(";")
+        if part.strip()
+        not in {"citation_quality_not_passed", "citation_quality_not_publishable"}
+    ]
+    if status == "degraded" and not error_parts:
+        structural_errors = validate_document_summary(
+            row.content,
+            bundle,
+            document_id=row.document_id,
+        )
+        if not structural_errors:
+            status = "ready"
     if status not in {"pending", "ready", "degraded", "failed", "stale"}:
         status = "failed"
     return DocumentSummaryArtifact(
@@ -761,14 +775,14 @@ def _summary_from_row(
         status=status,  # type: ignore[arg-type]
         profile=row.profile,
         content=row.content,
-        citation_bundle=bundle if isinstance(bundle, dict) else {},
+        citation_bundle=bundle,
         generated_at=generated_at,
         model_id=row.model_id,
         prompt_revision=row.prompt_revision,
         policy_revision=row.policy_revision,
         research_session_id=row.research_session_id,
         message_id=row.message_id,
-        error_message=row.error_message,
+        error_message="; ".join(error_parts) or None,
     )
 
 
@@ -792,13 +806,9 @@ def _provider_summary_artifact(
     summary_id = f"provider:{hashlib.sha256(identity.encode()).hexdigest()[:24]}"
     generated_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     content = summary.content if summary is not None else ""
-    bundle = summary.citation_bundle if summary is not None else {"version": 1, "citations": []}
-    if summary is not None:
-        bundle = evaluate_citation_quality(
-            content,
-            bundle,
-            summary.quality_policy,
-        )
+    bundle = _citation_only_bundle(
+        summary.citation_bundle if summary is not None else {"version": 1, "citations": []}
+    )
     validation_errors = (
         validate_document_summary(content, bundle, document_id=document.id) if content else []
     )
@@ -828,6 +838,18 @@ def _provider_summary_artifact(
         message_id=None,
         error_message="; ".join(combined_errors) or None,
     )
+
+
+def _citation_only_bundle(bundle: Any) -> dict[str, Any]:
+    """Keep summary citation indices while suppressing claim-quality UI.
+
+    Sanitizing on read also fixes summaries cached before this behavior was
+    introduced; they no longer reopen with every marker flagged for review.
+    """
+
+    if not isinstance(bundle, dict):
+        return {}
+    return {key: value for key, value in bundle.items() if key != "quality"}
 
 
 __all__ = [

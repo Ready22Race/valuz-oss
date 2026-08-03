@@ -1472,11 +1472,22 @@ class SessionService:
         return _session_to_detail(updated)
 
     async def send_message_sync(
-        self, session_id: str, content: str, user_id: str | None = None
+        self,
+        session_id: str,
+        content: str,
+        user_id: str | None = None,
+        *,
+        citation_enabled_override: bool | None = None,
+        citation_verification_enabled_override: bool | None = None,
     ) -> SessionRunResponse:
         """Block until the agent turn completes.  Used by the schedule runner."""
         try:
-            await refresh_citation_policy_for_session(session_id, user_id)
+            await refresh_citation_policy_for_session(
+                session_id,
+                user_id,
+                citation_enabled_override=citation_enabled_override,
+                verification_enabled_override=citation_verification_enabled_override,
+            )
         except Exception:  # noqa: BLE001
             logger.exception(
                 "send_message_sync: citation policy refresh failed for %s",

@@ -41,6 +41,16 @@ KEY_DEFAULT_PROVIDER_ID = "model.default_provider_id"
 KEY_DEFAULT_MODEL = "model.default_model"
 KEY_THEME = "ui.theme"
 KEY_FONT_SIZE = "ui.font_size"
+# Conversation trust controls. Citation rendering remains on by default so
+# source-bearing answers keep their inspectable indices. Verification is an
+# explicit opt-in because claim audit and the optional hidden repair can add
+# latency and model usage.
+KEY_CONVERSATION_CITATIONS_ENABLED = "conversation.citations_enabled"
+KEY_CONVERSATION_VERIFICATION_ENABLED = "conversation.verification_enabled"
+# Deterministic task-completeness checks are on by default and independent of
+# citation rendering/verification.  They can add one bounded candidate
+# revision for explicit closed tasks, so users retain a separate control.
+KEY_CONVERSATION_TASK_COVERAGE_ENABLED = "conversation.task_coverage_enabled"
 # Memory system toggles (memory-system-design §11). ``memory.enabled`` is the
 # product master switch (gates injection, the foreground tool, and the
 # background extractor); ``memory.auto_extract`` gates ONLY the background
@@ -125,6 +135,8 @@ async def _factory_effort(user_id: str | None) -> str:
         return value
     logger.warning("ignoring unknown factory default_effort: %r", value)
     return FALLBACK_EFFORT
+
+
 ALLOWED_THEMES = {"light", "dark", "auto"}
 ALLOWED_FONT_SIZES = {"compact", "default", "comfortable"}
 
@@ -368,13 +380,79 @@ async def set_font_size(db: AsyncSession, value: str, user_id: str | None = None
     await _write(db, KEY_FONT_SIZE, value, user_id=user_id)
 
 
-async def _read_bool(
-    db: AsyncSession, key: str, default: bool, user_id: str | None = None
-) -> bool:
+async def _read_bool(db: AsyncSession, key: str, default: bool, user_id: str | None = None) -> bool:
     raw = await _read(db, key, user_id=user_id)
     if raw is None:
         return default
     return raw == "true"
+
+
+async def get_conversation_citations_enabled(db: AsyncSession, user_id: str | None = None) -> bool:
+    """Whether normal conversation replies render canonical citations."""
+    return await _read_bool(
+        db,
+        KEY_CONVERSATION_CITATIONS_ENABLED,
+        True,
+        user_id=user_id,
+    )
+
+
+async def set_conversation_citations_enabled(
+    db: AsyncSession, value: bool, user_id: str | None = None
+) -> None:
+    await _write(
+        db,
+        KEY_CONVERSATION_CITATIONS_ENABLED,
+        "true" if value else "false",
+        user_id=user_id,
+    )
+
+
+async def get_conversation_verification_enabled(
+    db: AsyncSession, user_id: str | None = None
+) -> bool:
+    """Whether claim/citation verification runs for normal conversations."""
+    return await _read_bool(
+        db,
+        KEY_CONVERSATION_VERIFICATION_ENABLED,
+        False,
+        user_id=user_id,
+    )
+
+
+async def set_conversation_verification_enabled(
+    db: AsyncSession, value: bool, user_id: str | None = None
+) -> None:
+    await _write(
+        db,
+        KEY_CONVERSATION_VERIFICATION_ENABLED,
+        "true" if value else "false",
+        user_id=user_id,
+    )
+
+
+async def get_conversation_task_coverage_enabled(
+    db: AsyncSession, user_id: str | None = None
+) -> bool:
+    """Whether explicit task completeness is checked before publication."""
+
+    return await _read_bool(
+        db,
+        KEY_CONVERSATION_TASK_COVERAGE_ENABLED,
+        True,
+        user_id=user_id,
+    )
+
+
+async def set_conversation_task_coverage_enabled(
+    db: AsyncSession, value: bool, user_id: str | None = None
+) -> None:
+    await _write(
+        db,
+        KEY_CONVERSATION_TASK_COVERAGE_ENABLED,
+        "true" if value else "false",
+        user_id=user_id,
+    )
 
 
 async def get_memory_enabled(db: AsyncSession, user_id: str | None = None) -> bool:
@@ -382,9 +460,7 @@ async def get_memory_enabled(db: AsyncSession, user_id: str | None = None) -> bo
     return await _read_bool(db, KEY_MEMORY_ENABLED, True, user_id=user_id)
 
 
-async def set_memory_enabled(
-    db: AsyncSession, value: bool, user_id: str | None = None
-) -> None:
+async def set_memory_enabled(db: AsyncSession, value: bool, user_id: str | None = None) -> None:
     await _write(db, KEY_MEMORY_ENABLED, "true" if value else "false", user_id=user_id)
 
 
@@ -420,8 +496,6 @@ async def set_memory_custom_instructions(
     )
 
 
-
-
 # ── local backup preferences ─────────────────────────────────────────
 
 
@@ -452,9 +526,7 @@ async def get_backup_destination(db: AsyncSession, user_id: str | None = None) -
     return await _read(db, KEY_BACKUP_DESTINATION, user_id=user_id) or None
 
 
-async def set_backup_destination(
-    db: AsyncSession, value: str, user_id: str | None = None
-) -> None:
+async def set_backup_destination(db: AsyncSession, value: str, user_id: str | None = None) -> None:
     cleaned = value.strip()
     if not cleaned:
         raise ValueError("backup destination cannot be empty")

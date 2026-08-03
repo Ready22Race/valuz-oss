@@ -9,10 +9,12 @@ module constants so a bad overlay can't 500 the settings page.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from valuz_agent.api.routes import settings as settings_routes
 from valuz_agent.infra.database import Base
 from valuz_agent.modules.settings import preferences
 from valuz_agent.modules.settings.models import AppSettingRow
@@ -120,3 +122,98 @@ async def test_out_of_enum_port_values_should_clamp_to_constants(db, stub_port) 
         await preferences.get_default_effort(db, user_id=_OWNER)
         == preferences.FALLBACK_EFFORT
     )
+
+
+async def test_conversation_trust_and_coverage_defaults(db) -> None:
+    assert await preferences.get_conversation_citations_enabled(db, user_id=_OWNER) is True
+    assert await preferences.get_conversation_verification_enabled(db, user_id=_OWNER) is False
+    assert (
+        await preferences.get_conversation_task_coverage_enabled(db, user_id=_OWNER)
+        is True
+    )
+
+
+async def test_conversation_trust_preferences_round_trip(db) -> None:
+    await preferences.set_conversation_citations_enabled(db, False, user_id=_OWNER)
+    await preferences.set_conversation_verification_enabled(db, True, user_id=_OWNER)
+    await preferences.set_conversation_task_coverage_enabled(db, False, user_id=_OWNER)
+
+    assert await preferences.get_conversation_citations_enabled(db, user_id=_OWNER) is False
+    assert await preferences.get_conversation_verification_enabled(db, user_id=_OWNER) is True
+    assert (
+        await preferences.get_conversation_task_coverage_enabled(db, user_id=_OWNER)
+        is False
+    )
+
+
+async def test_preferences_route_disabling_citations_also_disables_verification(
+    db,
+    monkeypatch,
+) -> None:
+    await preferences.set_conversation_verification_enabled(db, True, user_id=_OWNER)
+
+    @asynccontextmanager
+    async def unit_of_work(*, commit=True):
+        del commit
+        yield db
+
+    monkeypatch.setattr(settings_routes, "async_unit_of_work", unit_of_work)
+
+    result = await settings_routes.patch_preferences(
+        settings_routes.PreferencesPatchPayload(
+            conversation_citations_enabled=False,
+        ),
+        user_id=_OWNER,
+    )
+
+    assert result.conversation_citations_enabled is False
+    assert result.conversation_verification_enabled is False
+    assert result.conversation_task_coverage_enabled is True
+
+
+async def test_preferences_route_enabling_verification_also_enables_citations(
+    db,
+    monkeypatch,
+) -> None:
+    await preferences.set_conversation_citations_enabled(db, False, user_id=_OWNER)
+
+    @asynccontextmanager
+    async def unit_of_work(*, commit=True):
+        del commit
+        yield db
+
+    monkeypatch.setattr(settings_routes, "async_unit_of_work", unit_of_work)
+
+    result = await settings_routes.patch_preferences(
+        settings_routes.PreferencesPatchPayload(
+            conversation_verification_enabled=True,
+        ),
+        user_id=_OWNER,
+    )
+
+    assert result.conversation_citations_enabled is True
+    assert result.conversation_verification_enabled is True
+    assert result.conversation_task_coverage_enabled is True
+
+
+async def test_preferences_route_toggles_task_coverage_independently(
+    db,
+    monkeypatch,
+) -> None:
+    @asynccontextmanager
+    async def unit_of_work(*, commit=True):
+        del commit
+        yield db
+
+    monkeypatch.setattr(settings_routes, "async_unit_of_work", unit_of_work)
+
+    result = await settings_routes.patch_preferences(
+        settings_routes.PreferencesPatchPayload(
+            conversation_task_coverage_enabled=False,
+        ),
+        user_id=_OWNER,
+    )
+
+    assert result.conversation_citations_enabled is True
+    assert result.conversation_verification_enabled is False
+    assert result.conversation_task_coverage_enabled is False

@@ -101,7 +101,9 @@ class LocalCitationDocumentResolver:
         owner_user_id: str,
         source: dict[str, Any],
         locator: dict[str, Any] | None,
+        evidence: dict[str, Any] | None = None,
     ) -> ResolvedCitationDocument:
+        del evidence
         document_id = source.get("documentId")
         if not isinstance(document_id, str) or not document_id:
             return ResolvedCitationDocument(

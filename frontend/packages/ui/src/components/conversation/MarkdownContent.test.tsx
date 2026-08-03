@@ -100,6 +100,66 @@ describe("MarkdownContent local file links", () => {
 });
 
 describe("MarkdownContent citations", () => {
+  it("does not show leaked source protocol placeholders from stored answers", () => {
+    render(
+      <MarkdownContent
+        content={
+          "管理层预计容量增长 80%。source\n\n" +
+          "The primary source is the annual report."
+        }
+      />,
+    );
+
+    expect(document.body.textContent).toContain("管理层预计容量增长 80%。");
+    expect(document.body.textContent).not.toContain("80%。source");
+    expect(document.body.textContent).toContain(
+      "The primary source is the annual report.",
+    );
+  });
+
+  it("removes citation-only lines that cannot be associated with a claim", () => {
+    render(
+      <MarkdownContent
+        content={
+          "| Product | Revenue |\n" +
+          "| --- | --- |\n" +
+          "| Moutai | 1,459.28 [source](citation://cit_first) |\n\n" +
+          "[source](citation://cit_second)\n\n---\n\n" +
+          "Next section."
+        }
+        citationBundle={CITATIONS}
+      />,
+    );
+
+    expect(
+      screen.getAllByRole("button", { name: /(?:citation|引用) 1/i }),
+    ).toHaveLength(1);
+    expect(
+      screen.queryByRole("button", { name: /(?:citation|引用) 2/i }),
+    ).toBeNull();
+    expect(document.body.textContent).toContain("Next section.");
+  });
+
+  it("removes citations attached only to decorative section headings", () => {
+    render(
+      <MarkdownContent
+        content={
+          "**By product**[source](citation://cit_second)\n\n" +
+          "Revenue 120 USD [source](citation://cit_first)."
+        }
+        citationBundle={CITATIONS}
+      />,
+    );
+
+    expect(document.body.textContent).toContain("By product");
+    expect(
+      screen.getAllByRole("button", { name: /(?:citation|引用) 1/i }),
+    ).toHaveLength(1);
+    expect(
+      screen.queryByRole("button", { name: /(?:citation|引用) 2/i }),
+    ).toBeNull();
+  });
+
   it("numbers citations by first appearance and reuses duplicate numbers", () => {
     render(
       <MarkdownContent
@@ -420,6 +480,344 @@ describe("MarkdownContent citations", () => {
     expect(tooltipText).not.toContain("tool ·");
   });
 
+  it("explains a structured field mismatch once without cascading validator errors", () => {
+    const bundle: CitationBundleV1 = {
+      version: 1,
+      citations: [
+        {
+          citationId: "cit_revenue",
+          source: {
+            sourceId: "reportify-financial-income-statement:600519",
+            providerId: "valuz-stock",
+            sourceType: "dataset",
+            title: "Company income statement · 600519",
+            retrievedAt: "2026-08-01T07:26:44Z",
+          },
+          evidence: {
+            kind: "structured-data",
+            datasetId: "reportify-financial-income-statement",
+            toolName: "company_income_statement",
+            field: "total_comprehensive_income",
+            value: 89330873529,
+            period: "2024 FY",
+            asOf: "2024-12-31",
+            capturedAt: "2026-08-01T07:26:44Z",
+          },
+        },
+      ],
+      quality: {
+        policyId: "finance",
+        policyRevision: "v1",
+        mode: "strict-domain",
+        status: "unverified",
+        publishStatus: "draft-only",
+        layers: { L1: "degraded", L4: "degraded" },
+        issues: [
+          {
+            code: "numeric_unit_missing",
+            layer: "L1",
+            severity: "degraded",
+            citationIds: ["cit_revenue"],
+          },
+          {
+            code: "structured_value_not_present_in_answer",
+            layer: "L4",
+            severity: "degraded",
+            citationIds: ["cit_revenue"],
+          },
+          {
+            code: "claim_evidence_mismatch",
+            layer: "L4",
+            severity: "unverified",
+            citationIds: ["cit_revenue"],
+            claimId: "clm_revenue",
+            claim: {
+              exact: "Revenue was 170899152276 CNY.",
+            },
+          },
+        ],
+        claims: [
+          {
+            claimId: "clm_revenue",
+            exact: "Revenue was 170899152276 CNY.",
+            segmentIndex: 0,
+            citationRequired: true,
+            citationIds: ["cit_revenue"],
+            status: "unverified",
+            issueCodes: [
+              "numeric_unit_missing",
+              "structured_value_not_present_in_answer",
+              "claim_evidence_mismatch",
+            ],
+          },
+        ],
+        metrics: {
+          citationCount: 1,
+          unsourcedClaimCount: 0,
+          unverifiedClaimCount: 1,
+          tierCounts: {},
+        },
+      },
+    };
+
+    render(
+      <MarkdownContent
+        content={
+          "Revenue was 170899152276 CNY [source](citation://cit_revenue)."
+        }
+        citationBundle={bundle}
+        messageId="message-1"
+        onCitationClick={vi.fn()}
+      />,
+    );
+
+    fireEvent.mouseEnter(
+      screen.getByRole("button", { name: /(?:citation|引用) 1/i }),
+    );
+    const quality = document.querySelector("[data-citation-quality-issues]");
+    expect(quality?.textContent).toMatch(
+      /total comprehensive income.*89330873529.*may not match|total comprehensive income.*89330873529.*可能不一致/i,
+    );
+    expect(quality?.textContent).not.toMatch(
+      /no unit|未标明单位|numeric basis|数字或计算依据/i,
+    );
+    expect(screen.getByRole("button", { name: /view evidence|查看依据/i })).not.toBeNull();
+  });
+
+  it("keeps advisory verification failures as neutral citations with a light hover note", () => {
+    render(
+      <MarkdownContent
+        content={
+          "Revenue [source](citation://cit_first). Margin [source](citation://cit_second)."
+        }
+        citationBundle={{
+          ...CITATIONS,
+          quality: {
+            policyId: "finance",
+            policyRevision: "finance-citation-policy-v1",
+            mode: "strict-domain",
+            status: "unverified",
+            publishStatus: "draft-only",
+            layers: { L4: "degraded" },
+            issues: [
+              {
+                code: "claim_evidence_mismatch",
+                layer: "L4",
+                severity: "unverified",
+                citationIds: ["cit_first"],
+              },
+              {
+                code: "claim_partially_supported",
+                layer: "L4",
+                severity: "unverified",
+                citationIds: ["cit_second"],
+              },
+            ],
+            metrics: {
+              citationCount: 2,
+              unsourcedClaimCount: 0,
+              unverifiedClaimCount: 2,
+              tierCounts: {},
+            },
+          },
+        }}
+      />,
+    );
+
+    const pills = screen.getAllByRole("button", {
+      name: /(?:citation|引用) [12]/i,
+    });
+    expect(pills).toHaveLength(2);
+    for (const pill of pills) {
+      expect(pill.getAttribute("data-citation-quality")).toBeNull();
+      expect(pill.className).toContain("border-surface-border");
+      expect(pill.parentElement?.className).toContain("mx-0.5");
+    }
+
+    fireEvent.mouseEnter(pills[0]!);
+    const note = document.querySelector('[data-citation-quality-issues="advisory"]');
+    expect(note?.textContent).toMatch(
+      /check against the source|建议结合原文确认/i,
+    );
+    expect(note?.className).toContain("bg-surface-muted");
+    expect(note?.className).not.toContain("bg-warning-light");
+    const qualityIconWrapper = note?.querySelector("svg")?.parentElement;
+    expect(qualityIconWrapper?.className).toContain("h-5");
+    expect(qualityIconWrapper?.className).toContain("items-center");
+  });
+
+  it("explains cross-language paraphrases without calling them mismatches", () => {
+    render(
+      <MarkdownContent
+        content="管理层表示需求持续增长 [source](citation://cit_first)。"
+        citationBundle={{
+          ...CITATIONS,
+          quality: {
+            policyId: "finance",
+            policyRevision: "finance-citation-policy-v1",
+            mode: "strict-domain",
+            status: "unverified",
+            publishStatus: "draft-only",
+            layers: { L4: "degraded" },
+            issues: [
+              {
+                code: "claim_translation_not_verified",
+                layer: "L4",
+                severity: "unverified",
+                citationIds: ["cit_first"],
+              },
+            ],
+            metrics: {
+              citationCount: 1,
+              unsourcedClaimCount: 0,
+              unverifiedClaimCount: 1,
+              tierCounts: {},
+            },
+          },
+        }}
+      />,
+    );
+
+    const pill = screen.getByRole("button", { name: /(?:citation|引用) 1/i });
+    expect(pill.getAttribute("data-citation-quality")).toBeNull();
+    fireEvent.mouseEnter(pill);
+    expect(
+      document.querySelector('[data-citation-quality-issues="advisory"]')
+        ?.textContent,
+    ).toMatch(/another language|外文原文/i);
+  });
+
+  it("limits a claim issue to the matching occurrence when a citation is reused", () => {
+    vi.useFakeTimers();
+    try {
+      const content =
+        "Revenue was 100 USD [source](citation://cit_first).\n\nTest value was 23.5% [source](citation://cit_first).";
+      const secondClaimStart = content.indexOf("Test value");
+
+      render(
+        <MarkdownContent
+          content={content}
+          citationBundle={{
+            ...CITATIONS,
+            quality: {
+              policyId: "finance",
+              policyRevision: "finance-citation-policy-v1",
+              mode: "strict-domain",
+              status: "unverified",
+              publishStatus: "draft-only",
+              layers: { L4: "degraded" },
+              issues: [
+                {
+                  code: "claim_evidence_mismatch",
+                  layer: "L4",
+                  severity: "unverified",
+                  citationIds: ["cit_first"],
+                  claimId: "claim-second",
+                  location: {
+                    kind: "text",
+                    blockIndex: 1,
+                    start: 0,
+                    end: content.length - secondClaimStart,
+                    sourceStart: secondClaimStart,
+                    sourceEnd: content.length,
+                  },
+                },
+              ],
+              claims: [
+                {
+                  claimId: "claim-second",
+                  exact: "Test value was 23.5%",
+                  segmentIndex: 1,
+                  citationRequired: true,
+                  citationIds: ["cit_first"],
+                  status: "unverified",
+                  issueCodes: ["claim_evidence_mismatch"],
+                  location: {
+                    kind: "text",
+                    blockIndex: 1,
+                    start: 0,
+                    end: content.length - secondClaimStart,
+                    sourceStart: secondClaimStart,
+                    sourceEnd: content.length,
+                  },
+                },
+              ],
+              metrics: {
+                citationCount: 1,
+                unsourcedClaimCount: 0,
+                unverifiedClaimCount: 1,
+                tierCounts: {},
+              },
+            },
+          }}
+        />,
+      );
+
+      const pills = screen.getAllByRole("button", {
+        name: /(?:citation|引用) 1/i,
+      });
+      expect(pills).toHaveLength(2);
+
+      fireEvent.mouseEnter(pills[0]!);
+      expect(
+        document.querySelector('[data-citation-quality-issues="advisory"]'),
+      ).toBeNull();
+
+      fireEvent.mouseLeave(pills[0]!.parentElement as HTMLElement);
+      act(() => vi.advanceTimersByTime(200));
+      fireEvent.mouseEnter(pills[1]!);
+      expect(
+        document.querySelector('[data-citation-quality-issues="advisory"]'),
+      ).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps confirmed conflicts as colored citation warnings", () => {
+    render(
+      <MarkdownContent
+        content={"Revenue [source](citation://cit_first)."}
+        citationBundle={{
+          ...CITATIONS,
+          quality: {
+            policyId: "finance",
+            policyRevision: "finance-citation-policy-v1",
+            mode: "strict-domain",
+            status: "unverified",
+            publishStatus: "draft-only",
+            layers: { L3: "degraded" },
+            issues: [
+              {
+                code: "claim_evidence_conflict",
+                layer: "L3",
+                severity: "unverified",
+                citationIds: ["cit_first"],
+              },
+            ],
+            metrics: {
+              citationCount: 1,
+              unsourcedClaimCount: 0,
+              unverifiedClaimCount: 1,
+              tierCounts: {},
+            },
+          },
+        }}
+      />,
+    );
+
+    const pill = screen.getByRole("button", {
+      name: /(?:citation|引用) 1.*(?:needs review|需要核验)/i,
+    });
+    expect(pill.getAttribute("data-citation-quality")).toBe("critical");
+    expect(pill.className).toContain("border-warning");
+
+    fireEvent.mouseEnter(pill);
+    expect(
+      document.querySelector('[data-citation-quality-issues="critical"]'),
+    ).not.toBeNull();
+  });
+
   it("prefers opening below and stays open while the pointer enters the card", () => {
     vi.useFakeTimers();
     try {
@@ -676,7 +1074,7 @@ describe("MarkdownContent citations", () => {
     ).toBeNull();
   });
 
-  it("surfaces a generic warning when runtime citation integrity is degraded", () => {
+  it("does not surface a generic warning when citation integrity cannot be localized", () => {
     render(
       <MarkdownContent
         content="The answer could not bind a source."
@@ -695,22 +1093,14 @@ describe("MarkdownContent citations", () => {
       />,
     );
 
-    const warning = document.querySelector(
-      '[data-citation-integrity="degraded"]',
-    );
-    expect(warning).not.toBeNull();
-    expect(warning?.className).toContain("items-center");
-    expect(warning?.querySelector("svg")?.className.baseVal).toContain(
-      "top-px",
-    );
-    expect(warning?.className).toContain("text-ink-meta");
-    expect(warning?.className).not.toContain("border-warning");
-    expect(warning?.className).not.toContain("bg-warning-light");
     expect(
-      screen.getByText(
+      document.querySelector('[data-citation-integrity="degraded"]'),
+    ).toBeNull();
+    expect(
+      screen.queryByText(
         /some citations could not be located or verified|部分引用无法定位或验证/i,
       ),
-    ).not.toBeNull();
+    ).toBeNull();
   });
 
   it("marks only the cited claim when a quality issue has citation ids", () => {
@@ -761,7 +1151,7 @@ describe("MarkdownContent citations", () => {
     const pill = screen.getByRole("button", {
       name: /(?:citation|引用) 1.*(?:needs review|需要核验)/i,
     });
-    expect(pill.getAttribute("data-citation-quality")).toBe("degraded");
+    expect(pill.getAttribute("data-citation-quality")).toBe("critical");
     expect(pill.parentElement?.className).toContain("mx-1");
     expect(
       document.querySelector("[data-citation-quality-warning]"),
@@ -792,7 +1182,7 @@ describe("MarkdownContent citations", () => {
     ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   });
 
-  it("marks an uncited claim at its exact sentence without a global warning", () => {
+  it("does not add a scary marker to an uncited advisory claim", () => {
     render(
       <MarkdownContent
         content="Revenue was 100 USD [source](citation://cit_first). Margin was 23.5%."
@@ -832,13 +1222,9 @@ describe("MarkdownContent citations", () => {
       />,
     );
 
-    const marker = document.querySelector<HTMLButtonElement>(
-      "[data-citation-claim-quality]",
-    );
-    expect(marker).not.toBeNull();
-    expect(marker?.getAttribute("aria-label")).toMatch(
-      /number or calculation|数字或计算依据/i,
-    );
+    expect(
+      document.querySelector("[data-citation-claim-quality]"),
+    ).toBeNull();
     expect(
       document.querySelector("[data-citation-quality-warning]"),
     ).toBeNull();
@@ -847,7 +1233,7 @@ describe("MarkdownContent citations", () => {
     ).toBeNull();
   });
 
-  it("uses claim source offsets to mark repeated claims independently", () => {
+  it("uses claim source offsets to mark repeated critical claims independently", () => {
     const content = "Metric repeated. Metric repeated.";
     const locations = [
       { kind: "text" as const, blockIndex: 0, start: 0, end: 16, sourceStart: 0, sourceEnd: 16 },
@@ -875,9 +1261,9 @@ describe("MarkdownContent citations", () => {
             publishStatus: "draft-only",
             layers: { L4: "degraded" },
             issues: locations.map((location, index) => ({
-              code: "claim_without_citation",
+              code: "claim_evidence_conflict",
               layer: "L4",
-              severity: "degraded",
+              severity: "unverified",
               claimId: `clm_${index + 1}`,
               claim: { exact: "Metric repeated." },
               location,
@@ -889,7 +1275,7 @@ describe("MarkdownContent citations", () => {
               citationRequired: true,
               citationIds: [],
               status: "unsupported" as const,
-              issueCodes: ["claim_without_citation"],
+              issueCodes: ["claim_evidence_conflict"],
               location,
             })),
             metrics: {
@@ -906,11 +1292,11 @@ describe("MarkdownContent citations", () => {
     expect(document.querySelectorAll("[data-citation-claim-quality]")).toHaveLength(2);
     expect(
       document.querySelector("[data-citation-claim-quality]")?.getAttribute("aria-label"),
-    ).toMatch(/citation evidence is incomplete|引用证据不完整/i);
+    ).toMatch(/cross-check|conflict|inconsistent|交叉验证|冲突|不一致/i);
     expect(document.querySelector("[data-citation-quality-warning]")).toBeNull();
   });
 
-  it("places a table-cell claim marker using its stable source location", () => {
+  it("places a critical table-cell claim marker using its stable source location", () => {
     const content = "| Metric | 2024 |\n|---|---:|\n| Revenue | 120 USD |";
     const valueStart = content.indexOf("120 USD");
     const location = {
@@ -921,6 +1307,89 @@ describe("MarkdownContent citations", () => {
       sourceStart: valueStart,
       sourceEnd: valueStart + "120 USD".length,
     };
+    const { container } = render(
+      <MarkdownContent
+        content={content}
+        citationBundle={{
+          version: 1,
+          citations: [],
+          integrity: {
+            status: "passed",
+            unknownCitationIds: [],
+            unusedCitationIds: [],
+            missingLocatorCitationIds: [],
+            repairAttempts: 0,
+            policyRevision: "citation-v1",
+          },
+          quality: {
+            policyId: "finance",
+            policyRevision: "v1",
+            mode: "strict-domain",
+            status: "degraded",
+            publishStatus: "draft-only",
+            layers: { L4: "degraded" },
+            issues: [
+              {
+                code: "claim_evidence_conflict",
+                layer: "L4",
+                severity: "unverified",
+                claimId: "clm_table",
+                claim: { exact: "Revenue — 2024: 120 USD" },
+                location,
+              },
+            ],
+            claims: [
+              {
+                claimId: "clm_table",
+                exact: "Revenue — 2024: 120 USD",
+                segmentIndex: 0,
+                citationRequired: true,
+                citationIds: [],
+                status: "unsupported",
+                issueCodes: ["claim_evidence_conflict"],
+                location,
+              },
+            ],
+            metrics: {
+              citationCount: 0,
+              unsourcedClaimCount: 1,
+              unverifiedClaimCount: 0,
+              tierCounts: {},
+            },
+          },
+        }}
+      />,
+    );
+
+    expect(document.querySelector("[data-citation-claim-quality]")).not.toBeNull();
+    expect(screen.getByText("120 USD")).not.toBeNull();
+    const richText = container.querySelector<HTMLElement>("#streamdown");
+    expect(richText?.className).toContain(
+      "div:not(:has([data-streamdown='table']))",
+    );
+    expect(richText?.className).not.toContain("div:has(button)");
+    const wrapper = container.querySelector<HTMLElement>(
+      "[data-streamdown='table-wrapper']",
+    );
+    const dataRegion = wrapper?.querySelector<HTMLElement>(
+      ":scope > div:has([data-streamdown='table'])",
+    );
+    expect(dataRegion).not.toBeNull();
+    expect(dataRegion?.querySelector("[data-citation-claim-quality]")).not.toBeNull();
+    const toolbarRegions = wrapper?.querySelectorAll(
+      ":scope > div:not(:has([data-streamdown='table']))",
+    );
+    expect(toolbarRegions).toHaveLength(1);
+    expect(
+      toolbarRegions?.[0]?.contains(
+        dataRegion?.querySelector("[data-citation-claim-quality]") ?? null,
+      ),
+    ).toBe(false);
+  });
+
+  it("moves a critical claim marker outside display math without exposing its internal URL", () => {
+    const content = "计算如下：\n\n$$\n增长率 = 15.71\\%\n$$";
+    const mathValueEnd = content.indexOf("15.71") + "15.71".length;
     render(
       <MarkdownContent
         content={content}
@@ -944,24 +1413,19 @@ describe("MarkdownContent citations", () => {
             layers: { L4: "degraded" },
             issues: [
               {
-                code: "numeric_claim_without_citation",
+                code: "claim_evidence_conflict",
                 layer: "L4",
-                severity: "degraded",
-                claimId: "clm_table",
-                claim: { exact: "Revenue — 2024: 120 USD" },
-                location,
-              },
-            ],
-            claims: [
-              {
-                claimId: "clm_table",
-                exact: "Revenue — 2024: 120 USD",
-                segmentIndex: 0,
-                citationRequired: true,
-                citationIds: [],
-                status: "unsupported",
-                issueCodes: ["numeric_claim_without_citation"],
-                location,
+                severity: "unverified",
+                claimId: "clm_math",
+                claim: { exact: "增长率 = 15.71%" },
+                location: {
+                  kind: "text",
+                  blockIndex: 1,
+                  start: 0,
+                  end: 13,
+                  sourceStart: content.indexOf("增长率"),
+                  sourceEnd: mathValueEnd,
+                },
               },
             ],
             metrics: {
@@ -975,11 +1439,12 @@ describe("MarkdownContent citations", () => {
       />,
     );
 
+    expect(document.body.textContent).not.toContain("valuz.quality-claim.invalid");
     expect(document.querySelector("[data-citation-claim-quality]")).not.toBeNull();
-    expect(screen.getByText("120 USD")).not.toBeNull();
+    expect(document.querySelector(".katex")).not.toBeNull();
   });
 
-  it("keeps a global warning for quality issues without a location", () => {
+  it("hides quality issues that cannot be located to a concrete claim", () => {
     render(
       <MarkdownContent
         content="Revenue was 100 USD [source](citation://cit_first)."
@@ -1018,25 +1483,17 @@ describe("MarkdownContent citations", () => {
       />,
     );
 
-    const warning = document.querySelector(
-      '[data-citation-quality-warning="degraded"]',
-    );
-    expect(warning).not.toBeNull();
-    expect(warning?.className).toContain("items-center");
-    expect(warning?.querySelector("svg")?.className.baseVal).toContain(
-      "top-px",
-    );
-    expect(warning?.className).toContain("text-ink-meta");
-    expect(warning?.className).not.toContain("border-warning");
-    expect(warning?.className).not.toContain("bg-warning-light");
     expect(
-      screen.getByText(
+      document.querySelector('[data-citation-quality-warning="degraded"]'),
+    ).toBeNull();
+    expect(
+      screen.queryByText(
         /some conclusions lack sufficient citation support|部分结论缺少充分的引用支持/i,
       ),
-    ).not.toBeNull();
+    ).toBeNull();
   });
 
-  it("uses the restrained unverified fallback when conflicts have no location", () => {
+  it("hides unverified conflicts that cannot be located to a concrete claim", () => {
     render(
       <MarkdownContent
         content="Revenue may differ across sources."
@@ -1076,25 +1533,17 @@ describe("MarkdownContent citations", () => {
       />,
     );
 
-    const warning = document.querySelector(
-      '[data-citation-quality-warning="unverified"]',
-    );
-    expect(warning).not.toBeNull();
-    expect(warning?.className).toContain("items-center");
-    expect(warning?.querySelector("svg")?.className.baseVal).toContain(
-      "top-px",
-    );
-    expect(warning?.className).toContain("text-ink-meta");
-    expect(warning?.className).not.toContain("border-warning");
-    expect(warning?.className).not.toContain("bg-warning-light");
     expect(
-      screen.getByText(
+      document.querySelector('[data-citation-quality-warning="unverified"]'),
+    ).toBeNull();
+    expect(
+      screen.queryByText(
         /some sources have not been cross-checked or conflict|部分来源尚未交叉验证或存在冲突/i,
       ),
-    ).not.toBeNull();
+    ).toBeNull();
   });
 
-  it("renders one localized blocked state without quality fallbacks", () => {
+  it("never hides useful content for legacy blocked citation metadata", () => {
     render(
       <MarkdownContent
         content="Citation verification failed after one automatic repair attempt."
@@ -1149,12 +1598,12 @@ describe("MarkdownContent citations", () => {
     );
 
     expect(
-      screen.getByText(
-        /unverified answer was not published|未经验证的回答未发布/i,
-      ),
+      screen.getByText(/after one automatic repair attempt/i),
     ).not.toBeNull();
     expect(
-      screen.queryByText(/after one automatic repair attempt/i),
+      screen.queryByText(
+        /unverified answer was not published|未经验证的回答未发布/i,
+      ),
     ).toBeNull();
     expect(
       document.querySelector("[data-citation-quality-warning]"),

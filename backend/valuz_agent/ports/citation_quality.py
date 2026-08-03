@@ -34,12 +34,28 @@ _MODE_STRENGTH: dict[CitationPolicyMode, int] = {
 }
 _PUBLISH_STRENGTH = {"ready": 0, "draft_only": 1, "blocked": 2}
 _MAX_POLICY_BYTES = 128_000
+_TASK_COVERAGE_SECTIONS = {
+    "contract": {
+        "requirement_kinds",
+        "dimensions",
+        "selectors",
+        "output_constraints",
+        "ontology_refs",
+        "dimension_ontology",
+        "topic_ontology",
+    },
+    "retrieval": {
+        "content_mappings",
+        "identity_mappings",
+        "candidate_selection",
+        "source_constraints",
+    },
+    "answer": {"structure_rules"},
+    "remediation": {"allowed_actions"},
+    "observability": {"record"},
+}
 _OSS_POLICY_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "resources"
-    / "citation-policies"
-    / "oss"
-    / "policy.yaml"
+    Path(__file__).resolve().parents[1] / "resources" / "citation-policies" / "oss" / "policy.yaml"
 )
 
 logger = logging.getLogger(__name__)
@@ -375,11 +391,233 @@ def _load_citation_policy_document_cached(
     for key in ("rules", "failure"):
         if key in payload and not isinstance(payload[key], dict):
             raise RuntimeError(f"citation policy {key} must be a mapping")
+    _validate_task_coverage_policy(payload.get("task_coverage"))
     # Validate JSON safety and the host/kernel metadata budget up front.
     encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     if len(encoded.encode("utf-8")) > _MAX_POLICY_BYTES:
         raise RuntimeError("citation policy payload exceeds 128 KiB")
     return payload
+
+
+def _validate_task_coverage_policy(value: Any) -> None:
+    """Validate the shared additive Task Coverage policy surface.
+
+    Lists intentionally remain open vocabularies: OSS owns the resolver
+    primitives while later layers may add named dimensions, selectors and
+    mappings without changing this loader.  What is fixed here is the shape
+    consumed by the shared resolver, so a typo cannot silently become a
+    distribution-only side channel.
+    """
+
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        raise RuntimeError("citation policy task_coverage must be a mapping")
+    unknown_sections = set(value) - set(_TASK_COVERAGE_SECTIONS)
+    if unknown_sections:
+        raise RuntimeError(
+            "citation policy task_coverage has unknown sections: "
+            + ", ".join(sorted(unknown_sections))
+        )
+    for section, allowed_keys in _TASK_COVERAGE_SECTIONS.items():
+        section_value = value.get(section)
+        if section_value is None:
+            continue
+        if not isinstance(section_value, dict):
+            raise RuntimeError(f"citation policy task_coverage.{section} must be a mapping")
+        unknown_keys = set(section_value) - allowed_keys
+        if unknown_keys:
+            raise RuntimeError(
+                f"citation policy task_coverage.{section} has unknown keys: "
+                + ", ".join(sorted(unknown_keys))
+            )
+        for key, entries in section_value.items():
+            if key == "dimension_ontology":
+                _validate_task_coverage_dimension_ontology(entries)
+                continue
+            if key == "topic_ontology":
+                _validate_task_coverage_topic_ontology(entries)
+                continue
+            if not isinstance(entries, list):
+                raise RuntimeError(f"citation policy task_coverage.{section}.{key} must be a list")
+            if key == "content_mappings":
+                _validate_task_coverage_content_mappings(entries)
+            elif key == "identity_mappings":
+                _validate_task_coverage_identity_mappings(entries)
+            elif not all(isinstance(entry, str) and entry for entry in entries):
+                raise RuntimeError(
+                    f"citation policy task_coverage.{section}.{key} must contain non-empty strings"
+                )
+
+
+def _validate_task_coverage_topic_ontology(value: Any) -> None:
+    if not isinstance(value, dict) or set(value) != {"revision", "topics"}:
+        raise RuntimeError(
+            "citation policy task_coverage topic ontology requires revision and topics"
+        )
+    revision = value.get("revision")
+    topics = value.get("topics")
+    if not isinstance(revision, str) or not revision or not isinstance(topics, dict) or not topics:
+        raise RuntimeError(
+            "citation policy task_coverage topic ontology revision or topics is invalid"
+        )
+    for topic_id, definition in topics.items():
+        if (
+            not isinstance(topic_id, str)
+            or not topic_id
+            or not isinstance(definition, dict)
+            or set(definition) != {"aliases"}
+        ):
+            raise RuntimeError(
+                "citation policy task_coverage topic ontology definitions are invalid"
+            )
+        aliases = definition.get("aliases")
+        if (
+            not isinstance(aliases, list)
+            or not aliases
+            or not all(isinstance(alias, str) and alias for alias in aliases)
+        ):
+            raise RuntimeError(
+                "citation policy task_coverage topic ontology aliases are invalid"
+            )
+
+
+def _validate_task_coverage_dimension_ontology(value: Any) -> None:
+    if not isinstance(value, dict) or set(value) != {"revision", "dimensions"}:
+        raise RuntimeError(
+            "citation policy task_coverage dimension ontology requires "
+            "revision and dimensions"
+        )
+    revision = value.get("revision")
+    dimensions = value.get("dimensions")
+    if (
+        not isinstance(revision, str)
+        or not revision
+        or not isinstance(dimensions, dict)
+        or not dimensions
+    ):
+        raise RuntimeError(
+            "citation policy task_coverage dimension ontology revision or dimensions "
+            "is invalid"
+        )
+    for dimension_id, definition in dimensions.items():
+        if (
+            not isinstance(dimension_id, str)
+            or not dimension_id
+            or not isinstance(definition, dict)
+            or set(definition) != {"aliases", "members"}
+        ):
+            raise RuntimeError(
+                "citation policy task_coverage dimension ontology definitions are invalid"
+            )
+        aliases = definition.get("aliases")
+        members = definition.get("members")
+        if (
+            not isinstance(aliases, list)
+            or not aliases
+            or not all(isinstance(alias, str) and alias for alias in aliases)
+            or not isinstance(members, dict)
+            or not members
+        ):
+            raise RuntimeError(
+                "citation policy task_coverage dimension ontology aliases or members "
+                "are invalid"
+            )
+        for member_id, member_definition in members.items():
+            if (
+                not isinstance(member_id, str)
+                or not member_id
+                or not isinstance(member_definition, dict)
+                or set(member_definition) != {"aliases"}
+            ):
+                raise RuntimeError(
+                    "citation policy task_coverage dimension ontology member "
+                    "definitions are invalid"
+                )
+            member_aliases = member_definition.get("aliases")
+            if (
+                not isinstance(member_aliases, list)
+                or not member_aliases
+                or not all(
+                    isinstance(alias, str) and alias for alias in member_aliases
+                )
+            ):
+                raise RuntimeError(
+                    "citation policy task_coverage dimension ontology member aliases "
+                    "are invalid"
+                )
+
+
+def _validate_task_coverage_content_mappings(entries: list[Any]) -> None:
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise RuntimeError("citation policy task_coverage retrieval mappings must be mappings")
+        required = {"id", "role", "tool_patterns"}
+        allowed = {*required, "coverage_text", "coverage_scope"}
+        if not required.issubset(entry) or set(entry) - allowed:
+            raise RuntimeError(
+                "citation policy task_coverage retrieval mapping requires id, "
+                "role and tool_patterns, with optional coverage_text and coverage_scope"
+            )
+        if not isinstance(entry.get("id"), str) or not entry["id"]:
+            raise RuntimeError("citation policy task_coverage retrieval mapping id is invalid")
+        if entry.get("role") not in {"candidate", "content"}:
+            raise RuntimeError("citation policy task_coverage retrieval mapping role is invalid")
+        if entry.get("coverage_text", "result") not in {
+            "result",
+            "input-and-result",
+        }:
+            raise RuntimeError(
+                "citation policy task_coverage retrieval mapping coverage_text is invalid"
+            )
+        if entry.get("coverage_scope", "partial") not in {
+            "partial",
+            "full-document",
+            "full-record",
+        }:
+            raise RuntimeError(
+                "citation policy task_coverage retrieval mapping coverage_scope is invalid"
+            )
+        patterns = entry.get("tool_patterns")
+        if (
+            not isinstance(patterns, list)
+            or not patterns
+            or not all(isinstance(pattern, str) and pattern for pattern in patterns)
+        ):
+            raise RuntimeError(
+                "citation policy task_coverage retrieval mapping patterns are invalid"
+            )
+
+
+def _validate_task_coverage_identity_mappings(entries: list[Any]) -> None:
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise RuntimeError(
+                "citation policy task_coverage identity mappings must be mappings"
+            )
+        required = {"id", "tool_patterns"}
+        allowed = {*required, "query_fields", "result_fields"}
+        if not required.issubset(entry) or set(entry) - allowed:
+            raise RuntimeError(
+                "citation policy task_coverage identity mapping requires id and "
+                "tool_patterns, with optional query_fields and result_fields"
+            )
+        if not isinstance(entry.get("id"), str) or not entry["id"]:
+            raise RuntimeError(
+                "citation policy task_coverage identity mapping id is invalid"
+            )
+        for key in ("tool_patterns", "query_fields", "result_fields"):
+            values = entry.get(key)
+            if values is None and key != "tool_patterns":
+                continue
+            if (
+                not isinstance(values, list)
+                or not values
+                or not all(isinstance(value, str) and value for value in values)
+            ):
+                raise RuntimeError(
+                    f"citation policy task_coverage identity mapping {key} is invalid"
+                )
 
 
 def load_citation_policy_document(

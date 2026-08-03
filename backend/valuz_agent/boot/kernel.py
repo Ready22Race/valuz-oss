@@ -55,8 +55,8 @@ KERNEL_ALEMBIC_INI: Path = KERNEL_ALEMBIC_DIR / "alembic.ini"
 # uses ``alembic_version_host`` in the same file so the two never collide).
 KERNEL_VERSION_TABLE = "alembic_version"
 # Kernel-owned tables the schema preflight inspects (never drops) — the
-# current trio plus pre-cutover fossils. Host ``valuz_*`` tables and the DeepAgents
-# langgraph checkpoint tables in the same file are off-limits.
+# current trio plus pre-cutover fossils. Host ``valuz_*`` tables are off-limits;
+# DeepAgents langgraph checkpoint tables live in their own sibling database.
 _KERNEL_OWNED_TABLES = ("sessions", "messages", "events", "projects", "agents", "environments")
 
 
@@ -85,18 +85,19 @@ def _set_kernel_env() -> None:
     ``app.config``.
 
     ``DEEPAGENTS_CHECKPOINT_DB`` points the kernel's DeepAgentsRuntime
-    langgraph checkpointer at the kernel's OWN SQLite file (``kernel.db``),
-    alongside ``sessions/messages/events`` — so the checkpoint tables
-    (``checkpoints`` / ``writes`` / ``checkpoint_blobs``) travel with the
-    kernel into a sandbox/remote deployment instead of being stranded in the
-    host ``valuz.db``. No stray ``./deepagents_checkpoints.db`` in whatever
-    cwd happened to be active at first boot; setdefault honours an external
-    override.
+    langgraph checkpointer at a deterministic sibling file next to
+    ``kernel.db``. It must not share ``kernel.db`` itself: each live
+    ``AsyncSqliteSaver`` initializes WAL and checkpoint tables, which can
+    interfere with the kernel session/message engine when multiple runtimes
+    overlap. Keeping the files adjacent preserves sandbox/user-log lifecycle
+    semantics without leaving a cwd-relative database behind. ``setdefault``
+    honours an external deployment override.
     """
     os.environ["DATABASE_URL"] = kernel_db_url_async()
     kernel_db_path = sqlite_path_from_url(kernel_db_url())
     if kernel_db_path is not None:
-        os.environ.setdefault("DEEPAGENTS_CHECKPOINT_DB", str(kernel_db_path))
+        checkpoint_db_path = kernel_db_path.parent / "deepagents_checkpoints.db"
+        os.environ.setdefault("DEEPAGENTS_CHECKPOINT_DB", str(checkpoint_db_path))
         # Local resident process uses the sqlite checkpointer above. The
         # ephemeral cloud SANDBOX instead uses FileCheckpointSaver (write-once
         # files on a per-owner COS mount — sqlite-on-COS corrupts), gated by
@@ -164,8 +165,8 @@ async def ensure_kernel_schema_migratable(engine: AsyncEngine | None = None) -> 
       restart. No committed data to lose, and still nothing is auto-deleted.
 
     Scoped to kernel-owned tables (``_KERNEL_OWNED_TABLES``); host ``valuz_*``
-    tables and the langgraph checkpoint tables in the same file are never read or
-    touched. No drops, ever. Reflects through an ASYNC engine (so a Postgres
+    tables are never read or touched, while langgraph checkpoints use their own
+    sibling database. No drops, ever. Reflects through an ASYNC engine (so a Postgres
     ``database_url`` resolves to asyncpg rather than choking a sync engine on an
     async driver); the caller runs it off the event loop in a worker thread.
     """
@@ -287,9 +288,24 @@ async def init_kernel_dependencies() -> None:
     """
     _set_kernel_env()
     from app.config import AppConfig
-    from app.dependencies import init_dependencies
+    from app.dependencies import get_orchestrator, init_dependencies
 
     await init_dependencies(AppConfig())
+
+    async def _refresh_citation_repair_credentials(user_id: str, session_id: str) -> bool:
+        # Keep the kernel independent of host modules: the Valuz in-process
+        # composition installs this callback after both sides are initialized.
+        # A hidden citation repair is a second runtime run inside one user turn,
+        # so the normal turn-entry connector refresh would otherwise be skipped.
+        from valuz_agent.modules.sessions.capabilities import (
+            refresh_always_on_mcp_for_session,
+        )
+
+        return await refresh_always_on_mcp_for_session(session_id, user_id)
+
+    get_orchestrator().set_citation_repair_refresh_hook(
+        _refresh_citation_repair_credentials
+    )
 
     # No kernel-side owner default to seed: every kernel write stamps ``user_id``
     # explicitly (host → kernel_client → route → store), so there is nothing to

@@ -14,30 +14,41 @@ import copy
 import fnmatch
 import re
 from collections import Counter, defaultdict
+from collections.abc import Iterable, Mapping
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from src.core.calculation import evaluate_decimal_expression
 from src.core.claim_audit import (
     CLAIM_EXTRACTOR_REVISION,
     CLAIM_VERIFIER_REVISION,
     ClaimCandidate,
+    calculation_formula_matches_evidence,
     canonical_evidence_dimension,
     canonical_evidence_metric,
     canonical_evidence_period,
+    evidence_periods_compatible,
+    evidence_semantic_options,
     extract_claims_with_status,
     match_available_evidence,
     structured_components_cover_claim,
+    structured_units_compatible,
     structured_value_present,
+    structured_values_equivalent,
+    text_components_cover_claim,
     verify_evidence_support,
 )
 
 _UNSOURCED_RE = re.compile(r"\[UNSOURCED\]", re.IGNORECASE)
 _UNVERIFIED_RE = re.compile(r"\[UNVERIFIED(?::[^\]]*)?\]", re.IGNORECASE)
 _ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_NUMBER_RE = re.compile(r"(?<![A-Za-z0-9_])[-+−﹣－＋]?\d[\d,]*(?:\.\d+)?")
+_CJK_CHAR_RE = re.compile(r"[\u3400-\u9fff]")
+_LATIN_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9'-]{1,}")
 _CITATION_LINK_RE = re.compile(r"\[[^\]\n]{0,240}\]\(citation://([A-Za-z0-9_-]{1,160})\)")
 _CLAIM_BOUNDARY_RE = re.compile(r"(?<=[.!?。！？；;])\s+|\n+")
 _FINANCIAL_NUMBER_RE = re.compile(
-    r"(?<![\w])[-+]?\d[\d,]*(?:\.\d+)?"
+    r"(?<![A-Za-z0-9_])[-+−﹣－＋]?\d[\d,]*(?:\.\d+)?"
     r"(?:\s*(?:%|bp|bps|[A-Z]{3}|百万元|亿元|万元|元|倍))",
     re.IGNORECASE,
 )
@@ -51,16 +62,6 @@ _DERIVED_CLAIM_RE = re.compile(
 _EXPLICIT_ARITHMETIC_RE = re.compile(
     r"(?:\d[\d,.]*|\))\s*(?:[+*/÷]|\s-\s)\s*(?:[-+]?\d|\()",
 )
-_ALLOWED_BINARY = {
-    ast.Add: lambda left, right: left + right,
-    ast.Sub: lambda left, right: left - right,
-    ast.Mult: lambda left, right: left * right,
-    ast.Div: lambda left, right: left / right,
-}
-_ALLOWED_UNARY = {
-    ast.UAdd: lambda value: value,
-    ast.USub: lambda value: -value,
-}
 _BASELINE_POLICY = {
     "policy_id": "oss-citation-baseline",
     "revision": "citation-baseline-v2",
@@ -79,6 +80,7 @@ def evaluate_citation_quality(
     policy_snapshot: dict[str, Any] | None,
     *,
     available_evidence: Any = (),
+    entity_aliases: Mapping[str, Iterable[str]] | None = None,
 ) -> dict[str, Any]:
     """Return a copy of *bundle* decorated with quality annotations."""
 
@@ -199,7 +201,7 @@ def evaluate_citation_quality(
     semantics = semantics if isinstance(semantics, dict) else None
 
     structured_groups: dict[
-        tuple[str, str, str, str],
+        tuple[str, str, str, str, str],
         list[tuple[str, Any]],
     ] = defaultdict(list)
     cross_source_groups: dict[
@@ -239,10 +241,10 @@ def evaluate_citation_quality(
                 evidence.get("period") or evidence.get("asOf"),
                 "",
             )
-            structured_groups[(dataset_id, record_key, field, period)].append(
+            subject = _structured_subject(citation, evidence) or ""
+            structured_groups[(subject, dataset_id, record_key, field, period)].append(
                 (citation_id, evidence.get("value"))
             )
-            subject = _structured_subject(citation, evidence)
             if subject and field and period:
                 cross_source_groups[(subject, field, period)].append(
                     (
@@ -258,6 +260,7 @@ def evaluate_citation_quality(
                 evidence,
                 time_rule,
                 issue,
+                semantics=semantics,
             )
         elif kind == "calculation":
             _validate_calculation(
@@ -375,9 +378,7 @@ def evaluate_citation_quality(
                 tier_by_citation,
                 check_tiers,
                 citation_by_id,
-                require_independent_sources=(
-                    cross_rule.get("require_independent_sources") is True
-                ),
+                require_independent_sources=(cross_rule.get("require_independent_sources") is True),
             )
         ]
         if low_without_check:
@@ -391,7 +392,7 @@ def evaluate_citation_quality(
     claim_audits, claim_metrics = _audit_claims(
         answer,
         citation_by_id,
-        list(available_evidence),
+        available_evidence,
         mode=mode,
         enabled=(
             isinstance(rules.get("factual_claim"), dict)
@@ -400,6 +401,7 @@ def evaluate_citation_quality(
         issue=issue,
         integrity=integrity,
         semantics=semantics,
+        entity_aliases=entity_aliases,
     )
     unsourced_marker_count = len(_UNSOURCED_RE.findall(answer))
     unsourced_count = unsourced_marker_count + claim_metrics["unsupported"]
@@ -443,7 +445,8 @@ def evaluate_citation_quality(
     publish_status = "ready"
     failure = config.get("failure")
     failure = failure if isinstance(failure, dict) else {}
-    if issues and failure.get("publish_on_degraded", "draft_only") == "draft_only":
+    material_issues = [entry for entry in issues if entry.get("severity") != "unverified"]
+    if material_issues and failure.get("publish_on_degraded", "draft_only") == "draft_only":
         publish_status = "draft-only"
 
     tier_counts = Counter(
@@ -485,13 +488,14 @@ def evaluate_citation_quality(
 def _audit_claims(
     answer: str,
     citation_by_id: dict[str, dict[str, Any]],
-    available_evidence: list[Any],
+    available_evidence: Iterable[Any],
     *,
     mode: str,
     enabled: bool,
     issue: Any,
     integrity: dict[str, Any],
     semantics: dict[str, Any] | None,
+    entity_aliases: Mapping[str, Iterable[str]] | None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     claims, extraction_truncated = extract_claims_with_status(
         answer,
@@ -512,7 +516,12 @@ def _audit_claims(
     }
     if extraction_truncated:
         issue("claim_audit_truncated", "L0")
-    for claim in claims:
+    canonical_entity_aliases = _entity_alias_context(
+        answer,
+        citation_by_id,
+        provided=entity_aliases,
+    )
+    for claim_index, claim in enumerate(claims):
         required = claim.citation_required if enabled else bool(claim.attached_citation_ids)
         if required:
             metrics["required"] += 1
@@ -521,10 +530,27 @@ def _audit_claims(
             for citation_id in claim.attached_citation_ids
             if citation_id in citation_by_id
         ]
+        adjacent_calculation_ids = _adjacent_calculation_citation_ids(
+            claim,
+            claim_index=claim_index,
+            claims=claims,
+            citation_by_id=citation_by_id,
+        )
+        if not citation_ids and adjacent_calculation_ids:
+            citation_ids = adjacent_calculation_ids
         issue_codes: list[str] = []
         bindings: list[dict[str, str]] = []
         status = "passed"
-        auto_bound = _claim_was_auto_bound(claim, citation_ids, citation_by_id)
+        auto_bound = bool(adjacent_calculation_ids) or _claim_was_auto_bound(
+            claim,
+            citation_ids,
+            citation_by_id,
+        )
+        equivalent_bound = _claim_was_equivalent_bound(
+            claim,
+            citation_ids,
+            citation_by_id,
+        )
         if not required:
             audits.append(
                 claim.to_bundle_dict(
@@ -538,6 +564,7 @@ def _audit_claims(
                 claim,
                 available_evidence,
                 semantics=semantics,
+                entity_aliases=entity_aliases,
             )
             if match.status == "ambiguous":
                 code = "claim_evidence_ambiguous"
@@ -546,15 +573,24 @@ def _audit_claims(
                 metrics["unverified"] += 1
                 severity = "unverified"
             elif match.status == "conflict":
-                code = "claim_evidence_conflict"
+                # With no citation attached there is no concrete evidence card
+                # the user can inspect. A discovery-time conflict is therefore
+                # an advisory matching gap, not a confirmed inline error.
+                code = "claim_evidence_ambiguous"
                 status = "unverified"
+                metrics["ambiguous"] += 1
                 metrics["unverified"] += 1
                 severity = "unverified"
             else:
                 code = _missing_claim_code(claim)
                 status = "unsupported"
                 metrics["unsupported"] += 1
-                severity = "degraded"
+                # Absence of a matching citation is a verification gap, not
+                # proof that the statement is false. It may trigger one
+                # hidden repair pass, but the preserved answer should remain
+                # publishable with a quiet advisory instead of being treated
+                # as a material conflict.
+                severity = "unverified"
             issue_codes.append(code)
             issue(
                 code,
@@ -569,19 +605,26 @@ def _audit_claims(
             support_rows: list[tuple[str, str, int]] = []
             for citation_id in citation_ids:
                 citation = citation_by_id[citation_id]
-                support = verify_evidence_support(
+                if _citation_entity_conflicts(
                     claim,
                     citation,
-                    semantics=semantics,
-                )
-                support_rows.append((citation_id, support.status, support.directness))
+                    canonical_entity_aliases,
+                ):
+                    support_rows.append((citation_id, "entity-conflict", 4))
+                else:
+                    support = verify_evidence_support(
+                        claim,
+                        citation,
+                        semantics=semantics,
+                    )
+                    support_rows.append((citation_id, support.status, support.directness))
             primary_id = _select_primary_citation(support_rows, citation_by_id)
             for citation_id, support_status, _directness in support_rows:
                 if support_status == "supported":
                     role = "primary" if citation_id == primary_id else "corroborating"
                 elif support_status == "partially-supported":
                     role = "component"
-                elif support_status == "contradicted":
+                elif support_status in {"contradicted", "entity-conflict"}:
                     role = "conflicting"
                 else:
                     role = "component"
@@ -601,14 +644,45 @@ def _audit_claims(
             supported = [row for row in support_rows if row[1] == "supported"]
             partial = [row for row in support_rows if row[1] == "partially-supported"]
             contradicted = [row for row in support_rows if row[1] == "contradicted"]
+            confirmed_contradicted = [
+                row
+                for row in contradicted
+                if citation_by_id[row[0]].get("evidence", {}).get("kind")
+                in {"structured-data", "calculation"}
+            ]
+            advisory_contradicted = [
+                row for row in contradicted if row not in confirmed_contradicted
+            ]
+            entity_conflicted = [row for row in support_rows if row[1] == "entity-conflict"]
             missing = [row for row in support_rows if row[1] == "not-found"]
-            component_covered = structured_components_cover_claim(
+            verification_gap_ids = [
+                row[0] for row in partial + missing + advisory_contradicted
+            ]
+            cross_language_gap = _cross_language_text_evidence_gap(
                 claim,
-                [citation_by_id[citation_id] for citation_id in citation_ids],
-                semantics=semantics,
+                verification_gap_ids,
+                citation_by_id,
             )
-            if contradicted or (not supported and not partial and not component_covered):
-                code = "claim_evidence_mismatch"
+            component_covered = (
+                structured_components_cover_claim(
+                    claim,
+                    [citation_by_id[citation_id] for citation_id in citation_ids],
+                    semantics=semantics,
+                )
+                or text_components_cover_claim(
+                    claim,
+                    [citation_by_id[citation_id] for citation_id in citation_ids],
+                    semantics=semantics,
+                )
+                or _calculation_components_cover_claim(
+                    claim,
+                    citation_ids,
+                    citation_by_id,
+                    semantics=semantics,
+                )
+            )
+            if entity_conflicted:
+                code = "claim_source_entity_conflict"
                 issue_codes.append(code)
                 status = "unverified"
                 metrics["mismatch"] += 1
@@ -616,21 +690,96 @@ def _audit_claims(
                 issue(
                     code,
                     "L4",
-                    citation_ids=[row[0] for row in contradicted + missing],
+                    citation_ids=[row[0] for row in entity_conflicted],
+                    claim=claim.exact,
+                    claim_id=claim.claim_id,
+                    location=claim.location,
+                    severity="degraded",
+                )
+            elif confirmed_contradicted:
+                # A concrete contradiction is materially different from the
+                # verifier merely failing to find enough matching evidence.
+                # Keep a distinct code so clients can reserve prominent
+                # warnings for facts the program can actually show conflict.
+                code = "claim_evidence_conflict"
+                issue_codes.append(code)
+                status = "unverified"
+                metrics["mismatch"] += 1
+                metrics["unverified"] += 1
+                issue(
+                    code,
+                    "L4",
+                    citation_ids=[row[0] for row in confirmed_contradicted],
                     claim=claim.exact,
                     claim_id=claim.claim_id,
                     location=claim.location,
                     severity="unverified",
                 )
-            elif not supported and (partial or missing) and not component_covered:
-                code = "claim_partially_supported"
+            elif equivalent_bound:
+                # A deterministic pre-audit pass proved this shorter recap is
+                # equivalent to an already-supported claim from the same
+                # period and metric. The underlying excerpt may not directly
+                # match a translated/abbreviated recap, so expose the actual
+                # transitive proof instead of reporting a false mismatch.
+                bindings = [
+                    (
+                        {
+                            **binding,
+                            "role": "primary" if index == 0 else "corroborating",
+                            "supportStatus": "equivalent-claim",
+                        }
+                        if binding.get("citationId") in citation_ids
+                        else binding
+                    )
+                    for index, binding in enumerate(bindings)
+                ]
+                status = "auto-bound"
+                metrics["auto_bound"] += 1
+            elif (
+                not supported
+                and not partial
+                and (missing or advisory_contradicted)
+                and not component_covered
+            ):
+                # ``not-found`` is an advisory verification gap, not proof
+                # that the statement is wrong.  Preserve it for the citation
+                # detail card without escalating the inline index.
+                code = (
+                    "claim_translation_not_verified"
+                    if cross_language_gap
+                    else "claim_evidence_mismatch"
+                )
+                issue_codes.append(code)
+                status = "unverified"
+                if code == "claim_evidence_mismatch":
+                    metrics["mismatch"] += 1
+                metrics["unverified"] += 1
+                issue(
+                    code,
+                    "L4",
+                    citation_ids=[row[0] for row in missing + advisory_contradicted],
+                    claim=claim.exact,
+                    claim_id=claim.claim_id,
+                    location=claim.location,
+                    severity="unverified",
+                )
+            elif (
+                not supported
+                and (partial or missing or advisory_contradicted)
+                and not component_covered
+            ):
+                code = (
+                    "claim_translation_not_verified"
+                    if cross_language_gap
+                    else "claim_partially_supported"
+                )
                 issue_codes.append(code)
                 status = "unverified"
                 metrics["unverified"] += 1
                 issue(
                     code,
                     "L4",
-                    citation_ids=[row[0] for row in partial + missing],
+                    citation_ids=[row[0] for row in partial + missing + advisory_contradicted],
                     claim=claim.exact,
                     claim_id=claim.claim_id,
                     location=claim.location,
@@ -660,6 +809,135 @@ def _missing_claim_code(claim: ClaimCandidate) -> str:
     return "claim_without_citation"
 
 
+_ENTITY_PAIR_RE = re.compile(
+    r"(?<![A-Za-z0-9\u3400-\u9fff])"
+    r"(?P<label>[A-Za-z\u3400-\u9fff][A-Za-z0-9\u3400-\u9fff .&-]{1,48}?)"
+    r"\s*[（(]\s*(?P<identifier>[A-Z]{1,6}|\d{5,6})\s*[)）]"
+)
+_NON_ENTITY_PAREN_IDENTIFIERS = {
+    "AGI",
+    "AI",
+    "ARR",
+    "CAGR",
+    "CAPEX",
+    "CPU",
+    "EBIT",
+    "EBITDA",
+    "EPS",
+    "GPU",
+    "IP",
+    "ROA",
+    "ROE",
+    "TAM",
+}
+
+
+def _normalize_entity_alias(value: Any) -> str:
+    return re.sub(r"[^a-z0-9\u3400-\u9fff]+", "", str(value).casefold())
+
+
+def _entity_pairs(value: str) -> list[tuple[str, str]]:
+    return [
+        (_normalize_entity_alias(match.group("label")), match.group("identifier").casefold())
+        for match in _ENTITY_PAIR_RE.finditer(value)
+        if len(_normalize_entity_alias(match.group("label"))) >= 2
+        and match.group("identifier").upper() not in _NON_ENTITY_PAREN_IDENTIFIERS
+    ]
+
+
+def _entity_alias_context(
+    answer: str,
+    citation_by_id: dict[str, dict[str, Any]],
+    *,
+    provided: Mapping[str, Iterable[str]] | None = None,
+) -> dict[str, str]:
+    """Build turn-local company-name aliases from explicit name/code pairs."""
+
+    aliases: dict[str, str] = {}
+    if provided:
+        for canonical, values in provided.items():
+            canonical_key = _normalize_entity_alias(canonical)
+            if not canonical_key:
+                continue
+            aliases[canonical_key] = canonical_key
+            for value in values:
+                alias = _normalize_entity_alias(value)
+                if len(alias) >= 2:
+                    aliases[alias] = canonical_key
+    pair_sources = [answer]
+    for citation in citation_by_id.values():
+        source = citation.get("source")
+        source = source if isinstance(source, dict) else {}
+        pair_sources.append(str(source.get("title") or ""))
+        evidence = citation.get("evidence")
+        evidence = evidence if isinstance(evidence, dict) else {}
+        entity_id = _normalize_entity_alias(evidence.get("entityId") or "")
+        entity_name = _normalize_entity_alias(evidence.get("entityName") or "")
+        if entity_id and len(entity_name) >= 2:
+            # A structured identifier only becomes comparable with a claim
+            # entity when the adapter also supplies a name that this turn can
+            # resolve.  Treating an otherwise opaque ticker as its own company
+            # used to turn translated names such as ``闪迪`` vs ``SNDK`` into
+            # a false cross-company conflict.  Unknown is not conflict.
+            canonical = aliases.get(entity_name)
+            if canonical:
+                aliases.setdefault(entity_id, canonical)
+    for value in pair_sources:
+        for label, identifier in _entity_pairs(value):
+            aliases.setdefault(identifier, identifier)
+            aliases.setdefault(label, aliases[identifier])
+    return aliases
+
+
+def _canonical_entities_in_text(value: str, aliases: dict[str, str]) -> set[str]:
+    normalized = _normalize_entity_alias(value)
+    output: set[str] = set()
+    for alias, canonical in aliases.items():
+        if len(alias) < 2:
+            continue
+        if re.fullmatch(r"[a-z0-9]{2,6}", alias):
+            if re.search(
+                rf"(?<![A-Za-z0-9]){re.escape(alias)}(?![A-Za-z0-9])",
+                value,
+                re.IGNORECASE,
+            ):
+                output.add(canonical)
+        elif alias in normalized:
+            output.add(canonical)
+    return output
+
+
+def _citation_entities(
+    citation: dict[str, Any],
+    aliases: dict[str, str],
+) -> set[str]:
+    source = citation.get("source")
+    source = source if isinstance(source, dict) else {}
+    evidence = citation.get("evidence")
+    evidence = evidence if isinstance(evidence, dict) else {}
+    output: set[str] = set()
+    for raw in (evidence.get("entityId"), evidence.get("entityName")):
+        normalized = _normalize_entity_alias(raw or "")
+        if normalized in aliases:
+            output.add(aliases[normalized])
+    title = str(source.get("title") or "")
+    output.update(identifier for _label, identifier in _entity_pairs(title))
+    output.update(_canonical_entities_in_text(title, aliases))
+    return output
+
+
+def _citation_entity_conflicts(
+    claim: ClaimCandidate,
+    citation: dict[str, Any],
+    aliases: dict[str, str],
+) -> bool:
+    claim_entities = _canonical_entities_in_text(claim.semantic_text, aliases)
+    if len(claim_entities) != 1:
+        return False
+    citation_entities = _citation_entities(citation, aliases)
+    return bool(citation_entities and claim_entities.isdisjoint(citation_entities))
+
+
 def _claim_was_auto_bound(
     claim: ClaimCandidate,
     citation_ids: list[str],
@@ -670,10 +948,62 @@ def _claim_was_auto_bound(
         annotations = annotations if isinstance(annotations, dict) else {}
         binding = annotations.get("binding")
         binding = binding if isinstance(binding, dict) else {}
-        claim_ids = binding.get("autoBoundClaimIds")
+        for key in ("autoBoundClaimIds", "autoReboundClaimIds"):
+            claim_ids = binding.get(key)
+            if isinstance(claim_ids, list) and claim.claim_id in claim_ids:
+                return True
+    return False
+
+
+def _claim_was_equivalent_bound(
+    claim: ClaimCandidate,
+    citation_ids: list[str],
+    citation_by_id: dict[str, dict[str, Any]],
+) -> bool:
+    for citation_id in citation_ids:
+        annotations = citation_by_id[citation_id].get("annotations")
+        annotations = annotations if isinstance(annotations, dict) else {}
+        binding = annotations.get("binding")
+        binding = binding if isinstance(binding, dict) else {}
+        claim_ids = binding.get("equivalentClaimIds")
         if isinstance(claim_ids, list) and claim.claim_id in claim_ids:
             return True
     return False
+
+
+def _adjacent_calculation_citation_ids(
+    claim: ClaimCandidate,
+    *,
+    claim_index: int,
+    claims: list[ClaimCandidate],
+    citation_by_id: dict[str, dict[str, Any]],
+) -> list[str]:
+    """Bind a formula block to the immediately adjacent cited result.
+
+    The calculation Evidence still has to prove the displayed arithmetic;
+    adjacency alone never creates a binding. This keeps a common two-block
+    presentation atomic without allowing an unrelated nearby citation to
+    satisfy the formula.
+    """
+    if claim.kind != "calculation" or claim.attached_citation_ids:
+        return []
+    neighbors = []
+    if claim_index > 0:
+        neighbors.append(claims[claim_index - 1])
+    if claim_index + 1 < len(claims):
+        neighbors.append(claims[claim_index + 1])
+    inherited: list[str] = []
+    for neighbor in neighbors:
+        if abs(neighbor.segment_index - claim.segment_index) != 1:
+            continue
+        for citation_id in neighbor.attached_citation_ids:
+            citation = citation_by_id.get(citation_id)
+            evidence = citation.get("evidence") if isinstance(citation, dict) else None
+            if not isinstance(evidence, dict):
+                continue
+            if calculation_formula_matches_evidence(claim.exact, evidence):
+                inherited.append(citation_id)
+    return list(dict.fromkeys(inherited))
 
 
 def _calculation_input_bindings(
@@ -733,6 +1063,48 @@ def _calculation_input_bindings(
     return output
 
 
+def _calculation_components_cover_claim(
+    claim: ClaimCandidate,
+    direct_citation_ids: list[str],
+    citation_by_id: dict[str, dict[str, Any]],
+    *,
+    semantics: dict[str, Any] | None,
+) -> bool:
+    """Accept a deterministic calculation when every dependency is verified.
+
+    A calculation record intentionally stores the formula result plus links to
+    its inputs.  It need not repeat every accounting dimension already carried
+    by those structured inputs (for example ``basis=attributable``).  Treating
+    that omission as a partial citation made a recomputed margin look suspect
+    even though the two statement fields and the arithmetic all matched.
+
+    This remains conservative: the direct calculation must at least partially
+    match the claim, every declared input must resolve to a supported citation,
+    and explicit entity/period/metric/unit contradictions still fail in
+    ``verify_evidence_support`` before this component check can apply.
+    """
+
+    if claim.kind != "calculation":
+        return False
+    for citation_id in direct_citation_ids:
+        citation = citation_by_id.get(citation_id)
+        evidence = citation.get("evidence") if isinstance(citation, dict) else None
+        if not isinstance(evidence, dict) or evidence.get("kind") != "calculation":
+            continue
+        support = verify_evidence_support(claim, citation, semantics=semantics)
+        if support.status not in {"supported", "partially-supported"}:
+            continue
+        inputs = evidence.get("inputs")
+        if not isinstance(inputs, list) or not inputs:
+            continue
+        bindings = _calculation_input_bindings([citation_id], citation_by_id)
+        if len(bindings) != len(inputs):
+            continue
+        if all(binding.get("supportStatus") == "supported" for binding in bindings):
+            return True
+    return False
+
+
 def _select_primary_citation(
     support_rows: list[tuple[str, str, int]],
     citation_by_id: dict[str, dict[str, Any]],
@@ -759,6 +1131,53 @@ def _select_primary_citation(
         return (-directness, -authority_rank, -locator_rank, citation_id)
 
     return min(supported, key=key)[0]
+
+
+def _cross_language_text_evidence_gap(
+    claim: ClaimCandidate,
+    citation_ids: list[str],
+    citation_by_id: dict[str, dict[str, Any]],
+) -> bool:
+    """Distinguish an unverified translation from an evidence mismatch.
+
+    The deterministic verifier can prove numbers, periods and direct text
+    overlap, but it cannot prove that a Chinese paraphrase is semantically
+    equivalent to an English transcript (or vice versa). Calling that common
+    case a mismatch tells the user the source is wrong when the actual limit
+    is only that no cross-language semantic verifier ran. Return true only
+    when every unresolved citation is text evidence in the opposite script;
+    mixed or same-language evidence keeps the ordinary mismatch class.
+    """
+
+    unresolved_texts: list[str] = []
+    for citation_id in citation_ids:
+        citation = citation_by_id.get(citation_id)
+        evidence = citation.get("evidence") if isinstance(citation, dict) else None
+        if not isinstance(evidence, dict) or evidence.get("kind") != "text":
+            return False
+        evidence_text = " ".join(
+            str(evidence.get(key) or "")
+            for key in ("prefix", "quote", "suffix", "snippet")
+        ).strip()
+        if not evidence_text:
+            return False
+        unresolved_texts.append(evidence_text)
+    if not unresolved_texts:
+        return False
+
+    claim_cjk = len(_CJK_CHAR_RE.findall(claim.exact))
+    claim_latin = len(_LATIN_WORD_RE.findall(claim.exact))
+    for evidence_text in unresolved_texts:
+        evidence_cjk = len(_CJK_CHAR_RE.findall(evidence_text))
+        evidence_latin = len(_LATIN_WORD_RE.findall(evidence_text))
+        opposite_script = (
+            claim_cjk >= 4 and evidence_cjk < 2 and evidence_latin >= 4
+        ) or (
+            claim_latin >= 4 and evidence_latin < 2 and evidence_cjk >= 4
+        )
+        if not opposite_script:
+            return False
+    return True
 
 
 def _merge_issues_into_claim_audits(
@@ -872,6 +1291,10 @@ def _structured_subject(
     source = citation.get("source")
     source = source if isinstance(source, dict) else {}
     dataset_id = _clean_text(evidence.get("datasetId"), "")
+    for raw in (evidence.get("entityId"), evidence.get("entityName")):
+        subject = _clean_text(raw, "")
+        if subject:
+            return subject
     for raw in (source.get("sourceId"), evidence.get("recordKey")):
         value = _clean_text(raw, "")
         if not value:
@@ -920,9 +1343,11 @@ def _validate_structured_evidence(
         issue("structured_value_missing", "L1", citation_ids=[citation_id])
         return
     numeric = _as_decimal(value) is not None
+    semantic_options = evidence_semantic_options(evidence, semantics)
+    require_unit = semantic_options.get("require_unit", rule.get("require_unit"))
     if (
         numeric
-        and rule.get("require_unit") is True
+        and require_unit is True
         and not _clean_text(
             evidence.get("unit"),
             "",
@@ -940,6 +1365,8 @@ def _validate_structured_evidence(
             value,
             _clean_text(evidence.get("unit"), ""),
             claim_text,
+            field=_clean_text(evidence.get("field"), ""),
+            metric=_clean_text(evidence.get("metric"), ""),
             semantics=semantics,
         ):
             issue(
@@ -990,15 +1417,32 @@ def _validate_calculation(
         if isinstance(input_evidence, dict):
             input_kind = input_evidence.get("kind")
             if input_kind == "structured-data":
-                if _stable_scalar(input_evidence.get("value")) != _stable_scalar(item.get("value")):
+                cited_unit = _clean_text(input_evidence.get("unit"), "")
+                input_unit = _clean_text(item.get("unit"), "")
+                # A Collection Address already identifies the exact structured
+                # field.  Calculation tools may preserve only that address and
+                # numeric value, so inherit the field's trusted unit instead of
+                # treating an omitted duplicate unit as a mismatch.
+                if not input_unit and cited_unit:
+                    input_unit = cited_unit
+                    item["unit"] = cited_unit
+                if not structured_values_equivalent(
+                    input_evidence.get("value"),
+                    cited_unit,
+                    item.get("value"),
+                    input_unit,
+                    semantics=semantics,
+                ):
                     issue(
                         "calculation_input_value_mismatch",
                         "L4",
                         citation_ids=[citation_id, input_citation_id],
                     )
-                cited_unit = _clean_text(input_evidence.get("unit"), "")
-                input_unit = _clean_text(item.get("unit"), "")
-                if (cited_unit or input_unit) and cited_unit != input_unit:
+                if (cited_unit or input_unit) and not structured_units_compatible(
+                    cited_unit,
+                    input_unit,
+                    semantics=semantics,
+                ):
                     issue(
                         "calculation_input_unit_mismatch",
                         "L4",
@@ -1089,15 +1533,21 @@ def _validate_calculation_input_semantics(
                 citation_ids=citation_ids,
             )
 
-    calculation_entity = _clean_text(
-        calculation.get("entityId") or calculation.get("entityName"),
-        "",
+    calculation_entity_id = _clean_text(calculation.get("entityId"), "")
+    input_entity_id = _clean_text(input_evidence.get("entityId"), "")
+    calculation_entity_name = _clean_text(calculation.get("entityName"), "")
+    input_entity_name = _clean_text(input_evidence.get("entityName"), "")
+    entity_conflicts = (
+        calculation_entity_id and input_entity_id and calculation_entity_id != input_entity_id
+    ) or (
+        calculation_entity_name
+        and input_entity_name
+        and calculation_entity_name.casefold() != input_entity_name.casefold()
     )
-    input_entity = _clean_text(
-        input_evidence.get("entityId") or input_evidence.get("entityName"),
-        "",
-    )
-    if calculation_entity and input_entity and calculation_entity != input_entity:
+    # IDs and names are different namespaces.  A calculation that says
+    # ``贵州茅台`` and an input identified as ``600519`` are not contradictory
+    # merely because one side lacks the other's representation.
+    if entity_conflicts:
         issue(
             "calculation_input_entity_mismatch",
             "L4",
@@ -1138,7 +1588,11 @@ def _validate_calculation_input_semantics(
         if input_name == "current"
         else _previous_comparable_period(calculation_period)
     )
-    if not input_period or not expected_period or input_period != expected_period:
+    if (
+        not input_period
+        or not expected_period
+        or not evidence_periods_compatible(input_period, expected_period)
+    ):
         issue(
             "calculation_input_period_mismatch",
             "L4",
@@ -1160,6 +1614,8 @@ def _validate_time_boundary(
     evidence: dict[str, Any],
     rule: dict[str, Any],
     issue: Any,
+    *,
+    semantics: dict[str, Any] | None = None,
 ) -> None:
     if rule.get("forbid_extrapolation") is not True:
         return
@@ -1174,13 +1630,23 @@ def _validate_time_boundary(
     as_of = _date_prefix(evidence.get("asOf"))
     start = _date_prefix(coverage.get("start"))
     end = _date_prefix(coverage.get("end"))
-    if rule.get("require_coverage") is True and as_of and not (start or end):
+    if (
+        rule.get("require_coverage") is True
+        and as_of
+        and not (start or end)
+        and _claim_requires_range_coverage(claim_text)
+    ):
         issue("evidence_coverage_missing", "L5", citation_ids=[citation_id])
     if as_of and start and as_of < start:
         issue("evidence_before_coverage", "L5", citation_ids=[citation_id])
     if as_of and end and as_of > end:
         issue("evidence_after_coverage", "L5", citation_ids=[citation_id])
-    claim_dates = _ISO_DATE_RE.findall(claim_text)
+    semantic_options = evidence_semantic_options(evidence, semantics)
+    claim_dates = (
+        []
+        if semantic_options.get("date_role") == "publication"
+        else _ISO_DATE_RE.findall(claim_text)
+    )
     if start and any(value < start for value in claim_dates):
         issue(
             "claim_before_evidence_coverage",
@@ -1197,30 +1663,39 @@ def _validate_time_boundary(
         )
 
 
+def _claim_requires_range_coverage(claim_text: str) -> bool:
+    """Return whether a claim needs interval coverage rather than a snapshot.
+
+    ``asOf`` and ``period`` identify a point or reporting-period observation.
+    They are sufficient for claims about that observation.  A separate
+    coverage range is only required when the prose asserts a span, trend or
+    change over time.  Requiring ``coverage`` for every structured snapshot
+    made exact financial-statement fields look unverified to users.
+    """
+
+    if re.search(
+        r"(?:"
+        r"(?:从|自).{0,32}(?:至|到|截至)|"
+        r"(?:过去|近|最近|连续)\s*(?:\d+|一|两|三|四|五|六|七|八|九|十)?\s*"
+        r"(?:天|周|月|季|季度|年)|"
+        r"(?:区间|期间内|时间段|走势|趋势|历史变化)|"
+        r"\b(?:from|between|since|through|over|during|trend|history)\b"
+        r")",
+        claim_text,
+        re.IGNORECASE,
+    ):
+        return True
+
+    temporal_values = {
+        value
+        for value in _ISO_DATE_RE.findall(claim_text)
+        if isinstance(value, str) and value
+    }
+    return len(temporal_values) > 1
+
+
 def _safe_decimal_eval(expression: str, values: dict[str, Decimal]) -> Decimal:
-    if len(expression) > 500:
-        raise ValueError("expression_too_long")
-    root = ast.parse(expression, mode="eval")
-
-    def evaluate(node: ast.AST, depth: int = 0) -> Decimal:
-        if depth > 32:
-            raise ValueError("expression_too_deep")
-        if isinstance(node, ast.Expression):
-            return evaluate(node.body, depth + 1)
-        if isinstance(node, ast.Name) and node.id in values:
-            return values[node.id]
-        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
-            return Decimal(str(node.value))
-        if isinstance(node, ast.BinOp) and type(node.op) in _ALLOWED_BINARY:
-            return _ALLOWED_BINARY[type(node.op)](
-                evaluate(node.left, depth + 1),
-                evaluate(node.right, depth + 1),
-            )
-        if isinstance(node, ast.UnaryOp) and type(node.op) in _ALLOWED_UNARY:
-            return _ALLOWED_UNARY[type(node.op)](evaluate(node.operand, depth + 1))
-        raise ValueError("unsupported_expression")
-
-    return evaluate(root)
+    return evaluate_decimal_expression(expression, values)
 
 
 def _expression_has_additive_op(expression: str) -> bool:
@@ -1266,7 +1741,10 @@ def _as_decimal(value: Any) -> Decimal | None:
     if isinstance(value, bool) or value is None:
         return None
     try:
-        result = Decimal(str(value).replace(",", ""))
+        normalized = str(value).translate(
+            str.maketrans({"−": "-", "﹣": "-", "－": "-", "＋": "+"})
+        )
+        result = Decimal(normalized.replace(",", ""))
     except (InvalidOperation, ValueError):
         return None
     return result if result.is_finite() else None
@@ -1275,26 +1753,41 @@ def _as_decimal(value: Any) -> Decimal | None:
 def _value_present(value: Any, text: str) -> bool:
     if not text:
         return False
-    literal = _stable_scalar(value)
-    candidates = {literal, literal.replace(",", "")}
     decimal = _as_decimal(value)
     if decimal is not None:
-        normalized = format(decimal, "f")
-        candidates.add(normalized)
-        if "." in normalized:
-            candidates.add(normalized.rstrip("0").rstrip("."))
-        integer = int(decimal)
-        if decimal == integer:
-            candidates.add(f"{integer:,}")
-    return any(candidate and candidate in text for candidate in candidates)
+        for match in _NUMBER_RE.finditer(text):
+            candidate_text = match.group(0).translate(
+                str.maketrans({"−": "-", "﹣": "-", "－": "-", "＋": "+"})
+            )
+            if not candidate_text.startswith(("-", "+")):
+                prefix = text[max(0, match.start() - 32) : match.start()]
+                if re.search(
+                    r"(?:同比|环比)?\s*(?:下降|减少|下跌|降低)\s*$|"
+                    r"\b(?:declined?|decreased?|fell|down)\s+(?:by\s+)?$",
+                    prefix,
+                    re.IGNORECASE,
+                ):
+                    candidate_text = f"-{candidate_text}"
+            candidate = _as_decimal(candidate_text)
+            if candidate is not None and candidate == decimal:
+                return True
+        return False
+    literal = _stable_scalar(value)
+    return bool(literal and literal.casefold() in text.casefold())
 
 
 def _citation_claim_groups(answer: str) -> list[tuple[str, set[str]]]:
     groups: list[tuple[str, set[str]]] = []
     for segment in _CLAIM_BOUNDARY_RE.split(answer):
-        citation_ids = set(_CITATION_LINK_RE.findall(segment))
-        if citation_ids:
-            groups.append((segment, citation_ids))
+        comma_parts = re.split(r"(?<!\d)[,，]|[,，](?!\d)", segment)
+        if len(comma_parts) > 1 and all(_CITATION_LINK_RE.search(part) for part in comma_parts):
+            candidates = comma_parts
+        else:
+            candidates = [segment]
+        for candidate in candidates:
+            citation_ids = set(_CITATION_LINK_RE.findall(candidate))
+            if citation_ids:
+                groups.append((candidate, citation_ids))
     return groups
 
 
@@ -1319,8 +1812,49 @@ def _citation_context(
     citation_id: str,
     groups: list[tuple[str, set[str]]],
 ) -> str:
+    table_contexts = _markdown_table_citation_contexts(answer, citation_id)
+    if table_contexts:
+        return "\n\n".join(table_contexts)
     matches = [text for text, ids in groups if citation_id in ids]
     return "\n".join(matches) if matches else answer
+
+
+def _markdown_table_citation_contexts(answer: str, citation_id: str) -> list[str]:
+    """Return self-contained table snippets for a citation-bearing cell.
+
+    The generic citation grouping intentionally narrows validation to the line
+    containing a citation.  For a Markdown table that drops the column header,
+    including contextual units such as ``（亿元）``.  Reattach the header and
+    delimiter row so structured-value preflight validates the same atomic
+    table-cell claim that the claim auditor sees later.
+    """
+
+    marker = f"citation://{citation_id}"
+    lines = answer.splitlines()
+    contexts: list[str] = []
+    delimiter_re = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$")
+    for row_index, row in enumerate(lines):
+        if marker not in row or row.count("|") < 2:
+            continue
+        block_start = row_index
+        while block_start > 0 and "|" in lines[block_start - 1]:
+            block_start -= 1
+        delimiter_index = next(
+            (index for index in range(block_start, row_index) if delimiter_re.match(lines[index])),
+            None,
+        )
+        if delimiter_index is None or delimiter_index <= block_start:
+            continue
+        contexts.append(
+            "\n".join(
+                (
+                    lines[delimiter_index - 1],
+                    lines[delimiter_index],
+                    row,
+                )
+            )
+        )
+    return list(dict.fromkeys(contexts))
 
 
 def _looks_like_derived_claim(

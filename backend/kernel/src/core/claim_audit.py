@@ -16,22 +16,43 @@ import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
+from functools import lru_cache
 from typing import Any, Literal
 
 from markdown_it import MarkdownIt
+from src.core.calculation import evaluate_decimal_expression
 
-CLAIM_EXTRACTOR_REVISION = "claim-extractor-v1"
-CLAIM_VERIFIER_REVISION = "claim-verifier-local-v1"
+CLAIM_EXTRACTOR_REVISION = "claim-extractor-v2"
+CLAIM_VERIFIER_REVISION = "claim-verifier-local-v2"
 MAX_CLAIMS_PER_ANSWER = 1_000
+
+# Policy snapshots are immutable for the lifetime of one turn. Keep a small
+# identity cache for their normalized unit ontology so hot verification paths
+# do not rebuild the same Decimal/alias tuples hundreds of thousands of times.
+# The original mapping and raw units object are retained in each entry, which
+# prevents Python object-id reuse from returning a different policy's data.
+_UNIT_DEFINITIONS_BY_POLICY: dict[
+    int,
+    tuple[Mapping[str, Any], Any, tuple[tuple[str, tuple[str, ...], Decimal], ...]],
+] = {}
+_MAX_UNIT_DEFINITION_POLICIES = 32
 
 _CITATION_LINK_RE = re.compile(
     r"\[([^\]\n]{0,240})\]\((citation|evidence)://([A-Za-z0-9_-]{1,160})\)"
 )
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]\n]{0,240})\]\(([^)\n]+)\)")
-_SENTENCE_BOUNDARY_RE = re.compile(r"(?:[!?。！？；;]+|\.(?!\d))(?=\s|$)")
-_NUMBER_RE = re.compile(r"(?<![\w])[-+]?\d[\d,]*(?:\.\d+)?")
+_SENTENCE_BOUNDARY_RE = re.compile(
+    r"(?:[。！？；]+[”’」』】》\"']?|"
+    r"[!?;]+[”’」』】》\"']?(?=\s|$)|"
+    r"\.(?!\d)[”’」』】》\"']?(?=\s|$)|"
+    # Markdown soft/hard breaks are explicit record boundaries.  Treating
+    # them as whitespace joined the last metric on one row with the entity on
+    # the next row and produced cross-row citation mismatches.
+    r"\n+)"
+)
+_NUMBER_RE = re.compile(r"(?<![A-Za-z0-9_])[-+−﹣－＋]?\d[\d,]*(?:\.\d+)?")
 _FINANCIAL_NUMBER_RE = re.compile(
-    r"(?<![\w])[-+]?\d[\d,]*(?:\.\d+)?\s*"
+    r"(?<![A-Za-z0-9_])[-+−﹣－＋]?\d[\d,]*(?:\.\d+)?\s*"
     r"(?:%|bp|bps|(?:USD|CNY|EUR|GBP|JPY|HKD)[kmb]?|百万元|亿元|万元|元|倍)",
     re.IGNORECASE,
 )
@@ -44,15 +65,73 @@ _DERIVED_RE = re.compile(
     r"\bCAGR\b|\byoy\b|\bqoq\b|\bgrowth(?: rate)?\b|\bmargin\b|\bratio\b)",
     re.IGNORECASE,
 )
+_FORMULA_LABEL_RE = re.compile(
+    r"(?:计算公式|计算式|算式|公式|calculation\s+formula|formula)",
+    re.IGNORECASE,
+)
+_ARITHMETIC_OPERATOR_RE = re.compile(r"(?:[+*/÷×]|\s[-−﹣－]\s)")
+_LATEX_FORMULA_RE = re.compile(r"\\(?:frac|times|div)\b")
 _REASONING_RE = re.compile(
     r"(?:我认为|我们认为|可能|或许|预计|推测|建议|值得关注|"
     r"\b(?:may|might|could|should|likely|suggests?|appears?|recommend)\b)",
+    re.IGNORECASE,
+)
+_HYPOTHETICAL_RE = re.compile(
+    r"(?:示例|例如|举例|比如|假设|假定|假如|某公司|"
+    r"\b(?:for example|e\.g\.|suppose|assuming?|hypothetical)\b)",
+    re.IGNORECASE,
+)
+_DEFINITION_RE = re.compile(
+    r"^(?:(?:[A-Z][A-Za-z0-9 /_-]{1,24})"
+    r"(?:（[^）]{1,80}）|\([^)]{1,80}\))?\s*"
+    r"(?:是指|指的是|是|表示|衡量|用于衡量|means?\b|refers? to\b|measures?\b)|"
+    r"[^，。！？;；]{1,30}(?:是指|指的是|用于衡量|refers? to\b))",
+    re.IGNORECASE,
+)
+_LABELED_DEFINITION_RE = re.compile(
+    r"^[^，。！？!?；;:：\n]{1,40}\s*[:：]\s*"
+    r"[^。！？!?\n]{0,120}(?:是指|指的是|表示|衡量|等于|减去|加上|除以|"
+    r"由.{0,40}组成|属于)"
+    r"|^[A-Za-z][A-Za-z0-9 /_-]{1,30}\s*[:：]\s*"
+    r"(?:means?|refers? to|measures?)\b",
+    re.IGNORECASE,
+)
+_EXPLANATORY_ANALOGY_RE = re.compile(
+    r"^(?:通俗理解|直观理解|简单理解|简单来说|换句话说|可以理解为)\s*[:：]",
+    re.IGNORECASE,
+)
+_DEFINITION_HEADING_RE = re.compile(
+    r"^[^。！？!?；;:：\n]{1,48}(?:（[^）\n]{2,80}）|\([^\)\n]{2,80}\))$",
     re.IGNORECASE,
 )
 _USER_PROVIDED_RE = re.compile(
     r"(?:你(?:说|提供|提到)|用户(?:说|提供|提到)|"
     r"\b(?:you said|you provided|according to you)\b)",
     re.IGNORECASE,
+)
+_EXPLICIT_ATTRIBUTION_RE = re.compile(
+    r"(?:"
+    r"(?:管理层|公司|机构|分析师|研究员|报告|公告|财报|电话会).{0,12}"
+    r"(?:表示|称|披露|指出|提到|认为|预计|宣称)|"
+    r"(?:表示|称|披露|指出|提到|认为|预计|宣称).{0,12}"
+    r"(?:管理层|公司|机构|分析师|研究员|报告|公告|财报|电话会)|"
+    r"\baccording to\b|"
+    r"\b(?:management|the company|analysts?|researchers?)\s+"
+    r"(?:said|stated|reported|disclosed|noted|expects?|believes?|claims?)\b"
+    r")",
+    re.IGNORECASE,
+)
+_NEGATIVE_DISCLOSURE_RE = re.compile(
+    r"(?:未(?:披露|给出|提供|说明|提及|找到|检索到|发现|查到|出现)|"
+    r"没有(?:披露|给出|提供|说明|提及|找到|检索到|发现|查到|出现)|"
+    r"无(?:明确|具体|相关|匹配|可用).{0,12}(?:披露|说明|数字|数据|表述|资料|结果)|"
+    r"\b(?:not disclosed|not provided|not stated|not reported|not found|"
+    r"no (?:specific|explicit|matching|relevant) .{0,32} (?:was|were )?"
+    r"(?:disclosed|provided|stated|reported|found))\b)",
+    re.IGNORECASE,
+)
+_QUOTED_SOURCE_FRAGMENT_RE = re.compile(
+    r"(?:[“「『]([^”」』\n]{8,240})[”」』]|\"([^\"\n]{8,240})\")"
 )
 _NOT_FOUND_RE = re.compile(
     r"(?:未(?:找到|检索到|发现|查到)|没有(?:找到|检索到|发现|查到)|"
@@ -61,12 +140,76 @@ _NOT_FOUND_RE = re.compile(
     r"could not find|unable to find|search returned no results?)\b)",
     re.IGNORECASE,
 )
+_LIMITATION_RE = re.compile(
+    r"(?:来源(?:定位|覆盖).{0,12}(?:不完整|不足)|"
+    r"(?:当前|现有)(?:来源|资料|检索结果).{0,8}"
+    r"(?:未披露|未提供|未包含|未覆盖|没有).{0,8}(?:数字|数据|金额)?|"
+    r"(?:暂时|目前|当前)?.{0,8}(?:无法|不能)(?:定位|核验|验证)|"
+    r"(?:证据|来源).{0,8}(?:不足|缺失|不完整)|以原始资料为准|"
+    r"\b(?:source coverage is incomplete|could not be verified|"
+    r"cannot be verified|unable to verify|check the original material)\b)",
+    re.IGNORECASE,
+)
+_PRESENTATION_RE = re.compile(
+    r"(?:结果如下|如下所示|以下(?:是|为)|概览如下|一览|"
+    r"(?:原文|正文)(?:如下)?\s*[:：]\s*$|"
+    r"(?:本|该)?(?:报告|回答|表格|内容).{0,20}(?:按|以).{0,20}(?:呈现|整理|分类|分组|排列)|"
+    r"(?:数据|资料|来源|信息).{0,8}(?:已充分|已齐全|已收集|已获取)|"
+    r"(?:现在|接下来|下面)(?:开始|将|直接)?.{0,12}(?:整合|汇总|整理|撰写|生成).{0,12}(?:来源|报告|结果|内容)?|"
+    r"(?:已|已经)(?:找到|检索到|收集到|获取到).{0,20}(?:资料|来源|数据|信息)|"
+    r"\b(?:results? (?:are|follow)|summary follows)\b)",
+    re.IGNORECASE,
+)
+_SOURCE_ATTRIBUTION_SUMMARY_RE = re.compile(
+    r"^(?:以上|以下|上述|前述|本表|本回答).{0,32}"
+    r"(?:均|全部)?(?:引自|来自|来源于|依据).{0,80}"
+    r"(?:报告|年报|财报|公告|文档|文件)[^。！？!?]{0,40}[。.!]?$",
+    re.IGNORECASE,
+)
+_SCOPE_DESCRIPTOR_RE = re.compile(
+    r"^\s*(?:期间|报告期|财年|统计期|period|reporting period|fiscal year)\s*[:：]"
+    r"[^。！？!?\n]{1,100}"
+    r"(?:[|｜,，；;]\s*(?:单位|币种|口径|范围|unit|currency|scope)\s*[:：]"
+    r"[^。！？!?\n]{1,80})+\s*$",
+    re.IGNORECASE,
+)
+_ABBREVIATED_METRIC_RE = re.compile(
+    r"^\s*(?:(?:19|20)\d{2}\s*年|上年(?:同期)?|去年|本期|上期)\s*"
+    r"(?:为|是|达到|录得|约为|约|was\b|were\b)",
+    re.IGNORECASE,
+)
 _SOURCE_HEADING_RE = re.compile(
     r"^(?:sources?|references?|citations?|来源|参考来源|引用来源|参考资料)\s*[:：]?$",
     re.IGNORECASE,
 )
+_TABLE_SOURCE_HEADER_RE = re.compile(
+    r"^(?:sources?|references?|citations?|来源|引用|参考来源|引用来源|"
+    r"数据来源|资料来源|关键数据来源)$",
+    re.IGNORECASE,
+)
+_TABLE_SCOPE_DESCRIPTOR_RE = re.compile(
+    r"^.{1,180}\s+—\s+(?:单位|币种|期间|报告期|财年|"
+    r"unit|currency|period|reporting period|fiscal year)\s*[:：]",
+    re.IGNORECASE,
+)
+_TABLE_SCOPE_HEADER_RE = re.compile(
+    r"^(?:单位|币种|期间|报告期|财年|统计期|口径|范围|截至日期|"
+    r"unit|currency|period|reporting period|fiscal year|scope|as of)$",
+    re.IGNORECASE,
+)
+_TABLE_EMPTY_PLACEHOLDER_RE = re.compile(
+    r"^(?:[-—–]+|N\s*/?\s*A|NOT\s+AVAILABLE)$",
+    re.IGNORECASE,
+)
+_SECTION_TITLE_RE = re.compile(
+    r"^(?:(?:第?[一二三四五六七八九十百]+|\d+)[.、．)）]\s*)"
+    r"[^.!?。！？；;]{1,100}$"
+)
+_SECTION_SLASH_LABEL_RE = re.compile(
+    r"^[^.!?。！？；;:：]{1,40}\s*[/／]\s*[^.!?。！？；;:：]{1,40}$"
+)
 _DECLARATIVE_RE = re.compile(
-    r"(?:是|为|有|达到|增长|下降|成立|发布|宣布|位于|属于|担任|"
+    r"(?:是|为|拥有|具有|达到|增长|下降|成立|发布|宣布|位于|属于|担任|"
     r"\b(?:is|are|was|were|has|have|had|founded|reported|announced|"
     r"serves?|became|increases?|increased|grows?|grew|rises?|rose|"
     r"decreases?|decreased|declines?|declined|falls?|fell|reached|located)\b)",
@@ -93,6 +236,33 @@ _METRIC_STOP_WORDS = {
     "were",
     "year",
     "fy",
+}
+_CITATION_LABEL_PLACEHOLDERS = {
+    "calc",
+    "calculation",
+    "citation",
+    "citations",
+    "cite",
+    "data",
+    "document",
+    "evidence",
+    "filing",
+    "news",
+    "reference",
+    "references",
+    "report",
+    "source",
+    "sources",
+    "出处",
+    "分析",
+    "原文",
+    "报告",
+    "引用",
+    "来源",
+    "数据",
+    "计算",
+    "表格",
+    "财报",
 }
 
 
@@ -163,6 +333,23 @@ class AutoBindResult:
 
 
 @dataclass(frozen=True)
+class CompositeAutoBindResult:
+    """Provisional multi-handle bindings for one composite text claim."""
+
+    text: str
+    claim_handles: dict[str, tuple[str, ...]]
+
+
+@dataclass(frozen=True)
+class ClaimBindingResult:
+    """All safe deterministic binding edits from one claim-extraction pass."""
+
+    text: str
+    auto_bound_claim_handles: dict[str, tuple[str, ...]]
+    rebound_claim_handles: dict[str, str]
+
+
+@dataclass(frozen=True)
 class _TableCell:
     content: str
     absolute_start: int
@@ -212,6 +399,7 @@ def extract_claims_with_status(
     parser = MarkdownIt("commonmark").enable("table")
     tokens = parser.parse(answer)
     line_offsets = _line_offsets(answer)
+    global_fiscal_year_context = _unique_fiscal_year_context(answer)
     claims = _ClaimAccumulator()
     block_index = -1
     list_stack: list[dict[str, int]] = []
@@ -223,6 +411,7 @@ def extract_claims_with_status(
     table_data_row = -1
     inline_search_cursor: dict[tuple[int, int], int] = {}
     heading_context: dict[int, str] = {}
+    narrative_context = ""
     pending_heading_level: int | None = None
     skip_remainder = False
 
@@ -289,7 +478,20 @@ def extract_claims_with_status(
                     mode=mode,
                     semantics=semantics,
                     normalization_context=" ".join(
-                        heading_context[level] for level in sorted(heading_context)
+                        part
+                        for part in (
+                            *(heading_context[level] for level in sorted(heading_context)),
+                            narrative_context,
+                            (
+                                global_fiscal_year_context
+                                if any(
+                                    re.search(r"(?<![A-Z0-9])Q[1-4](?!\d)", header, re.I)
+                                    for header in table_headers
+                                )
+                                else ""
+                            ),
+                        )
+                        if part
                     ),
                 )
             table_row_cells = []
@@ -314,7 +516,14 @@ def extract_claims_with_status(
             if plain_heading:
                 heading_context[pending_heading_level] = plain_heading
             continue
-        inherited_context = " ".join(heading_context[level] for level in sorted(heading_context))
+        inherited_context = " ".join(
+            part
+            for part in (
+                *(heading_context[level] for level in sorted(heading_context)),
+                narrative_context,
+            )
+            if part
+        )
         if table_block_index is not None:
             table_row_cells.append(
                 _TableCell(
@@ -348,6 +557,25 @@ def extract_claims_with_status(
             semantics=semantics,
             normalization_context=inherited_context,
         )
+        # A short presentation sentence can establish the entity/period for
+        # the table or formula that follows.  Preserve that discourse context
+        # for semantic verification without turning the preface itself into a
+        # source-required claim.
+        block_kind = _classify_claim(plain_block.strip())
+        if (
+            not list_stack
+            and len(plain_block.strip()) <= 200
+            and (
+                block_kind == "presentation"
+                or _is_structural_emphasis_label(token.content)
+                or _is_metric_context_emphasis_label(token.content, semantics)
+                or (
+                    block_kind == "reasoning"
+                    and _HYPOTHETICAL_RE.search(plain_block.strip()) is not None
+                )
+            )
+        ):
+            narrative_context = plain_block.strip()
     return list(claims), claims.truncated
 
 
@@ -356,19 +584,121 @@ def match_available_evidence(
     records: Iterable[Any],
     *,
     semantics: Mapping[str, Any] | None = None,
+    entity_aliases: Mapping[str, Iterable[str]] | None = None,
 ) -> EvidenceMatch:
-    """Return a unique exact Registry candidate or an explicit ambiguity."""
+    """Return the Resolver's safe binding decision through the legacy API."""
 
-    exact: list[str] = []
+    # Build once per turn in the caller when possible.  The compatibility
+    # entrypoint still accepts a plain iterable for isolated tests and legacy
+    # callers, but all expensive verification is restricted to the index's
+    # bounded high-recall union rather than the entire Registry.
+    from src.core.claim_evidence_resolution import (
+        ensure_evidence_candidate_index,
+        resolve_claim_evidence,
+    )
+
+    candidate_index = ensure_evidence_candidate_index(records, semantics=semantics)
+    cached_match = candidate_index.cached_match(claim, entity_aliases)
+    if isinstance(cached_match, EvidenceMatch):
+        return cached_match
+
+    def finish(match: EvidenceMatch) -> EvidenceMatch:
+        candidate_index.store_match(claim, entity_aliases, match)
+        return match
+
+    available = tuple(
+        sorted(
+            candidate_index.candidate_records(claim),
+            key=lambda record: candidate_index.record_position(_evidence_parts(record)[0]),
+        )
+    )
+    legacy = _legacy_match_available_evidence(
+        claim,
+        available,
+        semantics=semantics,
+        entity_aliases=entity_aliases,
+        support_index=candidate_index,
+    )
+    if legacy.status == "exact":
+        # The previous exact path is already a high-precision verifier and has
+        # a stable same-document specificity tie-break. Keep that safe result;
+        # the Resolver extends the cases where the old matcher returned none.
+        return finish(legacy)
+    resolution = resolve_claim_evidence(
+        claim,
+        candidate_index,
+        semantics=semantics,
+        entity_aliases=entity_aliases,
+    )
+    if resolution.status == "verified" and len(resolution.selected_handles) == 1:
+        return finish(EvidenceMatch("exact", resolution.selected_handles))
+    if resolution.status == "ambiguous":
+        supported = tuple(
+            handle
+            for handle in resolution.candidate_handles
+            if resolution.support_by_handle.get(handle) == "supported"
+        )
+        # Preserve the established focused-child selection for duplicate
+        # excerpts from one document. The Resolver currently treats every
+        # independently supported item as ambiguous; this legacy helper is a
+        # safe deterministic tie-break until source grouping moves into v2.
+        if legacy.status == "exact":
+            return finish(legacy)
+        if legacy.status == "ambiguous":
+            return finish(legacy)
+        return finish(EvidenceMatch("ambiguous", supported))
+    if resolution.status in {"contradicted", "calculation-invalid"}:
+        return finish(EvidenceMatch("conflict", resolution.selected_handles))
+
+    # Detect a set-level structured conflict without converting an unbound
+    # conflict into an automatic repair. Existing callers use this only as an
+    # advisory match state; the Resolver remains the authority for actions.
+    if legacy.status == "conflict":
+        return finish(legacy)
+    return finish(EvidenceMatch("none"))
+
+
+def _legacy_match_available_evidence(
+    claim: ClaimCandidate,
+    records: Iterable[Any],
+    *,
+    semantics: Mapping[str, Any] | None = None,
+    entity_aliases: Mapping[str, Iterable[str]] | None = None,
+    support_index: Any | None = None,
+) -> EvidenceMatch:
+    """Previous exact matcher retained only for deterministic tie/conflict compatibility."""
+
+    # Local import avoids the module cycle documented in
+    # ``match_available_evidence`` while sharing the Resolver's turn-local
+    # entity semantics with the legacy high-precision path.
+    from src.core.claim_evidence_resolution import evidence_entity_conflicts
+
+    exact: list[tuple[str, Mapping[str, Any], Mapping[str, Any], EvidenceSupport]] = []
     semantic_values: dict[tuple[str, str, str, str, str], set[str]] = {}
     semantic_handles: dict[tuple[str, str, str, str, str], list[str]] = {}
     for record in records:
-        handle, _source, evidence = _evidence_parts(record)
+        handle, source, evidence = _evidence_parts(record)
         if not handle or not isinstance(evidence, Mapping):
             continue
-        support = verify_evidence_support(claim, evidence, semantics=semantics)
+        if evidence_entity_conflicts(
+            claim.semantic_text,
+            source,
+            evidence,
+            entity_aliases,
+        ):
+            continue
+        support_for = getattr(support_index, "support_for", None)
+        support = (
+            support_for(claim, handle, source, evidence)
+            if callable(support_for)
+            else verify_evidence_support(
+                claim,
+                {"source": source, "evidence": evidence},
+                semantics=semantics,
+            )
+        )
         if support.status == "supported":
-            exact.append(handle)
+            exact.append((handle, source, evidence, support))
         if evidence.get("kind") != "structured-data":
             continue
         semantic_key = (
@@ -399,11 +729,27 @@ def match_available_evidence(
     ]
     if conflicts:
         return EvidenceMatch("conflict", tuple(dict.fromkeys(conflicts)))
-    exact = list(dict.fromkeys(exact))
+    exact_by_handle = {row[0]: row for row in exact}
+    exact = list(exact_by_handle.values())
     if len(exact) == 1:
-        return EvidenceMatch("exact", (exact[0],))
+        return EvidenceMatch("exact", (exact[0][0],))
     if len(exact) > 1:
-        return EvidenceMatch("ambiguous", tuple(exact))
+        # Multiple independent sources are useful corroboration, not a safe
+        # reason to choose one citation silently.  Duplicate chunks from the
+        # same document are different: prefer one uniquely tighter excerpt so
+        # a broad fetched page and its focused child chunk do not make an
+        # otherwise exact claim look ambiguous.
+        identities = {_source_identity(row[1]) for row in exact}
+        if len(identities) == 1 and "" not in identities:
+            scored = [
+                (_evidence_match_specificity(claim, row[2], row[3], semantics), row[0])
+                for row in exact
+            ]
+            best_score = max(score for score, _handle in scored)
+            best_handles = [handle for score, handle in scored if score == best_score]
+            if len(best_handles) == 1:
+                return EvidenceMatch("exact", (best_handles[0],))
+        return EvidenceMatch("ambiguous", tuple(row[0] for row in exact))
     return EvidenceMatch("none")
 
 
@@ -413,6 +759,7 @@ def auto_bind_unique_claims(
     *,
     mode: str = "required-on-evidence",
     semantics: Mapping[str, Any] | None = None,
+    entity_aliases: Mapping[str, Iterable[str]] | None = None,
 ) -> AutoBindResult:
     """Insert provisional links for unique exact matches at AST locations.
 
@@ -422,7 +769,10 @@ def auto_bind_unique_claims(
     the single repair/publication decision.
     """
 
-    available = list(records)
+    from src.core.claim_evidence_resolution import ensure_evidence_candidate_index
+
+    candidate_index = ensure_evidence_candidate_index(records, semantics=semantics)
+    available = list(candidate_index)
     insertions: list[tuple[int, str]] = []
     claim_handles: dict[str, str] = {}
     for claim in extract_claims(answer, mode=mode, semantics=semantics):
@@ -432,10 +782,37 @@ def auto_bind_unique_claims(
             or claim.attached_evidence_handles
         ):
             continue
-        match = match_available_evidence(claim, available, semantics=semantics)
+        attributed = bool(_EXPLICIT_ATTRIBUTION_RE.search(claim.exact))
+        disclosure_handle = _unique_negative_disclosure_handle(claim, available)
+        match = (
+            EvidenceMatch("exact", (disclosure_handle,))
+            if disclosure_handle is not None
+            else match_available_evidence(
+                claim,
+                candidate_index,
+                semantics=semantics,
+                entity_aliases=entity_aliases,
+            )
+        )
         if match.status != "exact" or len(match.handles) != 1:
             continue
         handle = match.handles[0]
+        if attributed and disclosure_handle is None:
+            matching_record = next(
+                (
+                    (source, evidence)
+                    for record in available
+                    for record_handle, source, evidence in [_evidence_parts(record)]
+                    if record_handle == handle
+                ),
+                None,
+            )
+            if matching_record is None or not _named_attribution_supported(
+                claim.exact,
+                matching_record[0],
+                matching_record[1],
+            ):
+                continue
         insertions.append(
             (
                 claim.insertion_offset,
@@ -449,6 +826,721 @@ def auto_bind_unique_claims(
     return AutoBindResult(text=text, claim_handles=claim_handles)
 
 
+def _named_attribution_supported(
+    claim_text: str,
+    source: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> bool:
+    """Accept an attributed auto-bind only when the named speaker is visible.
+
+    A blanket attribution ban prevented safe transcript bindings such as
+    ``Satya Nadella 表示 ...`` even when the indexed chunk named Satya Nadella
+    directly.  Relaxing the ban without checking the speaker would reintroduce
+    the opposite failure: a verbatim quote from another company could be
+    attached to a named claim.  Keep the automatic path narrow and language
+    neutral by requiring a two-token Latin personal name immediately before an
+    attribution verb and the same tokens in the trusted source context.
+
+    Generic labels (``管理层`` / ``the company``) and names that require
+    transliteration remain unbound for the model or repair layer to resolve.
+    """
+
+    subject_matches = re.finditer(
+        r"(?P<subject>[A-Z][A-Za-z.'-]{1,40}"
+        r"(?:\s+[A-Z][A-Za-z.'-]{1,40}){1,3})\s*"
+        r"(?:表示|称|披露|指出|提到|认为|预计|宣称|"
+        r"said\b|stated\b|reported\b|disclosed\b|noted\b|"
+        r"expects?\b|believes?\b|claims?\b)",
+        claim_text,
+        re.IGNORECASE,
+    )
+    trusted_context = _normalize_prose(
+        " ".join(
+            str(value or "")
+            for value in (
+                source.get("title"),
+                source.get("organization"),
+                evidence.get("prefix"),
+                evidence.get("quote"),
+                evidence.get("suffix"),
+                evidence.get("snippet"),
+            )
+        )
+    )
+    for match in subject_matches:
+        tokens = [
+            token.casefold()
+            for token in re.findall(
+                r"[A-Za-z][A-Za-z.'-]+",
+                match.group("subject"),
+            )
+        ]
+        if len(tokens) >= 2 and all(
+            re.search(rf"(?<![a-z]){re.escape(token)}(?![a-z])", trusted_context, re.I)
+            for token in tokens
+        ):
+            return True
+    return False
+
+
+def _unique_negative_disclosure_handle(
+    claim: ClaimCandidate,
+    records: Iterable[Any],
+) -> str | None:
+    """Bind a source-attributed absence only through its verbatim anchor.
+
+    Explicit attribution normally disables automatic binding because a claim
+    can name one company while the Registry contains an identical statement
+    from another.  A narrow absence exception is safe when the answer quotes a
+    sufficiently long source fragment found in exactly one text record, or the
+    Registry proves that exactly one target document was read to completion.
+    This keeps ``not disclosed`` answers inspectable without turning
+    attribution into fuzzy source guessing.
+    """
+
+    if not _NEGATIVE_DISCLOSURE_RE.search(claim.exact):
+        return None
+    available = list(records)
+    fragments: list[str] = []
+    for match in _QUOTED_SOURCE_FRAGMENT_RE.finditer(claim.exact):
+        raw_fragment = next((group for group in match.groups() if group), "")
+        # Models commonly quote a recognizable prefix followed by an ellipsis.
+        # The ellipsis is presentation, not part of the source text.
+        normalized = _normalize_prose(re.sub(r"(?:…+|\.{3,})", " ", raw_fragment))
+        if len(re.sub(r"\s+", "", normalized)) >= 16:
+            fragments.append(normalized)
+    if fragments:
+        matching_handles: set[str] = set()
+        for record in available:
+            handle, _source, evidence = _evidence_parts(record)
+            if not handle or evidence.get("kind") != "text":
+                continue
+            context = _normalize_prose(
+                " ".join(str(evidence.get(key) or "") for key in ("prefix", "quote", "suffix"))
+            )
+            if context and any(fragment in context for fragment in fragments):
+                matching_handles.add(handle)
+        if len(matching_handles) == 1:
+            return next(iter(matching_handles))
+
+    # A negative disclosure has no exact source sentence to highlight.  It is
+    # still traceable when the runtime has deterministically read one complete
+    # target document.  The synthetic Registry item proves that coverage and
+    # deliberately carries no page locator, so the UI opens the document
+    # without pretending that one arbitrary paragraph proves an absence.
+    coverage_handles = {
+        handle
+        for record in available
+        for handle, _source, evidence in [_evidence_parts(record)]
+        if handle
+        and evidence.get("kind") == "structured-data"
+        and evidence.get("field") == "document_coverage_complete"
+        and evidence.get("basis") == "full-document"
+        and evidence.get("value") is True
+    }
+    return next(iter(coverage_handles)) if len(coverage_handles) == 1 else None
+
+
+def auto_bind_composite_text_claims(
+    answer: str,
+    records: Iterable[Any],
+    *,
+    mode: str = "required-on-evidence",
+    semantics: Mapping[str, Any] | None = None,
+    entity_aliases: Mapping[str, Iterable[str]] | None = None,
+) -> CompositeAutoBindResult:
+    """Bind a numeric claim only when several excerpts jointly cover it.
+
+    Cross-period comparisons and synthesis commonly put more than one value in
+    one atomic clause.  No single document chunk can support such a claim, so
+    the unique matcher correctly refuses to choose one handle.  This bounded
+    second pass is deliberately narrower than semantic repair: every numeric
+    amount in the claim must be covered by a relevant text excerpt, the
+    concatenated excerpts must pass the ordinary numeric verifier, and no
+    selected excerpt may contradict the claim period.
+    """
+
+    from src.core.claim_evidence_resolution import ensure_evidence_candidate_index
+
+    candidate_index = ensure_evidence_candidate_index(records, semantics=semantics)
+    available = list(candidate_index)
+    records_by_handle = {
+        handle: (source, evidence)
+        for record in available
+        for handle, source, evidence in [_evidence_parts(record)]
+        if handle
+    }
+    insertions: list[tuple[int, str]] = []
+    claim_handles: dict[str, tuple[str, ...]] = {}
+    for claim in extract_claims(answer, mode=mode, semantics=semantics):
+        if (
+            not claim.citation_required
+            or claim.attached_citation_ids
+            or claim.attached_evidence_handles
+            or _EXPLICIT_ATTRIBUTION_RE.search(claim.exact)
+        ):
+            continue
+        # Several independent search/document excerpts can all state the same
+        # exact fact. ``match_available_evidence`` correctly reports that as
+        # ambiguous instead of guessing one source, but leaving the claim
+        # wholly uncited is worse: the agreeing sources are useful
+        # cross-checks. Bind at most two distinct text sources. Structured
+        # records remain single-source-only because equal numbers can belong
+        # to different metrics/scopes despite superficial agreement.
+        exact_match = match_available_evidence(
+            claim,
+            candidate_index,
+            semantics=semantics,
+            entity_aliases=entity_aliases,
+        )
+        if exact_match.status == "ambiguous":
+            agreeing: list[str] = []
+            source_ids: set[str] = set()
+            for handle in exact_match.handles:
+                source, evidence = records_by_handle.get(handle, ({}, {}))
+                if evidence.get("kind") != "text":
+                    agreeing = []
+                    break
+                source_id = _source_identity(source)
+                if source_id and source_id in source_ids:
+                    continue
+                agreeing.append(handle)
+                if source_id:
+                    source_ids.add(source_id)
+                if len(agreeing) == 2:
+                    break
+            if len(agreeing) >= 2:
+                handles = tuple(agreeing)
+                insertions.append(
+                    (
+                        claim.insertion_offset,
+                        " " + " ".join(f"[source](evidence://{handle})" for handle in handles),
+                    )
+                )
+                claim_handles[claim.claim_id] = handles
+                continue
+        handles = match_composite_text_evidence(
+            claim,
+            candidate_index.candidate_records(claim),
+            semantics=semantics,
+        )
+        if len(handles) < 2:
+            continue
+        insertions.append(
+            (
+                claim.insertion_offset,
+                " " + " ".join(f"[source](evidence://{handle})" for handle in handles),
+            )
+        )
+        claim_handles[claim.claim_id] = handles
+    text = answer
+    for offset, markdown in sorted(insertions, reverse=True):
+        text = f"{text[:offset]}{markdown}{text[offset:]}"
+    return CompositeAutoBindResult(text=text, claim_handles=claim_handles)
+
+
+def propagate_equivalent_claim_bindings(
+    answer: str,
+    records: Iterable[Any],
+    *,
+    mode: str = "required-on-evidence",
+    semantics: Mapping[str, Any] | None = None,
+) -> CompositeAutoBindResult:
+    """Reuse a verified binding for an equivalent recap claim.
+
+    Long research answers commonly state one fact in a period section and
+    repeat a shorter form in a comparison table. The shorter form can lose
+    enough vocabulary that matching it directly against a translated source
+    becomes ambiguous even though the answer already contains a verified
+    claim-handle binding for the same period and value.
+
+    This pass is deliberately narrower than evidence search: the source claim
+    must already be supported by its attached evidence, periods and metrics
+    cannot conflict, every recap amount must be covered, and the subject must
+    overlap. A candidate handle set is propagated only when it has one unique
+    best score. The pass never rewrites prose or crosses reporting periods.
+    """
+
+    available = list(records)
+    records_by_handle = {
+        handle: (source, evidence)
+        for record in available
+        for handle, source, evidence in [_evidence_parts(record)]
+        if handle
+    }
+    claims = extract_claims(answer, mode=mode, semantics=semantics)
+    supported: list[tuple[ClaimCandidate, tuple[str, ...]]] = []
+    for claim in claims:
+        direct_handles: list[str] = []
+        for handle in claim.attached_evidence_handles:
+            source_evidence = records_by_handle.get(handle)
+            if source_evidence is None:
+                continue
+            source, evidence = source_evidence
+            support = verify_evidence_support(
+                claim,
+                {"source": source, "evidence": evidence},
+                semantics=semantics,
+            )
+            if support.status == "supported":
+                direct_handles.append(handle)
+        if direct_handles:
+            supported.append((claim, tuple(dict.fromkeys(direct_handles))))
+
+    insertions: list[tuple[int, str]] = []
+    claim_handles: dict[str, tuple[str, ...]] = {}
+    for claim in claims:
+        if (
+            not claim.citation_required
+            or claim.attached_citation_ids
+            or claim.attached_evidence_handles
+            or _EXPLICIT_ATTRIBUTION_RE.search(claim.exact)
+        ):
+            continue
+        candidates: list[tuple[tuple[int, ...], tuple[str, ...]]] = []
+        for source_claim, handles in supported:
+            score = _equivalent_claim_propagation_score(
+                claim,
+                source_claim,
+                semantics=semantics,
+            )
+            if score is not None:
+                candidates.append((score, handles))
+        if not candidates:
+            continue
+        best_score = max(score for score, _handles in candidates)
+        best_handle_sets = {handles for score, handles in candidates if score == best_score}
+        if len(best_handle_sets) != 1:
+            continue
+        propagated_handles = next(iter(best_handle_sets))
+        insertions.append(
+            (
+                claim.insertion_offset,
+                " " + " ".join(f"[source](evidence://{handle})" for handle in propagated_handles),
+            )
+        )
+        claim_handles[claim.claim_id] = propagated_handles
+
+    text = answer
+    for offset, markdown in sorted(insertions, reverse=True):
+        text = f"{text[:offset]}{markdown}{text[offset:]}"
+    return CompositeAutoBindResult(text=text, claim_handles=claim_handles)
+
+
+def _equivalent_claim_propagation_score(
+    target: ClaimCandidate,
+    source: ClaimCandidate,
+    *,
+    semantics: Mapping[str, Any] | None,
+) -> tuple[int, ...] | None:
+    target_period = target.normalized.get("period", "")
+    source_period = source.normalized.get("period", "")
+    if bool(target_period) != bool(source_period):
+        return None
+    if target_period and not _periods_compatible(target_period, source_period):
+        return None
+
+    target_metric = target.normalized.get("metric", "")
+    source_metric = source.normalized.get("metric", "")
+    ontology = _metric_ontology(semantics)
+    target_canonical_metric = target_metric if target_metric in ontology else ""
+    source_canonical_metric = source_metric if source_metric in ontology else ""
+    if (
+        target_canonical_metric
+        and source_canonical_metric
+        and target_canonical_metric != source_canonical_metric
+    ):
+        return None
+
+    target_amounts = _claim_amounts(target.exact, semantics)
+    source_amounts = _claim_amounts(source.exact, semantics)
+    if target_amounts:
+        if not source_amounts or not all(
+            any(
+                _amounts_equivalent(target_amount, source_amount, semantics)
+                for source_amount in source_amounts
+            )
+            for target_amount in target_amounts
+        ):
+            return None
+
+    target_body = _claim_label_body(target.exact)
+    source_body = _claim_label_body(source.exact)
+    target_folded = _normalize_prose(target_body)
+    source_folded = _normalize_prose(source_body)
+    contains = int(
+        bool(target_folded and source_folded)
+        and (target_folded in source_folded or source_folded in target_folded)
+    )
+    latin_pattern = re.compile(r"[A-Za-z][A-Za-z0-9_-]{1,}")
+    ignored = _METRIC_STOP_WORDS | {"data", "value", "report", "quarter"}
+    target_latin = {
+        token.casefold()
+        for token in latin_pattern.findall(target_body)
+        if token.casefold() not in ignored
+    }
+    source_latin = {
+        token.casefold()
+        for token in latin_pattern.findall(source_body)
+        if token.casefold() not in ignored
+    }
+    latin_overlap = target_latin & source_latin
+    cjk_overlap = _cjk_bigrams(target_body) & _cjk_bigrams(source_body)
+    subject_overlap = _generic_text_subject_overlap(target_body, source_body)
+
+    metric_equal = int(
+        bool(target_canonical_metric and target_canonical_metric == source_canonical_metric)
+    )
+    if target_amounts:
+        if not (metric_equal or contains or subject_overlap):
+            return None
+    elif not (
+        contains
+        or len(cjk_overlap) >= 4
+        or len(latin_overlap) >= 2
+        or any(len(token) >= 5 for token in latin_overlap)
+    ):
+        return None
+
+    return (
+        metric_equal,
+        contains,
+        len(target_amounts),
+        len(latin_overlap),
+        len(cjk_overlap),
+        -abs(len(source_folded) - len(target_folded)),
+    )
+
+
+def match_composite_text_evidence(
+    claim: ClaimCandidate,
+    records: Iterable[Any],
+    *,
+    semantics: Mapping[str, Any] | None = None,
+) -> tuple[str, ...]:
+    """Return a bounded set of excerpts that jointly covers every claim amount."""
+
+    claim_amounts = _claim_amounts(claim.exact, semantics)
+    if len(claim_amounts) < 2:
+        return ()
+    candidates: list[tuple[str, Mapping[str, Any], Mapping[str, Any], set[int], int]] = []
+    for record in records:
+        handle, source, evidence = _evidence_parts(record)
+        if not handle or evidence.get("kind") != "text":
+            continue
+        if _text_source_period_conflicts(claim, source, evidence, semantics):
+            continue
+        quote = _plain_text(str(evidence.get("quote") or ""))
+        context = " ".join(str(evidence.get(key) or "") for key in ("prefix", "quote", "suffix"))
+        if not quote or not _generic_text_subject_overlap(claim.exact, context):
+            continue
+        quote_amounts = _claim_amounts(quote, semantics)
+        covered = {
+            index
+            for index, claim_amount in enumerate(claim_amounts)
+            if any(
+                _amounts_equivalent(claim_amount, quote_amount, semantics)
+                for quote_amount in quote_amounts
+            )
+        }
+        if not covered:
+            continue
+        claim_tokens = _semantic_tokens(_normalize_prose(claim.exact))
+        quote_tokens = _semantic_tokens(_normalize_prose(quote))
+        overlap = len(claim_tokens & quote_tokens)
+        candidates.append((handle, source, evidence, covered, overlap))
+    if not candidates:
+        return ()
+
+    # Prefer excerpts that cover the most still-missing amounts and have the
+    # strongest subject overlap.  Collapse duplicate chunks from one document
+    # when an equally useful tighter excerpt has already been selected.
+    uncovered = set(range(len(claim_amounts)))
+    selected: list[tuple[str, Mapping[str, Any], Mapping[str, Any], set[int], int]] = []
+    selected_sources: set[str] = set()
+    remaining = list(candidates)
+    while uncovered and remaining and len(selected) < 8:
+        ranked = sorted(
+            remaining,
+            key=lambda row: (
+                len(row[3] & uncovered),
+                len(row[3]),
+                row[4],
+                -len(str(row[2].get("quote") or "")),
+            ),
+            reverse=True,
+        )
+        chosen = next(
+            (
+                row
+                for row in ranked
+                if row[3] & uncovered
+                and (
+                    _source_identity(row[1]) not in selected_sources
+                    or not any(
+                        other[3] & uncovered and _source_identity(other[1]) not in selected_sources
+                        for other in ranked
+                    )
+                )
+            ),
+            None,
+        )
+        if chosen is None:
+            break
+        selected.append(chosen)
+        source_identity = _source_identity(chosen[1])
+        if source_identity:
+            selected_sources.add(source_identity)
+        uncovered -= chosen[3]
+        remaining.remove(chosen)
+    if uncovered or len(selected) < 2:
+        return ()
+
+    combined = "\n".join(str(row[2].get("quote") or "") for row in selected)
+    combined_context = "\n".join(
+        " ".join(str(row[2].get(key) or "") for key in ("prefix", "quote", "suffix"))
+        for row in selected
+    )
+    if not _text_numeric_supports_claim(
+        claim,
+        combined,
+        semantics,
+        metric_context=combined_context,
+        allow_distinctive_unit_match=all(
+            _text_source_period_matches(
+                claim,
+                row[1],
+                row[2],
+                semantics,
+            )
+            for row in selected
+        ),
+    ):
+        return ()
+    return tuple(row[0] for row in selected)
+
+
+def bind_claims_to_evidence(
+    answer: str,
+    records: Iterable[Any],
+    *,
+    mode: str = "required-on-evidence",
+    semantics: Mapping[str, Any] | None = None,
+    entity_aliases: Mapping[str, Iterable[str]] | None = None,
+) -> ClaimBindingResult:
+    """Apply safe rebind, unique-bind and composite-bind edits in one pass.
+
+    These policies previously reparsed the complete Markdown answer and
+    resolved every still-unbound claim independently.  Besides wasting CPU,
+    that made each policy observe a slightly different claim boundary after
+    the previous policy inserted citation markup.  One immutable extraction
+    gives all deterministic policies the same claim identity and one shared
+    Resolver/cache while preserving their conservative action gates.
+    """
+
+    from src.core.claim_evidence_resolution import ensure_evidence_candidate_index
+
+    candidate_index = ensure_evidence_candidate_index(records, semantics=semantics)
+    available = list(candidate_index)
+    records_by_handle = {
+        handle: (source, evidence)
+        for record in available
+        for handle, source, evidence in [_evidence_parts(record)]
+        if handle and isinstance(evidence, Mapping)
+    }
+    edits: list[tuple[int, int, str]] = []
+    auto_bound: dict[str, tuple[str, ...]] = {}
+    rebound: dict[str, str] = {}
+
+    for claim in extract_claims(answer, mode=mode, semantics=semantics):
+        if not claim.citation_required:
+            continue
+        if claim.attached_citation_ids:
+            # Canonical citation ids can only enter this path from the host's
+            # sealed baseline. They are already bound and must never receive
+            # an additional provisional evidence link during hidden repair.
+            continue
+
+        attached = claim.attached_evidence_handles
+        if attached:
+            if len(attached) != 1 or _EXPLICIT_ATTRIBUTION_RE.search(claim.exact):
+                continue
+            current_handle = attached[0]
+            current = records_by_handle.get(current_handle)
+            if current is not None:
+                support = candidate_index.support_for(
+                    claim,
+                    current_handle,
+                    current[0],
+                    current[1],
+                )
+                if support.status == "supported":
+                    continue
+            match = match_available_evidence(
+                claim,
+                candidate_index,
+                semantics=semantics,
+                entity_aliases=entity_aliases,
+            )
+            if (
+                match.status != "exact"
+                or len(match.handles) != 1
+                or match.handles[0] == current_handle
+            ):
+                continue
+            source_start = claim.location.get("sourceStart")
+            source_end = claim.location.get("sourceEnd")
+            if not isinstance(source_start, int) or not isinstance(source_end, int):
+                continue
+            source_slice = answer[source_start:source_end]
+            marker_offset = source_slice.find(f"evidence://{current_handle}")
+            if marker_offset < 0:
+                continue
+            replacement_start = source_start + marker_offset + len("evidence://")
+            replacement_end = replacement_start + len(current_handle)
+            target_handle = match.handles[0]
+            edits.append((replacement_start, replacement_end, target_handle))
+            rebound[claim.claim_id] = target_handle
+            continue
+
+        attributed = bool(_EXPLICIT_ATTRIBUTION_RE.search(claim.exact))
+        disclosure_handle = _unique_negative_disclosure_handle(claim, available)
+        match = (
+            EvidenceMatch("exact", (disclosure_handle,))
+            if disclosure_handle is not None
+            else match_available_evidence(
+                claim,
+                candidate_index,
+                semantics=semantics,
+                entity_aliases=entity_aliases,
+            )
+        )
+        handles: tuple[str, ...] = ()
+        if match.status == "exact" and len(match.handles) == 1:
+            handle = match.handles[0]
+            if attributed and disclosure_handle is None:
+                matching_record = records_by_handle.get(handle)
+                if matching_record is None or not _named_attribution_supported(
+                    claim.exact,
+                    matching_record[0],
+                    matching_record[1],
+                ):
+                    continue
+            handles = (handle,)
+        elif not attributed and match.status == "ambiguous":
+            agreeing: list[str] = []
+            source_ids: set[str] = set()
+            for handle in match.handles:
+                source, evidence = records_by_handle.get(handle, ({}, {}))
+                if evidence.get("kind") != "text":
+                    agreeing = []
+                    break
+                source_id = _source_identity(source)
+                if source_id and source_id in source_ids:
+                    continue
+                agreeing.append(handle)
+                if source_id:
+                    source_ids.add(source_id)
+                if len(agreeing) == 2:
+                    break
+            if len(agreeing) >= 2:
+                handles = tuple(agreeing)
+        if not handles and not attributed:
+            handles = match_composite_text_evidence(
+                claim,
+                candidate_index.candidate_records(claim),
+                semantics=semantics,
+            )
+            if len(handles) < 2:
+                handles = ()
+        if not handles:
+            continue
+        replacement = " ".join(f"[source](evidence://{handle})" for handle in handles)
+        edits.append((claim.insertion_offset, claim.insertion_offset, f" {replacement}"))
+        auto_bound[claim.claim_id] = handles
+
+    text = answer
+    for start, end, replacement in sorted(edits, reverse=True):
+        text = f"{text[:start]}{replacement}{text[end:]}"
+    return ClaimBindingResult(
+        text=text,
+        auto_bound_claim_handles=auto_bound,
+        rebound_claim_handles=rebound,
+    )
+
+
+def rebind_unique_mismatched_claims(
+    answer: str,
+    records: Iterable[Any],
+    *,
+    mode: str = "required-on-evidence",
+    semantics: Mapping[str, Any] | None = None,
+    entity_aliases: Mapping[str, Iterable[str]] | None = None,
+) -> AutoBindResult:
+    """Replace one wrong provisional handle with one uniquely exact candidate.
+
+    Models can select a sibling field from a wide structured result even when
+    the Registry also contains the exact field used by the prose.  Correct
+    that binding before publication only when the attached handle does not
+    support the claim and the full Registry yields exactly one supported
+    alternative.  Ambiguous or multi-source bindings are deliberately left
+    for the normal quality/repair path.
+    """
+
+    from src.core.claim_evidence_resolution import ensure_evidence_candidate_index
+
+    candidate_index = ensure_evidence_candidate_index(records, semantics=semantics)
+    available = list(candidate_index)
+    evidence_by_handle = {
+        handle: {"source": source, "evidence": evidence}
+        for record in available
+        for handle, source, evidence in [_evidence_parts(record)]
+        if handle and isinstance(evidence, Mapping)
+    }
+    replacements: list[tuple[int, int, str]] = []
+    claim_handles: dict[str, str] = {}
+    for claim in extract_claims(answer, mode=mode, semantics=semantics):
+        if (
+            not claim.citation_required
+            or len(claim.attached_evidence_handles) != 1
+            or _EXPLICIT_ATTRIBUTION_RE.search(claim.exact)
+        ):
+            continue
+        current_handle = claim.attached_evidence_handles[0]
+        current_evidence = evidence_by_handle.get(current_handle)
+        if current_evidence is not None:
+            support = verify_evidence_support(claim, current_evidence, semantics=semantics)
+            if support.status == "supported":
+                continue
+        match = match_available_evidence(
+            claim,
+            candidate_index,
+            semantics=semantics,
+            entity_aliases=entity_aliases,
+        )
+        if match.status != "exact" or len(match.handles) != 1 or match.handles[0] == current_handle:
+            continue
+        source_start = claim.location.get("sourceStart")
+        source_end = claim.location.get("sourceEnd")
+        if not isinstance(source_start, int) or not isinstance(source_end, int):
+            continue
+        source_slice = answer[source_start:source_end]
+        marker = f"evidence://{current_handle}"
+        marker_offset = source_slice.find(marker)
+        if marker_offset < 0:
+            continue
+        replacement_start = source_start + marker_offset + len("evidence://")
+        replacement_end = replacement_start + len(current_handle)
+        target_handle = match.handles[0]
+        replacements.append((replacement_start, replacement_end, target_handle))
+        claim_handles[claim.claim_id] = target_handle
+
+    text = answer
+    for start, end, target_handle in sorted(replacements, reverse=True):
+        text = f"{text[:start]}{target_handle}{text[end:]}"
+    return AutoBindResult(text=text, claim_handles=claim_handles)
+
+
 def verify_evidence_support(
     claim: ClaimCandidate,
     evidence_container: Mapping[str, Any],
@@ -457,11 +1549,14 @@ def verify_evidence_support(
 ) -> EvidenceSupport:
     """Conservatively verify one evidence snapshot against one claim."""
 
+    source = evidence_container.get("source")
+    source = source if isinstance(source, Mapping) else {}
     evidence = evidence_container.get("evidence")
     if isinstance(evidence, Mapping):
         evidence_container = evidence
     kind = evidence_container.get("kind")
     if kind == "structured-data":
+        semantic_options = evidence_semantic_options(evidence_container, semantics)
         value = evidence_container.get("value")
         if not _structured_value_matches_claim(value, evidence_container, claim, semantics):
             return EvidenceSupport("not-found", 0)
@@ -471,18 +1566,36 @@ def verify_evidence_support(
         entity_status = _entity_support_status(claim, evidence_container)
         if entity_status == "contradicted":
             return EvidenceSupport("contradicted", 2)
-        evidence_period = _period_key(
-            str(evidence_container.get("period") or evidence_container.get("asOf") or ""),
-            semantics,
+        evidence_periods = tuple(
+            dict.fromkeys(
+                period
+                for raw_period in (
+                    evidence_container.get("period"),
+                    evidence_container.get("asOf"),
+                )
+                for period in [_period_key(str(raw_period or ""), semantics)]
+                if period
+            )
         )
         claim_period = claim.normalized.get("period", "")
-        if claim_period and evidence_period and claim_period != evidence_period:
+        if (
+            semantic_options.get("date_role") != "publication"
+            and claim_period
+            and evidence_periods
+            and not any(
+                _periods_compatible(claim_period, evidence_period)
+                for evidence_period in evidence_periods
+            )
+        ):
             return EvidenceSupport("contradicted", 2)
         evidence_unit = _canonical_unit(
             str(evidence_container.get("unit") or ""),
             semantics,
         )
-        claim_unit = claim.normalized.get("unitBase") or claim.normalized.get("unit", "")
+        claim_unit = _canonical_unit(
+            claim.normalized.get("unitBase") or claim.normalized.get("unit", ""),
+            semantics,
+        )
         if claim_unit and evidence_unit and not _units_compatible(claim_unit, evidence_unit):
             return EvidenceSupport("contradicted", 2)
         dimension_status = _dimension_support_status(
@@ -498,27 +1611,95 @@ def verify_evidence_support(
             return EvidenceSupport("partially-supported", 2)
         return EvidenceSupport("supported", 4)
     if kind == "text":
-        quote = _plain_text(str(evidence_container.get("quote") or ""))
+        support_text = _plain_text(
+            " ".join(
+                str(evidence_container.get(key) or "")
+                for key in ("prefix", "quote", "suffix", "snippet")
+            )
+        )
+        metric_context = " ".join(
+            str(evidence_container.get(key) or "")
+            for key in ("prefix", "quote", "suffix", "snippet")
+        )
         claim_text = _normalize_prose(claim.exact)
-        quote_text = _normalize_prose(quote)
+        claim_body_text = _normalize_prose(_claim_label_body(claim.exact))
+        quote_text = _normalize_prose(support_text)
         if not quote_text:
             return EvidenceSupport("not-found", 0)
-        if claim_text in quote_text or quote_text in claim_text:
+        if _prose_contains(claim_text, quote_text) or (
+            claim_body_text != claim_text and _prose_contains(claim_body_text, quote_text)
+        ):
             return EvidenceSupport("supported", 4)
+        if any(
+            _prose_contains(_normalize_prose(fragment), quote_text)
+            for fragment in _quoted_claim_fragments(claim.exact)
+        ):
+            return EvidenceSupport("supported", 4)
+        # Exact quoted language outranks broad document-title metadata.  Only
+        # consult the source period once direct support has failed; otherwise
+        # an annual filing stored as ``2024 Q4`` can contradict its own 2024
+        # annual-report quote.
+        if _text_source_period_conflicts(claim, source, evidence_container, semantics):
+            return EvidenceSupport("contradicted", 2)
+        if _text_numeric_supports_claim(
+            claim,
+            support_text,
+            semantics,
+            metric_context=metric_context,
+            allow_distinctive_unit_match=_text_source_period_matches(
+                claim,
+                source,
+                evidence_container,
+                semantics,
+            ),
+        ):
+            return EvidenceSupport("supported", 3)
+        if _text_numeric_conflicts_claim(
+            claim,
+            support_text,
+            semantics,
+            metric_context=metric_context,
+        ):
+            return EvidenceSupport("contradicted", 3)
         claim_tokens = _semantic_tokens(claim_text)
         quote_tokens = _semantic_tokens(quote_text)
         if claim_tokens and len(claim_tokens & quote_tokens) / len(claim_tokens) >= 0.6:
             return EvidenceSupport("partially-supported", 1)
         return EvidenceSupport("not-found", 0)
     if kind == "calculation":
-        if not _value_present(evidence_container.get("result"), claim.exact):
+        result_present = _value_present(evidence_container.get("result"), claim.exact)
+        formula_supported = calculation_formula_matches_evidence(
+            claim.exact,
+            evidence_container,
+        )
+        if not result_present and not formula_supported:
             return EvidenceSupport("not-found", 0)
         if claim.kind != "calculation" and not _DERIVED_RE.search(claim.exact):
             return EvidenceSupport("partially-supported", 1)
         metric = _canonical_metric(evidence_container, semantics)
-        if metric and not _metric_matches_claim(metric, claim, semantics):
+        if (
+            metric
+            and not _metric_matches_claim(metric, claim, semantics)
+            and not formula_supported
+            and not _generic_derived_claim_accepts_calculation_metric(
+                claim,
+                evidence_container,
+                semantics,
+            )
+        ):
             return EvidenceSupport("not-found", 0)
         entity_status = _entity_support_status(claim, evidence_container)
+        if entity_status == "partial" and (
+            formula_supported
+            or _calculation_inputs_present_in_claim(
+                evidence_container,
+                claim.exact,
+            )
+        ):
+            # A displayed formula commonly inherits its company from a
+            # heading.  Matching the deterministic result plus every declared
+            # input is direct support even when the formula omits that label.
+            entity_status = "supported"
         if entity_status == "contradicted":
             return EvidenceSupport("contradicted", 2)
         evidence_period = _period_key(
@@ -526,13 +1707,20 @@ def verify_evidence_support(
             semantics,
         )
         claim_period = claim.normalized.get("period", "")
-        if claim_period and evidence_period and claim_period != evidence_period:
+        if (
+            claim_period
+            and evidence_period
+            and not _periods_compatible(claim_period, evidence_period)
+        ):
             return EvidenceSupport("contradicted", 2)
         evidence_unit = _canonical_unit(
             str(evidence_container.get("unit") or ""),
             semantics,
         )
-        claim_unit = claim.normalized.get("unitBase") or claim.normalized.get("unit", "")
+        claim_unit = _canonical_unit(
+            claim.normalized.get("unitBase") or claim.normalized.get("unit", ""),
+            semantics,
+        )
         if claim_unit and evidence_unit and not _units_compatible(claim_unit, evidence_unit):
             return EvidenceSupport("contradicted", 2)
         dimension_status = _dimension_support_status(
@@ -553,15 +1741,73 @@ def structured_value_present(
     unit: str,
     text: str,
     *,
+    field: str = "",
+    metric: str = "",
     semantics: Mapping[str, Any] | None = None,
 ) -> bool:
     """Return whether *text* contains *value* under the configured unit scale."""
 
-    evidence = {"value": value, "unit": unit}
+    evidence = {"value": value, "unit": unit, "field": field, "metric": metric}
     claims = extract_claims(text, mode="strict-domain", semantics=semantics)
     return any(
         _structured_value_matches_claim(value, evidence, claim, semantics) for claim in claims
     ) or _value_present(value, text)
+
+
+def structured_values_equivalent(
+    left_value: Any,
+    left_unit: str,
+    right_value: Any,
+    right_unit: str,
+    *,
+    semantics: Mapping[str, Any] | None = None,
+) -> bool:
+    """Compare two numeric values after applying configured unit scales.
+
+    The tolerance is derived from the displayed precision on either side so a
+    rounded value such as ``1,741.44 亿元`` can safely match the authoritative
+    raw value expressed in yuan without accepting a materially different value.
+    """
+
+    left_decimal = _as_decimal(left_value)
+    right_decimal = _as_decimal(right_value)
+    if left_decimal is None or right_decimal is None:
+        return _stable_scalar(left_value) == _stable_scalar(right_value)
+    left_resolved = _resolve_unit(left_unit, semantics)
+    right_resolved = _resolve_unit(right_unit, semantics)
+    if left_resolved is None or right_resolved is None:
+        return left_unit.strip().casefold() == right_unit.strip().casefold() and _decimal_close(
+            left_decimal,
+            right_decimal,
+        )
+    if left_resolved[0] != right_resolved[0]:
+        return False
+    tolerance = max(
+        _display_rounding_tolerance(str(left_value), left_resolved[1]),
+        _display_rounding_tolerance(str(right_value), right_resolved[1]),
+    )
+    return _decimal_close(
+        left_decimal * left_resolved[1],
+        right_decimal * right_resolved[1],
+        minimum_tolerance=tolerance,
+    )
+
+
+def structured_units_compatible(
+    left_unit: str,
+    right_unit: str,
+    *,
+    semantics: Mapping[str, Any] | None = None,
+) -> bool:
+    """Return whether two unit labels resolve to the same canonical unit."""
+
+    if not left_unit.strip() and not right_unit.strip():
+        return True
+    left_resolved = _resolve_unit(left_unit, semantics)
+    right_resolved = _resolve_unit(right_unit, semantics)
+    if left_resolved is not None and right_resolved is not None:
+        return left_resolved[0] == right_resolved[0]
+    return _units_compatible(left_unit, right_unit)
 
 
 def structured_components_cover_claim(
@@ -587,17 +1833,52 @@ def structured_components_cover_claim(
             continue
         if _entity_support_status(claim, evidence) == "contradicted":
             continue
-        evidence_period = _period_key(
-            str(evidence.get("period") or evidence.get("asOf") or ""),
-            semantics,
+        evidence_periods = tuple(
+            dict.fromkeys(
+                period
+                for raw_period in (evidence.get("period"), evidence.get("asOf"))
+                for period in [_period_key(str(raw_period or ""), semantics)]
+                if period
+            )
         )
         claim_period = claim.normalized.get("period", "")
-        if claim_period and evidence_period and claim_period != evidence_period:
+        if (
+            claim_period
+            and evidence_periods
+            and not any(
+                _periods_compatible(claim_period, evidence_period)
+                for evidence_period in evidence_periods
+            )
+        ):
             continue
         for index, amount in enumerate(amounts):
             if _evidence_matches_amount(evidence, amount, semantics):
                 covered[index] = True
     return all(covered)
+
+
+def text_components_cover_claim(
+    claim: ClaimCandidate,
+    evidence_items: Iterable[Mapping[str, Any]],
+    *,
+    semantics: Mapping[str, Any] | None = None,
+) -> bool:
+    """Return true when several cited excerpts jointly cover one numeric claim."""
+
+    records: list[dict[str, Any]] = []
+    for index, item in enumerate(evidence_items):
+        evidence = item.get("evidence")
+        if not isinstance(evidence, Mapping) or evidence.get("kind") != "text":
+            continue
+        source = item.get("source")
+        records.append(
+            {
+                "evidenceHandle": f"ev_component_{index:04d}",
+                "source": source if isinstance(source, Mapping) else {},
+                "evidence": evidence,
+            }
+        )
+    return len(match_composite_text_evidence(claim, records, semantics=semantics)) >= 2
 
 
 def canonical_evidence_metric(
@@ -607,6 +1888,22 @@ def canonical_evidence_metric(
     """Return the policy-canonical metric for a trusted evidence snapshot."""
 
     return _canonical_metric(evidence, semantics)
+
+
+def evidence_semantic_options(
+    evidence: Mapping[str, Any],
+    semantics: Mapping[str, Any] | None = None,
+) -> Mapping[str, Any]:
+    """Return edition-supplied options for an evidence metric.
+
+    The generic verifier stays industry-neutral; editions may describe
+    categorical value aliases and metadata behavior next to their metric
+    ontology entries.
+    """
+
+    metric = _canonical_metric(evidence, semantics)
+    definition = _metric_ontology(semantics).get(metric)
+    return definition if isinstance(definition, Mapping) else {}
 
 
 def canonical_evidence_dimension(
@@ -628,6 +1925,18 @@ def canonical_evidence_period(
     return _period_key(value, semantics)
 
 
+def evidence_periods_compatible(left: str, right: str) -> bool:
+    """Return whether two canonical reporting periods are equivalent.
+
+    Q1 and Q3 income-statement values are year-to-date by definition, while
+    provider metadata and document titles commonly abbreviate those periods as
+    ``Q1`` / ``Q3``.  Treating the abbreviation as a contradiction made a
+    filing reject its own verbatim table values.
+    """
+
+    return _periods_compatible(left, right)
+
+
 def _append_inline_claims(
     output: list[ClaimCandidate],
     content: str,
@@ -640,10 +1949,77 @@ def _append_inline_claims(
     semantics: Mapping[str, Any] | None,
     normalization_context: str = "",
 ) -> None:
+    stripped = content.strip()
+    if _is_structural_emphasis_label(stripped) or _is_metric_context_emphasis_label(
+        stripped,
+        semantics,
+    ):
+        # Bold-only paragraphs are frequently visual subsection labels (for
+        # example ``**Capital expenditure / infrastructure build**``), not
+        # assertions. Keep factual bold sentences auditable whenever they
+        # contain a number, predicate, negative disclosure, or citation.
+        return
+    inline_subject_context = ""
     for sentence_start, sentence_end in _sentence_spans(content):
         sentence = content[sentence_start:sentence_end]
+        if _is_structural_emphasis_label(sentence):
+            # Markdown soft breaks do not necessarily create a new paragraph,
+            # so ``**Section label**\nClaim`` can arrive as one inline token.
+            # Skip only the label sentence and continue auditing the claim.
+            continue
+        plain_sentence = _plain_text(sentence).strip()
+        if (
+            _NUMBER_RE.search(plain_sentence) is None
+            and len(plain_sentence) <= 80
+            and re.search(r"[;；]\s*$", plain_sentence)
+        ):
+            # Compact row renderers commonly emit ``Entity; field; field``.
+            # Keep that leading label as private semantic context for every
+            # claim on the same Markdown line, without changing visible claim
+            # offsets or treating the label itself as a sourced assertion.
+            inline_subject_context = re.sub(r"[;；\s]+$", "", plain_sentence)
         clause_spans = _atomic_clause_spans(sentence, semantics)
-        for clause_start, clause_end in clause_spans:
+        shared_period = _DATE_RE.search(sentence)
+        shared_subject = (
+            _leading_subject_context(
+                _plain_text(sentence[clause_spans[0][0] : clause_spans[0][1]]),
+                semantics,
+            )
+            if len(clause_spans) > 1
+            else ""
+        )
+        previous_metric = ""
+        for clause_index, (clause_start, clause_end) in enumerate(clause_spans):
+            clause = _plain_text(sentence[clause_start:clause_end])
+            clause_context_parts = [normalization_context, inline_subject_context]
+            if clause_index > 0 and shared_subject:
+                clause_context_parts.append(shared_subject)
+            # A leading period can scope comma-separated clauses (for example
+            # ``2024 年，收入……，利润……``), but must never overwrite a later
+            # clause's own period.
+            if (
+                len(clause_spans) > 1
+                and shared_period is not None
+                and (
+                    _DATE_RE.search(clause) is None
+                    or _clause_date_is_publication_metadata(clause, semantics)
+                )
+            ):
+                clause_context_parts.append(shared_period.group(0))
+            contextual_metric = _contextual_derived_metric(
+                clause,
+                previous_metric=previous_metric,
+                semantics=semantics,
+            )
+            if not contextual_metric:
+                contextual_metric = _contextual_abbreviated_metric(
+                    clause,
+                    previous_metric=previous_metric,
+                    semantics=semantics,
+                )
+            if contextual_metric:
+                clause_context_parts.append(contextual_metric)
+            clause_context = " ".join(part for part in clause_context_parts if part).strip()
             raw_start = sentence_start + clause_start
             raw_end = sentence_start + clause_end
             _append_inline_claim(
@@ -657,8 +2033,163 @@ def _append_inline_claims(
                 item_index=item_index,
                 mode=mode,
                 semantics=semantics,
-                normalization_context=normalization_context,
+                normalization_context=clause_context,
             )
+            explicit_metrics = _claim_metric_candidates(clause, semantics)
+            if len(explicit_metrics) == 1:
+                previous_metric = explicit_metrics[0]
+        if "\n" in sentence:
+            inline_subject_context = ""
+
+
+def _is_structural_emphasis_label(value: str) -> bool:
+    stripped = value.strip()
+    if not re.fullmatch(r"(?:\*\*|__)(.+)(?:\*\*|__)", stripped, re.DOTALL):
+        return False
+    if _binding_refs(stripped) != ((), ()):
+        return False
+    plain = _plain_text(stripped).strip()
+    if _SECTION_TITLE_RE.fullmatch(plain):
+        return True
+    if _SECTION_SLASH_LABEL_RE.fullmatch(plain) and _NUMBER_RE.search(plain) is None:
+        return True
+    return bool(
+        _DEFINITION_HEADING_RE.fullmatch(plain) is None
+        and _NUMBER_RE.search(plain) is None
+        and _DECLARATIVE_RE.search(plain) is None
+        and _NEGATIVE_DISCLOSURE_RE.search(plain) is None
+    )
+
+
+def _is_metric_context_emphasis_label(
+    value: str,
+    semantics: Mapping[str, Any] | None,
+) -> bool:
+    """Recognize a bold metric scope even when it contains unit metadata."""
+
+    stripped = value.strip()
+    if re.fullmatch(r"(?:\*\*|__)(.+)(?:\*\*|__)", stripped, re.DOTALL) is None:
+        return False
+    if _binding_refs(stripped) != ((), ()):
+        return False
+    plain = _plain_text(stripped).strip()
+    return bool(
+        plain
+        and _NUMBER_RE.search(plain) is None
+        and _DECLARATIVE_RE.search(plain) is None
+        and _NEGATIVE_DISCLOSURE_RE.search(plain) is None
+        and len(_claim_metric_candidates(plain, semantics)) == 1
+    )
+
+
+def _contextual_derived_metric(
+    clause: str,
+    *,
+    previous_metric: str,
+    semantics: Mapping[str, Any] | None,
+) -> str:
+    """Resolve an abbreviated derived metric from the nearest explicit metric.
+
+    Edition policy supplies the dependency graph.  This lets a phrase such as
+    ``营业收入……，同比增速为 15.71%`` resolve to ``revenue_growth`` without
+    hard-coding finance vocabulary into the OSS extractor.  Ambiguous graphs
+    deliberately produce no inferred metric.
+    """
+
+    if (
+        not previous_metric
+        or _DERIVED_RE.search(clause) is None
+        or _claim_metric_candidates(clause, semantics)
+        or not isinstance(semantics, Mapping)
+    ):
+        return ""
+    dependencies = semantics.get("calculation_dependencies")
+    if not isinstance(dependencies, Mapping):
+        return ""
+    candidates = [
+        str(metric)
+        for metric, inputs in dependencies.items()
+        if isinstance(metric, str)
+        and isinstance(inputs, list)
+        and previous_metric in {str(value) for value in inputs if str(value)}
+    ]
+    return candidates[0] if len(candidates) == 1 else ""
+
+
+def _contextual_abbreviated_metric(
+    clause: str,
+    *,
+    previous_metric: str,
+    semantics: Mapping[str, Any] | None,
+) -> str:
+    """Carry one explicit metric into a bounded period/value shorthand.
+
+    Comparative prose commonly says ``2024 年营业收入……，2023 年为……``.
+    The second clause is not a new generic fact: it abbreviates the same
+    metric.  Only accept the narrow date/comparison grammar above and never
+    overwrite an explicit metric candidate.
+    """
+
+    if (
+        not previous_metric
+        or _claim_metric_candidates(clause, semantics)
+        or _NUMBER_RE.search(clause) is None
+        or _ABBREVIATED_METRIC_RE.search(clause) is None
+    ):
+        return ""
+    return previous_metric
+
+
+def _leading_subject_context(
+    clause: str,
+    semantics: Mapping[str, Any] | None,
+) -> str:
+    """Keep only the leading subject before an edition-defined metric.
+
+    Later comma clauses commonly omit the company name.  Reusing only this
+    bounded prefix gives entity verification the sentence subject without
+    leaking the first clause's value or period into subsequent claims.
+    """
+
+    boundaries: list[int] = []
+    for metric_id, definition in _metric_ontology(semantics).items():
+        if not isinstance(metric_id, str):
+            continue
+        for term in _metric_terms(metric_id, definition):
+            normalized_term = term.replace("_", " ").strip()
+            if not normalized_term:
+                continue
+            if re.search(r"[\u4e00-\u9fff]", normalized_term):
+                index = clause.find(normalized_term)
+                if index >= 0:
+                    boundaries.append(index)
+            else:
+                match = re.search(
+                    rf"(?<![A-Za-z0-9]){re.escape(normalized_term)}(?![A-Za-z0-9])",
+                    clause,
+                    re.IGNORECASE,
+                )
+                if match is not None:
+                    boundaries.append(match.start())
+    if not boundaries:
+        return ""
+    prefix = clause[: min(boundaries)]
+    prefix = _DATE_RE.sub(" ", prefix)
+    prefix = _NUMBER_RE.sub(" ", prefix)
+    prefix = re.sub(r"(?<![\u4e00-\u9fff])年(?![\u4e00-\u9fff])", " ", prefix)
+    prefix = re.sub(r"[\s,，:：;；()（）]+", " ", prefix).strip()
+    return prefix[:160]
+
+
+def _clause_date_is_publication_metadata(
+    clause: str,
+    semantics: Mapping[str, Any] | None,
+) -> bool:
+    candidates = _claim_metric_candidates(clause, semantics)
+    if len(candidates) != 1:
+        return False
+    definition = _metric_ontology(semantics).get(candidates[0])
+    return isinstance(definition, Mapping) and definition.get("date_role") == "publication"
 
 
 def _append_inline_claim(
@@ -723,12 +2254,59 @@ def _append_table_claims(
     row_label = _plain_text(cells[0].content)
     if not row_label:
         return
-    row_citations, row_handles = _binding_refs(cells[0].content)
+    row_scope_parts: list[str] = []
     for column_index, cell in enumerate(cells[1:], start=1):
         value = _plain_text(cell.content)
-        if not value or not (_NUMBER_RE.search(value) or _DECLARATIVE_RE.search(value)):
+        header = headers[column_index] if column_index < len(headers) else ""
+        if not value:
             continue
+        if _TABLE_SCOPE_HEADER_RE.fullmatch(header.strip()) or re.search(
+            r"(?:单位|币种|口径|unit|currency)\s*[:：]",
+            value,
+            re.IGNORECASE,
+        ):
+            row_scope_parts.append(f"{header}: {value}" if header else value)
+    row_normalization_context = " ".join(
+        part for part in (normalization_context, *row_scope_parts) if part
+    )
+    row_citations, row_handles = _binding_refs(cells[0].content)
+    shared_citations: list[str] = list(row_citations)
+    shared_handles: list[str] = list(row_handles)
+    for column_index, cell in enumerate(cells):
+        citation_ids, handles = _binding_refs(cell.content)
+        if not citation_ids and not handles:
+            continue
+        header = headers[column_index] if column_index < len(headers) else ""
+        # A dedicated Source/Citation column or a citation-only cell applies
+        # to the complete row.  Do not propagate citations from ordinary value
+        # cells because different columns may deliberately use different
+        # evidence.
+        if _TABLE_SOURCE_HEADER_RE.fullmatch(header.strip()) or not _plain_text(cell.content):
+            shared_citations.extend(citation_ids)
+            shared_handles.extend(handles)
+        # An ordinary value-cell citation belongs to that cell only.  It must
+        # never leak across periods or metrics merely because it is the sole
+        # citation in a row.  Authors who intend row-wide evidence can use the
+        # explicit Source/Citation column handled above.
+    row_citations = tuple(dict.fromkeys(shared_citations))
+    row_handles = tuple(dict.fromkeys(shared_handles))
+    for column_index, cell in enumerate(cells[1:], start=1):
+        value = _plain_text(cell.content)
         header = headers[column_index] if column_index < len(headers) else str(column_index + 1)
+        if (
+            not value
+            or _TABLE_EMPTY_PLACEHOLDER_RE.fullmatch(value.strip())
+            or _TABLE_SOURCE_HEADER_RE.fullmatch(header.strip())
+        ):
+            continue
+        # Strict-domain audit covers ordinary factual table cells too.  Product
+        # families, ratings and named classifications often contain no number
+        # or verb, but they are still externally verifiable claims.  The old
+        # numeric/declarative gate let entire rows escape citation coverage.
+        if mode != "strict-domain" and not (
+            _NUMBER_RE.search(value) or _DECLARATIVE_RE.search(value)
+        ):
+            continue
         exact = f"{row_label} — {header}: {value}"
         citation_ids, handles = _binding_refs(cell.content)
         location = {
@@ -749,7 +2327,7 @@ def _append_table_claims(
             evidence_handles=tuple(dict.fromkeys((*row_handles, *handles))),
             mode=mode,
             semantics=semantics,
-            normalization_context=normalization_context,
+            normalization_context=row_normalization_context,
         )
 
 
@@ -767,6 +2345,8 @@ def _append_claim(
 ) -> None:
     semantic_text = f"{normalization_context} {exact}".strip()
     kind = _classify_claim(exact)
+    if _HYPOTHETICAL_RE.search(normalization_context):
+        kind = "reasoning"
     required = _citation_required(
         exact,
         kind=kind,
@@ -782,6 +2362,25 @@ def _append_claim(
     }
     fingerprint = json.dumps(identity_location, sort_keys=True, ensure_ascii=False)
     digest = hashlib.sha256(f"{fingerprint}\0{exact}".encode()).hexdigest()[:20]
+    # Context carries useful metric/period/entity information, but its numbers
+    # must never become the claim's asserted value.  A preface such as
+    # ``过去半年（2026 年 2—8 月）`` previously made every table claim normalize
+    # to the value ``8``; exact excerpts containing 50% or 80% were then
+    # falsely marked as mismatches.  Keep the established combined-context
+    # normalization for semantic inheritance, then source value fields only
+    # from the exact claim text.  Units may still come from a table/header
+    # context when the displayed value intentionally omits a repeated unit.
+    normalized = _normalize_claim(semantic_text, semantics, kind=kind)
+    exact_normalized = _normalize_claim(exact, semantics, kind=kind)
+    for key in ("value", "valueBase"):
+        normalized.pop(key, None)
+        if key in exact_normalized:
+            normalized[key] = exact_normalized[key]
+    if "unit" in exact_normalized:
+        normalized["unit"] = exact_normalized["unit"]
+    if "unitBase" in exact_normalized:
+        normalized["unitBase"] = exact_normalized["unitBase"]
+
     output.append(
         ClaimCandidate(
             claim_id=f"clm_{digest}",
@@ -790,7 +2389,7 @@ def _append_claim(
             kind=kind,
             citation_required=required,
             attached_citation_ids=citation_ids,
-            normalized=_normalize_claim(semantic_text, semantics),
+            normalized=normalized,
             location=location,
             semantic_text=semantic_text,
             insertion_offset=insertion_offset,
@@ -802,19 +2401,103 @@ def _append_claim(
 def _classify_claim(text: str) -> str:
     if _USER_PROVIDED_RE.search(text):
         return "user-provided"
+    if _HYPOTHETICAL_RE.search(text):
+        return "reasoning"
+    if _EXPLANATORY_ANALOGY_RE.search(text):
+        return "reasoning"
+    if _SOURCE_ATTRIBUTION_SUMMARY_RE.match(text.strip()):
+        return "presentation"
+    # A unit/currency/period table cell qualifies another value in the same
+    # row.  Classify it before the derived-value heuristic: labels such as
+    # ``同比增速 — 期间: 2024 vs 2023`` contain both a comparison word and
+    # numbers, but still do not assert an independently sourced result.
+    if _TABLE_SCOPE_DESCRIPTOR_RE.match(text.strip()):
+        return "presentation"
+    if _looks_like_numeric_formula(text):
+        return "calculation"
     if _DERIVED_RE.search(text) and _NUMBER_RE.search(text):
         return "calculation"
+    if _looks_like_explanatory_formula(text):
+        return "reasoning"
+    if _NUMBER_RE.search(text) is None and _DEFINITION_HEADING_RE.search(text.strip()):
+        return "definition"
+    if _NUMBER_RE.search(text) is None and (
+        _DEFINITION_RE.search(text.strip()) or _LABELED_DEFINITION_RE.search(text.strip())
+    ):
+        return "definition"
     if _FINANCIAL_NUMBER_RE.search(text):
         return "financial-fact"
+    if _LIMITATION_RE.search(text):
+        return "limitation"
+    if _PRESENTATION_RE.search(text):
+        return "presentation"
+    # A period/unit banner scopes the factual rows that follow; it is not an
+    # independent external fact.  Treating ``期间：2024 年度，单位：亿元`` as a
+    # standalone date claim produced a warning even when every displayed row
+    # carried period-accurate structured evidence.
+    if _SCOPE_DESCRIPTOR_RE.fullmatch(text.strip()):
+        return "presentation"
+    if _looks_like_period_scope_title(text):
+        return "presentation"
+    # A short standalone label scopes the claims that follow; the date inside
+    # it is context, not an independently asserted fact.  Treat labels such as
+    # ``贵州茅台 2024 年全年：`` like presentation text so the cited values
+    # below do not trigger a pointless repair pass.
+    if re.fullmatch(r"[^。！？!?；;\n]{1,80}[:：]", text.strip()):
+        return "presentation"
+    if _REASONING_RE.search(text):
+        return "reasoning"
     if _DATE_RE.search(text):
         return "date-fact"
     if _NUMBER_RE.search(text):
         return "numeric-fact"
-    if _REASONING_RE.search(text):
-        return "reasoning"
     if re.search(r"[\"“”‘’][^\"“”‘’]+[\"“”‘’]", text):
         return "quotation"
     return "document-claim"
+
+
+def _looks_like_period_scope_title(text: str) -> bool:
+    """Return whether a short date-bearing line is presentation context.
+
+    Models commonly render a compact title such as ``贵州茅台 2024 年度
+    （2024-01-01 至 2024-12-31）`` before a cited table.  The entity and period
+    scope the rows below; the title does not assert an additional business
+    fact.  Keep the rule conservative: prose punctuation, a financial amount,
+    or an assertion verb makes the line an ordinary claim again.
+    """
+
+    candidate = text.strip()
+    if not candidate or len(candidate) > 120 or _DATE_RE.search(candidate) is None:
+        return False
+    if re.search(r"[。！？!?；;]", candidate) or _FINANCIAL_NUMBER_RE.search(candidate):
+        return False
+    if re.search(
+        r"(?:成立(?:于)?|创立(?:于)?|实现|达到|录得|增长|下降|同比|环比|"
+        r"披露|表示|报告(?:称|显示)|(?:^|\s)(?:为|是)(?:\s|$)|"
+        r"\b(?:is|are|was|were|founded|reported|generated|reached|grew|declined)\b)",
+        candidate,
+        re.IGNORECASE,
+    ):
+        return False
+    # A parenthesized exchange/ticker identifier is title metadata rather than
+    # a business value.  Any other non-temporal number keeps the line factual.
+    without_identifiers = re.sub(r"[（(]\s*[A-Za-z]{0,8}:?\d{4,8}\s*[）)]", "", candidate)
+    without_dates = _DATE_RE.sub("", without_identifiers)
+    without_dates = re.sub(r"\b(?:FY\s*)?\d{4}\s*(?:FY|Q[1-4])\b", "", without_dates, flags=re.I)
+    return _NUMBER_RE.search(without_dates) is None
+
+
+def _looks_like_explanatory_formula(text: str) -> bool:
+    """Return whether text presents a symbolic formula, not a reported value."""
+
+    if "=" not in text:
+        return False
+    right = text.split("=", 1)[1]
+    return bool(
+        "\\frac" in text
+        or re.search(r"[+*/÷]", right)
+        or re.search(r"\([^)]{1,80}\)\s*[-+]", right)
+    )
 
 
 def _citation_required(
@@ -830,6 +2513,12 @@ def _citation_required(
         return False
     if kind == "reasoning":
         return False
+    if kind == "definition":
+        return False
+    if kind in {"limitation", "presentation"} or _LIMITATION_RE.search(text):
+        return False
+    if _NEGATIVE_DISCLOSURE_RE.search(text) and not _NOT_FOUND_RE.search(text):
+        return True
     if kind == "document-claim" and _NOT_FOUND_RE.search(text):
         return False
     if kind in {
@@ -848,16 +2537,35 @@ def _citation_required(
 def _normalize_claim(
     text: str,
     semantics: Mapping[str, Any] | None,
+    *,
+    kind: str = "",
 ) -> dict[str, str]:
     result: dict[str, str] = {}
     period_match = _DATE_RE.search(text)
-    period = _period_key(period_match.group(0), semantics) if period_match else ""
-    if period_match:
-        sentence_period = _period_key(text, semantics)
-        period = sentence_period or period
+    # Parse the whole claim first so fiscal shorthands such as ``Q4 FY26`` or
+    # ``2Q26`` remain available to cross-period evidence checks.  Fall back to
+    # the first long-form date for legacy prose.
+    period = _period_key(text, semantics)
+    if not period and period_match:
+        period = _period_key(period_match.group(0), semantics)
     if period:
         result["period"] = period
-    amount = _claim_amount(text, semantics)
+    amounts = _claim_amounts(text, semantics)
+    # A displayed calculation commonly includes its input values before the
+    # result (for example CNY inputs followed by a percentage result).  The
+    # result is the right-most amount; normalizing from the first input made a
+    # valid percentage calculation look like a CNY/unit contradiction.
+    amount = amounts[-1] if kind == "calculation" and amounts else (amounts[0] if amounts else None)
+    if amount is not None and not amount[1]:
+        contextual_unit = _contextual_table_unit(text, semantics)
+        if contextual_unit is not None:
+            unit_label, canonical_unit, scale = contextual_unit
+            amount = _apply_contextual_amount_unit(
+                amount,
+                unit_label=unit_label,
+                canonical_unit=canonical_unit,
+                scale=scale,
+            )
     if amount is not None:
         raw_value, raw_unit, base_value, base_unit = amount
         result["value"] = _stable_scalar(raw_value)
@@ -873,7 +2581,9 @@ def _normalize_claim(
     elif metric_candidates:
         result["metricCandidates"] = "|".join(metric_candidates)
     else:
-        metric_tokens = sorted(_semantic_tokens(text))
+        metric_tokens = sorted(
+            token for token in _semantic_tokens(text) if not _is_period_semantic_token(token)
+        )
         if metric_tokens:
             result["metric"] = " ".join(metric_tokens)
     for dimension in ("scope", "basis"):
@@ -883,6 +2593,16 @@ def _normalize_claim(
         elif candidates:
             result[f"{dimension}Candidates"] = "|".join(candidates)
     return result
+
+
+def _is_period_semantic_token(token: str) -> bool:
+    """Return whether a fallback semantic token is only a period label."""
+
+    normalized = token.casefold().replace(" ", "")
+    return bool(
+        re.fullmatch(r"(?:q[1-4](?:ytd)?|h[12]|fy|ytd)", normalized)
+        or re.fullmatch(r"(?:年)?(?:一|二|三|四)季(?:度|报)", normalized)
+    )
 
 
 def _binding_refs(text: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -896,7 +2616,10 @@ def _binding_refs(text: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
 
 
 def _plain_text(value: str) -> str:
-    value = _CITATION_LINK_RE.sub("", value)
+    value = _CITATION_LINK_RE.sub(
+        lambda match: _visible_citation_label(match.group(1)),
+        value,
+    )
     value = _MARKDOWN_LINK_RE.sub(lambda match: match.group(1), value)
     value = re.sub(r"(?:\*\*|__|~~|`)", "", value)
     value = re.sub(r"\\([\\`*{}\[\]()#+.!_>-])", r"\1", value)
@@ -904,17 +2627,52 @@ def _plain_text(value: str) -> str:
     return re.sub(r"\s+([.!?。！？；;,:：，])", r"\1", value)
 
 
+def _visible_citation_label(label: str) -> str:
+    """Keep business text wrapped by a citation link, not marker labels.
+
+    Models sometimes bind the exact displayed value or quote rather than add
+    a trailing ``[source]`` marker.  Dropping every link label made the claim
+    auditor verify ``2024 revenue`` after silently removing ``1,709 亿元``.
+    Canonical marker labels remain metadata and are still excluded.
+    """
+
+    normalized = re.sub(r"\s+", "", label).casefold()
+    if normalized in _CITATION_LABEL_PLACEHOLDERS or re.fullmatch(r"\d{1,3}", normalized):
+        return ""
+    return label
+
+
 def _sentence_spans(value: str) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     start = 0
     for match in _SENTENCE_BOUNDARY_RE.finditer(value):
-        spans.append((start, match.end()))
-        start = match.end()
+        end = _trailing_binding_end(value, match.end())
+        spans.append((start, end))
+        start = end
         while start < len(value) and value[start].isspace():
             start += 1
     if start < len(value):
         spans.append((start, len(value)))
     return spans
+
+
+def _trailing_binding_end(value: str, start: int) -> int:
+    """Include citation links written immediately after sentence punctuation.
+
+    Markdown authors commonly write ``Claim. [source](citation://...)``.  The
+    citation is still semantically attached to that claim, even though the
+    terminal punctuation appears before the link.
+    """
+
+    cursor = start
+    while cursor < len(value):
+        whitespace = re.match(r"\s*", value[cursor:])
+        candidate_start = cursor + (whitespace.end() if whitespace else 0)
+        binding = _CITATION_LINK_RE.match(value, candidate_start)
+        if binding is None:
+            break
+        cursor = binding.end()
+    return cursor
 
 
 def _atomic_clause_spans(
@@ -930,17 +2688,37 @@ def _atomic_clause_spans(
     case each clause becomes its own atomic claim.
     """
 
-    if not _metric_ontology(semantics):
-        return [(0, len(value))]
     boundaries = [match.span() for match in re.finditer(r"(?<!\d)[,，]|[,，](?!\d)", value)]
     if not boundaries:
         return [(0, len(value))]
+    citation_spans: list[tuple[int, int]] = []
+    citation_start = 0
+    for _boundary_start, boundary_end in boundaries:
+        candidate = value[citation_start:boundary_end]
+        remainder = value[boundary_end:]
+        if _binding_refs(candidate) != ((), ()) and _binding_refs(remainder) != ((), ()):
+            citation_spans.append((citation_start, boundary_end))
+            citation_start = boundary_end
+    if citation_spans:
+        citation_spans.append((citation_start, len(value)))
+        if all(_binding_refs(value[start:end]) != ((), ()) for start, end in citation_spans):
+            return citation_spans
+
     raw_spans: list[tuple[int, int]] = []
     start = 0
     for _boundary_start, boundary_end in boundaries:
         raw_spans.append((start, boundary_end))
         start = boundary_end
     raw_spans.append((start, len(value)))
+    first_clause = _plain_text(value[raw_spans[0][0] : raw_spans[0][1]])
+    if _PRESENTATION_RE.search(first_clause):
+        # Keep a reporting/layout preface separate from the factual clause
+        # that follows it.  Otherwise a warning for the latter appears to
+        # accuse the harmless prose (for example "本报告按品类呈现")
+        # of lacking a source.
+        return raw_spans
+    if not _metric_ontology(semantics):
+        return [(0, len(value))]
     meaningful = []
     for start, end in raw_spans:
         clause = _plain_text(value[start:end])
@@ -956,9 +2734,16 @@ def _atomic_clause_spans(
 def _is_meaningful_claim(text: str) -> bool:
     if len(text) < 4 or _SOURCE_HEADING_RE.fullmatch(text):
         return False
+    if _SECTION_TITLE_RE.fullmatch(text.strip()):
+        return False
     if re.fullmatch(r"[-:：,，.。\s]+", text):
         return False
-    return bool(_NUMBER_RE.search(text) or _DECLARATIVE_RE.search(text) or len(text.split()) >= 3)
+    return bool(
+        _NUMBER_RE.search(text)
+        or _DECLARATIVE_RE.search(text)
+        or (_NEGATIVE_DISCLOSURE_RE.search(text) and not _NOT_FOUND_RE.search(text))
+        or len(text.split()) >= 3
+    )
 
 
 def _insertion_index(content: str, start: int, end: int) -> int:
@@ -1017,6 +2802,183 @@ def _evidence_parts(record: Any) -> tuple[str, Mapping[str, Any], Mapping[str, A
     )
 
 
+def _source_identity(source: Mapping[str, Any]) -> str:
+    """Return the stable identity used to collapse duplicate source chunks."""
+
+    provider = str(source.get("providerId") or "").strip()
+    source_key = ""
+    for key in ("documentId", "sourceId", "canonicalUrl"):
+        value = source.get(key)
+        if isinstance(value, str) and value.strip():
+            source_key = value.strip()
+            break
+    if not source_key:
+        return ""
+    return f"{provider}\0{source_key}"
+
+
+def _evidence_match_specificity(
+    claim: ClaimCandidate,
+    evidence: Mapping[str, Any],
+    support: EvidenceSupport,
+    semantics: Mapping[str, Any] | None,
+) -> tuple[int, int, int, int]:
+    """Rank supported excerpts from one source without comparing authorities."""
+
+    if evidence.get("kind") != "text":
+        return (support.directness, 0, 0, 0)
+    claim_text = _normalize_prose(claim.exact)
+    quote_text = _normalize_prose(_plain_text(str(evidence.get("quote") or "")))
+    claim_tokens = _semantic_tokens(claim_text)
+    quote_tokens = _semantic_tokens(quote_text)
+    token_overlap = (
+        int(1_000 * len(claim_tokens & quote_tokens) / len(claim_tokens)) if claim_tokens else 0
+    )
+    claim_amount_count = len(_claim_amounts(claim.exact, semantics))
+    quote_amount_count = len(_claim_amounts(str(evidence.get("quote") or ""), semantics))
+    extra_amounts = max(0, quote_amount_count - claim_amount_count)
+    compact_claim = re.sub(r"\s+", "", claim_text)
+    compact_quote = re.sub(r"\s+", "", quote_text)
+    return (
+        support.directness,
+        -extra_amounts,
+        token_overlap,
+        -abs(len(compact_quote) - len(compact_claim)),
+    )
+
+
+def _text_source_period_conflicts(
+    claim: ClaimCandidate,
+    source: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+    semantics: Mapping[str, Any] | None,
+) -> bool:
+    """Reject a document chunk whose explicit period contradicts the claim."""
+
+    claim_period = claim.normalized.get("period", "")
+    if not claim_period:
+        return False
+    metric = claim.normalized.get("metric", "")
+    definition = _metric_ontology(semantics).get(metric)
+    if isinstance(definition, Mapping) and definition.get("date_role") == "publication":
+        return False
+    # A research document title often names its publication/forecast quarter
+    # while one fetched table contains several historical quarters.  When the
+    # exact chunk explicitly includes the claim period, that local evidence is
+    # authoritative for support and the broader title must not create a false
+    # contradiction (for example a ``2Q26`` tracker quoting ``1Q26`` actuals).
+    quote_periods = _explicit_period_keys(
+        " ".join(str(evidence.get(key) or "") for key in ("quote", "snippet"))
+    )
+    if any(_periods_compatible(claim_period, period) for period in quote_periods):
+        return False
+    # Financial tables commonly label comparison columns as ``2024年`` and
+    # ``2023年`` without spelling out ``年度``.  That bare year is direct local
+    # evidence for an FY claim, so the current-report year in the document
+    # title must not override a supported prior-year comparison value.  Exclude
+    # point-in-time dates such as ``2023年4月`` from this exception.
+    if claim_period.endswith(" FY"):
+        claim_year = re.escape(claim_period.split()[0])
+        quote_block = " ".join(str(evidence.get(key) or "") for key in ("quote", "snippet"))
+        if re.search(
+            rf"(?<!\d){claim_year}\s*年(?!\s*\d{{1,2}}\s*月)",
+            quote_block,
+        ):
+            return False
+    candidates = [
+        evidence.get("period"),
+        evidence.get("reportingPeriod"),
+        source.get("period"),
+        source.get("reportingPeriod"),
+        source.get("title"),
+        source.get("documentTitle"),
+    ]
+    for candidate in candidates:
+        if not isinstance(candidate, str) or not candidate.strip():
+            continue
+        evidence_period = _period_key(candidate, semantics)
+        if evidence_period:
+            return not _periods_compatible(evidence_period, claim_period)
+    return False
+
+
+def _text_source_period_matches(
+    claim: ClaimCandidate,
+    source: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+    semantics: Mapping[str, Any] | None,
+) -> bool:
+    """Return whether trusted text explicitly belongs to the claim period."""
+
+    claim_period = claim.normalized.get("period", "")
+    if not claim_period:
+        return False
+    quote_periods = _explicit_period_keys(
+        " ".join(str(evidence.get(key) or "") for key in ("quote", "snippet"))
+    )
+    if any(_periods_compatible(claim_period, period) for period in quote_periods):
+        return True
+    for candidate in (
+        evidence.get("period"),
+        evidence.get("reportingPeriod"),
+        source.get("period"),
+        source.get("reportingPeriod"),
+        source.get("title"),
+        source.get("documentTitle"),
+    ):
+        if not isinstance(candidate, str) or not candidate.strip():
+            continue
+        evidence_period = _period_key(candidate, semantics)
+        if evidence_period and _periods_compatible(claim_period, evidence_period):
+            return True
+    return False
+
+
+def _explicit_period_keys(value: str) -> set[str]:
+    """Collect explicit quarter/half/full-year periods from one text block."""
+
+    compact = re.sub(r"\s+", "", value).upper()
+    periods: set[str] = set()
+    for match in re.finditer(r"((?:19|20)\d{2})Q([1-4])", compact):
+        periods.add(f"{match.group(1)} Q{match.group(2)}")
+    for match in re.finditer(r"Q([1-4])((?:19|20)\d{2})", compact):
+        periods.add(f"{match.group(2)} Q{match.group(1)}")
+    for match in re.finditer(r"([1-4])Q(\d{2})(?!\d)", compact):
+        periods.add(f"20{match.group(2)} Q{match.group(1)}")
+    for match in re.finditer(r"Q([1-4])(\d{2})(?!\d)", compact):
+        periods.add(f"20{match.group(2)} Q{match.group(1)}")
+    # Research summaries often state the year once in the title/preamble and
+    # then use bare quarter labels in the body (``2026 上半年 ... 二季度``).
+    # When the excerpt contains exactly one calendar year, attach those bare
+    # quarter labels to it so a locally supported Q2 claim is not rejected
+    # merely because the broader document title normalizes to H1.
+    years = set(re.findall(r"(?:19|20)\d{2}", compact))
+    if len(years) == 1:
+        year = next(iter(years))
+        for match in re.finditer(r"(?<![A-Z0-9])Q([1-4])(?!\d)", compact):
+            periods.add(f"{year} Q{match.group(1)}")
+        for match in re.finditer(r"第?([一二三四])季度", compact):
+            number = {"一": "1", "二": "2", "三": "3", "四": "4"}[match.group(1)]
+            periods.add(f"{year} Q{number}")
+    for match in re.finditer(r"((?:19|20)\d{2})年第?([一二三四])季度", compact):
+        number = {"一": "1", "二": "2", "三": "3", "四": "4"}[match.group(2)]
+        periods.add(f"{match.group(1)} Q{number}")
+    for match in re.finditer(r"((?:19|20)\d{2})(?:H1|上半年|半年度)", compact):
+        periods.add(f"{match.group(1)} H1")
+    for match in re.finditer(
+        r"((?:19|20)\d{2})(?:年度|年报|年度报告|ANNUALREPORT|FULLYEAR|FY)",
+        compact,
+    ):
+        periods.add(f"{match.group(1)} FY")
+    for match in re.finditer(
+        r"((?:19|20)\d{2})年(?:1|01)月(?:1|01)日?[—~至到-]+"
+        r"(?:19|20)\d{2}年12月31日?",
+        compact,
+    ):
+        periods.add(f"{match.group(1)} FY")
+    return periods
+
+
 def _normalize_field(value: str) -> str:
     return " ".join(_FIELD_TOKEN_RE.findall(value.lower().replace("-", "_")))
 
@@ -1058,6 +3020,7 @@ def _metric_terms(
     return tuple(dict.fromkeys(values))
 
 
+@lru_cache(maxsize=32_768)
 def _term_in_text(term: str, text: str) -> bool:
     normalized_term = _normalize_prose(term.replace("_", " "))
     normalized_text = _normalize_prose(text.replace("_", " "))
@@ -1102,13 +3065,19 @@ def _canonical_metric(
         if explicit in ontology:
             return explicit
         normalized_explicit = _normalize_field(explicit)
+        prose_explicit = _normalize_prose(explicit.replace("_", " "))
         for metric_id, definition in ontology.items():
             if not isinstance(metric_id, str) or not isinstance(definition, Mapping):
                 continue
-            fields = definition.get("fields")
-            if isinstance(fields, list) and normalized_explicit in {
-                _normalize_field(item) for item in fields if isinstance(item, str) and item
-            }:
+            terms = _metric_terms(metric_id, definition)
+            machine_terms = {normalized for item in terms if (normalized := _normalize_field(item))}
+            prose_terms = {_normalize_prose(item.replace("_", " ")) for item in terms if item}
+            if (
+                normalized_explicit
+                and normalized_explicit in machine_terms
+                or prose_explicit
+                and prose_explicit in prose_terms
+            ):
                 return metric_id
         return normalized_explicit
     field = str(evidence.get("field") or "")
@@ -1135,19 +3104,73 @@ def _metric_matches_claim(
     if ambiguous:
         return False
     normalized_metric = claim.normalized.get("metric")
-    if _metric_ontology(semantics) and normalized_metric:
-        return normalized_metric == metric
+    if normalized_metric:
+        # ClaimPacket normalization is authoritative even when OSS has no
+        # edition ontology.  The ontology only adds aliases; it must never be
+        # required for matching two already-addressable adapter field IDs.
+        # Canonicalizing unknown stable identifiers also keeps a distribution
+        # ontology additive instead of turning it into an allowlist.
+        claim_metric = _canonical_metric({"metric": normalized_metric}, semantics)
+        if claim_metric == metric:
+            return True
+        if _metric_ontology(semantics):
+            return False
     return _field_matches_claim(metric, claim.exact)
+
+
+def _generic_derived_claim_accepts_calculation_metric(
+    claim: ClaimCandidate,
+    evidence: Mapping[str, Any],
+    semantics: Mapping[str, Any] | None,
+) -> bool:
+    """Allow a deliberately generic derived label to inherit trusted detail.
+
+    Compact tables often label a row only ``同比增速`` while the bound
+    calculation Evidence records the fully qualified metric (for example
+    operating-revenue growth), exact result, period and inputs.  A table may
+    also combine that row label with its value-column header, producing
+    ``同比增速 — 营业收入``.  In that form the claim extractor recognizes the
+    base metric rather than the derived metric.  The edition's declared
+    calculation dependency graph is the authority for accepting that
+    base-plus-derived composition; unrelated explicit metrics still fail
+    closed.
+    """
+
+    if not (
+        _DERIVED_RE.search(claim.exact)
+        and isinstance(evidence.get("inputs"), list)
+        and evidence.get("inputs")
+    ):
+        return False
+    if not _claim_metric_candidates(claim.semantic_text, semantics):
+        return True
+    if not isinstance(semantics, Mapping):
+        return False
+    dependencies = semantics.get("calculation_dependencies")
+    if not isinstance(dependencies, Mapping):
+        return False
+    evidence_metric = _canonical_metric(evidence, semantics)
+    claim_metric = claim.normalized.get("metric", "")
+    inputs = dependencies.get(evidence_metric)
+    return bool(
+        claim_metric
+        and isinstance(inputs, (list, tuple, set))
+        and claim_metric in {str(item) for item in inputs if str(item)}
+    )
 
 
 def _unit_definitions(
     semantics: Mapping[str, Any] | None,
-) -> list[tuple[str, tuple[str, ...], Decimal]]:
+) -> tuple[tuple[str, tuple[str, ...], Decimal], ...]:
     if not isinstance(semantics, Mapping):
-        return []
+        return ()
     ontology = semantics.get("unit_ontology")
     ontology = ontology if isinstance(ontology, Mapping) else semantics
     raw_units = ontology.get("units") if isinstance(ontology, Mapping) else None
+    cache_key = id(semantics)
+    cached = _UNIT_DEFINITIONS_BY_POLICY.get(cache_key)
+    if cached is not None and cached[0] is semantics and cached[1] is raw_units:
+        return cached[2]
     definitions: list[tuple[str, tuple[str, ...], Decimal]] = []
     if isinstance(raw_units, Mapping):
         iterable = [
@@ -1170,26 +3193,38 @@ def _unit_definitions(
     for unit_id, definition in iterable:
         if not unit_id or not isinstance(definition, Mapping):
             continue
-        aliases = definition.get("aliases")
-        terms = [unit_id]
-        if isinstance(aliases, list):
-            terms.extend(str(item) for item in aliases if isinstance(item, str) and item)
         try:
             scale = Decimal(str(definition.get("scale", 1)))
         except (InvalidOperation, ValueError):
             continue
+        aliases = definition.get("aliases")
+        terms = [unit_id] if scale == 1 else []
+        if isinstance(aliases, list):
+            terms.extend(str(item) for item in aliases if isinstance(item, str) and item)
         definitions.append((unit_id, tuple(dict.fromkeys(terms)), scale))
-    return definitions
+    result = tuple(definitions)
+    if len(_UNIT_DEFINITIONS_BY_POLICY) >= _MAX_UNIT_DEFINITION_POLICIES:
+        _UNIT_DEFINITIONS_BY_POLICY.pop(next(iter(_UNIT_DEFINITIONS_BY_POLICY)))
+    _UNIT_DEFINITIONS_BY_POLICY[cache_key] = (semantics, raw_units, result)
+    return result
 
 
 def _resolve_unit(
     raw_unit: str,
     semantics: Mapping[str, Any] | None,
 ) -> tuple[str, Decimal] | None:
+    return _resolve_unit_from_definitions(raw_unit, _unit_definitions(semantics))
+
+
+@lru_cache(maxsize=4_096)
+def _resolve_unit_from_definitions(
+    raw_unit: str,
+    definitions: tuple[tuple[str, tuple[str, ...], Decimal], ...],
+) -> tuple[str, Decimal] | None:
     normalized = _normalize_prose(raw_unit).replace(" ", "")
     if not normalized:
         return None
-    for unit_id, aliases, scale in _unit_definitions(semantics):
+    for unit_id, aliases, scale in definitions:
         if any(_normalize_prose(alias).replace(" ", "") == normalized for alias in aliases):
             return unit_id, scale
     return None
@@ -1215,21 +3250,76 @@ def _claim_amounts(
     text: str,
     semantics: Mapping[str, Any] | None,
 ) -> list[tuple[str, str, Decimal | None, str]]:
+    # The same claim/evidence text is verified in rebind, auto-bind,
+    # composite-bind and final quality-audit passes.  Amount extraction only
+    # depends on the text and normalized unit ontology, so share that work
+    # instead of repeating thousands of regex scans per answer.
+    unit_definitions = _unit_definitions(semantics)
+    return list(_claim_amounts_cached(text, unit_definitions))
+
+
+@lru_cache(maxsize=8_192)
+def _claim_amounts_cached(
+    text: str,
+    unit_definitions: tuple[tuple[str, tuple[str, ...], Decimal], ...],
+) -> tuple[tuple[str, str, Decimal | None, str], ...]:
     unit_terms: list[tuple[str, str, Decimal]] = []
-    for unit_id, aliases, scale in _unit_definitions(semantics):
+    for unit_id, aliases, scale in unit_definitions:
         unit_terms.extend((alias, unit_id, scale) for alias in aliases)
     unit_terms.sort(key=lambda item: len(item[0]), reverse=True)
     amounts: list[tuple[int, tuple[str, str, Decimal | None, str]]] = []
     occupied: list[tuple[int, int]] = []
+    # English financial transcripts commonly put a currency symbol before the
+    # number (``$54 billion``), while localized answers render the equivalent
+    # as ``540 亿美元``. Normalize the prefix form through the edition's unit
+    # ontology so deterministic matching compares base USD values rather than
+    # the surface numbers 54 and 540. Keep this narrow to unambiguous US-dollar
+    # symbols; ambiguous ``¥`` remains policy/tool data.
+    currency_prefix_pattern = re.compile(
+        r"(?P<currency>US\$|\$)\s*"
+        r"(?P<value>[-+−﹣－＋]?\d[\d,]*(?:\.\d+)?)\s*"
+        r"(?P<scale>billion|million|bn|mm|m)?\b",
+        re.IGNORECASE,
+    )
+    for match in currency_prefix_pattern.finditer(text):
+        scale_token = str(match.group("scale") or "").casefold()
+        scale_name = {
+            "billion": "billion",
+            "bn": "billion",
+            "million": "million",
+            "mm": "million",
+            "m": "million",
+        }.get(scale_token, "")
+        raw_unit = f"USD {scale_name}".strip()
+        resolved = _resolve_unit_from_definitions(raw_unit, unit_definitions)
+        raw_value = match.group("value")
+        decimal = _as_decimal(raw_value)
+        occupied.append(match.span())
+        amounts.append(
+            (
+                match.start(),
+                (
+                    raw_value,
+                    raw_unit,
+                    (
+                        decimal * resolved[1]
+                        if decimal is not None and resolved is not None
+                        else None
+                    ),
+                    resolved[0] if resolved is not None else "",
+                ),
+            )
+        )
     for alias, unit_id, scale in unit_terms:
         pattern = re.compile(
-            rf"(?P<value>[-+]?\d[\d,]*(?:\.\d+)?)\s*{re.escape(alias)}",
+            rf"(?P<value>[-+−﹣－＋]?\d[\d,]*(?:\.\d+)?)\s*"
+            rf"{re.escape(alias)}(?![A-Za-z])",
             re.IGNORECASE,
         )
         for match in pattern.finditer(text):
             if any(start <= match.start() < end for start, end in occupied):
                 continue
-            raw_value = match.group("value")
+            raw_value = _normalize_range_value(text, match.start("value"), match.group("value"))
             decimal = _as_decimal(raw_value)
             occupied.append(match.span())
             amounts.append(
@@ -1243,23 +3333,79 @@ def _claim_amounts(
                     ),
                 )
             )
-    if amounts:
-        return [item for _offset, item in sorted(amounts)]
-
+    # Normalize ordinary-language singular quantities used in transcripts
+    # (``one gigawatt`` / ``another gigawatt`` / ``一吉瓦``).  Only units with
+    # a non-financial canonical identity use this path; phrases such as
+    # ``another dollar`` or ``one percent`` remain too common to infer safely.
+    word_quantity_excluded_units = {
+        "CNY",
+        "EUR",
+        "GBP",
+        "HKD",
+        "JPY",
+        "KRW",
+        "USD",
+        "basis-point",
+        "multiple",
+        "percent",
+    }
+    for alias, unit_id, scale in unit_terms:
+        if unit_id in word_quantity_excluded_units:
+            continue
+        pattern = re.compile(
+            rf"(?:(?:one|another|an?|一)\s*){re.escape(alias)}(?![A-Za-z])",
+            re.IGNORECASE,
+        )
+        for match in pattern.finditer(text):
+            if any(start <= match.start() < end for start, end in occupied):
+                continue
+            occupied.append(match.span())
+            amounts.append(
+                (
+                    match.start(),
+                    ("1", alias, scale, unit_id),
+                )
+            )
     built_in_pattern = re.compile(
-        r"(?P<value>[-+]?\d[\d,]*(?:\.\d+)?)\s*"
+        r"(?P<value>[-+−﹣－＋]?\d[\d,]*(?:\.\d+)?)\s*"
         r"(?P<unit>%|bp|bps|(?:USD|CNY|EUR|GBP|JPY|HKD)[kmb]?|百万元|亿元|万元|元|倍)",
         re.IGNORECASE,
     )
-    built_in = list(built_in_pattern.finditer(text))
-    if built_in:
-        return [(match.group("value"), match.group("unit"), None, "") for match in built_in]
+    for match in built_in_pattern.finditer(text):
+        if any(start <= match.start() < end for start, end in occupied):
+            continue
+        occupied.append(match.span())
+        raw_value = _normalize_range_value(text, match.start("value"), match.group("value"))
+        amounts.append(
+            (
+                match.start(),
+                (raw_value, match.group("unit"), None, ""),
+            )
+        )
 
-    period = _period_key(text, semantics)
-    fallback: list[tuple[str, str, Decimal | None, str]] = []
+    period = _period_key(text)
+    temporal_spans = [
+        match.span()
+        for match in re.finditer(
+            r"(?:19|20)\d{2}(?:"
+            r"[-/]\d{1,2}(?:[-/]\d{1,2})?|"
+            r"\s*年(?:\s*\d{1,2}\s*月(?:\s*\d{1,2}\s*日)?)?"
+            r")?",
+            text,
+            re.IGNORECASE,
+        )
+    ]
     for match in _NUMBER_RE.finditer(text):
-        raw_value = match.group(0)
+        if any(start <= match.start() < end for start, end in occupied):
+            continue
+        if any(start <= match.start() < end for start, end in temporal_spans):
+            continue
+        raw_value = _normalize_range_value(text, match.start(), match.group(0))
         if period and raw_value in period:
+            continue
+        if _number_is_temporal_component(text, match.start(), match.end(), raw_value):
+            continue
+        if _number_is_locator_component(text, match.start(), match.end()):
             continue
         if len(raw_value.replace(",", "")) in {5, 6} and _looks_like_identifier(
             text,
@@ -1267,16 +3413,111 @@ def _claim_amounts(
             match.end(),
         ):
             continue
-        fallback.append((raw_value, "", None, ""))
-    return fallback
+        amounts.append((match.start(), (raw_value, "", None, "")))
+    return tuple(item for _offset, item in sorted(amounts))
+
+
+def _number_is_temporal_component(
+    text: str,
+    start: int,
+    end: int,
+    raw_value: str,
+) -> bool:
+    """Exclude every explicit calendar year from business-value matching.
+
+    ``_period_key`` intentionally returns one canonical period, but a change
+    statement may contain two periods (``2025 Q4 ... 2026 Q1``). Treating the
+    second year as an asserted amount made otherwise verbatim evidence fail.
+    A four-digit value followed by a business unit remains a real amount.
+    """
+
+    compact_value = raw_value.replace(",", "").lstrip("+-")
+    if not re.fullmatch(r"(?:19|20)\d{2}", compact_value):
+        return False
+    suffix = text[end : end + 20]
+    if re.match(
+        r"\s*(?:%|bp|bps|(?:USD|CNY|EUR|GBP|JPY|HKD)[kmb]?|百万元|亿元|万元|元|倍)",
+        suffix,
+        re.IGNORECASE,
+    ):
+        return False
+    prefix = text[max(0, start - 8) : start]
+    return bool(
+        re.search(r"(?:Q[1-4]\s*)?$", prefix, re.IGNORECASE)
+        or re.match(r"\s*(?:年|[-/]\d{1,2}|Q[1-4]\b|FY\b)", suffix, re.IGNORECASE)
+    )
+
+
+def _number_is_locator_component(text: str, start: int, end: int) -> bool:
+    """Exclude document coordinates from business-value comparison.
+
+    Page, section, line and chunk numbers identify where evidence lives.  They
+    are not quantities asserted by the claim, so requiring the quote itself to
+    repeat ``第 9 页`` made otherwise exact document evidence look incomplete.
+    """
+
+    prefix = text[max(0, start - 24) : start]
+    suffix = text[end : end + 16]
+    chinese_prefix = re.search(r"(?:第|页码\s*[:：]?|章节\s*[:：]?)\s*$", prefix)
+    chinese_suffix = re.match(r"\s*(?:页|章|节|段|行|条|图|表|附注)", suffix)
+    if chinese_prefix and chinese_suffix:
+        return True
+    return bool(re.search(r"\b(?:page|p\.?|section|sec\.?|line|chunk)\s*#?\s*$", prefix, re.I))
+
+
+def _normalize_range_value(text: str, start: int, raw_value: str) -> str:
+    normalized_value = raw_value.translate(
+        str.maketrans({"−": "-", "﹣": "-", "－": "-", "＋": "+"})
+    )
+    if normalized_value.startswith("-") and start > 0:
+        prefix = text[max(0, start - 32) : start]
+        # ASCII hyphens are frequently used as range separators both before
+        # and after a unit (``50-55%`` / ``70%-75%``). They are not a minus
+        # sign when a complete numeric amount immediately precedes them.
+        if re.search(
+            r"\d[\d,]*(?:\.\d+)?\s*"
+            r"(?:%|％|bp|bps|(?:USD|CNY|EUR|GBP|JPY|HKD)[kmb]?|百万元|亿元|万元|元|倍)?\s*$",
+            prefix,
+            re.IGNORECASE,
+        ):
+            return normalized_value[1:]
+    if not normalized_value.startswith(("-", "+")) and start > 0:
+        prefix = text[max(0, start - 32) : start]
+        if re.search(
+            r"(?:同比|环比)?\s*(?:下降|减少|下跌|降低)\s*$|"
+            r"\b(?:declined?|decreased?|fell|down)\s+(?:by\s+)?$",
+            prefix,
+            re.IGNORECASE,
+        ):
+            return f"-{normalized_value}"
+    return normalized_value
 
 
 def _as_decimal(value: Any) -> Decimal | None:
     try:
-        result = Decimal(str(value).replace(",", ""))
+        normalized = str(value).translate(
+            str.maketrans({"−": "-", "﹣": "-", "－": "-", "＋": "+"})
+        )
+        result = Decimal(normalized.replace(",", ""))
     except (InvalidOperation, ValueError):
         return None
     return result if result.is_finite() else None
+
+
+def _apply_contextual_amount_unit(
+    amount: tuple[str, str, Decimal | None, str],
+    *,
+    unit_label: str,
+    canonical_unit: str,
+    scale: Decimal,
+) -> tuple[str, str, Decimal | None, str]:
+    raw_value, unit, base_value, base_unit = amount
+    if unit:
+        return raw_value, unit, base_value, base_unit
+    decimal_value = _as_decimal(raw_value)
+    if decimal_value is None:
+        return amount
+    return raw_value, unit_label, decimal_value * scale, canonical_unit
 
 
 def _looks_like_identifier(text: str, start: int, end: int) -> bool:
@@ -1291,10 +3532,503 @@ def _structured_value_matches_claim(
     claim: ClaimCandidate,
     semantics: Mapping[str, Any] | None,
 ) -> bool:
-    for amount in _claim_amounts(claim.exact, semantics):
+    normalized_value = claim.normalized.get("valueBase")
+    normalized_unit = claim.normalized.get("unitBase", "")
+    if normalized_value is None or normalized_value == "":
+        normalized_value = claim.normalized.get("value")
+        normalized_unit = claim.normalized.get("unit", "")
+    if normalized_value is not None and normalized_value != "":
+        evidence_value = evidence.get("value")
+        evidence_decimal = _as_decimal(evidence_value)
+        if (
+            evidence_decimal is not None
+            and evidence_semantic_options(evidence, semantics).get("value_transform") == "absolute"
+        ):
+            evidence_value = abs(evidence_decimal)
+        if structured_values_equivalent(
+            normalized_value,
+            str(normalized_unit or ""),
+            evidence_value,
+            str(evidence.get("unit") or ""),
+            semantics=semantics,
+        ):
+            return True
+    amounts = _claim_amounts(claim.exact, semantics)
+    contextual_unit = _contextual_table_unit(claim.exact, semantics)
+    if contextual_unit is not None:
+        unit_label, canonical_unit, scale = contextual_unit
+        amounts = [
+            _apply_contextual_amount_unit(
+                amount,
+                unit_label=unit_label,
+                canonical_unit=canonical_unit,
+                scale=scale,
+            )
+            for amount in amounts
+        ]
+    for amount in amounts:
         if _evidence_matches_amount(evidence, amount, semantics):
             return True
+    definition = evidence_semantic_options(evidence, semantics)
+    value_aliases = definition.get("value_aliases")
+    if isinstance(value_aliases, Mapping):
+        aliases = value_aliases.get(str(value))
+        wildcard_aliases = value_aliases.get("*")
+        candidates: list[str] = []
+        if isinstance(aliases, list):
+            candidates.extend(item for item in aliases if isinstance(item, str))
+        if isinstance(wildcard_aliases, list):
+            candidates.extend(item for item in wildcard_aliases if isinstance(item, str))
+        if any(_term_in_text(alias, claim.exact) for alias in candidates):
+            return True
+    if amounts:
+        return False
     return _value_present(value, claim.exact)
+
+
+def _text_numeric_supports_claim(
+    claim: ClaimCandidate,
+    quote: str,
+    semantics: Mapping[str, Any] | None,
+    *,
+    metric_context: str | None = None,
+    allow_distinctive_unit_match: bool = False,
+) -> bool:
+    claim_amounts = _claim_amounts(claim.exact, semantics)
+    if not claim_amounts:
+        return False
+    claim_contextual_unit = _contextual_table_unit(claim.exact, semantics)
+    if claim_contextual_unit is not None:
+        unit_label, canonical_unit, scale = claim_contextual_unit
+        claim_amounts = [
+            _apply_contextual_amount_unit(
+                amount,
+                unit_label=unit_label,
+                canonical_unit=canonical_unit,
+                scale=scale,
+            )
+            for amount in claim_amounts
+        ]
+    quote_amounts = _claim_amounts(quote, semantics)
+    if not quote_amounts:
+        return False
+    contextual_unit = _contextual_table_unit(quote, semantics)
+    if contextual_unit is not None:
+        unit_label, canonical_unit, scale = contextual_unit
+        quote_amounts = [
+            _apply_contextual_amount_unit(
+                amount,
+                unit_label=unit_label,
+                canonical_unit=canonical_unit,
+                scale=scale,
+            )
+            for amount in quote_amounts
+        ]
+    else:
+        # Extracted filing tables often declare one amount unit (for example
+        # ``单位：万元``) while percentage columns keep their values bare. In
+        # that mixed-unit shape ``_contextual_table_unit`` intentionally
+        # refuses to reinterpret every number as currency. Preserve the raw
+        # variants for percentages, and add amount-unit variants so a table
+        # cell rendered as ``1,459.28 亿元`` can still match the original
+        # ``14,592,807.60`` 万元 value.
+        marker = re.search(
+            r"单位\s*[:：]\s*([^\s|,，;；()（）]{1,24})",
+            quote,
+            re.IGNORECASE,
+        )
+        resolved_marker = _resolve_unit(marker.group(1), semantics) if marker is not None else None
+        if marker is not None and resolved_marker is not None:
+            unit_label = marker.group(1)
+            canonical_unit, scale = resolved_marker
+            contextual_amounts = [
+                _apply_contextual_amount_unit(
+                    amount,
+                    unit_label=unit_label,
+                    canonical_unit=canonical_unit,
+                    scale=scale,
+                )
+                for amount in quote_amounts
+                if not amount[1]
+            ]
+            quote_amounts = [*quote_amounts, *contextual_amounts]
+    directly_supported = [
+        claim_amount
+        for claim_amount in claim_amounts
+        if any(
+            _amounts_equivalent(claim_amount, quote_amount, semantics)
+            for quote_amount in quote_amounts
+        )
+    ]
+    if not directly_supported or not all(
+        claim_amount in directly_supported
+        or any(
+            _amounts_equivalent(claim_amount, supported_amount, semantics)
+            or _amounts_equivalent(supported_amount, claim_amount, semantics)
+            for supported_amount in directly_supported
+        )
+        for claim_amount in claim_amounts
+    ):
+        return False
+    metric = claim.normalized.get("metric", "")
+    context = metric_context or quote
+    if metric:
+        definition = _metric_ontology(semantics).get(metric)
+        if _metric_context_supports(metric, definition, context, semantics):
+            return True
+
+    # Period-scoped operational quantities often cross languages while the SI
+    # unit remains authoritative (for example ``1 GW`` and ``one gigawatt``).
+    # Once every amount matches and the source period is explicitly the same,
+    # a non-financial canonical unit is sufficiently distinctive to bridge the
+    # vocabulary gap.  Currency, percentages, basis points and multiples are
+    # intentionally excluded because the same value commonly appears in many
+    # unrelated metrics within one report.
+    if allow_distinctive_unit_match and _distinctive_unit_overlap(
+        claim_amounts,
+        quote_amounts,
+    ):
+        return True
+    if allow_distinctive_unit_match and _has_distinctive_amount_vector(claim_amounts):
+        # A same-period vector of several values is often the only stable
+        # bridge between a localized answer and an English source sentence.
+        # One matching currency/percentage is too weak; two or more distinct
+        # values that are all already proven present form a conservative
+        # source fingerprint without requiring company- or metric-specific
+        # translation aliases.
+        return True
+
+    # Generic retrieved text (market research, transcripts, web documents)
+    # does not necessarily use an edition ontology metric.  Requiring one made
+    # a verbatim quote with every numeric value fail as "partially supported".
+    # Numeric equality alone is still too weak, so require distinctive lexical
+    # overlap as a second independent condition.
+    return _generic_text_subject_overlap(claim.semantic_text, context)
+
+
+def _text_numeric_conflicts_claim(
+    claim: ClaimCandidate,
+    quote: str,
+    semantics: Mapping[str, Any] | None,
+    *,
+    metric_context: str | None = None,
+) -> bool:
+    """Detect a provable table-unit conflict without guessing semantics.
+
+    A filing may declare one unit for every bare value in a table, while an
+    answer copies one raw cell and appends a different display scale.  This is
+    stronger than ordinary ``not-found`` only when all of the following are
+    deterministic: one ontology metric identifies the relevant source line,
+    the table-wide unit resolves uniquely, the exact raw number is copied, and
+    both units resolve to the same canonical currency with different values.
+    """
+
+    metric = claim.normalized.get("metric", "")
+    if not metric:
+        return False
+    definition = _metric_ontology(semantics).get(metric)
+    context = metric_context or quote
+    metric_lines = [
+        line
+        for line in context.splitlines()
+        if _metric_context_supports(metric, definition, line, semantics)
+    ]
+    if not metric_lines:
+        return False
+
+    quote_unit = _contextual_table_unit(quote, semantics)
+    if quote_unit is None:
+        return False
+    quote_label, quote_canonical, quote_scale = quote_unit
+    quote_amounts = [
+        _apply_contextual_amount_unit(
+            amount,
+            unit_label=quote_label,
+            canonical_unit=quote_canonical,
+            scale=quote_scale,
+        )
+        for amount in _claim_amounts("\n".join(metric_lines), semantics)
+        if not amount[1]
+    ]
+    if not quote_amounts:
+        return False
+
+    claim_amounts = _claim_amounts(claim.exact, semantics)
+    claim_unit = _contextual_table_unit(claim.exact, semantics)
+    if claim_unit is not None:
+        claim_label, claim_canonical, claim_scale = claim_unit
+        claim_amounts = [
+            _apply_contextual_amount_unit(
+                amount,
+                unit_label=claim_label,
+                canonical_unit=claim_canonical,
+                scale=claim_scale,
+            )
+            for amount in claim_amounts
+        ]
+
+    for claim_amount in claim_amounts:
+        claim_raw = _as_decimal(claim_amount[0])
+        if claim_raw is None or not claim_amount[1] or claim_amount[2] is None:
+            continue
+        for quote_amount in quote_amounts:
+            quote_raw = _as_decimal(quote_amount[0])
+            if (
+                quote_raw is not None
+                and claim_raw == quote_raw
+                and quote_amount[2] is not None
+                and claim_amount[3]
+                and claim_amount[3] == quote_amount[3]
+                and not _amounts_equivalent(claim_amount, quote_amount, semantics)
+            ):
+                return True
+    return False
+
+
+def _distinctive_unit_overlap(
+    claim_amounts: Iterable[tuple[str, str, Decimal | None, str]],
+    evidence_amounts: Iterable[tuple[str, str, Decimal | None, str]],
+) -> bool:
+    excluded = {
+        "",
+        "CNY",
+        "EUR",
+        "GBP",
+        "HKD",
+        "JPY",
+        "KRW",
+        "USD",
+        "basis-point",
+        "multiple",
+        "percent",
+    }
+    claim_units = {amount[3] for amount in claim_amounts if amount[3] not in excluded}
+    evidence_units = {amount[3] for amount in evidence_amounts if amount[3] not in excluded}
+    return bool(claim_units and claim_units & evidence_units)
+
+
+def _has_distinctive_amount_vector(
+    amounts: Iterable[tuple[str, str, Decimal | None, str]],
+) -> bool:
+    distinct: set[tuple[str, str]] = set()
+    for raw_value, unit, base_value, base_unit in amounts:
+        if base_value is not None:
+            distinct.add((base_unit or unit.casefold(), str(base_value.normalize())))
+        else:
+            distinct.add((unit.casefold(), _stable_scalar(raw_value)))
+    return len(distinct) >= 2
+
+
+def _metric_context_supports(
+    metric: str,
+    definition: Any,
+    context: str,
+    semantics: Mapping[str, Any] | None,
+) -> bool:
+    """Match a metric directly or through an explicit reported-change column.
+
+    Filing tables often split a derived metric across one row label and one
+    comparative header: ``归母净利润`` + ``本期比上年同期增减(%)``.  The
+    answer can naturally render that cell as ``净利润同比增长 15.38%``.
+    Edition policy already declares the derived metric's input dependency, so
+    use that graph rather than hard-coding finance metric names in OSS.
+    """
+
+    if any(_term_in_text(term, context) for term in _metric_terms(metric, definition)):
+        return True
+    if (
+        not isinstance(semantics, Mapping)
+        or re.search(
+            r"(?:同比|环比|增减|增长|下降|上升|growth|change)",
+            context,
+            re.IGNORECASE,
+        )
+        is None
+    ):
+        return False
+    dependencies = semantics.get("calculation_dependencies")
+    if not isinstance(dependencies, Mapping):
+        return False
+    inputs = dependencies.get(metric)
+    if not isinstance(inputs, list) or not inputs:
+        return False
+    ontology = _metric_ontology(semantics)
+    return any(
+        any(
+            _term_in_text(term, context)
+            for term in _metric_terms(input_metric, ontology.get(input_metric))
+        )
+        for input_metric in (str(item) for item in inputs if str(item))
+    )
+
+
+def _generic_text_subject_overlap(claim_text: str, evidence_text: str) -> bool:
+    latin_pattern = re.compile(r"[A-Za-z][A-Za-z0-9_-]{1,}")
+    ignored = _METRIC_STOP_WORDS | {
+        "data",
+        "value",
+        "values",
+        "report",
+        "reported",
+        "according",
+        "quarter",
+    }
+    claim_latin = {
+        token.casefold()
+        for token in latin_pattern.findall(claim_text)
+        if token.casefold() not in ignored
+    }
+    evidence_latin = {
+        token.casefold()
+        for token in latin_pattern.findall(evidence_text)
+        if token.casefold() not in ignored
+    }
+    latin_overlap = claim_latin & evidence_latin
+    if len(latin_overlap) >= 2 or any(len(token) >= 4 for token in latin_overlap):
+        return True
+
+    claim_cjk = _cjk_bigrams(claim_text)
+    evidence_cjk = _cjk_bigrams(evidence_text)
+    overlap = claim_cjk & evidence_cjk
+    if len(overlap) >= 2:
+        return True
+    generic = {
+        "公司",
+        "数据",
+        "报告",
+        "增长",
+        "上涨",
+        "下跌",
+        "上升",
+        "下降",
+        "涨幅",
+        "同比",
+        "环比",
+        "收入",
+        "价格",
+        "年度",
+        "季度",
+    }
+    return bool(overlap - generic)
+
+
+def _contextual_table_unit(
+    value: str,
+    semantics: Mapping[str, Any] | None,
+) -> tuple[str, str, Decimal] | None:
+    marker = re.search(r"单位\s*[:：]\s*([^\s|,，;；()（）]{1,24})", value, re.IGNORECASE)
+    raw_candidates = [marker.group(1)] if marker is not None else []
+    # Markdown table claims carry their unit in the column heading, which the
+    # extractor preserves before the cell value, for example:
+    # ``贵州茅台 — 营业收入（亿元）: 1,708.99``.  The ordinary amount parser only
+    # sees units that follow a number, so preserve the nearest resolvable
+    # parenthetical header unit as cell context.  Identifiers such as（600519）
+    # are harmless because they are not part of the unit ontology.
+    # English filings commonly use a descriptive table-wide marker such as
+    # ``(In millions of Korean won, except per share data)``.  Twenty-four
+    # characters was enough for compact Chinese labels but silently dropped
+    # these authoritative unit declarations.  Keep the span bounded while
+    # allowing the normal filing phrase; punctuation splitting below still
+    # requires one exact ontology alias before it can affect any amount.
+    raw_candidates.extend(reversed(re.findall(r"[（(]\s*([^()（）]{1,96})\s*[）)]", value)))
+    # Column labels often combine the magnitude and currency, for example
+    # ``金额（亿元，人民币）``.  Resolve both the complete phrase and its
+    # punctuation-delimited parts; the ontology then selects the one coherent
+    # canonical unit/scale.  This avoids treating 1,708.99 亿元 as though it
+    # had to equal a raw 170,899,152,276 CNY value without scaling.
+    candidates = [
+        part.strip()
+        for raw in raw_candidates
+        for part in (raw, *re.split(r"[,，/|·;；]+", raw))
+        if part.strip()
+    ]
+    resolved_candidates = [
+        (raw_unit, resolved[0], resolved[1])
+        for raw_unit in candidates
+        for resolved in [_resolve_unit(raw_unit, semantics)]
+        if resolved is not None
+    ]
+    if not resolved_candidates:
+        return None
+    if value.count("|") >= 8 and any(
+        canonical == "percent" for _raw, canonical, _scale in resolved_candidates
+    ):
+        # ``(%)`` in a Markdown table is normally a column header, never a
+        # table-wide unit.  Bare numbers in neighboring currency columns must
+        # not be reinterpreted as percentages.
+        resolved_candidates = [item for item in resolved_candidates if item[1] != "percent"]
+        if not resolved_candidates:
+            return None
+    # A financial table commonly mixes a base currency with percentage
+    # columns.  Applying the nearest parenthesized unit to every bare numeric
+    # cell turns valid CNY amounts into percentages (or vice versa).  Use a
+    # contextual unit only when all recognizable table-wide cues agree.
+    if len({(canonical, scale) for _raw, canonical, scale in resolved_candidates}) > 1:
+        return None
+    return resolved_candidates[0]
+
+
+def _cjk_bigrams(value: str) -> set[str]:
+    output: set[str] = set()
+    for sequence in re.findall(r"[\u3400-\u9fff]{2,}", value):
+        output.update(sequence[index : index + 2] for index in range(len(sequence) - 1))
+    return output
+
+
+def _amounts_equivalent(
+    left: tuple[str, str, Decimal | None, str],
+    right: tuple[str, str, Decimal | None, str],
+    semantics: Mapping[str, Any] | None,
+) -> bool:
+    left_raw, left_unit, left_base, left_base_unit = left
+    right_raw, right_unit, right_base, right_base_unit = right
+    if (
+        left_base is not None
+        and right_base is not None
+        and left_base_unit
+        and left_base_unit == right_base_unit
+    ):
+        resolved_left_unit = _resolve_unit(left_unit, semantics)
+        tolerance = (
+            _display_rounding_tolerance(left_raw, resolved_left_unit[1])
+            if resolved_left_unit is not None
+            else Decimal(0)
+        )
+        return _decimal_close(left_base, right_base, minimum_tolerance=tolerance)
+    left_decimal = _as_decimal(left_raw)
+    right_decimal = _as_decimal(right_raw)
+    # A parsed table cell frequently omits its unit even though the raw value
+    # is already in the ontology's base unit (for example 74,843,327,030.79
+    # CNY), while the answer presents the rounded display value as 748.43
+    # 亿元.  Comparing the explicit-unit side's scaled value to the unitless
+    # raw cell is conservative: an actually unitless 748.43 cell cannot match
+    # 74.843 billion, but a base-unit cell can match within display precision.
+    if (
+        left_base is not None
+        and right_base is None
+        and not right_unit
+        and right_decimal is not None
+    ):
+        resolved_left_unit = _resolve_unit(left_unit, semantics)
+        tolerance = (
+            _display_rounding_tolerance(left_raw, resolved_left_unit[1])
+            if resolved_left_unit is not None
+            else Decimal(0)
+        )
+        return _decimal_close(left_base, right_decimal, minimum_tolerance=tolerance)
+    if right_base is not None and left_base is None and not left_unit and left_decimal is not None:
+        resolved_right_unit = _resolve_unit(right_unit, semantics)
+        tolerance = (
+            _display_rounding_tolerance(right_raw, resolved_right_unit[1])
+            if resolved_right_unit is not None
+            else Decimal(0)
+        )
+        return _decimal_close(right_base, left_decimal, minimum_tolerance=tolerance)
+    return (
+        left_decimal is not None
+        and right_decimal is not None
+        and _decimal_close(left_decimal, right_decimal)
+    )
 
 
 def _evidence_matches_amount(
@@ -1306,6 +4040,8 @@ def _evidence_matches_amount(
     evidence_decimal = _as_decimal(evidence.get("value"))
     if evidence_decimal is None:
         return False
+    if evidence_semantic_options(evidence, semantics).get("value_transform") == "absolute":
+        evidence_decimal = abs(evidence_decimal)
     resolved = _resolve_unit(str(evidence.get("unit") or ""), semantics)
     if claim_base is not None and resolved:
         claim_unit = _resolve_unit(raw_unit, semantics)
@@ -1349,6 +4085,11 @@ def _semantic_value_key(
 ) -> str:
     value = evidence.get("value")
     decimal = _as_decimal(value)
+    if (
+        decimal is not None
+        and evidence_semantic_options(evidence, semantics).get("value_transform") == "absolute"
+    ):
+        decimal = abs(decimal)
     resolved = _resolve_unit(str(evidence.get("unit") or ""), semantics)
     if decimal is not None and resolved:
         return f"{_stable_scalar(decimal * resolved[1])} {resolved[0]}"
@@ -1368,9 +4109,11 @@ def _entity_support_status(
         return "contradicted"
     if claim_ids and not evidence_ids:
         return "partial"
-    entity_name = str(evidence.get("entityName") or "").strip()
-    if entity_name and entity_name not in claim.semantic_text and not claim_ids:
-        return "partial"
+    # Missing repetition is not evidence of a mismatch.  Answers commonly put
+    # the company in the user request, a heading or a neighboring table cell;
+    # an atomic row then contains only metric/value.  Keep explicit conflicting
+    # identifiers above as contradictions, but do not trigger repair merely
+    # because trusted Evidence is more specific than the displayed claim.
     return "supported"
 
 
@@ -1438,7 +4181,9 @@ def _dimension_support_status(
         evidence_raw = str(evidence.get(dimension) or "")
         if not evidence_raw:
             return "partial"
-        if _canonical_dimension(evidence_raw, semantics, dimension) != claim_value:
+        claim_canonical = _canonical_dimension(str(claim_value), semantics, dimension)
+        evidence_canonical = _canonical_dimension(evidence_raw, semantics, dimension)
+        if evidence_canonical != claim_canonical:
             return "contradicted"
     return "supported"
 
@@ -1452,6 +4197,18 @@ def _semantic_tokens(value: str) -> set[str]:
     return {token for token in tokens if not token.isdigit()}
 
 
+def _periods_compatible(left: str, right: str) -> bool:
+    if not left or not right:
+        return True
+    if left == right:
+        return True
+
+    def abbreviated(value: str) -> str:
+        return re.sub(r" Q([13]) YTD$", r" Q\1", value)
+
+    return abbreviated(left) == abbreviated(right)
+
+
 def _period_key(
     value: str,
     semantics: Mapping[str, Any] | None = None,
@@ -1460,7 +4217,21 @@ def _period_key(
     compact = re.sub(r"\s+", "", value).upper()
     year_match = re.search(r"(?:19|20)\d{2}", compact)
     if not year_match:
-        return ""
+        short_quarter = (
+            re.search(r"FY(\d{2})Q([1-4])", compact)
+            or re.search(r"Q([1-4])FY(\d{2})", compact)
+            or re.search(r"([1-4])Q(\d{2})(?!\d)", compact)
+            or re.search(r"Q([1-4])(\d{2})(?!\d)", compact)
+        )
+        if short_quarter:
+            first, second = short_quarter.groups()
+            if compact.startswith("FY"):
+                year_suffix, quarter_number = first, second
+            else:
+                quarter_number, year_suffix = first, second
+            return f"20{year_suffix} Q{quarter_number}"
+        short_fiscal_year = re.search(r"FY(\d{2})(?!\d)", compact)
+        return f"20{short_fiscal_year.group(1)} FY" if short_fiscal_year else ""
     year = year_match.group(0)
     date_range = re.search(
         rf"{year}-01-01[/~至到]{year}-(\d{{2}})-(\d{{2}})",
@@ -1483,6 +4254,11 @@ def _period_key(
         return f"{year} Q3 YTD"
     if re.search(r"(?:H1|上半年|半年度)", compact):
         return f"{year} H1"
+    # Search indexes sometimes append ``Q4`` to an annual filing title.  The
+    # explicit annual-report marker is the reporting period; Q4 is storage
+    # metadata and must not turn a full-year claim into a false conflict.
+    if re.search(r"(?:年度报告|年度财报|年报|ANNUALREPORT|FULLYEAR)", compact):
+        return f"{year} FY"
     quarter = re.search(r"Q([1-4])", compact)
     if quarter:
         return f"{year} Q{quarter.group(1)}"
@@ -1494,6 +4270,21 @@ def _period_key(
     if full_date:
         return f"{year}-{int(full_date.group(1)):02d}-{int(full_date.group(2)):02d}"
     return f"{year} FY"
+
+
+def _unique_fiscal_year_context(value: str) -> str:
+    """Return one explicit fiscal year shared by abbreviated table columns."""
+
+    years = {
+        match.group(1) or match.group(2)
+        for match in re.finditer(
+            r"\bFY\s*((?:19|20)\d{2})\b|\b((?:19|20)\d{2})\s*(?:财年|FISCAL\s+YEAR)\b",
+            value,
+            re.IGNORECASE,
+        )
+    }
+    years.discard(None)
+    return f"FY{next(iter(years))}" if len(years) == 1 else ""
 
 
 def _stable_scalar(value: Any) -> str:
@@ -1508,16 +4299,157 @@ def _stable_scalar(value: Any) -> str:
     return format(decimal.normalize(), "f")
 
 
+def _calculation_inputs_present_in_claim(
+    evidence: Mapping[str, Any],
+    text: str,
+) -> bool:
+    inputs = evidence.get("inputs")
+    if not isinstance(inputs, list) or not inputs:
+        return False
+    values = [
+        item.get("value")
+        for item in inputs
+        if isinstance(item, Mapping) and item.get("value") is not None
+    ]
+    return len(values) == len(inputs) and all(_value_present(value, text) for value in values)
+
+
+def calculation_formula_matches_evidence(
+    text: str,
+    evidence: Mapping[str, Any],
+) -> bool:
+    """Prove that a displayed numeric formula represents calculation Evidence.
+
+    Models commonly put the arithmetic on one Markdown block and the result,
+    with its citation, on the next. The formula is supported only when every
+    declared input is present and its safely evaluated numeric expression
+    reproduces the Evidence result (including ratio-to-percent display).
+    Merely sharing input numbers is not sufficient.
+    """
+    if evidence.get("kind") != "calculation":
+        return False
+    if not _looks_like_numeric_formula(text):
+        return False
+    expression = _normalize_display_formula(text)
+    if not expression:
+        return False
+    if not _calculation_inputs_present_in_claim(evidence, expression):
+        return False
+    try:
+        displayed = evaluate_decimal_expression(expression, {})
+        expected = Decimal(str(evidence.get("result")))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    if not displayed.is_finite() or not expected.is_finite():
+        return False
+
+    rounding = str(evidence.get("rounding") or "")
+    match = re.fullmatch(r"(\d{1,2})dp", rounding, re.IGNORECASE)
+    decimal_places = int(match.group(1)) if match else 8
+    tolerance = Decimal("0.5") * (Decimal(10) ** -decimal_places)
+    candidates = [displayed]
+    if str(evidence.get("unit") or "").strip() == "%":
+        candidates.extend((displayed * 100, displayed / 100))
+    return any(abs(candidate - expected) <= tolerance for candidate in candidates)
+
+
+def _looks_like_numeric_formula(text: str) -> bool:
+    return bool(
+        (_FORMULA_LABEL_RE.search(text) or _LATEX_FORMULA_RE.search(text))
+        and len(_NUMBER_RE.findall(text)) >= 2
+        and (_ARITHMETIC_OPERATOR_RE.search(text) or _LATEX_FORMULA_RE.search(text))
+    )
+
+
+def _normalize_display_formula(text: str) -> str:
+    """Normalize bounded plain/LaTeX display arithmetic for the safe evaluator."""
+    body = re.split(r"[:：]", text, maxsplit=1)[-1]
+    # TeX thousands separators emitted by models, e.g. ``170{,}899``.
+    body = re.sub(r"(?<=\d)\{,\}(?=\d)", "", body)
+    body = body.replace(r"\,", "")
+    body = body.replace(r"\left", "").replace(r"\right", "")
+    body = body.replace(r"\times", "*").replace(r"\div", "/")
+    body = body.replace(r"\%", "").replace("$$", "")
+    fraction = re.compile(r"\\frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}")
+    for _ in range(8):
+        rewritten = fraction.sub(r"((\1)/(\2))", body)
+        if rewritten == body:
+            break
+        body = rewritten
+    body = body.translate(
+        str.maketrans(
+            {
+                "−": "-",
+                "﹣": "-",
+                "－": "-",
+                "＋": "+",
+                "×": "*",
+                "÷": "/",
+                "{": "(",
+                "}": ")",
+            }
+        )
+    )
+    body = re.sub(r"(?<=\d),(?=\d)", "", body)
+    expression = re.sub(r"[^0-9eE.+*/()\-\s]", "", body).strip()
+    return expression if _ARITHMETIC_OPERATOR_RE.search(expression) else ""
+
+
 def _value_present(value: Any, text: str) -> bool:
-    target = _stable_scalar(value)
-    for match in _NUMBER_RE.findall(text):
-        if _stable_scalar(match) == target:
+    target_decimal = _as_decimal(value)
+    for match in _NUMBER_RE.finditer(text):
+        candidate_text = _normalize_range_value(
+            text,
+            match.start(),
+            match.group(0),
+        )
+        candidate_decimal = _as_decimal(candidate_text)
+        if target_decimal is not None and candidate_decimal == target_decimal:
             return True
+    target = _stable_scalar(value)
     return bool(target and target.lower() in text.lower())
 
 
 def _normalize_prose(value: str) -> str:
     return re.sub(r"[^\w\u4e00-\u9fff%]+", " ", value.lower()).strip()
+
+
+def _claim_label_body(value: str) -> str:
+    """Drop a short presentation label before ``:`` from a rendered claim.
+
+    Markdown answers often render ``审计意见：<verbatim filing sentence>``.
+    The label is UI structure, not part of the asserted source language; using
+    it in prose containment made an otherwise verbatim quote only partially
+    supported.  Bound the prefix so normal sentences containing a later colon
+    are left intact.
+    """
+
+    return re.sub(r"^\s*(?:[*_#`]+\s*)?[^\n:：]{1,32}[:：]\s*", "", value, count=1)
+
+
+def _prose_contains(left: str, right: str) -> bool:
+    shorter = min((left, right), key=lambda value: len(re.sub(r"\s+", "", value)))
+    compact_shorter = re.sub(r"\s+", "", shorter)
+    # A page number, one digit, or another tiny fragment is not evidence for
+    # a complete factual sentence.  The old symmetric substring check made a
+    # PDF quote such as ``"2"`` support every claim that happened to contain
+    # that digit, which in turn allowed unsafe automatic citation rebinding.
+    if len(compact_shorter) < 8 or not re.search(r"[A-Za-z\u3400-\u9fff]", compact_shorter):
+        return False
+    if left in right or right in left:
+        return True
+    if not (re.search(r"[\u4e00-\u9fff]", left) or re.search(r"[\u4e00-\u9fff]", right)):
+        return False
+    compact_left = re.sub(r"\s+", "", left)
+    compact_right = re.sub(r"\s+", "", right)
+    return compact_left in compact_right or compact_right in compact_left
+
+
+def _quoted_claim_fragments(value: str) -> tuple[str, ...]:
+    fragments: list[str] = []
+    for pattern in (r'"([^"\n]{4,})"', r"“([^”\n]{4,})”"):
+        fragments.extend(match.group(1).strip() for match in re.finditer(pattern, value))
+    return tuple(fragment for fragment in fragments if fragment)
 
 
 def _units_compatible(left: str, right: str) -> bool:
@@ -1529,6 +4461,7 @@ __all__ = [
     "CLAIM_EXTRACTOR_REVISION",
     "CLAIM_VERIFIER_REVISION",
     "AutoBindResult",
+    "CompositeAutoBindResult",
     "ClaimCandidate",
     "EvidenceMatch",
     "EvidenceSupport",
@@ -1538,8 +4471,14 @@ __all__ = [
     "extract_claims",
     "extract_claims_with_status",
     "auto_bind_unique_claims",
+    "auto_bind_composite_text_claims",
+    "propagate_equivalent_claim_bindings",
+    "rebind_unique_mismatched_claims",
     "match_available_evidence",
     "structured_components_cover_claim",
+    "text_components_cover_claim",
     "structured_value_present",
+    "structured_values_equivalent",
+    "structured_units_compatible",
     "verify_evidence_support",
 ]

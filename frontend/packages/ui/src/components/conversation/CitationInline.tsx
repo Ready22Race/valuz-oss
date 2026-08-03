@@ -13,7 +13,7 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
-import { AlertTriangle, ExternalLink } from "lucide-react";
+import { AlertTriangle, ExternalLink, Info } from "lucide-react";
 import { Streamdown, type Components } from "streamdown";
 import type {
   CitationBundleV1,
@@ -34,8 +34,11 @@ type CitationCardSide = "bottom" | "top";
 type CitationCardPosition = { left: number; top: number };
 
 export interface CitationQualityDisplayIssue {
+  code?: string;
+  claimId?: string;
   label: string;
   severity: string;
+  tone: "advisory" | "critical";
 }
 
 function comparableEvidenceText(value: string): string {
@@ -66,19 +69,48 @@ function redundantEvidenceSnippet(quote: string, snippet?: string): boolean {
 }
 
 export function rewriteCitationMarkdownLinks(content: string): string {
-  return content.replace(CITATION_URI_PATTERN, (_whole, citationId: string) => {
-    return `${CITATION_HREF_PREFIX}${encodeURIComponent(citationId)}`;
-  });
+  return content.replace(
+    CITATION_URI_PATTERN,
+    (_whole, citationId: string, sourceOffset: number) =>
+      `${CITATION_HREF_PREFIX}${encodeURIComponent(citationId)}?offset=${sourceOffset}`,
+  );
 }
 
 export function citationIdFromHref(href?: string): string | null {
   if (!href?.startsWith(CITATION_HREF_PREFIX)) return null;
   try {
-    const citationId = decodeURIComponent(href.slice(CITATION_HREF_PREFIX.length));
+    const encodedCitationId = href
+      .slice(CITATION_HREF_PREFIX.length)
+      .split("?", 1)[0];
+    const citationId = decodeURIComponent(encodedCitationId ?? "");
     return citationId || null;
   } catch {
     return null;
   }
+}
+
+export function citationOffsetFromHref(href?: string): number | null {
+  if (!href?.startsWith(CITATION_HREF_PREFIX)) return null;
+  try {
+    const offset = Number(new URL(href).searchParams.get("offset"));
+    return Number.isInteger(offset) && offset >= 0 ? offset : null;
+  } catch {
+    return null;
+  }
+}
+
+export function citationOccurrences(
+  content: string,
+): Map<string, number[]> {
+  const occurrences = new Map<string, number[]>();
+  for (const match of content.matchAll(CITATION_URI_PATTERN)) {
+    const citationId = match[1];
+    if (!citationId || match.index === undefined) continue;
+    const offsets = occurrences.get(citationId) ?? [];
+    offsets.push(match.index);
+    occurrences.set(citationId, offsets);
+  }
+  return occurrences;
 }
 
 export function citationDisplayOrder(content: string): Map<string, number> {
@@ -146,7 +178,10 @@ function citationIndexLabel(indexes: number[]): string {
     : indexes.join(", ");
 }
 
-function evidenceText(citation: CitationRefV1): {
+function evidenceText(
+  citation: CitationRefV1,
+  documentCoverageLabel: string,
+): {
   quote: string;
   snippet?: string;
   time?: string;
@@ -162,7 +197,17 @@ function evidenceText(citation: CitationRefV1): {
     };
   }
   if (evidence.kind === "structured-data") {
-    const field = (evidence.field.split(".").at(-1) ?? evidence.field)
+    if (
+      evidence.field === "document_coverage_complete" &&
+      evidence.basis === "full-document" &&
+      evidence.value === true
+    ) {
+      return {
+        quote: documentCoverageLabel,
+        time: evidence.capturedAt,
+      };
+    }
+    const field = (evidence.field.split(/[./]/u).at(-1) ?? evidence.field)
       .replace(/([a-z0-9])([A-Z])/gu, "$1 $2")
       .replace(/[_-]+/gu, " ")
       .trim();
@@ -385,10 +430,18 @@ function CitationHoverCard({
   onMouseLeave: () => void;
 }) {
   const { t } = useI18n();
-  const detail = evidenceText(citation);
+  const detail = evidenceText(
+    citation,
+    t("ui.citation.documentCoverageComplete"),
+  );
   const attribution =
     citation.source.organization ?? citation.source.author ?? citation.source.providerId;
   const quality = qualityBadge(citation);
+  const qualityTone = qualityIssues?.some((issue) => issue.tone === "critical")
+    ? "critical"
+    : qualityIssues?.length
+      ? "advisory"
+      : undefined;
   const hasTable = containsMarkdownTable(detail.quote);
   const calculationInputs =
     citation.evidence.kind === "calculation"
@@ -430,7 +483,9 @@ function CitationHoverCard({
                 "rounded px-1.5 py-0.5 text-2xs",
                 quality.status === "passed"
                   ? "bg-success-light text-success"
-                  : "bg-warning-light text-warning-text",
+                  : qualityTone === "critical"
+                    ? "bg-warning-light text-warning-text"
+                    : "bg-surface-muted text-ink-meta",
               )}
             >
               {quality.label}
@@ -457,16 +512,36 @@ function CitationHoverCard({
       </div>
       {qualityIssues?.length ? (
         <div
-          data-citation-quality-issues
-          className="mt-2 flex items-start gap-1.5 rounded-md bg-warning-light/50 px-2.5 py-2 leading-5 text-ink-body"
+          data-citation-quality-issues={qualityTone}
+          className={cn(
+            "mt-2 flex items-start gap-1.5 rounded-md px-2.5 py-2 leading-5 text-ink-body",
+            qualityTone === "critical"
+              ? "bg-warning-light/50"
+              : "bg-surface-muted/70",
+          )}
         >
-          <AlertTriangle
-            className="relative top-px h-3.5 w-3.5 shrink-0 text-warning-text"
+          <span
+            className="flex h-5 shrink-0 items-center"
             aria-hidden="true"
-          />
+          >
+            {qualityTone === "critical" ? (
+              <AlertTriangle className="h-3.5 w-3.5 text-warning-text" />
+            ) : (
+              <Info className="h-3.5 w-3.5 text-ink-meta" />
+            )}
+          </span>
           <span>
-            <span className="font-medium text-warning-text">
-              {t("ui.citation.qualityNeedsReview")}
+            <span
+              className={cn(
+                "font-medium",
+                qualityTone === "critical"
+                  ? "text-warning-text"
+                  : "text-ink-body",
+              )}
+            >
+              {qualityTone === "critical"
+                ? t("ui.citation.qualityNeedsReview")
+                : t("ui.citation.qualityCheckSuggested")}
             </span>
             <span className="mx-1 text-ink-meta" aria-hidden="true">
               ·
@@ -519,7 +594,9 @@ function CitationHoverCard({
             onOpen();
           }}
         >
-          {t("ui.citation.openSource", "Open source")}
+          {qualityIssues?.length
+            ? t("ui.citation.viewEvidence", "View evidence")
+            : t("ui.citation.openSource", "Open source")}
           <ExternalLink className="h-3 w-3" aria-hidden="true" />
         </button>
       ) : null}
@@ -559,10 +636,10 @@ export function CitationPill({
     citation?.resolutionStatus !== "forbidden" &&
     citation?.resolutionStatus !== "missing" &&
     Boolean(onCitationClick);
-  const qualityStatus = qualityIssues?.length
-    ? qualityIssues.every((issue) => issue.severity === "unverified")
-      ? "unverified"
-      : "degraded"
+  const qualityStatus = qualityIssues?.some(
+    (issue) => issue.tone === "critical",
+  )
+    ? "critical"
     : undefined;
   // Numbering belongs to the message body, not the sidecar.  A newer/missing
   // bundle must still render a stable, non-interactive number instead of
@@ -688,12 +765,10 @@ export function CitationPill({
         data-citation-quality={qualityStatus}
         className={cn(
           "inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border p-0 text-2xs font-medium tabular-nums no-underline transition-colors",
-          qualityStatus === "degraded"
+          qualityStatus === "critical"
             ? "border-warning/50 bg-warning-light/70 text-warning-text hover:bg-warning-light focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warning/20"
-            : qualityStatus === "unverified"
-              ? "border-warning/30 bg-warning-light/50 text-warning-text hover:bg-warning-light focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warning/20"
-              : citation
-                ? "border-surface-border bg-surface-muted text-ink-body hover:text-ink-heading focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
+            : citation
+              ? "border-surface-border bg-surface-muted text-ink-body hover:text-ink-heading focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
             : "cursor-default border-surface-border bg-surface-muted text-ink-meta",
         )}
         onClick={open}

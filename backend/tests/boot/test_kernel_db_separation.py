@@ -97,6 +97,44 @@ def _tables(path: Path) -> set[str]:
 KERNEL_TABLES = {"sessions", "messages", "events"}
 
 
+def test_kernel_env_keeps_deepagents_checkpoints_in_a_sibling_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A new runtime must not reconfigure WAL on the live kernel database."""
+    import valuz_agent.boot.kernel as kb
+
+    kernel_db = tmp_path / "kernel.db"
+    monkeypatch.setattr(kb, "kernel_db_url_async", lambda: f"sqlite+aiosqlite:///{kernel_db}")
+    monkeypatch.setattr(kb, "kernel_db_url", lambda: f"sqlite:///{kernel_db}")
+    monkeypatch.delenv("DEEPAGENTS_CHECKPOINT_DB", raising=False)
+    monkeypatch.delenv("DEEPAGENTS_CHECKPOINT_ROOT", raising=False)
+    monkeypatch.setenv("KERNEL_STORE", "remote")
+
+    kb._set_kernel_env()
+
+    checkpoint_db = Path(os.environ["DEEPAGENTS_CHECKPOINT_DB"])
+    assert checkpoint_db == tmp_path / "deepagents_checkpoints.db"
+    assert checkpoint_db != kernel_db
+    assert Path(os.environ["DEEPAGENTS_CHECKPOINT_ROOT"]) == tmp_path / "deepagents-checkpoints"
+
+
+def test_kernel_env_preserves_an_explicit_checkpoint_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import valuz_agent.boot.kernel as kb
+
+    kernel_db = tmp_path / "kernel.db"
+    external_checkpoint_db = tmp_path / "operator-checkpoints.db"
+    monkeypatch.setattr(kb, "kernel_db_url_async", lambda: f"sqlite+aiosqlite:///{kernel_db}")
+    monkeypatch.setattr(kb, "kernel_db_url", lambda: f"sqlite:///{kernel_db}")
+    monkeypatch.setenv("DEEPAGENTS_CHECKPOINT_DB", str(external_checkpoint_db))
+    monkeypatch.setenv("KERNEL_STORE", "remote")
+
+    kb._set_kernel_env()
+
+    assert Path(os.environ["DEEPAGENTS_CHECKPOINT_DB"]) == external_checkpoint_db
+
+
 @pytest.mark.asyncio
 async def test_kernel_tables_live_only_in_kernel_db(split_db) -> None:
     host_db, kernel_db = split_db

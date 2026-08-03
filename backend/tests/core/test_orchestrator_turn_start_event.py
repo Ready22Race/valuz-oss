@@ -14,6 +14,7 @@ and BEFORE the runtime runs, and the terminal frame still closes the turn.
 # ruff: noqa: I001 — kernel bootstrap side-effect import must precede src.*
 from __future__ import annotations
 
+import copy
 import json
 
 import valuz_agent.boot.kernel  # noqa: F401 — sets sys.path for ``src`` / ``app``
@@ -21,7 +22,7 @@ import valuz_agent.boot.kernel  # noqa: F401 — sets sys.path for ``src`` / ``a
 from src.core.agent_config import AgentConfig
 from src.core.events import Event
 from src.core.orchestrator import SessionOrchestrator
-from src.core.types import EndTurn, Session, UserMessage
+from src.core.types import BARE_COMPLETION_METADATA_KEY, EndTurn, Session, UserMessage
 
 
 class _FakeStore:
@@ -114,6 +115,8 @@ class _CitationRepairRuntime:
     def __init__(self, sink: object) -> None:
         self.sink = sink
         self.prompts: list[str] = []
+        self.sessions: list[Session] = []
+        self.closed = False
         self.has_live_background_tasks = False
 
     @property
@@ -125,7 +128,9 @@ class _CitationRepairRuntime:
 
     async def run(self, session: Session, user_message: UserMessage) -> None:
         self.prompts.append(user_message.text)
-        if len(self.prompts) == 1:
+        self.sessions.append(copy.deepcopy(session))
+        is_repair = bool(session.metadata.get(BARE_COMPLETION_METADATA_KEY))
+        if not is_repair:
             evidence = {
                 "_valuz_evidence": {
                     "evidenceHandle": "ev_repair_12345678",
@@ -156,8 +161,23 @@ class _CitationRepairRuntime:
                 )
             )
             answer = "Revenue declined."
+            session.runtime_session_id = "native-research-thread"
         else:
-            answer = "Revenue increased [1](evidence://ev_repair_12345678)."
+            context = json.loads(
+                user_message.text.split("Restricted repair context (JSON):\n", 1)[1]
+            )
+            answer = json.dumps(
+                {
+                    "version": "citation-claim-patch-v1",
+                    "patches": [
+                        {
+                            "claimId": context["claimIssues"][0]["claimId"],
+                            "replacementText": "Revenue increased by 12%.",
+                            "evidenceHandles": ["ev_repair_12345678"],
+                        }
+                    ],
+                }
+            )
         await self.sink.emit(Event(type="assistant_message", data={"text": answer}))
         session.status = "idle"
         session.stop_reason = EndTurn()
@@ -172,10 +192,10 @@ class _CitationRepairRuntime:
         pass
 
     async def close(self) -> None:
-        pass
+        self.closed = True
 
 
-async def test_run_turn_performs_one_hidden_citation_repair(tmp_path, monkeypatch) -> None:
+async def test_run_turn_does_not_repair_an_unresolved_claim(tmp_path, monkeypatch) -> None:
     agent = AgentConfig(id="agent-1", name="tester")
     session = Session(
         id="sess-1",
@@ -184,6 +204,7 @@ async def test_run_turn_performs_one_hidden_citation_repair(tmp_path, monkeypatc
         user_id="owner-1",
         status="created",
         skills=("/bundled/skills/citation",),
+        metadata={"valuz": {"citation_verification_enabled": True}},
     )
     store = _FakeStore(session)
     orch = SessionOrchestrator(store)  # type: ignore[arg-type]
@@ -203,12 +224,55 @@ async def test_run_turn_performs_one_hidden_citation_repair(tmp_path, monkeypatc
     )
 
     assert len(runtimes) == 1
-    assert len(runtimes[0].prompts) == 2
+    assert len(runtimes[0].prompts) == 1
     assert runtimes[0].prompts[0] == "Answer with citations"
-    assert "previous draft was withheld" in runtimes[0].prompts[1]
-    assert '"claimIssues"' in runtimes[0].prompts[1]
-    assert '"evidenceHandle":"ev_repair_12345678"' in runtimes[0].prompts[1]
+    assert runtimes[0].closed is False
+    assert store._session.runtime_session_id == "native-research-thread"
     assert message.assistant_message is not None
-    assert "citation://cit_" in message.assistant_message
+    assert "Revenue declined." in message.assistant_message
     assert [event.type for event in store.appended].count("assistant_message") == 1
     assert [event.type for event in store.appended].count("session_idle") == 1
+
+
+async def test_unresolved_claim_does_not_refresh_credentials_for_repair(
+    tmp_path, monkeypatch
+) -> None:
+    agent = AgentConfig(id="agent-1", name="tester")
+    session = Session(
+        id="sess-refresh",
+        agent_config=agent,
+        cwd=str(tmp_path),
+        user_id="owner-1",
+        status="created",
+        skills=("/bundled/skills/citation",),
+        metadata={"valuz": {"citation_verification_enabled": True}},
+    )
+    store = _FakeStore(session)
+    orch = SessionOrchestrator(store)  # type: ignore[arg-type]
+    runtimes: list[_CitationRepairRuntime] = []
+    refresh_calls: list[tuple[str, str]] = []
+
+    async def refresh(user_id: str, session_id: str) -> bool:
+        refresh_calls.append((user_id, session_id))
+        return True
+
+    orch.set_citation_repair_refresh_hook(refresh)
+
+    def create_runtime(*args, **kwargs) -> _CitationRepairRuntime:  # noqa: ANN002, ANN003
+        runtime = _CitationRepairRuntime(args[2])
+        runtimes.append(runtime)
+        return runtime
+
+    monkeypatch.setattr("src.runtimes.factory.create_runtime", create_runtime)
+
+    message = await orch.run_turn(
+        "owner-1",
+        "sess-refresh",
+        UserMessage(text="Answer with citations"),
+    )
+
+    assert refresh_calls == []
+    assert len(runtimes) == 1
+    assert runtimes[0].prompts == ["Answer with citations"]
+    assert message.assistant_message is not None
+    assert "Revenue declined." in message.assistant_message

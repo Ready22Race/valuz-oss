@@ -276,6 +276,9 @@ def _translate_kernel_event(
         citation_bundle = data.get("citation_bundle")
         if isinstance(citation_bundle, dict):
             payload["citation_bundle"] = _stringify(citation_bundle)
+        task_coverage = data.get("task_coverage")
+        if isinstance(task_coverage, dict):
+            payload["task_coverage"] = _stringify(task_coverage)
         return "message.assistant.delta", _with_parent_tool_use_id(
             _with_message_id(
                 payload,

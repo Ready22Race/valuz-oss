@@ -275,6 +275,10 @@ export function locatorToDocumentLocation(
   return { kind: "external" };
 }
 
+function internalAppRoute(value: string): boolean {
+  return value.startsWith("/") && !value.startsWith("//");
+}
+
 export function CitationDocumentPreviewProvider({
   children,
 }: {
@@ -452,6 +456,23 @@ export function CitationDocumentPreviewProvider({
             citationResolutionI18nKey(result.fallback_reason),
           );
         }
+        if (
+          result.document.render.kind === "external" &&
+          internalAppRoute(result.document.render.url)
+        ) {
+          const route = result.document.render.url;
+          setTarget(null);
+          setOriginTarget(null);
+          setResolvedDocument(null);
+          setDocumentLocation(undefined);
+          setResolutionNotice(null);
+          automaticRefreshesRef.current.clear();
+          // Remove the transient citation query before pushing the app route,
+          // so Back returns to the conversation without reopening the preview.
+          setCitationQuery(null);
+          window.setTimeout(() => navigate(route), 0);
+          return;
+        }
         const resolved = await materializeCitationDocument(
           result.document,
           platform,
@@ -484,7 +505,7 @@ export function CitationDocumentPreviewProvider({
         if (!signal.aborted) setLoading(false);
       }
     },
-    [platform, t],
+    [navigate, platform, setCitationQuery, t],
   );
 
   useEffect(() => {

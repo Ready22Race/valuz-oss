@@ -33,6 +33,11 @@ def patched(monkeypatch):
         return SimpleNamespace(base_url=None, api_key="k", api_protocol="anthropic")
 
     monkeypatch.setattr(t.kernel_client, "get_session", _get_session)
+
+    async def _list_messages(user_id, sid, *, limit=1):
+        return [SimpleNamespace(user_message=SimpleNamespace(text="请生成销售图表"))]
+
+    monkeypatch.setattr(t.kernel_client, "list_messages", _list_messages)
     monkeypatch.setattr(t, "resolve_model_provider", _resolve)
 
     async def _fake_completer(prompt):
@@ -59,6 +64,18 @@ async def test_handler_requires_request(patched):
     res = await handler({"request": "   "}, _ctx())
     assert res.is_error is True
     assert "request" in res.content
+
+
+async def test_handler_rejects_dashboard_when_user_only_asked_for_a_list(monkeypatch, patched):
+    async def _list_messages(user_id, sid, *, limit=1):
+        return [SimpleNamespace(user_message=SimpleNamespace(text="列出最近四个季度的数据"))]
+
+    monkeypatch.setattr(t.kernel_client, "list_messages", _list_messages)
+    handler = build_generative_ui_tool_defs()[0].handler
+    res = await handler({"request": "Create a quarterly dashboard"}, _ctx())
+
+    assert res.is_error is True
+    assert "did not explicitly request" in res.content
 
 
 async def test_handler_passes_data_into_prompt(monkeypatch, patched):

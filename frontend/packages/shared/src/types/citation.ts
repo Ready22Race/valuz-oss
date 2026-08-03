@@ -169,6 +169,10 @@ export interface CitationIntegrityV1 {
   repairAttempts: number;
   policyRevision: string;
   evidenceRegisteredCount?: number;
+  evidenceCollectionCount?: number;
+  evidenceAddressRequestedCount?: number;
+  evidenceMaterializedCount?: number;
+  evidenceMaterializationRejectedCount?: number;
   evidenceRejectedCount?: number;
   evidenceOverflowReasons?: string[];
   publicationBlocked?: boolean;
