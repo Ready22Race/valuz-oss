@@ -924,22 +924,10 @@ def _unique_negative_disclosure_handle(
         if len(matching_handles) == 1:
             return next(iter(matching_handles))
 
-    # A negative disclosure has no exact source sentence to highlight.  It is
-    # still traceable when the runtime has deterministically read one complete
-    # target document.  The synthetic Registry item proves that coverage and
-    # deliberately carries no page locator, so the UI opens the document
-    # without pretending that one arbitrary paragraph proves an absence.
-    coverage_handles = {
-        handle
-        for record in available
-        for handle, _source, evidence in [_evidence_parts(record)]
-        if handle
-        and evidence.get("kind") == "structured-data"
-        and evidence.get("field") == "document_coverage_complete"
-        and evidence.get("basis") == "full-document"
-        and evidence.get("value") is True
-    }
-    return next(iter(coverage_handles)) if len(coverage_handles) == 1 else None
+    # Reaching the end of a document can inform internal Task Coverage, but it
+    # cannot localize support for an absence claim and must not become a user
+    # citation.  Without a unique quoted passage, leave the claim unbound.
+    return None
 
 
 def auto_bind_composite_text_claims(

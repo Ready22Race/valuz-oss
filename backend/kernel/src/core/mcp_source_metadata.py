@@ -16,6 +16,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlparse
 
 MCP_SOURCE_METADATA_KEY = "cn.valuz/citation-source"
 MCP_SOURCE_TRANSPORT_KEY = "_valuz_mcp_source_transport_v1"
@@ -284,6 +285,17 @@ def _document_envelopes(
     resource: Mapping[str, Any],
     captured_at: str,
 ) -> list[dict[str, Any]] | None:
+    operation = descriptor.get("operation")
+    operation = operation if isinstance(operation, Mapping) else {}
+    operation_tool = str(operation.get("toolName") or "").rsplit("__", 1)[-1]
+    if operation_tool == "document_raw_content":
+        # Older Reportify metadata described the root ``content`` string as
+        # one document chunk and reused doc_id as chunkId.  Raw content is a
+        # retrieval substrate; targeted grep/search creates the actual local
+        # Evidence.  This is operation-specific, not a blanket size rule:
+        # document_fetch may legitimately return one real chunk for a short
+        # or naturally indivisible document.
+        return []
     root_pointer = _pointer(resource.get("rootPointer"))
     items_pointer = _pointer(resource.get("itemsPointer"))
     mapping = resource.get("mapping")
@@ -318,11 +330,14 @@ def _document_envelopes(
         document_id = _mapped_value(doc_base, document.get("documentId")) or source_id
         if not source_id or not document_id:
             continue
-        title = _mapped_value(doc_base, document.get("title")) or f"Document · {document_id}"
         version = _mapped_value(doc_base, document.get("documentVersion"))
         published_at = _mapped_value(doc_base, document.get("publishedAt"))
         url = _mapped_value(doc_base, document.get("url"))
         category = _mapped_value(doc_base, document.get("providerCategory"))
+        title = _mapped_value(doc_base, document.get("title")) or _fallback_document_title(
+            url,
+            category=category,
+        )
         quote = text.strip()[:_MAX_QUOTE_CHARS]
         if not isinstance(chunk_id, (str, int)) or not str(chunk_id).strip():
             continue
@@ -362,6 +377,17 @@ def _document_envelopes(
             }
         )
     return output
+
+
+def _fallback_document_title(value: Any, *, category: Any) -> str:
+    """Return a readable fallback without exposing an opaque document id."""
+
+    if isinstance(value, str) and value.strip():
+        parsed = urlparse(value.strip())
+        if parsed.hostname:
+            return parsed.hostname.removeprefix("www.")[:1_024]
+    normalized_category = str(category or "").replace("_", " ").strip()
+    return normalized_category[:1_024] or "Document"
 
 
 def _document_source(

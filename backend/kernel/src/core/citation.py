@@ -292,6 +292,11 @@ class EvidenceRegistry:
                 for index, candidate in enumerate(candidates):
                     if index in consumed:
                         continue
+                    if _is_internal_document_coverage_marker(candidate):
+                        # Reaching EOF is Task Coverage state, not localized
+                        # claim evidence.  Ignore legacy synthetic markers
+                        # without treating the producer payload as corrupt.
+                        continue
                     if len(self._records) >= _MAX_REGISTRY_RECORDS:
                         self._rejected_count += 1
                         self._overflow_reasons.add("max_records")
@@ -815,9 +820,7 @@ class CitationGuard:
                 citation["annotations"] = annotations
             if record.locator is not None:
                 citation["locator"] = copy.deepcopy(record.locator)
-            elif record.source.get(
-                "sourceType"
-            ) == "document" and not _is_complete_document_coverage_evidence(record.evidence):
+            elif record.source.get("sourceType") == "document":
                 citation["resolutionStatus"] = "degraded"
                 missing_locator_ids.append(citation_id)
             citations.append(citation)
@@ -1065,11 +1068,13 @@ def _resolve_calculation_input_handle(
     return unique[0] if len(unique) == 1 else current_handle
 
 
-def _is_complete_document_coverage_evidence(evidence: dict[str, Any]) -> bool:
-    """Return whether a locator-free item intentionally proves whole-doc coverage."""
+def _is_internal_document_coverage_marker(item: dict[str, Any]) -> bool:
+    """Keep legacy EOF markers out of the user-facing Evidence Registry."""
 
+    evidence = item.get("evidence")
     return (
-        evidence.get("kind") == "structured-data"
+        isinstance(evidence, dict)
+        and evidence.get("kind") == "structured-data"
         and evidence.get("field") == "document_coverage_complete"
         and evidence.get("basis") == "full-document"
         and evidence.get("value") is True

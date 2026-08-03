@@ -213,6 +213,88 @@ def test_document_chunks_create_direct_evidence_with_pdf_locator() -> None:
     assert registry.resolve(envelope["evidenceHandle"]) is not None
 
 
+def test_raw_document_metadata_cannot_turn_the_whole_body_into_one_chunk() -> None:
+    payload = {
+        "doc_id": "doc-annual-report",
+        "original_url": "https://example.com/annual-report.pdf",
+        "content": "The complete original document body.",
+    }
+    descriptor = _descriptor(
+        payload,
+        tool_name="document_raw_content",
+        resources=[
+            {
+                "resourceId": "document-raw-content",
+                "kind": "document-chunks",
+                "authority": "authoritative",
+                "rootPointer": "",
+                "document": {
+                    "scope": "resource",
+                    "sourceId": "/doc_id",
+                    "documentId": "/doc_id",
+                    "url": "/original_url",
+                },
+                "itemsPointer": "",
+                "mapping": {"chunkId": "/doc_id", "text": "/content"},
+            }
+        ],
+    )
+
+    adapted = adapt_mcp_source_result(
+        [],
+        tool_name="document_raw_content",
+        descriptor=descriptor,
+        structured_content=payload,
+    )
+
+    assert adapted is not None
+    assert adapted.citable is False
+    assert adapted.evidence_count == 0
+    assert "_valuz_evidence" not in adapted.model_content
+
+
+def test_chunk_source_title_falls_back_to_hostname_not_document_id() -> None:
+    payload = {
+        "doc_id": "W13341981828044806",
+        "title": "",
+        "url": "https://www.news.cn/tech/example.html",
+        "chunks": [{"id": "chunk-1", "content": "A short real chunk."}],
+    }
+    descriptor = _descriptor(
+        payload,
+        tool_name="document_fetch",
+        resources=[
+            {
+                "resourceId": "document-fetch-chunks",
+                "kind": "document-chunks",
+                "authority": "authoritative",
+                "rootPointer": "",
+                "document": {
+                    "scope": "resource",
+                    "sourceId": "/doc_id",
+                    "documentId": "/doc_id",
+                    "title": "/title",
+                    "url": "/url",
+                },
+                "itemsPointer": "/chunks",
+                "mapping": {"chunkId": "/id", "text": "/content"},
+            }
+        ],
+    )
+
+    adapted = adapt_mcp_source_result(
+        [],
+        tool_name="document_fetch",
+        descriptor=descriptor,
+        structured_content=payload,
+    )
+
+    assert adapted is not None and adapted.citable
+    source = adapted.model_content["_valuz_evidence"][0]["source"]
+    assert source["title"] == "news.cn"
+    assert source["documentId"] not in source["title"]
+
+
 def test_large_structured_result_registers_one_collection_and_materializes_one_address() -> None:
     rows = [
         {

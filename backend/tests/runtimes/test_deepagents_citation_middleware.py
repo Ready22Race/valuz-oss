@@ -1215,6 +1215,141 @@ async def test_grep_over_raw_document_returns_traceable_focused_evidence() -> No
     assert registry.register_tool_result(private_content, trusted_private=True) == 1
 
 
+async def test_non_citable_raw_metadata_still_feeds_focused_grep_evidence() -> None:
+    middleware = CitationEvidenceCompactionMiddleware()
+
+    def metadata_result(
+        *,
+        tool_name: str,
+        payload: dict[str, Any],
+        resources: list[dict[str, Any]],
+        call_id: str,
+    ) -> ToolMessage:
+        digest = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        descriptor = {
+            "version": 1,
+            "provider": {"id": "reportify"},
+            "operation": {"toolName": tool_name},
+            "result": {
+                "target": "structuredContent",
+                "hash": {"algorithm": "sha256", "value": digest},
+                "capturedAt": "2026-08-03T00:00:00Z",
+            },
+            "resources": resources,
+        }
+        return ToolMessage(
+            content=[{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}],
+            artifact={
+                "structured_content": {
+                    MCP_SOURCE_TRANSPORT_KEY: {
+                        "descriptor": descriptor,
+                        "hasStructuredContent": True,
+                        "structuredContent": payload,
+                    }
+                }
+            },
+            tool_call_id=call_id,
+            name=tool_name,
+        )
+
+    discovery_payload = {"docs": [{"doc_id": "doc-annual-report", "title": "Annual report"}]}
+    discovery = metadata_result(
+        tool_name="reports_search",
+        payload=discovery_payload,
+        resources=[
+            {
+                "resourceId": "search",
+                "kind": "document-discovery",
+                "authority": "discovery-only",
+                "rootPointer": "",
+                "itemsPointer": "/docs",
+                "mapping": {"sourceId": "/doc_id", "title": "/title"},
+            }
+        ],
+        call_id="toolu-discovery",
+    )
+    raw_payload = {
+        "doc_id": "doc-annual-report",
+        "original_url": "https://reportify.cn/financials/doc-annual-report",
+        "content": (
+            "主营业务分销售模式\n"
+            "| 渠道 | 营业收入（元） | 同比 |\n"
+            "| 直销 | 74,843,327,030.79 | 11.32% |\n"
+            "| 批发代理 | 95,768,511,021.23 | 19.73% |\n"
+        ),
+    }
+    raw = metadata_result(
+        tool_name="document_raw_content",
+        payload=raw_payload,
+        resources=[
+            {
+                "resourceId": "document-raw-content",
+                "kind": "operational",
+                "authority": "non-citable",
+                "rootPointer": "",
+            }
+        ],
+        call_id="toolu-raw-document",
+    )
+
+    async def discovery_handler(_request: ToolCallRequest) -> ToolMessage:
+        return discovery
+
+    async def raw_handler(_request: ToolCallRequest) -> ToolMessage:
+        return raw
+
+    def request(call_id: str, name: str, args: dict[str, Any]) -> Any:
+        return cast(
+            Any,
+            type(
+                "Request",
+                (),
+                {"tool_call": {"id": call_id, "name": name, "args": args}},
+            )(),
+        )
+
+    await middleware.awrap_tool_call(
+        request("toolu-discovery", "reports_search", {}),
+        discovery_handler,
+    )
+    raw_result = await middleware.awrap_tool_call(
+        request(
+            "toolu-raw-document",
+            "document_raw_content",
+            {"doc_id": "doc-annual-report"},
+        ),
+        raw_handler,
+    )
+    assert citation_artifact_content(raw_result) is None
+    assert "evidenceHandle" not in str(raw_result.content)
+
+    grep_result = ToolMessage(
+        content="/large_tool_results/toolu-raw-document:\n  1: stored document matched pattern",
+        tool_call_id="toolu-grep",
+        name="grep",
+    )
+
+    async def grep_handler(_request: ToolCallRequest) -> ToolMessage:
+        return grep_result
+
+    focused = await middleware.awrap_tool_call(
+        request(
+            "toolu-grep",
+            "grep",
+            {"pattern": "直销", "path": "/large_tool_results"},
+        ),
+        grep_handler,
+    )
+    private_content = citation_artifact_content(focused)
+    assert private_content is not None
+    evidence = json.loads(private_content)["_valuz_evidence"][0]
+    assert evidence["source"]["title"] == "Annual report"
+    assert "74,843,327,030.79" in evidence["evidence"]["quote"]
+    assert evidence["locator"]["kind"] == "external"
+
+
 async def test_document_discovery_calls_are_bounded_per_agent_turn() -> None:
     middleware = ResearchToolBudgetMiddleware()
     middleware.before_agent(None, None)
@@ -1400,7 +1535,7 @@ async def test_complete_document_blocks_redundant_raw_reload_and_refetch() -> No
     assert calls == ["document_fetch"]
 
 
-async def test_complete_document_registers_document_level_coverage_evidence() -> None:
+async def test_complete_document_keeps_coverage_internal_without_fake_evidence() -> None:
     full_payload = {
         "doc_id": "doc-complete",
         "total_chunks": 44,
@@ -1468,14 +1603,12 @@ async def test_complete_document_registers_document_level_coverage_evidence() ->
     payload = json.loads(private)
     if isinstance(payload, list):
         payload = json.loads(payload[0]["text"])
-    coverage = next(
-        item
+    assert not any(
+        item.get("evidence", {}).get("field") == "document_coverage_complete"
         for item in payload["_valuz_evidence"]
-        if item.get("evidence", {}).get("field") == "document_coverage_complete"
     )
-    assert coverage["evidence"]["value"] is True
-    assert coverage["evidence"]["basis"] == "full-document"
-    assert f"evidence://{coverage['evidenceHandle']}" in str(result.content[-1]["text"])
+    assert "reached this document's final chunk" in str(result.content[-1]["text"])
+    assert "evidence://ev_doc_coverage_" not in str(result.content[-1]["text"])
 
 
 async def test_hidden_repair_with_candidate_catalog_cannot_restart_research() -> None:

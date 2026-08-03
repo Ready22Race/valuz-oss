@@ -8,6 +8,7 @@ import re
 import shlex
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlparse
 
 _REQUEST_FIELD_BLOCK_RE = re.compile(
     r"(?:列出|给出|查找|查询|提取|说明)\s*(?P<fields>[^。；\n]{2,220}?)"
@@ -78,11 +79,7 @@ def constrain_indexed_document_scope(
         # There is no contrary document identity to prove leakage, so preserve
         # them. Scope enforcement activates only on explicit returned ids.
         return content
-    chunks = [
-        chunk
-        for chunk in identified_chunks
-        if _indexed_chunk_document_id(chunk) in allowed
-    ]
+    chunks = [chunk for chunk in identified_chunks if _indexed_chunk_document_id(chunk) in allowed]
     result = {**content, "chunks": chunks}
     if len(chunks) != len(content["chunks"]):
         result["_valuz_scope"] = {
@@ -224,8 +221,8 @@ def _indexed_chunk_evidence(
     if not quote or not document_id or not chunk_id:
         return None
     quote = quote[:32_000]
-    title = str(document.get("title") or f"Document · {document_id}").strip()
     url = str(document.get("url") or document.get("file_url") or "").strip()
+    title = str(document.get("title") or _document_title_fallback(url)).strip()
     published_at = _published_at(document.get("published_at"))
     digest = hashlib.sha256(
         f"valuz-search\0{document_id}\0{chunk_id}\0{quote}".encode()
@@ -276,6 +273,16 @@ def _indexed_chunk_evidence(
     }
 
 
+def _document_title_fallback(url: str) -> str:
+    """Avoid surfacing an opaque document id as a source title."""
+
+    if url:
+        hostname = urlparse(url).hostname
+        if hostname:
+            return hostname.removeprefix("www.")[:1_024]
+    return "Document"
+
+
 def _published_at(value: Any) -> str | None:
     if isinstance(value, bool):
         return None
@@ -284,9 +291,7 @@ def _published_at(value: Any) -> str | None:
         if timestamp > 10_000_000_000:
             timestamp /= 1_000
         try:
-            return datetime.fromtimestamp(timestamp, UTC).isoformat().replace(
-                "+00:00", "Z"
-            )
+            return datetime.fromtimestamp(timestamp, UTC).isoformat().replace("+00:00", "Z")
         except (OSError, OverflowError, ValueError):
             return None
     if isinstance(value, str) and value.strip():
@@ -368,9 +373,9 @@ def grep_document_evidence(
             excerpts.append(excerpt)
     quote = "\n…\n".join(excerpts)[:32_000]
     first = matches[0]
-    snippet = raw_text[
-        max(0, first.start() - 260) : min(len(raw_text), first.end() + 420)
-    ].strip()[:4_000]
+    snippet = raw_text[max(0, first.start() - 260) : min(len(raw_text), first.end() + 420)].strip()[
+        :4_000
+    ]
     document_id = str(raw_document.get("doc_id") or "document")
     url = str(raw_document.get("url") or raw_document.get("original_url") or "").strip()
     title = str(raw_document.get("title") or f"Reportify document · {document_id}")
@@ -472,9 +477,7 @@ def targeted_document_evidence(
         if focused is None and len(term) >= 4 and re.fullmatch(r"[\u3400-\u9fff]+", term):
             focused = grep_document_evidence(
                 "",
-                tool_args={
-                    "pattern": f"{re.escape(term[:2])}|{re.escape(term[-2:])}"
-                },
+                tool_args={"pattern": f"{re.escape(term[:2])}|{re.escape(term[-2:])}"},
                 raw_documents=raw_documents,
                 captured_at=captured_at,
             )
@@ -482,9 +485,7 @@ def targeted_document_evidence(
             continue
         visible, envelope = focused
         parsed = json.loads(visible)
-        if envelope["evidenceHandle"] in {
-            item["evidenceHandle"] for item in envelopes
-        }:
+        if envelope["evidenceHandle"] in {item["evidenceHandle"] for item in envelopes}:
             continue
         envelopes.append(envelope)
         rows.append(
