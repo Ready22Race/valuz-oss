@@ -81,7 +81,6 @@ import {
   ApprovalResolvedStrip,
   AutoApprovedStrip,
   AskUserQuestionCard,
-  ArtifactViewerShell,
   AutomationToolCard,
   Badge,
   Button,
@@ -157,6 +156,7 @@ import { canSendProjectHandoff } from "./conversation-project-handoff";
 import { dropHandoffFromHistory } from "./conversation-handoff-history";
 import { LiveTaskCard } from "../components/LiveTaskCard";
 import { QueuedInputsBar } from "../components/QueuedInputsBar";
+import { ArtifactSplitPane } from "../components/ArtifactSplitPane";
 import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
 import { CreateAgentDialog } from "../components/CreateAgentDialog";
 import { OriginBadge } from "../components/ExecutionLocationPicker";
@@ -190,7 +190,6 @@ function toFileTree(nodes: ProjectFileNode[], prefix = ""): FileTreeNode[] {
     return result;
   });
 }
-
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -1514,14 +1513,15 @@ export const ConversationPage = () => {
       sessionId: selectedSessionId ?? undefined,
       projectId: artifactProjectId ?? undefined,
     },
+    // The preview pane carries a tab strip, so opening a second document adds
+    // to the set instead of replacing what's on screen.
+    multiTab: true,
   });
+  // The split pane consumes the loaded document itself; the page only needs
+  // the active path (for the reveal action) and the open/reload/close verbs.
   const {
     selectedPath: selectedArtifactPath,
-    artifact,
     content: artifactContent,
-    target: artifactTarget,
-    loading: artifactLoading,
-    error: artifactError,
     open: openArtifact,
     reload: reloadArtifact,
     close: closeArtifact,
@@ -6010,255 +6010,275 @@ export const ConversationPage = () => {
     panelSetCollapsed,
   ]);
 
-  const artifactViewerOpen = Boolean(
-    selectedArtifactPath || artifactLoading || artifactError,
-  );
 
   return (
     <>
-      <div className="relative flex h-full min-h-0 flex-col bg-surface">
-        {/* Page header — rendered inline so the scroll container below can run
+      {/* The pane is always mounted with the conversation as its first column,
+          so opening or closing a document never remounts the message list. */}
+      <ArtifactSplitPane
+        file={artifactFile}
+        onReload={handleArtifactReload}
+        onClose={handleArtifactClose}
+        onCopyContent={handleArtifactCopy}
+        onOpenExternal={handleArtifactOpenExternal}
+      >
+          <div className="relative flex h-full min-h-0 flex-col bg-surface">
+            {/* Page header — rendered inline so the scroll container below can run
             edge-to-edge of the main card and its scrollbar sits flush against
             the bordered card edge. Layout-level header is hidden via
             setHideHeader(true). */}
-        <header className="flex h-12 shrink-0 items-center px-5">
-          <div className="flex w-full items-center justify-between">
-            <div className="flex min-w-0 items-center gap-2">
-              {fromTaskId ? (
-                <>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      navigate(`/tasks/${encodeURIComponent(fromTaskId)}`)
-                    }
-                    className="inline-flex shrink-0 items-center gap-1 text-[13px] text-ink-meta transition-colors hover:text-ink-heading"
-                  >
-                    <ArrowLeft className="h-3.5 w-3.5" />
-                    <span>
-                      {t("conversation.backToTask" as Parameters<typeof t>[0])}
-                    </span>
-                  </button>
-                  <ChevronRight className="h-3.5 w-3.5 shrink-0 text-ink-muted" />
-                </>
-              ) : null}
-              {isSkillCreatorMode ? (
-                <Badge variant="metaBrand" className="shrink-0">
-                  <Sparkles className="h-3 w-3" />
-                  Skill Creator
-                </Badge>
-              ) : null}
-              {headerTitle ? (
-                titleRenaming ? (
-                  // Inline rename. Confirm on Enter / blur, cancel on Esc.
-                  // No menu accessible while editing so the click target
-                  // stays clean. ``autoFocus`` + ``select()`` via the ref
-                  // would race with the dropdown's close-auto-focus on
-                  // some browsers — we open rename via menu select, which
-                  // already does ``e.preventDefault()`` on close, so a
-                  // plain ``autoFocus`` is enough.
-                  <input
-                    autoFocus
-                    value={titleRenameValue}
-                    onChange={(e) => setTitleRenameValue(e.target.value)}
-                    onBlur={() => {
-                      const trimmed = titleRenameValue.trim();
-                      if (trimmed && trimmed !== selectedSession?.name) {
-                        sessionsApi
-                          .rename(selectedSessionId!, trimmed)
-                          .then(() => {
-                            toast.success(
-                              t("sidebar.renamed" as Parameters<typeof t>[0]),
-                            );
-                            void refreshActiveSession(selectedSessionId);
-                          })
-                          .catch(() =>
-                            toast.error(
-                              t(
-                                "sidebar.renameFailed" as Parameters<
-                                  typeof t
-                                >[0],
-                              ),
-                            ),
-                          );
-                      }
-                      setTitleRenaming(false);
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        e.preventDefault();
-                        (e.target as HTMLInputElement).blur();
-                      } else if (e.key === "Escape") {
-                        e.preventDefault();
-                        setTitleRenaming(false);
-                      }
-                    }}
-                    onFocus={(e) => e.currentTarget.select()}
-                    style={
-                      titleRenameWidth !== null
-                        ? { width: titleRenameWidth }
-                        : undefined
-                    }
-                    className="min-w-0 border-0 border-b border-brand bg-transparent px-1 text-sm font-medium text-ink-heading outline-none"
-                  />
-                ) : (
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
+            <header className="flex h-12 shrink-0 items-center px-5">
+              <div className="flex w-full items-center justify-between">
+                <div className="flex min-w-0 items-center gap-2">
+                  {fromTaskId ? (
+                    <>
                       <button
                         type="button"
-                        ref={titleTriggerRef}
-                        disabled={!selectedSessionId}
-                        className="flex min-w-0 items-center gap-1 rounded-md px-1 py-0.5 text-sm font-medium text-ink-heading transition-colors hover:bg-surface-soft focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-brand/30 disabled:cursor-default disabled:hover:bg-transparent"
+                        onClick={() =>
+                          navigate(`/tasks/${encodeURIComponent(fromTaskId)}`)
+                        }
+                        className="inline-flex shrink-0 items-center gap-1 text-[13px] text-ink-meta transition-colors hover:text-ink-heading"
                       >
-                        <span className="truncate">{headerTitle}</span>
-                        <ChevronDown
-                          className="h-3.5 w-3.5 shrink-0 text-ink-muted"
-                          strokeWidth={2}
-                          aria-hidden
-                        />
+                        <ArrowLeft className="h-3.5 w-3.5" />
+                        <span>
+                          {t(
+                            "conversation.backToTask" as Parameters<
+                              typeof t
+                            >[0],
+                          )}
+                        </span>
                       </button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent
-                      // Anchor under the chevron (right end of the
-                      // trigger), not the title's left edge — otherwise
-                      // the menu drops down far away from where the user
-                      // clicked.
-                      align="end"
-                      className="min-w-[160px]"
-                      onCloseAutoFocus={(e) => e.preventDefault()}
-                    >
-                      <DropdownMenuItem
-                        onSelect={() => {
-                          // Snapshot the trigger's current width so the
-                          // input occupies the same horizontal space the
-                          // title button just had — otherwise the input
-                          // expands to the row's max width and shoves the
-                          // sibling status pills around.
-                          const w =
-                            titleTriggerRef.current?.getBoundingClientRect()
-                              .width ?? null;
-                          setTitleRenameWidth(w);
-                          setTitleRenameValue(
-                            selectedSession?.name ?? headerTitle,
-                          );
-                          setTitleRenaming(true);
+                      <ChevronRight className="h-3.5 w-3.5 shrink-0 text-ink-muted" />
+                    </>
+                  ) : null}
+                  {isSkillCreatorMode ? (
+                    <Badge variant="metaBrand" className="shrink-0">
+                      <Sparkles className="h-3 w-3" />
+                      Skill Creator
+                    </Badge>
+                  ) : null}
+                  {headerTitle ? (
+                    titleRenaming ? (
+                      // Inline rename. Confirm on Enter / blur, cancel on Esc.
+                      // No menu accessible while editing so the click target
+                      // stays clean. ``autoFocus`` + ``select()`` via the ref
+                      // would race with the dropdown's close-auto-focus on
+                      // some browsers — we open rename via menu select, which
+                      // already does ``e.preventDefault()`` on close, so a
+                      // plain ``autoFocus`` is enough.
+                      <input
+                        autoFocus
+                        value={titleRenameValue}
+                        onChange={(e) => setTitleRenameValue(e.target.value)}
+                        onBlur={() => {
+                          const trimmed = titleRenameValue.trim();
+                          if (trimmed && trimmed !== selectedSession?.name) {
+                            sessionsApi
+                              .rename(selectedSessionId!, trimmed)
+                              .then(() => {
+                                toast.success(
+                                  t(
+                                    "sidebar.renamed" as Parameters<
+                                      typeof t
+                                    >[0],
+                                  ),
+                                );
+                                void refreshActiveSession(selectedSessionId);
+                              })
+                              .catch(() =>
+                                toast.error(
+                                  t(
+                                    "sidebar.renameFailed" as Parameters<
+                                      typeof t
+                                    >[0],
+                                  ),
+                                ),
+                              );
+                          }
+                          setTitleRenaming(false);
                         }}
-                      >
-                        <FilePenLine />
-                        {t("sidebar.rename" as Parameters<typeof t>[0])}
-                      </DropdownMenuItem>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuItem
-                        variant="destructive"
-                        onSelect={() => setTitleDeleting(true)}
-                      >
-                        <Trash2 />
-                        {t("common.delete" as Parameters<typeof t>[0])}
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                )
-              ) : null}
-              <SessionStatusPill
-                // ``created`` is exactly the state a not-yet-minted session is
-                // in: accepted, not running. It is the same pill the promoted
-                // page shows a beat later, so nothing changes on handover.
-                status={
-                  selectedSession?.status ??
-                  (draftSendInFlight ? "created" : undefined)
-                }
-                cancelled={
-                  effectiveTurns[effectiveTurns.length - 1]?.cancelled === true
-                }
-                pending={effectiveTurns.length === 0}
-                // Server-side flag, the SAME one the sidebar pulse and the
-                // Activity page read (``bg_busy_session_ids()``), so one
-                // session can't read "background running" in one surface and
-                // idle in another. The strip below the transcript keeps
-                // deriving from events — it renders the task LIST, which the
-                // flag doesn't carry.
-                background={selectedSession?.background === true}
-              />
-              {/* Execution origin (multi-target editions): where this
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            (e.target as HTMLInputElement).blur();
+                          } else if (e.key === "Escape") {
+                            e.preventDefault();
+                            setTitleRenaming(false);
+                          }
+                        }}
+                        onFocus={(e) => e.currentTarget.select()}
+                        style={
+                          titleRenameWidth !== null
+                            ? { width: titleRenameWidth }
+                            : undefined
+                        }
+                        className="min-w-0 border-0 border-b border-brand bg-transparent px-1 text-sm font-medium text-ink-heading outline-none"
+                      />
+                    ) : (
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <button
+                            type="button"
+                            ref={titleTriggerRef}
+                            disabled={!selectedSessionId}
+                            className="flex min-w-0 items-center gap-1 rounded-md px-1 py-0.5 text-sm font-medium text-ink-heading transition-colors hover:bg-surface-soft focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-brand/30 disabled:cursor-default disabled:hover:bg-transparent"
+                          >
+                            <span className="truncate">{headerTitle}</span>
+                            <ChevronDown
+                              className="h-3.5 w-3.5 shrink-0 text-ink-muted"
+                              strokeWidth={2}
+                              aria-hidden
+                            />
+                          </button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent
+                          // Anchor under the chevron (right end of the
+                          // trigger), not the title's left edge — otherwise
+                          // the menu drops down far away from where the user
+                          // clicked.
+                          align="end"
+                          className="min-w-[160px]"
+                          onCloseAutoFocus={(e) => e.preventDefault()}
+                        >
+                          <DropdownMenuItem
+                            onSelect={() => {
+                              // Snapshot the trigger's current width so the
+                              // input occupies the same horizontal space the
+                              // title button just had — otherwise the input
+                              // expands to the row's max width and shoves the
+                              // sibling status pills around.
+                              const w =
+                                titleTriggerRef.current?.getBoundingClientRect()
+                                  .width ?? null;
+                              setTitleRenameWidth(w);
+                              setTitleRenameValue(
+                                selectedSession?.name ?? headerTitle,
+                              );
+                              setTitleRenaming(true);
+                            }}
+                          >
+                            <FilePenLine />
+                            {t("sidebar.rename" as Parameters<typeof t>[0])}
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem
+                            variant="destructive"
+                            onSelect={() => setTitleDeleting(true)}
+                          >
+                            <Trash2 />
+                            {t("common.delete" as Parameters<typeof t>[0])}
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    )
+                  ) : null}
+                  <SessionStatusPill
+                    // ``created`` is exactly the state a not-yet-minted session is
+                    // in: accepted, not running. It is the same pill the promoted
+                    // page shows a beat later, so nothing changes on handover.
+                    status={
+                      selectedSession?.status ??
+                      (draftSendInFlight ? "created" : undefined)
+                    }
+                    cancelled={
+                      effectiveTurns[effectiveTurns.length - 1]?.cancelled ===
+                      true
+                    }
+                    pending={effectiveTurns.length === 0}
+                    // Server-side flag, the SAME one the sidebar pulse and the
+                    // Activity page read (``bg_busy_session_ids()``), so one
+                    // session can't read "background running" in one surface and
+                    // idle in another. The strip below the transcript keeps
+                    // deriving from events — it renders the task LIST, which the
+                    // flag doesn't carry.
+                    background={selectedSession?.background === true}
+                  />
+                  {/* Execution origin (multi-target editions): where this
                   session's backend lives. Locked at creation; renders
                   nothing on single-target builds. */}
-              <OriginBadge
-                entityId={selectedSessionId}
-                kind="session"
-                // No session id to observe yet; the session is minted on the
-                // project's origin, so show that. ``origin`` short-circuits
-                // the lookup, and single-target builds still render nothing.
-                origin={
-                  !selectedSessionId && draftSendInFlight
-                    ? selectedProjectOrigin
-                    : undefined
-                }
-              />
-              {headerAgentSlug ? (
-                <Badge variant="metaBrand" className="shrink-0">
-                  <Bot className="h-3 w-3" />
-                  {agentNameBySlug.get(headerAgentSlug) ?? headerAgentSlug}
-                </Badge>
-              ) : null}
-              {selectedSession?.worktree ? (
-                // Worktree attribution (creation-time snapshot). Greys out
-                // when the worktree no longer exists on disk — the next
-                // send self-heals by recreating it, which the tooltip says.
-                <Badge
-                  variant="metaOutline"
-                  className={cn(
-                    "shrink-0",
-                    selectedSession.worktree.exists === false && "opacity-60",
-                  )}
-                  title={
-                    selectedSession.worktree.exists === false
-                      ? t("conversation.worktreeBadgeGone")
-                      : t("conversation.worktreeBadgeHint")
-                  }
-                >
-                  <GitBranch className="h-3 w-3" />
-                  {selectedSession.worktree.branch ??
-                    selectedSession.worktree.name}
-                </Badge>
-              ) : null}
-              {activeProject?.name && !isSkillCreatorMode ? (
-                <Badge variant="metaOutline" className="shrink-0">
-                  {activeProject.name}
-                </Badge>
-              ) : null}
-            </div>
-          </div>
-        </header>
+                  <OriginBadge
+                    entityId={selectedSessionId}
+                    kind="session"
+                    // No session id to observe yet; the session is minted on the
+                    // project's origin, so show that. ``origin`` short-circuits
+                    // the lookup, and single-target builds still render nothing.
+                    origin={
+                      !selectedSessionId && draftSendInFlight
+                        ? selectedProjectOrigin
+                        : undefined
+                    }
+                  />
+                  {headerAgentSlug ? (
+                    <Badge variant="metaBrand" className="shrink-0">
+                      <Bot className="h-3 w-3" />
+                      {agentNameBySlug.get(headerAgentSlug) ?? headerAgentSlug}
+                    </Badge>
+                  ) : null}
+                  {selectedSession?.worktree ? (
+                    // Worktree attribution (creation-time snapshot). Greys out
+                    // when the worktree no longer exists on disk — the next
+                    // send self-heals by recreating it, which the tooltip says.
+                    <Badge
+                      variant="metaOutline"
+                      className={cn(
+                        "shrink-0",
+                        selectedSession.worktree.exists === false &&
+                          "opacity-60",
+                      )}
+                      title={
+                        selectedSession.worktree.exists === false
+                          ? t("conversation.worktreeBadgeGone")
+                          : t("conversation.worktreeBadgeHint")
+                      }
+                    >
+                      <GitBranch className="h-3 w-3" />
+                      {selectedSession.worktree.branch ??
+                        selectedSession.worktree.name}
+                    </Badge>
+                  ) : null}
+                  {activeProject?.name && !isSkillCreatorMode ? (
+                    <Badge variant="metaOutline" className="shrink-0">
+                      {activeProject.name}
+                    </Badge>
+                  ) : null}
+                </div>
+              </div>
+            </header>
 
-        {shouldShowNoModelEmptyState({
-          isNewConversation: id === NEW_SESSION_ID,
-          pageLoading: loading,
-          providerCount: providers.length,
-          providerStatus: providerChannelState.status,
-        }) ? (
-          <div className="flex flex-1 items-center justify-center p-8">
-            <EmptyState
-              icon={<Settings />}
-              title={t("conversation.noModel" as Parameters<typeof t>[0])}
-              message={t("conversation.noModelHint" as Parameters<typeof t>[0])}
-              action={
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="default"
-                  onClick={() => navigate("/settings")}
+            {shouldShowNoModelEmptyState({
+              isNewConversation: id === NEW_SESSION_ID,
+              pageLoading: loading,
+              providerCount: providers.length,
+              providerStatus: providerChannelState.status,
+            }) ? (
+              <div className="flex flex-1 items-center justify-center p-8">
+                <EmptyState
+                  icon={<Settings />}
+                  title={t("conversation.noModel" as Parameters<typeof t>[0])}
+                  message={t(
+                    "conversation.noModelHint" as Parameters<typeof t>[0],
+                  )}
+                  action={
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="default"
+                      onClick={() => navigate("/settings")}
+                    >
+                      {t(
+                        "conversation.goToSettings" as Parameters<typeof t>[0],
+                      )}
+                    </Button>
+                  }
+                />
+              </div>
+            ) : (
+              <>
+                <div
+                  ref={scrollContainerRef}
+                  className="min-h-0 flex-1 overflow-y-auto bg-surface pt-0 pb-7"
                 >
-                  {t("conversation.goToSettings" as Parameters<typeof t>[0])}
-                </Button>
-              }
-            />
-          </div>
-        ) : (
-          <>
-            <div
-              ref={scrollContainerRef}
-              className="min-h-0 flex-1 overflow-y-auto bg-surface pt-0 pb-7"
-            >
-              {/* Top sentinel — visible "Load older" pill that doubles
+                  {/* Top sentinel — visible "Load older" pill that doubles
                   as the IntersectionObserver target. Two ways to fetch the
                   next page:
                     1. Click the pill (explicit affordance — what users
@@ -6271,96 +6291,98 @@ export const ConversationPage = () => {
                   fetch. Whole element disappears when ``hasMoreOlder``
                   flips false so the observer stops firing past the
                   start of history. */}
-              {hasMoreOlder || loadingOlder ? (
-                <div className="flex justify-center py-2">
-                  <button
-                    ref={topSentinelRef}
-                    type="button"
-                    onClick={() => {
-                      // Manual click bypasses the "user must scroll first"
-                      // gate the observer needs — the click itself IS the
-                      // user signal.
-                      userScrolledRef.current = true;
-                      void loadOlderTurns();
+                  {hasMoreOlder || loadingOlder ? (
+                    <div className="flex justify-center py-2">
+                      <button
+                        ref={topSentinelRef}
+                        type="button"
+                        onClick={() => {
+                          // Manual click bypasses the "user must scroll first"
+                          // gate the observer needs — the click itself IS the
+                          // user signal.
+                          userScrolledRef.current = true;
+                          void loadOlderTurns();
+                        }}
+                        disabled={loadingOlder}
+                        className="rounded-full border border-surface-border bg-surface px-3 py-1 text-2xs text-ink-body shadow-xs transition-colors hover:bg-surface-soft disabled:cursor-default disabled:opacity-60"
+                      >
+                        {loadingOlder
+                          ? `${t("conversation.loadOlder" as Parameters<typeof t>[0])}…`
+                          : `↑ ${t("conversation.loadOlder" as Parameters<typeof t>[0])}`}
+                      </button>
+                    </div>
+                  ) : null}
+                  <ConversationTurnList
+                    // Remount on true session switches so the virtualizer's
+                    // internal state starts fresh. The /conversation/new → real-id
+                    // promotion keeps this key stable so the first sent turn
+                    // doesn't look like a page refresh.
+                    key={conversationInstanceKey}
+                    turns={effectiveTurns}
+                    scrollContainerRef={scrollContainerRef}
+                    sending={displayBusy}
+                    loading={id === NEW_SESSION_ID ? false : loading}
+                    error={error}
+                    onRetry={handleRetry}
+                    onSwitchModel={handleSwitchModel}
+                    retryCounts={retryCounts}
+                    lastTurnMinHeight={
+                      effectiveTurns.length > 1 ? containerHeight : 0
+                    }
+                    skillsBySlug={skillsBySlug}
+                    onVirtualApiReady={handleTurnListVirtualApiReady}
+                    renderToolCall={renderToolCall}
+                    isToolCardFoldable={isToolCardFoldable}
+                    onRevealFile={revealInFinder}
+                    isLocalFileHref={localFileLinks.isLocalFileHref}
+                    onLocalFileLinkClick={localFileLinks.openLocalFileHref}
+                    onCitationClick={({ messageId, citationId }) => {
+                      if (!selectedSessionId || !messageId) return;
+                      openCitation({
+                        sessionId: selectedSessionId,
+                        messageId,
+                        citationId,
+                      });
                     }}
-                    disabled={loadingOlder}
-                    className="rounded-full border border-surface-border bg-surface px-3 py-1 text-2xs text-ink-body shadow-xs transition-colors hover:bg-surface-soft disabled:cursor-default disabled:opacity-60"
-                  >
-                    {loadingOlder
-                      ? `${t("conversation.loadOlder" as Parameters<typeof t>[0])}…`
-                      : `↑ ${t("conversation.loadOlder" as Parameters<typeof t>[0])}`}
-                  </button>
+                    emptySuggestions={[
+                      t(
+                        "conversation.newChatSuggestion1" as Parameters<
+                          typeof t
+                        >[0],
+                      ),
+                      t(
+                        "conversation.newChatSuggestion2" as Parameters<
+                          typeof t
+                        >[0],
+                      ),
+                      t(
+                        "conversation.newChatSuggestion3" as Parameters<
+                          typeof t
+                        >[0],
+                      ),
+                    ]}
+                    onEmptySuggestionClick={(text) => setDraft(text)}
+                    // Only a genuinely new chat (URL is /conversation/new) shows the
+                    // welcome. An existing conversation keyed by id has no turns yet
+                    // while its transcript loads — gate on the URL, not the transient
+                    // ``selectedSessionId`` (which briefly nulls mid-navigation), so
+                    // the mascot + suggestions don't flash before history lands.
+                    // …and not while a project-detail send is still landing: that
+                    // arrives at /conversation/new with no turns yet and waits for
+                    // bootstrap to bind the project before it can fire, so the
+                    // mascot + suggestions would flash in the gap — on a page the
+                    // user reached by SENDING something, which reads as the message
+                    // having been dropped.
+                    showWelcome={
+                      id === NEW_SESSION_ID && !hasPendingProjectSend
+                    }
+                    startingRuntime={startingRuntime}
+                  />
                 </div>
-              ) : null}
-              <ConversationTurnList
-                // Remount on true session switches so the virtualizer's
-                // internal state starts fresh. The /conversation/new → real-id
-                // promotion keeps this key stable so the first sent turn
-                // doesn't look like a page refresh.
-                key={conversationInstanceKey}
-                turns={effectiveTurns}
-                scrollContainerRef={scrollContainerRef}
-                sending={displayBusy}
-                loading={id === NEW_SESSION_ID ? false : loading}
-                error={error}
-                onRetry={handleRetry}
-                onSwitchModel={handleSwitchModel}
-                retryCounts={retryCounts}
-                lastTurnMinHeight={
-                  effectiveTurns.length > 1 ? containerHeight : 0
-                }
-                skillsBySlug={skillsBySlug}
-                onVirtualApiReady={handleTurnListVirtualApiReady}
-                renderToolCall={renderToolCall}
-                isToolCardFoldable={isToolCardFoldable}
-                onRevealFile={revealInFinder}
-                isLocalFileHref={localFileLinks.isLocalFileHref}
-                onLocalFileLinkClick={localFileLinks.openLocalFileHref}
-                onCitationClick={({ messageId, citationId }) => {
-                  if (!selectedSessionId || !messageId) return;
-                  openCitation({
-                    sessionId: selectedSessionId,
-                    messageId,
-                    citationId,
-                  });
-                }}
-                emptySuggestions={[
-                  t(
-                    "conversation.newChatSuggestion1" as Parameters<
-                      typeof t
-                    >[0],
-                  ),
-                  t(
-                    "conversation.newChatSuggestion2" as Parameters<
-                      typeof t
-                    >[0],
-                  ),
-                  t(
-                    "conversation.newChatSuggestion3" as Parameters<
-                      typeof t
-                    >[0],
-                  ),
-                ]}
-                onEmptySuggestionClick={(text) => setDraft(text)}
-                // Only a genuinely new chat (URL is /conversation/new) shows the
-                // welcome. An existing conversation keyed by id has no turns yet
-                // while its transcript loads — gate on the URL, not the transient
-                // ``selectedSessionId`` (which briefly nulls mid-navigation), so
-                // the mascot + suggestions don't flash before history lands.
-                // …and not while a project-detail send is still landing: that
-                // arrives at /conversation/new with no turns yet and waits for
-                // bootstrap to bind the project before it can fire, so the
-                // mascot + suggestions would flash in the gap — on a page the
-                // user reached by SENDING something, which reads as the message
-                // having been dropped.
-                showWelcome={id === NEW_SESSION_ID && !hasPendingProjectSend}
-                startingRuntime={startingRuntime}
-              />
-            </div>
-          </>
-        )}
+              </>
+            )}
 
-        {/* ADR-013 v2 (kernel d008b53) approval tray — renders any
+            {/* ADR-013 v2 (kernel d008b53) approval tray — renders any
             unresolved session.requires_action pending whose subject
             is NOT ``clarifying_questions`` (those use
             AskUserQuestionCard inline in the turn stream). Sits
@@ -6370,419 +6392,412 @@ export const ConversationPage = () => {
             ApprovalResolvedStrip (post-decision, before fadeout).
             AutoApprovedStrip rows render cache-hit notices that
             never had a preceding card. */}
-        {(pendingApprovals.length > 0 || autoApprovedNotices.length > 0) && (
-          <div className="mx-auto mb-2 w-full max-w-[760px] space-y-2 px-4">
-            {pendingApprovals.map((entry) => {
-              if (entry.answered && entry.decision) {
-                return (
-                  <ApprovalResolvedStrip
-                    key={entry.pendingId}
-                    decision={entry.decision}
-                    rulePreviewDisplay={entry.sessionRulePreviewDisplay}
-                    rejectMessage={entry.rejectMessage}
-                    resolvedAtLabel={
-                      entry.receivedAt
-                        ? new Date(entry.receivedAt).toLocaleTimeString()
-                        : undefined
-                    }
+            {(pendingApprovals.length > 0 ||
+              autoApprovedNotices.length > 0) && (
+              <div className="mx-auto mb-2 w-full max-w-[760px] space-y-2 px-4">
+                {pendingApprovals.map((entry) => {
+                  if (entry.answered && entry.decision) {
+                    return (
+                      <ApprovalResolvedStrip
+                        key={entry.pendingId}
+                        decision={entry.decision}
+                        rulePreviewDisplay={entry.sessionRulePreviewDisplay}
+                        rejectMessage={entry.rejectMessage}
+                        resolvedAtLabel={
+                          entry.receivedAt
+                            ? new Date(entry.receivedAt).toLocaleTimeString()
+                            : undefined
+                        }
+                      />
+                    );
+                  }
+                  return (
+                    <ApprovalCard
+                      key={entry.pendingId}
+                      pendingId={entry.pendingId}
+                      subject={entry.subject}
+                      payload={entry.payload}
+                      availableDecisions={entry.availableDecisions}
+                      sessionRulePreviewDisplay={
+                        entry.sessionRulePreviewDisplay
+                      }
+                      originalInput={entry.originalInput}
+                      receivedAtLabel={
+                        entry.receivedAt
+                          ? new Date(entry.receivedAt).toLocaleTimeString()
+                          : undefined
+                      }
+                      submitting={entry.submitting}
+                      onApprove={() =>
+                        handleApprovalDecision(entry.pendingId, "approve")
+                      }
+                      onReject={(reason) =>
+                        handleApprovalDecision(entry.pendingId, "reject", {
+                          message: reason,
+                        })
+                      }
+                      onApproveWithChanges={(modifiedInput) =>
+                        handleApprovalDecision(
+                          entry.pendingId,
+                          "approve_with_changes",
+                          { modifiedInput },
+                        )
+                      }
+                      onApproveForSession={() =>
+                        handleApprovalDecision(
+                          entry.pendingId,
+                          "approve_for_session",
+                        )
+                      }
+                    />
+                  );
+                })}
+                {autoApprovedNotices.map((notice) => (
+                  <AutoApprovedStrip
+                    key={notice.pendingId}
+                    subject={notice.subject ?? undefined}
+                    payload={notice.payload ?? undefined}
+                    rulePreviewDisplay={notice.rulePreviewDisplay}
+                    resolvedAtLabel={notice.receivedAtLabel}
                   />
-                );
-              }
-              return (
-                <ApprovalCard
-                  key={entry.pendingId}
-                  pendingId={entry.pendingId}
-                  subject={entry.subject}
-                  payload={entry.payload}
-                  availableDecisions={entry.availableDecisions}
-                  sessionRulePreviewDisplay={entry.sessionRulePreviewDisplay}
-                  originalInput={entry.originalInput}
-                  receivedAtLabel={
-                    entry.receivedAt
-                      ? new Date(entry.receivedAt).toLocaleTimeString()
-                      : undefined
-                  }
-                  submitting={entry.submitting}
-                  onApprove={() =>
-                    handleApprovalDecision(entry.pendingId, "approve")
-                  }
-                  onReject={(reason) =>
-                    handleApprovalDecision(entry.pendingId, "reject", {
-                      message: reason,
-                    })
-                  }
-                  onApproveWithChanges={(modifiedInput) =>
-                    handleApprovalDecision(
-                      entry.pendingId,
-                      "approve_with_changes",
-                      { modifiedInput },
-                    )
-                  }
-                  onApproveForSession={() =>
-                    handleApprovalDecision(
-                      entry.pendingId,
-                      "approve_for_session",
-                    )
-                  }
-                />
-              );
-            })}
-            {autoApprovedNotices.map((notice) => (
-              <AutoApprovedStrip
-                key={notice.pendingId}
-                subject={notice.subject ?? undefined}
-                payload={notice.payload ?? undefined}
-                rulePreviewDisplay={notice.rulePreviewDisplay}
-                resolvedAtLabel={notice.receivedAtLabel}
-              />
-            ))}
-          </div>
-        )}
+                ))}
+              </div>
+            )}
 
-        {/* Background-task strip — the turn that LAUNCHES a run_in_background
+            {/* Background-task strip — the turn that LAUNCHES a run_in_background
             command ends normally while the process keeps running for minutes;
             without this the conversation reads as "finished" with no cue that
             work is still in flight. Derived from persisted session.bg_task.*
             events (deriveBackgroundTasks), so it also survives re-entering the
             page mid-run; hides itself once every task reaches a terminal
             state (finished / stopped-on-runtime-close). */}
-        <BackgroundTaskStrip tasks={runningBgTasks} />
+            <BackgroundTaskStrip tasks={runningBgTasks} />
 
-        {/* Scroll-to-bottom button + Composer share a relative wrapper so the
+            {/* Scroll-to-bottom button + Composer share a relative wrapper so the
             button anchors to the Composer's top edge (``bottom-full``) instead
             of a magic ``bottom: 150px``. The Composer's height varies a lot
             (skill chip, attachments, multi-line draft, model picker), so the
             old magic number sometimes left the button overlapping the Composer
             top border. Pulses while a turn is still streaming so the user
             knows the run hasn't stalled. */}
-        <div className="relative">
-          {showScrollBottom && (
-            <button
-              type="button"
-              onClick={handleScrollToBottom}
-              className={cn(
-                "absolute bottom-full left-1/2 z-20 mb-3 flex h-8 w-8 -translate-x-1/2 items-center justify-center rounded-full border border-surface-border bg-surface shadow-md transition-opacity hover:bg-surface-soft",
-                displayBusy &&
-                  "animate-[border-breathe_1.8s_ease-in-out_infinite] border-brand/60",
-              )}
-            >
-              <ArrowDown className="h-4 w-4 text-ink-body" />
-            </button>
-          )}
-
-          {!selectedSession && (rosterEmpty || (channelLoaded && !hasChannel)) && (
-              <div className="mx-auto mb-2 flex w-full max-w-[760px] items-center justify-between gap-3 rounded-lg border border-info-border bg-info-light px-3 py-2 text-xs text-info-text">
-                <span>
-                  {channelsPending
-                    ? t("conversation.channelsPendingBanner" as I18nKey)
-                    : agentPending
-                      ? t("conversation.agentPendingBanner" as I18nKey)
-                      : channelLoaded && !hasChannel
-                        ? rosterEmpty
-                          ? t("conversation.noChannelAndAgentBanner" as I18nKey)
-                          : t("conversation.noChannelBanner" as I18nKey)
-                        : t("conversation.noAgentBanner" as I18nKey)}
-                </span>
+            <div className="relative">
+              {showScrollBottom && (
                 <button
                   type="button"
-                  onClick={() => {
-                    if (!setupPending) {
-                      navigate("/welcome");
-                      return;
-                    }
-                    if (channelsPending) refreshChannels();
-                    if (rosterEmpty) refreshAgents();
-                  }}
-                  className="shrink-0 rounded-md bg-brand px-2.5 py-1 font-medium text-white transition-colors hover:bg-brand-hover"
+                  onClick={handleScrollToBottom}
+                  className={cn(
+                    "absolute bottom-full left-1/2 z-20 mb-3 flex h-8 w-8 -translate-x-1/2 items-center justify-center rounded-full border border-surface-border bg-surface shadow-md transition-opacity hover:bg-surface-soft",
+                    displayBusy &&
+                      "animate-[border-breathe_1.8s_ease-in-out_infinite] border-brand/60",
+                  )}
                 >
-                  {setupPending
-                    ? t("conversation.pendingBannerCta" as I18nKey)
-                    : t("conversation.noAgentBannerCta" as I18nKey)}
+                  <ArrowDown className="h-4 w-4 text-ink-body" />
                 </button>
-              </div>
-            )}
-          <CreateAgentDialog
-            open={createAgentOpen}
-            onOpenChange={setCreateAgentOpen}
-            onCreated={(slug) => {
-              setAgentLibraryRevision((revision) => revision + 1);
-              setSelectedAgentSlug(slug);
-              setComposerTouched(true);
-            }}
-          />
-          {selectedSessionId ? (
-            // Mirror the Composer root's horizontal inset (``px-5``) so the
-            // queue lines up with the input box, which is its own
-            // ``mx-auto max-w-[760px]`` inside that same px-5.
-            <div className="px-5">
-              <QueuedInputsBar
-                queue={queue}
-                // The dispatched head bridges the gap between "left the queue"
-                // and "visible in the transcript": show it only while no turn
-                // is active — once the drained turn's ``message.user`` streams
-                // in (``isBusy`` via the running status), the transcript
-                // renders it and the bubble would just duplicate it.
-                dispatching={isBusy ? null : queueDispatching}
-                paused={queuePaused}
-                onEdit={handleEditQueued}
-                onDelete={handleDeleteQueued}
-                onResume={handleResumeQueue}
-                onSteer={handleSteerQueued}
+              )}
+
+              {!selectedSession &&
+                (rosterEmpty || (channelLoaded && !hasChannel)) && (
+                  <div className="mx-auto mb-2 flex w-full max-w-[760px] items-center justify-between gap-3 rounded-lg border border-info-border bg-info-light px-3 py-2 text-xs text-info-text">
+                    <span>
+                      {channelsPending
+                        ? t("conversation.channelsPendingBanner" as I18nKey)
+                        : agentPending
+                          ? t("conversation.agentPendingBanner" as I18nKey)
+                          : channelLoaded && !hasChannel
+                            ? rosterEmpty
+                              ? t(
+                                  "conversation.noChannelAndAgentBanner" as I18nKey,
+                                )
+                              : t("conversation.noChannelBanner" as I18nKey)
+                            : t("conversation.noAgentBanner" as I18nKey)}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!setupPending) {
+                          navigate("/welcome");
+                          return;
+                        }
+                        if (channelsPending) refreshChannels();
+                        if (rosterEmpty) refreshAgents();
+                      }}
+                      className="shrink-0 rounded-md bg-brand px-2.5 py-1 font-medium text-white transition-colors hover:bg-brand-hover"
+                    >
+                      {setupPending
+                        ? t("conversation.pendingBannerCta" as I18nKey)
+                        : t("conversation.noAgentBannerCta" as I18nKey)}
+                    </button>
+                  </div>
+                )}
+              <CreateAgentDialog
+                open={createAgentOpen}
+                onOpenChange={setCreateAgentOpen}
+                onCreated={(slug) => {
+                  setAgentLibraryRevision((revision) => revision + 1);
+                  setSelectedAgentSlug(slug);
+                  setComposerTouched(true);
+                }}
+              />
+              {selectedSessionId ? (
+                // Mirror the Composer root's horizontal inset (``px-5``) so the
+                // queue lines up with the input box, which is its own
+                // ``mx-auto max-w-[760px]`` inside that same px-5.
+                <div className="px-5">
+                  <QueuedInputsBar
+                    queue={queue}
+                    // The dispatched head bridges the gap between "left the queue"
+                    // and "visible in the transcript": show it only while no turn
+                    // is active — once the drained turn's ``message.user`` streams
+                    // in (``isBusy`` via the running status), the transcript
+                    // renders it and the bubble would just duplicate it.
+                    dispatching={isBusy ? null : queueDispatching}
+                    paused={queuePaused}
+                    onEdit={handleEditQueued}
+                    onDelete={handleDeleteQueued}
+                    onResume={handleResumeQueue}
+                    onSteer={handleSteerQueued}
+                  />
+                </div>
+              ) : null}
+              <Composer
+                // Remount on true conversation switches so native autoFocus refires.
+                // Keep the key stable during /conversation/new → real-id promotion
+                // so first-send does not rebuild the composer.
+                key={conversationInstanceKey}
+                value={draft}
+                onChange={setDraft}
+                // Keep the composer usable while a turn runs — submitting queues a
+                // follow-up (session-input-queue) instead of being blocked.
+                queueWhileSending
+                // Project conversations can't attach skills ad-hoc (skills are the
+                // agent's equipment), so the toolbar "add skill" button stays hidden
+                // there. The ``/`` picker, however, is enabled once a member agent
+                // is selected so the user can invoke that agent's bound skills; the
+                // assistant (non-project) chat keeps both for global ``/`` skills.
+                showSkillButton={!isProjectProject}
+                showSkillSlash={
+                  isProjectProject ? effectiveAgentSlug != null : undefined
+                }
+                autoFocus
+                onSend={() => {
+                  void handleSend();
+                }}
+                sending={displayBusy}
+                onStop={() => interruptRef.current()}
+                // Upload cap counts only the *pending* server rows — the
+                // ones staged for the next turn. Consumed rows live on in
+                // the panel as history but don't eat the staging budget.
+                // The composer adds its own not-yet-uploaded local queue on
+                // top and greys the attachment menu once the total hits
+                // ``MAX_SESSION_ATTACHMENTS``.
+                existingAttachmentCount={
+                  sessionAttachments.filter((a) => !a.consumed_at).length
+                }
+                // Both local uploads and KB picks surface as chips in the
+                // composer's attachment row, each with its async parse status
+                // (spinner while ``parsing``). Only *pending* ones show: once a
+                // turn consumes them they drop from the staging row (but stay in
+                // the side panel's history).
+                uploadOnAttach
+                pinnedAttachments={sessionAttachments
+                  .filter((a) => !a.consumed_at)
+                  .map((a) => ({
+                    id: a.id,
+                    name: a.filename,
+                    parseStatus: a.parse_status as
+                      "parsing" | "ready" | "failed" | "native" | undefined,
+                    sourceKind: a.source_kind,
+                  }))}
+                onRemovePinnedAttachment={handleRemoveSessionAttachment}
+                // 09-assistant §2.1/§2.2: every conversation — 临时 or project —
+                // binds to an agent, so the 🤖 chip is always in agent mode. The
+                // candidate roster comes from ``composerAgents`` (临时 → "我的"
+                // library; project → 派驻 members). The session inherits
+                // runtime/model/provider/effort/skills/connectors from the chosen
+                // agent.
+                agents={composerAgents}
+                selectedAgentSlug={
+                  selectedSession ? sessionAgentSlug : selectedAgentSlug
+                }
+                // Surface the bound agent's runtime / model / effort in the agent
+                // dropdown — temp / quick chats only. Project conversations are
+                // driven by the deployed agent team, so they neither show the
+                // model hint nor offer a per-conversation override. For a NEW temp
+                // conversation the controls are an editable override (applied at
+                // session creation; the agent itself is never modified); for an
+                // EXISTING temp session runtime/model are read-only (frozen,
+                // ADR-006) but visible, and effort stays editable (live-reconcile).
+                allowAgentBrainOverride={!isProjectProject}
+                // ADR-006: once a session exists both chips freeze (the locked
+                // 🤖 chip shows the bound ``sessionAgentSlug``).
+                agentLocked={selectedSession != null}
+                onAgentChange={(slug) => {
+                  setSelectedAgentSlug(slug);
+                  // Switching to an agent re-seeds runtime/model/effort from that
+                  // agent's brain. Picking "Default" (slug = null) keeps whatever
+                  // you already chose in the rows below — don't reset it.
+                  if (slug) setComposerTouched(false);
+                }}
+                // 09-assistant 📁 project chip: switches the draft between 临时对话
+                // (chat-default) and a project project. The page stores the
+                // ``"chat-default"`` sentinel for 临时, so the chip sees ``null``
+                // when the active project isn't a project, and a change to
+                // ``null`` maps back to the sentinel. Frozen once a session exists.
+                footerBar={
+                  <ExecutionLocationBar
+                    locked={execBarLocked}
+                    lockedOriginId={sessionExecOrigin}
+                    targetId={execTargetId}
+                    onTargetChange={(tid) => {
+                      setExecTargetId(tid);
+                      // Provider ids are backend-local. Clear the old pick while
+                      // the newly selected service's list is loading.
+                      setSelectedProviderId(null);
+                      setSelectedModelId(null);
+                      // A project belongs to ONE backend — switching location
+                      // resets the pick back to 临时对话.
+                      const current = projects.find(
+                        (w) => w.id === selectedProjectId,
+                      );
+                      if (current && (current.exec_origin ?? "local") !== tid) {
+                        setSelectedProjectId("chat-default");
+                        setSelectedComposerSkill(null);
+                      }
+                      setComposerTouched(true);
+                    }}
+                    projects={execBarProjects}
+                    selectedProjectId={
+                      isProjectProject ? selectedProjectId : null
+                    }
+                    onProjectChange={(idOrNull) => {
+                      const nextTargetId = idOrNull
+                        ? (projects.find((w) => w.id === idOrNull)
+                            ?.exec_origin ?? "local")
+                        : (execTargetId ?? getDefaultExecutionTarget()?.id);
+                      if (nextTargetId !== providerTarget?.id) {
+                        setSelectedProviderId(null);
+                        setSelectedModelId(null);
+                      }
+                      setSelectedProjectId(idOrNull ?? "chat-default");
+                      // Same scope rule as the old toolbar chip: skills don't
+                      // survive a project-scope change.
+                      setSelectedComposerSkill(null);
+                      setComposerTouched(true);
+                      // A project always has meaningful panel content (file
+                      // tree / KB / members) — reveal the right panel on pick.
+                      if (idOrNull) panelSetCollapsed(false);
+                    }}
+                  />
+                }
+                onAddAgent={
+                  isProjectProject && selectedProjectId
+                    ? () =>
+                        navigate(
+                          `/projects/${encodeURIComponent(selectedProjectId)}`,
+                        )
+                    : () => setCreateAgentOpen(true)
+                }
+                // Only the project path greys the send button (a project with no
+                // deployed members / no pick). 临时 conversations stay clickable
+                // even with an empty library — handleSend then nudges the user to
+                // pick/create an agent (10-new-conversation-guidance).
+                sendDisabled={
+                  isProjectProject &&
+                  !selectedSession &&
+                  (composerAgents.length === 0 || !selectedAgentSlug)
+                }
+                providers={composerProviders}
+                selectedProviderId={selectedProviderId}
+                selectedModelId={selectedModelId}
+                runtimes={composerRuntimes}
+                selectedRuntimeId={selectedRuntimeId}
+                onRuntimeChange={(rt) => {
+                  setSelectedRuntimeId((rt as RuntimeId | null) ?? null);
+                  setComposerTouched(true);
+                }}
+                permissionMode={selectedPermissionMode}
+                // Kernel V5+bba3014 live-reconciles ``permission_mode`` on
+                // the next Send (Claude live ``set_permission_mode`` mutator
+                // + fork-on-rebuild for the bypass tier; Codex per-turn
+                // approval/sandbox kwargs; DeepAgents graph rebuild). The
+                // pre-bba3014 lock-on-live-session has been dropped — the
+                // picker is now interactive for both new and live sessions.
+                permissionModeLocked={false}
+                onPermissionModeChange={(mode) => {
+                  setSelectedPermissionMode(mode);
+                  // For a live session, persist via PATCH so the next Send
+                  // picks up the new mode. For new-session entry the value
+                  // is forwarded into ``sessionsApi.create`` from
+                  // ``handleSend`` instead.
+                  if (!isNewSession && id) {
+                    void sessionsApi
+                      .updatePermissionMode(id, mode)
+                      .catch(() => {
+                        /* non-fatal — surfaced by error toast pipeline */
+                      });
+                  }
+                }}
+                // Effort budget: seeded from the bound agent's brain for a new
+                // agent conversation (overridable here — see
+                // ``allowAgentBrainOverride`` below), or from Settings for quick
+                // chats. For a live session it live-reconciles via PATCH.
+                effort={selectedEffort}
+                onEffortChange={(level) => {
+                  setSelectedEffort(level);
+                  setComposerTouched(true);
+                  if (!isNewSession && id) {
+                    void sessionsApi.updateEffort(id, level).catch(() => {
+                      /* non-fatal — surfaced by error toast pipeline */
+                    });
+                  }
+                }}
+                // Session model is frozen at creation (V5 / ADR-006). Lock the
+                // picker the moment a session exists — including freshly-created
+                // sessions (e.g. Skill Creator opens a session before the user
+                // can type), where the previous ``turns.length > 0`` guard let
+                // the picker pretend it was effective. ``modelSelectorUnlocked``
+                // is the manual escape hatch the retry-with-different-model flow
+                // toggles via ``handleSwitchModel``. The same lock applies to
+                // ``runtime`` per ADR-006 + REP-107 — no mid-session swaps.
+                modelLocked={selectedSession != null && !modelSelectorUnlocked}
+                onModelChange={(chId, mId) => {
+                  setSelectedProviderId(chId);
+                  setSelectedModelId(mId);
+                  setComposerTouched(true);
+                }}
+                skills={
+                  isProjectProject
+                    ? selectedAgentSkillItems
+                    : composerMentionSkills
+                }
+                onSkillSelect={(s) => {
+                  const skill =
+                    availableSkills.find((sk) => sk.id === s.id) ?? null;
+                  setSelectedComposerSkill(skill);
+                }}
+                onKBPick={() => {
+                  void handleOpenKbPicker();
+                }}
+                onLocalUpload={handleLocalFilesAttach}
+                onFileDrop={handleLocalFilesAttach}
+                connectors={connectorOptions}
+                selectedConnectorSlugs={selectedMcpSlugs}
+                onToggleConnector={toggleConnector}
+                connectorsReadOnly={!isNewSession}
+                onManageSkills={() => navigate("/skills")}
+                onManageConnectors={() => navigate("/connectors")}
+              />
+              <AttachmentParsingDialog
+                open={parsingConfirmOpen}
+                onConfirm={() => {
+                  setParsingConfirmOpen(false);
+                  void performSend();
+                }}
+                onCancel={() => setParsingConfirmOpen(false)}
               />
             </div>
-          ) : null}
-          <Composer
-            // Remount on true conversation switches so native autoFocus refires.
-            // Keep the key stable during /conversation/new → real-id promotion
-            // so first-send does not rebuild the composer.
-            key={conversationInstanceKey}
-            value={draft}
-            onChange={setDraft}
-            // Keep the composer usable while a turn runs — submitting queues a
-            // follow-up (session-input-queue) instead of being blocked.
-            queueWhileSending
-            // Project conversations can't attach skills ad-hoc (skills are the
-            // agent's equipment), so the toolbar "add skill" button stays hidden
-            // there. The ``/`` picker, however, is enabled once a member agent
-            // is selected so the user can invoke that agent's bound skills; the
-            // assistant (non-project) chat keeps both for global ``/`` skills.
-            showSkillButton={!isProjectProject}
-            showSkillSlash={
-              isProjectProject ? effectiveAgentSlug != null : undefined
-            }
-            autoFocus
-            onSend={() => {
-              void handleSend();
-            }}
-            sending={displayBusy}
-            onStop={() => interruptRef.current()}
-            // Upload cap counts only the *pending* server rows — the
-            // ones staged for the next turn. Consumed rows live on in
-            // the panel as history but don't eat the staging budget.
-            // The composer adds its own not-yet-uploaded local queue on
-            // top and greys the attachment menu once the total hits
-            // ``MAX_SESSION_ATTACHMENTS``.
-            existingAttachmentCount={
-              sessionAttachments.filter((a) => !a.consumed_at).length
-            }
-            // Both local uploads and KB picks surface as chips in the
-            // composer's attachment row, each with its async parse status
-            // (spinner while ``parsing``). Only *pending* ones show: once a
-            // turn consumes them they drop from the staging row (but stay in
-            // the side panel's history).
-            uploadOnAttach
-            pinnedAttachments={sessionAttachments
-              .filter((a) => !a.consumed_at)
-              .map((a) => ({
-                id: a.id,
-                name: a.filename,
-                parseStatus: a.parse_status as
-                  "parsing" | "ready" | "failed" | "native" | undefined,
-                sourceKind: a.source_kind,
-              }))}
-            onRemovePinnedAttachment={handleRemoveSessionAttachment}
-            // 09-assistant §2.1/§2.2: every conversation — 临时 or project —
-            // binds to an agent, so the 🤖 chip is always in agent mode. The
-            // candidate roster comes from ``composerAgents`` (临时 → "我的"
-            // library; project → 派驻 members). The session inherits
-            // runtime/model/provider/effort/skills/connectors from the chosen
-            // agent.
-            agents={composerAgents}
-            selectedAgentSlug={
-              selectedSession ? sessionAgentSlug : selectedAgentSlug
-            }
-            // Surface the bound agent's runtime / model / effort in the agent
-            // dropdown — temp / quick chats only. Project conversations are
-            // driven by the deployed agent team, so they neither show the
-            // model hint nor offer a per-conversation override. For a NEW temp
-            // conversation the controls are an editable override (applied at
-            // session creation; the agent itself is never modified); for an
-            // EXISTING temp session runtime/model are read-only (frozen,
-            // ADR-006) but visible, and effort stays editable (live-reconcile).
-            allowAgentBrainOverride={!isProjectProject}
-            // ADR-006: once a session exists both chips freeze (the locked
-            // 🤖 chip shows the bound ``sessionAgentSlug``).
-            agentLocked={selectedSession != null}
-            onAgentChange={(slug) => {
-              setSelectedAgentSlug(slug);
-              // Switching to an agent re-seeds runtime/model/effort from that
-              // agent's brain. Picking "Default" (slug = null) keeps whatever
-              // you already chose in the rows below — don't reset it.
-              if (slug) setComposerTouched(false);
-            }}
-            // 09-assistant 📁 project chip: switches the draft between 临时对话
-            // (chat-default) and a project project. The page stores the
-            // ``"chat-default"`` sentinel for 临时, so the chip sees ``null``
-            // when the active project isn't a project, and a change to
-            // ``null`` maps back to the sentinel. Frozen once a session exists.
-            footerBar={
-              <ExecutionLocationBar
-                locked={execBarLocked}
-                lockedOriginId={sessionExecOrigin}
-                targetId={execTargetId}
-                onTargetChange={(tid) => {
-                  setExecTargetId(tid);
-                  // Provider ids are backend-local. Clear the old pick while
-                  // the newly selected service's list is loading.
-                  setSelectedProviderId(null);
-                  setSelectedModelId(null);
-                  // A project belongs to ONE backend — switching location
-                  // resets the pick back to 临时对话.
-                  const current = projects.find(
-                    (w) => w.id === selectedProjectId,
-                  );
-                  if (current && (current.exec_origin ?? "local") !== tid) {
-                    setSelectedProjectId("chat-default");
-                    setSelectedComposerSkill(null);
-                  }
-                  setComposerTouched(true);
-                }}
-                projects={execBarProjects}
-                selectedProjectId={isProjectProject ? selectedProjectId : null}
-                onProjectChange={(idOrNull) => {
-                  const nextTargetId = idOrNull
-                    ? (projects.find((w) => w.id === idOrNull)?.exec_origin ??
-                      "local")
-                    : (execTargetId ?? getDefaultExecutionTarget()?.id);
-                  if (nextTargetId !== providerTarget?.id) {
-                    setSelectedProviderId(null);
-                    setSelectedModelId(null);
-                  }
-                  setSelectedProjectId(idOrNull ?? "chat-default");
-                  // Same scope rule as the old toolbar chip: skills don't
-                  // survive a project-scope change.
-                  setSelectedComposerSkill(null);
-                  setComposerTouched(true);
-                  // A project always has meaningful panel content (file
-                  // tree / KB / members) — reveal the right panel on pick.
-                  if (idOrNull) panelSetCollapsed(false);
-                }}
-              />
-            }
-            onAddAgent={
-              isProjectProject && selectedProjectId
-                ? () =>
-                    navigate(
-                      `/projects/${encodeURIComponent(selectedProjectId)}`,
-                    )
-                : () => setCreateAgentOpen(true)
-            }
-            // Only the project path greys the send button (a project with no
-            // deployed members / no pick). 临时 conversations stay clickable
-            // even with an empty library — handleSend then nudges the user to
-            // pick/create an agent (10-new-conversation-guidance).
-            sendDisabled={
-              isProjectProject &&
-              !selectedSession &&
-              (composerAgents.length === 0 || !selectedAgentSlug)
-            }
-            providers={composerProviders}
-            selectedProviderId={selectedProviderId}
-            selectedModelId={selectedModelId}
-            runtimes={composerRuntimes}
-            selectedRuntimeId={selectedRuntimeId}
-            onRuntimeChange={(rt) => {
-              setSelectedRuntimeId((rt as RuntimeId | null) ?? null);
-              setComposerTouched(true);
-            }}
-            permissionMode={selectedPermissionMode}
-            // Kernel V5+bba3014 live-reconciles ``permission_mode`` on
-            // the next Send (Claude live ``set_permission_mode`` mutator
-            // + fork-on-rebuild for the bypass tier; Codex per-turn
-            // approval/sandbox kwargs; DeepAgents graph rebuild). The
-            // pre-bba3014 lock-on-live-session has been dropped — the
-            // picker is now interactive for both new and live sessions.
-            permissionModeLocked={false}
-            onPermissionModeChange={(mode) => {
-              setSelectedPermissionMode(mode);
-              // For a live session, persist via PATCH so the next Send
-              // picks up the new mode. For new-session entry the value
-              // is forwarded into ``sessionsApi.create`` from
-              // ``handleSend`` instead.
-              if (!isNewSession && id) {
-                void sessionsApi.updatePermissionMode(id, mode).catch(() => {
-                  /* non-fatal — surfaced by error toast pipeline */
-                });
-              }
-            }}
-            // Effort budget: seeded from the bound agent's brain for a new
-            // agent conversation (overridable here — see
-            // ``allowAgentBrainOverride`` below), or from Settings for quick
-            // chats. For a live session it live-reconciles via PATCH.
-            effort={selectedEffort}
-            onEffortChange={(level) => {
-              setSelectedEffort(level);
-              setComposerTouched(true);
-              if (!isNewSession && id) {
-                void sessionsApi.updateEffort(id, level).catch(() => {
-                  /* non-fatal — surfaced by error toast pipeline */
-                });
-              }
-            }}
-            // Session model is frozen at creation (V5 / ADR-006). Lock the
-            // picker the moment a session exists — including freshly-created
-            // sessions (e.g. Skill Creator opens a session before the user
-            // can type), where the previous ``turns.length > 0`` guard let
-            // the picker pretend it was effective. ``modelSelectorUnlocked``
-            // is the manual escape hatch the retry-with-different-model flow
-            // toggles via ``handleSwitchModel``. The same lock applies to
-            // ``runtime`` per ADR-006 + REP-107 — no mid-session swaps.
-            modelLocked={selectedSession != null && !modelSelectorUnlocked}
-            onModelChange={(chId, mId) => {
-              setSelectedProviderId(chId);
-              setSelectedModelId(mId);
-              setComposerTouched(true);
-            }}
-            skills={
-              isProjectProject ? selectedAgentSkillItems : composerMentionSkills
-            }
-            onSkillSelect={(s) => {
-              const skill =
-                availableSkills.find((sk) => sk.id === s.id) ?? null;
-              setSelectedComposerSkill(skill);
-            }}
-            onKBPick={() => {
-              void handleOpenKbPicker();
-            }}
-            onLocalUpload={handleLocalFilesAttach}
-            onFileDrop={handleLocalFilesAttach}
-            connectors={connectorOptions}
-            selectedConnectorSlugs={selectedMcpSlugs}
-            onToggleConnector={toggleConnector}
-            connectorsReadOnly={!isNewSession}
-            onManageSkills={() => navigate("/skills")}
-            onManageConnectors={() => navigate("/connectors")}
-          />
-          <AttachmentParsingDialog
-            open={parsingConfirmOpen}
-            onConfirm={() => {
-              setParsingConfirmOpen(false);
-              void performSend();
-            }}
-            onCancel={() => setParsingConfirmOpen(false)}
-          />
-        </div>
-        {artifactViewerOpen ? (
-          <div
-            className="absolute inset-0 z-30 overflow-hidden overscroll-contain bg-surface"
-            onWheel={(event) => event.stopPropagation()}
-            onTouchMove={(event) => event.stopPropagation()}
-          >
-            <ArtifactViewerShell
-              artifact={artifact}
-              content={artifactContent}
-              target={artifactTarget}
-              loading={artifactLoading}
-              error={artifactError}
-              framed={false}
-              onReload={handleArtifactReload}
-              onClose={handleArtifactClose}
-              onCopyContent={handleArtifactCopy}
-              onOpenExternal={handleArtifactOpenExternal}
-            />
           </div>
-        ) : null}
-      </div>
+      </ArtifactSplitPane>
 
       {/* Knowledge Base file picker overlay — tree view: documents are
           organised under their KB and folders; folders are expandable

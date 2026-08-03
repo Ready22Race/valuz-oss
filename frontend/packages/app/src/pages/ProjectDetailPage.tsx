@@ -4,7 +4,6 @@ import {
   Composer,
   type ComposerAgentItem,
   DeleteConfirmDialog,
-  ArtifactViewerShell,
   ProjectDetailContextPanel,
   type FileTreeNode,
   type ProjectMemberItem,
@@ -73,6 +72,7 @@ import {
 } from "../lib/agent-skill-items";
 import { toFileTree } from "../lib/file-tree";
 import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
+import { ArtifactSplitPane } from "../components/ArtifactSplitPane";
 import { useArtifactFile } from "../hooks/use-artifact-file";
 import { toAbsoluteProjectPath } from "../lib/project-paths";
 
@@ -963,14 +963,16 @@ export const ProjectDetailPage = () => {
     missingErrorMessage: t(
       "task.artifactOpenInFinder" as Parameters<typeof t>[0],
     ),
+    // The preview pane carries a tab strip, so opening a second document adds
+    // to the set instead of replacing what's on screen.
+    multiTab: true,
   });
+  // The split pane consumes the loaded document itself; the page keeps only
+  // what it needs for URL sync and the copy / reveal actions.
   const {
+    activePath: activeArtifactPath,
     selectedPath: selectedArtifactPath,
-    artifact,
     content: artifactContent,
-    target: artifactTarget,
-    loading: artifactLoading,
-    error: artifactError,
     open: openArtifact,
     reload: reloadArtifact,
     close: closeArtifact,
@@ -994,35 +996,74 @@ export const ProjectDetailPage = () => {
     [id, openArtifact, searchParams, setSearchParams],
   );
 
+  // ?file is an output of the focused tab, and only an input when it changed
+  // from outside this page. Without that distinction the two effects below
+  // ping-pong: each reads the other's not-yet-settled value and "corrects" it.
+  // ?file names the focused document. It is an *output* while anything is
+  // open — the tab strip is the source of truth — and only an input when the
+  // preview is closed, i.e. on load or after a deep link. Treating a stale
+  // param as an instruction is what made these two effects ping-pong: each
+  // read the other's not-yet-settled value and "corrected" it.
+  const authoredFileParamRef = useRef<string | null>(null);
+  const hadArtifactRef = useRef(false);
+
+  useEffect(() => {
+    if (activeArtifactPath) {
+      hadArtifactRef.current = true;
+      if (activeArtifactPath === selectedFileParam) return;
+      authoredFileParamRef.current = activeArtifactPath;
+      setSearchParams(
+        (current) => {
+          const next = new URLSearchParams(current);
+          next.set("file", activeArtifactPath);
+          return next;
+        },
+        { replace: true },
+      );
+      return;
+    }
+    // Nothing open. Clear the param only if something *was* open — on mount it
+    // just means the deep link hasn't been consumed yet.
+    if (!hadArtifactRef.current || !selectedFileParam) return;
+    hadArtifactRef.current = false;
+    // Claim the value being removed, not null: effects run in declaration
+    // order, so the reader below sees this stale param before the clear lands
+    // and would otherwise reopen what was just closed.
+    authoredFileParamRef.current = selectedFileParam;
+    setSearchParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        next.delete("file");
+        return next;
+      },
+      { replace: true },
+    );
+  }, [activeArtifactPath, selectedFileParam, setSearchParams]);
+
   useEffect(() => {
     if (!selectedFileParam) {
-      if (selectedArtifactPath) {
-        const timer = window.setTimeout(() => {
-          closeArtifact();
-        }, 0);
-        return () => window.clearTimeout(timer);
-      }
+      // The clear has landed; drop the claim so a later deep link to the same
+      // document is honoured rather than mistaken for our own echo.
+      authoredFileParamRef.current = null;
       return;
     }
-    if (
-      selectedFileParam === selectedArtifactPath &&
-      (artifact || artifactLoading || artifactError)
-    ) {
-      return;
-    }
+    // Something is already focused, so the param is this effect's own trailing
+    // output rather than a request.
+    if (activeArtifactPath) return;
+    // Nothing is focused but the param still names what we last wrote — the
+    // reader just closed it and the clear hasn't landed. Reopening it here is
+    // how "close the last tab" used to bounce straight back.
+    if (selectedFileParam === authoredFileParamRef.current) return;
+    // The project root arrives with the detail fetch, and the path the deep
+    // link names is relative to it. Resolving before it lands builds a bogus
+    // absolute path and lands the tab in an error state it never retries out
+    // of — wait for the root, then open.
+    if (!project?.root_path) return;
     const timer = window.setTimeout(() => {
       void openArtifactFile(selectedFileParam, { syncUrl: false });
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [
-    artifact,
-    artifactError,
-    artifactLoading,
-    closeArtifact,
-    openArtifactFile,
-    selectedArtifactPath,
-    selectedFileParam,
-  ]);
+  }, [project?.root_path, activeArtifactPath, openArtifactFile, selectedFileParam]);
 
   const handleArtifactReload = useCallback(() => {
     void reloadArtifact();
@@ -1555,23 +1596,14 @@ export const ProjectDetailPage = () => {
   }
 
   return (
-    <div className="flex h-full flex-col">
-      {selectedArtifactPath || artifactLoading || artifactError ? (
-        <div className="min-h-0 flex-1">
-          <ArtifactViewerShell
-            artifact={artifact}
-            content={artifactContent}
-            target={artifactTarget}
-            loading={artifactLoading}
-            error={artifactError}
-            framed={false}
-            onReload={handleArtifactReload}
-            onClose={handleArtifactClose}
-            onCopyContent={handleArtifactCopy}
-            onOpenExternal={handleArtifactOpenExternal}
-          />
-        </div>
-      ) : (
+    <ArtifactSplitPane
+      file={artifactFile}
+      onReload={handleArtifactReload}
+      onClose={handleArtifactClose}
+      onCopyContent={handleArtifactCopy}
+      onOpenExternal={handleArtifactOpenExternal}
+    >
+      <div className="flex h-full flex-col">
         <>
           {/* Anchor the content stack at a stable top offset so the project title
           keeps a predictable visual position across desktop window sizes. */}
@@ -1783,7 +1815,6 @@ export const ProjectDetailPage = () => {
             </div>
           </div>
         </>
-      )}
 
       {/* Project automation create — uses the same agent-driven dialog
           as the global Automation page, with task mode enabled (this is
@@ -1964,6 +1995,7 @@ export const ProjectDetailPage = () => {
           }
         }}
       />
-    </div>
+      </div>
+    </ArtifactSplitPane>
   );
 };
