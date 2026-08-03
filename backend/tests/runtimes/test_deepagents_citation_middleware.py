@@ -677,7 +677,7 @@ async def test_reportify_mcp_metadata_builds_lazy_collection_without_per_field_e
     assert private_payload["_valuz_evidence"][0]["kind"] == "structured-evidence-collection"
 
 
-async def test_reportify_discovery_metadata_exposes_only_citable_metadata_collection() -> None:
+async def test_reportify_discovery_metadata_stays_non_citable() -> None:
     payload = {
         "docs": [
             {
@@ -743,36 +743,15 @@ async def test_reportify_discovery_metadata_exposes_only_citable_metadata_collec
     assert isinstance(result.content, str)
     visible_payload = json.loads(result.content)
     assert "evidenceHandle" not in visible_payload["docs"][0]
-    hint = visible_payload["_valuz_evidence_hint"]
-    assert hint["collectionHandle"].startswith("evc_projection_")
-    assert hint["allowedItemPaths"] == ["/doc_id", "/title"]
+    assert "_valuz_evidence_hint" not in visible_payload
     assert visible_payload["_valuz_discovery"]["citationEvidence"] == (
         "original-indexed-chunk-required"
     )
     assert visible_payload["_valuz_discovery"]["originalDocumentPreferred"] is True
-    private = citation_artifact_content(result)
-    assert private is not None
-    descriptor = json.loads(private)["_valuz_evidence"][0]
-    assert descriptor["addressing"]["allowedItemPaths"] == ["/doc_id", "/title"]
-    assert descriptor["collectionHandle"] == hint["collectionHandle"]
+    assert citation_artifact_content(result) is None
     registry = EvidenceRegistry()
-    assert (
-        registry.register_tool_projection(
-            result.content,
-            private,
-            tool_name="reports_search",
-            trusted_private=True,
-        )
-        == 1
-    )
+    assert registry.register_tool_result(result.content, tool_name="reports_search") == 0
     assert registry.rejected_count == 0
-    assert (
-        registry.materialize_reference(
-            hint["collectionHandle"],
-            "#/docs/3/title",
-        )
-        is not None
-    )
 
 
 async def test_discovery_search_summaries_are_bounded_for_model_history() -> None:

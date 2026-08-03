@@ -32,15 +32,6 @@ _SUPPORTED_RESOURCE_KINDS = {
     "structured-collection",
     "operational",
 }
-_DISCOVERY_CITABLE_MAPPING_KEYS = (
-    "sourceId",
-    "title",
-    "url",
-    "publishedAt",
-    "providerCategory",
-)
-
-
 @dataclass(frozen=True)
 class McpSourceAdaptation:
     """Validated model/private projection for one MCP tool result."""
@@ -199,14 +190,12 @@ def adapt_mcp_source_result(
                 return None
             envelopes.extend(chunk_envelopes)
         elif kind == "document-discovery":
-            collection = _discovery_metadata_collection_envelope(
-                target,
-                descriptor=descriptor,
-                resource=raw_resource,
-                captured_at=captured_at,
-            )
-            if collection is not None:
-                envelopes.append(collection)
+            # Discovery rows select what to read next.  Even their title or
+            # doc_id cannot support a business claim, and exposing a generic
+            # metadata Collection lets models bind arbitrary prose to search
+            # result fields.  Keep the rows in Model Content and Task Coverage
+            # only; document_fetch/kb_search supplies citable chunks.
+            continue
         elif kind == "structured-collection":
             collection = _structured_collection_envelope(
                 target,
@@ -593,88 +582,6 @@ def _structured_collection_envelope(
         "semantics": semantics,
         "contentHash": _content_hash(snapshot),
     }
-
-
-def _discovery_metadata_collection_envelope(
-    target: Any,
-    *,
-    descriptor: Mapping[str, Any],
-    resource: Mapping[str, Any],
-    captured_at: str,
-) -> dict[str, Any] | None:
-    """Expose citable result metadata without making summaries authoritative.
-
-    A discovery row can prove that a document with a particular title, date,
-    URL, or provider id was returned.  It cannot prove claims copied from the
-    provider summary.  Generate concrete allowed JSON pointers for only those
-    metadata fields so the original result remains visible once while summary
-    addresses are rejected by the Registry.
-    """
-
-    root_pointer = _pointer(resource.get("rootPointer"))
-    items_pointer = _pointer(resource.get("itemsPointer"))
-    mapping = resource.get("mapping")
-    if root_pointer is None or items_pointer is None or not isinstance(mapping, Mapping):
-        return None
-    found, items = _resolve_pointer(target, items_pointer)
-    if not found:
-        return None
-    if isinstance(items, list):
-        indexed_items = [
-            (f"{items_pointer}/{index}", item) for index, item in enumerate(items[:_MAX_ITEMS])
-        ]
-    elif isinstance(items, Mapping) or isinstance(items, str):
-        indexed_items = [(items_pointer, items)]
-    else:
-        return None
-
-    allowed_item_paths: list[str] = []
-    for key in _DISCOVERY_CITABLE_MAPPING_KEYS:
-        relative = _pointer(mapping.get(key))
-        if relative in {None, ""}:
-            continue
-        for _item_pointer, item in indexed_items:
-            found, value = _resolve_pointer(item, relative)
-            if not found or value is None:
-                continue
-            allowed_item_paths.append(relative)
-            break
-    if not allowed_item_paths:
-        return None
-
-    provider = descriptor.get("provider")
-    provider = provider if isinstance(provider, Mapping) else {}
-    operation = descriptor.get("operation")
-    operation = operation if isinstance(operation, Mapping) else {}
-    source_id_pointer = _pointer(mapping.get("sourceId"))
-    synthetic = {
-        "resourceId": f"{resource.get('resourceId') or 'discovery'}-metadata",
-        "kind": "structured-collection",
-        "authority": "derived",
-        # Freeze only the result rows.  A root pointer of ``""`` would hash
-        # the synthetic ``_valuz_evidence`` envelope after it is attached and
-        # invalidate the otherwise immutable collection during registration.
-        "rootPointer": items_pointer,
-        "itemsPointer": items_pointer,
-        "dataset": {
-            "id": (
-                f"{provider.get('id') or 'mcp'}:{operation.get('toolName') or 'discovery'}:metadata"
-            ),
-            "sourceCategory": "document_discovery_metadata",
-        },
-        "identity": {"fields": [source_id_pointer] if source_id_pointer is not None else []},
-        "semantics": {},
-        "addressing": {
-            "mode": "json-pointer",
-            "allowedItemPaths": allowed_item_paths,
-        },
-    }
-    return _structured_collection_envelope(
-        target,
-        descriptor=descriptor,
-        resource=synthetic,
-        captured_at=captured_at,
-    )
 
 
 def _shift_root_envelopes(envelopes: list[dict[str, Any]]) -> list[dict[str, Any]]:
