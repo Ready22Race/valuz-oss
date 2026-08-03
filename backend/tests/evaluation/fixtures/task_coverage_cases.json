@@ -26,7 +26,7 @@
         "step_count": 1,
         "strategy_counts": {"structured-fetch": 1},
         "entity_step_count": 0,
-        "planner_revision": "task-retrieval-planner-v1"
+        "planner_revision": "task-retrieval-planner-v2"
       },
       "expected_coverage": {
         "status": "complete",
@@ -161,10 +161,10 @@
         "enforceable": true
       },
       "expected_retrieval_plan": {
-        "step_count": 2,
-        "strategy_counts": {"document-discovery": 2},
-        "period_step_count": 2,
-        "planner_revision": "task-retrieval-planner-v1"
+        "step_count": 4,
+        "strategy_counts": {"document-discovery": 2, "document-scoped-search": 2},
+        "period_step_count": 4,
+        "planner_revision": "task-retrieval-planner-v2"
       },
       "expected_coverage": {
         "status": "partial",

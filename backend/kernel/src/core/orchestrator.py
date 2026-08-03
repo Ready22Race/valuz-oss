@@ -181,6 +181,15 @@ _INTERNAL_CITATION_PROSE_RE = re.compile(
     re.IGNORECASE,
 )
 _CJK_RE = re.compile(r"[\u3400-\u9fff]")
+# Classification only.  A runtime-authored compaction handoff remains a
+# user-visible assistant segment exactly as it was before citation support;
+# this marker merely keeps host-side answer coverage/citation processing from
+# mistaking machine state for the substantive answer.
+_INTERNAL_HANDOFF_RE = re.compile(
+    r"^\s*##\s+SESSION INTENT\b[\s\S]*?^##\s+SUMMARY\b"
+    r"[\s\S]*?^##\s+ARTIFACTS\b[\s\S]*?^##\s+NEXT STEPS\b",
+    re.IGNORECASE | re.MULTILINE,
+)
 _LEADING_PROGRESS_RE = re.compile(
     r"^(?:"
     r"(?:已?获得|获得了).{0,160}(?:现在|接下来|随后).{0,40}"
@@ -210,6 +219,8 @@ _LEADING_PROGRESS_RE = re.compile(
     r"(?:现在)?(?:可以|将要)?给出.{0,48}(?:答案|结果).{0,80}|"
     r"(?:已有|已获得|已具备).{0,32}(?:足够|充分).{0,32}"
     r"(?:原文|证据|数据|资料).{0,64}(?:输出|给出|生成).{0,16}(?:结果|答案)|"
+    r"(?:我|我们)?(?:现)?已有.{0,160}(?:现在|接下来).{0,24}"
+    r"(?:输出|生成|整理|撰写).{0,80}|"
     r"以下是.{0,32}(?:完整)?答案\s*[:：]?|"
     r"(?:I|we)(?: now)?(?: have|'ve)? (?:found|retrieved|collected).{0,80}|"
     r"(?:I|we)(?: now)?(?: have|'ve) (?:all|enough|the needed).{0,32}"
@@ -558,6 +569,29 @@ def _strip_leading_assistant_progress(text: str) -> str:
     # text here leaked retrieval narration (and sometimes protocol vocabulary)
     # as a separate user-visible message when a run was cancelled or repaired.
     return cleaned
+
+
+def _assistant_segment_coverage_text(text: str) -> str:
+    """Return the substantive answer portion of a visible runtime segment.
+
+    Visibility and answer semantics are intentionally separate.  Every
+    top-level runtime message (including compaction handoffs and progress
+    narration) is still persisted and broadcast, while Task Coverage only
+    consumes segments that plausibly contain user-facing answer content.
+    """
+
+    if _INTERNAL_HANDOFF_RE.search(text):
+        return ""
+    cleaned = _strip_leading_assistant_progress(text).strip()
+    if not cleaned:
+        return ""
+    if _INLINE_EVIDENCE_LINK_RE.search(cleaned):
+        return cleaned
+    if len(cleaned) >= 400:
+        return cleaned
+    if re.search(r"(?m)^\s*#{1,6}\s+\S|^\s*\|.+\|\s*$", cleaned):
+        return cleaned
+    return ""
 
 
 def _strip_unrequested_source_excerpt(text: str, user_prompt: str) -> str:
@@ -1706,6 +1740,12 @@ class _MessageObserverSink:
         self._user_prompt = user_prompt
         self._assistant_chunks: list[str] = []
         self._assistant_delta_chunks: list[str] = []
+        # Substantive top-level assistant segments that closed before the
+        # runtime's last canonical block.  They stay independently visible in
+        # the event stream, but the final Task Coverage audit must evaluate
+        # them together with the last block as one user turn.
+        self._coverage_answer_chunks: list[str] = []
+        self._coverage_citation_bundles: list[dict[str, Any]] = []
         self._pending_assistant: Event | None = None
         self._final_assistant_published = False
         self._tool_names: dict[str, str] = {}
@@ -2024,6 +2064,87 @@ class _MessageObserverSink:
         if isinstance(task_coverage, dict):
             self.task_coverage = copy.deepcopy(task_coverage)
 
+    def _record_intermediate_answer_coverage(self, event: Event) -> None:
+        text = str(event.data.get("text") or event.data.get("content") or "")
+        coverage_text = _assistant_segment_coverage_text(text)
+        if not coverage_text:
+            return
+        self._coverage_answer_chunks.append(coverage_text)
+        citation_bundle = event.data.get("citation_bundle")
+        if isinstance(citation_bundle, dict):
+            self._coverage_citation_bundles.append(copy.deepcopy(citation_bundle))
+
+    def _coverage_answer_text(self, current_text: str) -> str:
+        chunks = [*self._coverage_answer_chunks, current_text.strip()]
+        return "\n\n".join(chunk for chunk in chunks if chunk)
+
+    def _coverage_citation_bundle(
+        self,
+        current_bundle: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Return the ready citations used anywhere in the visible answer.
+
+        Claim locations remain segment-local and therefore stay on each
+        emitted assistant event.  Task Coverage only needs the union of ready
+        citation records to prove that links in the cumulative answer were
+        backed by model-visible Evidence.
+        """
+
+        citations: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for bundle in (*self._coverage_citation_bundles, current_bundle):
+            if not isinstance(bundle, dict):
+                continue
+            raw_citations = bundle.get("citations")
+            if not isinstance(raw_citations, list):
+                continue
+            for citation in raw_citations:
+                if not isinstance(citation, dict):
+                    continue
+                citation_id = citation.get("citationId")
+                if not isinstance(citation_id, str) or not citation_id or citation_id in seen:
+                    continue
+                seen.add(citation_id)
+                citations.append(copy.deepcopy(citation))
+        return {"version": 1, "citations": citations} if citations else None
+
+    async def _build_intermediate_assistant_event(
+        self,
+        raw_text: str,
+        *,
+        base_data: dict[str, Any] | None = None,
+        timestamp: int | None = None,
+    ) -> Event:
+        """Seal a substantive intermediate answer without changing visibility.
+
+        Progress narration and runtime handoffs are emitted byte-for-byte.
+        A substantive answer segment crosses the same deterministic citation
+        boundary as the last segment, but never starts an automatic repair or
+        Task Coverage revision of its own.
+        """
+
+        data = dict(base_data or {})
+        data["text"] = raw_text
+        if _assistant_segment_coverage_text(raw_text) and self._citation_guard.requires_citation:
+            result = await asyncio.to_thread(
+                self._citation_guard.finalize,
+                raw_text,
+                repair_attempts=0,
+                entity_aliases=(
+                    self._task_coverage_tracker.entity_aliases_snapshot()
+                    if self._task_coverage_tracker is not None
+                    else None
+                ),
+            )
+            data["text"] = result.text
+            if result.bundle is not None:
+                data["citation_bundle"] = result.bundle
+        return Event(
+            type="assistant_message",
+            data=data,
+            **({"timestamp": timestamp} if timestamp is not None else {}),
+        )
+
     @property
     def citation_repair_requested(self) -> bool:
         return self._citation_repair_requested
@@ -2185,7 +2306,16 @@ class _MessageObserverSink:
             allow_repair=allow_repair,
         )
         if event is None:
-            return False
+            # A progress-only delta is still runtime-authored user-visible
+            # information. Persist it, but do not let it masquerade as the
+            # final answer; session_idle will request the bounded final-answer
+            # continuation immediately afterwards.
+            if not text.strip():
+                return False
+            event = Event(type="assistant_message", data={"text": text})
+            self._record_assistant_message(event)
+            await self._inner.emit(event)
+            return True
         self._record_assistant_message(event)
         self._final_assistant_published = True
         await self._inner.emit(event)
@@ -2208,6 +2338,7 @@ class _MessageObserverSink:
             if key not in {"text", "content", "citation_bundle"}
         }
         data["text"] = str(raw_text)
+        canonical_final = False
         if final:
             event = await self._build_final_assistant_event(
                 str(raw_text),
@@ -2216,11 +2347,28 @@ class _MessageObserverSink:
                 allow_repair=allow_repair,
             )
             if event is None:
-                return False
+                if not str(raw_text).strip():
+                    return False
+                # Preserve the runtime message while keeping the final-answer
+                # recovery gate open.  This is the canonical-message variant
+                # of ensure_partial_assistant_message's progress fallback.
+                event = Event(
+                    type="assistant_message",
+                    data=data,
+                    timestamp=pending.timestamp,
+                )
+            else:
+                canonical_final = True
         else:
-            event = Event(type="assistant_message", data=data, timestamp=pending.timestamp)
+            event = await self._build_intermediate_assistant_event(
+                str(raw_text),
+                base_data=data,
+                timestamp=pending.timestamp,
+            )
         self._record_assistant_message(event)
-        if final:
+        if not final:
+            self._record_intermediate_answer_coverage(event)
+        if final and canonical_final:
             self._final_assistant_published = True
         await self._inner.emit(event)
         return True
@@ -2336,13 +2484,19 @@ class _MessageObserverSink:
             "verified-evidence-answer-cell" if task_revision_patch_ids else None
         )
         if self._task_coverage_tracker is not None:
-            pre_guard_coverage = self._task_coverage_tracker.evaluate(raw_text)
+            pre_guard_coverage = self._task_coverage_tracker.evaluate(
+                self._coverage_answer_text(raw_text),
+                citation_bundle=self._coverage_citation_bundle(),
+            )
             raw_text, ordered_patch_ids = self._task_coverage_tracker.patch_ordered_table_rows(
                 raw_text,
                 pre_guard_coverage,
             )
             if ordered_patch_ids:
-                pre_guard_coverage = self._task_coverage_tracker.evaluate(raw_text)
+                pre_guard_coverage = self._task_coverage_tracker.evaluate(
+                    self._coverage_answer_text(raw_text),
+                    citation_bundle=self._coverage_citation_bundle(),
+                )
             raw_text, unavailable_patch_ids = (
                 self._task_coverage_tracker.patch_unavailable_table_slots(
                     raw_text,
@@ -2350,7 +2504,10 @@ class _MessageObserverSink:
                 )
             )
             if unavailable_patch_ids:
-                pre_guard_coverage = self._task_coverage_tracker.evaluate(raw_text)
+                pre_guard_coverage = self._task_coverage_tracker.evaluate(
+                    self._coverage_answer_text(raw_text),
+                    citation_bundle=self._coverage_citation_bundle(),
+                )
             raw_text, calculation_patch_ids = (
                 self._task_coverage_tracker.patch_required_calculation_formula(
                     raw_text,
@@ -2358,7 +2515,10 @@ class _MessageObserverSink:
                 )
             )
             if calculation_patch_ids:
-                pre_guard_coverage = self._task_coverage_tracker.evaluate(raw_text)
+                pre_guard_coverage = self._task_coverage_tracker.evaluate(
+                    self._coverage_answer_text(raw_text),
+                    citation_bundle=self._coverage_citation_bundle(),
+                )
             raw_text, metadata_patch_ids = self._task_coverage_tracker.patch_required_metadata(
                 raw_text,
                 pre_guard_coverage,
@@ -2432,9 +2592,10 @@ class _MessageObserverSink:
 
         coverage_audit: dict[str, Any] | None = None
         if self._task_coverage_tracker is not None:
+            coverage_answer = self._coverage_answer_text(result.text)
             coverage_audit = self._task_coverage_tracker.evaluate(
-                result.text,
-                citation_bundle=result.bundle,
+                coverage_answer,
+                citation_bundle=self._coverage_citation_bundle(result.bundle),
             )
             if task_coverage_patch_ids:
                 coverage_audit["deterministicPatch"] = {
@@ -2514,7 +2675,7 @@ class _MessageObserverSink:
                     break
             self._task_coverage_revision_prompt = self._task_coverage_tracker.revision_prompt(
                 coverage_audit,
-                result.text,
+                self._coverage_answer_text(result.text),
                 self._user_prompt,
                 candidate_evidence=(
                     self._repair_evidence_summary(record) for record in candidate_records

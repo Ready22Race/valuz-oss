@@ -1871,6 +1871,7 @@ async def test_progress_only_bookkeeping_block_requests_final_answer_recovery() 
         "获得了中证2000的7月31日市盈率以及各指数行业分布信息。"
         "现在读取更多详细内容，特别是行业分布和中证指数估值表。",
         "已收集到极为丰富的原始数据。现在整合所有信息撰写深度报告：",
+        "我已有全部五家公司的完整资本开支数字，结合电话会纪要和新闻报道，现在输出最终分析报告。",
     ],
 )
 async def test_research_progress_only_end_turn_requests_final_answer_recovery(text: str) -> None:
@@ -1885,8 +1886,8 @@ async def test_research_progress_only_end_turn_requests_final_answer_recovery(te
     )
 
     assert observer.final_answer_recovery_requested is True
-    assert observer.assistant_text is None
-    assert all(event.type != "assistant_message" for event in store.appended)
+    assert observer.assistant_text == text
+    assert any(event.type == "assistant_message" for event in store.appended)
 
 
 async def test_second_empty_end_turn_publishes_nontechnical_fallback() -> None:
@@ -2028,8 +2029,61 @@ async def test_bookkeeping_tool_after_complete_cited_answer_does_not_discard_it(
     assistants = [event for event in store.appended if event.type == "assistant_message"]
     assert len(assistants) == 2
     assert "FY2026 Q1" in assistants[0].data["text"]
-    assert "evidence://ev_q1_12345678" in assistants[0].data["text"]
+    assert "evidence://" not in assistants[0].data["text"]
+    assert "citation://" in assistants[0].data["text"]
+    assert len(assistants[0].data["citation_bundle"]["citations"]) == 1
     assert assistants[1].data["text"] == "以上为完整对比。"
+
+
+async def test_task_coverage_evaluates_substantive_answer_before_bookkeeping_tool() -> None:
+    store = _FakeStore()
+    live = _RecordingSink()
+    db = DatabaseEventSink(store, "owner-1", "sess-1", "msg-1")
+    coalesced = DeltaCoalescingSink(PersistThenBroadcastSink(db, live))
+    prompt = "用 Markdown 表格列出甲公司和乙公司 2025 Q1 的营业收入和经营现金流。"
+    policy = _task_coverage_policy()
+    contract = parse_task_contract(prompt, policy_snapshot=policy)
+    observer = _MessageObserverSink(
+        coalesced,
+        message_id="msg-1",
+        user_prompt=prompt,
+        citation_quality_policy=policy,
+        citation_enabled=True,
+        task_contract=contract,
+        task_coverage_enabled=True,
+    )
+
+    await observer.emit(Event(type="tool_use", data={"id": "data-1", "name": "stock"}))
+    await observer.emit(
+        Event(
+            type="tool_result",
+            data={
+                "id": "data-1",
+                "content": (
+                    "甲公司 2025 Q1 营业收入 100 亿元，经营现金流 20 亿元；"
+                    "乙公司 2025 Q1 营业收入 90 亿元，经营现金流 10 亿元。"
+                ),
+            },
+        )
+    )
+    table = (
+        "| 公司 | 报告期 | 营业收入 | 经营现金流 |\n"
+        "|---|---|---:|---:|\n"
+        "| 甲公司 | 2025 Q1 | 100 亿元 | 20 亿元 |\n"
+        "| 乙公司 | 2025 Q1 | 90 亿元 | 10 亿元 |"
+    )
+    await observer.emit(Event(type="assistant_message", data={"text": table}))
+    await observer.emit(Event(type="tool_use", data={"id": "todos-1", "name": "write_todos"}))
+    await observer.emit(
+        Event(type="tool_result", data={"id": "todos-1", "content": "Updated todo list"})
+    )
+    await observer.emit(Event(type="assistant_message", data={"text": "以上为完整对比。"}))
+    await observer.emit(Event(type="session_idle", data={"num_turns": 1}))
+
+    assistants = [event for event in store.appended if event.type == "assistant_message"]
+    assert [event.data["text"] for event in assistants] == [table, "以上为完整对比。"]
+    assert observer.task_coverage is not None
+    assert observer.task_coverage["status"] == "complete"
 
 
 async def test_internal_compaction_handoff_preserves_runtime_visibility() -> None:
@@ -2106,14 +2160,17 @@ async def test_tool_call_preamble_is_visible_before_the_final_answer() -> None:
     assistants = [event for event in store.appended if event.type == "assistant_message"]
     assert len(assistants) == 2
     assert "19%" in assistants[0].data["text"]
-    assert "ev_fake" in (observer.assistant_text or "")
+    assert "现在查原文" in assistants[0].data["text"]
+    assert "ev_fake" not in (observer.assistant_text or "")
     assert "20%" in (observer.assistant_text or "")
     assert [event.type for event in live.events].index("assistant_message") < [
         event.type for event in live.events
     ].index("tool_use")
 
 
-async def test_citation_candidate_followed_by_new_text_remains_visible() -> None:
+async def test_citation_candidate_followed_by_new_text_remains_visible_without_raw_protocol() -> (
+    None
+):
     store, _live, observer = _observer_with_citations()
     await observer.emit(
         Event(
@@ -2127,10 +2184,11 @@ async def test_citation_candidate_followed_by_new_text_remains_visible() -> None
 
     assistants = [event for event in store.appended if event.type == "assistant_message"]
     assert [event.data["text"] for event in assistants] == [
-        "Draft with raw protocol [1](evidence://ev_fake_12345678).",
+        "Draft with raw protocol.",
         "Final answer.",
     ]
-    assert "ev_fake" in (observer.assistant_text or "")
+    assert "Draft with raw protocol." in (observer.assistant_text or "")
+    assert "ev_fake" not in (observer.assistant_text or "")
 
 
 async def test_final_assistant_message_captures_citation_bundle() -> None:

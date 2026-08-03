@@ -30,7 +30,7 @@ from src.core.output_contract import OutputContract, parse_output_contract
 
 TASK_CONTRACT_REVISION = "task-contract-v1"
 TASK_COVERAGE_RESOLVER_REVISION = "task-coverage-resolver-v1"
-TASK_RETRIEVAL_PLANNER_REVISION = "task-retrieval-planner-v1"
+TASK_RETRIEVAL_PLANNER_REVISION = "task-retrieval-planner-v2"
 TASK_COVERAGE_PATCH_VERSION = "task-coverage-patch-v1"
 
 TaskType = Literal[
@@ -338,6 +338,7 @@ _OUTPUT_COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
         "reporting period",
         "fiscal period",
         "报告期",
+        "财报期",
         "期间",
         "年度",
         "季度",
@@ -442,6 +443,7 @@ class TaskRetrievalStep:
     entity_ids: tuple[str, ...] = ()
     periods: tuple[str, ...] = ()
     document_ids: tuple[str, ...] = ()
+    depends_on_step_ids: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -452,6 +454,11 @@ class TaskRetrievalStep:
             **({"entityIds": list(self.entity_ids)} if self.entity_ids else {}),
             **({"periods": list(self.periods)} if self.periods else {}),
             **({"documentIds": list(self.document_ids)} if self.document_ids else {}),
+            **(
+                {"dependsOnStepIds": list(self.depends_on_step_ids)}
+                if self.depends_on_step_ids
+                else {}
+            ),
             "strategy": self.strategy,
             "maxAttempts": self.max_attempts,
         }
@@ -1049,6 +1056,12 @@ def build_task_retrieval_plan(
         }[requirement.kind]
         grouped.setdefault((strategy, entity, period, document), []).append(requirement)
 
+    declared_documents = contract.declared_scope.get("documentIds")
+    declared_document_ids = (
+        tuple(str(item) for item in declared_documents if str(item))
+        if isinstance(declared_documents, list)
+        else ()
+    )
     steps: list[TaskRetrievalStep] = []
     for (strategy, entity, period, document), requirements in grouped.items():
         requested_parts: list[str] = []
@@ -1064,35 +1077,53 @@ def build_task_retrieval_plan(
                 suffix = ",".join(f"{key}={value}" for key, value in sorted(dimensions.items()))
                 part = f"{part}[{suffix}]"
             requested_parts.append(part)
-        basis = {
-            "contractId": contract.contract_id,
-            "strategy": strategy,
-            "entity": entity,
-            "period": period,
-            "document": document,
-            "parts": requested_parts,
-        }
-        steps.append(
-            TaskRetrievalStep(
-                step_id="step_" + _digest(basis, 18),
-                requirement_ids=tuple(item.requirement_id for item in requirements),
-                requested_parts=tuple(dict.fromkeys(requested_parts)),
-                allowed_source_classes=source_constraints,
-                strategy=cast(
-                    Literal[
-                        "structured-fetch",
-                        "document-discovery",
-                        "document-scoped-search",
-                        "section-read",
-                    ],
-                    strategy,
-                ),
-                max_attempts=2 if inspect_partial else 1,
-                entity_ids=(entity,) if entity else (),
-                periods=(period,) if period else (),
-                document_ids=(document,) if document else (),
+        document_ids = (document,) if document else declared_document_ids
+        strategies = (strategy,)
+        if strategy == "document-discovery":
+            # A discovery result identifies candidate documents but does not
+            # expose original text that can support the requested topic.  For
+            # open document research, compile both stages explicitly.  A
+            # locked document scope can skip discovery and read its indexed
+            # chunks directly.
+            strategies = (
+                ("document-scoped-search",)
+                if document_ids
+                else ("document-discovery", "document-scoped-search")
             )
-        )
+        dependency_ids: tuple[str, ...] = ()
+        for planned_strategy in strategies:
+            basis = {
+                "contractId": contract.contract_id,
+                "strategy": planned_strategy,
+                "entity": entity,
+                "period": period,
+                "documents": document_ids,
+                "parts": requested_parts,
+            }
+            step_id = "step_" + _digest(basis, 18)
+            steps.append(
+                TaskRetrievalStep(
+                    step_id=step_id,
+                    requirement_ids=tuple(item.requirement_id for item in requirements),
+                    requested_parts=tuple(dict.fromkeys(requested_parts)),
+                    allowed_source_classes=source_constraints,
+                    strategy=cast(
+                        Literal[
+                            "structured-fetch",
+                            "document-discovery",
+                            "document-scoped-search",
+                            "section-read",
+                        ],
+                        planned_strategy,
+                    ),
+                    max_attempts=2 if inspect_partial else 1,
+                    entity_ids=(entity,) if entity else (),
+                    periods=(period,) if period else (),
+                    document_ids=document_ids,
+                    depends_on_step_ids=dependency_ids,
+                )
+            )
+            dependency_ids = (step_id,)
     return TaskRetrievalPlan(contract_id=contract.contract_id, steps=tuple(steps))
 
 
@@ -1148,6 +1179,11 @@ def task_contract_prompt(
                     "same query; use a second attempt only for a different compatible source "
                     "when the first source is partial."
                 ),
+                (
+                    "- document-discovery returns candidate metadata only. After selecting a "
+                    "compatible document, execute its dependent document-scoped-search and "
+                    "read original indexed chunks before writing any factual answer or citation."
+                ),
             )
         )
         for step in retrieval_plan.steps[:24]:
@@ -1166,6 +1202,11 @@ def task_contract_prompt(
             lines.append(
                 f"- {step.step_id}: {step.strategy}; {scope}; "
                 f"parts={','.join(step.requested_parts)}; maxAttempts={step.max_attempts}"
+                + (
+                    f"; dependsOn={','.join(step.depends_on_step_ids)}"
+                    if step.depends_on_step_ids
+                    else ""
+                )
             )
     return "\n".join(lines)
 
@@ -1445,33 +1486,63 @@ class TaskCoverageTracker:
         self,
         rows: Iterable[Mapping[str, Any]],
     ) -> dict[str, Any]:
-        by_id = {
-            str(row.get("requirementId")): row
-            for row in rows
-            if isinstance(row, Mapping) and row.get("requirementId")
-        }
+        # Per-stage progress is role-specific (candidate vs original content),
+        # so it must inspect the retrieval attempts rather than the flattened
+        # requirement rows used by the public coverage audit.
+        del rows
         steps: list[dict[str, Any]] = []
         for step in self.retrieval_plan.steps:
-            requirement_rows = [
-                by_id[requirement_id]
-                for requirement_id in step.requirement_ids
-                if requirement_id in by_id
-            ]
+            requirements = {
+                requirement.requirement_id: requirement
+                for requirement in self.contract.requirements
+                if requirement.requirement_id in step.requirement_ids
+            }
+            desired_role = "candidate" if step.strategy == "document-discovery" else "content"
+            attempted_by_requirement: dict[str, list[str]] = {}
+            covered_by_requirement: dict[str, list[str]] = {}
+            for requirement_id, requirement in requirements.items():
+                target_scope = self._relative_scope(requirement)
+                aliases = self._entity_aliases_for(requirement)
+                for attempt in self._attempts:
+                    role_matches = attempt.role == desired_role
+                    # Direct scoped content already proves candidate selection,
+                    # so discovery does not remain falsely pending when a tool
+                    # can search original chunks without a separate listing.
+                    if step.strategy == "document-discovery" and attempt.role == "content":
+                        role_matches = True
+                    if not role_matches:
+                        continue
+                    returned_part = _attempt_matches_requirement(
+                        attempt,
+                        requirement,
+                        target_scope=target_scope,
+                        entity_aliases=aliases,
+                    )
+                    attempted_scope = returned_part or _attempt_matches_request_scope(
+                        attempt,
+                        requirement,
+                        target_scope=target_scope,
+                        entity_aliases=aliases,
+                    )
+                    if attempted_scope:
+                        attempted_by_requirement.setdefault(requirement_id, []).append(
+                            attempt.attempt_id
+                        )
+                    if returned_part:
+                        covered_by_requirement.setdefault(requirement_id, []).append(
+                            attempt.attempt_id
+                        )
             attempt_ids = tuple(
                 dict.fromkeys(
-                    str(attempt_id)
-                    for row in requirement_rows
-                    for attempt_id in (
-                        row.get("attemptIds") if isinstance(row.get("attemptIds"), list) else []
-                    )
-                    if str(attempt_id).startswith("attempt_")
+                    attempt_id
+                    for requirement_attempts in attempted_by_requirement.values()
+                    for attempt_id in requirement_attempts
                 )
             )
             missing = [
-                str(row.get("requirementId"))
-                for row in requirement_rows
-                if row.get("retrievalStatus") != "available"
-                or row.get("modelInputStatus") != "visible"
+                requirement_id
+                for requirement_id in step.requirement_ids
+                if requirement_id not in covered_by_requirement
             ]
             if not missing:
                 status = "covered"

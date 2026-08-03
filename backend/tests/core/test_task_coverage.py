@@ -1032,9 +1032,10 @@ def test_retrieval_plan_groups_topics_per_relative_period() -> None:
 
     plan = build_task_retrieval_plan(contract, policy_snapshot=policy)
 
-    assert len(plan.steps) == 4
+    assert len(plan.steps) == 8
     assert all(step.entity_ids == ("微软",) for step in plan.steps)
-    assert all(step.strategy == "document-discovery" for step in plan.steps)
+    assert sum(step.strategy == "document-discovery" for step in plan.steps) == 4
+    assert sum(step.strategy == "document-scoped-search" for step in plan.steps) == 4
     assert {step.periods for step in plan.steps} == {
         ("latest-published:1",),
         ("latest-published:2",),
@@ -1045,6 +1046,56 @@ def test_retrieval_plan_groups_topics_per_relative_period() -> None:
         step.requested_parts == ("ai_compute_demand", "capital_expenditure", "supply_constraints")
         for step in plan.steps
     )
+    discovery_ids = {
+        (step.periods, step.step_id) for step in plan.steps if step.strategy == "document-discovery"
+    }
+    assert all(
+        len(step.depends_on_step_ids) == 1
+        and (step.periods, step.depends_on_step_ids[0]) in discovery_ids
+        for step in plan.steps
+        if step.strategy == "document-scoped-search"
+    )
+
+
+def test_topic_plan_progress_requires_original_content_after_discovery() -> None:
+    policy = _finance_like_policy()
+    contract = parse_task_contract(
+        "分析甲公司价格趋势。",
+        policy_snapshot=policy,
+    )
+    tracker = TaskCoverageTracker(contract, policy_snapshot=policy)
+    tracker.record_tool_result(
+        "earnings_search",
+        {"company": "甲公司", "query": "价格趋势"},
+        {"documents": [{"id": "doc-1", "title": "甲公司行业报告"}]},
+    )
+
+    discovery_only = tracker.evaluate("甲公司价格趋势保持上行。")
+    progress = discovery_only["retrievalPlanProgress"]
+
+    assert progress["coveredStepCount"] == 1
+    assert progress["pendingStepCount"] == 1
+    content_step = next(
+        step
+        for step in progress["steps"]
+        if step["stepId"]
+        == next(
+            planned.step_id
+            for planned in tracker.retrieval_plan.steps
+            if planned.strategy == "document-scoped-search"
+        )
+    )
+    assert content_step["status"] == "pending"
+
+    tracker.record_tool_result(
+        "kb_search",
+        {"doc_ids": ["doc-1"], "query": "价格趋势"},
+        {"chunks": [{"chunk_id": "c1", "text": "甲公司价格趋势保持上行。"}]},
+    )
+    with_content = tracker.evaluate("甲公司价格趋势保持上行。")
+
+    assert with_content["retrievalPlanProgress"]["coveredStepCount"] == 2
+    assert with_content["retrievalPlanProgress"]["pendingStepCount"] == 0
 
 
 def test_task_contract_prompt_includes_bounded_retrieval_plan() -> None:
@@ -1109,10 +1160,30 @@ def test_retrieval_plan_progress_is_auditable_per_scope() -> None:
     audit = tracker.evaluate(answer)
     progress = audit["retrievalPlanProgress"]
 
-    assert audit["retrievalPlan"]["plannerRevision"] == "task-retrieval-planner-v1"
+    assert audit["retrievalPlan"]["plannerRevision"] == "task-retrieval-planner-v2"
     assert progress["coveredStepCount"] == 1
     assert progress["pendingStepCount"] == 1
     assert progress["exhaustedStepCount"] == 0
+
+
+def test_financial_report_period_column_alias_is_accepted() -> None:
+    policy = _finance_like_policy()
+    contract = parse_task_contract(
+        "对比甲公司和乙公司最近一期财报的营业收入和净利润，只输出 Markdown 表格。",
+        policy_snapshot=policy,
+    )
+    tracker = TaskCoverageTracker(contract, policy_snapshot=policy)
+    answer = """| 公司 | 财报期 | 营业收入 | 净利润 |
+|---|---|---:|---:|
+| 甲公司 | 2025 Q1 | 100 | 20 |
+| 乙公司 | 2025 Q1 | 90 | 18 |
+"""
+
+    audit = tracker.evaluate(answer)
+    output = next(row for row in audit["requirements"] if row["kind"] == "output-shape")
+
+    assert output["answerStatus"] == "fulfilled"
+    assert output["reasonCodes"] == ["requested-output-shape-present"]
 
 
 def test_tracker_separates_discovery_content_and_answer_coverage() -> None:
