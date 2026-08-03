@@ -658,7 +658,10 @@ class CitationEvidenceCompactionMiddleware(AgentMiddleware):
                     )
                     visible = discovery[0] if discovery is not None else adaptation.model_content
                     return result.model_copy(
-                        update={"content": visible, "artifact": artifact or None}
+                        update={
+                            "content": _serialize_tool_content(visible),
+                            "artifact": artifact or None,
+                        }
                     )
                 compacted = compact_citation_tool_content(
                     adaptation.model_content,
@@ -676,7 +679,10 @@ class CitationEvidenceCompactionMiddleware(AgentMiddleware):
                         trusted_private=True,
                     )
                 return result.model_copy(
-                    update={"content": compacted, "artifact": artifact or None}
+                    update={
+                        "content": _serialize_tool_content(compacted),
+                        "artifact": artifact or None,
+                    }
                 )
 
         if str(tool_name or "").rsplit("__", 1)[-1] == "kb_search":

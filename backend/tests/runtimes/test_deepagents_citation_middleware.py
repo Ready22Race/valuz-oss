@@ -663,10 +663,11 @@ async def test_reportify_mcp_metadata_builds_lazy_collection_without_per_field_e
     result = await CitationEvidenceCompactionMiddleware().awrap_tool_call(request, handler)
 
     assert isinstance(result, ToolMessage)
-    assert isinstance(result.content, dict)
-    assert result.content["data"] == payload["data"]
-    assert "_valuz_evidence" not in result.content
-    hint = result.content["_valuz_evidence_hint"]
+    assert isinstance(result.content, str)
+    visible_payload = json.loads(result.content)
+    assert visible_payload["data"] == payload["data"]
+    assert "_valuz_evidence" not in visible_payload
+    hint = visible_payload["_valuz_evidence_hint"]
     assert hint["collectionHandle"].startswith("evc_mcp_")
     assert result.artifact["structured_content"] == payload
     private = citation_artifact_content(result)
@@ -730,9 +731,10 @@ async def test_reportify_discovery_metadata_does_not_expose_summary_handle() -> 
     result = await CitationEvidenceCompactionMiddleware().awrap_tool_call(request, handler)
 
     assert isinstance(result, ToolMessage)
-    assert isinstance(result.content, dict)
-    assert "evidenceHandle" not in result.content["docs"][0]
-    assert result.content["_valuz_discovery"]["citationEvidence"] == (
+    assert isinstance(result.content, str)
+    visible_payload = json.loads(result.content)
+    assert "evidenceHandle" not in visible_payload["docs"][0]
+    assert visible_payload["_valuz_discovery"]["citationEvidence"] == (
         "original-indexed-chunk-required"
     )
     assert citation_artifact_content(result) is None
