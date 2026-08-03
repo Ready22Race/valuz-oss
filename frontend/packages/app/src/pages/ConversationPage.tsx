@@ -2630,10 +2630,23 @@ export const ConversationPage = () => {
   );
 
   const firstUserText = turns[0]?.userText;
+  // A draft page that has already accepted a send. The session does not exist
+  // yet — it is minted behind the optimistic turn — but everything the header
+  // displays is already decided: the project, the agent, the execution
+  // origin, and the fact that no run has started. Without this the whole
+  // header stayed blank for the entire mint + startup window and then popped
+  // in, which on a cloud project is several seconds of a page that looks like
+  // it lost the message.
+  const draftSendInFlight = isNewSession && effectiveTurns.length > 0;
+  // The agent this conversation runs as: bound on an existing session, and the
+  // composer's pick while the session is still being minted (it is what
+  // ``ensureSession`` will freeze into it).
+  const headerAgentSlug =
+    sessionAgentSlug ?? (draftSendInFlight ? selectedAgentSlug : null);
   const headerTitle =
     selectedSession?.name ||
     firstUserText?.slice(0, 40) ||
-    (isNewSession
+    (isNewSession && !draftSendInFlight
       ? null
       : t("conversation.newChat" as Parameters<typeof t>[0]));
 
@@ -6146,7 +6159,13 @@ export const ConversationPage = () => {
                 )
               ) : null}
               <SessionStatusPill
-                status={selectedSession?.status}
+                // ``created`` is exactly the state a not-yet-minted session is
+                // in: accepted, not running. It is the same pill the promoted
+                // page shows a beat later, so nothing changes on handover.
+                status={
+                  selectedSession?.status ??
+                  (draftSendInFlight ? "created" : undefined)
+                }
                 cancelled={
                   effectiveTurns[effectiveTurns.length - 1]?.cancelled === true
                 }
@@ -6162,11 +6181,22 @@ export const ConversationPage = () => {
               {/* Execution origin (multi-target editions): where this
                   session's backend lives. Locked at creation; renders
                   nothing on single-target builds. */}
-              <OriginBadge entityId={selectedSessionId} kind="session" />
-              {sessionAgentSlug ? (
+              <OriginBadge
+                entityId={selectedSessionId}
+                kind="session"
+                // No session id to observe yet; the session is minted on the
+                // project's origin, so show that. ``origin`` short-circuits
+                // the lookup, and single-target builds still render nothing.
+                origin={
+                  !selectedSessionId && draftSendInFlight
+                    ? selectedProjectOrigin
+                    : undefined
+                }
+              />
+              {headerAgentSlug ? (
                 <Badge variant="metaBrand" className="shrink-0">
                   <Bot className="h-3 w-3" />
-                  {agentNameBySlug.get(sessionAgentSlug) ?? sessionAgentSlug}
+                  {agentNameBySlug.get(headerAgentSlug) ?? headerAgentSlug}
                 </Badge>
               ) : null}
               {selectedSession?.worktree ? (
