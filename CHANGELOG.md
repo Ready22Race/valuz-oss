@@ -14,7 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with `[WinError 267] The directory name is invalid`, because Windows cannot
   use `:` (and `<>"|?*`, device names, trailing dots/spaces) in a directory
   name. Such names now fall back to the skill's source directory name on every
-  platform.
+  platform, and skill naming is sanitized at the source: creating, renaming,
+  copying or importing a skill scrubs those characters out of both the
+  directory slug and the `SKILL.md` name (a reserved device name like `con`
+  gets a suffix), and pack import does the same for embedded skill slugs.
 - **Turn timer** — the conversation header's elapsed counter ran twice per turn:
   it re-anchored from the client's Send time onto the kernel's `message.user`
   stamp (written once the runtime is up), so it fell back to zero mid-turn and
