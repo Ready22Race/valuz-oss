@@ -24,10 +24,12 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from valuz_agent.infra.db_urls import (
+    db_url,
     db_url_async,
     kernel_db_url,
     kernel_db_url_async,
@@ -58,6 +60,7 @@ KERNEL_VERSION_TABLE = "alembic_version"
 # current trio plus pre-cutover fossils. Host ``valuz_*`` tables are off-limits;
 # DeepAgents langgraph checkpoint tables live in their own sibling database.
 _KERNEL_OWNED_TABLES = ("sessions", "messages", "events", "projects", "agents", "environments")
+_SQLITE_HEADER = b"SQLite format 3\x00"
 
 
 def kernel_api_prefix() -> str:
@@ -128,6 +131,67 @@ def _known_kernel_revisions() -> set[str]:
     cfg = Config(str(KERNEL_ALEMBIC_INI))
     cfg.set_main_option("script_location", str(KERNEL_ALEMBIC_DIR))
     return {rev.revision for rev in ScriptDirectory.from_config(cfg).walk_revisions()}
+
+
+def _prepare_default_kernel_db() -> Path | None:
+    """Quarantine an unreadable legacy local ``kernel.db`` before migration.
+
+    Older builds placed the DeepAgents checkpointer in the same file as the
+    kernel store.  A checkpoint/WAL failure could therefore leave the file
+    without a SQLite header.  Newer builds keep checkpoints in a sibling DB,
+    but would still fail every startup while trying to reflect that legacy
+    file.  The host ``valuz.db`` is the durable/read authority and receives the
+    same session history through dual-write, so a default local installation
+    can safely rebuild its execution-local kernel cache.
+
+    This recovery is deliberately narrow: configured kernel URLs, shared DBs,
+    missing/empty files, and installations without a healthy local durable DB
+    are left untouched.  The unreadable file and sidecars are renamed in place
+    for operator recovery; nothing is deleted.
+    """
+
+    from valuz_agent.infra.config import settings
+
+    if settings.kernel_database_url is not None:
+        return None
+    kernel_path = sqlite_path_from_url(kernel_db_url())
+    durable_path = sqlite_path_from_url(db_url())
+    if (
+        kernel_path is None
+        or durable_path is None
+        or kernel_path == durable_path
+        or not kernel_path.is_file()
+        or kernel_path.stat().st_size == 0
+        or not durable_path.is_file()
+    ):
+        return None
+    with kernel_path.open("rb") as stream:
+        if stream.read(len(_SQLITE_HEADER)) == _SQLITE_HEADER:
+            return None
+    with durable_path.open("rb") as stream:
+        if stream.read(len(_SQLITE_HEADER)) != _SQLITE_HEADER:
+            return None
+
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    recovery_path = kernel_path.with_name(f"{kernel_path.name}.unreadable-{timestamp}")
+    counter = 1
+    while recovery_path.exists():
+        recovery_path = kernel_path.with_name(
+            f"{kernel_path.name}.unreadable-{timestamp}-{counter}"
+        )
+        counter += 1
+    kernel_path.rename(recovery_path)
+    for suffix in ("-wal", "-shm"):
+        sidecar = kernel_path.with_name(kernel_path.name + suffix)
+        if sidecar.exists():
+            sidecar.rename(recovery_path.with_name(recovery_path.name + suffix))
+    logger.warning(
+        "quarantined unreadable legacy kernel DB at %s; rebuilding the local "
+        "execution store from healthy durable DB %s",
+        recovery_path,
+        durable_path,
+    )
+    return recovery_path
 
 
 async def _any_kernel_rows(engine: AsyncEngine, tables: list[str]) -> bool:
@@ -259,6 +323,7 @@ def run_kernel_migrations() -> None:
     import asyncio
     import threading
 
+    _prepare_default_kernel_db()
     error: list[BaseException] = []
 
     def _runner() -> None:
