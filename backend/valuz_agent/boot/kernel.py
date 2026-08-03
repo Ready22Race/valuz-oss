@@ -360,7 +360,7 @@ async def init_kernel_dependencies() -> None:
     async def _refresh_citation_repair_credentials(user_id: str, session_id: str) -> bool:
         # Keep the kernel independent of host modules: the Valuz in-process
         # composition installs this callback after both sides are initialized.
-        # A hidden citation repair is a second runtime run inside one user turn,
+        # A citation repair is a second runtime run inside one user turn,
         # so the normal turn-entry connector refresh would otherwise be skipped.
         from valuz_agent.modules.sessions.capabilities import (
             refresh_always_on_mcp_for_session,
