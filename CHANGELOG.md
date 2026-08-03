@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Windows skill materialization** — a skill whose `SKILL.md` declares a
+  namespaced frontmatter name (e.g. `react:components`) crashed session start
+  with `[WinError 267] The directory name is invalid`, because Windows cannot
+  use `:` (and `<>"|?*`, device names, trailing dots/spaces) in a directory
+  name. Such names now fall back to the skill's source directory name on every
+  platform.
 - **Turn timer** — the conversation header's elapsed counter ran twice per turn:
   it re-anchored from the client's Send time onto the kernel's `message.user`
   stamp (written once the runtime is up), so it fell back to zero mid-turn and
