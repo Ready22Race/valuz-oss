@@ -356,7 +356,9 @@ class DeepAgentsRuntime:
                 initial_state = await graph.aget_state(stream_config)
                 known_citation_tool_messages = {
                     key
-                    for key, _tool_name, _content in _state_citation_artifacts(initial_state)
+                    for key, _tool_name, _model_content, _private_content in (
+                        _state_citation_artifacts(initial_state)
+                    )
                 }
 
             usage_totals = {
