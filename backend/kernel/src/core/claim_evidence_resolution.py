@@ -161,11 +161,7 @@ class EvidenceCandidateIndex:
                 metric = canonical_evidence_metric(evidence, semantics)
                 if metric:
                     self._append(self._by_metric, metric, index)
-                period = canonical_evidence_period(
-                    str(evidence.get("period") or evidence.get("asOf") or ""),
-                    semantics,
-                )
-                if period:
+                for period in _structured_period_coordinates(evidence, semantics):
                     self._append(self._by_period, period, index)
             elif kind == "calculation":
                 number_text = " ".join(
@@ -186,7 +182,9 @@ class EvidenceCandidateIndex:
                     entity_text,
                     str(evidence.get("field") or ""),
                     str(evidence.get("metric") or ""),
-                    str(evidence.get("period") or evidence.get("asOf") or ""),
+                    " ".join(
+                        str(evidence.get(key) or "") for key in ("period", "asOf")
+                    ),
                     _text_evidence(evidence) if kind == "text" else "",
                 )
             )
@@ -722,10 +720,7 @@ def _deterministic_support(
     # values across metrics remain ambiguous and therefore unbound.
     if not canonical_claim_metric and evidence_metric:
         claim_period = claim.normalized.get("period", "")
-        evidence_period = canonical_evidence_period(
-            str(evidence.get("period") or evidence.get("asOf") or ""),
-            semantics,
-        )
+        evidence_periods = _structured_period_coordinates(evidence, semantics)
         claim_unit = claim.normalized.get("unit", "")
         evidence_unit = str(evidence.get("unit") or "")
         if (
@@ -739,8 +734,11 @@ def _deterministic_support(
             )
             and not (
                 claim_period
-                and evidence_period
-                and not evidence_periods_compatible(claim_period, evidence_period)
+                and evidence_periods
+                and not any(
+                    evidence_periods_compatible(claim_period, evidence_period)
+                    for evidence_period in evidence_periods
+                )
             )
             and "entity" not in candidate.hard_conflicts
             and not (
@@ -761,16 +759,13 @@ def _deterministic_support(
     ):
         return support
     claim_period = claim.normalized.get("period", "")
-    evidence_period = canonical_evidence_period(
-        str(evidence.get("period") or evidence.get("asOf") or ""),
-        semantics,
-    )
+    evidence_periods = _structured_period_coordinates(evidence, semantics)
     if (
         claim_period
-        and evidence_period
-        and not evidence_periods_compatible(
-            claim_period,
-            evidence_period,
+        and evidence_periods
+        and not any(
+            evidence_periods_compatible(claim_period, evidence_period)
+            for evidence_period in evidence_periods
         )
     ):
         return support
@@ -901,12 +896,12 @@ def _add_structured_identity_signals(
         conflicts.append("metric")
 
     claim_period = claim.normalized.get("period", "")
-    evidence_period = canonical_evidence_period(
-        str(evidence.get("period") or evidence.get("asOf") or ""),
-        semantics,
-    )
-    if claim_period and evidence_period:
-        if evidence_periods_compatible(claim_period, evidence_period):
+    evidence_periods = _structured_period_coordinates(evidence, semantics)
+    if claim_period and evidence_periods:
+        if any(
+            evidence_periods_compatible(claim_period, evidence_period)
+            for evidence_period in evidence_periods
+        ):
             signals.append(CandidateSignal("period-match", 20.0))
         else:
             conflicts.append("period")
@@ -945,6 +940,29 @@ def _evidence_parts(
         source if isinstance(source, Mapping) else {},
         evidence if isinstance(evidence, Mapping) else {},
     )
+
+
+def _structured_period_coordinates(
+    evidence: Mapping[str, Any],
+    semantics: Mapping[str, Any] | None,
+) -> tuple[str, ...]:
+    """Return every distinct reporting/as-of coordinate carried by Evidence.
+
+    A structured row may describe a fiscal bucket (``2024 annual``) and its
+    exact boundary date (``2024-12-31``).  Claims can state either form; using
+    only the first non-empty field creates a false period conflict even though
+    the second coordinate is an exact match.
+    """
+
+    output: list[str] = []
+    for key in ("period", "asOf"):
+        value = str(evidence.get(key) or "")
+        if not value:
+            continue
+        canonical = canonical_evidence_period(value, semantics)
+        if canonical and canonical not in output:
+            output.append(canonical)
+    return tuple(output)
 
 
 def _text_evidence(evidence: Mapping[str, Any]) -> str:

@@ -2575,12 +2575,25 @@ def _normalize_claim(
             result["valueBase"] = _stable_scalar(base_value)
         if base_unit:
             result["unitBase"] = base_unit
-    metric_candidates = _claim_metric_candidates(text, semantics)
+    raw_metric_candidates = _claim_metric_candidates(text, semantics)
+    # A compact answer can state the primary amount first and append metadata,
+    # for example ``170,899,152,276 CNY，期间：2024 财年``.  Terms such as
+    # ``财年`` and ``申报日期`` belong to the temporal context of the amount;
+    # treating them as the amount's primary metric creates a false conflict
+    # with an explicitly bound revenue/profit Evidence item.  Edition policy
+    # may mark more context dimensions with ``claim_role``; well-known
+    # period/date fields remain compatible without requiring that annotation.
+    metric_candidates = tuple(
+        metric
+        for metric in raw_metric_candidates
+        if not (amount is not None and _metric_is_context_dimension(metric, semantics))
+    )
+    context_metric_only = bool(raw_metric_candidates) and not metric_candidates
     if len(metric_candidates) == 1:
         result["metric"] = metric_candidates[0]
     elif metric_candidates:
         result["metricCandidates"] = "|".join(metric_candidates)
-    else:
+    elif not context_metric_only:
         metric_tokens = sorted(
             token for token in _semantic_tokens(text) if not _is_period_semantic_token(token)
         )
@@ -2593,6 +2606,27 @@ def _normalize_claim(
         elif candidates:
             result[f"{dimension}Candidates"] = "|".join(candidates)
     return result
+
+
+def _metric_is_context_dimension(
+    metric: str,
+    semantics: Mapping[str, Any] | None,
+) -> bool:
+    definition = _metric_ontology(semantics).get(metric)
+    if not isinstance(definition, Mapping):
+        return False
+    if definition.get("claim_role") in {"context", "dimension", "metadata"}:
+        return True
+    if definition.get("date_role") in {"publication", "reporting", "as_of"}:
+        return True
+    fields = definition.get("fields")
+    if not isinstance(fields, list) or not fields:
+        return False
+    temporal_field = re.compile(
+        r"(?:^|_)(?:as_of|date|fiscal_year|fiscal_quarter|period)(?:$|_)",
+        re.IGNORECASE,
+    )
+    return all(isinstance(field, str) and temporal_field.search(field) for field in fields)
 
 
 def _is_period_semantic_token(token: str) -> bool:
