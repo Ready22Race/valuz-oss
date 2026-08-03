@@ -72,7 +72,7 @@ def test_transport_preserves_meta_and_restores_original_structured_content() -> 
     assert restored == {"structured_content": structured, "existing": True}
 
 
-def test_discovery_metadata_creates_bounded_collection_without_summary_addresses() -> None:
+def test_discovery_metadata_stays_non_citable_retrieval_input() -> None:
     payload = {
         "docs": [
             {
@@ -117,20 +117,10 @@ def test_discovery_metadata_creates_bounded_collection_without_summary_addresses
 
     assert adapted is not None
     assert adapted.discovery_only is True
-    assert adapted.citable is True
-    envelope = adapted.model_content["_valuz_evidence"][0]
-    assert envelope["kind"] == "structured-evidence-collection"
-    assert envelope["addressing"]["allowedItemPaths"] == ["/doc_id", "/title", "/url"]
-    assert "allowedPathRoots" not in envelope["addressing"]
-
-    compacted = compact_citation_tool_content(adapted.model_content)
-    private = private_citation_tool_content(adapted.model_content)
-    assert compacted is not None and private is not None
-    registry = EvidenceRegistry()
-    assert registry.register_tool_projection(compacted, private, trusted_private=True) == 1
-    handle = envelope["collectionHandle"]
-    assert registry.materialize_reference(handle, "#/docs/19/title") is not None
-    assert registry.materialize_reference(handle, "#/docs/19/summary") is None
+    assert adapted.citable is False
+    assert adapted.evidence_count == 0
+    assert adapted.model_content == payload
+    assert "_valuz_evidence" not in adapted.model_content
 
 
 def test_document_chunks_create_direct_evidence_with_pdf_locator() -> None:
