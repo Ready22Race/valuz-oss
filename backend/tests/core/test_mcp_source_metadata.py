@@ -76,11 +76,12 @@ def test_discovery_metadata_creates_bounded_collection_without_summary_addresses
     payload = {
         "docs": [
             {
-                "doc_id": "doc-1",
-                "title": "Annual report",
-                "summary": "Revenue was 100.",
-                "url": "https://example.com/doc-1",
+                "doc_id": f"doc-{index}",
+                "title": f"Annual report {index}",
+                "summary": f"Revenue was {index}00.",
+                "url": f"https://example.com/doc-{index}",
             }
+            for index in range(20)
         ]
     }
     descriptor = _descriptor(
@@ -119,11 +120,8 @@ def test_discovery_metadata_creates_bounded_collection_without_summary_addresses
     assert adapted.citable is True
     envelope = adapted.model_content["_valuz_evidence"][0]
     assert envelope["kind"] == "structured-evidence-collection"
-    assert envelope["addressing"]["allowedPathRoots"] == [
-        "/docs/0/doc_id",
-        "/docs/0/title",
-        "/docs/0/url",
-    ]
+    assert envelope["addressing"]["allowedItemPaths"] == ["/doc_id", "/title", "/url"]
+    assert "allowedPathRoots" not in envelope["addressing"]
 
     compacted = compact_citation_tool_content(adapted.model_content)
     private = private_citation_tool_content(adapted.model_content)
@@ -131,8 +129,8 @@ def test_discovery_metadata_creates_bounded_collection_without_summary_addresses
     registry = EvidenceRegistry()
     assert registry.register_tool_projection(compacted, private, trusted_private=True) == 1
     handle = envelope["collectionHandle"]
-    assert registry.materialize_reference(handle, "#/docs/0/title") is not None
-    assert registry.materialize_reference(handle, "#/docs/0/summary") is None
+    assert registry.materialize_reference(handle, "#/docs/19/title") is not None
+    assert registry.materialize_reference(handle, "#/docs/19/summary") is None
 
 
 def test_document_chunks_create_direct_evidence_with_pdf_locator() -> None:

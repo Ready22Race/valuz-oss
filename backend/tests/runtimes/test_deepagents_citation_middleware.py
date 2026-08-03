@@ -736,6 +736,7 @@ async def test_reportify_discovery_metadata_exposes_only_citable_metadata_collec
     assert "evidenceHandle" not in visible_payload["docs"][0]
     hint = visible_payload["_valuz_evidence_hint"]
     assert hint["collectionHandle"].startswith("evc_mcp_")
+    assert hint["allowedItemPaths"] == ["/doc_id", "/title"]
     assert visible_payload["_valuz_discovery"]["citationEvidence"] == (
         "original-indexed-chunk-required"
     )
@@ -743,10 +744,7 @@ async def test_reportify_discovery_metadata_exposes_only_citable_metadata_collec
     private = citation_artifact_content(result)
     assert private is not None
     descriptor = json.loads(private)["_valuz_evidence"][0]
-    assert descriptor["addressing"]["allowedPathRoots"] == [
-        "/docs/0/doc_id",
-        "/docs/0/title",
-    ]
+    assert descriptor["addressing"]["allowedItemPaths"] == ["/doc_id", "/title"]
 
 
 async def test_discovery_search_summaries_are_bounded_for_model_history() -> None:
