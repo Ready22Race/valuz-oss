@@ -886,7 +886,7 @@ def test_unrelated_rejected_tool_payload_does_not_degrade_valid_final_citation()
     assert result.bundle["integrity"]["evidenceRejectedCount"] == 1
 
 
-def test_complete_document_coverage_is_ready_without_fake_page_locator() -> None:
+def test_complete_document_coverage_marker_is_internal_not_citation_evidence() -> None:
     coverage = _item("ev_doc_coverage_12345678")
     coverage["evidence"] = {
         "kind": "structured-data",
@@ -900,23 +900,19 @@ def test_complete_document_coverage_is_ready_without_fake_page_locator() -> None
         "capturedAt": "2026-08-02T08:00:00Z",
     }
 
-    result = CitationGuard(
-        _registry(coverage),
-        message_id="msg-coverage",
-        user_prompt="What was not disclosed?",
-        policy_available=True,
-    ).finalize(
-        "The document did not disclose the value [source](evidence://ev_doc_coverage_12345678)."
+    registry = EvidenceRegistry()
+    assert (
+        registry.register_tool_result(
+            {"_valuz_evidence": coverage},
+            tool_name="document_fetch",
+        )
+        == 0
     )
-
-    assert result.bundle is not None
-    citation = result.bundle["citations"][0]
-    assert citation["resolutionStatus"] == "ready"
-    assert "locator" not in citation
-    assert result.bundle["integrity"]["missingLocatorCitationIds"] == []
+    assert registry.rejected_count == 0
+    assert list(registry.values()) == []
 
 
-def test_complete_document_coverage_auto_binds_when_verification_policy_is_absent() -> None:
+def test_complete_document_coverage_does_not_auto_bind_when_verification_is_absent() -> None:
     coverage = _item("ev_doc_coverage_auto_12345678")
     coverage["evidence"] = {
         "kind": "structured-data",
@@ -929,19 +925,25 @@ def test_complete_document_coverage_auto_binds_when_verification_policy_is_absen
         "basis": "full-document",
         "capturedAt": "2026-08-02T08:00:00Z",
     }
+    registry = EvidenceRegistry()
+    assert (
+        registry.register_tool_result(
+            {"_valuz_evidence": coverage},
+            tool_name="document_fetch",
+        )
+        == 0
+    )
 
     result = CitationGuard(
-        _registry(coverage),
+        registry,
         message_id="msg-coverage-auto",
         user_prompt="What was not disclosed?",
         policy_available=False,
         verification_enabled=False,
     ).finalize("AI 服务贡献百分点：原文未披露具体数字。")
 
-    assert "citation://" in result.text
-    assert result.bundle is not None
-    assert len(result.bundle["citations"]) == 1
-    assert result.bundle["citations"][0]["evidence"]["field"] == ("document_coverage_complete")
+    assert result.text == "AI 服务贡献百分点：原文未披露具体数字。"
+    assert result.bundle is None
 
 
 def test_registry_rejects_oversized_snapshots_and_locator_geometry() -> None:

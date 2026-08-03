@@ -854,9 +854,7 @@ def test_table_visual_placeholders_are_not_factual_claims() -> None:
         mode="strict-domain",
     )
 
-    assert [claim.exact for claim in claims] == [
-        "单季新增容量 — Q2 FY26: ~1 GW"
-    ]
+    assert [claim.exact for claim in claims] == ["单季新增容量 — Q2 FY26: ~1 GW"]
     assert claims[0].normalized["period"] == "2026 Q2"
 
 
@@ -1334,9 +1332,7 @@ def test_equivalent_recap_never_crosses_reporting_periods() -> None:
 def test_equivalent_recap_never_crosses_canonical_metrics() -> None:
     handle = "ev_revenue_growth_12345678"
     answer = (
-        "### 2024 FY\n\n"
-        f"营业收入同比增长40% [source](evidence://{handle})。\n\n"
-        "净利润同比增长40%。"
+        f"### 2024 FY\n\n营业收入同比增长40% [source](evidence://{handle})。\n\n净利润同比增长40%。"
     )
     evidence = {
         "evidenceHandle": handle,
@@ -1559,7 +1555,7 @@ def test_auto_bind_negative_disclosure_with_unique_quoted_anchor() -> None:
     assert result.claim_handles == {claim.claim_id: "ev_msft_ai_12345678"}
 
 
-def test_auto_bind_negative_disclosure_from_unique_complete_document() -> None:
+def test_negative_disclosure_does_not_bind_document_coverage_marker() -> None:
     answer = "AI 服务贡献百分点：原文未披露具体数字。"
     coverage = {
         "evidenceHandle": "ev_doc_coverage_12345678",
@@ -1588,9 +1584,8 @@ def test_auto_bind_negative_disclosure_from_unique_complete_document() -> None:
         semantics=_FINANCE_SEMANTICS,
     )
 
-    assert result.text == (
-        "AI 服务贡献百分点：原文未披露具体数字 [source](evidence://ev_doc_coverage_12345678)。"
-    )
+    assert result.text == answer
+    assert result.claim_handles == {}
 
 
 def test_auto_bind_negative_disclosure_does_not_choose_between_complete_documents() -> None:
@@ -1998,17 +1993,20 @@ def test_compact_line_label_scopes_every_claim_on_only_that_line() -> None:
     assert "批发代理" not in claims[1].semantic_text
     assert "批发代理" in claims[3].semantic_text
     assert "直销" not in claims[3].semantic_text
-    assert verify_evidence_support(
-        claims[1],
-        {
-            "kind": "text",
-            "quote": (
-                "| 销售模式 | 营业收入 | 营业收入比上年增减（%） |\n"
-                "| 直销 | 74,843,327,030.79 | 11.32 |"
-            ),
-        },
-        semantics=_FINANCE_SEMANTICS,
-    ).status == "supported"
+    assert (
+        verify_evidence_support(
+            claims[1],
+            {
+                "kind": "text",
+                "quote": (
+                    "| 销售模式 | 营业收入 | 营业收入比上年增减（%） |\n"
+                    "| 直销 | 74,843,327,030.79 | 11.32 |"
+                ),
+            },
+            semantics=_FINANCE_SEMANTICS,
+        ).status
+        == "supported"
+    )
 
 
 def test_text_evidence_snippet_is_verified_as_trusted_local_context() -> None:
@@ -2287,10 +2285,7 @@ def test_currency_prefix_billion_matches_localized_hundred_million_usd() -> None
         },
         "evidence": {
             "kind": "text",
-            "quote": (
-                "Microsoft Cloud exceeded $54 billion in revenue, "
-                "up 29% year-over-year."
-            ),
+            "quote": ("Microsoft Cloud exceeded $54 billion in revenue, up 29% year-over-year."),
         },
     }
 

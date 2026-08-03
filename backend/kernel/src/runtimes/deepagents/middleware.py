@@ -618,6 +618,12 @@ class CitationEvidenceCompactionMiddleware(AgentMiddleware):
             )
             if adaptation is not None:
                 artifact = restored_artifact or {}
+                self._remember_document_titles(adaptation.model_content)
+                self._cache_raw_document(
+                    adaptation.model_content,
+                    tool_name=str(tool_name or ""),
+                    tool_call_id=str(result.tool_call_id or request_call.get("id") or ""),
+                )
                 if not adaptation.citable:
                     if adaptation.resource_kinds == {"operational"}:
                         return result.model_copy(update={"artifact": artifact or None})
@@ -675,17 +681,11 @@ class CitationEvidenceCompactionMiddleware(AgentMiddleware):
             if constrained is not result.content:
                 result = result.model_copy(update={"content": constrained})
 
-        if tool_name == "document_raw_content":
-            raw_document = _extract_raw_document(result.content)
-            if raw_document is not None:
-                document_id = str(raw_document.get("doc_id") or "")
-                if document_id and document_id in self._document_titles:
-                    raw_document["title"] = self._document_titles[document_id]
-                cache_key = str(result.tool_call_id or request_call.get("id") or "")
-                if cache_key:
-                    if len(self._raw_documents) >= _RAW_DOCUMENT_CACHE_LIMIT:
-                        self._raw_documents.pop(next(iter(self._raw_documents)))
-                    self._raw_documents[cache_key] = raw_document
+        self._cache_raw_document(
+            result.content,
+            tool_name=str(tool_name or ""),
+            tool_call_id=str(result.tool_call_id or request_call.get("id") or ""),
+        )
 
         if tool_name == "grep":
             grep_evidence = _grep_document_evidence(
@@ -765,6 +765,59 @@ class CitationEvidenceCompactionMiddleware(AgentMiddleware):
             trusted_private=True,
         )
         return result.model_copy(update={"content": compacted, "artifact": artifact})
+
+    def _remember_document_titles(self, content: Any) -> None:
+        for document_id, title in _document_title_pairs(content):
+            self._document_titles[document_id] = title
+
+    def _cache_raw_document(
+        self,
+        content: Any,
+        *,
+        tool_name: str,
+        tool_call_id: str,
+    ) -> None:
+        if tool_name.rsplit("__", 1)[-1] != "document_raw_content" or not tool_call_id:
+            return
+        raw_document = _extract_raw_document(content)
+        if raw_document is None:
+            return
+        document_id = str(raw_document.get("doc_id") or "")
+        if document_id and document_id in self._document_titles:
+            raw_document["title"] = self._document_titles[document_id]
+        if len(self._raw_documents) >= _RAW_DOCUMENT_CACHE_LIMIT:
+            self._raw_documents.pop(next(iter(self._raw_documents)))
+        self._raw_documents[tool_call_id] = raw_document
+
+
+def _document_title_pairs(value: Any) -> set[tuple[str, str]]:
+    """Extract stable discovery titles without scanning raw document bodies."""
+
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped or stripped[0] not in "[{":
+            return set()
+        try:
+            return _document_title_pairs(json.loads(stripped))
+        except (TypeError, ValueError):
+            return set()
+    if isinstance(value, list):
+        pairs: set[tuple[str, str]] = set()
+        for item in value:
+            pairs.update(_document_title_pairs(item))
+        return pairs
+    if not isinstance(value, Mapping):
+        return set()
+    pairs = set()
+    document_id = str(value.get("doc_id") or value.get("document_id") or "").strip()
+    title = str(value.get("title") or "").strip()
+    if document_id and title:
+        pairs.add((document_id, title))
+    for key, item in value.items():
+        if key in {"content", "summary", "html", "markdown", "raw_content"}:
+            continue
+        pairs.update(_document_title_pairs(item))
+    return pairs
 
 
 def _calculation_input_validation_error(
@@ -876,17 +929,11 @@ def _append_complete_document_coverage_note(
     *,
     doc_id: str,
 ) -> ToolMessage:
-    artifact = dict(result.artifact) if isinstance(result.artifact, dict) else {}
-    coverage_handle = _append_document_coverage_evidence(
-        artifact,
-        doc_id=doc_id,
-    )
+    # End-of-document coverage is internal retrieval state, not localized
+    # support for a user-facing claim.  Preserve the instruction for answer
+    # construction without manufacturing a citation handle or locator.
+    _ = doc_id
     content = result.content
-    if coverage_handle is None:
-        content, coverage_handle = _append_document_coverage_evidence_to_content(
-            content,
-            doc_id=doc_id,
-        )
     note = (
         "Document coverage for answer construction: the adjacent indexed windows "
         "reached this document's final chunk. Ellipses inside evidence excerpts are "
@@ -895,156 +942,9 @@ def _append_complete_document_coverage_note(
         "disclosure anywhere in the returned evidence, state simply that the original "
         "document did not disclose it."
     )
-    if coverage_handle:
-        note = (
-            f"{note} Bind that document-level non-disclosure statement to "
-            f"evidence://{coverage_handle}."
-        )
     blocks = list(content) if isinstance(content, list) else [{"type": "text", "text": content}]
     blocks.append({"type": "text", "text": note})
-    update: dict[str, Any] = {"content": blocks}
-    if coverage_handle:
-        update["artifact"] = artifact
-    return result.model_copy(update=update)
-
-
-def _append_document_coverage_evidence(
-    artifact: dict[str, Any],
-    *,
-    doc_id: str,
-) -> str | None:
-    """Register one document-level proof that indexed coverage reached EOF."""
-
-    raw = artifact.get(_CITATION_ARTIFACT_KEY)
-    if not isinstance(raw, str):
-        return None
-    try:
-        payload = json.loads(raw)
-    except (TypeError, ValueError):
-        return None
-    payload, handle = _append_document_coverage_evidence_to_content(
-        payload,
-        doc_id=doc_id,
-    )
-    if handle is None:
-        return None
-    artifact[_CITATION_ARTIFACT_KEY] = json.dumps(
-        payload,
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    return handle
-
-
-def _append_document_coverage_evidence_to_content(
-    content: Any,
-    *,
-    doc_id: str,
-) -> tuple[Any, str | None]:
-    if isinstance(content, str):
-        try:
-            payload = json.loads(content)
-        except (TypeError, ValueError):
-            return content, None
-        if not isinstance(payload, dict):
-            return content, None
-        handle = _append_document_coverage_evidence_to_payload(payload, doc_id=doc_id)
-        if handle is None:
-            return content, None
-        return (
-            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-            handle,
-        )
-    if isinstance(content, list):
-        output = list(content)
-        for index, item in enumerate(output):
-            if not isinstance(item, dict) or item.get("type") != "text":
-                continue
-            updated, handle = _append_document_coverage_evidence_to_content(
-                item.get("text"),
-                doc_id=doc_id,
-            )
-            if handle is None:
-                continue
-            output[index] = {**item, "text": updated}
-            return output, handle
-        return content, None
-    if isinstance(content, dict):
-        payload = dict(content)
-        handle = _append_document_coverage_evidence_to_payload(payload, doc_id=doc_id)
-        return (payload, handle) if handle is not None else (content, None)
-    return content, None
-
-
-def _append_document_coverage_evidence_to_payload(
-    payload: dict[str, Any],
-    *,
-    doc_id: str,
-) -> str | None:
-    source = _find_document_evidence_source(payload, doc_id=doc_id)
-    if source is None:
-        return None
-    version = str(source.get("documentVersion") or "")
-    digest = hashlib.sha256(
-        f"{doc_id}\0{version}\0document-coverage-complete".encode()
-    ).hexdigest()[:24]
-    handle = f"ev_doc_coverage_{digest}"
-    evidence = {
-        "evidenceHandle": handle,
-        "source": source,
-        "evidence": {
-            "kind": "structured-data",
-            "datasetId": f"document:{doc_id}",
-            "toolName": "document_fetch",
-            "recordKey": f"{doc_id}:complete",
-            "field": "document_coverage_complete",
-            "metric": "document_coverage_complete",
-            "value": True,
-            "basis": "full-document",
-            "capturedAt": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-        },
-    }
-    existing = payload.get("_valuz_evidence")
-    if isinstance(existing, list):
-        if not any(
-            isinstance(item, dict) and item.get("evidenceHandle") == handle for item in existing
-        ):
-            existing.append(evidence)
-    elif isinstance(existing, dict):
-        if existing.get("evidenceHandle") != handle:
-            payload["_valuz_evidence"] = [existing, evidence]
-    else:
-        payload["_valuz_evidence"] = [evidence]
-    return handle
-
-
-def _find_document_evidence_source(
-    value: Any,
-    *,
-    doc_id: str,
-) -> dict[str, Any] | None:
-    if isinstance(value, dict):
-        envelope = value.get("_valuz_evidence")
-        items = envelope if isinstance(envelope, list) else [envelope]
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            source = item.get("source")
-            if (
-                isinstance(source, dict)
-                and str(source.get("documentId") or source.get("sourceId") or "") == doc_id
-            ):
-                return dict(source)
-        for item in value.values():
-            found = _find_document_evidence_source(item, doc_id=doc_id)
-            if found is not None:
-                return found
-    elif isinstance(value, list):
-        for item in value:
-            found = _find_document_evidence_source(item, doc_id=doc_id)
-            if found is not None:
-                return found
-    return None
+    return result.model_copy(update={"content": blocks})
 
 
 _STRUCTURED_FALLBACK_TOOLS = {
