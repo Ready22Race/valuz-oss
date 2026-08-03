@@ -81,7 +81,6 @@ import {
   ApprovalResolvedStrip,
   AutoApprovedStrip,
   AskUserQuestionCard,
-  ArtifactViewerShell,
   AutomationToolCard,
   Badge,
   Button,
@@ -98,12 +97,7 @@ import {
   cn,
   Composer,
   KnowledgeFileTreePicker,
-  ArtifactTabBar,
   ProjectDetailContextPanel,
-  ResizableHandle,
-  ResizablePanel,
-  ResizablePanelGroup,
-  useGroupRef,
   SkillStagingPanel,
   SkillSubmissionCard,
   AgentProposalCard,
@@ -162,6 +156,7 @@ import { canSendProjectHandoff } from "./conversation-project-handoff";
 import { dropHandoffFromHistory } from "./conversation-handoff-history";
 import { LiveTaskCard } from "../components/LiveTaskCard";
 import { QueuedInputsBar } from "../components/QueuedInputsBar";
+import { ArtifactSplitPane } from "../components/ArtifactSplitPane";
 import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
 import { CreateAgentDialog } from "../components/CreateAgentDialog";
 import { OriginBadge } from "../components/ExecutionLocationPicker";
@@ -173,30 +168,6 @@ import {
 import { getLastTempAgent, setLastTempAgent } from "../lib/last-temp-agent";
 import { useArtifactFile } from "../hooks/use-artifact-file";
 import { toAbsoluteProjectPath, toProjectRelativePath } from "../lib/project-paths";
-
-/** Panel ids for the conversation ↔ artifact-preview split. */
-const CONVERSATION_PANEL_ID = "conversation";
-const ARTIFACT_PANEL_ID = "artifact";
-
-/** Width of the artifact preview pane, as a percentage of the split. Every
- *  open starts at an even 50/50 — the drag is a per-viewing adjustment, not a
- *  remembered preference, so opening a document is always predictable. */
-const ARTIFACT_SPLIT_DEFAULT = 50;
-
-/**
- * Floors for the two columns, in px rather than percentages: what makes a
- * column unusable is an absolute width, not a share of whatever the window
- * happens to be. Below their sum there is no split worth showing, so the
- * preview folds away entirely and the conversation takes the pane back.
- */
-const CONVERSATION_MIN_PX = 480;
-const ARTIFACT_MIN_PX = 360;
-const SPLIT_MIN_PX = CONVERSATION_MIN_PX + ARTIFACT_MIN_PX;
-
-/** Frames to wait for the artifact panel to register with the Group before
- *  giving up on resetting the split. Registration lands on the next frame in
- *  practice; the budget only exists so a change upstream can't spin forever. */
-const SPLIT_RESET_MAX_FRAMES = 10;
 
 /** True while a workflow snapshot's status denotes an in-flight run (vs a
  *  terminal ``completed`` / ``killed`` / ``failed`` verb). Used to decide
@@ -1546,17 +1517,11 @@ export const ConversationPage = () => {
     // to the set instead of replacing what's on screen.
     multiTab: true,
   });
+  // The split pane consumes the loaded document itself; the page only needs
+  // the active path (for the reveal action) and the open/reload/close verbs.
   const {
-    tabs: artifactTabs,
-    activePath: activeArtifactPath,
-    activate: activateArtifactTab,
-    closeTab: closeArtifactTab,
     selectedPath: selectedArtifactPath,
-    artifact,
     content: artifactContent,
-    target: artifactTarget,
-    loading: artifactLoading,
-    error: artifactError,
     open: openArtifact,
     reload: reloadArtifact,
     close: closeArtifact,
@@ -6045,73 +6010,18 @@ export const ConversationPage = () => {
     panelSetCollapsed,
   ]);
 
-  // Measure the pane itself instead of the viewport: the sidebar collapses at
-  // its own breakpoint and the right panel at another, so the same window
-  // width leaves wildly different room here. Folding when the two columns no
-  // longer fit keeps the open tabs in state — widen again and they return.
-  const splitGroupElRef = useRef<HTMLDivElement | null>(null);
-  const [splitFits, setSplitFits] = useState(true);
-  useEffect(() => {
-    const element = splitGroupElRef.current;
-    if (!element) return;
-    const observer = new ResizeObserver(([entry]) => {
-      setSplitFits(entry.contentRect.width >= SPLIT_MIN_PX);
-    });
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, []);
-  const artifactViewerOpen = artifactTabs.length > 0 && splitFits;
-
-  // Force the even split on every open. The Group remembers each panel's size
-  // by id across mount/unmount, so the artifact panel's ``defaultSize`` only
-  // takes effect the very first time it registers — without this, a session
-  // where the user once dragged the divider would reopen every later document
-  // at that old ratio instead of 50/50.
-  //
-  // The artifact Panel isn't in the Group's layout yet when this page's effects
-  // run (``getLayout()`` still reports ``{conversation: 100}``), and calling
-  // ``setLayout`` with two entries against a one-panel group throws
-  // ``Invalid 1 panel layout``. So poll a couple of animation frames until the
-  // registration lands, then reset — and give up rather than spin forever if
-  // the panel never shows up.
-  const splitGroupRef = useGroupRef();
-  useEffect(() => {
-    if (!artifactViewerOpen) return;
-    let frame = 0;
-    let attemptsLeft = SPLIT_RESET_MAX_FRAMES;
-    const applyEvenSplit = () => {
-      const group = splitGroupRef.current;
-      if (!group) return;
-      if (Object.keys(group.getLayout()).length !== 2) {
-        if (attemptsLeft-- > 0) frame = requestAnimationFrame(applyEvenSplit);
-        return;
-      }
-      group.setLayout({
-        [CONVERSATION_PANEL_ID]: 100 - ARTIFACT_SPLIT_DEFAULT,
-        [ARTIFACT_PANEL_ID]: ARTIFACT_SPLIT_DEFAULT,
-      });
-    };
-    applyEvenSplit();
-    return () => cancelAnimationFrame(frame);
-  }, [artifactViewerOpen, splitGroupRef]);
 
   return (
     <>
-      {/* Conversation and the artifact preview sit side by side in a resizable
-          split: the preview opens as a right-hand pane taking half the width
-          rather than covering the conversation, and the hairline between them
-          can be dragged to rebalance the two. The group is always mounted so
-          opening/closing the preview never remounts the message list. */}
-      <ResizablePanelGroup
-        className="min-h-0 bg-surface"
-        groupRef={splitGroupRef}
-        elementRef={splitGroupElRef}
+      {/* The pane is always mounted with the conversation as its first column,
+          so opening or closing a document never remounts the message list. */}
+      <ArtifactSplitPane
+        file={artifactFile}
+        onReload={handleArtifactReload}
+        onClose={handleArtifactClose}
+        onCopyContent={handleArtifactCopy}
+        onOpenExternal={handleArtifactOpenExternal}
       >
-        <ResizablePanel
-          id={CONVERSATION_PANEL_ID}
-          minSize={`${CONVERSATION_MIN_PX}px`}
-          style={{ overflow: "hidden" }}
-        >
           <div className="relative flex h-full min-h-0 flex-col bg-surface">
             {/* Page header — rendered inline so the scroll container below can run
             edge-to-edge of the main card and its scrollbar sits flush against
@@ -6887,56 +6797,7 @@ export const ConversationPage = () => {
               />
             </div>
           </div>
-        </ResizablePanel>
-        {artifactViewerOpen ? (
-          <>
-            <ResizableHandle className="data-[separator=hover]:bg-brand/60 data-[separator=active]:bg-brand data-[separator=focus]:bg-brand transition-colors" />
-            <ResizablePanel
-              id={ARTIFACT_PANEL_ID}
-              defaultSize={`${ARTIFACT_SPLIT_DEFAULT}%`}
-              minSize={`${ARTIFACT_MIN_PX}px`}
-              style={{ overflow: "hidden" }}
-            >
-              <div
-                className="flex h-full min-h-0 flex-col overflow-hidden overscroll-contain bg-surface"
-                onWheel={(event) => event.stopPropagation()}
-                onTouchMove={(event) => event.stopPropagation()}
-              >
-                {/* Tab strip names the open documents, so the shell below runs
-                    its compact header — otherwise the file name would appear
-                    twice and cost a row of content in a half-width pane. */}
-                <ArtifactTabBar
-                  tabs={artifactTabs.map((tab) => ({
-                    path: tab.path,
-                    name: tab.name,
-                    previewKind: tab.artifact?.previewKind ?? null,
-                    loading: tab.loading,
-                    error: Boolean(tab.error),
-                  }))}
-                  activePath={activeArtifactPath}
-                  onActivate={activateArtifactTab}
-                  onClose={closeArtifactTab}
-                />
-                <div className="min-h-0 flex-1">
-                  <ArtifactViewerShell
-                    artifact={artifact}
-                    content={artifactContent}
-                    target={artifactTarget}
-                    loading={artifactLoading}
-                    error={artifactError}
-                    framed={false}
-                    compactHeader
-                    onReload={handleArtifactReload}
-                    onClose={handleArtifactClose}
-                    onCopyContent={handleArtifactCopy}
-                    onOpenExternal={handleArtifactOpenExternal}
-                  />
-                </div>
-              </div>
-            </ResizablePanel>
-          </>
-        ) : null}
-      </ResizablePanelGroup>
+      </ArtifactSplitPane>
 
       {/* Knowledge Base file picker overlay — tree view: documents are
           organised under their KB and folders; folders are expandable
