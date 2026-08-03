@@ -68,6 +68,33 @@ def test_ingest_is_idempotent_by_dedup(db_factory) -> None:
     assert unread == 1
 
 
+def test_ingest_publishes_created_event_only_for_new_row(
+    db_factory, monkeypatch
+) -> None:
+    from valuz_agent.infra.eventbus import event_bus
+
+    published: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        event_bus,
+        "publish",
+        lambda topic, **payload: published.append((topic, payload)),
+    )
+    svc = NotificationService()
+
+    async def run() -> None:
+        await svc.ingest(OWNER, **_q())
+        await svc.ingest(OWNER, **_q())
+
+    asyncio.run(run())
+
+    assert len(published) == 1
+    topic, payload = published[0]
+    assert topic == "notification.created"
+    assert payload["owner_user_id"] == OWNER
+    assert payload["notification"]["kind"] == "question"
+    assert payload["notification"]["pending_id"] == "p1"
+
+
 def test_resolve_clears_from_open_set(db_factory) -> None:
     svc = NotificationService()
 

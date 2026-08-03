@@ -111,6 +111,11 @@ resolved(和今天 aggregator 的 hydrate 同精神)。
 - 动作本身走各自领域端点（答复 → `/sessions/{id}/actions`，恢复 →
   `/tasks/{id}:intervene action=resume`）；这些成功后经来源 `resolve` 消解通知。
 
+扩展事件：`NotificationService.ingest()` 首次创建账本行后，以 best effort 发布
+`notification.created`。稳定 payload 为 `owner_user_id` + 完整 `notification` wire
+对象；幂等 upsert 返回既有行时不重复发布。它只供 overlay 接外部系统通知等副作用，
+不能替代持久账本或 DB-poll SSE，也不承诺跨进程重放。
+
 `/v1/decisions/*` 与 `/v1/tasks/attention` 退役（前者的能力被 question-kind 覆盖，
 后者被 stream 覆盖）。
 
