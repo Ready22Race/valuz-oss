@@ -150,6 +150,58 @@ def test_explicit_structured_binding_accepts_appended_period_metadata() -> None:
     assert resolution.selected_handles == (handle,)
 
 
+def test_local_period_metric_overrides_inherited_financial_metric() -> None:
+    semantics = copy.deepcopy(_SEMANTICS)
+    semantics["metric_ontology"] = {
+        "metrics": {
+            "operating_revenue": {
+                "aliases": ["营业收入"],
+                "fields": ["operating_revenue"],
+            },
+            "reporting_period": {
+                "aliases": ["财年", "报告期"],
+                "fields": ["fiscal_year"],
+            },
+        }
+    }
+    handle = "ev_fiscal_year_2024"
+    claims = extract_claims(
+        (
+            "贵州茅台（600519）2024 年度营业收入：\n\n"
+            "- 财年：2024 FY（报告期截至 2024-12-31） "
+            f"[1](evidence://{handle})"
+        ),
+        mode="strict-domain",
+        semantics=semantics,
+    )
+    claim = next(item for item in claims if item.attached_evidence_handles)
+    evidence_pool = [
+        {
+            "evidenceHandle": handle,
+            "source": {"providerId": "reportify", "sourceType": "dataset"},
+            "evidence": {
+                "kind": "structured-data",
+                "field": "/data/0/fiscal_year",
+                "metric": "fiscal_year",
+                "value": "2024",
+                "entityId": "600519",
+                "period": "2024 annual",
+                "asOf": "2024-12-31",
+            },
+        }
+    ]
+
+    resolution = resolve_claim_evidence(
+        claim,
+        evidence_pool,
+        semantics=semantics,
+    )
+
+    assert claim.normalized["metric"] == "reporting_period"
+    assert resolution.status == "verified"
+    assert resolution.selected_handles == (handle,)
+
+
 @pytest.mark.parametrize(
     "claim_text",
     (
