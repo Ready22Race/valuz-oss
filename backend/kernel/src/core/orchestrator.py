@@ -133,7 +133,7 @@ Rules:
 """
 
 _MAX_CITATION_REPAIR_CLAIMS = 12
-# A claim patch contains at most twelve explicit issues.  Starting a hidden
+# A claim patch contains at most twelve explicit issues.  Starting another
 # model pass for a draft with more failures cannot repair the complete set in
 # one bounded attempt; it only adds latency/cost and tempts the model to hollow
 # out the answer.  Publish that useful draft with advisory citation state and
@@ -181,20 +181,6 @@ _INTERNAL_CITATION_PROSE_RE = re.compile(
     re.IGNORECASE,
 )
 _CJK_RE = re.compile(r"[\u3400-\u9fff]")
-_INTERNAL_HANDOFF_RE = re.compile(
-    r"^\s*##\s+SESSION INTENT\b[\s\S]*?^##\s+SUMMARY\b"
-    r"[\s\S]*?^##\s+ARTIFACTS\b[\s\S]*?^##\s+NEXT STEPS\b",
-    re.IGNORECASE | re.MULTILINE,
-)
-_BOOKKEEPING_TOOL_NAMES = frozenset(
-    {
-        "write_todos",
-        "todo_write",
-        "update_todos",
-        "update_plan",
-        "modify_plan",
-    }
-)
 _LEADING_PROGRESS_RE = re.compile(
     r"^(?:"
     r"(?:已?获得|获得了).{0,160}(?:现在|接下来|随后).{0,40}"
@@ -1721,6 +1707,7 @@ class _MessageObserverSink:
         self._assistant_chunks: list[str] = []
         self._assistant_delta_chunks: list[str] = []
         self._pending_assistant: Event | None = None
+        self._final_assistant_published = False
         self._tool_names: dict[str, str] = {}
         self._tool_inputs: dict[str, Any] = {}
         self._evidence_registry = EvidenceRegistry(
@@ -1814,37 +1801,13 @@ class _MessageObserverSink:
             # A runtime can emit multiple canonical text blocks in one turn:
             # an assistant preamble, then a tool call, then the final answer.
             # Hold only the latest top-level block until we know whether a
-            # continuation follows.  This lets the Citation Guard seal the one
-            # final block before either persistence or broadcast.
+            # continuation follows.  A continuation flushes that block exactly
+            # as the runtime emitted it; only the last block is sealed by the
+            # Citation Guard.  Citation policy must never change the visibility
+            # of intermediate runtime messages.
             canonical_text = str(event.data.get("text") or event.data.get("content") or "")
             if self._pending_assistant is not None:
-                if self._citation_guard.requires_citation:
-                    pending_text = str(
-                        self._pending_assistant.data.get("text")
-                        or self._pending_assistant.data.get("content")
-                        or ""
-                    )
-                    pending_bindings = len(_INLINE_EVIDENCE_LINK_RE.findall(pending_text))
-                    canonical_bindings = len(_INLINE_EVIDENCE_LINK_RE.findall(canonical_text))
-                    preserve_pending = len(pending_text) >= max(
-                        400,
-                        len(canonical_text) * 2,
-                    ) and (pending_bindings > 0 or canonical_bindings == 0)
-                    if preserve_pending:
-                        self._assistant_delta_chunks.clear()
-                        logger.warning(
-                            "citation_guard preserved complete pending answer over short "
-                            "post-tool block pending=%d canonical=%d",
-                            len(pending_text),
-                            len(canonical_text),
-                        )
-                        return
-                    # Citation-bearing candidates remain private until one
-                    # final block is guarded. Replacing the weaker candidate
-                    # must not persist it as an unsealed assistant message.
-                    self._pending_assistant = None
-                else:
-                    await self._flush_pending_assistant(final=False)
+                await self._flush_pending_assistant(final=False)
             streamed_text = self.partial_assistant_text or ""
             # Claude can occasionally report only the last paragraph in its
             # canonical AssistantMessage even though the immediately preceding
@@ -1886,20 +1849,7 @@ class _MessageObserverSink:
             and is_top_level
             and event.type in {"text_delta", "tool_use"}
         ):
-            tool_name = str(event.data.get("name") or "").strip().casefold()
-            keep_through_bookkeeping = (
-                event.type == "tool_use" and tool_name in _BOOKKEEPING_TOOL_NAMES
-            )
-            keep_through_citation_continuation = (
-                event.type == "text_delta" and self._citation_guard.requires_citation
-            )
-            if not keep_through_bookkeeping and not keep_through_citation_continuation:
-                await self._flush_pending_assistant(
-                    final=False,
-                    suppress_user_visible=(
-                        event.type == "tool_use" or self._citation_guard.requires_citation
-                    ),
-                )
+            await self._flush_pending_assistant(final=False)
 
         if event.type == "assistant_message":
             # Subagent text is an out-of-band flow and must not take ownership
@@ -1909,12 +1859,6 @@ class _MessageObserverSink:
             text = event.data.get("text") or event.data.get("delta") or ""
             if text:
                 self._assistant_delta_chunks.append(str(text))
-            if is_top_level and self._citation_guard.requires_citation:
-                # Source-bearing answers are provisional until the complete
-                # body has passed Guard + Claim Audit.  Do not leak the first
-                # draft through the live delta stream before a hidden repair
-                # can replace it.  Non-citation chat keeps normal streaming.
-                return
         elif event.type == "tool_use":
             tool_use_id = event.data.get("id")
             tool_name = event.data.get("name")
@@ -2017,12 +1961,12 @@ class _MessageObserverSink:
             elif not task_revision_aborted:
                 await self.ensure_partial_assistant_message(allow_repair=allow_repair)
             if self._citation_repair_requested or self._task_coverage_revision_requested:
-                # Keep the turn running while the orchestrator sends one
-                # hidden repair instruction to the same runtime.  The failed
-                # candidate and this interim idle frame are neither persisted
-                # nor broadcast.
+                # Keep the user turn running while the orchestrator performs
+                # one revision. Runtime text remains visible; only this
+                # technical idle boundary is withheld so clients do not close
+                # the turn before the continuation starts.
                 return
-            if self.assistant_text is None:
+            if not self._final_assistant_published:
                 if allow_repair and self._final_answer_recovery_attempts == 0:
                     self._final_answer_recovery_requested = True
                     logger.warning(
@@ -2127,8 +2071,8 @@ class _MessageObserverSink:
         self._citation_repair_attempts += 1
         self._usage_before_citation_repair = dict(self.usage) if self.usage is not None else None
         # A runtime may emit only text_delta frames and no final
-        # assistant_message.  The withheld first draft must not be prefixed to
-        # the repaired attempt.
+        # assistant_message. The already-published first draft must not be
+        # prefixed to the repair attempt's own visible stream.
         self._assistant_delta_chunks.clear()
         self._pending_assistant = None
 
@@ -2166,6 +2110,7 @@ class _MessageObserverSink:
         if event is None:
             event = Event(type="assistant_message", data={"text": text})
         self._record_assistant_message(event)
+        self._final_assistant_published = True
         await self._inner.emit(event)
         logger.error("published nontechnical fallback after empty finalization continuation")
 
@@ -2193,13 +2138,12 @@ class _MessageObserverSink:
         return True
 
     async def publish_citation_repair_baseline_on_abort(self, *, reason: str) -> bool:
-        """Discard an interrupted repair and publish the sealed first draft.
+        """Close an interrupted repair with the already-published first draft.
 
-        The repair prompt and its partial output are turn-private protocol
-        state.  If the runtime is interrupted, errors, or exhausts its budget,
-        persisting that partial can expose evidence handles, validation codes,
-        tool failures, and repair instructions.  The first draft has already
-        passed the deterministic guard, so it is the only safe fallback.
+        Repair deltas are streamed like every other runtime output. If the
+        runtime is interrupted, errors, or exhausts its budget before a
+        canonical revision exists, the sealed first draft remains the durable
+        answer and closes the live continuation.
         """
 
         baseline = self._citation_repair_baseline_event
@@ -2243,6 +2187,7 @@ class _MessageObserverSink:
         if event is None:
             return False
         self._record_assistant_message(event)
+        self._final_assistant_published = True
         await self._inner.emit(event)
         return True
 
@@ -2251,28 +2196,12 @@ class _MessageObserverSink:
         *,
         final: bool,
         allow_repair: bool = True,
-        suppress_user_visible: bool = False,
     ) -> bool:
         pending = self._pending_assistant
         if pending is None:
             return False
         self._pending_assistant = None
         raw_text = pending.data.get("text") or pending.data.get("content") or ""
-        if suppress_user_visible:
-            # A top-level assistant block immediately followed by a tool call
-            # is the model's research preamble, not its answer. Persisting it
-            # used to leak remembered values, fake evidence links, raw ids, and
-            # "now I will fetch" narration ahead of the later guarded answer.
-            # Tool events already represent this progress in the UI.
-            self._assistant_delta_chunks.clear()
-            return False
-        if _INTERNAL_HANDOFF_RE.search(str(raw_text)):
-            # DeepAgents' context-compaction middleware may surface its
-            # machine-to-machine handoff as a top-level assistant block.  It
-            # is runtime state, not an answer, and must never be persisted or
-            # broadcast to the user.
-            self._assistant_delta_chunks.clear()
-            return False
         data = {
             key: value
             for key, value in pending.data.items()
@@ -2291,6 +2220,8 @@ class _MessageObserverSink:
         else:
             event = Event(type="assistant_message", data=data, timestamp=pending.timestamp)
         self._record_assistant_message(event)
+        if final:
+            self._final_assistant_published = True
         await self._inner.emit(event)
         return True
 
@@ -2596,9 +2527,9 @@ class _MessageObserverSink:
                 self._task_coverage_tracker.uses_local_patch_protocol(coverage_audit)
             )
             logger.warning(
-                "task_coverage withheld incomplete draft and requested one candidate revision"
+                "task_coverage published incomplete draft and requested one candidate revision"
             )
-            return None
+            return event
 
         needs_repair = self._citation_publication_needs_repair(result.bundle)
         if allow_repair and needs_repair and self._citation_repair_attempts == 0:
@@ -2625,8 +2556,8 @@ class _MessageObserverSink:
             self._citation_repair_baseline_event = copy.deepcopy(event)
             self._citation_repair_requested = True
             self._citation_repair_prompt = repair_prompt
-            logger.warning("citation_guard withheld draft and requested one repair pass")
-            return None
+            logger.warning("citation_guard published draft and requested one repair pass")
+            return event
         if self._citation_repair_attempts:
             baseline = self._citation_repair_baseline_event
             if baseline is not None and not self._repair_improves(
@@ -2966,7 +2897,7 @@ class _MessageObserverSink:
                 + int(metrics.get("unverifiedClaimCount") or 0),
             )
         # The patch protocol exposes at most twelve explicit claim issues.
-        # Never run a hidden repair that provably cannot see and patch the full
+        # Never run another repair pass that provably cannot see and patch the full
         # failed set; retain the sealed answer instead of spending another
         # model pass on a partial, potentially destructive rewrite.
         if problematic > _MAX_CITATION_REPAIR_PROBLEM_CLAIMS:
@@ -3331,7 +3262,7 @@ class SessionOrchestrator:
         self,
         hook: CitationRepairRefreshHook | None,
     ) -> None:
-        """Install the host credential-refresh seam for hidden repair runs."""
+        """Install the host credential-refresh seam for citation repair runs."""
 
         self._citation_repair_refresh_hook = hook
 
@@ -3747,7 +3678,7 @@ class SessionOrchestrator:
                 # Hosts may still use this boundary to refresh their persisted
                 # resource snapshot.  The repair itself never receives those
                 # resources: all admissible evidence is sealed into its compact
-                # prompt, so a hidden quality pass cannot start a second
+                # prompt, so a quality pass cannot start a second
                 # research run or cross an expiring tool credential.
                 if self._citation_repair_refresh_hook is not None:
                     try:

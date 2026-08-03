@@ -1298,7 +1298,7 @@ def _claim_patch_json(
     )
 
 
-async def test_task_coverage_withholds_partial_matrix_and_accepts_improved_revision() -> None:
+async def test_task_coverage_publishes_partial_matrix_and_accepts_improved_revision() -> None:
     store = _FakeStore()
     live = _RecordingSink()
     db = DatabaseEventSink(store, "owner-1", "sess-1", "msg-1")
@@ -1374,7 +1374,9 @@ async def test_task_coverage_withholds_partial_matrix_and_accepts_improved_revis
         )[1]
     )
     assert revision_context["candidateEvidence"] == []
-    assert observer.assistant_text is None
+    assert observer.assistant_text is not None
+    assert "| 乙公司 | 2025 Q1 | 90 | — |" in observer.assistant_text
+    assert [event.type for event in store.appended].count("assistant_message") == 1
 
     observer.begin_task_coverage_revision()
     await observer.emit(
@@ -1859,8 +1861,8 @@ async def test_progress_only_bookkeeping_block_requests_final_answer_recovery() 
     )
 
     assert observer.final_answer_recovery_requested is True
-    assert observer.assistant_text is None
-    assert all(event.type != "assistant_message" for event in store.appended)
+    assert observer.assistant_text == "已收集了充足的资料，现在撰写完整报告："
+    assert any(event.type == "assistant_message" for event in store.appended)
 
 
 @pytest.mark.parametrize(
@@ -2017,21 +2019,20 @@ async def test_bookkeeping_tool_after_complete_cited_answer_does_not_discard_it(
     await observer.emit(Event(type="assistant_message", data={"text": full_answer}))
     await observer.emit(Event(type="tool_use", data={"id": "todo-1", "name": "write_todos"}))
     await observer.emit(Event(type="tool_result", data={"id": "todo-1", "content": "updated"}))
-    # DeepAgents streams the post-bookkeeping epilogue before emitting its
-    # canonical assistant block.  That delta must not flush and suppress the
-    # already complete citation-bearing answer.
+    # Runtime output keeps its original event order, including the answer
+    # emitted before bookkeeping and the post-bookkeeping epilogue.
     await observer.emit(Event(type="text_delta", data={"text": "以上为完整对比。"}))
     await observer.emit(Event(type="assistant_message", data={"text": "以上为完整对比。"}))
     await observer.emit(Event(type="session_idle", data={"num_turns": 1}))
 
     assistants = [event for event in store.appended if event.type == "assistant_message"]
-    assert len(assistants) == 1
+    assert len(assistants) == 2
     assert "FY2026 Q1" in assistants[0].data["text"]
-    assert "citation://cit_" in assistants[0].data["text"]
-    assert "以上为完整对比" not in assistants[0].data["text"]
+    assert "evidence://ev_q1_12345678" in assistants[0].data["text"]
+    assert assistants[1].data["text"] == "以上为完整对比。"
 
 
-async def test_internal_compaction_handoff_is_not_persisted_or_broadcast() -> None:
+async def test_internal_compaction_handoff_preserves_runtime_visibility() -> None:
     store, live, observer = _observer()
     handoff = """## SESSION INTENT
 Research the filing.
@@ -2052,12 +2053,12 @@ Continue with tools.
     await observer.emit(Event(type="session_idle", data={"num_turns": 1}))
 
     assistants = [event for event in store.appended if event.type == "assistant_message"]
-    assert [event.data["text"] for event in assistants] == ["Visible answer."]
-    assert "SESSION INTENT" not in observer.assistant_text
-    assert all("SESSION INTENT" not in str(event.data.get("text") or "") for event in live.events)
+    assert [event.data["text"] for event in assistants] == [handoff, "Visible answer."]
+    assert "SESSION INTENT" in (observer.assistant_text or "")
+    assert any("SESSION INTENT" in str(event.data.get("text") or "") for event in live.events)
 
 
-async def test_tool_call_preamble_is_not_part_of_the_final_answer() -> None:
+async def test_tool_call_preamble_is_visible_before_the_final_answer() -> None:
     store, live, observer = _observer_with_citations()
     evidence = {
         "_valuz_evidence": {
@@ -2103,14 +2104,16 @@ async def test_tool_call_preamble_is_not_part_of_the_final_answer() -> None:
     await observer.emit(Event(type="session_idle", data={"num_turns": 1}))
 
     assistants = [event for event in store.appended if event.type == "assistant_message"]
-    assert len(assistants) == 1
-    assert "19%" not in assistants[0].data["text"]
-    assert "ev_fake" not in observer.assistant_text
-    assert "20%" in observer.assistant_text
-    assert any(event.type == "tool_use" for event in live.events)
+    assert len(assistants) == 2
+    assert "19%" in assistants[0].data["text"]
+    assert "ev_fake" in (observer.assistant_text or "")
+    assert "20%" in (observer.assistant_text or "")
+    assert [event.type for event in live.events].index("assistant_message") < [
+        event.type for event in live.events
+    ].index("tool_use")
 
 
-async def test_citation_candidate_followed_by_new_text_is_never_published() -> None:
+async def test_citation_candidate_followed_by_new_text_remains_visible() -> None:
     store, _live, observer = _observer_with_citations()
     await observer.emit(
         Event(
@@ -2123,8 +2126,11 @@ async def test_citation_candidate_followed_by_new_text_is_never_published() -> N
     await observer.emit(Event(type="session_idle", data={"num_turns": 1}))
 
     assistants = [event for event in store.appended if event.type == "assistant_message"]
-    assert [event.data["text"] for event in assistants] == ["Final answer."]
-    assert "ev_fake" not in observer.assistant_text
+    assert [event.data["text"] for event in assistants] == [
+        "Draft with raw protocol [1](evidence://ev_fake_12345678).",
+        "Final answer.",
+    ]
+    assert "ev_fake" in (observer.assistant_text or "")
 
 
 async def test_final_assistant_message_captures_citation_bundle() -> None:
@@ -2710,8 +2716,8 @@ async def test_citation_only_mode_discards_unknown_marker_without_hidden_repair(
     assert assistant.data["text"] == "Revenue was 120 USD."
 
 
-async def test_confirmed_entity_conflict_requests_bounded_local_repair() -> None:
-    _store, _live, observer = _observer_with_citations()
+async def test_confirmed_entity_conflict_publishes_draft_and_requests_repair() -> None:
+    store, live, observer = _observer_with_citations()
     evidence = {
         "_valuz_evidence": {
             "evidenceHandle": "ev_wrong_entity_12345678",
@@ -2764,6 +2770,17 @@ async def test_confirmed_entity_conflict_requests_bounded_local_repair() -> None
     assert [row["evidenceHandle"] for row in context["candidateEvidence"]] == [
         "ev_wrong_entity_12345678"
     ]
+    draft = next(event for event in store.appended if event.type == "assistant_message")
+    assert "贵州茅台" in draft.data["text"]
+    assert any(event.type == "assistant_message" for event in live.events)
+
+    observer.begin_citation_repair()
+    await observer.emit(Event(type="text_delta", data={"text": '{"version":'}))
+    await observer.emit(Event(type="usage_update", data={}))
+    assert any(
+        event.type == "text_delta" and event.data.get("text") == '{"version":'
+        for event in live.events
+    )
 
 
 async def test_source_free_general_knowledge_does_not_trigger_repair() -> None:
@@ -2791,6 +2808,7 @@ async def test_unresolved_delta_draft_remains_visible_without_second_model_pass(
     assert observer.citation_repair_requested is False
     assistant = next(event for event in store.appended if event.type == "assistant_message")
     assert assistant.data["text"] == "Revenue was 120 USD in 2025."
+    assert any(event.type == "text_delta" for event in live.events)
     assert any(event.type == "assistant_message" for event in live.events)
 
 
