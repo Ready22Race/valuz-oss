@@ -2030,6 +2030,7 @@
       "qualityIssueCrossCheck": "The source lacks cross-checking or conflicts with another source",
       "qualityIssueLowTier": "This statement is mainly supported by public secondary sources and has not yet been cross-checked against a higher-authority source.",
       "qualityIssueEntityConflict": "The company named in this statement does not match the cited source. Check the original material for the intended company.",
+      "qualityIssuePeriodConflict": "The period named in this statement does not match the cited source. Check the original material for the intended period.",
       "qualityIssueConflict": "This statement differs from a value or key fact in the cited evidence. Use the original material as the authority.",
       "qualityIssueAmbiguous": "Several sources may correspond to this statement, so the most accurate evidence cannot yet be determined.",
       "qualityIssueEvidence": "Citation evidence is incomplete",

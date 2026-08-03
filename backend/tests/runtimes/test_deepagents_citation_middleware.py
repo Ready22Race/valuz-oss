@@ -677,7 +677,7 @@ async def test_reportify_mcp_metadata_builds_lazy_collection_without_per_field_e
     assert private_payload["_valuz_evidence"][0]["kind"] == "structured-evidence-collection"
 
 
-async def test_reportify_discovery_metadata_does_not_expose_summary_handle() -> None:
+async def test_reportify_discovery_metadata_exposes_only_citable_metadata_collection() -> None:
     payload = {"docs": [{"doc_id": "d1", "title": "One", "summary": "Revenue 100"}]}
     digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -734,10 +734,19 @@ async def test_reportify_discovery_metadata_does_not_expose_summary_handle() -> 
     assert isinstance(result.content, str)
     visible_payload = json.loads(result.content)
     assert "evidenceHandle" not in visible_payload["docs"][0]
+    hint = visible_payload["_valuz_evidence_hint"]
+    assert hint["collectionHandle"].startswith("evc_mcp_")
     assert visible_payload["_valuz_discovery"]["citationEvidence"] == (
         "original-indexed-chunk-required"
     )
-    assert citation_artifact_content(result) is None
+    assert visible_payload["_valuz_discovery"]["originalDocumentPreferred"] is True
+    private = citation_artifact_content(result)
+    assert private is not None
+    descriptor = json.loads(private)["_valuz_evidence"][0]
+    assert descriptor["addressing"]["allowedPathRoots"] == [
+        "/docs/0/doc_id",
+        "/docs/0/title",
+    ]
 
 
 async def test_discovery_search_summaries_are_bounded_for_model_history() -> None:

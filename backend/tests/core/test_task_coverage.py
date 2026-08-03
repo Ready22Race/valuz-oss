@@ -694,6 +694,45 @@ def test_single_document_period_scope_applies_to_all_prose_slots() -> None:
     assert {item["answerStatus"] for item in structured} == {"fulfilled"}
 
 
+def test_prose_slot_keeps_section_heading_across_an_introductory_line() -> None:
+    policy = _finance_like_policy()
+    contract = parse_task_contract(
+        "请根据贵州茅台2024年年度报告，只列出审计意见。",
+        policy_snapshot=policy,
+    )
+    tracker = TaskCoverageTracker(contract, policy_snapshot=policy)
+
+    audit = tracker.evaluate(
+        "**一、审计意见**\n\n"
+        "年度报告原文（重要提示第三条）：\n\n"
+        '> "天健会计师事务所为本公司出具了**标准无保留意见**的审计报告。"'
+    )
+
+    structured = [item for item in audit["requirements"] if item["kind"] == "structured-slot"]
+    assert len(structured) == 1
+    assert structured[0]["answerStatus"] == "fulfilled"
+
+
+def test_topic_keeps_parent_heading_across_nested_subheading() -> None:
+    policy = _finance_like_policy()
+    contract = parse_task_contract(
+        "分析阳光电源行情走势和行业基本面。",
+        policy_snapshot=policy,
+    )
+    tracker = TaskCoverageTracker(contract, policy_snapshot=policy)
+
+    audit = tracker.evaluate(
+        "## 二、行情走势\n\n"
+        "### 近18个月K线回顾\n\n"
+        "股价先上攻后回落，当前在低位企稳。\n\n"
+        "## 三、行业基本面\n\n"
+        "储能需求仍在增长，海外订单构成主要驱动力。"
+    )
+
+    topics = [item for item in audit["requirements"] if item["kind"] == "topic"]
+    assert {item["answerStatus"] for item in topics} == {"fulfilled"}
+
+
 def test_policy_topic_ontology_maps_capex_to_capacity_language() -> None:
     policy = _finance_like_policy()
     contract = parse_task_contract(
@@ -2195,6 +2234,85 @@ def test_latest_published_selector_rejects_fallback_to_older_complete_period() -
     assert latest_audit["status"] == "complete"
 
 
+def test_latest_selector_ignores_wrong_issuer_returned_for_requested_symbol() -> None:
+    policy = _finance_like_policy()
+    contract = parse_task_contract(
+        "只列出三星电子最近一期已发布财报的营业收入。",
+        policy_snapshot=policy,
+    )
+    tracker = TaskCoverageTracker(contract, policy_snapshot=policy)
+    tracker.record_tool_result(
+        "earnings_search",
+        {"symbols": ["HK:05930"], "query": "三星电子"},
+        {
+            "docs": [
+                {
+                    "doc_id": "wrong-q4",
+                    "title": "Samson Paper Holdings FY2026 Q4 Results",
+                }
+            ]
+        },
+    )
+    tracker.record_tool_result(
+        "earnings_search",
+        {"symbols": ["KR:005930"], "query": "三星电子"},
+        {
+            "docs": [
+                {
+                    "doc_id": "samsung-q2",
+                    "title": "三星电子 FY2026 Q2 Results",
+                }
+            ]
+        },
+    )
+
+    audit = tracker.evaluate("三星电子 FY2026 Q2 营业收入：74.6 万亿韩元。")
+    row = next(item for item in audit["requirements"] if item["kind"] == "structured-slot")
+
+    assert row["selectorResolution"]["period"] == "2026-q2"
+
+
+def test_discovery_marker_keeps_provider_summary_out_of_content_coverage() -> None:
+    policy = _finance_like_policy()
+    policy["config"]["task_coverage"]["retrieval"]["content_mappings"].append(
+        {
+            "id": "provider-docs",
+            "role": "content",
+            "coverage_text": "result",
+            "tool_patterns": ["*docs_by_symbols"],
+        }
+    )
+    contract = parse_task_contract(
+        "只列出 SK海力士最近一期已发布财报的经营现金流。",
+        policy_snapshot=policy,
+    )
+    tracker = TaskCoverageTracker(contract, policy_snapshot=policy)
+    tracker.record_tool_result(
+        "docs_by_symbols",
+        {"symbols": ["KR:000660"]},
+        {
+            "docs": [
+                {
+                    "doc_id": "sk-q2",
+                    "title": "SK海力士 FY2026 Q2 Results",
+                    "summary": "经营现金流为 26.33 万亿韩元。",
+                }
+            ],
+            "_valuz_discovery": {
+                "citationEvidence": "original-indexed-chunk-required",
+                "originalDocumentPreferred": True,
+            },
+        },
+    )
+
+    audit = tracker.evaluate("SK海力士 FY2026 Q2 经营现金流：当前资料未披露。")
+    row = next(item for item in audit["requirements"] if item["kind"] == "structured-slot")
+
+    assert row["retrievalStatus"] == "partial"
+    assert row["modelInputStatus"] == "not-visible"
+    assert "available-evidence-marked-unavailable" not in row["reasonCodes"]
+
+
 def test_full_document_inherits_exact_discovery_record_scope_when_externalized() -> None:
     policy = _finance_like_policy()
     policy["config"]["task_coverage"]["retrieval"]["content_mappings"].append(
@@ -2449,6 +2567,29 @@ def test_multi_period_structured_query_expands_metric_period_matrix_and_topics_o
     output = next(item for item in contract.requirements if item.kind == "output-shape")
     assert output.slots["format"] == "table"
     assert output.slots["periodGroupCount"] == 4
+
+
+def test_multi_period_table_fulfills_period_groups_without_period_headings() -> None:
+    policy = _finance_like_policy()
+    contract = parse_task_contract(
+        "查询微软过去四个季度的单季毛利率和运营利润率，逐季列成表，解释趋势并拆解驱动。",
+        policy_snapshot=policy,
+    )
+    tracker = TaskCoverageTracker(contract, policy_snapshot=policy)
+
+    audit = tracker.evaluate(
+        "| 公司 | 财季 | 毛利率 | 运营利润率 |\n"
+        "|---|---|---:|---:|\n"
+        "| 微软 | FY2026 Q1 | 69.1% | 48.9% |\n"
+        "| 微软 | FY2026 Q2 | 68.0% | 47.1% |\n"
+        "| 微软 | FY2026 Q3 | 67.6% | 46.3% |\n"
+        "| 微软 | FY2026 Q4 | 67.2% | 45.1% |\n\n"
+        "## 趋势分析\n\n两项利润率连续下行。\n\n"
+        "## 驱动因素\n\nAI 基础设施折旧和运营费用增长构成主要压力。"
+    )
+
+    output = next(item for item in audit["requirements"] if item["kind"] == "output-shape")
+    assert output["answerStatus"] == "fulfilled"
 
 
 def test_generic_subject_parser_keeps_only_compared_companies() -> None:

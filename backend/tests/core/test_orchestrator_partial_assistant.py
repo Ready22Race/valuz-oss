@@ -8,6 +8,7 @@ import hashlib
 import json
 import threading
 
+import pytest
 import valuz_agent.boot.kernel  # noqa: F401
 
 from src.adapters.database_sink import DatabaseEventSink
@@ -464,6 +465,18 @@ def test_final_answer_strips_collected_data_progress_leadin() -> None:
     )
 
     assert _strip_leading_assistant_progress(text).startswith("## 存储产品与涨价幅度")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "获得了中证2000的7月31日市盈率以及各指数行业分布信息。"
+        "现在读取更多详细内容，特别是行业分布和中证指数估值表。",
+        "已收集到极为丰富的原始数据。现在整合所有信息撰写深度报告：",
+    ],
+)
+def test_final_answer_suppresses_progress_only_research_transitions(text: str) -> None:
+    assert _strip_leading_assistant_progress(text) == ""
 
 
 def test_final_answer_strips_completed_source_collection_transition() -> None:
@@ -1850,6 +1863,30 @@ async def test_progress_only_bookkeeping_block_requests_final_answer_recovery() 
     assert all(event.type != "assistant_message" for event in store.appended)
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "获得了中证2000的7月31日市盈率以及各指数行业分布信息。"
+        "现在读取更多详细内容，特别是行业分布和中证指数估值表。",
+        "已收集到极为丰富的原始数据。现在整合所有信息撰写深度报告：",
+    ],
+)
+async def test_research_progress_only_end_turn_requests_final_answer_recovery(text: str) -> None:
+    store, _live, observer = _observer_with_citations()
+
+    await observer.emit(Event(type="assistant_message", data={"text": text}))
+    await observer.emit(
+        Event(
+            type="session_idle",
+            data={"stop_reason": {"type": "end_turn"}, "num_turns": 1},
+        )
+    )
+
+    assert observer.final_answer_recovery_requested is True
+    assert observer.assistant_text is None
+    assert all(event.type != "assistant_message" for event in store.appended)
+
+
 async def test_second_empty_end_turn_publishes_nontechnical_fallback() -> None:
     store, _live, observer = _observer()
 
@@ -2252,14 +2289,17 @@ async def test_private_citation_content_is_registered_but_not_forwarded() -> Non
 async def test_checkpoint_citation_replay_registers_collection_with_visible_snapshot() -> None:
     store, _live, observer = _observer_with_citations()
     snapshot = [{"symbol": "600519", "revenue": 170899152276}]
-    content_hash = "sha256:" + hashlib.sha256(
-        json.dumps(
-            snapshot,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()
+    content_hash = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(
+                snapshot,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+    )
     handle = "evc_mcp_replay1234"
     visible = {
         "data": snapshot,
@@ -2419,6 +2459,81 @@ async def test_task_coverage_uses_private_full_result_for_candidate_scope() -> N
         3: {"2026-q2"},
         4: {"2026-q1"},
     }
+
+
+async def test_task_coverage_uses_model_projection_for_lazy_collection_result() -> None:
+    store = _FakeStore()
+    live = _RecordingSink()
+    db = DatabaseEventSink(store, "owner-1", "sess-1", "msg-1")
+    coalesced = DeltaCoalescingSink(PersistThenBroadcastSink(db, live))
+    prompt = "只列出甲公司最近一期财报的营业收入。"
+    policy = _task_coverage_policy()
+    policy["config"]["task_coverage"]["retrieval"]["content_mappings"].append(
+        {
+            "id": "structured",
+            "role": "content",
+            "coverage_text": "input-and-result",
+            "tool_patterns": ["*financial_metrics"],
+        }
+    )
+    contract = parse_task_contract(prompt, policy_snapshot=policy)
+    observer = _MessageObserverSink(
+        coalesced,
+        message_id="msg-1",
+        user_prompt=prompt,
+        citation_policy_available=True,
+        citation_quality_policy=policy,
+        task_contract=contract,
+        task_coverage_enabled=True,
+    )
+    visible_result = {
+        "data": [{"company": "甲公司", "period": "2026 Q2", "营业收入": 100}],
+        "_valuz_evidence_hint": {
+            "collectionHandle": "evc_test_12345678",
+            "addressingMode": "json-pointer",
+        },
+    }
+    private_descriptor = {
+        "_valuz_evidence": [
+            {
+                "version": 1,
+                "kind": "structured-evidence-collection",
+                "collectionHandle": "evc_test_12345678",
+                "source": {"title": "Financial metrics"},
+                "addressing": {"mode": "json-pointer", "allowedPathRoots": ["/data"]},
+            }
+        ]
+    }
+    await observer.emit(
+        Event(
+            type="tool_use",
+            data={
+                "id": "metrics-1",
+                "name": "stock_financial_metrics",
+                "input": {"company": "甲公司", "fields": ["营业收入"]},
+            },
+        )
+    )
+    await observer.emit(
+        Event(
+            type="tool_result",
+            data={
+                "id": "metrics-1",
+                "content": json.dumps(visible_result, ensure_ascii=False),
+                "_citation_content": json.dumps(private_descriptor, ensure_ascii=False),
+            },
+        )
+    )
+
+    assert observer._task_coverage_tracker is not None
+    audit = observer._task_coverage_tracker.evaluate(  # noqa: SLF001
+        "甲公司 FY2026 Q2 营业收入：100 亿元。"
+    )
+    row = next(item for item in audit["requirements"] if item["kind"] == "structured-slot")
+
+    assert row["retrievalStatus"] == "available"
+    assert row["modelInputStatus"] == "visible"
+    assert row["selectorResolution"]["period"] == "2026-q2"
 
 
 async def test_large_private_citation_content_registers_evidence_without_forwarding() -> None:

@@ -333,7 +333,16 @@ _ANSWER_FORMULA_OPERATOR_RE = re.compile(r"(?:÷|/|×|\*|\+|=)")
 _QUARTER_SCOPE_RE = re.compile(r"(?:季度|财季|\b(?:fiscal\s+)?quarters?\b)", re.I)
 _OUTPUT_COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
     "entity": ("entity", "company", "issuer", "security", "公司", "企业", "主体"),
-    "period": ("period", "reporting period", "fiscal period", "报告期", "期间", "年度", "季度"),
+    "period": (
+        "period",
+        "reporting period",
+        "fiscal period",
+        "报告期",
+        "期间",
+        "年度",
+        "季度",
+        "财季",
+    ),
 }
 
 
@@ -1227,6 +1236,16 @@ class TaskCoverageTracker:
             name,
             self._config,
         )
+        if _is_document_discovery_projection(scoped_model_content):
+            # The transport metadata is authoritative about result semantics.
+            # A discovery row can prove its own title/date/link and establish a
+            # candidate document scope, but its provider summary is not the
+            # original document content for Task Coverage.  This also keeps
+            # third-party tool names policy-independent once they adopt the
+            # source-metadata contract.
+            role = "candidate"
+            coverage_source = "result"
+            coverage_scope = "partial"
         indexed_search_empty = name.rsplit("__", 1)[
             -1
         ] == "kb_search" and _indexed_search_has_explicitly_empty_chunks(scoped_model_content)
@@ -2460,6 +2479,14 @@ class TaskCoverageTracker:
                     entity_aliases=entity_aliases,
                 ):
                     continue
+                if role == "candidate" and not _attempt_returned_entity_matches(
+                    attempt,
+                    entity_aliases,
+                ):
+                    # Query arguments express intent, not result identity.  A
+                    # failed symbol lookup may return another issuer whose
+                    # newer period must not redefine "latest" for this entity.
+                    continue
                 values = (
                     [period for _scope_id, period in attempt.scope_pairs]
                     if attempt.scope_pairs
@@ -3531,6 +3558,23 @@ def _attempt_matches_requirement_scope(
     return not document_id or document_id in scope_haystack
 
 
+def _attempt_returned_entity_matches(
+    attempt: RetrievalAttempt,
+    entity_aliases: tuple[str, ...],
+) -> bool:
+    """Require a candidate's returned payload to identify the target entity.
+
+    Candidate discovery is used to resolve relative selectors such as
+    ``latest-published``.  Its request text cannot establish the identity of
+    returned rows because a provider may accept a stale/wrong symbol and
+    return a different company.  Learned cross-language/ticker aliases remain
+    valid because they are scoped to this turn.
+    """
+
+    returned = f"{attempt.model_content}\n{attempt.scope_context}"
+    return any(_contains_alias(returned, alias) for alias in entity_aliases)
+
+
 def _answer_status(
     requirement: TaskRequirement,
     manifest: AnswerManifest,
@@ -4050,7 +4094,11 @@ def _output_shape_status(
         if positions != sorted(positions):
             return "missing", ["requested-table-row-order-mismatch"]
     group_count = slots.get("periodGroupCount")
-    if isinstance(group_count, int) and len(manifest.period_sections) < group_count:
+    represented_periods = max(
+        len(manifest.period_sections),
+        len(_period_keys_in_text(manifest.text)),
+    )
+    if isinstance(group_count, int) and represented_periods < group_count:
         return "missing", ["required-period-groups-missing"]
     exact_lines = slots.get("exactLineCount")
     if isinstance(exact_lines, int):
@@ -4484,19 +4532,34 @@ def _answer_chunks(text: str) -> tuple[str, ...]:
 
 
 def _scoped_answer_chunk(chunks: tuple[str, ...], index: int) -> str:
-    """Attach a list item to its nearest non-list local scope label."""
+    """Attach content to its local prose label and Markdown heading ancestry."""
 
     current = chunks[index]
-    context = ""
+    context: list[str] = []
+    prose_added = False
+    nearest_heading_level = 7
     for previous in reversed(chunks[:index]):
         stripped = previous.lstrip()
         if stripped in {"---", "***", "___"}:
-            continue
+            break
         if re.match(r"^(?:[-*+]\s+|\d+[.)]\s+|\|)", stripped):
             continue
-        context = previous
-        break
-    return f"{context}\n{current}" if context else current
+        heading = re.fullmatch(r"\s*(#{1,6})\s+.+?\s*", previous)
+        if heading is not None:
+            level = len(heading.group(1))
+            if level < nearest_heading_level:
+                context.append(previous)
+                nearest_heading_level = level
+            if level == 1:
+                break
+            continue
+        if re.fullmatch(r"\s*\*\*[^*]+\*\*\s*", previous):
+            context.append(previous)
+            break
+        if not prose_added:
+            context.append(previous)
+            prose_added = True
+    return "\n".join((*reversed(context), current)) if context else current
 
 
 def _contains_alias(text: str, alias: str) -> bool:
@@ -4802,6 +4865,28 @@ def _maybe_json(value: Any) -> Any:
     except (TypeError, ValueError):
         return value
     return parsed
+
+
+def _is_document_discovery_projection(value: Any) -> bool:
+    """Return whether model content carries the bounded discovery marker."""
+
+    stack: list[Any] = [value]
+    visited = 0
+    while stack and visited < 10_000:
+        node = stack.pop()
+        visited += 1
+        parsed = _maybe_json(node)
+        if parsed is not node:
+            stack.append(parsed)
+            continue
+        if isinstance(node, Mapping):
+            marker = node.get("_valuz_discovery")
+            if isinstance(marker, Mapping):
+                return True
+            stack.extend(node.values())
+        elif isinstance(node, (list, tuple)):
+            stack.extend(node)
+    return False
 
 
 def _period_keys_in_text(value: str) -> tuple[str, ...]:
