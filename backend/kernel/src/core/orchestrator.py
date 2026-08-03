@@ -1786,7 +1786,9 @@ class _MessageObserverSink:
             citation_content = event.data.get("content")
             if self._citation_enabled and isinstance(citation_content, str):
                 tool_name = event.data.get("tool_name")
-                self._evidence_registry.register_tool_result(
+                model_content = event.data.get("model_content")
+                self._evidence_registry.register_tool_projection(
+                    model_content if model_content is not None else citation_content,
                     citation_content,
                     tool_name=str(tool_name) if tool_name else None,
                     trusted_private=True,

@@ -491,7 +491,9 @@ class DeepAgentsRuntime:
                 # the turn or it paused on an interrupt. Snapshot state to
                 # find out which.
                 state = await graph.aget_state(stream_config)
-                for key, tool_name, citation_content in _state_citation_artifacts(state):
+                for key, tool_name, model_content, citation_content in _state_citation_artifacts(
+                    state
+                ):
                     if key in known_citation_tool_messages:
                         continue
                     known_citation_tool_messages.add(key)
@@ -500,6 +502,7 @@ class DeepAgentsRuntime:
                             type="citation_evidence",
                             data={
                                 "tool_name": tool_name,
+                                "model_content": model_content,
                                 "content": citation_content,
                             },
                         )
@@ -1647,7 +1650,7 @@ def _output_is_error(output: Any) -> bool:
     return False
 
 
-def _state_citation_artifacts(state: Any) -> list[tuple[str, str | None, str]]:
+def _state_citation_artifacts(state: Any) -> list[tuple[str, str | None, Any, str]]:
     """Return private evidence sidecars added by graph tool middleware.
 
     LangChain emits the underlying tool's ``on_tool_end`` event before
@@ -1662,7 +1665,7 @@ def _state_citation_artifacts(state: Any) -> list[tuple[str, str | None, str]]:
     messages = values.get("messages")
     if not isinstance(messages, list):
         return []
-    artifacts: list[tuple[str, str | None, str]] = []
+    artifacts: list[tuple[str, str | None, Any, str]] = []
     for index, message in enumerate(messages):
         artifact = getattr(message, "artifact", None)
         if not isinstance(artifact, dict):
@@ -1673,8 +1676,9 @@ def _state_citation_artifacts(state: Any) -> list[tuple[str, str | None, str]]:
         raw_id = getattr(message, "tool_call_id", None) or getattr(message, "id", None)
         key = str(raw_id or f"tool-message-{index}")
         raw_name = getattr(message, "name", None)
+        model_content = getattr(message, "content", None)
         artifacts.append(
-            (key, str(raw_name) if raw_name else None, citation_content)
+            (key, str(raw_name) if raw_name else None, model_content, citation_content)
         )
     return artifacts
 
