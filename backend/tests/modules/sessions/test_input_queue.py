@@ -261,9 +261,18 @@ def _patch_drain(monkeypatch, *, budget_raises=False):
     calls: list[str] = []
 
     async def _fake_run(
-        session_id, text, event_bus, on_message=None, queued_attachments=None, user_id=None
+        session_id,
+        text,
+        event_bus,
+        on_message=None,
+        queued_attachments=None,
+        pre_turn=None,
+        user_id=None,
     ):
         assert user_id == OWNER
+        # A drained item is a full chat turn, so it must carry the full
+        # per-turn convergence hook — not the credential-only default.
+        assert pre_turn is not None
         # Invariant: while an item's turn runs, the drain exposes it as the
         # in-flight head — the ``dispatching`` bridge ``list_queue`` serves so
         # the item is never invisible in both queue and transcript (§14.5).

@@ -43,7 +43,9 @@ def _run_to_idle_with_stop_reason(
     ``message`` carries ``stop_reason``; return (returned final_status, finalize
     call args). The turn outcome is classified off the message, not a re-read of
     the durable session (which is now only a secondary meter/error signal)."""
-    monkeypatch.setattr(turn_driver, "_restamp_always_on_mcp", _as_async(lambda *a, **k: None))
+    # The turn's capability hook is irrelevant here — inert it (the fake
+    # ``run_turn`` below never invokes it anyway).
+    monkeypatch.setattr(turn_driver, "always_on_mcp_hook", lambda *a, **k: _as_async(lambda: None))
 
     after_run = SimpleNamespace(status="idle", stop_reason=stop_reason, metadata={})
 

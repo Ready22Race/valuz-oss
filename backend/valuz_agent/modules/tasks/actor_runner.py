@@ -2,8 +2,9 @@
 
 ``run_turn`` drives one turn on a persistent session; ``run_actor_loop`` runs
 turn → idle → await mailbox → repeat until shutdown/terminal/TTL. Shared turn
-semantics (``_resolve_turn_status`` / ``_restamp_always_on_mcp``) are imported
-from ``sessions/turn_driver`` so both drivers read one implementation.
+semantics (``_resolve_turn_status``) are imported from ``sessions/turn_driver``
+and the per-turn capability hook from ``sessions/pre_turn``, so both drivers
+read one implementation.
 
 What happens *around* a turn is delegated through two typed protocols bound at
 the composition root: :class:`ActorFinalizer` (loop exit → LifecycleService)
@@ -23,10 +24,8 @@ from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.infra.lifecycle import is_draining
 from valuz_agent.modules.tasks.task_state import NON_REVIEWABLE_DONE
 from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
-from valuz_agent.modules.sessions.turn_driver import (
-    _restamp_always_on_mcp,
-    _resolve_turn_status,
-)
+from valuz_agent.modules.sessions.pre_turn import always_on_mcp_hook
+from valuz_agent.modules.sessions.turn_driver import _resolve_turn_status
 
 logger = logging.getLogger(__name__)
 
@@ -78,9 +77,7 @@ class ActorFinalizer(Protocol):
 class ActorCoordinator(Protocol):
     """The two role-specific between-turn questions. (``CoordinationService``.)"""
 
-    async def notify_lead_member_idle(
-        self, session_id: str, status: str, user_id: str
-    ) -> None:
+    async def notify_lead_member_idle(self, session_id: str, status: str, user_id: str) -> None:
         """A member finished a turn — post ``member_done`` to its lead's inbox."""
         ...
 
@@ -132,17 +129,25 @@ class ActorRunner:
         the session — the actor loop owns that, once, at loop exit. Live
         events reach SSE followers through the kernel's bus taps.
         """
-        # Heal a stale in-process MCP token before every actor-loop turn — this
-        # is the path a recovered / resumed lead+member loop runs on after a
-        # backend restart, where the persisted ``harness`` token is stale and
-        # would otherwise 403 (hiding dispatch / review_subtask / finish_task).
-        await _restamp_always_on_mcp(session_id, user_id)
         try:
             # Classify off the AUTHORITATIVE run_turn result, not a re-read of
             # the lagging durable session (see ``_resolve_turn_status``). The
             # kernel persists ``status="running"`` at turn start itself
             # (agent-harness 3e742fc) — no host pre-persist needed.
-            message = await kernel_client.run_turn(user_id, session_id, content)
+            #
+            # ``pre_turn`` heals a stale in-process MCP token before every
+            # actor-loop turn — this is the path a recovered / resumed
+            # lead+member loop runs on after a backend restart, where the
+            # persisted ``harness`` token is stale and would otherwise 403
+            # (hiding dispatch / review_subtask / finish_task). It runs inside
+            # ``run_turn``, after the turn's kernel is allocated, so the write
+            # reaches that kernel rather than only the durable.
+            message = await kernel_client.run_turn(
+                user_id,
+                session_id,
+                content,
+                pre_turn=always_on_mcp_hook(session_id, user_id),
+            )
             return _resolve_turn_status(message)
         except Exception as exc:  # noqa: BLE001
             logger.warning("actor turn failed for session %s: %s", session_id, exc)
