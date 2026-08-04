@@ -264,6 +264,7 @@ const GENERATIVE_UI_LAYOUT_CSS = `
     min-width: 0;
     max-width: 100%;
     container-type: inline-size;
+    container-name: genui-inline;
   }
 
   ${OPENUI_SCOPE_SELECTOR} * {
@@ -484,8 +485,30 @@ const GENERATIVE_UI_LAYOUT_CSS = `
     overflow-y: visible;
   }
 
-  @container (max-width: 34rem) {
+  @container genui-inline (max-width: 48rem) {
     ${OPENUI_SCOPE_SELECTOR} .openui-card {
+      flex-basis: min(100%, 18rem) !important;
+    }
+
+    ${OPENUI_SCOPE_SELECTOR}
+      :has(> .openui-card:nth-child(3)) > .openui-card,
+    ${OPENUI_SCOPE_SELECTOR}
+      :has(> :nth-child(3))
+      > :not([class]):has(> .openui-tag):has(> :nth-child(2) .openui-markdown-renderer) {
+      flex-basis: min(100%, 14rem) !important;
+    }
+  }
+
+  @container genui-inline (max-width: 34rem) {
+    ${OPENUI_SCOPE_SELECTOR} .openui-card {
+      flex-basis: 100% !important;
+    }
+
+    ${OPENUI_SCOPE_SELECTOR}
+      :has(> .openui-card:nth-child(3)) > .openui-card,
+    ${OPENUI_SCOPE_SELECTOR}
+      :has(> :nth-child(3))
+      > :not([class]):has(> .openui-tag):has(> :nth-child(2) .openui-markdown-renderer) {
       flex-basis: 100% !important;
     }
 
