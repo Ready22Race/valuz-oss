@@ -17,6 +17,19 @@ Input mirrors the reference payload — an ``attachments`` array of
 ``fileName`` / ``fileSize`` / ``mimeType`` are derived from disk when omitted, so
 the agent can deliver with just a path. The handler reads the *current* file
 from disk, so a missing file is skipped (reported back) rather than recorded.
+
+Owner boundary
+--------------
+``filePath`` is model-supplied, so it is checked against the caller's own roots
+(``owner_allowed_roots`` + ``assert_owned`` — the same isolation line the
+``/v1/files/resolve`` endpoint uses, symlink-escape guard included) before
+anything else touches it. Without that check a model could register another
+tenant's absolute path: harmless-looking today because every *read* path
+re-validates ownership, but the row itself is already a cross-owner reference,
+and any future handling that copies bytes host-side (content snapshots) would
+turn it into a real leak — the host process can see the whole shared mount.
+The check runs BEFORE the ``isfile`` probe so an out-of-bounds path cannot be
+used as an existence oracle for someone else's files.
 """
 
 from __future__ import annotations
@@ -33,11 +46,21 @@ from src.core.tools import ExecContext
 
 import valuz_agent.boot.kernel  # noqa: F401  (sets kernel import path)
 from valuz_agent.infra.db import async_unit_of_work
+from valuz_agent.modules.files.service import assert_owned, owner_allowed_roots
 from valuz_agent.modules.sessions.datastore import SessionDatastore
 
 logger = logging.getLogger(__name__)
 
 DELIVER_ARTIFACTS_TOOL_NAME = "deliver_artifacts"
+
+# Skip reason for a path outside the caller's roots. Phrased as an instruction
+# because the model only ever sees this as text (the toolkit MCP renders tool
+# errors as a string prefix, not a wire failure), so it has to say what to do
+# next — not just that something was refused.
+_NOT_OWNED_REASON = (
+    "path is outside your workspace — write the file into your working "
+    "directory and deliver it from there"
+)
 
 TOOL_DESCRIPTION = (
     "Register finished output files as session artifacts — they show up in the "
@@ -45,8 +68,10 @@ TOOL_DESCRIPTION = (
     "user can open. Pass an 'attachments' array; each entry needs a 'filePath' "
     "(absolute path to a file you already wrote). 'fileName', 'fileSize' and "
     "'mimeType' are optional — they are derived from the file on disk when "
-    "omitted. Re-delivering the same path updates the existing entry instead of "
-    "duplicating it. When you mention a delivered file in your reply text, link "
+    "omitted. The file must live inside your own working directory; paths "
+    "outside it are refused. Re-delivering the same path updates the existing "
+    "entry instead of duplicating it. When you mention a delivered file in your "
+    "reply text, link "
     "it by joining `valuz-file://` with the absolute filePath (which starts with "
     "`/`), giving three slashes — e.g. "
     "[report.md](valuz-file:///Users/you/proj/report.md) — so the client can open "
@@ -117,6 +142,21 @@ async def _deliver_artifacts_handler(args: dict[str, Any], ctx: ExecContext) -> 
             is_error=True,
         )
 
+    # Resolved once per call, and OUTSIDE the unit of work below:
+    # ``owner_allowed_roots`` opens its own session, and nesting a second live
+    # session inside the handler's would have two connections contending on the
+    # same sqlite file for the whole loop.
+    roots = await owner_allowed_roots(user_id)
+    if not roots:
+        # Fail closed, but say why. An empty allowlist means the owner's managed
+        # root could not be resolved at all — reporting every entry as "outside
+        # your workspace" would send the model chasing its own file paths.
+        logger.warning("deliver_artifacts: no allowed roots for owner %s", user_id)
+        return ToolResult(
+            content="deliver_artifacts: cannot resolve your workspace root — nothing was recorded",
+            is_error=True,
+        )
+
     delivered: list[str] = []
     skipped: list[dict[str, str]] = []
 
@@ -131,6 +171,18 @@ async def _deliver_artifacts_handler(args: dict[str, Any], ctx: ExecContext) -> 
                 skipped.append({"filePath": str(file_path), "reason": "missing 'filePath'"})
                 continue
             abs_path = os.path.abspath(os.path.expanduser(file_path))
+            # Owner boundary first — see the module docstring. The row keeps the
+            # unresolved ``abs_path``; ``assert_owned``'s resolved form is only
+            # the gate, so a legitimate delivery records exactly the path the
+            # agent wrote (the read path resolves symlinks again anyway).
+            try:
+                assert_owned(Path(abs_path), roots)
+            except PermissionError:
+                logger.warning(
+                    "deliver_artifacts: refused out-of-bounds path for owner %s", user_id
+                )
+                skipped.append({"filePath": file_path, "reason": _NOT_OWNED_REASON})
+                continue
             if not os.path.isfile(abs_path):
                 skipped.append({"filePath": file_path, "reason": "file not found"})
                 continue
