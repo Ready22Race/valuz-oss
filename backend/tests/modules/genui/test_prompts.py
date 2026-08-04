@@ -41,14 +41,13 @@ def test_constants_are_set():
     assert "full-width primary trend" in GENERATIVE_UI_INSTRUCTIONS
     assert "balanced visual weight" in GENERATIVE_UI_INSTRUCTIONS
     assert "readable single-column flow" in GENERATIVE_UI_INSTRUCTIONS
-    assert "Valuz renderer extensions" in GENERATIVE_UI_INSTRUCTIONS
-    assert "MarketIndexGrid" in GENERATIVE_UI_INSTRUCTIONS
-    assert "MarketIndexCard" in GENERATIVE_UI_INSTRUCTIONS
-    assert "FinanceMetric" in GENERATIVE_UI_INSTRUCTIONS
-    assert "MarketBreadth" in GENERATIVE_UI_INSTRUCTIONS
-    assert "DataList" in GENERATIVE_UI_INSTRUCTIONS
-    assert "rank / main / value / meta" in GENERATIVE_UI_INSTRUCTIONS
-    assert "Prefer DataList over free-form rows" in GENERATIVE_UI_INSTRUCTIONS
+    # The component roster used to be restated here in prose. It now lives in
+    # the generated catalog (see test_a2ui_block_catalog.py) — describing
+    # components in two places is how one of them ends up naming a component
+    # that no longer exists, which is exactly what happened to FinanceMetric.
+    # These instructions carry layout policy only.
+    assert "MarketIndexGrid" not in GENERATIVE_UI_INSTRUCTIONS
+    assert "FinanceMetric" not in GENERATIVE_UI_INSTRUCTIONS
     assert "Never invent, duplicate, or repeat metrics" in GENERATIVE_UI_INSTRUCTIONS
     assert "stack all major sections top-to-bottom" not in GENERATIVE_UI_INSTRUCTIONS
     assert (

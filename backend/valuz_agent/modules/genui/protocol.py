@@ -49,20 +49,6 @@ OpenUI component catalog supported by the A2UI renderer:
   SwitchGroup, SwitchItem.
 - Actions/display: Button, Buttons, TagBlock, Tag, Metric, KPI, ListBlock,
   ListItem, List.
-- Valuz semantic components:
-  - MarketIndexGrid: props title, description, indices. Use for groups of
-    market/index quote cards. Each index item may include name, code, latest,
-    change, changePct, turnover, source, asOf.
-  - MarketIndexCard: props name, code, latest, change, changePct, turnover,
-    source, asOf. Use only for one standalone quote.
-  - MarketBreadth: props title, up, down, flat, total, source. Use for
-    up/down/flat breadth summaries.
-  - DataList: props title, description, items. Use for rankings, ordered
-    records, sector movers, stock movers, holdings, news, risk flags, and other
-    compact repeated textual data. Each item may include rank, name/title,
-    description, value, changePct/meta, trend. Prefer DataList over free-form
-    Row/Grid/TextContent lists; the renderer aligns rows as rank / main / value / meta
-    and wraps responsively.
 Use official A2UI v0.9 component objects with component properties at the top
 level, not nested under "props":
 {"id":"title","component":"TextContent","text":"Revenue","size":"large-heavy"}

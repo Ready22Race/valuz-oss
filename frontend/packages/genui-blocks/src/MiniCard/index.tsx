@@ -19,8 +19,10 @@ export const MiniCard = defineComponent({
     const tone = props.tone ?? trendTone(props.trend);
     return (
       <div className="vgb-tile vgb-tile-row" data-slot="vgb-mini-card">
-        <span className="vgb-tile-label">{props.label}</span>
-        <span className="vgb-tile-row" style={{ display: "flex", gap: "var(--openui-space-s)" }}>
+        <span className="vgb-tile-slot-start">
+          <span className="vgb-tile-label">{props.label}</span>
+        </span>
+        <span className="vgb-tile-slot-end" style={{ gap: "var(--openui-space-s)" }}>
           <span className="vgb-tile-value" style={{ fontSize: "var(--openui-font-size-lg)" }}>
             {props.value}
           </span>

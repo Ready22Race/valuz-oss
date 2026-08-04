@@ -54,7 +54,10 @@ def test_a2ui_prompt_describes_message_stream_and_openui_catalog():
     assert "StatsCard" in prompt
     assert "MarketBreadth" in prompt
     assert "DataList" in prompt
-    assert "rank / main / value / meta" in prompt
+    # The row anatomy used to be spelled out in hand-written catalog prose.
+    # It now comes from the DataList block's own description, which is
+    # generated — so assert the substance rather than the retired wording.
+    assert "leaderboards" in prompt
     assert "Do not create placeholder charts" in prompt
 
 

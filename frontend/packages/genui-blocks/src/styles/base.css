@@ -52,17 +52,22 @@
 
 /*
  * The tile grid. `flex-basis` is the knob that decides how many tiles share a
- * row: peers wrap once they can no longer hold their basis. The container
- * queries below step it down so a tile strip degrades to two-up and then
- * one-up as the chat column narrows, instead of overflowing.
+ * row: peers wrap once they can no longer hold their basis.
+ *
+ * 320px matches the reference implementation these blocks are modelled on, and
+ * it is a deliberate floor rather than a preference — below it a label and its
+ * figure stop fitting on one line and the tile reflows into two, which reads as
+ * a different component. The container queries further down relax the floor
+ * instead of letting tiles overflow: a chat column narrower than the floor has
+ * to give somewhere, and wrapping early beats a horizontal scrollbar.
  */
 .vgb-tile {
   display: flex;
-  flex: 1 1 15rem;
-  min-width: 0;
+  flex: 1 1 320px;
+  min-width: 320px;
   flex-direction: column;
-  gap: var(--openui-space-xs);
-  padding: var(--openui-space-l);
+  gap: var(--openui-space-s);
+  padding: var(--openui-space-m);
   background-color: var(--openui-highlight-subtle);
   border-radius: var(--openui-radius-2xl);
 }
@@ -72,6 +77,24 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--openui-space-s);
+}
+
+/*
+ * The value side of a label/value row. Capping it at 35% keeps a long figure
+ * from starving the label, and the 100px floor keeps a short one from being
+ * squeezed to a single character; `overflow: hidden` makes both bite.
+ */
+.vgb-tile-slot-start,
+.vgb-tile-slot-end {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  overflow: hidden;
+}
+
+.vgb-tile-slot-end {
+  max-width: 35%;
+  min-width: 100px;
 }
 
 .vgb-tile-label {
@@ -96,15 +119,24 @@
   white-space: nowrap;
 }
 
+/*
+ * The 320px floor above is right for a full-width surface and wrong for a chat
+ * column, which is routinely narrower than two tiles and sometimes narrower
+ * than one. `min-width` has to be relaxed alongside `flex-basis` — leaving it
+ * at 320px would make a single tile overflow its own container rather than
+ * shrink, and the whole column would scroll sideways.
+ */
 @container vgb (max-width: 48rem) {
   .vgb-tile {
-    flex-basis: 11rem;
+    flex-basis: 15rem;
+    min-width: 15rem;
   }
 }
 
 @container vgb (max-width: 30rem) {
   .vgb-tile {
     flex-basis: 100%;
+    min-width: 0;
   }
 }
 

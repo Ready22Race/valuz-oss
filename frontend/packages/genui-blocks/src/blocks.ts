@@ -4,7 +4,10 @@ import { MediumCardBlock, SmallCardBlock } from "./CardBlock";
 import { Citation, CondensedSources, SourceItem, SourceList } from "./Citation";
 import { CompositeCard } from "./CompositeCard";
 import { ContextCard } from "./ContextCard";
+import { DataList, DataListItem } from "./DataList";
 import { DataTileCard } from "./DataTileCard";
+import { MarketBreadth } from "./MarketBreadth";
+import { MarketIndexCard, MarketIndexGrid } from "./MarketIndexGrid";
 import { Mermaid, MermaidBadge } from "./Mermaid";
 import { MiniCard, MiniCardBlock } from "./MiniCard";
 import { OptionCard, OptionCards } from "./OptionCard";
@@ -81,6 +84,12 @@ export const blockComponents: BlockComponent[] = [
   ReportKeyStatement,
   ReportTable,
   ReportImage,
+  // Market data
+  MarketIndexGrid,
+  MarketIndexCard,
+  MarketBreadth,
+  DataList,
+  DataListItem,
   // Diagrams
   Mermaid,
   MermaidBadge,
@@ -138,6 +147,19 @@ export const blockComponentGroups: ComponentGroup[] = [
     ],
     notes: [
       "Long-form printable documents: ReportDocument wraps ReportFrontPage, an optional ReportTocPage, then one ReportPage per page — fill pages with the ordinary shared blocks (MiniCardBlock, TextContent, charts), never a report-specific twin of them.",
+    ],
+  },
+  {
+    name: "Market Data",
+    components: [
+      "MarketIndexGrid",
+      "MarketIndexCard",
+      "MarketBreadth",
+      "DataList",
+      "DataListItem",
+    ],
+    notes: [
+      "Market answers open with a MarketIndexGrid of quotes and, when the answer claims the move was broad, a MarketBreadth beside it; DataList is the ranking/leaderboard shape and beats a Table whenever every row is name + figure + change.",
     ],
   },
   {
