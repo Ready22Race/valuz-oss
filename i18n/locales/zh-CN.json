@@ -281,6 +281,7 @@
     "generatedFilesCount": "{count}个",
     "goToSettings": "前往设置",
     "noGeneratedFiles": "暂无生成文件",
+    "artifactSupersededHint": "该版本已被更新的版本取代",
     "indexing": "索引中...",
     "inputPlaceholder": "输入指令... / 引用技能，@ 引用文档",
     "interruptFailed": "中断失败",

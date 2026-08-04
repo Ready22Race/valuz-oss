@@ -198,8 +198,23 @@ export interface GeneratedArtifactItem {
   name: string;
   /** Optional human-readable byte size, e.g. "1.2 MB". */
   size?: string;
-  /** Absolute path the row opens via ``onOpenGeneratedFile``. */
+  /**
+   * Absolute path the row opens via ``onOpenGeneratedFile``. Points at this
+   * version's immutable snapshot, so it keeps working after the agent edits
+   * its working copy.
+   */
   path: string;
+  /**
+   * 1-based version of the deliverable, when the backend reports one. Shown as
+   * "v2" from the second version on — a lone "v1" would be noise on every row.
+   */
+  versionNo?: number;
+  /**
+   * Whether this is still the deliverable's latest version. ``false`` means a
+   * later turn or another session superseded it; the row dims so a stale
+   * version is not mistaken for the current deliverable.
+   */
+  isCurrent?: boolean;
 }
 
 /**
@@ -1355,7 +1370,25 @@ export const ProjectDetailContextPanel = ({
               title={f.path}
             >
               <FileTypeIcon filename={f.name} />
-              <span className="flex-1 truncate text-ink-heading">{f.name}</span>
+              <span
+                className={`flex-1 truncate ${
+                  f.isCurrent === false ? "text-ink-meta" : "text-ink-heading"
+                }`}
+              >
+                {f.name}
+              </span>
+              {f.versionNo != null && f.versionNo > 1 ? (
+                <span
+                  className="shrink-0 rounded bg-surface-muted px-1 text-2xs text-ink-meta"
+                  title={
+                    f.isCurrent === false
+                      ? t("conversation.artifactSupersededHint")
+                      : undefined
+                  }
+                >
+                  v{f.versionNo}
+                </span>
+              ) : null}
               {f.size ? (
                 <span className="shrink-0 text-2xs text-ink-meta">
                   {f.size}

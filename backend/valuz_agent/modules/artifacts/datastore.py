@@ -492,6 +492,16 @@ class ArtifactDatastore:
             )
         ).scalar_one_or_none()
 
+    async def get_content(self, user_id: str, content_id: str) -> ArtifactContentRow | None:
+        return (
+            await self._db.execute(
+                select(ArtifactContentRow).where(
+                    ArtifactContentRow.user_id == user_id,
+                    ArtifactContentRow.id == content_id,
+                )
+            )
+        ).scalar_one_or_none()
+
     async def get_artifact(self, user_id: str, artifact_id: str) -> ArtifactRow | None:
         return (
             await self._db.execute(

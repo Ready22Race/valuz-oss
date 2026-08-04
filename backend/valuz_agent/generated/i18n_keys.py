@@ -556,6 +556,7 @@ I18nKey = Literal[
     "conversation.approvalRulePreviewPrefix",
     "conversation.approvalTrayBadge",
     "conversation.approvalTrayWarning",
+    "conversation.artifactSupersededHint",
     "conversation.askUserAnswerTitle",
     "conversation.attachmentLimitReached",
     "conversation.attachmentParsing",

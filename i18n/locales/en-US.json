@@ -281,6 +281,7 @@
     "generatedFilesCount": "{count}",
     "goToSettings": "Go to Settings",
     "noGeneratedFiles": "No generated files yet",
+    "artifactSupersededHint": "Superseded by a newer version",
     "indexing": "Indexing...",
     "inputPlaceholder": "Enter instruction... / @ skills, @ docs",
     "interruptFailed": "Interrupt failed",

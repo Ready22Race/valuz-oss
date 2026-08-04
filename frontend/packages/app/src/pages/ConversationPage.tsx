@@ -5779,6 +5779,8 @@ export const ConversationPage = () => {
       name: a.file_name,
       size: formatFileSize(a.file_size),
       path: a.file_path,
+      versionNo: a.version_no,
+      isCurrent: a.is_current,
     }));
     // Always render the panel — even when it has nothing in it — so the
     // right-side toggle button stays visible on every conversation page.
