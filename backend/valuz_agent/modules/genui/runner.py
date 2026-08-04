@@ -109,15 +109,15 @@ def _make_completer(
     text as the canonical ToolResult. When either is None, behaves as the
     synchronous (non-streaming) version."""
 
-    if not _uses_official_cli_auth(runtime_provider=runtime_provider, mp=mp):
-        return _make_direct_llm_completer(
-            user_id=user_id,
-            model=model,
-            mp=mp,
-            calling_session_id=calling_session_id,
-            tool_use_id=tool_use_id,
-            output_format=output_format,
-        )
+    # if not _uses_official_cli_auth(runtime_provider=runtime_provider, mp=mp):
+    #     return _make_direct_llm_completer(
+    #         user_id=user_id,
+    #         model=model,
+    #         mp=mp,
+    #         calling_session_id=calling_session_id,
+    #         tool_use_id=tool_use_id,
+    #         output_format=output_format,
+    #     )
 
     async def _forward_deltas(ephem_id: str) -> None:
         forwarded = 0
