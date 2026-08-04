@@ -11,6 +11,7 @@ import {
 } from "@a2ui/web_core/v0_9";
 import * as OpenUI from "@openuidev/react-ui";
 import { Modal as OpenUIModal } from "@openuidev/react-ui/Modal";
+import { blockComponents, blockNames } from "@valuz/genui-blocks";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { type CSSProperties, type ReactNode, useMemo } from "react";
 import { z } from "zod/v3";
@@ -67,7 +68,6 @@ const OPENUI_COMPONENT_NAMES = [
   "ListItem",
   "MarkDownRenderer",
   "Markdown",
-  "FinanceMetric",
   "MarketBreadth",
   "MarketIndexCard",
   "MarketIndexGrid",
@@ -107,6 +107,88 @@ const OPENUI_COMPONENT_NAMES = [
   "TextContent",
   "Title",
 ];
+
+const BLOCK_BY_NAME = new Map(blockComponents.map((block) => [block.name, block]));
+
+/**
+ * Names retired in favour of a block, kept resolvable so payloads generated
+ * before the change — and any prompt still naming them — keep rendering.
+ * `map` reshapes the retired component's props onto the block's.
+ */
+const RETIRED_TO_BLOCK: Record<
+  string,
+  { block: string; map: (props: Record<string, unknown>) => Record<string, unknown> }
+> = {
+  FinanceMetric: {
+    block: "StatsCard",
+    map: (props) => ({
+      label: readText(props.label ?? props.name ?? props.title),
+      value: [readText(props.value ?? props.latest ?? props.text), readText(props.unit)]
+        .filter(Boolean)
+        .join(" "),
+      delta: readText(props.changePct ?? props.change_pct ?? props.pct ?? props.change),
+      description: readText(props.description),
+    }),
+  },
+};
+
+/**
+ * Every name the A2UI runtime will accept: the hand-listed OpenUI names above,
+ * every block in @valuz/genui-blocks, and the retired names.
+ *
+ * Derived rather than listed, because a name registered here but missing from
+ * the block registry (or the reverse) fails silently — the model is told about
+ * a component that renders as bare text, or a rendered component is never
+ * offered to the model. Adding a block to that package is the only edit needed
+ * to reach this protocol. Retired names stay registered so the runtime still
+ * accepts them; the adapter maps them onto their replacement.
+ */
+const A2UI_COMPONENT_NAMES = [
+  ...OPENUI_COMPONENT_NAMES,
+  ...blockNames,
+  ...Object.keys(RETIRED_TO_BLOCK),
+];
+
+/**
+ * Render a block from an A2UI component model.
+ *
+ * One adapter serves every block because the two protocols differ in exactly
+ * one place: children. A2UI passes child ids that `buildChild` turns into
+ * React nodes, while a block expects to call `renderNode(props.children)`.
+ * Handing it a `renderNode` that returns the already-built nodes closes the
+ * gap; scalar and array props pass straight through, and the block's own zod
+ * schema supplies defaults and coercion.
+ */
+function renderBlockComponent(
+  name: string,
+  rawProps: Record<string, unknown>,
+  buildChild: BuildChild,
+): ReactNode | null {
+  const retired = RETIRED_TO_BLOCK[name];
+  const blockName = retired ? retired.block : name;
+  const block = BLOCK_BY_NAME.get(blockName);
+  if (!block) return null;
+
+  const props = retired ? retired.map(rawProps) : rawProps;
+  const built = readChildren(props, buildChild);
+
+  // Prefer the parsed value for its defaults and coercion, but never let a
+  // schema miss blank the component: model output is untrusted, and a missing
+  // optional field should degrade to an empty slot rather than a dropped block.
+  const parsed = block.props.safeParse({ ...props, children: [] });
+  const resolved: Record<string, unknown> = {
+    ...props,
+    ...(parsed.success ? (parsed.data as Record<string, unknown>) : {}),
+    children: built,
+  };
+
+  const Impl = block.component as (renderProps: {
+    props: Record<string, unknown>;
+    renderNode: (value: unknown) => ReactNode;
+  }) => ReactNode;
+
+  return <Impl props={resolved} renderNode={(value) => value as ReactNode} />;
+}
 
 const createA2UIComponent = createBinderlessComponentImplementation as unknown as (
   api: ComponentApi,
@@ -161,7 +243,7 @@ function buildSurfaces(body: string): SurfaceModel<ReactComponentImplementation>
 }
 
 function createOpenUIComponents(): ReactComponentImplementation[] {
-  return OPENUI_COMPONENT_NAMES.map((name) => {
+  return A2UI_COMPONENT_NAMES.map((name) => {
     const api = { name, schema: looseComponentSchema } as unknown as ComponentApi;
     return createA2UIComponent(
       api,
@@ -297,8 +379,6 @@ function OpenUIComponent({
     case "DataListItem":
     case "ListItem":
       return <DataListRow item={readDataListItem(props)} />;
-    case "FinanceMetric":
-      return <FinanceMetricBox props={props} />;
     case "MarketBreadth":
       return <MarketBreadthBox props={props} />;
     case "MarketIndexCard":
@@ -561,8 +641,14 @@ function OpenUIComponent({
           {children}
         </OpenUIModal>
       );
-    default:
+    default: {
+      // Blocks resolve here rather than as cases above: they are registered by
+      // name from the block catalog, so a switch arm per block would be a
+      // second list to keep in step with the first.
+      const block = renderBlockComponent(name, props, buildChild);
+      if (block) return block;
       return <TextBlock>{readText(props.text ?? props.label ?? name)}</TextBlock>;
+    }
   }
 }
 
@@ -1039,98 +1125,6 @@ function MarketIndexCardBox({ index }: { index: MarketIndexItem }) {
           >
             {[index.asOf, index.source].filter(Boolean).join(" · ")}
           </div>
-        ) : null}
-      </article>
-    </OpenUI.Card>
-  );
-}
-
-function FinanceMetricBox({ props }: { props: Record<string, unknown> }) {
-  const value = readText(props.value ?? props.latest ?? props.text);
-  const unit = readText(props.unit);
-  const change =
-    readText(props.changePct ?? props.change_pct ?? props.pct) ||
-    readText(props.change);
-  const trend = inferTrend(readText(props.trend) || change);
-
-  return (
-    <OpenUI.Card variant="card" width="full">
-      <article
-        data-a2ui-component="finance-metric"
-        data-a2ui-trend={trend}
-        style={{
-          display: "flex",
-          minHeight: "100%",
-          minWidth: 0,
-          flexDirection: "column",
-          gap: "var(--openui-space-xs)",
-        }}
-      >
-        <span
-          data-a2ui-finance-metric-label
-          style={{
-            color: "var(--openui-text-neutral-primary)",
-            font: "var(--openui-text-label-default-heavy)",
-            overflowWrap: "anywhere",
-          }}
-        >
-          {readText(props.label ?? props.title)}
-        </span>
-        {readText(props.description ?? props.subtitle) ? (
-          <span
-            data-a2ui-finance-metric-description
-            style={{
-              color: "var(--openui-text-neutral-secondary)",
-              font: "var(--openui-text-label-sm)",
-            }}
-          >
-            {readText(props.description ?? props.subtitle)}
-          </span>
-        ) : null}
-        <div
-          data-a2ui-finance-metric-value-row
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            alignItems: "baseline",
-            gap: "var(--openui-space-2xs)",
-            marginTop: "var(--openui-space-xs)",
-          }}
-        >
-          <span
-            data-a2ui-finance-metric-value
-            style={{
-              color: "var(--openui-text-neutral-primary)",
-              font: "var(--openui-text-numbers-heading-md)",
-              fontVariantNumeric: "tabular-nums",
-              letterSpacing: 0,
-            }}
-          >
-            {value}
-          </span>
-          {unit ? (
-            <span
-              data-a2ui-finance-metric-unit
-              style={{
-                color: "var(--openui-text-neutral-secondary)",
-                font: "var(--openui-text-label-sm)",
-              }}
-            >
-              {unit}
-            </span>
-          ) : null}
-        </div>
-        {change ? (
-          <span
-            data-a2ui-finance-metric-change
-            style={{
-              color: "var(--openui-text-neutral-secondary)",
-              font: "var(--openui-text-label-sm)",
-              fontVariantNumeric: "tabular-nums",
-            }}
-          >
-            {change}
-          </span>
         ) : null}
       </article>
     </OpenUI.Card>

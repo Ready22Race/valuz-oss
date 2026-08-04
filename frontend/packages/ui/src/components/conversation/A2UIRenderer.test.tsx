@@ -503,9 +503,10 @@ describe("A2UIRenderer", () => {
     expect(screen.getByText("创业板指")).toBeTruthy();
     expect(screen.getByText("+5.73%")).toBeTruthy();
 
-    const financeMetric = container.querySelector(
-      '[data-a2ui-component="finance-metric"]',
-    );
+    // FinanceMetric's bespoke renderer was retired: the name now resolves onto
+    // the StatsCard block, which carries the same label/value/unit/change
+    // shape. The payload is unchanged, so the rendered content must be too.
+    const financeMetric = container.querySelector('[data-slot="vgb-stats-card"]');
     expect(financeMetric?.textContent).toContain("TTM市盈率");
     expect(financeMetric?.textContent).toContain("76.1");
     expect(financeMetric?.textContent).toContain("倍");

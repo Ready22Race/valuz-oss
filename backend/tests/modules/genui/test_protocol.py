@@ -47,7 +47,11 @@ def test_a2ui_prompt_describes_message_stream_and_openui_catalog():
     assert "Valuz semantic components" in prompt
     assert "MarketIndexGrid" in prompt
     assert "MarketIndexCard" in prompt
-    assert "FinanceMetric" in prompt
+    # FinanceMetric was retired in favour of the StatsCard block, which carries
+    # the same label/value/delta/description shape. The name still resolves in
+    # the renderer for older payloads, but the model is no longer taught it —
+    # see test_a2ui_block_catalog.py.
+    assert "StatsCard" in prompt
     assert "MarketBreadth" in prompt
     assert "DataList" in prompt
     assert "rank / main / value / meta" in prompt

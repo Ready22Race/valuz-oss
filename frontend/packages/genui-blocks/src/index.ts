@@ -1,6 +1,13 @@
 import "./styles.css";
 
 export type { BlockComponent } from "./blocks";
+export type { BlockPropSpec, BlockSpec } from "./catalog";
+export {
+  blockCatalog,
+  blockNames,
+  describeBlock,
+  renderBlockCatalogText,
+} from "./catalog";
 export { blockAdditionalRules, blockExamples, valuzPromptOptions } from "./prompt";
 export {
   createBlockOnlyLibrary,

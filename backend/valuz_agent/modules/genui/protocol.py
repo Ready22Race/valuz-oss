@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from importlib import resources
 from typing import Literal
 
 from valuz_agent.modules.genui.prompts import (
@@ -29,7 +30,7 @@ A2UI_GENERATIVE_UI_INSTRUCTIONS = (
     "placeholder charts: only render chart components when the request or data "
     "contains real chart series, labels, slices, or points. When the data is a "
     "current snapshot rather than a time series, use MarketIndexGrid, "
-    "FinanceMetric, MarketBreadth, DataList, or Table instead of an empty chart."
+    "StatsCard, MarketBreadth, DataList, or Table instead of an empty chart."
 )
 
 A2UI_OPENUI_COMPONENT_CATALOG = """
@@ -54,8 +55,6 @@ OpenUI component catalog supported by the A2UI renderer:
     change, changePct, turnover, source, asOf.
   - MarketIndexCard: props name, code, latest, change, changePct, turnover,
     source, asOf. Use only for one standalone quote.
-  - FinanceMetric: props label, value, unit, change, changePct, description.
-    Use for PE/PB/market cap/revenue/margin/ROE/turnover-rate/valuation metrics.
   - MarketBreadth: props title, up, down, flat, total, source. Use for
     up/down/flat breadth summaries.
   - DataList: props title, description, items. Use for rankings, ordered
@@ -71,7 +70,31 @@ Use flat component ids for layout children:
 {"id":"root","component":"Stack","children":["title","chart"],"direction":"column","gap":"m"}
 Do not create placeholder charts or charts with empty series. If supplied data
 does not include chart-ready arrays, show the raw values with DataList, Table,
-MarketIndexGrid, FinanceMetric, or MarketBreadth.
+MarketIndexGrid, StatsCard, or MarketBreadth.
+"""
+
+
+def _load_block_catalog() -> str:
+    """The Valuz block section of the catalog.
+
+    Generated from the block registry in ``@valuz/genui-blocks`` by
+    ``frontend/packages/ui/scripts/gen_openui_prompt.mjs`` — the same registry
+    ``A2UIRenderer`` builds its component list from, so the model is never told
+    about a block that cannot render, nor left unaware of one that can. Hand-
+    editing this asset re-opens exactly that drift.
+    """
+
+    return (
+        resources.files("valuz_agent.modules.genui")
+        .joinpath("a2ui_block_catalog.txt")
+        .read_text(encoding="utf-8")
+        .rstrip("\n")
+    )
+
+
+A2UI_COMPONENT_CATALOG = f"""{A2UI_OPENUI_COMPONENT_CATALOG}
+- Valuz blocks (cards, citations, report pages, diagrams):
+{_load_block_catalog()}
 """
 
 
@@ -118,7 +141,7 @@ def build_a2ui_prompt(request: str, data: object | None = None) -> str:
         "- deleteSurface is allowed only when removing a surface.",
         '- every UI must include a component with id "root"; put the visible tree under root.children.',
         "",
-        A2UI_OPENUI_COMPONENT_CATALOG.strip(),
+        A2UI_COMPONENT_CATALOG.strip(),
         "",
         "REQUEST:",
         request.strip(),

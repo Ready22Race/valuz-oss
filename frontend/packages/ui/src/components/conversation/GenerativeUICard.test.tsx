@@ -24,6 +24,11 @@ vi.mock("@openuidev/react-ui/Modal", () => ({
 // stub Renderer.
 vi.mock("@valuz/genui-blocks", () => ({
   createValuzLibrary: () => ({}),
+  // A2UIRenderer builds its component registry from these; this file exercises
+  // the card's chrome, so an empty registry is the point — no block should be
+  // needed to render it.
+  blockComponents: [],
+  blockNames: [],
 }));
 vi.mock("../../hooks/use-i18n", () => ({
   useI18n: () => ({ t: (k: string) => k }),
