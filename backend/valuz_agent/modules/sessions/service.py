@@ -67,7 +67,10 @@ from valuz_agent.modules.sessions.attachments import (
     _load_pending_attachments,
     _mark_attachments_consumed,
 )
-from valuz_agent.modules.sessions.context_builder import _build_additional_context
+from valuz_agent.modules.sessions.context_builder import (
+    _build_additional_context,
+    worktree_name_of,
+)
 from valuz_agent.modules.sessions.datastore import SessionDatastore
 from valuz_agent.modules.sessions.dto import (
     QueuedInput,
@@ -1519,6 +1522,7 @@ class SessionService:
                 project_id,
                 pending_attachments,
                 user_id=user_id,
+                worktree=worktree_name_of(session),
             )
 
             try:

@@ -17,7 +17,7 @@ import re
 import secrets
 from dataclasses import dataclass
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from valuz_agent.infra.time_utils import now_ms
@@ -431,6 +431,26 @@ class ArtifactDatastore:
             .limit(limit)
         )
         return [tuple(r) for r in (await self._db.execute(stmt)).all()]
+
+    async def count_scope_artifacts(self, scope: Scope) -> int:
+        """How many live artifacts the scope holds.
+
+        Separate from ``list_scope_heads`` because the per-turn context block
+        shows a capped list but has to say how many were left out — a truncated
+        list that looks complete would have the model conclude a deliverable it
+        cannot see does not exist.
+        """
+        stmt = (
+            select(func.count())
+            .select_from(ArtifactRow)
+            .where(
+                ArtifactRow.user_id == scope.user_id,
+                ArtifactRow.project_id == scope.project_id,
+                ArtifactRow.worktree == scope.worktree,
+                ArtifactRow.archived_at.is_(None),
+            )
+        )
+        return int((await self._db.execute(stmt)).scalar_one())
 
     async def list_revisions(self, user_id: str, artifact_id: str) -> list[ArtifactRevisionRow]:
         """An artifact's full history, oldest first."""
