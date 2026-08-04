@@ -14,7 +14,7 @@ export const DataTileCard = defineComponent({
   description:
     "An amount over a one-line breakdown that qualifies it — \"$4.2M\" above \"across 12 accounts\". " +
     "Use it when the figure needs that second line to be understood; when it does not, MiniCard or ValueCard is lighter. " +
-    "value is the formatted amount, breakdown the qualifying line, label an optional metric name above the value, and icon a lucide icon name in kebab-case (\"wallet\", \"trending-up\", \"users\") — an unknown name simply renders no icon. " +
+    "value is the formatted amount, breakdown the qualifying line, label an optional metric name above the value, and icon any lucide-react icon name — an unknown name simply renders no icon. " +
     "Lay several out with SmallCardBlock or MediumCardBlock.",
   component: ({ props }) => (
     <div className="vgb-tile vgb-data-tile" data-slot="vgb-data-tile-card">

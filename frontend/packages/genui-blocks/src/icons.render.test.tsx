@@ -11,7 +11,7 @@ function renderLang(source: string) {
 
 describe("icons", () => {
   it("loads a lucide icon by name", async () => {
-    const { container } = renderLang(`root = IconTag("trending-up")`);
+    const { container } = renderLang(`root = IconTag("TrendingUp")`);
     // The icon arrives through a dynamic import, so it is a frame or two late.
     await waitFor(() => expect(container.querySelector("svg")).not.toBeNull());
     expect(container.querySelector('[data-slot="vgb-icon-tag"]')).not.toBeNull();
@@ -54,24 +54,21 @@ describe("icons", () => {
     expect(isKnownIcon("")).toBe(false);
   });
 
-  it("names only icons that exist in the prompt examples", () => {
-    // The description lists example names to teach the shape. An example that
-    // does not resolve teaches the model a name that renders nothing.
-    for (const name of [
-      "trending-up",
-      "trending-down",
-      "dollar-sign",
-      "chart-line",
-      "users",
-      "alert-triangle",
-      "circle-check",
-      "info",
-      "star",
-      "activity",
-      "wallet",
-      "building-2",
+  it("accepts the component spelling as well as the id", () => {
+    // The prompt says only "any lucide-react icon name". The model knows that
+    // set as the component exports — TrendingUp, Building2 — while the import
+    // map is keyed on ids. Rejecting the spelling it is likelier to produce
+    // would turn a correct icon name into a blank.
+    for (const [written, id] of [
+      ["TrendingUp", "trending-up"],
+      ["Building2", "building-2"],
+      ["ChartLine", "chart-line"],
+      ["trending_up", "trending-up"],
+      ["Trending Up", "trending-up"],
+      ["  Star  ", "star"],
     ]) {
-      expect(isKnownIcon(name), `${name} is not a lucide icon`).toBe(true);
+      expect(isKnownIcon(written), `${written} should resolve to ${id}`).toBe(true);
+      expect(isKnownIcon(id)).toBe(true);
     }
   });
 });

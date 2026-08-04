@@ -8,13 +8,14 @@ import { IconTagSchema, IconTextSchema } from "./schema";
 export { IconSizeSchema, IconTagSchema, IconTextSchema } from "./schema";
 
 /**
- * Icon names are lucide's kebab-case ids. The description below lists a handful
- * rather than all ~1900: the list is prompt text, and its job is to teach the
- * *shape* of a name so the model can reach for one it was never shown. An
- * unknown name renders nothing rather than breaking the document.
+ * The prompt names the library and stops there. The model already knows
+ * lucide's icon set from pretraining, so a dozen example names would spend
+ * prompt budget teaching it something it can recall — and would quietly cap it
+ * at whichever names happened to be listed. `normalise()` in lib/icon accepts
+ * both the component spelling it is likelier to reach for (`TrendingUp`) and
+ * the id (`trending-up`).
  */
-const ICON_NAMING =
-  'icon is a lucide icon name in kebab-case — "trending-up", "trending-down", "dollar-sign", "chart-line", "users", "alert-triangle", "circle-check", "info", "star", "activity", "wallet", "building-2". Any lucide name works; use the plain noun for the thing, not a brand or a filename.';
+const ICON_NAMING = "icon is any lucide-react icon name.";
 
 export const IconTag = defineComponent({
   name: "IconTag",

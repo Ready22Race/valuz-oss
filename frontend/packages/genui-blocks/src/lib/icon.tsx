@@ -37,8 +37,25 @@ const loaders = dynamicIconImports as unknown as IconLoaders;
 // so a bad name is looked up once rather than on every render.
 const nodeCache = new Map<string, IconNode | null>();
 
+/**
+ * Accept any spelling of a lucide name.
+ *
+ * The prompt just names lucide-react, which the model knows from pretraining —
+ * but it knows it as the *component* export, `TrendingUp` / `Building2`, while
+ * the dynamic import map is keyed on the id, `trending-up` / `building-2`.
+ * Insisting on one spelling would make a correct icon name render nothing, so
+ * PascalCase, snake_case and spaced forms all fold onto the id. The digit
+ * boundary matters as much as the case one: lucide has a `Building2`.
+ */
 function normalise(name: string | undefined): string {
-  return (name ?? "").trim().toLowerCase();
+  return (name ?? "")
+    .trim()
+    .replace(/([a-z])([A-Z])/g, "$1-$2")
+    .replace(/([a-zA-Z])([0-9])/g, "$1-$2")
+    .replace(/[\s_]+/g, "-")
+    .toLowerCase()
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
 }
 
 /** True when `name` is an icon lucide actually ships. */
