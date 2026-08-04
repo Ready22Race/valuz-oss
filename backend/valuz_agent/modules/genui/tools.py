@@ -43,11 +43,40 @@ logger = logging.getLogger(__name__)
 GENERATIVE_UI_TOOL_NAME = "generate_ui"
 _GENERATION_MAX_ATTEMPTS = 2
 _GENERATION_RETRY_DELAY_SECONDS = 0.5
+# How many recent turns may carry the visual intent forward. A refinement
+# ("换成柱状图", "把刚才的图加上成交额") rarely restates the request, and making
+# the user re-say the magic word every turn is what made this gate feel
+# arbitrary. The window is deliberately short: intent from an hour ago is not
+# intent now, and a wide window would hand back exactly the scope-expansion
+# this gate exists to prevent.
+_INTENT_LOOKBACK_TURNS = 3
+
 _EXPLICIT_VISUAL_REQUEST_RE = re.compile(
-    r"(?:可视化|图表|画图|绘图|仪表盘|数据看板|交互(?:式)?(?:界面|图)|"
-    r"\b(?:dashboard|chart|plot|graph|visuali[sz](?:e|ation)|interactive\s+ui)\b)",
+    r"(?:可视化|图形化|图表|仪表盘|看板|数据面板|行情面板"
+    r"|(?:柱状|条形|折线|曲线|饼|饼状|散点|热力|雷达|走势|甘特|漏斗|气泡|K\s*线)图"
+    r"|[画绘](?:制)?[一二三]?[张个幅]?图"
+    r"|交互(?:式)?(?:界面|图)|生成式\s*UI"
+    r"|\b(?:dashboard|chart|plot|graph|visuali[sz](?:e|ation)|visual|viz"
+    r"|interactive\s+ui|render\s+(?:a\s+)?ui)\b)",
     re.IGNORECASE,
 )
+
+
+def _requested_visual_output(messages: object) -> bool:
+    """True when any of the recent turns explicitly asked for a visual.
+
+    Bare 图 is deliberately not a keyword: it would match 地图, 图片 and 试图.
+    Refinements that say only "把刚才的图…" are covered by the lookback window
+    rather than by loosening the pattern, because loosening it is what would
+    let an ordinary request become a dashboard.
+    """
+
+    for message in list(messages or [])[:_INTENT_LOOKBACK_TURNS]:
+        user_message = getattr(message, "user_message", None)
+        text = getattr(user_message, "text", "")
+        if isinstance(text, str) and _EXPLICIT_VISUAL_REQUEST_RE.search(text):
+            return True
+    return False
 
 _PARAMS = {
     "type": "object",
@@ -122,21 +151,21 @@ async def _generate_ui_handler(args: dict[str, Any], ctx: ExecContext) -> ToolRe
     # current user message so "列出..." cannot silently become a dashboard.
     try:
         messages = (
-            await kernel_client.list_messages(user_id, ctx.session_id, limit=1)
+            await kernel_client.list_messages(
+                user_id, ctx.session_id, limit=_INTENT_LOOKBACK_TURNS
+            )
             if ctx.session_id
             else []
         )
     except Exception:  # noqa: BLE001
         logger.debug("generate_ui: user-intent lookup failed", exc_info=True)
         messages = []
-    latest = messages[0] if messages else None
-    user_message = getattr(latest, "user_message", None)
-    user_text = getattr(user_message, "text", "")
-    if not isinstance(user_text, str) or not _EXPLICIT_VISUAL_REQUEST_RE.search(user_text):
+    if not _requested_visual_output(messages):
         return ToolResult(
             content=(
-                "generate_ui: the current user message did not explicitly request "
-                "a chart, dashboard, visualization, or interactive UI"
+                "generate_ui: no recent user message asked for a chart, dashboard, "
+                "visualization, or interactive UI. Answer in text instead; only call "
+                "this tool once the user has asked for one."
             ),
             is_error=True,
         )

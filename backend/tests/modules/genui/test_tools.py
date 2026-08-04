@@ -106,14 +106,19 @@ async def test_handler_requires_request(patched):
 
 async def test_handler_rejects_dashboard_when_user_only_asked_for_a_list(monkeypatch, patched):
     async def _list_messages(user_id, sid, *, limit=1):
-        return [SimpleNamespace(user_message=SimpleNamespace(text="列出最近四个季度的数据"))]
+        # The gate now looks back a few turns, so the whole window has to be
+        # free of a visual request for the rejection to be the one under test.
+        return [
+            SimpleNamespace(user_message=SimpleNamespace(text="列出最近四个季度的数据")),
+            SimpleNamespace(user_message=SimpleNamespace(text="这些数字怎么来的")),
+        ]
 
     monkeypatch.setattr(t.kernel_client, "list_messages", _list_messages)
     handler = build_generative_ui_tool_defs()[0].handler
     res = await handler({"request": "Create a quarterly dashboard"}, _ctx())
 
     assert res.is_error is True
-    assert "did not explicitly request" in res.content
+    assert "no recent user message asked for" in res.content
 
 
 async def test_handler_passes_data_into_prompt(monkeypatch, patched):
