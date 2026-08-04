@@ -776,7 +776,7 @@ def _generated_case(
         "gold_relation": "entailed" if gold else "unresolved",
         "expected_status": expected_status,
         "expected_binding_action": expected_binding,
-        "expected_repair_action": "none",
+        "expected_user_visible_severity": "none",
         "notes": notes,
     }
 
@@ -964,7 +964,7 @@ def evaluate_fixture(payload: dict[str, Any]) -> dict[str, Any]:
         first_rank = min(ranks) if ranks else None
         expected_status = str(case.get("expected_status") or "")
         expected_binding = str(case.get("expected_binding_action") or "")
-        expected_repair = str(case.get("expected_repair_action") or "")
+        expected_severity = str(case.get("expected_user_visible_severity") or "")
         cases.append(
             {
                 "resolver_case_id": case["resolver_case_id"],
@@ -981,9 +981,9 @@ def evaluate_fixture(payload: dict[str, Any]) -> dict[str, Any]:
                 "expected_binding_action": expected_binding,
                 "actual_binding_action": resolution.binding_action,
                 "binding_ok": resolution.binding_action == expected_binding,
-                "expected_repair_action": expected_repair,
-                "actual_repair_action": resolution.repair_action,
-                "repair_ok": resolution.repair_action == expected_repair,
+                "expected_user_visible_severity": expected_severity,
+                "actual_user_visible_severity": resolution.user_visible_severity,
+                "severity_ok": resolution.user_visible_severity == expected_severity,
                 "selected_handles": list(resolution.selected_handles),
                 "support_by_handle": dict(resolution.support_by_handle),
                 "reason_codes": list(resolution.reason_codes),
@@ -1067,8 +1067,6 @@ def _policy_coverage(
 def _case_metrics(cases: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     recall_hits = {1: 0, 3: 0, 5: 0, 8: 0}
     reciprocal_ranks: list[float] = []
-    unresolved_cases = 0
-    unresolved_repaired = 0
     for case in cases:
         gold = case.get("gold_evidence_ids") or []
         first_rank = case.get("first_gold_rank")
@@ -1077,9 +1075,6 @@ def _case_metrics(cases: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             for cutoff in recall_hits:
                 if isinstance(first_rank, int) and first_rank <= cutoff:
                     recall_hits[cutoff] += 1
-        if case.get("expected_status") == "unresolved":
-            unresolved_cases += 1
-            unresolved_repaired += int(case.get("actual_repair_action") != "none")
     count = len(cases)
     recall_denominator = sum(bool(case.get("gold_evidence_ids")) for case in cases)
     metrics = {
@@ -1099,15 +1094,18 @@ def _case_metrics(cases: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             "binding_action_accuracy": (
                 sum(bool(case.get("binding_ok")) for case in cases) / count if count else 1.0
             ),
-            "repair_action_accuracy": (
-                sum(bool(case.get("repair_ok")) for case in cases) / count if count else 1.0
-            ),
-            "unresolved_repair_rate": (
-                unresolved_repaired / unresolved_cases if unresolved_cases else 0.0
+            "user_visible_severity_accuracy": (
+                sum(bool(case.get("severity_ok")) for case in cases) / count
+                if count
+                else 1.0
             ),
             "case_count": count,
             "failed_case_count": sum(
-                not (case.get("status_ok") and case.get("binding_ok") and case.get("repair_ok"))
+                not (
+                    case.get("status_ok")
+                    and case.get("binding_ok")
+                    and case.get("severity_ok")
+                )
                 for case in cases
             ),
         }
@@ -1131,14 +1129,15 @@ def _print_summary(result: dict[str, Any]) -> None:
     for gap in coverage.get("unknown_references") or ():
         print(f"UNKNOWN POLICY REF {gap['owner_layer']}: {gap['policy_ref']}")
     for case in result["cases"]:
-        if case["status_ok"] and case["binding_ok"] and case["repair_ok"]:
+        if case["status_ok"] and case["binding_ok"] and case["severity_ok"]:
             continue
         print(
             f"FAIL {case['resolver_case_id']} ({case['owner_layer']}): "
             f"status {case['expected_status']} -> {case['actual_status']}; "
             f"binding {case['expected_binding_action']} -> "
             f"{case['actual_binding_action']}; "
-            f"repair {case['expected_repair_action']} -> {case['actual_repair_action']}; "
+            f"severity {case['expected_user_visible_severity']} -> "
+            f"{case['actual_user_visible_severity']}; "
             f"candidates={case['candidate_handles']}"
         )
 
@@ -1153,7 +1152,7 @@ def _print_metrics(label: str, metrics: Mapping[str, Any]) -> None:
         f"MRR={metrics['mean_reciprocal_rank']:.3f} "
         f"status={metrics['status_accuracy']:.3f} "
         f"binding={metrics['binding_action_accuracy']:.3f} "
-        f"unresolved-repair={metrics['unresolved_repair_rate']:.3f}"
+        f"severity={metrics['user_visible_severity_accuracy']:.3f}"
     )
 
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
@@ -157,7 +158,45 @@ _PRESENTATION_RE = re.compile(
     r"(?:数据|资料|来源|信息).{0,8}(?:已充分|已齐全|已收集|已获取)|"
     r"(?:现在|接下来|下面)(?:开始|将|直接)?.{0,12}(?:整合|汇总|整理|撰写|生成).{0,12}(?:来源|报告|结果|内容)?|"
     r"(?:已|已经)(?:找到|检索到|收集到|获取到).{0,20}(?:资料|来源|数据|信息)|"
-    r"\b(?:results? (?:are|follow)|summary follows)\b)",
+    r"\bnow (?:compiling|assembling|preparing|writing|generating).{0,32}"
+    r"(?:report|summary|answer|response|results?)\b|"
+    r"\b(?:results? (?:are|follow)|summary follows|"
+    r"all (?:requested )?(?:data|sources|information) "
+    r"(?:(?:has|have) been )?(?:retrieved|collected|obtained|gathered|available))\b)",
+    re.IGNORECASE,
+)
+_ASSISTANT_PROCESS_RE = re.compile(
+    r"^(?:"
+    r"(?:搜索|检索|查询)(?:结果)?(?:只|仅)?.{0,120}(?:覆盖|返回|命中).{0,120}|"
+    r"(?:已|已经)(?:获得|取得|获取|收集)(?:到)?(?:全部)?.{0,40}"
+    r"(?:摘要|文档|文件|报告|记录|资料|来源|证据)(?:。|！|!|$)|"
+    r"(?:使用|用|通过).{0,120}(?:文件|文档|报告|工具|接口|数据源).{0,120}"
+    r"(?:查找|搜索|检索|查询|获取|读取|提取)|"
+    r"(?:using|with|through).{0,120}(?:file|document|report|tool|api|data source)"
+    r".{0,120}\b(?:search|fetch|query|read|retrieve|extract)\b|"
+    r"(?:现在|接下来|随后)(?:让我|我将|我会|我需要|开始|继续)?.{0,100}"
+    r"(?:查找|搜索|检索|查询|获取|读取|提取|定位|整理|汇总|撰写|生成|构建|标记)|"
+    r"(?:我|我们)(?:现在|接下来|随后|将|会|需要|正在|可以).{0,100}"
+    r"(?:查找|搜索|检索|查询|获取|读取|提取|定位|整理|汇总|撰写|生成|构建|标记)|"
+    r"[^。！？!?]{0,80}(?:已取到|已获取到|已检索到|已找到)|"
+    r"(?:已|已经)(?:找到|检索到|获取到|收集到).{0,100}"
+    r"(?:资料|来源|数据|信息|证据|原文|文档|报告|年报|财报|结果)|"
+    r"(?:(?:now|next|then)\s+)?(?:let me|i(?:'ll| will| need to| can now)?).{0,120}\b"
+    r"(?:search(?:es|ing)?|fetch(?:es|ing)?|query|read|retrieve|extract|locate|compile|"
+    r"assemble|build|write|mark)\b|"
+    r"i\s+(?:now\s+)?(?:have|need|will|can).{0,120}\b"
+    r"(?:search|fetch|query|read|retrieve|extract|locate|compile|assemble|build|write|mark|"
+    r"evidence|data|sources?|transcripts?)\b"
+    r")",
+    re.IGNORECASE,
+)
+_COMPLETION_REVIEW_RE = re.compile(
+    r"^(?:the\s+)?(?:response|answer).{0,240}\b"
+    r"(?:complete|accurate|fully\s+(?:addresses|satisfies)|nothing\s+(?:is\s+)?missing)\b|"
+    r"^(?:nothing\s+(?:was|is)\s+(?:omitted|missing)|"
+    r"no\s+(?:important\s+)?(?:omissions?|corrections?)"
+    r"(?:\s+(?:or|and)\s+(?:omissions?|corrections?))?"
+    r"(?:\s+are|\s+were|\s+is)?\s+(?:needed|required))",
     re.IGNORECASE,
 )
 _SOURCE_ATTRIBUTION_SUMMARY_RE = re.compile(
@@ -190,6 +229,16 @@ _TABLE_SOURCE_HEADER_RE = re.compile(
 _TABLE_SCOPE_DESCRIPTOR_RE = re.compile(
     r"^.{1,180}\s+—\s+(?:单位|币种|期间|报告期|财年|"
     r"unit|currency|period|reporting period|fiscal year)\s*[:：]",
+    re.IGNORECASE,
+)
+_TABLE_RULE_DESCRIPTOR_RE = re.compile(
+    r"^.{1,180}\s+—\s+(?:阈值(?:\s*/\s*规则)?|规则|判断规则|"
+    r"触发条件|条件|threshold|rule|trigger condition)\s*[:：]",
+    re.IGNORECASE,
+)
+_TABLE_DECISION_DESCRIPTOR_RE = re.compile(
+    r"^.{1,180}\s+—\s+(?:触发\s*[?？]?|是否触发|状态|判断|结论|"
+    r"triggered\s*[?？]?|status|decision|conclusion)\s*[:：]",
     re.IGNORECASE,
 )
 _TABLE_SCOPE_HEADER_RE = re.compile(
@@ -300,6 +349,7 @@ class ClaimCandidate:
         self,
         *,
         citation_ids: Iterable[str] | None = None,
+        citation_required: bool | None = None,
         bindings: list[dict[str, str]] | None = None,
         status: str,
         issue_codes: Iterable[str] = (),
@@ -308,7 +358,9 @@ class ClaimCandidate:
             "claimId": self.claim_id,
             "exact": self.exact,
             "segmentIndex": self.segment_index,
-            "citationRequired": self.citation_required,
+            "citationRequired": (
+                self.citation_required if citation_required is None else citation_required
+            ),
             "citationIds": list(citation_ids or self.attached_citation_ids),
             "status": status,
             "issueCodes": list(dict.fromkeys(issue_codes)),
@@ -741,7 +793,11 @@ def _legacy_match_available_evidence(
     if conflicts:
         return EvidenceMatch("conflict", tuple(dict.fromkeys(conflicts)))
     exact_by_handle = {row[0]: row for row in exact}
-    exact = list(exact_by_handle.values())
+    exact = _collapse_semantic_duplicate_structured_matches(
+        list(exact_by_handle.values()),
+        semantics,
+    )
+    exact = _prefer_unique_canonical_structured_match(claim, exact, semantics)
     if len(exact) == 1:
         return EvidenceMatch("exact", (exact[0][0],))
     if len(exact) > 1:
@@ -776,8 +832,8 @@ def auto_bind_unique_claims(
 
     Insertions are applied from the end of the Markdown document so offsets
     remain stable.  Existing evidence/citation bindings are never replaced.
-    Ambiguous, conflicting, partial and missing matches are left untouched for
-    the single repair/publication decision.
+    Ambiguous, conflicting, partial and missing matches are left untouched and
+    remain unresolved in the published audit sidecar.
     """
 
     from src.core.claim_evidence_resolution import ensure_evidence_candidate_index
@@ -853,7 +909,8 @@ def _named_attribution_supported(
     attribution verb and the same tokens in the trusted source context.
 
     Generic labels (``管理层`` / ``the company``) and names that require
-    transliteration remain unbound for the model or repair layer to resolve.
+    transliteration remain unbound unless the Agent supplies an explicit
+    Evidence binding.
     """
 
     subject_matches = re.finditer(
@@ -953,7 +1010,7 @@ def auto_bind_composite_text_claims(
     Cross-period comparisons and synthesis commonly put more than one value in
     one atomic clause.  No single document chunk can support such a claim, so
     the unique matcher correctly refuses to choose one handle.  This bounded
-    second pass is deliberately narrower than semantic repair: every numeric
+    second pass is deliberately bounded and deterministic: every numeric
     amount in the claim must be covered by a relevant text excerpt, the
     concatenated excerpts must pass the ordinary numeric verifier, and no
     selected excerpt may contradict the claim period.
@@ -1324,6 +1381,7 @@ def bind_claims_to_evidence(
     records: Iterable[Any],
     *,
     mode: str = "required-on-evidence",
+    user_prompt: str = "",
     semantics: Mapping[str, Any] | None = None,
     entity_aliases: Mapping[str, Iterable[str]] | None = None,
 ) -> ClaimBindingResult:
@@ -1364,7 +1422,7 @@ def bind_claims_to_evidence(
         if claim.attached_citation_ids:
             # Canonical citation ids can only enter this path from the host's
             # sealed baseline. They are already bound and must never receive
-            # an additional provisional evidence link during hidden repair.
+            # an additional provisional evidence link.
             continue
 
         attached = claim.attached_evidence_handles
@@ -1482,6 +1540,14 @@ def bind_claims_to_evidence(
             )
             if len(handles) < 2:
                 handles = ()
+        if not handles and not attributed:
+            handles = match_composite_structured_evidence(
+                claim,
+                candidate_index.candidate_records(claim),
+                user_prompt=user_prompt,
+                semantics=semantics,
+                entity_aliases=entity_aliases,
+            )
         if not handles:
             continue
         replacement = " ".join(f"[source](evidence://{handle})" for handle in handles)
@@ -1513,7 +1579,7 @@ def rebind_unique_mismatched_claims(
     that binding before publication only when the attached handle does not
     support the claim and the full Registry yields exactly one supported
     alternative.  Ambiguous or multi-source bindings are deliberately left
-    for the normal quality/repair path.
+    for the normal quality path.
     """
 
     from src.core.claim_evidence_resolution import ensure_evidence_candidate_index
@@ -1586,9 +1652,6 @@ def verify_evidence_support(
     kind = evidence_container.get("kind")
     if kind == "structured-data":
         semantic_options = evidence_semantic_options(evidence_container, semantics)
-        value = evidence_container.get("value")
-        if not _structured_value_matches_claim(value, evidence_container, claim, semantics):
-            return EvidenceSupport("not-found", 0)
         metric = _canonical_metric(evidence_container, semantics)
         if not metric or not _metric_matches_claim(metric, claim, semantics):
             return EvidenceSupport("not-found", 0)
@@ -1634,6 +1697,16 @@ def verify_evidence_support(
         )
         if dimension_status == "contradicted":
             return EvidenceSupport("contradicted", 2)
+        value = evidence_container.get("value")
+        if not _structured_value_matches_claim(value, evidence_container, claim, semantics):
+            # Once metric/entity/period/unit/scope/basis are compatible, an
+            # explicit structured value that differs from the Claim is a
+            # programmatically proven conflict rather than a fuzzy retrieval
+            # miss. This ordering is essential: a sibling field must remain
+            # ``not-found`` and must never become a false numeric warning.
+            if _claim_amounts(_claim_assertion_text(claim, semantics), semantics):
+                return EvidenceSupport("contradicted", 4, "value-conflict")
+            return EvidenceSupport("not-found", 0)
         if entity_status == "partial" or dimension_status == "partial":
             return EvidenceSupport("partially-supported", 2)
         if len(_claim_amounts(_claim_assertion_text(claim, semantics), semantics)) > 1:
@@ -1703,12 +1776,17 @@ def verify_evidence_support(
         )
         if not result_present and not formula_supported:
             return EvidenceSupport("not-found", 0)
-        if claim.kind != "calculation" and not _DERIVED_RE.search(claim.exact):
-            return EvidenceSupport("partially-supported", 1)
         metric = _canonical_metric(evidence_container, semantics)
+        metric_matches = bool(metric and _metric_matches_claim(metric, claim, semantics))
+        if (
+            claim.kind != "calculation"
+            and not _DERIVED_RE.search(claim.exact)
+            and not metric_matches
+        ):
+            return EvidenceSupport("partially-supported", 1)
         if (
             metric
-            and not _metric_matches_claim(metric, claim, semantics)
+            and not metric_matches
             and not formula_supported
             and not _generic_derived_claim_accepts_calculation_metric(
                 claim,
@@ -1805,15 +1883,24 @@ def structured_values_equivalent(
     left_resolved = _resolve_unit(left_unit, semantics)
     right_resolved = _resolve_unit(right_unit, semantics)
     if left_resolved is None or right_resolved is None:
+        tolerance = max(
+            _display_rounding_tolerance(str(left_value), Decimal(1)),
+            _display_rounding_tolerance(str(right_value), Decimal(1)),
+        )
         if bool(left_unit.strip()) != bool(right_unit.strip()):
             # One-sided unit absence is an unknown dimension, not a value
             # conflict.  Compare the raw decimals only; never apply an
             # inferred scale.  Callers still retain the missing-unit quality
             # issue and cannot claim a currency/unit was verified.
-            return _decimal_close(left_decimal, right_decimal)
+            return _decimal_close(
+                left_decimal,
+                right_decimal,
+                minimum_tolerance=tolerance,
+            )
         return left_unit.strip().casefold() == right_unit.strip().casefold() and _decimal_close(
             left_decimal,
             right_decimal,
+            minimum_tolerance=tolerance,
         )
     if left_resolved[0] != right_resolved[0]:
         return False
@@ -1849,6 +1936,7 @@ def structured_components_cover_claim(
     claim: ClaimCandidate,
     evidence_items: Iterable[Mapping[str, Any]],
     *,
+    user_prompt: str = "",
     semantics: Mapping[str, Any] | None = None,
 ) -> bool:
     """Return true when structured component evidence covers every claim value."""
@@ -1856,16 +1944,23 @@ def structured_components_cover_claim(
     amounts = _claim_amounts(_claim_assertion_text(claim, semantics), semantics)
     if len(amounts) < 2:
         return False
-    covered = [False] * len(amounts)
-    for evidence in evidence_items:
+    covered = [
+        index in user_input_covered_amount_indexes(claim, user_prompt, semantics=semantics)
+        for index in range(len(amounts))
+    ]
+    candidates_by_amount: list[list[tuple[bool, int]]] = [[] for _ in amounts]
+    for evidence_index, evidence in enumerate(evidence_items):
         container = evidence.get("evidence")
         if isinstance(container, Mapping):
             evidence = container
-        if evidence.get("kind") != "structured-data":
+        kind = evidence.get("kind")
+        if kind not in {"structured-data", "calculation"}:
             continue
+        comparable = evidence
+        if kind == "calculation":
+            comparable = {**evidence, "value": evidence.get("result")}
         metric = _canonical_metric(evidence, semantics)
-        if not metric or not _metric_matches_claim(metric, claim, semantics):
-            continue
+        metric_matches = bool(metric and _metric_matches_claim(metric, claim, semantics))
         if _entity_support_status(claim, evidence) == "contradicted":
             continue
         evidence_periods = tuple(
@@ -1887,9 +1982,257 @@ def structured_components_cover_claim(
         ):
             continue
         for index, amount in enumerate(amounts):
-            if _evidence_matches_amount(evidence, amount, semantics):
-                covered[index] = True
+            if _evidence_matches_amount(comparable, amount, semantics):
+                candidates_by_amount[index].append((metric_matches, evidence_index))
+    for index, candidates in enumerate(candidates_by_amount):
+        if covered[index] or not candidates:
+            continue
+        unique_evidence = {evidence_index for _matches, evidence_index in candidates}
+        metric_evidence = {evidence_index for matches, evidence_index in candidates if matches}
+        if len(unique_evidence) == 1 or len(metric_evidence) == 1:
+            covered[index] = True
     return all(covered)
+
+
+def numeric_comparison_truth(
+    claim: ClaimCandidate,
+    *,
+    semantics: Mapping[str, Any] | None = None,
+) -> bool | None:
+    """Evaluate explicit ``<``/``>`` relations written inside one claim.
+
+    This is intentionally narrower than formula inference: it never invents
+    an operation from prose.  It only checks comparison operators the model
+    actually wrote and values rendered immediately around them.  Metric
+    parameters such as ``MA20``/``MA60`` are labels rather than operands and
+    are removed before extracting the nearest comparable amounts.
+    """
+
+    text = _claim_assertion_text(claim, semantics)
+    text = re.sub(r"\bMA\s*\(?\s*\d{1,4}\s*\)?\b", "MA", text, flags=re.IGNORECASE)
+    operators = list(re.finditer(r"(?<![<>=])(?:<=|>=|≤|≥|<|>)(?![<>=])", text))
+    if not operators:
+        return None
+    outcomes: list[bool] = []
+    for operator in operators:
+        left_amounts = _claim_amounts(text[: operator.start()], semantics)
+        right_amounts = _claim_amounts(text[operator.end() :], semantics)
+        if not left_amounts or not right_amounts:
+            continue
+        comparable = _comparable_amount_pair(
+            left_amounts[-1],
+            right_amounts[0],
+            semantics,
+        )
+        if comparable is None:
+            continue
+        left, right = comparable
+        token = operator.group(0)
+        outcomes.append(
+            {
+                "<": left < right,
+                "<=": left <= right,
+                "≤": left <= right,
+                ">": left > right,
+                ">=": left >= right,
+                "≥": left >= right,
+            }[token]
+        )
+    return all(outcomes) if outcomes else None
+
+
+def _comparable_amount_pair(
+    left: tuple[str, str, Decimal | None, str],
+    right: tuple[str, str, Decimal | None, str],
+    semantics: Mapping[str, Any] | None,
+) -> tuple[Decimal, Decimal] | None:
+    left_raw, left_unit, left_base, left_base_unit = left
+    right_raw, right_unit, right_base, right_base_unit = right
+    if left_base is not None and right_base is not None:
+        if left_base_unit and right_base_unit and left_base_unit != right_base_unit:
+            return None
+        return left_base, right_base
+    left_decimal = _as_decimal(left_raw)
+    right_decimal = _as_decimal(right_raw)
+    if left_decimal is None or right_decimal is None:
+        return None
+    left_resolved = _resolve_unit(left_unit, semantics) if left_unit else None
+    right_resolved = _resolve_unit(right_unit, semantics) if right_unit else None
+    if left_resolved and right_resolved:
+        if left_resolved[0] != right_resolved[0]:
+            return None
+        return left_decimal * left_resolved[1], right_decimal * right_resolved[1]
+    if bool(left_unit) != bool(right_unit):
+        return None
+    return left_decimal, right_decimal
+
+
+def user_input_covered_amount_indexes(
+    claim: ClaimCandidate,
+    user_prompt: str,
+    *,
+    semantics: Mapping[str, Any] | None = None,
+) -> frozenset[int]:
+    """Return claim amounts that repeat immutable values supplied by the user.
+
+    User thresholds, costs and scenario assumptions are turn inputs, not
+    external facts.  They therefore do not need a source citation.  Coverage
+    is deliberately numeric and unit-aware; prose similarity alone can never
+    exempt a factual claim, and values not present in the current user prompt
+    remain subject to the ordinary Evidence verifier.
+    """
+
+    if not user_prompt.strip():
+        return frozenset()
+    claim_amounts = _claim_amounts(_claim_assertion_text(claim, semantics), semantics)
+    prompt_amounts = _claim_amounts(user_prompt, semantics)
+    if not claim_amounts or not prompt_amounts:
+        return frozenset()
+    return frozenset(
+        index
+        for index, claim_amount in enumerate(claim_amounts)
+        if any(
+            _amounts_equivalent(claim_amount, prompt_amount, semantics)
+            for prompt_amount in prompt_amounts
+        )
+    )
+
+
+def user_input_value_present(
+    value: Any,
+    unit: str,
+    user_prompt: str,
+    *,
+    semantics: Mapping[str, Any] | None = None,
+) -> bool:
+    """Return whether one declared calculation input came from the user.
+
+    Calculation Evidence may mix retrieved facts with explicit user-owned
+    thresholds, costs, assumptions, and scenario parameters.  The latter do
+    not need an external citation, but the runtime must still prove that the
+    model did not invent them.  Compare the declared value against the full
+    effective task prompt using the same unit ontology and display-rounding
+    rules as ordinary Claim Audit.
+    """
+
+    if not user_prompt.strip() or isinstance(value, bool) or value is None:
+        return False
+    target_text = f"{value} {unit}".strip()
+    target_amounts = _claim_amounts(target_text, semantics)
+    prompt_amounts = _claim_amounts(user_prompt, semantics)
+    if not target_amounts or not prompt_amounts:
+        return False
+    return any(
+        _amounts_equivalent(target, prompt_amount, semantics)
+        for target in target_amounts
+        for prompt_amount in prompt_amounts
+    )
+
+
+def user_input_fully_covers_claim(
+    claim: ClaimCandidate,
+    user_prompt: str,
+    *,
+    semantics: Mapping[str, Any] | None = None,
+) -> bool:
+    """Return whether every numeric assertion in a claim came from the user."""
+
+    amounts = _claim_amounts(_claim_assertion_text(claim, semantics), semantics)
+    return bool(amounts) and len(
+        user_input_covered_amount_indexes(claim, user_prompt, semantics=semantics)
+    ) == len(amounts)
+
+
+def match_composite_structured_evidence(
+    claim: ClaimCandidate,
+    records: Iterable[Any],
+    *,
+    user_prompt: str = "",
+    semantics: Mapping[str, Any] | None = None,
+    entity_aliases: Mapping[str, Iterable[str]] | None = None,
+) -> tuple[str, ...]:
+    """Bind mixed user-input/structured comparisons without guessing.
+
+    Every amount not supplied by the user must map to one unique structured or
+    calculation Evidence item.  A canonical metric match can break a duplicate
+    numeric tie, but two equally plausible fields or sources remain unbound.
+    """
+
+    from src.core.claim_evidence_resolution import evidence_entity_conflicts
+
+    amounts = _claim_amounts(_claim_assertion_text(claim, semantics), semantics)
+    if len(amounts) < 2:
+        return ()
+    user_covered = user_input_covered_amount_indexes(
+        claim,
+        user_prompt,
+        semantics=semantics,
+    )
+    remaining = [index for index in range(len(amounts)) if index not in user_covered]
+    if not remaining:
+        return ()
+    candidates_by_amount: dict[
+        int,
+        list[tuple[str, bool, Mapping[str, Any], Mapping[str, Any]]],
+    ] = {index: [] for index in remaining}
+    for record in records:
+        handle, source, evidence = _evidence_parts(record)
+        if not handle or evidence.get("kind") not in {"structured-data", "calculation"}:
+            continue
+        if evidence_entity_conflicts(
+            claim.semantic_text,
+            source,
+            evidence,
+            entity_aliases,
+        ):
+            continue
+        evidence_periods = tuple(
+            dict.fromkeys(
+                period
+                for raw_period in (evidence.get("period"), evidence.get("asOf"))
+                for period in [_period_key(str(raw_period or ""), semantics)]
+                if period
+            )
+        )
+        claim_period = claim.normalized.get("period", "")
+        if (
+            claim_period
+            and evidence_periods
+            and not any(
+                _periods_compatible(claim_period, evidence_period)
+                for evidence_period in evidence_periods
+            )
+        ):
+            continue
+        comparable = evidence
+        if evidence.get("kind") == "calculation":
+            comparable = {**evidence, "value": evidence.get("result")}
+        metric = _canonical_metric(evidence, semantics)
+        metric_matches = bool(metric and _metric_matches_claim(metric, claim, semantics))
+        for index in remaining:
+            if _evidence_matches_amount(comparable, amounts[index], semantics):
+                candidates_by_amount[index].append((handle, metric_matches, source, evidence))
+
+    selected: list[str] = []
+    for index in remaining:
+        candidates = _prefer_composite_structured_candidates(
+            claim,
+            candidates_by_amount[index],
+            semantics,
+        )
+        unique_handles = tuple(
+            dict.fromkeys(handle for handle, _matches, _source, _evidence in candidates)
+        )
+        if len(unique_handles) == 1:
+            selected.append(unique_handles[0])
+            continue
+        metric_handles = tuple(
+            dict.fromkeys(handle for handle, matches, _source, _evidence in candidates if matches)
+        )
+        if len(metric_handles) != 1:
+            return ()
+        selected.append(metric_handles[0])
+    return tuple(dict.fromkeys(selected))
 
 
 def text_components_cover_claim(
@@ -2445,6 +2788,16 @@ def _append_claim(
         normalized["unit"] = exact_normalized["unit"]
     if "unitBase" in exact_normalized:
         normalized["unitBase"] = exact_normalized["unitBase"]
+    if "period" in exact_normalized and (
+        kind != "date-fact"
+        or re.search(
+            r"(?:报告期|期间|财年|年度|季度|上半年|前三季度|\bFY\s*\d{2,4}\b|"
+            r"\bQ[1-4](?:\s*FY)?\s*\d{0,4}\b)",
+            exact,
+            re.IGNORECASE,
+        )
+    ):
+        normalized["period"] = exact_normalized["period"]
     # Inherited headings and narrative establish defaults, but an explicit
     # dimension on the claim itself is more specific.  For example, under a
     # ``2024 年营业收入`` heading the row ``财年：2024 FY`` describes the
@@ -2499,12 +2852,24 @@ def _classify_claim(text: str) -> str:
         return "reasoning"
     if _SOURCE_ATTRIBUTION_SUMMARY_RE.match(text.strip()):
         return "presentation"
+    if _ASSISTANT_PROCESS_RE.search(text.strip()) or _COMPLETION_REVIEW_RE.search(
+        text.strip()
+    ):
+        return "presentation"
     # A unit/currency/period table cell qualifies another value in the same
     # row.  Classify it before the derived-value heuristic: labels such as
     # ``同比增速 — 期间: 2024 vs 2023`` contain both a comparison word and
     # numbers, but still do not assert an independently sourced result.
     if _TABLE_SCOPE_DESCRIPTOR_RE.match(text.strip()):
         return "presentation"
+    # Rule parameters and evaluated status labels are reasoning outputs, not
+    # external records. Their observed inputs remain citation-required in the
+    # neighboring current-value/comparison cells; demanding a document source
+    # for ``阈值`` or ``是否触发`` creates warnings that no source can resolve.
+    if _TABLE_RULE_DESCRIPTOR_RE.match(text.strip()) or _TABLE_DECISION_DESCRIPTOR_RE.match(
+        text.strip()
+    ):
+        return "reasoning"
     if _looks_like_numeric_formula(text):
         return "calculation"
     if _DERIVED_RE.search(text) and _NUMBER_RE.search(text):
@@ -2534,7 +2899,7 @@ def _classify_claim(text: str) -> str:
     # A short standalone label scopes the claims that follow; the date inside
     # it is context, not an independently asserted fact.  Treat labels such as
     # ``贵州茅台 2024 年全年：`` like presentation text so the cited values
-    # below do not trigger a pointless repair pass.
+    # below do not trigger a false unsupported warning.
     if re.fullmatch(r"[^。！？!?；;\n]{1,80}[:：]", text.strip()):
         return "presentation"
     if _REASONING_RE.search(text):
@@ -2575,6 +2940,20 @@ def _looks_like_period_scope_title(text: str) -> bool:
     # a business value.  Any other non-temporal number keeps the line factual.
     without_identifiers = re.sub(r"[（(]\s*[A-Za-z]{0,8}:?\d{4,8}\s*[）)]", "", candidate)
     without_dates = _DATE_RE.sub("", without_identifiers)
+    # Reporting-period titles often omit the repeated year at the right side
+    # of a range (``2025年1月1日—12月31日`` or ``2025-01-01–12-31``).
+    # ``_DATE_RE`` removes the fully-qualified left endpoint, so remove only a
+    # delimiter-bound month/day tail before checking for unrelated numbers.
+    # This is title classification only; it does not change normalized period
+    # extraction for the factual claims scoped by the title.
+    without_dates = re.sub(
+        r"(?:至|到|[-—–~～])\s*(?:"
+        r"\d{1,2}\s*月\s*\d{1,2}\s*日|"
+        r"\d{1,2}\s*[-/]\s*\d{1,2}"
+        r")",
+        "",
+        without_dates,
+    )
     without_dates = re.sub(r"\b(?:FY\s*)?\d{4}\s*(?:FY|Q[1-4])\b", "", without_dates, flags=re.I)
     return _NUMBER_RE.search(without_dates) is None
 
@@ -2599,8 +2978,6 @@ def _citation_required(
     has_binding: bool,
     mode: str,
 ) -> bool:
-    if has_binding:
-        return True
     if kind == "user-provided":
         return False
     if kind == "reasoning":
@@ -2609,6 +2986,12 @@ def _citation_required(
         return False
     if kind in {"limitation", "presentation"} or _LIMITATION_RE.search(text):
         return False
+    # A source marker can live in a table's unit/period/context cell for
+    # presentation and navigation.  It must not turn that nonfactual context
+    # into a separately auditable Claim.  Citation projection still preserves
+    # the marker, while the row's factual value cells are resolved normally.
+    if has_binding:
+        return True
     if _NEGATIVE_DISCLOSURE_RE.search(text) and not _NOT_FOUND_RE.search(text):
         return True
     if kind == "document-claim" and _NOT_FOUND_RE.search(text):
@@ -2916,7 +3299,7 @@ def _atomic_clause_spans(
     case each clause becomes its own atomic claim.
     """
 
-    boundaries = [match.span() for match in re.finditer(r"(?<!\d)[,，]|[,，](?!\d)", value)]
+    boundaries = _top_level_comma_boundaries(value)
     if not boundaries:
         return [(0, len(value))]
     citation_spans: list[tuple[int, int]] = []
@@ -2957,6 +3340,46 @@ def _atomic_clause_spans(
     if len(set(meaningful)) != len(meaningful):
         return [(0, len(value))]
     return raw_spans
+
+
+def _top_level_comma_boundaries(value: str) -> list[tuple[int, int]]:
+    """Return clause commas that are outside balanced inline context.
+
+    A reporting label commonly embeds context as
+    ``metric（annual report，period：date）：value``.  Splitting the comma in
+    that parenthetical separates the metric from its value and turns one
+    factual Claim into a presentation fragment plus an under-specified
+    numeric Claim.  Markdown links and quoted labels have the same property,
+    so only commas at the outermost level are eligible clause boundaries.
+    """
+
+    closing_for = {
+        "(": ")",
+        "（": "）",
+        "[": "]",
+        "【": "】",
+        "《": "》",
+        "「": "」",
+        "『": "』",
+        "“": "”",
+    }
+    stack: list[str] = []
+    boundaries: list[tuple[int, int]] = []
+    for index, character in enumerate(value):
+        if character in closing_for:
+            stack.append(closing_for[character])
+            continue
+        if stack and character == stack[-1]:
+            stack.pop()
+            continue
+        if character not in {",", "，"} or stack:
+            continue
+        previous = value[index - 1] if index > 0 else ""
+        following = value[index + 1] if index + 1 < len(value) else ""
+        if previous.isdigit() and following.isdigit():
+            continue
+        boundaries.append((index, index + 1))
+    return boundaries
 
 
 def _is_meaningful_claim(text: str) -> bool:
@@ -3043,6 +3466,189 @@ def _source_identity(source: Mapping[str, Any]) -> str:
     if not source_key:
         return ""
     return f"{provider}\0{source_key}"
+
+
+def _collapse_semantic_duplicate_structured_matches(
+    rows: list[tuple[str, Mapping[str, Any], Mapping[str, Any], EvidenceSupport]],
+    semantics: Mapping[str, Any] | None,
+) -> list[tuple[str, Mapping[str, Any], Mapping[str, Any], EvidenceSupport]]:
+    """Collapse two JSON paths that encode the same structured fact.
+
+    Analytics APIs often return a canonical scalar and a presentation mirror,
+    for example ``factor_value`` plus ``indicators[formula]``.  Materializing
+    both paths is useful for high-recall addressing, but treating them as two
+    independent sources makes an otherwise unique Claim look ambiguous.  Only
+    collapse records whose trusted source, row identity, canonical metric,
+    value and semantic dimensions are all identical; cross-source agreement
+    and genuinely distinct fields remain separate candidates.
+    """
+
+    output: list[tuple[str, Mapping[str, Any], Mapping[str, Any], EvidenceSupport]] = []
+    positions: dict[tuple[str, ...], int] = {}
+    for row in rows:
+        _handle, source, evidence, _support = row
+        if evidence.get("kind") != "structured-data":
+            output.append(row)
+            continue
+        source_identity = _source_identity(source)
+        metric = _canonical_metric(evidence, semantics)
+        record_key = _normalize_prose(str(evidence.get("recordKey") or ""))
+        if not source_identity or not metric or not record_key:
+            output.append(row)
+            continue
+        key = (
+            source_identity,
+            str(evidence.get("datasetId") or ""),
+            record_key,
+            metric,
+            _semantic_value_key(evidence, semantics),
+            _period_key(
+                str(evidence.get("period") or evidence.get("asOf") or ""),
+                semantics,
+            ),
+            _normalize_prose(str(evidence.get("entityId") or evidence.get("entityName") or "")),
+            _canonical_unit(str(evidence.get("unit") or ""), semantics),
+            _canonical_dimension(str(evidence.get("scope") or ""), semantics, "scope"),
+            _canonical_dimension(str(evidence.get("basis") or ""), semantics, "basis"),
+        )
+        existing_position = positions.get(key)
+        if existing_position is None:
+            positions[key] = len(output)
+            output.append(row)
+            continue
+        existing = output[existing_position]
+        if _structured_duplicate_preference(row[2], metric) > _structured_duplicate_preference(
+            existing[2], metric
+        ):
+            output[existing_position] = row
+    return output
+
+
+def _prefer_unique_canonical_structured_match(
+    claim: ClaimCandidate,
+    rows: list[tuple[str, Mapping[str, Any], Mapping[str, Any], EvidenceSupport]],
+    semantics: Mapping[str, Any] | None,
+) -> list[tuple[str, Mapping[str, Any], Mapping[str, Any], EvidenceSupport]]:
+    """Prefer one canonical provider field among agreeing source mirrors.
+
+    A quote endpoint and several factor endpoints may all repeat the same
+    close price.  Agreement is useful, but it should not make the direct
+    ``stock_price`` field ambiguous with incidental ``close`` mirrors.  The
+    tie-break is allowed only when every candidate encodes the same semantic
+    fact and exactly one candidate uses the canonical metric id directly.
+    """
+
+    if len(rows) < 2 or any(row[2].get("kind") != "structured-data" for row in rows):
+        return rows
+    fact_keys = {_structured_semantic_fact_key(row[2], semantics) for row in rows}
+    if len(fact_keys) != 1 or None in fact_keys:
+        return rows
+    scores = [_structured_claim_preference(claim, row[2], semantics) for row in rows]
+    best = max(scores)
+    best_positions = [index for index, score in enumerate(scores) if score == best]
+    return [rows[best_positions[0]]] if len(best_positions) == 1 else rows
+
+
+def _prefer_composite_structured_candidates(
+    claim: ClaimCandidate,
+    candidates: list[tuple[str, bool, Mapping[str, Any], Mapping[str, Any]]],
+    semantics: Mapping[str, Any] | None,
+) -> list[tuple[str, bool, Mapping[str, Any], Mapping[str, Any]]]:
+    """Collapse semantic duplicate paths before multi-input auto-binding."""
+
+    grouped: dict[
+        tuple[str, ...] | None,
+        list[tuple[str, bool, Mapping[str, Any], Mapping[str, Any]]],
+    ] = {}
+    order: list[tuple[str, ...] | None] = []
+    for candidate in candidates:
+        key = _structured_semantic_fact_key(candidate[3], semantics)
+        if key not in grouped:
+            grouped[key] = []
+            order.append(key)
+        grouped[key].append(candidate)
+
+    output: list[tuple[str, bool, Mapping[str, Any], Mapping[str, Any]]] = []
+    for key in order:
+        rows = grouped[key]
+        if key is None or len(rows) == 1:
+            output.extend(rows)
+            continue
+        scores = [_structured_claim_preference(claim, row[3], semantics) for row in rows]
+        best = max(scores)
+        best_positions = [index for index, score in enumerate(scores) if score == best]
+        if len(best_positions) == 1:
+            output.append(rows[best_positions[0]])
+            continue
+        # Duplicate paths from one immutable source are one fact even when
+        # neither path uses the canonical metric id verbatim.  Prefer the
+        # shallower field deterministically; equal candidates from independent
+        # sources remain ambiguous and are never silently selected.
+        identities = {_source_identity(row[2]) for row in rows}
+        if len(identities) == 1 and "" not in identities:
+            output.append(
+                max(
+                    rows,
+                    key=lambda row: _structured_duplicate_preference(
+                        row[3],
+                        _canonical_metric(row[3], semantics),
+                    ),
+                )
+            )
+        else:
+            output.extend(rows)
+    return output
+
+
+def _structured_semantic_fact_key(
+    evidence: Mapping[str, Any],
+    semantics: Mapping[str, Any] | None,
+) -> tuple[str, ...] | None:
+    if evidence.get("kind") != "structured-data":
+        return None
+    metric = _canonical_metric(evidence, semantics)
+    if not metric:
+        return None
+    return (
+        metric,
+        _semantic_value_key(evidence, semantics),
+        _period_key(
+            str(evidence.get("period") or evidence.get("asOf") or ""),
+            semantics,
+        ),
+        _normalize_prose(str(evidence.get("entityId") or evidence.get("entityName") or "")),
+        _canonical_unit(str(evidence.get("unit") or ""), semantics),
+        _canonical_dimension(str(evidence.get("scope") or ""), semantics, "scope"),
+        _canonical_dimension(str(evidence.get("basis") or ""), semantics, "basis"),
+    )
+
+
+def _structured_claim_preference(
+    claim: ClaimCandidate,
+    evidence: Mapping[str, Any],
+    semantics: Mapping[str, Any] | None,
+) -> tuple[int, int]:
+    canonical_metric = _canonical_metric(evidence, semantics)
+    raw_metric = str(evidence.get("metric") or "")
+    claim_metrics = set(_claim_metric_candidates(claim.exact, semantics))
+    return (
+        int(raw_metric in claim_metrics),
+        int(bool(canonical_metric) and raw_metric == canonical_metric),
+    )
+
+
+def _structured_duplicate_preference(
+    evidence: Mapping[str, Any],
+    canonical_metric: str,
+) -> tuple[int, int]:
+    """Prefer the provider-declared canonical field over a nested mirror."""
+
+    raw_metric = str(evidence.get("metric") or "")
+    field = str(evidence.get("field") or "")
+    return (
+        int(raw_metric == canonical_metric),
+        -field.count("/"),
+    )
 
 
 def _evidence_match_specificity(
@@ -3316,22 +3922,31 @@ def _canonical_metric(
             return explicit
         normalized_explicit = _normalize_field(explicit)
         prose_explicit = _normalize_prose(explicit.replace("_", " "))
+        prose_matches: list[str] = []
+        machine_matches: list[str] = []
         for metric_id, definition in ontology.items():
             if not isinstance(metric_id, str) or not isinstance(definition, Mapping):
                 continue
             terms = _metric_terms(metric_id, definition)
             machine_terms = {normalized for item in terms if (normalized := _normalize_field(item))}
             prose_terms = {_normalize_prose(item.replace("_", " ")) for item in terms if item}
-            if (
-                normalized_explicit
-                and normalized_explicit in machine_terms
-                or prose_explicit
-                and prose_explicit in prose_terms
-            ):
-                return metric_id
+            if prose_explicit and prose_explicit in prose_terms:
+                prose_matches.append(metric_id)
+            if normalized_explicit and normalized_explicit in machine_terms:
+                machine_matches.append(metric_id)
+        # A complete localized alias is more specific than the ASCII tokens
+        # extracted from it.  For example both ``TTM 营业收入`` and
+        # ``TTM 市销率`` reduce to the machine token ``ttm``; policy order must
+        # never decide which metric a ClaimPacket means.  Only fall back to
+        # machine-field normalization when that match is unique.
+        if len(set(prose_matches)) == 1:
+            return prose_matches[0]
+        if len(set(machine_matches)) == 1:
+            return machine_matches[0]
         return normalized_explicit
     field = str(evidence.get("field") or "")
     normalized_field = _normalize_field(field)
+    field_matches: list[str] = []
     for metric_id, definition in ontology.items():
         if not isinstance(metric_id, str):
             continue
@@ -3341,7 +3956,9 @@ def _canonical_metric(
             if (normalized := _normalize_field(term))
         }
         if normalized_field in normalized_terms:
-            return metric_id
+            field_matches.append(metric_id)
+    if len(set(field_matches)) == 1:
+        return field_matches[0]
     return normalized_field
 
 
@@ -3471,13 +4088,28 @@ def _resolve_unit_from_definitions(
     raw_unit: str,
     definitions: tuple[tuple[str, tuple[str, ...], Decimal], ...],
 ) -> tuple[str, Decimal] | None:
-    normalized = _normalize_prose(raw_unit).replace(" ", "")
+    normalized = _normalize_unit_lookup(raw_unit)
     if not normalized:
         return None
     for unit_id, aliases, scale in definitions:
-        if any(_normalize_prose(alias).replace(" ", "") == normalized for alias in aliases):
+        if any(_normalize_unit_lookup(alias) == normalized for alias in aliases):
             return unit_id, scale
     return None
+
+
+def _normalize_unit_lookup(value: str) -> str:
+    """Normalize word units while retaining punctuation-only symbols.
+
+    General prose normalization intentionally removes punctuation, but that
+    turns valid ontology aliases such as ``$`` into an empty string.  Prefer
+    the existing word normalization whenever it has content; otherwise retain
+    the NFKC-normalized symbol sequence as the exact lookup key.
+    """
+
+    prose = _normalize_prose(value).replace(" ", "")
+    if prose:
+        return prose
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", value).casefold())
 
 
 def _canonical_unit(
@@ -4306,7 +4938,11 @@ def _evidence_matches_amount(
             minimum_tolerance=display_tolerance,
         )
     raw_decimal = _as_decimal(raw_value)
-    return raw_decimal is not None and _decimal_close(raw_decimal, evidence_decimal)
+    return raw_decimal is not None and _decimal_close(
+        raw_decimal,
+        evidence_decimal,
+        minimum_tolerance=_display_rounding_tolerance(raw_value, Decimal(1)),
+    )
 
 
 def _display_rounding_tolerance(raw_value: str, unit_scale: Decimal) -> Decimal:
@@ -4362,7 +4998,7 @@ def _entity_support_status(
     # Missing repetition is not evidence of a mismatch.  Answers commonly put
     # the company in the user request, a heading or a neighboring table cell;
     # an atomic row then contains only metric/value.  Keep explicit conflicting
-    # identifiers above as contradictions, but do not trigger repair merely
+    # identifiers above as contradictions, but do not report a mismatch merely
     # because trusted Evidence is more specific than the displayed claim.
     return "supported"
 
@@ -4467,18 +5103,25 @@ def _period_key(
     compact = re.sub(r"\s+", "", value).upper()
     year_match = re.search(r"(?:19|20)\d{2}", compact)
     if not year_match:
-        short_quarter = (
-            re.search(r"FY(\d{2})Q([1-4])", compact)
-            or re.search(r"Q([1-4])FY(\d{2})", compact)
-            or re.search(r"([1-4])Q(\d{2})(?!\d)", compact)
-            or re.search(r"Q([1-4])(\d{2})(?!\d)", compact)
-        )
-        if short_quarter:
-            first, second = short_quarter.groups()
-            if compact.startswith("FY"):
-                year_suffix, quarter_number = first, second
-            else:
-                quarter_number, year_suffix = first, second
+        # Parse each shorthand shape explicitly. The previous combined branch
+        # inferred group meaning from ``compact.startswith('FY')``; a table
+        # cell such as ``Microsoft FY26 Q3`` therefore swapped the groups and
+        # became the impossible period ``203 Q26``.
+        fiscal_prefix = re.search(r"FY(\d{2})Q([1-4])", compact)
+        if fiscal_prefix:
+            year_suffix, quarter_number = fiscal_prefix.groups()
+            return f"20{year_suffix} Q{quarter_number}"
+        quarter_fiscal = re.search(r"Q([1-4])FY(\d{2})", compact)
+        if quarter_fiscal:
+            quarter_number, year_suffix = quarter_fiscal.groups()
+            return f"20{year_suffix} Q{quarter_number}"
+        compact_quarter = re.search(r"([1-4])Q(\d{2})(?!\d)", compact)
+        if compact_quarter:
+            quarter_number, year_suffix = compact_quarter.groups()
+            return f"20{year_suffix} Q{quarter_number}"
+        suffix_quarter = re.search(r"Q([1-4])(\d{2})(?!\d)", compact)
+        if suffix_quarter:
+            quarter_number, year_suffix = suffix_quarter.groups()
             return f"20{year_suffix} Q{quarter_number}"
         short_fiscal_year = re.search(r"FY(\d{2})(?!\d)", compact)
         return f"20{short_fiscal_year.group(1)} FY" if short_fiscal_year else ""
@@ -4705,9 +5348,7 @@ def _claim_assertion_text(
     # Remove only terms belonging to the ClaimPacket's canonical metric before
     # numeric verification; subject, period and actual value remain visible.
     raw_metric = str(claim.normalized.get("metric") or "")
-    canonical_metric = (
-        _canonical_metric({"metric": raw_metric}, semantics) if raw_metric else ""
-    )
+    canonical_metric = _canonical_metric({"metric": raw_metric}, semantics) if raw_metric else ""
     definition = _metric_ontology(semantics).get(canonical_metric)
     if isinstance(definition, Mapping):
         for term in sorted(
@@ -4769,6 +5410,9 @@ __all__ = [
     "rebind_unique_mismatched_claims",
     "match_available_evidence",
     "structured_components_cover_claim",
+    "match_composite_structured_evidence",
+    "user_input_covered_amount_indexes",
+    "user_input_fully_covers_claim",
     "text_components_cover_claim",
     "structured_value_present",
     "structured_values_equivalent",

@@ -1188,9 +1188,9 @@
       "citationsLabel": "Show citations",
       "citationsDesc": "Show clickable citation indices when an answer uses traceable sources.",
       "verificationLabel": "Verify citations",
-      "verificationDesc": "Check facts, numbers, and citation consistency before publishing; this may add latency and model usage.",
+      "verificationDesc": "Review facts, numbers, and source consistency after each assistant message; this may add latency and model usage.",
       "taskCoverageLabel": "Check task completeness",
-      "taskCoverageDesc": "Check whether the answer covers explicitly requested entities, metrics, periods, and output formats; filling omissions may add one revision step.",
+      "taskCoverageDesc": "After the main answer finishes, check whether it covers the request; important omissions may be added in one continuation.",
       "memoryTitle": "Memory",
       "saveFailed": "Failed to save personalization settings"
     },

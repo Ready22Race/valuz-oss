@@ -203,6 +203,57 @@ def test_document_chunks_create_direct_evidence_with_pdf_locator() -> None:
     assert registry.resolve(envelope["evidenceHandle"]) is not None
 
 
+def test_document_published_at_is_not_substituted_for_document_version() -> None:
+    payload = {
+        "chunks": [
+            {
+                "id": "chunk-1",
+                "content": "Stable cited text.",
+                "doc": {
+                    "doc_id": "doc-1",
+                    "title": "Issuer filing",
+                    "url": "https://example.com/doc-1.pdf",
+                    "published_at": 1_785_364_320_000,
+                },
+            }
+        ]
+    }
+    descriptor = _descriptor(
+        payload,
+        tool_name="kb_search",
+        resources=[
+            {
+                "resourceId": "kb-search-chunks",
+                "kind": "document-chunks",
+                "authority": "authoritative",
+                "rootPointer": "",
+                "document": {
+                    "scope": "item",
+                    "sourceId": "/doc/doc_id",
+                    "documentId": "/doc/doc_id",
+                    "title": "/doc/title",
+                    "url": "/doc/url",
+                    "publishedAt": "/doc/published_at",
+                },
+                "itemsPointer": "/chunks",
+                "mapping": {"chunkId": "/id", "text": "/content"},
+            }
+        ],
+    )
+
+    adapted = adapt_mcp_source_result(
+        [],
+        tool_name="mcp__reportify__kb_search",
+        descriptor=descriptor,
+        structured_content=payload,
+    )
+
+    assert adapted is not None and adapted.citable
+    source = adapted.model_content["_valuz_evidence"][0]["source"]
+    assert source["publishedAt"] == "2026-07-29T22:32:00Z"
+    assert "documentVersion" not in source
+
+
 def test_document_summary_creates_direct_evidence_without_copying_model_content() -> None:
     summary = (
         "Top Models Weekly usage. 1. Alpha 8.25T tokens. "
@@ -524,3 +575,77 @@ def test_tampered_business_result_rejects_metadata() -> None:
         )
         is None
     )
+
+
+def test_factor_collection_materializes_formula_bound_metric() -> None:
+    payload = {
+        "metadata": {"formula": "MA(CLOSE, 20)", "as_of": "2026-08-03"},
+        "datas": [
+            {
+                "date": "2026-08-03",
+                "symbol": "MRVL",
+                "factor_value": 203.69,
+            }
+        ],
+    }
+    descriptor = _descriptor(
+        payload,
+        tool_name="factors_compute",
+        resources=[
+            {
+                "resourceId": "reportify-factors-compute",
+                "kind": "structured-collection",
+                "authority": "derived",
+                "rootPointer": "/datas",
+                "itemsPointer": "/datas",
+                "dataset": {
+                    "id": "reportify.factors_compute",
+                    "revision": "v1",
+                    "sourceCategory": "derived_analytics",
+                },
+                "identity": {"fields": ["/symbol", "/date"]},
+                "semantics": {
+                    "entity": {"symbol": "/symbol"},
+                    "asOf": {"date": "/date"},
+                    "metric": {
+                        "mode": "field-map",
+                        "fields": {"/factor_value": "moving_average_20"},
+                    },
+                },
+                "addressing": {
+                    "mode": "json-pointer",
+                    "allowedPathRoots": ["/datas"],
+                    "fieldSchemaRef": {
+                        "id": "reportify.factors_compute",
+                        "revision": "v1",
+                    },
+                },
+            }
+        ],
+    )
+
+    adapted = adapt_mcp_source_result(
+        [],
+        tool_name="mcp__reportify__factors_compute",
+        descriptor=descriptor,
+        structured_content=payload,
+    )
+    assert adapted is not None and adapted.citable
+    compacted = compact_citation_tool_content(adapted.model_content)
+    private = private_citation_tool_content(adapted.model_content)
+    assert compacted is not None and private is not None
+    assert compacted["_valuz_evidence_hint"]["metricFields"] == {
+        "/factor_value": "moving_average_20"
+    }
+
+    registry = EvidenceRegistry()
+    assert registry.register_tool_projection(compacted, private, trusted_private=True) == 1
+    factor = registry.materialize_reference(
+        compacted["_valuz_evidence_hint"]["collectionHandle"],
+        "#/datas/0/factor_value",
+    )
+    assert factor is not None
+    assert factor.evidence["metric"] == "moving_average_20"
+    assert factor.evidence["value"] == 203.69
+    assert factor.evidence["entityId"] == "MRVL"
+    assert factor.evidence["asOf"] == "2026-08-03"

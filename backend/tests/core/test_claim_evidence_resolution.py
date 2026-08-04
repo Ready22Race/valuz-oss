@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from src.core.claim_audit import ClaimCandidate, extract_claims
 from src.core.claim_evidence_resolution import (
     EvidenceCandidate,
     EvidenceCandidateIndex,
+    SemanticVerificationRequest,
     SemanticVerificationResult,
     resolve_claim_evidence,
 )
@@ -55,41 +57,245 @@ def test_resolver_fixture(case: dict[str, Any]) -> None:
 
     assert resolution.status == case["expected_status"]
     assert resolution.binding_action == case["expected_binding_action"]
-    assert resolution.repair_action == case["expected_repair_action"]
+    assert resolution.user_visible_severity == case["expected_user_visible_severity"]
     gold = set(case.get("gold_evidence_ids") or ())
     if gold:
         assert gold.intersection(resolution.candidate_handles[:5])
 
 
 class _EntailingVerifier:
-    def verify(
+    def verify_batch(
         self,
-        claim: ClaimCandidate,
-        candidates: tuple[EvidenceCandidate, ...],
-    ) -> SemanticVerificationResult:
+        requests: tuple[SemanticVerificationRequest, ...],
+    ) -> dict[str, SemanticVerificationResult]:
+        assert len(requests) == 1
+        claim = requests[0].claim
+        candidates = requests[0].candidates
         assert claim.claim_id == "OSS-TEXT-002"
         assert len(candidates) <= 8
-        return SemanticVerificationResult(
-            verdict="entailed",
-            evidence_handles=("ev_oss_doc_paraphrase",),
-            confidence=0.98,
-            verifier_revision="test-semantic-v1",
-        )
+        return {
+            claim.claim_id: SemanticVerificationResult(
+                verdict="entailed",
+                evidence_handles=("ev_oss_doc_paraphrase",),
+                confidence=0.98,
+                verifier_revision="test-semantic-v1",
+            )
+        }
 
 
-def test_bounded_semantic_verifier_can_resolve_paraphrase() -> None:
+def test_bounded_semantic_verifier_can_verify_existing_paraphrase_binding() -> None:
     case = next(item for item in _FIXTURE["cases"] if item["resolver_case_id"] == "OSS-TEXT-002")
+    claim = replace(
+        _claim(case),
+        attached_evidence_handles=("ev_oss_doc_paraphrase",),
+    )
 
     resolution = resolve_claim_evidence(
-        _claim(case),
+        claim,
         case["evidence_pool"],
         semantics=_SEMANTICS,
         semantic_verifier=_EntailingVerifier(),
     )
 
     assert resolution.status == "verified"
-    assert resolution.binding_action == "auto-bind"
+    assert resolution.binding_action == "keep"
     assert resolution.selected_handles == ("ev_oss_doc_paraphrase",)
+
+
+class _RecordingVerifier:
+    def __init__(self, result: SemanticVerificationResult | Exception) -> None:
+        self.result = result
+        self.calls: list[tuple[ClaimCandidate, tuple[EvidenceCandidate, ...]]] = []
+
+    def verify_batch(
+        self,
+        requests: tuple[SemanticVerificationRequest, ...],
+    ) -> dict[str, SemanticVerificationResult]:
+        self.calls.extend((request.claim, request.candidates) for request in requests)
+        if isinstance(self.result, Exception):
+            raise self.result
+        return {request.claim.claim_id: self.result for request in requests}
+
+
+def _semantic_case() -> dict[str, Any]:
+    return next(
+        item for item in _FIXTURE["cases"] if item["resolver_case_id"] == "OSS-TEXT-002"
+    )
+
+
+def _semantic_claim(case: dict[str, Any]) -> ClaimCandidate:
+    return replace(
+        _claim(case),
+        attached_evidence_handles=("ev_oss_doc_paraphrase",),
+    )
+
+
+@pytest.mark.parametrize(
+    "verifier",
+    (
+        _RecordingVerifier(RuntimeError("provider unavailable")),
+        _RecordingVerifier(
+            SemanticVerificationResult(
+                verdict="entailed",
+                evidence_handles=("ev_oss_doc_paraphrase",),
+                confidence=0.49,
+                verifier_revision="test-semantic-low-confidence",
+            )
+        ),
+        _RecordingVerifier(
+            SemanticVerificationResult(
+                verdict="entailed",
+                evidence_handles=("ev_not_in_candidate_set",),
+                confidence=0.99,
+                verifier_revision="test-semantic-unknown-handle",
+            )
+        ),
+        _RecordingVerifier(
+            SemanticVerificationResult(
+                verdict="contradicted",
+                evidence_handles=("ev_oss_doc_paraphrase",),
+                confidence=0.99,
+                verifier_revision="test-semantic-advisory-conflict",
+            )
+        ),
+    ),
+    ids=("provider-error", "low-confidence", "unknown-handle", "semantic-contradiction"),
+)
+def test_semantic_verifier_failure_never_changes_unresolved_result(
+    verifier: _RecordingVerifier,
+) -> None:
+    case = _semantic_case()
+
+    resolution = resolve_claim_evidence(
+        _semantic_claim(case),
+        case["evidence_pool"],
+        semantics=_SEMANTICS,
+        semantic_verifier=verifier,
+    )
+
+    assert resolution.status == "unresolved"
+    assert resolution.binding_action == "keep"
+    assert resolution.user_visible_severity == "advisory"
+    assert resolution.selected_handles == ("ev_oss_doc_paraphrase",)
+
+
+def test_semantic_verifier_receives_only_bounded_text_candidates() -> None:
+    case = _semantic_case()
+    verifier = _RecordingVerifier(
+        SemanticVerificationResult(
+            verdict="unresolved",
+            evidence_handles=(),
+            confidence=0.9,
+            verifier_revision="test-semantic-bounds",
+        )
+    )
+    evidence_pool = [
+        *case["evidence_pool"],
+        *(
+            {
+                "evidenceHandle": f"ev_extra_{index}",
+                "source": {"providerId": "fixture"},
+                "evidence": {
+                    "kind": "text" if index % 2 == 0 else "structured-data",
+                    "quote": f"Unrelated document passage {index}",
+                    "metric": "unrelated_metric",
+                    "value": index,
+                },
+            }
+            for index in range(40)
+        ),
+    ]
+
+    resolve_claim_evidence(
+        _semantic_claim(case),
+        evidence_pool,
+        semantics=_SEMANTICS,
+        semantic_verifier=verifier,
+        limit=5,
+    )
+
+    assert len(verifier.calls) == 1
+    verified_claim, candidates = verifier.calls[0]
+    assert verified_claim.claim_id == "OSS-TEXT-002"
+    assert 0 < len(candidates) <= 5
+    assert all(candidate.evidence.get("kind") == "text" for candidate in candidates)
+
+
+def test_semantic_verifier_never_creates_a_new_citation_binding() -> None:
+    case = _semantic_case()
+    verifier = _RecordingVerifier(
+        SemanticVerificationResult(
+            verdict="entailed",
+            evidence_handles=("ev_oss_doc_paraphrase",),
+            confidence=0.99,
+            verifier_revision="must-not-auto-bind",
+        )
+    )
+
+    resolution = resolve_claim_evidence(
+        _claim(case),
+        case["evidence_pool"],
+        semantics=_SEMANTICS,
+        semantic_verifier=verifier,
+    )
+
+    assert verifier.calls == []
+    assert resolution.status == "unresolved"
+    assert resolution.binding_action == "none"
+    assert resolution.selected_handles == ()
+
+
+def test_semantic_verifier_does_not_override_deterministic_conflict() -> None:
+    exact = "Alpha Corp revenue was 100 USD in 2025."
+    claim = ClaimCandidate(
+        claim_id="deterministic-conflict",
+        exact=exact,
+        segment_index=0,
+        kind="structured-fact",
+        citation_required=True,
+        attached_citation_ids=(),
+        normalized={
+            "entityId": "ALPHA",
+            "metric": "revenue",
+            "period": "2025 FY",
+            "value": "100",
+            "unit": "USD",
+        },
+        location={"kind": "fixture", "blockIndex": 0, "start": 0, "end": len(exact)},
+        semantic_text=exact,
+        insertion_offset=len(exact),
+        attached_evidence_handles=("ev_conflict",),
+    )
+    verifier = _RecordingVerifier(
+        SemanticVerificationResult(
+            verdict="entailed",
+            evidence_handles=("ev_conflict",),
+            confidence=1.0,
+            verifier_revision="must-not-run",
+        )
+    )
+
+    resolution = resolve_claim_evidence(
+        claim,
+        [
+            {
+                "evidenceHandle": "ev_conflict",
+                "source": {"providerId": "fixture"},
+                "evidence": {
+                    "kind": "text",
+                    "entityId": "BETA",
+                    "quote": "Beta Corp revenue was 100 USD in 2025.",
+                },
+            }
+        ],
+        semantics=_SEMANTICS,
+        entity_aliases={"Alpha Corp": ("Alpha Corp", "ALPHA"), "Beta Corp": ("Beta Corp", "BETA")},
+        semantic_verifier=verifier,
+    )
+
+    assert verifier.calls == []
+    assert resolution.status == "contradicted"
+    assert resolution.selected_handles == ("ev_conflict",)
 
 
 def test_explicit_structured_binding_accepts_appended_period_metadata() -> None:
@@ -259,7 +465,7 @@ def test_generic_value_and_unit_labels_do_not_create_false_metric_conflicts(
     assert resolution.selected_handles == (handle,)
 
 
-def test_unresolved_claim_never_requests_repair() -> None:
+def test_unbound_unresolved_claim_has_no_user_visible_severity() -> None:
     case = next(item for item in _FIXTURE["cases"] if item["resolver_case_id"] == "OSS-NEG-001")
 
     resolution = resolve_claim_evidence(
@@ -269,7 +475,7 @@ def test_unresolved_claim_never_requests_repair() -> None:
     )
 
     assert resolution.status == "unresolved"
-    assert resolution.repair_action == "none"
+    assert resolution.user_visible_severity == "none"
 
 
 def test_turn_local_index_bounds_large_registry_verification(

@@ -396,7 +396,7 @@ async def test_post_tool_hook_recovers_kb_chunks_from_stale_non_citable_meta() -
     assert sidecar["_valuz_evidence"][0]["locator"]["chunkId"] == "chunk-7"
 
 
-async def test_post_tool_hook_keeps_filtered_discovery_non_citable() -> None:
+async def test_post_tool_hook_keeps_provider_discovery_unchanged_and_non_citable() -> None:
     runtime = ClaudeAgentRuntime(AgentConfig(id="a", name="a"), "", _RecordingSink())
     hook = runtime._map_hooks()["PostToolUse"][0].hooks[0]
     payload = {
@@ -453,14 +453,10 @@ async def test_post_tool_hook_keeps_filtered_discovery_non_citable() -> None:
         None,  # type: ignore[arg-type]
     )
 
-    compacted = output["hookSpecificOutput"]["updatedMCPToolOutput"]
-    assert len(compacted["docs"]) == 4
-    assert "_valuz_evidence" not in compacted
-    assert "_valuz_evidence_hint" not in compacted
-    assert compacted["_valuz_discovery"]["citationEvidence"] == ("original-indexed-chunk-required")
+    assert "hookSpecificOutput" not in output
     assert "mcp-meta-discovery" not in runtime._citation_tool_result_sidecars
     registry = EvidenceRegistry()
-    assert registry.register_tool_result(compacted, tool_name="reports_search") == 0
+    assert registry.register_tool_result(payload, tool_name="reports_search") == 0
     assert registry.rejected_count == 0
 
 
@@ -522,7 +518,7 @@ async def test_post_tool_hook_keeps_late_prose_visible_within_long_chunk() -> No
     assert "revenue grew 40% and 39%" in excerpt
 
 
-async def test_transcript_uses_one_indexed_search_and_blocks_original_reads() -> None:
+async def test_citation_hooks_do_not_control_agent_research_sequence() -> None:
     runtime = ClaudeAgentRuntime(AgentConfig(id="a", name="a"), "", _RecordingSink())
     hooks = runtime._map_hooks()
     post_hook = hooks["PostToolUse"][0].hooks[0]
@@ -590,28 +586,15 @@ async def test_transcript_uses_one_indexed_search_and_blocks_original_reads() ->
         None,  # type: ignore[arg-type]
     )
 
-    assert raw_before_search["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert (
-        "exactly one kb_search"
-        in raw_before_search["hookSpecificOutput"]["permissionDecisionReason"]
-    )
-    assert "continue_" not in first_search
-    assert first_search["hookSpecificOutput"]["updatedInput"]["num"] == 10
-    assert "one targeted indexed search" in search_result["hookSpecificOutput"]["additionalContext"]
-    assert repeated_search["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert (
-        "already had its one targeted indexed search"
-        in repeated_search["hookSpecificOutput"]["permissionDecisionReason"]
-    )
-    assert fetch_after_search["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert (
-        "Use the returned chunks"
-        in fetch_after_search["hookSpecificOutput"]["permissionDecisionReason"]
-    )
-    assert "continue_" not in unrelated_raw
+    assert "hookSpecificOutput" not in raw_before_search
+    assert "hookSpecificOutput" not in first_search
+    assert "additionalContext" not in search_result["hookSpecificOutput"]
+    assert "hookSpecificOutput" not in repeated_search
+    assert "hookSpecificOutput" not in fetch_after_search
+    assert "hookSpecificOutput" not in unrelated_raw
 
 
-async def test_transcript_discovery_prioritizes_one_original_per_period() -> None:
+async def test_transcript_discovery_preserves_provider_order_and_cardinality() -> None:
     runtime = ClaudeAgentRuntime(AgentConfig(id="a", name="a"), "", _RecordingSink())
     hook = runtime._map_hooks()["PostToolUse"][0].hooks[0]
     docs = []
@@ -657,14 +640,11 @@ async def test_transcript_discovery_prioritizes_one_original_per_period() -> Non
 
     visible = result["hookSpecificOutput"]["updatedMCPToolOutput"]
     assert [document["doc_id"] for document in visible["docs"]] == [
-        "Q4-call",
-        "Q3-call",
-        "Q2-call",
-        "Q1-call",
+        document["doc_id"] for document in docs
     ]
 
 
-async def test_broad_transcript_discovery_expands_candidate_window_once() -> None:
+async def test_pre_tool_hook_does_not_rewrite_transcript_discovery_input() -> None:
     runtime = ClaudeAgentRuntime(AgentConfig(id="a", name="a"), "", _RecordingSink())
     pre_hook = runtime._map_hooks()["PreToolUse"][0].hooks[0]
 
@@ -690,12 +670,11 @@ async def test_broad_transcript_discovery_expands_candidate_window_once() -> Non
         None,  # type: ignore[arg-type]
     )
 
-    assert broad["hookSpecificOutput"]["permissionDecision"] == "allow"
-    assert broad["hookSpecificOutput"]["updatedInput"]["num"] == 20
-    assert "updatedInput" not in exact_quarter.get("hookSpecificOutput", {})
+    assert "hookSpecificOutput" not in broad
+    assert "hookSpecificOutput" not in exact_quarter
 
 
-async def test_document_fetch_budget_blocks_fourth_call() -> None:
+async def test_pre_tool_hook_does_not_limit_document_fetch_count() -> None:
     runtime = ClaudeAgentRuntime(AgentConfig(id="a", name="a"), "", _RecordingSink())
     pre_hook = runtime._map_hooks()["PreToolUse"][0].hooks[0]
 
@@ -714,7 +693,7 @@ async def test_document_fetch_budget_blocks_fourth_call() -> None:
         )
         assert "continue_" not in allowed
 
-    blocked = await pre_hook(
+    fourth = await pre_hook(
         {
             "tool_name": "mcp__valuz-search__document_fetch",
             "tool_input": {
@@ -727,12 +706,10 @@ async def test_document_fetch_budget_blocks_fourth_call() -> None:
         None,  # type: ignore[arg-type]
     )
 
-    assert blocked["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert "budget" in blocked["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "continue_" not in blocked
+    assert "hookSpecificOutput" not in fourth
 
 
-async def test_document_discovery_budget_hard_denies_seventh_call() -> None:
+async def test_pre_tool_hook_does_not_limit_document_discovery_count() -> None:
     runtime = ClaudeAgentRuntime(AgentConfig(id="a", name="a"), "", _RecordingSink())
     pre_hook = runtime._map_hooks()["PreToolUse"][0].hooks[0]
 
@@ -748,7 +725,7 @@ async def test_document_discovery_budget_hard_denies_seventh_call() -> None:
         assert "continue_" not in allowed
         assert "hookSpecificOutput" not in allowed
 
-    blocked = await pre_hook(
+    seventh = await pre_hook(
         {
             "tool_name": "mcp__valuz-search__filings_search",
             "tool_input": {"query": "query-7"},
@@ -757,11 +734,10 @@ async def test_document_discovery_budget_hard_denies_seventh_call() -> None:
         None,  # type: ignore[arg-type]
     )
 
-    assert blocked["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert "discovery budget" in blocked["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "hookSpecificOutput" not in seventh
 
 
-async def test_filing_fetch_blocks_distant_and_adjacent_windows() -> None:
+async def test_pre_tool_hook_does_not_control_document_chunk_windows() -> None:
     runtime = ClaudeAgentRuntime(AgentConfig(id="a", name="a"), "", _RecordingSink())
     hooks = runtime._map_hooks()
     pre_hook = hooks["PreToolUse"][0].hooks[0]
@@ -809,13 +785,11 @@ async def test_filing_fetch_blocks_distant_and_adjacent_windows() -> None:
         None,  # type: ignore[arg-type]
     )
 
-    assert distant["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert "distant chunk offset" in distant["hookSpecificOutput"]["permissionDecisionReason"]
-    assert adjacent["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert "Do not page sequentially" in adjacent["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "hookSpecificOutput" not in distant
+    assert "hookSpecificOutput" not in adjacent
 
 
-async def test_post_tool_hook_filters_secondary_and_duplicate_transcripts() -> None:
+async def test_post_tool_hook_does_not_filter_or_deduplicate_transcripts() -> None:
     runtime = ClaudeAgentRuntime(AgentConfig(id="a", name="a"), "", _RecordingSink())
     hook = runtime._map_hooks()["PostToolUse"][0].hooks[0]
     msft = {
@@ -850,12 +824,7 @@ async def test_post_tool_hook_filters_secondary_and_duplicate_transcripts() -> N
         None,  # type: ignore[arg-type]
     )
 
-    compacted = output["hookSpecificOutput"]["updatedMCPToolOutput"]
-    assert [doc["doc_id"] for doc in compacted["docs"]] == ["msft-first"]
-    assert "summary" not in compacted["docs"][0]
-    assert compacted["_valuz_discovery"]["filteredOut"] == 1
-    assert compacted["_valuz_discovery"]["duplicatesRemoved"] == 1
-    assert compacted["_valuz_discovery"]["citationEvidence"] == ("original-indexed-chunk-required")
+    assert "hookSpecificOutput" not in output
 
 
 async def test_raw_document_grep_returns_traceable_focused_evidence() -> None:
@@ -902,41 +871,41 @@ async def test_raw_document_grep_returns_traceable_focused_evidence() -> None:
     assert sidecar["_valuz_evidence"][0]["source"]["documentId"] == "annual-report"
 
 
-async def test_raw_document_resolves_requested_fields_without_full_scan() -> None:
+async def test_raw_document_is_not_replaced_by_host_selected_fields_or_next_steps() -> None:
     runtime = ClaudeAgentRuntime(AgentConfig(id="a", name="a"), "", _RecordingSink())
-    runtime._citation_user_query = (
-        "请根据年度报告，分别列出审计意见、营业总收入和营业收入，并逐项引用原文。"
-    )
     post_hook = runtime._map_hooks()["PostToolUse"][0].hooks[0]
+
+    raw_content = (
+        "天健会计师事务所出具了标准无保留意见的审计报告。\n"
+        "年度内公司实现营业总收入 1,741.44 亿元。\n"
+        "营业收入 170,899,152,276.34 元。"
+    )
+    tool_response = {
+        "doc_id": "annual-report",
+        "title": "Annual report",
+        "url": "https://reportify.cn/financials/annual-report",
+        "content": raw_content,
+    }
 
     result = await post_hook(
         {
             "tool_name": "mcp__valuz-search__document_raw_content",
             "tool_input": {"doc_id": "annual-report"},
-            "tool_response": {
-                "doc_id": "annual-report",
-                "title": "Annual report",
-                "url": "https://reportify.cn/financials/annual-report",
-                "content": (
-                    "天健会计师事务所出具了标准无保留意见的审计报告。\n"
-                    "年度内公司实现营业总收入 1,741.44 亿元。\n"
-                    "营业收入 170,899,152,276.34 元。"
-                ),
-            },
+            "tool_response": tool_response,
         },
         "raw-targeted",
         None,  # type: ignore[arg-type]
     )
 
-    visible = json.loads(result["hookSpecificOutput"]["updatedMCPToolOutput"])
-    assert [row["requestedField"] for row in visible["targetedEvidence"]] == [
-        "审计意见",
-        "营业总收入",
-        "营业收入",
-    ]
-    assert "scan the full document" in visible["nextAction"]
-    sidecar = json.loads(runtime._citation_tool_result_sidecars["raw-targeted"])
-    assert len(sidecar["_valuz_evidence"]) == 3
+    visible = result.get("hookSpecificOutput", {}).get(
+        "updatedMCPToolOutput",
+        tool_response,
+    )
+    parsed_visible = json.loads(visible) if isinstance(visible, str) else visible
+    serialized = json.dumps(parsed_visible, ensure_ascii=False)
+    assert parsed_visible["content"] == raw_content
+    assert "targetedEvidence" not in serialized
+    assert "nextAction" not in serialized
 
 
 async def test_raw_document_bash_grep_returns_traceable_focused_evidence() -> None:
@@ -979,7 +948,7 @@ async def test_raw_document_bash_grep_returns_traceable_focused_evidence() -> No
     assert sidecar["_valuz_evidence"][0]["source"]["documentId"] == "annual-report"
 
 
-async def test_filing_fetch_rejects_small_window_before_spending_budget() -> None:
+async def test_pre_tool_hook_does_not_force_document_chunk_limit() -> None:
     runtime = ClaudeAgentRuntime(AgentConfig(id="a", name="a"), "", _RecordingSink())
     pre_hook = runtime._map_hooks()["PreToolUse"][0].hooks[0]
 
@@ -1000,9 +969,8 @@ async def test_filing_fetch_rejects_small_window_before_spending_budget() -> Non
         None,  # type: ignore[arg-type]
     )
 
-    assert rejected["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert "chunk_limit=60" in rejected["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "continue_" not in allowed
+    assert "hookSpecificOutput" not in rejected
+    assert "hookSpecificOutput" not in allowed
 
 
 async def test_tool_result_event_replays_private_sidecar_for_registry() -> None:
@@ -1049,3 +1017,23 @@ def test_disabled_citation_mode_does_not_install_internal_hook() -> None:
     runtime._citation_compaction_enabled = False
 
     assert runtime._map_hooks() is None
+
+
+def test_source_metadata_hook_is_independent_from_citation_projection() -> None:
+    runtime = ClaudeAgentRuntime(AgentConfig(id="a", name="a"), "", _RecordingSink())
+    session = Session(
+        id="s",
+        agent_config=AgentConfig(id="a", name="a"),
+        cwd="/tmp",
+        metadata={
+            "valuz": {
+                "citation_enabled": False,
+                "citation_verification_enabled": False,
+            }
+        },
+    )
+
+    runtime._build_options(session)
+
+    assert runtime._citation_compaction_enabled is True
+    assert runtime._map_hooks() is not None
