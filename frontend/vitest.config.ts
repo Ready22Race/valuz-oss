@@ -48,6 +48,20 @@ export default defineConfig({
     environment: "jsdom",
     globals: true,
     setupFiles: [resolvePath("./vitest.setup.ts")],
+    server: {
+      deps: {
+        // ``@openuidev/react-ui@0.12.1`` ships extensionless relative imports
+        // in its subpath entries — ``dist/components/Modal/index.js`` does
+        // ``from "./Modal"``. Bundlers resolve that; Node's ESM loader does
+        // not, and Vitest externalises node_modules to Node by default. Any
+        // test that transitively reaches ``@openuidev/react-ui/Modal`` (which
+        // is every test importing ``@valuz/ui``, since its index re-exports
+        // A2UIRenderer) dies at collection with "Cannot find module …/Modal".
+        // Inlining hands the package to Vite's resolver instead. Remove this
+        // once upstream publishes fully-specified subpath imports.
+        inline: [/@openuidev\/react-ui/],
+      },
+    },
     include: [
       `${resolvePath("./apps")}/**/src/**/*.test.{ts,tsx}`,
       `${resolvePath("./packages")}/**/src/**/*.test.{ts,tsx}`,

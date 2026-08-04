@@ -41,6 +41,14 @@ def test_constants_are_set():
     assert "full-width primary trend" in GENERATIVE_UI_INSTRUCTIONS
     assert "balanced visual weight" in GENERATIVE_UI_INSTRUCTIONS
     assert "readable single-column flow" in GENERATIVE_UI_INSTRUCTIONS
+    assert "Valuz renderer extensions" in GENERATIVE_UI_INSTRUCTIONS
+    assert "MarketIndexGrid" in GENERATIVE_UI_INSTRUCTIONS
+    assert "MarketIndexCard" in GENERATIVE_UI_INSTRUCTIONS
+    assert "FinanceMetric" in GENERATIVE_UI_INSTRUCTIONS
+    assert "MarketBreadth" in GENERATIVE_UI_INSTRUCTIONS
+    assert "DataList" in GENERATIVE_UI_INSTRUCTIONS
+    assert "rank / main / value / meta" in GENERATIVE_UI_INSTRUCTIONS
+    assert "Prefer DataList over free-form rows" in GENERATIVE_UI_INSTRUCTIONS
     assert "Never invent, duplicate, or repeat metrics" in GENERATIVE_UI_INSTRUCTIONS
     assert "stack all major sections top-to-bottom" not in GENERATIVE_UI_INSTRUCTIONS
     assert (

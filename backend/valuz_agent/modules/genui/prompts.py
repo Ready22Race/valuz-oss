@@ -17,8 +17,8 @@ TOOL_DESCRIPTION = (
     "visualization, or interactive UI. Never infer this intent from data, and do "
     "not call it merely because the user asks to list items or show a table. Pass "
     "a natural-language `request` describing what to show, and optional `data`. "
-    "The client renders the returned OpenUI Lang inline; do not repeat the same "
-    "content as text afterwards."
+    "The client renders the returned GenUI protocol payload inline; do not repeat "
+    "the same content as text afterwards."
 )
 
 GENERATIVE_UI_INSTRUCTIONS = (
@@ -62,7 +62,23 @@ GENERATIVE_UI_INSTRUCTIONS = (
     "sizes, allow tables to scroll only when their columns cannot remain readable, "
     "and omit template regions for which the request or supplied data has no "
     "content. Never invent, duplicate, or repeat metrics merely to fill the "
-    "template."
+    "template. "
+    "Valuz renderer extensions: when rendering financial dashboards, prefer "
+    "semantic A2UI-compatible component names that the Valuz renderer maps to "
+    "polished OpenUI surfaces. Use MarketIndexGrid for a group of market/index "
+    "quote cards; its props should include title/description and an indices "
+    "array. Each index item should use name, code, latest, change, changePct, "
+    "turnover, source, and asOf when available. Use MarketIndexCard only for a "
+    "single standalone quote. Use FinanceMetric for standalone financial "
+    "numbers such as PE, PB, market cap, revenue, margin, ROE, turnover rate, "
+    "or valuation. Use MarketBreadth for up/down/flat market breadth summaries. "
+    "For rankings, ordered items, news lists, holdings, sector movers, stock "
+    "movers, risk flags, or any compact repeated textual records, use DataList "
+    "with title/description and items. Each DataList item may include rank, "
+    "name/title, description, value, changePct/meta, and trend. Prefer DataList "
+    "over free-form rows, Grid, or many TextContent elements for repeated list "
+    "content; the renderer aligns each row as rank / main / value / meta and "
+    "wraps it responsively."
 )
 
 
