@@ -134,11 +134,18 @@ class ArtifactDatastore:
     ) -> ArtifactRow:
         """Create an artifact and its two lookup keys.
 
-        The name key is best-effort: another artifact in this scope may already
-        hold that name (two files with the same basename in different folders),
-        and losing the *fallback* key is not a reason to fail a delivery whose
-        path key is unique. The path key is not optional — without it the next
-        delivery of the same file would not find this artifact.
+        The path key **takes over** any existing one for that path rather than
+        being inserted blindly. A path holds one artifact at a time — the one
+        currently living there — and a caller reaches this method for an
+        already-keyed path exactly when it means "same file, different
+        deliverable" (the ``asNewArtifact`` escape hatch). Inserting would
+        violate the key's uniqueness and fail the whole batch; taking over
+        leaves the previous artifact its history and its name key, and points
+        future deliveries of that path at the new one.
+
+        The name key is best-effort by contrast: another artifact in the same
+        directory may already hold that name, and losing a *fallback* key is not
+        a reason to fail a delivery whose path key is settled.
         """
         rel_dir = rel_dir_of(rel_path)
         row = ArtifactRow(
@@ -153,16 +160,31 @@ class ArtifactDatastore:
         self._db.add(row)
         await self._db.flush()
 
-        self._db.add(
-            ArtifactKeyRow(
-                user_id=scope.user_id,
-                project_id=scope.project_id,
-                worktree=scope.worktree,
-                key_kind=KEY_KIND_PATH,
-                key_value=rel_path,
-                artifact_id=row.id,
+        existing_path_key = (
+            await self._db.execute(
+                select(ArtifactKeyRow).where(
+                    ArtifactKeyRow.user_id == scope.user_id,
+                    ArtifactKeyRow.project_id == scope.project_id,
+                    ArtifactKeyRow.worktree == scope.worktree,
+                    ArtifactKeyRow.key_kind == KEY_KIND_PATH,
+                    ArtifactKeyRow.key_value == rel_path,
+                )
             )
-        )
+        ).scalar_one_or_none()
+        if existing_path_key is not None:
+            existing_path_key.artifact_id = row.id
+            existing_path_key.updated_at = now_ms()
+        else:
+            self._db.add(
+                ArtifactKeyRow(
+                    user_id=scope.user_id,
+                    project_id=scope.project_id,
+                    worktree=scope.worktree,
+                    key_kind=KEY_KIND_PATH,
+                    key_value=rel_path,
+                    artifact_id=row.id,
+                )
+            )
         await self._db.flush()
         await self.try_add_name_key(
             scope, artifact_id=row.id, display_name=display_name, rel_dir=rel_dir

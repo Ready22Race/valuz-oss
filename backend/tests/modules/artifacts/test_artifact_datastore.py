@@ -478,3 +478,24 @@ async def test_lost_race_leaves_nothing_behind_for_the_retry(session_factory, sc
             abs_path="/ws/v3/r.md",
         )
         assert retried is not None and retried.version_no == 3
+
+
+async def test_new_artifact_at_a_used_path_takes_the_key_over(session_factory, scope):  # type: ignore[no-untyped-def]
+    """The ``asNewArtifact`` path: same file, deliberately a different deliverable.
+
+    A path holds one artifact at a time. The newcomer takes the key so later
+    deliveries of that file continue IT, while the previous artifact keeps its
+    history.
+    """
+    async with session_factory() as db:
+        ds = ArtifactDatastore(db)
+        old = await _deliver(ds, scope, rel_path="r.md", display_name="R", digest="h1")
+        assert old is not None
+
+        fresh = await ds.create_artifact(scope, kind="document", display_name="R", rel_path="r.md")
+        assert fresh.id != old.artifact_id
+
+        found = await ds.find_by_keys(scope, rel_path="r.md", display_name="R")
+        assert found is not None and found.id == fresh.id
+        # The displaced artifact still has its history.
+        assert len(await ds.list_revisions("u1", old.artifact_id)) == 1
