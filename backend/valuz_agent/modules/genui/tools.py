@@ -23,8 +23,16 @@ from src.core.tools import ExecContext
 
 import valuz_agent.boot.kernel  # noqa: F401  (sets kernel import path)
 from valuz_agent.adapters import kernel_client
+from valuz_agent.infra.config import settings
 from valuz_agent.modules.genui.ids import resolve_tool_use_id
-from valuz_agent.modules.genui.prompts import TOOL_DESCRIPTION, build_openui_prompt
+from valuz_agent.modules.genui.prompts import TOOL_DESCRIPTION
+from valuz_agent.modules.genui.protocol import (
+    build_prompt_for_protocol,
+    normalize_genui_protocol,
+    output_format_for_protocol,
+    session_instructions_for_protocol,
+    wrap_generated_ui,
+)
 from valuz_agent.modules.genui.runner import _make_completer, _resolve_provider_id
 from valuz_agent.modules.providers.service import (
     resolve_model_provider_for_user as resolve_model_provider,
@@ -163,6 +171,7 @@ async def _generate_ui_handler(args: dict[str, Any], ctx: ExecContext) -> ToolRe
     tool_use_id = await resolve_tool_use_id(
         user_id=user_id, session_id=ctx.session_id, arguments=args
     )
+    protocol = normalize_genui_protocol(settings.genui_protocol)
     completer = _make_completer(
         user_id=user_id,
         runtime_provider=runtime_provider,
@@ -170,20 +179,25 @@ async def _generate_ui_handler(args: dict[str, Any], ctx: ExecContext) -> ToolRe
         mp=mp,
         calling_session_id=ctx.session_id if tool_use_id else None,
         tool_use_id=tool_use_id,
+        session_instructions=session_instructions_for_protocol(protocol),
+        output_format=output_format_for_protocol(protocol),
     )
     try:
-        openui = await _complete_with_retries(
+        generated = await _complete_with_retries(
             completer,
-            build_openui_prompt(str(request), data),
+            build_prompt_for_protocol(protocol, str(request), data),
         )
     except Exception as exc:  # noqa: BLE001
         logger.debug("generate_ui: generation failed", exc_info=True)
         return ToolResult(content=f"generate_ui: generation failed ({exc})", is_error=True)
 
-    openui = (openui or "").strip()
-    if not openui:
-        return ToolResult(content="generate_ui: model returned no OpenUI Lang", is_error=True)
-    return ToolResult(content=openui, is_error=False)
+    generated = (generated or "").strip()
+    if not generated:
+        return ToolResult(
+            content=f"generate_ui: model returned no {output_format_for_protocol(protocol)}",
+            is_error=True,
+        )
+    return ToolResult(content=wrap_generated_ui(protocol, generated), is_error=False)
 
 
 def build_generative_ui_tool_defs() -> tuple[ToolDef, ...]:

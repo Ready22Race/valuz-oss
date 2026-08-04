@@ -17,8 +17,8 @@ TOOL_DESCRIPTION = (
     "visualization, or interactive UI. Never infer this intent from data, and do "
     "not call it merely because the user asks to list items or show a table. Pass "
     "a natural-language `request` describing what to show, and optional `data`. "
-    "The client renders the returned OpenUI Lang inline; do not repeat the same "
-    "content as text afterwards."
+    "The client renders the returned GenUI protocol payload inline; do not repeat "
+    "the same content as text afterwards."
 )
 
 GENERATIVE_UI_INSTRUCTIONS = (

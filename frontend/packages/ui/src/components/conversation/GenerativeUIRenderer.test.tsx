@@ -18,6 +18,11 @@ vi.mock("@openuidev/react-ui", () => ({
 vi.mock("@openuidev/react-ui/genui-lib", () => ({
   openuiLibrary: {},
 }));
+vi.mock("./A2UIRenderer", () => ({
+  A2UIRenderer: ({ body }: { body: string }) => (
+    <div data-testid="a2ui-renderer">{body}</div>
+  ),
+}));
 
 import { GenerativeUIRenderer } from "./GenerativeUIRenderer";
 import { parseGenerativeUIPayload } from "./generative-ui-payload";
@@ -37,7 +42,7 @@ describe("GenerativeUIRenderer", () => {
     const messages = [
       JSON.stringify({
         version: "v0.9",
-        createSurface: { surfaceId: "s1", catalogId: "valuz" },
+        createSurface: { surfaceId: "s1", catalogId: "openui" },
       }),
     ].join("\n");
 
@@ -48,48 +53,22 @@ describe("GenerativeUIRenderer", () => {
     ).toEqual({ protocol: "a2ui-json", body: messages });
   });
 
-  it("renders A2UI v0.9 message streams with the local catalog", () => {
+  it("renders A2UI payloads through the A2UI renderer", () => {
     const messages = [
-      {
+      JSON.stringify({
         version: "v0.9",
-        createSurface: { surfaceId: "dashboard", catalogId: "valuz" },
-      },
-      {
+        createSurface: { surfaceId: "dashboard", catalogId: "openui" },
+      }),
+      JSON.stringify({
         version: "v0.9",
         updateComponents: {
           surfaceId: "dashboard",
           components: [
-            {
-              id: "root",
-              component: "Stack",
-              props: { direction: "column" },
-              children: [
-                {
-                  id: "title",
-                  component: "Heading",
-                  props: { text: "Revenue dashboard" },
-                },
-                {
-                  id: "revenue",
-                  component: "Metric",
-                  props: { label: "Revenue", value: "$12.4M" },
-                },
-                {
-                  id: "rows",
-                  component: "Table",
-                  props: {
-                    columns: ["Name", "Value"],
-                    rows: [["North", "$7.1M"]],
-                  },
-                },
-              ],
-            },
+            { id: "root", component: "TextContent", text: "Revenue" },
           ],
         },
-      },
-    ]
-      .map((message) => JSON.stringify(message))
-      .join("\n");
+      }),
+    ].join("\n");
 
     render(
       <GenerativeUIRenderer
@@ -98,10 +77,6 @@ describe("GenerativeUIRenderer", () => {
     );
 
     expect(screen.queryByTestId("renderer")).toBeNull();
-    expect(screen.getByTestId("a2ui-surface")).toBeTruthy();
-    expect(screen.getByText("Revenue dashboard")).toBeTruthy();
-    expect(screen.getByText("Revenue")).toBeTruthy();
-    expect(screen.getByText("$12.4M")).toBeTruthy();
-    expect(screen.getByText("North")).toBeTruthy();
+    expect(screen.getByTestId("a2ui-renderer").textContent).toBe(messages);
   });
 });
