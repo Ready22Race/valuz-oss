@@ -65,8 +65,10 @@ describe("GenerativeUICard", () => {
       .join("\n");
 
     expect(styles).toContain("container-type: inline-size");
+    expect(styles).toContain("container-name: genui-inline");
     expect(styles).toContain("flex-basis: max-content !important");
-    expect(styles).toContain("@container (max-width: 34rem)");
+    expect(styles).toContain("@container genui-inline (max-width: 48rem)");
+    expect(styles).toContain("@container genui-inline (max-width: 34rem)");
     expect(styles).toContain("flex-basis: 100% !important");
     expect(styles).toContain(":has(> .openui-card:nth-child(3)) > .openui-card");
     expect(styles).toContain(".openui-card-sunk");
