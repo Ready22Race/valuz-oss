@@ -20,7 +20,7 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -53,6 +53,8 @@ from src.core.task_coverage import (
     TaskCoverageTracker,
     build_task_retrieval_plan,
     parse_task_contract,
+    pending_task_clarification,
+    resume_pending_task_clarification,
     task_contract_prompt,
     task_coverage_improves,
 )
@@ -1785,6 +1787,92 @@ def _session_task_coverage_enabled(session: Session) -> bool:
     return value if isinstance(value, bool) else True
 
 
+_PENDING_TASK_CLARIFICATION_KEY = "pending_task_clarification"
+
+
+def _session_pending_task_clarification(session: Session) -> dict[str, Any] | None:
+    metadata = session.metadata if isinstance(session.metadata, dict) else {}
+    valuz = metadata.get("valuz")
+    pending = (
+        valuz.get(_PENDING_TASK_CLARIFICATION_KEY)
+        if isinstance(valuz, dict)
+        else None
+    )
+    return pending if isinstance(pending, dict) else None
+
+
+def _replace_pending_task_clarification(
+    session: Session,
+    value: Mapping[str, Any] | None,
+) -> None:
+    metadata = copy.deepcopy(session.metadata) if isinstance(session.metadata, dict) else {}
+    raw_valuz = metadata.get("valuz")
+    valuz = dict(raw_valuz) if isinstance(raw_valuz, dict) else {}
+    if value is None:
+        valuz.pop(_PENDING_TASK_CLARIFICATION_KEY, None)
+    else:
+        valuz[_PENDING_TASK_CLARIFICATION_KEY] = copy.deepcopy(dict(value))
+    metadata["valuz"] = valuz
+    session.metadata = metadata
+
+
+def _task_prompt_after_pending_clarification(
+    session: Session,
+    current_prompt: str,
+    *,
+    enabled: bool,
+) -> tuple[str, bool]:
+    """Return the effective Task Coverage prompt and prerequisite state."""
+
+    pending = _session_pending_task_clarification(session)
+    if not enabled:
+        if pending is not None:
+            _replace_pending_task_clarification(session, None)
+        return current_prompt, False
+    if pending is None:
+        return current_prompt, False
+    resolution = resume_pending_task_clarification(pending, current_prompt)
+    if not resolution.continuation:
+        _replace_pending_task_clarification(session, None)
+        return current_prompt, False
+    if not resolution.resolved:
+        updated = {
+            **pending,
+            "missingInputs": list(resolution.remaining_inputs),
+            "supplements": list(resolution.supplements),
+        }
+        _replace_pending_task_clarification(session, updated)
+    return resolution.effective_prompt, resolution.resolved
+
+
+def _task_clarification_message(
+    contract: TaskContract,
+    user_prompt: str,
+) -> str:
+    """Render the host-owned preflight response for missing user inputs.
+
+    This boundary is intentionally deterministic: once the Contract proves
+    that execution depends on values absent from the visible conversation,
+    the Runtime is not constructed and therefore cannot start speculative
+    retrieval before asking.  The next user turn still goes through the native
+    Runtime after the pending state has been resolved.
+    """
+
+    raw_inputs = contract.declared_scope.get("contextRequiredInputs")
+    inputs = [
+        str(item).strip()
+        for item in raw_inputs
+        if str(item).strip()
+    ] if isinstance(raw_inputs, list) else []
+    if re.search(r"[\u3400-\u9fff]", user_prompt):
+        if inputs == ["既有规则参数"]:
+            return "请先补充任务所依赖的既有规则参数及其具体数值，我再按原规则继续。"
+        labels = "、".join(inputs) if inputs else "任务所依赖的参数"
+        return f"请先补充以下信息及其具体数值：{labels}。补充后我会继续原任务。"
+    labels = ", ".join(inputs) if inputs else "the values required by this task"
+    return f"Please provide {labels} and their explicit values before I continue the task."
+
+
 def _session_document_scope(session: Session) -> set[str] | None:
     """Return the host-stamped locked document scope, if present."""
 
@@ -1850,6 +1938,7 @@ class _MessageObserverSink:
         self._citation_enabled = citation_enabled
         self._citation_verification_enabled = citation_verification_enabled
         self._task_coverage_enabled = task_coverage_enabled
+        self._task_contract = task_contract
         self._task_coverage_tracker = (
             TaskCoverageTracker(
                 task_contract,
@@ -3849,6 +3938,14 @@ class SessionOrchestrator:
         citation_policy_snapshot = _session_citation_quality_policy(session)
         document_scope = _session_document_scope(session)
         task_coverage_enabled = _session_task_coverage_enabled(session)
+        current_task_prompt = user_message.text
+        effective_task_prompt, context_inputs_resolved = (
+            _task_prompt_after_pending_clarification(
+                session,
+                current_task_prompt,
+                enabled=task_coverage_enabled,
+            )
+        )
 
         # Slice 3 of session-modes (broadened in slice 6 simplification):
         # both Claude and Codex process ``/plan <text>`` / ``/goal <text>``
@@ -3867,18 +3964,23 @@ class SessionOrchestrator:
 
         context_blocks: list[str] = []
         if _session_citation_enabled(session):
-            scope_context = _citation_output_scope_context(user_message.text)
+            scope_context = _citation_output_scope_context(effective_task_prompt)
             if scope_context:
                 context_blocks.append(scope_context)
         task_contract = (
             parse_task_contract(
-                user_message.text,
+                effective_task_prompt,
                 policy_snapshot=citation_policy_snapshot,
                 document_ids=document_scope,
+                context_inputs_resolved=context_inputs_resolved,
             )
             if task_coverage_enabled
             else None
         )
+        if task_contract is not None and _session_pending_task_clarification(session) is None:
+            pending = pending_task_clarification(task_contract, effective_task_prompt)
+            if pending is not None:
+                _replace_pending_task_clarification(session, pending)
         if task_contract is not None:
             retrieval_plan = build_task_retrieval_plan(
                 task_contract,
@@ -3890,6 +3992,16 @@ class SessionOrchestrator:
             )
             if coverage_context:
                 context_blocks.append(coverage_context)
+        context_inputs = (
+            task_contract.declared_scope.get("contextRequiredInputs")
+            if task_contract is not None
+            else None
+        )
+        clarification_required = bool(
+            isinstance(context_inputs, list)
+            and context_inputs
+            and not context_inputs_resolved
+        )
         if context_blocks:
             existing_context = user_message.additional_context.strip()
             joined_context = "\n\n".join(context_blocks)
@@ -3951,7 +4063,7 @@ class SessionOrchestrator:
         observer = _MessageObserverSink(
             coalesced,
             message_id=message.id,
-            user_prompt=user_message.text,
+            user_prompt=effective_task_prompt,
             citation_policy_available=any(Path(path).name == "citation" for path in session.skills),
             citation_quality_policy=citation_policy_snapshot,
             allowed_document_ids=document_scope,
@@ -3967,15 +4079,17 @@ class SessionOrchestrator:
         # Sessions are self-sufficient: ``session.cwd`` is required at
         # creation. Seed the workspace stub lazily (idempotent, one stat on
         # the hot path) — there is no project-creation moment to hook.
-        bootstrap_session_workspace(session.cwd, agent.name or None)
-        runtime = await self._ensure_runtime(
-            session_id,
-            agent,
-            session,
-            observer,
-            session.cwd,
-        )
-        self._active[session_id] = runtime
+        runtime: RuntimePort | None = None
+        if not clarification_required:
+            bootstrap_session_workspace(session.cwd, agent.name or None)
+            runtime = await self._ensure_runtime(
+                session_id,
+                agent,
+                session,
+                observer,
+                session.cwd,
+            )
+            self._active[session_id] = runtime
 
         try:
             await observer.emit(
@@ -4003,8 +4117,27 @@ class SessionOrchestrator:
                     data={"status": "running", "message_id": message.id},
                 )
             )
-            await runtime.run(session, user_message)
+            if clarification_required:
+                assert task_contract is not None
+                await observer.emit(
+                    Event(
+                        type="assistant_message",
+                        data={
+                            "text": _task_clarification_message(
+                                task_contract,
+                                effective_task_prompt,
+                            )
+                        },
+                    )
+                )
+                session.status = "idle"
+                session.stop_reason = None
+            else:
+                assert runtime is not None
+                await runtime.run(session, user_message)
             if (
+                runtime is not None
+                and
                 observer.final_answer_recovery_requested
                 and getattr(session.stop_reason, "type", None) == "end_turn"
             ):
@@ -4024,6 +4157,8 @@ class SessionOrchestrator:
                     ),
                 )
             if (
+                runtime is not None
+                and
                 observer.task_coverage_revision_requested
                 and getattr(session.stop_reason, "type", None) == "end_turn"
             ):
@@ -4092,6 +4227,8 @@ class SessionOrchestrator:
                     await self._evict_runtime(session_id)
                     self._active.pop(session_id, None)
             if (
+                runtime is not None
+                and
                 observer.citation_repair_requested
                 and getattr(session.stop_reason, "type", None) == "end_turn"
             ):
@@ -4160,6 +4297,12 @@ class SessionOrchestrator:
             # (and message.todos) from the observer's last todo_update payload;
             # saving first would persist a stale snapshot.
             self._finalize_message(message, session, observer)
+            if context_inputs_resolved and message.status == "completed":
+                # A resolved clarification is consumed only after the answer
+                # has reached a publishable terminal state.  Keeping the
+                # original pending record through runtime/provider failures
+                # makes the same explicit supplement safely retryable.
+                _replace_pending_task_clarification(session, None)
             # User-mutable fields (today: ``session.mode``) must survive a
             # mid-turn ``POST /mode``. The runtime holds the session by
             # reference and the unconditional ``save_session`` below would

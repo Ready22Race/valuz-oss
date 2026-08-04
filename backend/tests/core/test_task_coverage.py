@@ -7,6 +7,8 @@ from src.core.task_coverage import (
     build_answer_manifest,
     build_task_retrieval_plan,
     parse_task_contract,
+    pending_task_clarification,
+    resume_pending_task_clarification,
     task_contract_prompt,
     task_coverage_improves,
 )
@@ -1269,7 +1271,7 @@ def test_retrieval_plan_groups_structured_fields_by_entity_and_period() -> None:
         for step in plan.steps
     )
     assert all(step.periods == ("latest-complete-before-as-of",) for step in plan.steps)
-    assert all(step.max_attempts == 2 for step in plan.steps)
+    assert all(step.max_attempts == 3 for step in plan.steps)
 
 
 def test_retrieval_plan_groups_topics_per_relative_period() -> None:
@@ -2451,6 +2453,63 @@ def test_structured_positional_values_materialize_returned_field_addresses() -> 
     assert {row["retrievalStatus"] for row in structured} == {"available"}
 
 
+def test_structured_collection_null_value_is_attempted_but_not_available() -> None:
+    policy = _finance_like_policy()
+    policy["config"]["semantics"]["metric_ontology"]["metrics"][
+        "price_to_sales_ttm"
+    ] = {
+        "aliases": ["TTM PS", "PS_TTM()"],
+        "fields": ["price_to_sales_ttm", "ps_ttm"],
+    }
+    policy["config"]["task_coverage"]["retrieval"]["content_mappings"].append(
+        {
+            "id": "factor-content",
+            "role": "content",
+            "coverage_text": "input-and-result",
+            "tool_patterns": ["*factors_compute"],
+        }
+    )
+    contract = parse_task_contract(
+        "列出 MRVL 的 TTM PS。",
+        policy_snapshot=policy,
+    )
+    empty_tracker = TaskCoverageTracker(contract, policy_snapshot=policy)
+    available_tracker = TaskCoverageTracker(contract, policy_snapshot=policy)
+    base_result = {
+        "metadata": {"formula": "PS_TTM()"},
+        "datas": [{"date": "2026-08-03", "symbol": "MRVL", "factor_value": None}],
+        "_valuz_evidence_hint": {
+            "collectionHandle": "evc_test_ps_ttm",
+            "contentRoot": "/datas",
+            "metricMode": "field-map",
+            "metricFields": {"/factor_value": "price_to_sales_ttm"},
+        },
+    }
+    tool_input = {"symbols": ["MRVL"], "formula": "PS_TTM()"}
+    empty_tracker.record_tool_result("factors_compute", tool_input, base_result)
+    available_result = json.loads(json.dumps(base_result))
+    available_result["datas"][0]["factor_value"] = 19.3
+    available_tracker.record_tool_result(
+        "factors_compute",
+        tool_input,
+        available_result,
+    )
+
+    empty_audit = empty_tracker.evaluate("MRVL TTM PS：当前资料未披露。")
+    available_audit = available_tracker.evaluate("MRVL TTM PS：19.3 倍。")
+    empty_row = next(
+        row for row in empty_audit["requirements"] if row["kind"] == "structured-slot"
+    )
+    available_row = next(
+        row for row in available_audit["requirements"] if row["kind"] == "structured-slot"
+    )
+
+    assert empty_row["retrievalStatus"] == "partial"
+    assert empty_row["modelInputStatus"] == "not-visible"
+    assert available_row["retrievalStatus"] == "available"
+    assert available_row["modelInputStatus"] == "visible"
+
+
 def test_tracker_learns_entity_aliases_across_identity_lookup_chain() -> None:
     policy = _finance_like_policy()
     policy["config"]["task_coverage"]["retrieval"]["content_mappings"].append(
@@ -3294,6 +3353,136 @@ def test_generic_subject_parser_keeps_only_compared_companies() -> None:
         "当前状态",
         "还需连续观察",
     } & set(contract.declared_scope.get("entities", []))
+    assert contract.declared_scope["contextRequiredInputs"] == ["连续季度阈值"]
+    assert contract.ambiguous is True
+    assert build_task_retrieval_plan(contract).steps == ()
+
+    prompt = task_contract_prompt(contract)
+    assert "Before any tool call" in prompt
+    assert "连续季度阈值" in prompt
+    assert "Do not retrieve" in prompt
+
+    audit = TaskCoverageTracker(contract).evaluate("请补充连续季度阈值。")
+    assert audit["status"] == "insufficient-input"
+    assert TaskCoverageTracker(contract).should_request_revision(audit) is False
+
+
+def test_context_parameter_parser_covers_missing_limits_but_not_inline_values() -> None:
+    missing = parse_task_contract(
+        "对 A 股全量股票执行筛选：最新收盘价相对近 60 日最低价的涨幅"
+        "不超过用户设定上限。只输出同时满足全部条件的股票。",
+        policy_snapshot=_finance_like_policy(),
+    )
+    existing_rules = parse_task_contract(
+        "检查 MRVL 的固定止损线、相对成本涨幅线和估值分位阈值是否触发；"
+        "逐条报告当前值、阈值、差距和状态，不重新制定规则。",
+        policy_snapshot=_finance_like_policy(),
+    )
+    explicit = parse_task_contract(
+        "按用户给定的连续季度阈值为 50%、连续 3 季判断红黄绿灯。",
+        policy_snapshot=_finance_like_policy(),
+    )
+
+    assert missing.declared_scope["contextRequiredInputs"] == ["上限"]
+    assert existing_rules.declared_scope["contextRequiredInputs"] == ["既有规则参数"]
+    assert "contextRequiredInputs" not in explicit.declared_scope
+    assert explicit.ambiguous is False
+
+
+def test_pending_clarification_restores_original_contract_after_named_value() -> None:
+    original = (
+        "用最新完整财季检查中际旭创单季营收同比增速，并与新易盛同季数据比较；"
+        "按用户给定的连续季度阈值判断红黄绿灯。"
+    )
+    contract = parse_task_contract(original, policy_snapshot=_finance_like_policy())
+    pending = pending_task_clarification(contract, original)
+
+    assert pending is not None
+    resolution = resume_pending_task_clarification(
+        pending,
+        "连续季度阈值为 50%，继续按原任务检查。",
+    )
+
+    assert resolution.continuation is True
+    assert resolution.resolved is True
+    assert original in resolution.effective_prompt
+    assert "连续季度阈值为 50%" in resolution.effective_prompt
+    resumed = parse_task_contract(
+        resolution.effective_prompt,
+        policy_snapshot=_finance_like_policy(),
+        context_inputs_resolved=resolution.resolved,
+    )
+    assert "contextRequiredInputs" not in resumed.declared_scope
+    assert resumed.required_requirements
+    assert build_task_retrieval_plan(resumed).steps
+
+
+def test_pending_clarification_requires_all_named_inputs_and_ignores_unrelated_number() -> None:
+    pending = {
+        "version": 1,
+        "originalRequest": "检查固定止损线和估值阈值是否触发。",
+        "missingInputs": ["固定止损线", "估值阈值"],
+        "supplements": [],
+        "contractId": "tc_test",
+        "policyRevision": "finance-v1",
+    }
+
+    partial = resume_pending_task_clarification(pending, "固定止损线为 160 美元。")
+    unrelated = resume_pending_task_clarification(pending, "请查 2024 年营业收入。")
+
+    assert partial.continuation is True
+    assert partial.resolved is False
+    assert partial.remaining_inputs == ("估值阈值",)
+    assert unrelated.continuation is False
+    assert unrelated.effective_prompt == "请查 2024 年营业收入。"
+
+
+def test_aggregate_existing_rules_require_named_values_and_continuation_cue() -> None:
+    original = (
+        "检查 MRVL 固定止损线、相对成本涨幅线和估值阈值是否触发；"
+        "不重新制定规则。"
+    )
+    contract = parse_task_contract(original, policy_snapshot=_finance_like_policy())
+    pending = pending_task_clarification(contract, original)
+
+    assert pending is not None
+    resolved = resume_pending_task_clarification(
+        pending,
+        "固定止损线为160美元；持仓成本为150美元，涨幅阈值为20%；"
+        "TTM PS阈值为25倍。继续按原规则检查。",
+    )
+    unrelated = resume_pending_task_clarification(pending, "查询 2024 年营业收入。")
+
+    assert resolved.continuation is True
+    assert resolved.resolved is True
+    assert unrelated.continuation is False
+
+
+def test_structured_plan_budgets_one_required_fetch_per_distinct_metric() -> None:
+    policy = _finance_like_policy()
+    metrics = policy["config"]["semantics"]["metric_ontology"]["metrics"]
+    metrics.update(
+        {
+            "stock_price": {"aliases": ["最新收盘价"], "fields": ["stock_price"]},
+            "moving_average_20": {"aliases": ["MA20"], "fields": ["ma20"]},
+            "moving_average_60": {"aliases": ["MA60"], "fields": ["ma60"]},
+        }
+    )
+    contract = parse_task_contract(
+        "检查 MRVL 最新收盘价、MA20 和 MA60。",
+        policy_snapshot=policy,
+    )
+
+    plan = build_task_retrieval_plan(contract, policy_snapshot=policy)
+
+    assert len(plan.steps) == 1
+    assert plan.steps[0].strategy == "structured-fetch"
+    assert plan.steps[0].requested_parts == (
+        "stock_price",
+        "moving_average_20",
+        "moving_average_60",
+    )
+    assert plan.steps[0].max_attempts == 3
 
 
 def test_placeholder_subject_is_not_registered_as_a_literal_entity() -> None:

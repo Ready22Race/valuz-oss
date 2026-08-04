@@ -513,6 +513,80 @@ def test_normalized_metric_matches_without_surface_label_or_ontology() -> None:
     assert resolution.binding_action == "auto-bind"
 
 
+def test_unique_structured_metric_can_bind_when_source_unit_is_unknown() -> None:
+    claim = ClaimCandidate(
+        claim_id="missing-source-unit",
+        exact="MRVL MA20 was $203.69 on 2026-08-03.",
+        segment_index=0,
+        kind="structured-fact",
+        citation_required=True,
+        attached_citation_ids=(),
+        normalized={
+            "entityId": "MRVL",
+            "metric": "moving_average_20",
+            "period": "2026-08-03",
+            "value": "203.69",
+            "unit": "USD",
+        },
+        location={"kind": "fixture", "blockIndex": 0, "start": 0, "end": 39},
+        semantic_text="MRVL MA20 was $203.69 on 2026-08-03.",
+        insertion_offset=39,
+        attached_evidence_handles=(),
+    )
+    evidence = {
+        "evidenceHandle": "ev_ma20_missing_unit",
+        "source": {"providerId": "market-data"},
+        "evidence": {
+            "kind": "structured-data",
+            "entityId": "MRVL",
+            "metric": "moving_average_20",
+            "asOf": "2026-08-03",
+            "value": 203.69,
+        },
+    }
+
+    resolution = resolve_claim_evidence(claim, [evidence], semantics=_SEMANTICS)
+
+    assert resolution.status == "verified"
+    assert resolution.binding_action == "auto-bind"
+    assert resolution.selected_handles == ("ev_ma20_missing_unit",)
+    assert resolution.support_by_handle["ev_ma20_missing_unit"] == "supported"
+
+
+def test_missing_source_unit_never_guesses_a_scale_conversion() -> None:
+    claim = ClaimCandidate(
+        claim_id="missing-source-unit-scale",
+        exact="The amount was $203.69.",
+        segment_index=0,
+        kind="structured-fact",
+        citation_required=True,
+        attached_citation_ids=(),
+        normalized={
+            "metric": "amount",
+            "value": "203.69",
+            "unit": "USD",
+        },
+        location={"kind": "fixture", "blockIndex": 0, "start": 0, "end": 23},
+        semantic_text="The amount was $203.69.",
+        insertion_offset=23,
+        attached_evidence_handles=(),
+    )
+    evidence = {
+        "evidenceHandle": "ev_amount_missing_unit",
+        "source": {"providerId": "market-data"},
+        "evidence": {
+            "kind": "structured-data",
+            "metric": "amount",
+            "value": 2.0369,
+        },
+    }
+
+    resolution = resolve_claim_evidence(claim, [evidence], semantics=_SEMANTICS)
+
+    assert resolution.status == "unresolved"
+    assert resolution.binding_action == "none"
+
+
 def test_metricless_calculation_input_auto_binds_by_unique_value_period_and_unit() -> None:
     claim = ClaimCandidate(
         claim_id="metricless-calculation-input",
@@ -709,3 +783,56 @@ def test_missing_explicit_handle_is_invalid_instead_of_plain_unresolved() -> Non
     assert resolution.status == "invalid-binding"
     assert resolution.binding_action == "none"
     assert resolution.reason_codes == ("explicit-binding-missing",)
+
+
+def test_metric_alias_parameter_numbers_are_not_treated_as_claim_values() -> None:
+    semantics = copy.deepcopy(_SEMANTICS)
+    semantics["metric_ontology"] = {
+        "metrics": {
+            "moving_average_60": {
+                "aliases": ["MA60", "MA(CLOSE,60)", "60-day moving average"],
+                "fields": ["moving_average_60", "ma60"],
+            }
+        }
+    }
+    exact = "MA(CLOSE,60) in 2024 was 123 CNY."
+    claim = ClaimCandidate(
+        claim_id="metric-parameter-number",
+        exact=exact,
+        segment_index=0,
+        kind="structured-fact",
+        citation_required=True,
+        attached_citation_ids=(),
+        normalized={
+            "metric": "MA(CLOSE,60)",
+            "period": "2024 FY",
+            "value": "123",
+            "unit": "CNY",
+        },
+        location={"kind": "fixture", "blockIndex": 0, "start": 0, "end": len(exact)},
+        semantic_text=exact,
+        insertion_offset=len(exact),
+        attached_evidence_handles=(),
+    )
+
+    resolution = resolve_claim_evidence(
+        claim,
+        [
+            {
+                "evidenceHandle": "ev_ma60",
+                "source": {"providerId": "factor-data"},
+                "evidence": {
+                    "kind": "structured-data",
+                    "metric": "moving_average_60",
+                    "period": "2024 FY",
+                    "value": 123,
+                    "unit": "CNY",
+                },
+            }
+        ],
+        semantics=semantics,
+    )
+
+    assert resolution.status == "verified"
+    assert resolution.binding_action == "auto-bind"
+    assert resolution.selected_handles == ("ev_ma60",)

@@ -785,6 +785,21 @@ def _deterministic_support(
         )
     ):
         return support
+    if bool(claim_unit) != bool(evidence_unit):
+        # A missing unit is unknown, not a contradiction.  Exact canonical
+        # metric/value identity can still support a unique binding, but only
+        # without applying any scale conversion.  The quality layer keeps the
+        # missing-unit issue on the resulting citation so this never invents a
+        # currency or display unit.
+        if structured_values_equivalent(
+            claim_value,
+            "",
+            evidence_value,
+            "",
+            semantics=semantics,
+        ):
+            return EvidenceSupport("supported", 3)
+        return support
     if not structured_values_equivalent(
         claim_value,
         claim_unit,
@@ -793,7 +808,7 @@ def _deterministic_support(
         semantics=semantics,
     ):
         return EvidenceSupport("contradicted", 4)
-    return support
+    return EvidenceSupport("supported", 3)
 
 
 def _candidate_signals(

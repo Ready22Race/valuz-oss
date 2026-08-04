@@ -1521,6 +1521,28 @@ def test_guard_moves_citation_after_table_boundary_into_last_cell() -> None:
     assert "citation://cit_" in data_row
 
 
+def test_guard_folds_trailing_citation_only_overflow_cell_into_last_declared_cell() -> None:
+    registry = _registry(_item(locator={"kind": "chunk", "chunkId": "chunk-1"}))
+    guard = CitationGuard(
+        registry,
+        message_id="msg-1",
+        user_prompt="请用表格列出数据和计算公式",
+        policy_available=True,
+    )
+
+    result = guard.finalize(
+        "| 项目 | 原始金额 | 折合亿元 |\n"
+        "| --- | ---: | ---: |\n"
+        "| 2026 Q1 营业收入 | 10,285,128,726 | 102.85 亿元 |"
+        "[1](evidence://ev_revenue_2025) |"
+    )
+
+    data_row = result.text.splitlines()[2]
+    assert data_row.endswith(" |")
+    assert data_row.count("|") == 4
+    assert "102.85 亿元 [1](citation://cit_" in data_row
+
+
 def test_guard_focuses_long_text_preview_on_the_cited_table_row() -> None:
     item = _item(locator={"kind": "chunk", "chunkId": "chunk-1"})
     item["evidence"] = {

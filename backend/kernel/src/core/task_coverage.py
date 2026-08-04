@@ -59,6 +59,17 @@ class TaskCoveragePatchResult:
     code: str | None = None
 
 
+@dataclass(frozen=True)
+class TaskClarificationResolution:
+    """Host-side interpretation of one turn after an input clarification."""
+
+    continuation: bool
+    resolved: bool
+    effective_prompt: str
+    supplements: tuple[str, ...] = ()
+    remaining_inputs: tuple[str, ...] = ()
+
+
 _ZH_ENTITY_TRIGGER_RE = re.compile(
     r"(?:对比|比较|列出|分析|总结|归纳)\s*"
     r"(?P<body>.{1,180}?)"
@@ -294,6 +305,53 @@ _NEGATED_CALCULATION_RE = re.compile(
     r"(?:total|subtotal|calculation|calculate|recalculate)",
     re.IGNORECASE,
 )
+_ZH_CONTEXT_INPUT_RE = re.compile(
+    r"(?:按|根据|使用|沿用)?\s*(?:用户|你|您)?\s*"
+    r"(?:已)?(?:给定|设定|设置|确认|约定|配置|既有|现有|原有)(?:的)?\s*"
+    r"(?P<label>[^，,。；;\n]{0,40}?(?:阈值|上限|下限|区间|规则|参数|条件))",
+    re.IGNORECASE,
+)
+_ZH_EXISTING_RULE_RE = re.compile(
+    r"(?:不|不要|不得|无需)\s*重新(?:制定|设定|设置|定义|选择|发明)"
+    r"[^，,。；;\n]{0,16}(?:规则|阈值|参数|条件)",
+    re.IGNORECASE,
+)
+_EN_CONTEXT_INPUT_RE = re.compile(
+    r"(?:using|apply|follow|according\s+to)\s+(?:the\s+)?"
+    r"(?:user[- ](?:provided|defined|configured)|existing|previously\s+(?:agreed|set))\s+"
+    r"(?P<label>[^,.;\n]{0,48}?(?:threshold|limit|range|rule|parameter|condition)s?)",
+    re.IGNORECASE,
+)
+_INLINE_CONTEXT_VALUE_RE = re.compile(
+    r"^\s*(?:为|是|取|设为|=|:|：)?\s*[±+$¥￥]?(?:\d+(?:\.\d+)?|\.\d+)"
+    r"\s*(?:%|％|元|美元|倍|个?季度|季|天|bps?|点)?",
+    re.IGNORECASE,
+)
+_NAMED_CONTEXT_VALUE_RE = re.compile(
+    r"(?:^|[，,；;\n])\s*"
+    r"(?P<label>[^，,。；;\n:=：]{1,48}?)\s*"
+    r"(?:设为|设置为|定为|取值为|为|是|=|:|：)\s*"
+    r"(?P<value>[±+$¥￥]?(?:\d+(?:\.\d+)?|\.\d+)\s*"
+    r"(?:%|％|元|美元|倍|个?季度|季|天|bps?|点)?)",
+    re.IGNORECASE,
+)
+_SINGLE_CONTEXT_VALUE_RE = re.compile(
+    r"^\s*[±+$¥￥]?(?:\d+(?:\.\d+)?|\.\d+)\s*"
+    r"(?:%|％|元|美元|倍|个?季度|季|天|bps?|点)?\s*[。.!！]?\s*$",
+    re.IGNORECASE,
+)
+_CLARIFICATION_CONTINUE_RE = re.compile(
+    r"(?:继续|接着|按(?:照)?(?:原|既有|上述|这些)(?:规则|参数|条件)?|"
+    r"使用(?:这些|上述)参数|补充(?:如下|参数)|"
+    r"\b(?:continue|resume|use\s+(?:these|the)\s+(?:values|parameters))\b)",
+    re.IGNORECASE,
+)
+_AGGREGATE_CONTEXT_INPUTS = {
+    "既有规则参数",
+    "existing rules",
+    "existing parameters",
+    "previous parameters",
+}
 _ZH_NEGATED_METRIC_SUBSTITUTION_RE = re.compile(
     r"(?:不要|不得|禁止|不能|勿)\s*(?:(?:用|使用|把|将)\s*)?"
     r"(?P<substitute>[^。；;\n]{1,96}?)\s*"
@@ -550,11 +608,162 @@ class AnswerManifest:
     tables: tuple[MarkdownTable, ...]
 
 
+def _context_required_inputs(user_prompt: str) -> tuple[str, ...]:
+    """Find user-owned rule inputs referenced without an inline value.
+
+    The result is deliberately a prerequisite marker, not a guessed default.
+    Runtime history may still satisfy the dependency; otherwise the agent must
+    clarify before retrieval. Keeping this language-neutral primitive in the
+    shared resolver avoids per-company or per-strategy branches.
+    """
+
+    labels: list[str] = []
+    for pattern in (_ZH_CONTEXT_INPUT_RE, _EN_CONTEXT_INPUT_RE):
+        for match in pattern.finditer(user_prompt):
+            tail = user_prompt[match.end() : match.end() + 48]
+            if _INLINE_CONTEXT_VALUE_RE.search(tail):
+                continue
+            label = re.sub(r"\s+", " ", str(match.group("label") or "")).strip()
+            if label:
+                labels.append(label)
+    if _ZH_EXISTING_RULE_RE.search(user_prompt):
+        match = _ZH_EXISTING_RULE_RE.search(user_prompt)
+        assert match is not None
+        tail = user_prompt[match.end() : match.end() + 48]
+        if not _INLINE_CONTEXT_VALUE_RE.search(tail):
+            labels.append("既有规则参数")
+    return tuple(dict.fromkeys(labels))
+
+
+def pending_task_clarification(
+    contract: TaskContract,
+    original_request: str,
+    *,
+    supplements: Iterable[str] = (),
+) -> dict[str, Any] | None:
+    """Build the versioned session state for a contract awaiting user values."""
+
+    raw_inputs = contract.declared_scope.get("contextRequiredInputs")
+    missing_inputs = [
+        str(item).strip()
+        for item in raw_inputs
+        if str(item).strip()
+    ] if isinstance(raw_inputs, list) else []
+    if not missing_inputs or not original_request.strip():
+        return None
+    normalized_supplements = tuple(
+        dict.fromkeys(str(item).strip() for item in supplements if str(item).strip())
+    )[:8]
+    return {
+        "version": 1,
+        "originalRequest": original_request.strip(),
+        "missingInputs": missing_inputs,
+        "supplements": list(normalized_supplements),
+        "contractId": contract.contract_id,
+        "policyRevision": contract.policy_revision,
+    }
+
+
+def _named_context_assignments(value: str) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (
+            re.sub(r"\s+", " ", str(match.group("label") or "")).strip(),
+            re.sub(r"\s+", " ", str(match.group("value") or "")).strip(),
+        )
+        for match in _NAMED_CONTEXT_VALUE_RE.finditer(value)
+        if str(match.group("label") or "").strip()
+        and str(match.group("value") or "").strip()
+    )
+
+
+def _context_input_matches_label(required: str, supplied: str) -> bool:
+    required_key = _fold(required)
+    supplied_key = _fold(supplied)
+    return bool(
+        required_key
+        and supplied_key
+        and (required_key in supplied_key or supplied_key in required_key)
+    )
+
+
+def resume_pending_task_clarification(
+    pending: Mapping[str, Any],
+    user_prompt: str,
+) -> TaskClarificationResolution:
+    """Resolve a narrowly scoped parameter follow-up without hijacking new work.
+
+    A named assignment can satisfy a matching missing input.  Aggregate
+    dependencies (for example, ``既有规则参数``) additionally require an
+    explicit continuation cue, so an unrelated question containing a year or
+    another number cannot accidentally resume the old task.
+    """
+
+    current = user_prompt.strip()
+    original = str(pending.get("originalRequest") or "").strip()
+    raw_missing = pending.get("missingInputs")
+    missing = tuple(
+        dict.fromkeys(
+            str(item).strip()
+            for item in raw_missing
+            if str(item).strip()
+        )
+    ) if isinstance(raw_missing, list) else ()
+    raw_supplements = pending.get("supplements")
+    prior_supplements = tuple(
+        str(item).strip()
+        for item in raw_supplements
+        if str(item).strip()
+    ) if isinstance(raw_supplements, list) else ()
+    if pending.get("version") != 1 or not original or not missing or not current:
+        return TaskClarificationResolution(False, False, current)
+
+    assignments = _named_context_assignments(current)
+    has_continue_cue = bool(_CLARIFICATION_CONTINUE_RE.search(current))
+    numeric_only = bool(_SINGLE_CONTEXT_VALUE_RE.fullmatch(current))
+    aggregate_keys = {_fold(value) for value in _AGGREGATE_CONTEXT_INPUTS}
+    aggregate = any(_fold(item) in aggregate_keys for item in missing)
+    matching_inputs = {
+        required
+        for required in missing
+        for label, _value in assignments
+        if _context_input_matches_label(required, label)
+    }
+    continuation = bool(
+        matching_inputs
+        or (numeric_only and len(missing) == 1)
+        or (aggregate and assignments and has_continue_cue)
+    )
+    if not continuation:
+        return TaskClarificationResolution(False, False, current)
+
+    if aggregate:
+        remaining: tuple[str, ...] = () if assignments and has_continue_cue else missing
+    elif numeric_only and len(missing) == 1:
+        remaining = ()
+    else:
+        remaining = tuple(item for item in missing if item not in matching_inputs)
+    supplements = tuple(dict.fromkeys((*prior_supplements, current)))[:8]
+    effective_prompt = "\n\n".join(
+        (
+            original,
+            "用户后续明确补充：\n" + "\n".join(supplements),
+        )
+    )
+    return TaskClarificationResolution(
+        True,
+        not remaining,
+        effective_prompt,
+        supplements,
+        remaining,
+    )
+
+
 def parse_task_contract(
     user_prompt: str,
     *,
     policy_snapshot: Mapping[str, Any] | None = None,
     document_ids: Iterable[str] | None = None,
+    context_inputs_resolved: bool = False,
 ) -> TaskContract:
     """Expand deterministic, explicit task scope into atomic requirements."""
 
@@ -609,6 +818,9 @@ def parse_task_contract(
     calculation_prompt = _NEGATED_CALCULATION_RE.sub("", user_prompt)
     calculation_requested = (
         bool(_CALCULATION_RE.search(calculation_prompt)) and not explanatory_only
+    )
+    context_required_inputs = (
+        () if context_inputs_resolved else _context_required_inputs(user_prompt)
     )
     requirements: list[TaskRequirement] = []
 
@@ -1009,6 +1221,11 @@ def parse_task_contract(
         **({"documentIds": list(locked_documents)} if locked_documents else {}),
         **({"topics": [topic for topic, _ in topics]} if topics else {}),
         **(
+            {"contextRequiredInputs": list(context_required_inputs)}
+            if context_required_inputs
+            else {}
+        ),
+        **(
             {
                 "dimensions": {
                     dimension: [member for member, _aliases, _policy_ref in members]
@@ -1068,7 +1285,9 @@ def parse_task_contract(
         declared_scope=declared_scope,
         output_contract=output_dict,
         policy_revision=policy_revision,
-        ambiguous=bool(latest_selector and not entities and not locked_documents),
+        ambiguous=bool(
+            context_required_inputs or (latest_selector and not entities and not locked_documents)
+        ),
     )
 
 
@@ -1085,6 +1304,10 @@ def build_task_retrieval_plan(
     so OSS, Commercial and distribution layers use one algorithm without
     embedding edition-specific tool names here.
     """
+
+    context_inputs = contract.declared_scope.get("contextRequiredInputs")
+    if isinstance(context_inputs, list) and context_inputs:
+        return TaskRetrievalPlan(contract_id=contract.contract_id, steps=())
 
     selected_ids = (
         {str(requirement_id) for requirement_id in requirement_ids if str(requirement_id)}
@@ -1178,6 +1401,12 @@ def build_task_retrieval_plan(
                 "parts": requested_parts,
             }
             step_id = "step_" + _digest(basis, 18)
+            base_attempts = 2 if inspect_partial else 1
+            max_attempts = (
+                min(16, max(base_attempts, len(tuple(dict.fromkeys(requested_parts)))))
+                if planned_strategy == "structured-fetch"
+                else base_attempts
+            )
             steps.append(
                 TaskRetrievalStep(
                     step_id=step_id,
@@ -1193,7 +1422,7 @@ def build_task_retrieval_plan(
                         ],
                         planned_strategy,
                     ),
-                    max_attempts=2 if inspect_partial else 1,
+                    max_attempts=max_attempts,
                     entity_ids=(entity,) if entity else (),
                     periods=(period,) if period else (),
                     document_ids=document_ids,
@@ -1210,6 +1439,30 @@ def task_contract_prompt(
     retrieval_plan: TaskRetrievalPlan | None = None,
 ) -> str:
     """Return a compact host-owned checklist injected before generation."""
+
+    context_inputs = contract.declared_scope.get("contextRequiredInputs")
+    if isinstance(context_inputs, list) and context_inputs:
+        labels = ", ".join(str(item) for item in context_inputs if str(item).strip())
+        return "\n".join(
+            (
+                "Host-enforced task prerequisite:",
+                f"- The request depends on user-defined or existing values: {labels}.",
+                (
+                    "- Before any tool call, reuse those values only if their explicit values "
+                    "are visible in this conversation context."
+                ),
+                (
+                    "- If any value is absent, ask one concise clarification and stop this "
+                    "turn. Do not retrieve data, calculate, complete a partial report, or "
+                    "invent an industry/default value."
+                ),
+                (
+                    "- Do not treat an inferred or model-remembered value as user-provided. "
+                    "The next user turn will receive the full task coverage contract after "
+                    "the missing values are supplied."
+                ),
+            )
+        )
 
     if not contract.enforceable:
         return ""
@@ -1673,7 +1926,14 @@ class TaskCoverageTracker:
             if row["kind"] not in {"output-shape", "comparison", "calculation"}
             and row["modelInputStatus"] != "visible"
         ]
-        status = "complete" if not answer_missing and not input_gaps else "partial"
+        context_inputs = self.contract.declared_scope.get("contextRequiredInputs")
+        status = (
+            "insufficient-input"
+            if isinstance(context_inputs, list) and context_inputs
+            else "complete"
+            if not answer_missing and not input_gaps
+            else "partial"
+        )
         metrics = {
             "taskRequirementCount": len(rows),
             "taskRequirementRequiredCount": len(required),
@@ -1811,6 +2071,8 @@ class TaskCoverageTracker:
         }
 
     def should_request_revision(self, audit: Mapping[str, Any]) -> bool:
+        if audit.get("status") == "insufficient-input":
+            return False
         if not self.contract.enforceable:
             return False
         requirements = audit.get("requirements")
@@ -3788,6 +4050,92 @@ def _metric_value_aliases(metric: str, semantics: Mapping[str, Any]) -> tuple[st
     return tuple(dict.fromkeys(aliases))
 
 
+def _resolve_coverage_pointer(value: Any, pointer: str) -> tuple[bool, Any]:
+    if pointer == "":
+        return True, value
+    if not isinstance(pointer, str) or not pointer.startswith("/"):
+        return False, None
+    current = value
+    for raw_token in pointer[1:].split("/"):
+        token = raw_token.replace("~1", "/").replace("~0", "~")
+        if isinstance(current, Mapping) and token in current:
+            current = current[token]
+        elif isinstance(current, (list, tuple)) and token.isdigit():
+            index = int(token)
+            if index >= len(current):
+                return False, None
+            current = current[index]
+        else:
+            return False, None
+    return True, current
+
+
+def _structured_metric_value_state(
+    value: Any,
+    *,
+    aliases: Iterable[str],
+) -> bool | None:
+    """Return whether a standard Collection exposes a non-empty metric value.
+
+    ``False`` is authoritative only when a Collection hint maps the requested
+    canonical metric to one or more concrete fields and every returned value
+    is empty.  ``None`` keeps legacy untyped payloads on the existing textual
+    compatibility path.
+    """
+
+    alias_keys = {_fold(str(alias)) for alias in aliases if _fold(str(alias))}
+    if not alias_keys:
+        return None
+    stack: list[Any] = [value]
+    visited = 0
+    mapped = False
+    while stack and visited < 10_000:
+        node = stack.pop()
+        visited += 1
+        parsed = _maybe_json(node)
+        if parsed is not node:
+            stack.append(parsed)
+            continue
+        if isinstance(node, Mapping):
+            raw_hints = node.get("_valuz_evidence_hint")
+            hints = raw_hints if isinstance(raw_hints, list) else [raw_hints]
+            for hint in hints:
+                if not isinstance(hint, Mapping):
+                    continue
+                metric_fields = hint.get("metricFields")
+                content_root = hint.get("contentRoot")
+                if not isinstance(metric_fields, Mapping) or not isinstance(
+                    content_root,
+                    str,
+                ):
+                    continue
+                selected_fields = [
+                    str(pointer)
+                    for pointer, metric in metric_fields.items()
+                    if _fold(str(metric)) in alias_keys and isinstance(pointer, str)
+                ]
+                if not selected_fields:
+                    continue
+                found, records = _resolve_coverage_pointer(node, content_root)
+                if not found:
+                    continue
+                mapped = True
+                record_items = records if isinstance(records, (list, tuple)) else [records]
+                for record in record_items:
+                    for pointer in selected_fields:
+                        present, field_value = _resolve_coverage_pointer(record, pointer)
+                        if present and field_value not in (None, ""):
+                            return True
+            stack.extend(
+                child
+                for key, child in node.items()
+                if key != "_valuz_evidence_hint"
+            )
+        elif isinstance(node, (list, tuple)):
+            stack.extend(node)
+    return False if mapped else None
+
+
 def _requirement_dimension_aliases(
     requirement: TaskRequirement,
 ) -> tuple[tuple[str, tuple[str, ...]], ...]:
@@ -3830,6 +4178,16 @@ def _attempt_matches_requirement(
         return False
     metric = str(slots.get("metric") or "")
     metric_aliases = requirement.aliases.get("metric", ()) or ((metric,) if metric else ())
+    structured_value_state = (
+        _structured_metric_value_state(
+            attempt.model_content,
+            aliases=metric_aliases,
+        )
+        if requirement.kind == "structured-slot" and attempt.role == "content"
+        else None
+    )
+    if structured_value_state is False:
+        return False
     if metric_aliases and not any(
         _contains_alias(evidence_haystack, alias) for alias in metric_aliases
     ):
@@ -3837,7 +4195,7 @@ def _attempt_matches_requirement(
         # A company-level search result is still the auditable candidate for
         # each requested metric even when its metadata does not repeat every
         # field name; it remains `partial` until a content tool proves the part.
-        if attempt.role != "candidate" or not entity:
+        if structured_value_state is not True and (attempt.role != "candidate" or not entity):
             return False
     for _dimension, member_aliases in _requirement_dimension_aliases(requirement):
         if not any(_contains_alias(evidence_haystack, alias) for alias in member_aliases):
@@ -5849,11 +6207,14 @@ __all__ = [
     "TASK_COVERAGE_RESOLVER_REVISION",
     "AnswerManifest",
     "TaskContract",
+    "TaskClarificationResolution",
     "TaskCoveragePatchResult",
     "TaskCoverageTracker",
     "TaskRequirement",
     "build_answer_manifest",
     "parse_task_contract",
+    "pending_task_clarification",
+    "resume_pending_task_clarification",
     "task_contract_prompt",
     "task_coverage_improves",
     "task_coverage_tool_mapping",

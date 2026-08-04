@@ -60,7 +60,6 @@ _DISCOVERY_RESULT_LIMIT = 4
 _DISCOVERY_SUMMARY_LIMIT = 360
 _DOCUMENT_FETCH_FAILURE_LIMIT = 2
 _DOCUMENT_FETCH_BLOCK_SECONDS = 60.0
-_STRUCTURED_FALLBACK_EVIDENCE_LIMIT = 128
 _RAW_DOCUMENT_CACHE_LIMIT = 8
 _FINANCIAL_STATEMENT_TOOLS = {
     "income_statement",
@@ -1041,22 +1040,70 @@ def _append_complete_document_coverage_note(
     return result.model_copy(update={"content": blocks})
 
 
-_STRUCTURED_FALLBACK_TOOLS = {
-    "income_statement",
-    "balance_sheet",
-    "cashflow_statement",
-    "revenue_breakdown",
-    "company_income_statement",
-    "company_balance_sheet",
-    "company_cashflow_statement",
+_STRUCTURED_FALLBACK_SPECS: dict[str, dict[str, Any]] = {
+    "income_statement": {"contentRoot": "/data"},
+    "balance_sheet": {"contentRoot": "/data"},
+    "cashflow_statement": {"contentRoot": "/data"},
+    "revenue_breakdown": {"contentRoot": "/data"},
+    "company_income_statement": {"contentRoot": "/data"},
+    "company_balance_sheet": {"contentRoot": "/data"},
+    "company_cashflow_statement": {"contentRoot": "/data"},
+    # Compatibility adapters for Reportify MCP deployments that predate the
+    # source-metadata transport. Each tool call still becomes one immutable
+    # Collection; no row or scalar Evidence is generated eagerly.
+    "factors_compute": {
+        "contentRoot": "/datas",
+        "itemsPointer": "/datas",
+        "identityFields": ["/symbol", "/date"],
+        "sourceCategory": "structured_market_data",
+        "semantics": {
+            "entity": {"symbol": "/symbol", "name": "/name"},
+            "asOf": {"date": "/date"},
+            "metric": {"mode": "field-name", "valueRoots": [""]},
+        },
+    },
+    "stock_quote": {
+        "contentRoot": "/data",
+        "itemsPointer": "/data/items",
+        "identityFields": ["/symbol", "/date"],
+        "sourceCategory": "structured_market_data",
+        "semantics": {
+            "entity": {"symbol": "/symbol", "name": "/stock_name"},
+            "asOf": {"date": "/date"},
+            "metric": {"mode": "field-name", "valueRoots": [""]},
+        },
+    },
 }
-_STRUCTURED_CONTEXT_KEYS = {
-    "currency",
-    "end_date",
-    "fiscal_year",
-    "name",
-    "period",
+
+
+_SIMPLE_FACTOR_METRICS = {
+    "PS": "price_to_sales",
+    "PS_TTM": "price_to_sales_ttm",
+    "PE": "price_to_earnings",
+    "PE_TTM": "price_to_earnings_ttm",
+    "PB": "price_to_book",
+    "PCF": "price_to_cash_flow",
 }
+
+
+def _canonical_metric_for_factor_formula(formula: str) -> str | None:
+    """Map a small, auditable factor grammar to canonical metric ids."""
+
+    normalized = re.sub(r"\s+", "", str(formula or "")).upper()
+    simple = re.fullmatch(r"([A-Z][A-Z0-9_]*)\(\)", normalized)
+    if simple and simple.group(1) in _SIMPLE_FACTOR_METRICS:
+        return _SIMPLE_FACTOR_METRICS[simple.group(1)]
+    moving_average = re.fullmatch(r"MA\(CLOSE,(\d{1,4})\)", normalized)
+    if moving_average:
+        window = int(moving_average.group(1))
+        if 1 <= window <= 1_000:
+            return f"moving_average_{window}"
+    rsi = re.fullmatch(r"RSI\((\d{1,3})\)", normalized)
+    if rsi:
+        window = int(rsi.group(1))
+        if 1 <= window <= 999:
+            return f"rsi_{window}"
+    return None
 
 
 def _augment_structured_tool_content(
@@ -1066,17 +1113,17 @@ def _augment_structured_tool_content(
     tool_args: dict[str, Any],
     captured_at: str,
 ) -> Any | None:
-    """Add exact per-field envelopes when a trusted data tool only cites status.
+    """Add one lazy Collection when a trusted legacy data tool lacks Metadata.
 
     Some connector versions attach one envelope for the top-level HTTP
-    ``status`` but none for the actual nested financial values. The tool result
-    is already inside the trusted runtime boundary, so deriving immutable
-    per-scalar snapshots here is safer than letting the model cite ``status``
-    or an unrelated document cover page.
+    ``status`` but none for the actual structured values. The compatibility
+    adapter freezes the exact result root once and exposes JSON-pointer
+    addresses. Only fields used by final claims are materialized later.
     """
 
-    name = str(tool_name or "")
-    if name not in _STRUCTURED_FALLBACK_TOOLS:
+    name = str(tool_name or "").rsplit("__", 1)[-1]
+    spec = _STRUCTURED_FALLBACK_SPECS.get(name)
+    if spec is None:
         return None
     if isinstance(content, str):
         return _augment_structured_json_text(
@@ -1084,6 +1131,7 @@ def _augment_structured_tool_content(
             tool_name=name,
             tool_args=tool_args,
             captured_at=captured_at,
+            spec=spec,
         )
     if not isinstance(content, list):
         return None
@@ -1100,6 +1148,7 @@ def _augment_structured_tool_content(
                 tool_name=name,
                 tool_args=tool_args,
                 captured_at=captured_at,
+                spec=spec,
             )
             if isinstance(raw_text, str)
             else None
@@ -1118,6 +1167,7 @@ def _augment_structured_json_text(
     tool_name: str,
     tool_args: dict[str, Any],
     captured_at: str,
+    spec: dict[str, Any],
 ) -> str | None:
     try:
         payload = json.loads(raw_text)
@@ -1137,6 +1187,7 @@ def _augment_structured_json_text(
                     tool_name=tool_name,
                     tool_args=tool_args,
                     captured_at=captured_at,
+                    spec=spec,
                 )
                 if isinstance(text, str)
                 else None
@@ -1147,7 +1198,17 @@ def _augment_structured_json_text(
             output.append({**block, "text": nested})
             changed = True
         return json.dumps(output, ensure_ascii=False, separators=(",", ":")) if changed else None
-    if not isinstance(payload, dict) or not isinstance(payload.get("data"), (dict, list)):
+    if not isinstance(payload, dict):
+        return None
+    if isinstance(payload.get("_valuz_evidence_hint"), (dict, list)):
+        # A prior middleware pass already split this projection into a visible
+        # hint and a private descriptor. Preserve that exact immutable handle;
+        # the ToolMessage artifact carries the descriptor across wrappers.
+        return None
+    content_root = str(spec.get("contentRoot") or "")
+    root_key = content_root.removeprefix("/")
+    snapshot = payload.get(root_key)
+    if "/" in root_key or not isinstance(snapshot, (dict, list)):
         return None
     existing = payload.get("_valuz_evidence")
     existing_items = (
@@ -1164,10 +1225,12 @@ def _augment_structured_json_text(
     if valid_existing:
         return None
     synthesized = _structured_fallback_collection(
-        payload["data"],
+        snapshot,
         tool_name=tool_name,
         tool_args=tool_args,
         captured_at=captured_at,
+        payload=payload,
+        spec=spec,
     )
     if synthesized is None:
         return None
@@ -1182,22 +1245,32 @@ def _structured_fallback_collection(
     tool_name: str,
     tool_args: dict[str, Any],
     captured_at: str,
+    payload: dict[str, Any],
+    spec: dict[str, Any],
 ) -> dict[str, Any] | None:
-    identifier = next(
-        (
-            str(tool_args.get(key)).strip()
-            for key in ("symbol", "ticker", "code", "symbols", "names")
-            if str(tool_args.get(key) or "").strip()
-        ),
-        "result",
-    )
+    identifier_values: list[str] = []
+    for key in ("symbol", "ticker", "code", "symbols", "names"):
+        raw_identifier = tool_args.get(key)
+        if isinstance(raw_identifier, list):
+            identifier_values = [str(item).strip() for item in raw_identifier if str(item).strip()]
+        elif str(raw_identifier or "").strip():
+            identifier_values = [str(raw_identifier).strip()]
+        if identifier_values:
+            break
+    identifier = ",".join(identifier_values[:8]) or "result"
     source_id = f"tool-result:{tool_name}:{identifier}"[:512]
+    metadata = payload.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    formula = str(metadata.get("formula") or tool_args.get("formula") or "").strip()
+    title_parts = [tool_name, identifier]
+    if formula:
+        title_parts.append(formula)
     source: dict[str, Any] = {
         "sourceId": source_id,
         "providerId": "valuz-stock",
         "sourceType": "tool-result",
-        "sourceCategory": "financials",
-        "title": f"{tool_name} · {identifier}"[:1_024],
+        "sourceCategory": str(spec.get("sourceCategory") or "financials"),
+        "title": " · ".join(title_parts)[:1_024],
         "retrievedAt": captured_at,
     }
     try:
@@ -1210,46 +1283,60 @@ def _structured_fallback_collection(
     except (TypeError, ValueError):
         return None
     content_hash = f"sha256:{hashlib.sha256(serialized.encode()).hexdigest()}"
-    digest = hashlib.sha256(f"{source_id}\0{tool_name}\0{content_hash}".encode()).hexdigest()[:24]
     common: dict[str, Any] = {
         "datasetId": f"tool-result:{tool_name}",
         "toolName": tool_name,
         "capturedAt": captured_at,
     }
+    as_of = payload.get("as_of") or metadata.get("as_of")
+    if as_of not in (None, ""):
+        common["asOf"] = str(as_of)
     if isinstance(data, dict) and data.get("currency"):
         common["currency"] = str(data["currency"])
-    if identifier != "result":
-        common["entityId"] = identifier
+    if len(identifier_values) == 1:
+        common["entityId"] = identifier_values[0]
+    content_root = str(spec.get("contentRoot") or "/data")
+    addressing: dict[str, Any] = {
+        "mode": "json-pointer",
+        "contentRoot": content_root,
+        "identityFields": list(spec.get("identityFields") or []),
+        "allowedPathRoots": [content_root],
+    }
+    items_pointer = spec.get("itemsPointer")
+    if isinstance(items_pointer, str) and items_pointer:
+        addressing["itemsPointer"] = items_pointer
+    semantics = dict(spec.get("semantics") or {})
+    if tool_name == "factors_compute":
+        canonical_metric = _canonical_metric_for_factor_formula(formula)
+        if canonical_metric:
+            semantics["metric"] = {
+                "mode": "field-map",
+                "fields": {"/factor_value": canonical_metric},
+            }
+    descriptor_identity = json.dumps(
+        {
+            "source": source,
+            "common": common,
+            "addressing": addressing,
+            "semantics": semantics,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(
+        f"{source_id}\0{tool_name}\0{content_hash}\0{descriptor_identity}".encode()
+    ).hexdigest()[:24]
     return {
         "version": 1,
         "kind": "structured-evidence-collection",
         "collectionHandle": f"evc_tool_{digest}",
         "source": source,
         "common": common,
-        "addressing": {
-            "mode": "json-pointer",
-            "contentRoot": "/data",
-            "identityFields": [],
-            "allowedPathRoots": ["/data"],
-        },
+        "addressing": addressing,
+        "semantics": semantics,
         "contentHash": content_hash,
     }
-
-
-def _structured_fallback_value(
-    field: str, value: int | float, *, root_currency: str
-) -> tuple[int | float, str]:
-    normalized = field.casefold()
-    if normalized.endswith("_rate") and abs(float(value)) <= 1:
-        return float(value) * 100, "percent"
-    if any(term in normalized for term in ("percentage", "growth", "yoy", "rate")):
-        return value, "percent"
-    if root_currency and any(
-        term in normalized
-        for term in ("revenue", "cost", "profit", "asset", "liabil", "cash", "income")
-    ):
-        return value, root_currency
-    return value, ""
 
 
 def _compact_discovery_tool_content(

@@ -24,6 +24,8 @@ from src.core.task_coverage import (  # noqa: E402
     TASK_COVERAGE_RESOLVER_REVISION,
     TaskCoverageTracker,
     parse_task_contract,
+    pending_task_clarification,
+    resume_pending_task_clarification,
     task_coverage_tool_mapping,
 )
 
@@ -452,13 +454,35 @@ def _evaluate_dimension_ontology_families(
 
 def evaluate_case(case: Mapping[str, Any], policy: Mapping[str, Any]) -> dict[str, Any]:
     prompt = str(case.get("prompt") or "")
+    policy_snapshot = {
+        "revision": "task-effective-eval",
+        "config": dict(policy),
+    }
+    contract_prompt = prompt
+    clarification_continuation: bool | None = None
+    clarification_resolved: bool | None = None
+    context_inputs_resolved = False
+    clarification_follow_up = str(case.get("clarification_follow_up") or "").strip()
+    if clarification_follow_up:
+        initial_contract = parse_task_contract(
+            prompt,
+            policy_snapshot=policy_snapshot,
+            document_ids=case.get("document_ids") or (),
+        )
+        pending = pending_task_clarification(initial_contract, prompt)
+        resolution = resume_pending_task_clarification(
+            pending or {},
+            clarification_follow_up,
+        )
+        clarification_continuation = resolution.continuation
+        clarification_resolved = resolution.resolved
+        contract_prompt = resolution.effective_prompt
+        context_inputs_resolved = resolution.resolved
     contract = parse_task_contract(
-        prompt,
-        policy_snapshot={
-            "revision": "task-effective-eval",
-            "config": dict(policy),
-        },
+        contract_prompt,
+        policy_snapshot=policy_snapshot,
         document_ids=case.get("document_ids") or (),
+        context_inputs_resolved=context_inputs_resolved,
     )
     tracker = TaskCoverageTracker(
         contract,
@@ -485,8 +509,26 @@ def evaluate_case(case: Mapping[str, Any], policy: Mapping[str, Any]) -> dict[st
         "kind_counts": dict(kind_counts),
         "entities": contract.declared_scope.get("entities", []),
         "topics": contract.declared_scope.get("topics", []),
+        "metrics": list(
+            dict.fromkeys(
+                str(item.slots.get("metric"))
+                for item in contract.requirements
+                if item.kind == "structured-slot" and item.slots.get("metric")
+            )
+        ),
+        "context_required_inputs": contract.declared_scope.get(
+            "contextRequiredInputs", []
+        ),
         "enforceable": contract.enforceable,
         "ambiguous": contract.ambiguous,
+        **(
+            {
+                "clarification_continuation": clarification_continuation,
+                "clarification_resolved": clarification_resolved,
+            }
+            if clarification_follow_up
+            else {}
+        ),
     }
     _compare_expected("contract", expected_contract, actual_contract, failures)
     metrics = audit["metrics"]
@@ -502,7 +544,11 @@ def evaluate_case(case: Mapping[str, Any], policy: Mapping[str, Any]) -> dict[st
     revision_requested = tracker.should_request_revision(audit)
     result_item_retrieval_count = 0
     if revision_requested and missing_result_items:
-        revision_prompt = tracker.revision_prompt(audit, str(case.get("answer") or ""), prompt)
+        revision_prompt = tracker.revision_prompt(
+            audit,
+            str(case.get("answer") or ""),
+            contract_prompt,
+        )
         marker = "Restricted task-coverage context (JSON):\n"
         if marker in revision_prompt:
             revision_context = json.loads(revision_prompt.split(marker, 1)[1])

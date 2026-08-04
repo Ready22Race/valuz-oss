@@ -1338,9 +1338,10 @@ def _normalize_markdown_table_citation_suffixes(text: str) -> str:
     """Move citations emitted after a table row boundary into the last cell.
 
     A model may close the Markdown row and then append an evidence link, for
-    example ``| value | formula |[source](evidence://...)``. After canonical
-    citation sealing that suffix would be parsed as an extra column. Keep the
-    binding on the same row while restoring a stable column count.
+    example ``| value | formula |[source](evidence://...)`` or emit the same
+    link as a citation-only fourth cell in a three-column table. After
+    canonical citation sealing either form would be parsed as an extra column.
+    Keep the binding on the same row while restoring the declared column count.
     """
 
     suffix = re.compile(
@@ -1362,7 +1363,56 @@ def _normalize_markdown_table_citation_suffixes(text: str) -> str:
             citations = match.group("citations").strip()
             body = f"{row} {citations} |"
         output.append(f"{body}{newline}")
-    return "".join(output)
+    normalized = "".join(output)
+
+    citation_only = re.compile(
+        r"^(?:\s*\[[^\]\n]{1,240}\]"
+        r"\(citation://[A-Za-z0-9_-]{1,160}\)\s*)+$"
+    )
+
+    def split_row(line: str) -> tuple[str, ...]:
+        if "|" not in line:
+            return ()
+        value = line.strip()
+        if value.startswith("|"):
+            value = value[1:]
+        if value.endswith("|"):
+            value = value[:-1]
+        cells = tuple(cell.strip() for cell in re.split(r"(?<!\\)\|", value))
+        return cells if len(cells) >= 2 else ()
+
+    lines = normalized.splitlines(keepends=True)
+    index = 0
+    while index + 1 < len(lines):
+        header = split_row(lines[index])
+        separator = split_row(lines[index + 1])
+        if (
+            not header
+            or len(header) != len(separator)
+            or not all(re.fullmatch(r":?-{3,}:?", cell.replace(" ", "")) for cell in separator)
+        ):
+            index += 1
+            continue
+        expected_width = len(header)
+        row_index = index + 2
+        while row_index < len(lines):
+            row = split_row(lines[row_index])
+            if not row:
+                break
+            if len(row) > expected_width:
+                overflow = row[expected_width:]
+                if all(not cell or citation_only.fullmatch(cell) for cell in overflow):
+                    citations = " ".join(cell.strip() for cell in overflow if cell.strip())
+                    declared = list(row[:expected_width])
+                    if citations:
+                        declared[-1] = f"{declared[-1].rstrip()} {citations}".strip()
+                    newline = "\r\n" if lines[row_index].endswith("\r\n") else "\n"
+                    if not lines[row_index].endswith(("\r\n", "\n")):
+                        newline = ""
+                    lines[row_index] = f"| {' | '.join(declared)} |{newline}"
+            row_index += 1
+        index = row_index
+    return "".join(lines)
 
 
 def _strip_protocol_source_placeholders(text: str) -> str:
@@ -1686,6 +1736,9 @@ def _collection_hint(collection: EvidenceCollectionRecord) -> dict[str, Any]:
     metric_semantics = collection.semantics.get("metric")
     if isinstance(metric_semantics, dict) and metric_semantics.get("mode") == "field-name":
         hint["metricMode"] = "field-name"
+    elif isinstance(metric_semantics, dict) and metric_semantics.get("mode") == "field-map":
+        hint["metricMode"] = "field-map"
+        hint["metricFields"] = copy.deepcopy(metric_semantics.get("fields", {}))
     if "fieldSchemaRef" in collection.addressing:
         hint["fieldSchemaRef"] = copy.deepcopy(collection.addressing["fieldSchemaRef"])
     if "allowedItemPaths" in collection.addressing:
@@ -2332,7 +2385,10 @@ def _scalar_index_keys(value: Any, *, field: str = "") -> tuple[str, ...]:
         keys.add(f"n:{numeric}")
         normalized_field = field.casefold()
         if (
-            any(term in normalized_field for term in ("rate", "ratio", "margin", "yoy", "growth"))
+            any(
+                term in normalized_field
+                for term in ("rate", "ratio", "margin", "yoy", "growth", "percent")
+            )
             and abs(Decimal(numeric)) <= 1
         ):
             scaled = _decimal_key(Decimal(numeric) * 100)
@@ -2532,6 +2588,25 @@ def _normalize_collection_semantics(value: Any) -> dict[str, Any] | None:
                 "mode": "field-name",
                 "valueRoots": normalized_roots,
                 "excludedFields": normalized_excluded,
+            }
+            continue
+        if group == "metric" and mapping.get("mode") == "field-map":
+            fields = mapping.get("fields")
+            if not isinstance(fields, dict) or not fields or len(fields) > 256:
+                return None
+            normalized_fields: dict[str, str] = {}
+            for raw_pointer, raw_metric in fields.items():
+                if (
+                    not isinstance(raw_pointer, str)
+                    or not raw_pointer.startswith("/")
+                    or _json_pointer_tokens(raw_pointer) is None
+                    or not _bounded_nonempty_string(raw_metric, _MAX_SOURCE_TEXT_CHARS)
+                ):
+                    return None
+                normalized_fields[raw_pointer] = str(raw_metric)
+            output[group] = {
+                "mode": "field-map",
+                "fields": normalized_fields,
             }
             continue
         if len(mapping) > 32:
@@ -2907,7 +2982,7 @@ def _materialize_collection_address(
     normalized_field = field.casefold()
     numeric = _decimal_key(raw_value)
     if numeric is not None and any(
-        term in normalized_field for term in ("rate", "ratio", "margin", "yoy", "growth")
+        term in normalized_field for term in ("rate", "ratio", "margin", "yoy", "growth", "percent")
     ):
         decimal = Decimal(numeric)
         if abs(decimal) <= 1:
@@ -3052,7 +3127,12 @@ def _materialize_collection_address(
         "toolName": collection.common["toolName"],
         "recordKey": "|".join(identity_values) or record_pointer or pointer,
         "field": pointer,
-        "metric": field,
+        "metric": _collection_metric_for_pointer(
+            collection,
+            pointer=pointer,
+            record_pointer=record_pointer,
+            fallback=field,
+        ),
         "value": value,
         "capturedAt": collection.common["capturedAt"],
     }
@@ -3165,6 +3245,32 @@ def _collection_semantic_value(
         ):
             return value
     return None
+
+
+def _collection_metric_for_pointer(
+    collection: EvidenceCollectionRecord,
+    *,
+    pointer: str,
+    record_pointer: str | None,
+    fallback: str,
+) -> str:
+    mapping = collection.semantics.get("metric")
+    if not isinstance(mapping, dict) or mapping.get("mode") != "field-map":
+        return fallback
+    fields = mapping.get("fields")
+    if not isinstance(fields, dict):
+        return fallback
+    if record_pointer and pointer.startswith(f"{record_pointer.rstrip('/')}/"):
+        relative = pointer[len(record_pointer) :]
+    else:
+        items_pointer = str(collection.addressing.get("itemsPointer") or "")
+        relative = (
+            pointer[len(items_pointer) :]
+            if items_pointer and pointer.startswith(items_pointer)
+            else ""
+        )
+    metric = fields.get(relative)
+    return str(metric) if _bounded_nonempty_string(metric, _MAX_SOURCE_TEXT_CHARS) else fallback
 
 
 def _validate_evidence_item(

@@ -21,10 +21,11 @@ import valuz_agent.boot.kernel  # noqa: F401 — sets sys.path for ``src`` / ``a
 
 from src.core.agent_config import AgentConfig
 from src.core.events import Event
-from src.core.orchestrator import SessionOrchestrator
+from src.core.orchestrator import SessionOrchestrator, _task_prompt_after_pending_clarification
 from src.core.types import (
     BARE_COMPLETION_METADATA_KEY,
     EndTurn,
+    Error,
     McpHttpServerConfig,
     Session,
     UserMessage,
@@ -85,6 +86,210 @@ class _FakeRuntime:
 
     async def close(self) -> None:
         pass
+
+
+def test_pending_task_clarification_is_session_local_and_restores_effective_prompt(
+    tmp_path,
+) -> None:
+    original = "检查固定止损线和估值阈值是否触发，不重新制定规则。"
+    session = Session(
+        id="sess-pending",
+        agent_config=AgentConfig(id="agent-1", name="tester"),
+        cwd=str(tmp_path),
+        user_id="owner-1",
+        metadata={
+            "valuz": {
+                "pending_task_clarification": {
+                    "version": 1,
+                    "originalRequest": original,
+                    "missingInputs": ["固定止损线", "估值阈值"],
+                    "supplements": [],
+                    "contractId": "tc_pending",
+                    "policyRevision": "finance-v1",
+                }
+            }
+        },
+    )
+
+    effective, resolved = _task_prompt_after_pending_clarification(
+        session,
+        "固定止损线为 160 美元。",
+        enabled=True,
+    )
+
+    assert original in effective
+    assert resolved is False
+    pending = session.metadata["valuz"]["pending_task_clarification"]
+    assert pending["missingInputs"] == ["估值阈值"]
+    assert pending["supplements"] == ["固定止损线为 160 美元。"]
+
+    effective, resolved = _task_prompt_after_pending_clarification(
+        session,
+        "估值阈值为 25 倍，继续按原规则检查。",
+        enabled=True,
+    )
+
+    assert original in effective
+    assert "固定止损线为 160 美元" in effective
+    assert "估值阈值为 25 倍" in effective
+    assert resolved is True
+    assert "pending_task_clarification" in session.metadata["valuz"]
+
+
+def test_unrelated_turn_discards_pending_task_without_rewriting_prompt(tmp_path) -> None:
+    current = "请查 2024 年营业收入。"
+    session = Session(
+        id="sess-pending-new-task",
+        agent_config=AgentConfig(id="agent-1", name="tester"),
+        cwd=str(tmp_path),
+        user_id="owner-1",
+        metadata={
+            "valuz": {
+                "pending_task_clarification": {
+                    "version": 1,
+                    "originalRequest": "检查固定止损线。",
+                    "missingInputs": ["固定止损线"],
+                    "supplements": [],
+                }
+            }
+        },
+    )
+
+    effective, resolved = _task_prompt_after_pending_clarification(
+        session,
+        current,
+        enabled=True,
+    )
+
+    assert effective == current
+    assert resolved is False
+    assert "pending_task_clarification" not in session.metadata["valuz"]
+
+
+async def test_run_turn_persists_then_consumes_pending_task_clarification(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    session = Session(
+        id="sess-pending-turns",
+        agent_config=AgentConfig(id="agent-1", name="tester"),
+        cwd=str(tmp_path),
+        user_id="owner-1",
+        status="created",
+        metadata={"valuz": {"task_coverage_enabled": True}},
+    )
+    store = _FakeStore(session)
+    orch = SessionOrchestrator(store)  # type: ignore[arg-type]
+
+    def create_runtime(*_args, **_kwargs) -> _FakeRuntime:
+        return _FakeRuntime(store)
+
+    monkeypatch.setattr("src.runtimes.factory.create_runtime", create_runtime)
+
+    await orch.run_turn(
+        "owner-1",
+        session.id,
+        UserMessage(
+            text="按用户给定的连续季度阈值判断是否触发，不重新制定规则。"
+        ),
+    )
+
+    pending = store._session.metadata["valuz"]["pending_task_clarification"]
+    assert pending["originalRequest"].startswith("按用户给定的连续季度阈值")
+    assert pending["missingInputs"]
+
+    await orch.run_turn(
+        "owner-1",
+        session.id,
+        UserMessage(text="连续季度阈值为 50%，继续按原任务检查。"),
+    )
+
+    assert "pending_task_clarification" not in store._session.metadata["valuz"]
+
+
+async def test_missing_context_short_circuits_before_runtime_or_tools(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    session = Session(
+        id="sess-host-clarification",
+        agent_config=AgentConfig(id="agent-1", name="tester"),
+        cwd=str(tmp_path),
+        user_id="owner-1",
+        status="created",
+        metadata={"valuz": {"task_coverage_enabled": True}},
+    )
+    store = _FakeStore(session)
+    orch = SessionOrchestrator(store)  # type: ignore[arg-type]
+
+    def fail_if_runtime_is_created(*_args, **_kwargs):
+        raise AssertionError("runtime must not be created before required user input")
+
+    monkeypatch.setattr(
+        "src.runtimes.factory.create_runtime",
+        fail_if_runtime_is_created,
+    )
+
+    message = await orch.run_turn(
+        "owner-1",
+        session.id,
+        UserMessage(text="按用户给定的连续季度阈值判断是否触发，不重新制定规则。"),
+    )
+
+    assert message.status == "completed"
+    assert "请先补充" in (message.assistant_message or "")
+    assert message.metadata["task_coverage"]["status"] == "insufficient-input"
+    assert not any(event.type in {"tool_use", "tool_result"} for event in store.appended)
+    assert "pending_task_clarification" in store._session.metadata["valuz"]
+
+
+async def test_failed_resumed_turn_keeps_pending_task_clarification_for_retry(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    session = Session(
+        id="sess-pending-failed-resume",
+        agent_config=AgentConfig(id="agent-1", name="tester"),
+        cwd=str(tmp_path),
+        user_id="owner-1",
+        status="created",
+        metadata={
+            "valuz": {
+                "task_coverage_enabled": True,
+                "pending_task_clarification": {
+                    "version": 1,
+                    "originalRequest": "按用户给定的连续季度阈值判断是否触发。",
+                    "missingInputs": ["连续季度阈值"],
+                    "supplements": [],
+                },
+            }
+        },
+    )
+    store = _FakeStore(session)
+    orch = SessionOrchestrator(store)  # type: ignore[arg-type]
+
+    class _FailingRuntime(_FakeRuntime):
+        async def run(self, session: Session, user_message: UserMessage) -> None:
+            self.types_at_run = [e.type for e in self._store.appended]
+            session.status = "idle"
+            session.stop_reason = Error(
+                category="execution_error",
+                message="transient provider stream failure",
+            )
+
+    monkeypatch.setattr(
+        "src.runtimes.factory.create_runtime",
+        lambda *_args, **_kwargs: _FailingRuntime(store),
+    )
+
+    message = await orch.run_turn(
+        "owner-1",
+        session.id,
+        UserMessage(text="连续季度阈值为 50%，继续按原任务检查。"),
+    )
+
+    assert message.status == "errored"
+    assert "pending_task_clarification" in store._session.metadata["valuz"]
 
 
 async def test_run_turn_emits_running_session_update_before_runtime(tmp_path, monkeypatch) -> None:

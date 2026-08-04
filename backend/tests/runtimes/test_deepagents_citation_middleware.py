@@ -19,6 +19,7 @@ from src.runtimes.deepagents.middleware import (
     CitationEvidenceCompactionMiddleware,
     ResearchToolBudgetMiddleware,
     ToolErrorTolerantMiddleware,
+    _canonical_metric_for_factor_formula,
     citation_artifact_content,
 )
 
@@ -1406,6 +1407,188 @@ async def test_financial_status_only_result_gets_addressable_collection() -> Non
     assert gross_margin is not None
     assert gross_margin.evidence["value"] == 94.06
     assert gross_margin.evidence["unit"] == "percent"
+
+
+async def test_factor_series_result_gets_one_addressable_collection() -> None:
+    payload = {
+        "metadata": {
+            "formula": "MA(CLOSE, 20)",
+            "as_of": "2026-08-03",
+            "coverage": {"start": "2026-05-06", "end": "2026-08-03", "rows": 2},
+        },
+        "datas": [
+            {
+                "date": "2026-08-03",
+                "symbol": "MRVL",
+                "name": "Marvell Technology",
+                "close": 193.775,
+                "factor_value": 203.69,
+            },
+            {
+                "date": "2026-07-31",
+                "symbol": "MRVL",
+                "name": "Marvell Technology",
+                "close": 187.56,
+                "factor_value": 206.47,
+            },
+        ],
+    }
+    original = ToolMessage(
+        content=[{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}],
+        tool_call_id="toolu-factor",
+        name="factors_compute",
+    )
+
+    async def handler(_request: ToolCallRequest) -> ToolMessage:
+        return original
+
+    request = cast(
+        Any,
+        type(
+            "Request",
+            (),
+            {
+                "tool_call": {
+                    "id": "toolu-factor",
+                    "name": "factors_compute",
+                    "args": {
+                        "symbols": ["MRVL"],
+                        "market": "us",
+                        "formula": "MA(CLOSE, 20)",
+                    },
+                }
+            },
+        )(),
+    )
+    middleware = CitationEvidenceCompactionMiddleware()
+    result = await middleware.awrap_tool_call(request, handler)
+
+    compacted = json.loads(result.content[0]["text"])
+    assert compacted["datas"] == payload["datas"]
+    hint = compacted["_valuz_evidence_hint"]
+    assert hint["contentRoot"] == "/datas"
+    assert hint["metricMode"] == "field-map"
+    assert hint["metricFields"] == {"/factor_value": "moving_average_20"}
+    private_content = citation_artifact_content(result)
+    assert private_content is not None
+    registry = EvidenceRegistry()
+    assert (
+        registry.register_tool_projection(
+            result.content,
+            private_content,
+            tool_name="factors_compute",
+            trusted_private=True,
+        )
+        == 1
+    )
+    assert registry.collection_count == 1
+    factor = registry.materialize_reference(
+        hint["collectionHandle"],
+        "#/datas/0/factor_value",
+    )
+    assert factor is not None
+    assert factor.evidence["entityId"] == "MRVL"
+    assert factor.evidence["asOf"] == "2026-08-03"
+    assert factor.evidence["metric"] == "moving_average_20"
+    assert factor.evidence["value"] == 203.69
+
+    async def second_handler(_request: ToolCallRequest) -> ToolMessage:
+        return result
+
+    repeated = await middleware.awrap_tool_call(request, second_handler)
+    repeated_hint = json.loads(repeated.content[0]["text"])["_valuz_evidence_hint"]
+    assert repeated_hint["collectionHandle"] == hint["collectionHandle"]
+    assert citation_artifact_content(repeated) == private_content
+
+
+def test_factor_formula_metric_mapping_is_bounded_and_deterministic() -> None:
+    assert _canonical_metric_for_factor_formula("MA(CLOSE, 20)") == "moving_average_20"
+    assert _canonical_metric_for_factor_formula("ma(close,250)") == "moving_average_250"
+    assert _canonical_metric_for_factor_formula("PS_TTM()") == "price_to_sales_ttm"
+    assert _canonical_metric_for_factor_formula("PS()") == "price_to_sales"
+    assert _canonical_metric_for_factor_formula("RSI(14)") == "rsi_14"
+    assert _canonical_metric_for_factor_formula("CUSTOM(USER_INPUT)") is None
+
+
+async def test_market_quote_items_get_one_addressable_collection() -> None:
+    payload = {
+        "as_of": "2026-08-03",
+        "coverage": {"start": "2026-07-31", "end": "2026-08-03", "rows": 2},
+        "status": 200,
+        "data": {
+            "items": [
+                {
+                    "symbol": "MRVL",
+                    "stock_name": "Marvell Technology",
+                    "stock_price": 187.56,
+                    "stock_change_percent": -0.0321,
+                    "date": "2026-07-31T00:00:00-04:00",
+                },
+                {
+                    "symbol": "MRVL",
+                    "stock_name": "Marvell Technology",
+                    "stock_price": 193.775,
+                    "stock_change_percent": 0.0331,
+                    "date": "2026-08-03T00:00:00-04:00",
+                },
+            ]
+        },
+    }
+    original = ToolMessage(
+        content=[{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}],
+        tool_call_id="toolu-quote",
+        name="stock_quote",
+    )
+
+    async def handler(_request: ToolCallRequest) -> ToolMessage:
+        return original
+
+    request = cast(
+        Any,
+        type(
+            "Request",
+            (),
+            {
+                "tool_call": {
+                    "id": "toolu-quote",
+                    "name": "stock_quote",
+                    "args": {"symbol": "MRVL"},
+                }
+            },
+        )(),
+    )
+    result = await CitationEvidenceCompactionMiddleware().awrap_tool_call(request, handler)
+
+    compacted = json.loads(result.content[0]["text"])
+    hint = compacted["_valuz_evidence_hint"]
+    assert hint["contentRoot"] == "/data"
+    private_content = citation_artifact_content(result)
+    assert private_content is not None
+    registry = EvidenceRegistry()
+    assert (
+        registry.register_tool_projection(
+            result.content,
+            private_content,
+            tool_name="stock_quote",
+            trusted_private=True,
+        )
+        == 1
+    )
+    quote = registry.materialize_reference(
+        hint["collectionHandle"],
+        "#/data/items/1/stock_price",
+    )
+    change = registry.materialize_reference(
+        hint["collectionHandle"],
+        "#/data/items/1/stock_change_percent",
+    )
+    assert quote is not None
+    assert quote.evidence["entityId"] == "MRVL"
+    assert quote.evidence["asOf"] == "2026-08-03T00:00:00-04:00"
+    assert quote.evidence["value"] == 193.775
+    assert change is not None
+    assert change.evidence["value"] == 3.31
+    assert change.evidence["unit"] == "percent"
 
 
 async def test_grep_over_raw_document_returns_traceable_focused_evidence() -> None:

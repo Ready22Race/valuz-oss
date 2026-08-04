@@ -1219,7 +1219,7 @@ def match_composite_text_evidence(
 ) -> tuple[str, ...]:
     """Return a bounded set of excerpts that jointly covers every claim amount."""
 
-    claim_amounts = _claim_amounts(_claim_assertion_text(claim), semantics)
+    claim_amounts = _claim_amounts(_claim_assertion_text(claim, semantics), semantics)
     if len(claim_amounts) < 2:
         return ()
     candidates: list[tuple[str, Mapping[str, Any], Mapping[str, Any], set[int], int]] = []
@@ -1636,7 +1636,7 @@ def verify_evidence_support(
             return EvidenceSupport("contradicted", 2)
         if entity_status == "partial" or dimension_status == "partial":
             return EvidenceSupport("partially-supported", 2)
-        if len(_claim_amounts(_claim_assertion_text(claim), semantics)) > 1:
+        if len(_claim_amounts(_claim_assertion_text(claim, semantics), semantics)) > 1:
             return EvidenceSupport("partially-supported", 2)
         return EvidenceSupport("supported", 4)
     if kind == "text":
@@ -1805,6 +1805,12 @@ def structured_values_equivalent(
     left_resolved = _resolve_unit(left_unit, semantics)
     right_resolved = _resolve_unit(right_unit, semantics)
     if left_resolved is None or right_resolved is None:
+        if bool(left_unit.strip()) != bool(right_unit.strip()):
+            # One-sided unit absence is an unknown dimension, not a value
+            # conflict.  Compare the raw decimals only; never apply an
+            # inferred scale.  Callers still retain the missing-unit quality
+            # issue and cannot claim a currency/unit was verified.
+            return _decimal_close(left_decimal, right_decimal)
         return left_unit.strip().casefold() == right_unit.strip().casefold() and _decimal_close(
             left_decimal,
             right_decimal,
@@ -1847,7 +1853,7 @@ def structured_components_cover_claim(
 ) -> bool:
     """Return true when structured component evidence covers every claim value."""
 
-    amounts = _claim_amounts(_claim_assertion_text(claim), semantics)
+    amounts = _claim_amounts(_claim_assertion_text(claim, semantics), semantics)
     if len(amounts) < 2:
         return False
     covered = [False] * len(amounts)
@@ -3056,7 +3062,7 @@ def _evidence_match_specificity(
     token_overlap = (
         int(1_000 * len(claim_tokens & quote_tokens) / len(claim_tokens)) if claim_tokens else 0
     )
-    claim_amount_count = len(_claim_amounts(_claim_assertion_text(claim), semantics))
+    claim_amount_count = len(_claim_amounts(_claim_assertion_text(claim, semantics), semantics))
     quote_amount_count = len(_claim_amounts(str(evidence.get("quote") or ""), semantics))
     extra_amounts = max(0, quote_amount_count - claim_amount_count)
     compact_claim = re.sub(r"\s+", "", claim_text)
@@ -3838,7 +3844,7 @@ def _text_numeric_supports_claim(
     metric_context: str | None = None,
     allow_distinctive_unit_match: bool = False,
 ) -> bool:
-    claim_amounts = _claim_amounts(_claim_assertion_text(claim), semantics)
+    claim_amounts = _claim_amounts(_claim_assertion_text(claim, semantics), semantics)
     if not claim_amounts:
         return False
     claim_contextual_unit = _contextual_table_unit(claim.exact, semantics)
@@ -3997,7 +4003,7 @@ def _text_numeric_conflicts_claim(
     if not quote_amounts:
         return False
 
-    claim_amounts = _claim_amounts(_claim_assertion_text(claim), semantics)
+    claim_amounts = _claim_amounts(_claim_assertion_text(claim, semantics), semantics)
     claim_unit = _contextual_table_unit(claim.exact, semantics)
     if claim_unit is not None:
         claim_label, claim_canonical, claim_scale = claim_unit
@@ -4671,7 +4677,10 @@ def _claim_label_body(value: str) -> str:
     return re.sub(r"^\s*(?:[*_#`]+\s*)?[^\n:：]{1,32}[:：]\s*", "", value, count=1)
 
 
-def _claim_assertion_text(claim: ClaimCandidate) -> str:
+def _claim_assertion_text(
+    claim: ClaimCandidate,
+    semantics: Mapping[str, Any] | None = None,
+) -> str:
     """Return the value asserted by one structural claim.
 
     A table claim's ``exact`` text intentionally includes its row identity and
@@ -4683,13 +4692,32 @@ def _claim_assertion_text(claim: ClaimCandidate) -> str:
     matching, but restrict numeric verification to the rendered cell value.
     """
 
-    if claim.location.get("kind") != "table-cell":
-        return claim.exact
-    _separator, marker, descriptor = claim.exact.partition(" — ")
-    if not marker:
-        return claim.exact
-    match = re.match(r"^[^\n:：]{1,240}[:：]\s*(.+)$", descriptor, re.DOTALL)
-    return match.group(1).strip() if match is not None else claim.exact
+    text = claim.exact
+    if claim.location.get("kind") == "table-cell":
+        _separator, marker, descriptor = text.partition(" — ")
+        if marker:
+            match = re.match(r"^[^\n:：]{1,240}[:：]\s*(.+)$", descriptor, re.DOTALL)
+            text = match.group(1).strip() if match is not None else text
+
+    # Metric labels may contain numeric parameters such as MA(CLOSE,60),
+    # MA120, 20-day moving average, or IFRS 16. Those digits identify the
+    # metric and are not additional business values asserted by the claim.
+    # Remove only terms belonging to the ClaimPacket's canonical metric before
+    # numeric verification; subject, period and actual value remain visible.
+    raw_metric = str(claim.normalized.get("metric") or "")
+    canonical_metric = (
+        _canonical_metric({"metric": raw_metric}, semantics) if raw_metric else ""
+    )
+    definition = _metric_ontology(semantics).get(canonical_metric)
+    if isinstance(definition, Mapping):
+        for term in sorted(
+            _metric_terms(canonical_metric, definition),
+            key=len,
+            reverse=True,
+        ):
+            if term:
+                text = re.sub(re.escape(term), " ", text, flags=re.IGNORECASE)
+    return text
 
 
 def _prose_contains(left: str, right: str) -> bool:
