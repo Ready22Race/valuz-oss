@@ -24,6 +24,7 @@ from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.artifacts.models import (
     KEY_KIND_NAME,
     KEY_KIND_PATH,
+    REVISION_STATUS_MISSING,
     REVISION_STATUS_READY,
     SHARED_CWD,
     STORAGE_KIND_FILE,
@@ -532,6 +533,33 @@ class ArtifactDatastore:
         )
         await self._db.flush()
         return row
+
+    async def archive_scope(self, scope: Scope) -> int:
+        """Retire every artifact in a scope whose files have just been deleted.
+
+        Used when a worktree is removed: the snapshots lived inside it, so their
+        bytes are gone. The rows are deliberately KEPT — a deliverable that
+        existed is part of the record, and a dangling reference the UI can
+        explain ("delivered in worktree feat-x, no longer available") is better
+        than a 404 from a link the user still holds.
+
+        Revisions are stamped ``missing`` rather than deleted. Their
+        ``abs_path`` is left in place: it is now a forensic breadcrumb rather
+        than an address, and every read path gates on ``status`` before offering
+        the path as openable.
+
+        Returns how many artifacts were retired.
+        """
+        rows = await self.list_scope_heads(scope, limit=10_000)
+        for artifact, _head, _revision in rows:
+            revisions = await self.list_revisions(scope.user_id, artifact.id)
+            for revision in revisions:
+                if revision.status != REVISION_STATUS_MISSING:
+                    revision.status = REVISION_STATUS_MISSING
+                    revision.updated_at = now_ms()
+            await self.archive(scope.user_id, artifact.id)
+        await self._db.flush()
+        return len(rows)
 
     async def archive(self, user_id: str, artifact_id: str) -> ArtifactRow | None:
         """Retire an artifact and free its keys.

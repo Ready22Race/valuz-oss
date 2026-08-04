@@ -7,7 +7,7 @@ needs concurrency control:
     valuz_artifact           immutable identity   (display_name / archived_at aside)
     valuz_artifact_key       mutable index        how a delivery finds its artifact
     valuz_artifact_head      mutable pointer      the single row CAS lands on
-    valuz_artifact_revision  immutable event      INSERT only, never UPDATE
+    valuz_artifact_revision  immutable event      never rewritten (but see ``status``)
     valuz_artifact_content   immutable bytes      INSERT only, never UPDATE
 
 Keeping the head pointer OFF ``valuz_artifact`` is what lets the identity row
@@ -154,7 +154,13 @@ class ArtifactHeadRow(Base, TimestampMixin, UserMixin):
 
 
 class ArtifactRevisionRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
-    """One generation of an artifact. Append-only: rows are never updated.
+    """One generation of an artifact.
+
+    Append-only in the sense that matters: what a generation WAS — its parent,
+    its version, its content, where it came from — is never rewritten and never
+    deleted. ``status`` is the one exception and is not part of that record: it
+    tracks whether the bytes are still on disk, which genuinely changes when a
+    worktree is removed out from under them.
 
     ``source_tool_call_id`` is best-effort audit data and is deliberately NOT
     part of any unique constraint. The MCP server hands tool handlers

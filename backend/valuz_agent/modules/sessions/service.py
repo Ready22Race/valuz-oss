@@ -1996,7 +1996,9 @@ class SessionService:
                     return  # still in use by a live session
             from valuz_agent.modules.worktrees.service import worktree_service
 
-            removed = await worktree_service.cleanup_if_clean(snapshot)
+            removed = await worktree_service.cleanup_if_clean(
+                snapshot, user_id=user_id, project_id=project_id or ""
+            )
             if removed:
                 logger.info(
                     "delete_session: removed clean worktree '%s' (%s)",
