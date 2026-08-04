@@ -5,7 +5,9 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import keyword
 import re
+import unicodedata
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
@@ -15,11 +17,8 @@ from src.core.calculation import evaluate_decimal_expression
 from src.core.tools import ExecContext
 
 CITATION_CALCULATE_TOOL_NAME = "citation_calculate"
-_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 _HANDLE_RE = re.compile(r"^ev_[A-Za-z0-9_-]{8,128}$")
-_COLLECTION_ADDRESS_RE = re.compile(
-    r"^evc_[A-Za-z0-9_-]{8,128}#/[^\s#?]{1,1024}$"
-)
+_COLLECTION_ADDRESS_RE = re.compile(r"^evc_[A-Za-z0-9_-]{8,128}#/[^\s#?]{1,1024}$")
 
 _PARAMS = {
     "type": "object",
@@ -66,6 +65,26 @@ def _decimal(value: Any) -> Decimal:
     if not result.is_finite():
         raise ValueError("invalid_input_value")
     return result
+
+
+def _input_name(value: Any) -> str | None:
+    """Return the canonical language-neutral expression identifier.
+
+    Python's bounded AST accepts Unicode identifiers safely. Restricting names
+    to ASCII made otherwise valid calculations fail whenever a model used
+    natural Chinese, Japanese, or other localized input labels. NFKC mirrors
+    Python's own identifier normalization so the stored input key and the
+    parsed expression always address the same variable.
+    """
+
+    if not isinstance(value, str):
+        return None
+    normalized = unicodedata.normalize("NFKC", value)
+    if not normalized or len(normalized) > 64:
+        return None
+    if not normalized.isidentifier() or keyword.iskeyword(normalized):
+        return None
+    return normalized
 
 
 def _stable_decimal(value: Decimal, decimal_places: int) -> str:
@@ -141,13 +160,12 @@ async def _citation_calculate_handler(
         for raw in raw_inputs:
             if not isinstance(raw, dict):
                 raise ValueError("invalid_input")
-            name = raw.get("name")
+            name = _input_name(raw.get("name"))
             handle = raw.get("evidenceHandle")
-            if not isinstance(name, str) or not _NAME_RE.fullmatch(name) or name in values:
+            if name is None or name in values:
                 raise ValueError("invalid_input_name")
             if not isinstance(handle, str) or not (
-                _HANDLE_RE.fullmatch(handle)
-                or _COLLECTION_ADDRESS_RE.fullmatch(handle)
+                _HANDLE_RE.fullmatch(handle) or _COLLECTION_ADDRESS_RE.fullmatch(handle)
             ):
                 raise ValueError("invalid_evidence_handle")
             value = _decimal(raw.get("value"))

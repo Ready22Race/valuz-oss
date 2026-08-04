@@ -84,9 +84,7 @@ def test_merge_is_ordered_additive_and_cannot_weaken_earlier_rules() -> None:
 
 def test_merge_rejects_out_of_order_or_duplicate_layers() -> None:
     with pytest.raises(ValueError, match="fixed-order"):
-        merge_citation_quality_policy_snapshots(
-            [_snapshot("commercial"), _snapshot("oss")]
-        )
+        merge_citation_quality_policy_snapshots([_snapshot("commercial"), _snapshot("oss")])
     with pytest.raises(ValueError, match="fixed-order"):
         merge_citation_quality_policy_snapshots([_snapshot("oss"), _snapshot("oss")])
 
@@ -135,9 +133,7 @@ def test_task_coverage_policy_merges_all_layers_additively() -> None:
         "dimensions": ["entity", "period", "connector-scope", "financial-metric"],
         "selectors": ["explicit", "locked-resource", "latest-published"],
     }
-    assert merged.config["task_coverage"]["remediation"]["allowed_actions"] == [
-        "regenerate"
-    ]
+    assert merged.config["task_coverage"]["remediation"]["allowed_actions"] == ["regenerate"]
 
 
 def test_policy_loader_accepts_task_coverage_identity_mapping(tmp_path: Path) -> None:
@@ -168,6 +164,36 @@ task_coverage:
 
     mapping = loaded["task_coverage"]["retrieval"]["identity_mappings"][0]
     assert mapping["id"] == "company-identity"
+
+
+def test_policy_loader_accepts_task_coverage_ignored_attempt_patterns(
+    tmp_path: Path,
+) -> None:
+    policy_path = tmp_path / "policy.yaml"
+    policy_path.write_text(
+        """policy_id: test-policy
+layer: distribution
+version: test-policy-v1
+activation:
+  default_mode: required-on-evidence
+task_coverage:
+  retrieval:
+    ignored_tool_patterns: ["*list_skills*", "*automation*"]
+    ignored_input_patterns: ["*/.agents/skills/*"]
+""",
+        encoding="utf-8",
+    )
+
+    loaded = load_citation_policy_document(
+        policy_path,
+        expected_policy_id="test-policy",
+        expected_layer="distribution",
+        revision_prefix="test-policy-v",
+    )
+
+    retrieval = loaded["task_coverage"]["retrieval"]
+    assert retrieval["ignored_tool_patterns"] == ["*list_skills*", "*automation*"]
+    assert retrieval["ignored_input_patterns"] == ["*/.agents/skills/*"]
 
 
 def test_policy_loader_rejects_unknown_identity_mapping_key(tmp_path: Path) -> None:
@@ -225,9 +251,7 @@ task_coverage:
         revision_prefix="test-policy-v",
     )
 
-    topic = loaded["task_coverage"]["contract"]["topic_ontology"]["topics"][
-        "capital_expenditure"
-    ]
+    topic = loaded["task_coverage"]["contract"]["topic_ontology"]["topics"]["capital_expenditure"]
     assert topic["aliases"] == ["capital expenditure", "gigawatt of capacity"]
 
 
@@ -298,9 +322,9 @@ task_coverage:
         revision_prefix="test-policy-v",
     )
 
-    dimension = loaded["task_coverage"]["contract"]["dimension_ontology"][
-        "dimensions"
-    ]["sales_channel"]
+    dimension = loaded["task_coverage"]["contract"]["dimension_ontology"]["dimensions"][
+        "sales_channel"
+    ]
     assert dimension["members"]["direct"]["aliases"] == ["direct", "direct sales"]
 
 

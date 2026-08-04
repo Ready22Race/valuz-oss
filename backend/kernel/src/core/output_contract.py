@@ -51,6 +51,12 @@ _ZH_EXACT_ITEM_COUNT_RE = re.compile(
     r"(?:家|个|项|条|种|份|位)(?:公司|企业|股票|案例|方案|策略|产品|标的)?",
     re.IGNORECASE,
 )
+_RANKED_ITEM_COUNT_RE = re.compile(
+    r"(?:\btop\s*(?P<count>\d+)\b|"
+    r"(?:前|排行前|排名前)\s*(?P<zh_count>[一二两三四五六七八九十\d]+)\s*"
+    r"(?:名|位|家|个|项|条|种|份)?)",
+    re.IGNORECASE,
+)
 _EN_EXACT_ITEM_COUNT_RE = re.compile(
     r"\b(?:recommend|list|select|choose|provide|give(?:\s+me)?)\s+"
     r"(?:exactly\s+)?"
@@ -97,6 +103,28 @@ _EN_TABLE_ROW_COUNT_RE = re.compile(
 _GENERATED_UI_RE = re.compile(
     r"(?:图表|仪表盘|可视化|交互(?:页面|界面)|dashboard|chart|visuali[sz]ation|"
     r"interactive\s+(?:ui|interface))",
+    re.IGNORECASE,
+)
+_ARTIFACT_MUTATION_RE = re.compile(
+    r"(?:导出|保存(?:为)?|下载|创建|生成|写入|制作).{0,28}"
+    r"(?:文件|文档|附件|PDF|DOCX|XLSX|PPTX|Excel|Word)|"
+    r"(?:文件|文档|附件|PDF|DOCX|XLSX|PPTX|Excel|Word).{0,28}"
+    r"(?:导出|保存|下载|创建|生成|写入|制作)|"
+    r"\b(?:export|save|download|create|generate|write)\b.{0,36}"
+    r"\b(?:file|document|attachment|pdf|docx|xlsx|pptx|spreadsheet)\b|"
+    r"\b(?:file|document|attachment|pdf|docx|xlsx|pptx|spreadsheet)\b.{0,36}"
+    r"\b(?:export|save|download|create|generate|write)\b",
+    re.IGNORECASE,
+)
+_AUTOMATION_MUTATION_RE = re.compile(
+    r"(?:创建|设置|添加|安排|开启|启用|建立).{0,24}(?:定时任务|自动化|提醒)|"
+    r"(?:定时任务|自动化|提醒).{0,24}(?:创建|设置|添加|安排|开启|启用|建立)|"
+    r"(?:每天|每日|每周|每月|工作日|每隔\s*\d+[^，,。；;\n]{0,8})"
+    r".{0,40}(?:提醒|发送|执行|运行)|"
+    r"\b(?:create|set(?:\s+up)?|schedule|enable|add)\b.{0,40}"
+    r"\b(?:automation|scheduled\s+task|recurring\s+task|reminder)\b|"
+    r"\b(?:automation|scheduled\s+task|recurring\s+task|reminder)\b.{0,40}"
+    r"\b(?:create|set(?:\s+up)?|schedule|enable|add)\b",
     re.IGNORECASE,
 )
 _NEGATED_GENERATED_UI_RE = re.compile(
@@ -189,6 +217,8 @@ class OutputContract:
     reporting_period_required: bool = False
     unit_required: bool = False
     calculation_formula_required: bool = False
+    artifact_mutation_allowed: bool = False
+    automation_mutation_allowed: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -206,6 +236,8 @@ class OutputContract:
             "reportingPeriodRequired": self.reporting_period_required,
             "unitRequired": self.unit_required,
             "calculationFormulaRequired": self.calculation_formula_required,
+            "artifactMutationAllowed": self.artifact_mutation_allowed,
+            "automationMutationAllowed": self.automation_mutation_allowed,
         }
 
     def required_fields_for_claim(self, exact: str) -> tuple[str, ...]:
@@ -238,8 +270,7 @@ def parse_output_contract(user_prompt: str) -> OutputContract:
                     len(parsed_fields) >= 2
                     and re.search(r"[、，,/]", raw_fields)
                     and not any(
-                        _UNCOUNTED_OUTPUT_INSTRUCTION_RE.search(field)
-                        for field in parsed_fields
+                        _UNCOUNTED_OUTPUT_INSTRUCTION_RE.search(field) for field in parsed_fields
                     )
                 ):
                     requested_fields = parsed_fields
@@ -307,6 +338,8 @@ def parse_output_contract(user_prompt: str) -> OutputContract:
         reporting_period_required=bool(_REPORTING_PERIOD_METADATA_RE.search(metadata_prompt)),
         unit_required=bool(_UNIT_METADATA_RE.search(metadata_prompt)),
         calculation_formula_required=bool(_CALCULATION_FORMULA_RE.search(user_prompt)),
+        artifact_mutation_allowed=bool(_ARTIFACT_MUTATION_RE.search(user_prompt)),
+        automation_mutation_allowed=bool(_AUTOMATION_MUTATION_RE.search(user_prompt)),
     )
 
 
@@ -329,6 +362,11 @@ def _parse_count(value: str) -> int | None:
 def _parse_explicit_item_count(user_prompt: str) -> int | None:
     """Parse an exact requested result cardinality, never an approximate bound."""
 
+    ranked = _RANKED_ITEM_COUNT_RE.search(user_prompt)
+    if ranked is not None:
+        raw_count = ranked.group("count") or ranked.group("zh_count")
+        if raw_count:
+            return int(raw_count) if raw_count.isdigit() else _ZH_NUMBERS.get(raw_count)
     for pattern in (_ZH_EXACT_ITEM_COUNT_RE, _EN_EXACT_ITEM_COUNT_RE):
         for match in pattern.finditer(user_prompt):
             prefix = user_prompt[max(0, match.start() - 24) : match.start()]

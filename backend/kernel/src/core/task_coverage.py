@@ -20,7 +20,7 @@ import hashlib
 import json
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import product
 from typing import Any, Literal, cast
 
@@ -30,7 +30,7 @@ from src.core.output_contract import OutputContract, parse_output_contract
 
 TASK_CONTRACT_REVISION = "task-contract-v1"
 TASK_COVERAGE_RESOLVER_REVISION = "task-coverage-resolver-v1"
-TASK_RETRIEVAL_PLANNER_REVISION = "task-retrieval-planner-v1"
+TASK_RETRIEVAL_PLANNER_REVISION = "task-retrieval-planner-v2"
 TASK_COVERAGE_PATCH_VERSION = "task-coverage-patch-v1"
 
 TaskType = Literal[
@@ -57,6 +57,17 @@ class TaskCoveragePatchResult:
     text: str | None = None
     requirement_ids: tuple[str, ...] = ()
     code: str | None = None
+
+
+@dataclass(frozen=True)
+class TaskClarificationResolution:
+    """Host-side interpretation of one turn after an input clarification."""
+
+    continuation: bool
+    resolved: bool
+    effective_prompt: str
+    supplements: tuple[str, ...] = ()
+    remaining_inputs: tuple[str, ...] = ()
 
 
 _ZH_ENTITY_TRIGGER_RE = re.compile(
@@ -145,7 +156,9 @@ _ENTITY_SPLIT_RE = re.compile(r"\s*(?:、|，|,|；|;|以及|及|与|和|\band\b
 _NON_ENTITY_INSTRUCTION_RE = re.compile(
     r"(?:引用|标注|注明|说明|对应|原文|来源|逐项|逐行|分别|"
     r"不要|仅|只|输出|列出|展示|返回|输入|公式|结果|判定|阈值|状态|差距|方法|"
-    r"是否通过|红\s*/?\s*黄\s*/?\s*绿(?:灯)?|cite|source|reference|output)",
+    r"是否通过|红\s*/?\s*黄\s*/?\s*绿(?:灯)?|"
+    r"周环比|月环比|季环比|年环比|同比(?:增长率|增速|变化率)?|环比(?:增长率|增速|变化率)?|"
+    r"cite|source|reference|output)",
     re.IGNORECASE,
 )
 _ENTITY_STOP_WORDS = {
@@ -262,6 +275,24 @@ _EXPLICIT_RETRIEVAL_REQUEST_RE = re.compile(
     r"\b(?:data|filing|report|transcript|source)\b",
     re.IGNORECASE,
 )
+_RESEARCH_CONTENT_REQUEST_RE = re.compile(
+    r"(?:列出|推荐|汇总|生成|梳理|总结|研究|调研|分析|跟踪).{0,100}"
+    r"(?:报告|研报|新闻|公司|企业|标的|行业|产业链|市场|事件|来源|资料|业绩|产品)|"
+    r"(?:报告|研报|新闻|公司|企业|标的|行业|产业链|市场|事件|来源|资料|业绩|产品)"
+    r".{0,100}(?:汇总|梳理|总结|研究|调研|分析|跟踪)|"
+    r"\b(?:list|recommend|summari[sz]e|research|analy[sz]e|compile)\b.{0,100}"
+    r"\b(?:reports?|research|news|compan(?:y|ies)|industr(?:y|ies)|markets?|"
+    r"events?|sources?|earnings|products?)\b",
+    re.IGNORECASE,
+)
+_SOURCE_BACKED_RANKING_RE = re.compile(
+    r"(?:统计|排行|排名|榜单).{0,120}(?:\btop\s*\d+\b|前\s*[一二两三四五六七八九十\d]+\s*(?:名|位))|"
+    r"(?:\btop\s*\d+\b|前\s*[一二两三四五六七八九十\d]+\s*(?:名|位))"
+    r".{0,120}(?:统计|排行|排名|榜单|用量|销量|收入|市值|份额)|"
+    r"\b(?:rank|ranking|leaderboard)\b.{0,120}\btop\s*\d+\b|"
+    r"\btop\s*\d+\b.{0,120}\b(?:rank|ranking|leaderboard|usage|sales|revenue|share)\b",
+    re.IGNORECASE,
+)
 _NEGATED_RETRIEVAL_REQUEST_RE = re.compile(
     r"(?:不要|无需|无须|不必|禁止|不需要)\s*"
     r"(?:查询|检索|搜索|查找|查阅|使用)[^。；;\n]*",
@@ -274,6 +305,53 @@ _NEGATED_CALCULATION_RE = re.compile(
     r"(?:total|subtotal|calculation|calculate|recalculate)",
     re.IGNORECASE,
 )
+_ZH_CONTEXT_INPUT_RE = re.compile(
+    r"(?:按|根据|使用|沿用)?\s*(?:用户|你|您)?\s*"
+    r"(?:已)?(?:给定|设定|设置|确认|约定|配置|既有|现有|原有)(?:的)?\s*"
+    r"(?P<label>[^，,。；;\n]{0,40}?(?:阈值|上限|下限|区间|规则|参数|条件))",
+    re.IGNORECASE,
+)
+_ZH_EXISTING_RULE_RE = re.compile(
+    r"(?:不|不要|不得|无需)\s*重新(?:制定|设定|设置|定义|选择|发明)"
+    r"[^，,。；;\n]{0,16}(?:规则|阈值|参数|条件)",
+    re.IGNORECASE,
+)
+_EN_CONTEXT_INPUT_RE = re.compile(
+    r"(?:using|apply|follow|according\s+to)\s+(?:the\s+)?"
+    r"(?:user[- ](?:provided|defined|configured)|existing|previously\s+(?:agreed|set))\s+"
+    r"(?P<label>[^,.;\n]{0,48}?(?:threshold|limit|range|rule|parameter|condition)s?)",
+    re.IGNORECASE,
+)
+_INLINE_CONTEXT_VALUE_RE = re.compile(
+    r"^\s*(?:为|是|取|设为|=|:|：)?\s*[±+$¥￥]?(?:\d+(?:\.\d+)?|\.\d+)"
+    r"\s*(?:%|％|元|美元|倍|个?季度|季|天|bps?|点)?",
+    re.IGNORECASE,
+)
+_NAMED_CONTEXT_VALUE_RE = re.compile(
+    r"(?:^|[，,；;\n])\s*"
+    r"(?P<label>[^，,。；;\n:=：]{1,48}?)\s*"
+    r"(?:设为|设置为|定为|取值为|为|是|=|:|：)\s*"
+    r"(?P<value>[±+$¥￥]?(?:\d+(?:\.\d+)?|\.\d+)\s*"
+    r"(?:%|％|元|美元|倍|个?季度|季|天|bps?|点)?)",
+    re.IGNORECASE,
+)
+_SINGLE_CONTEXT_VALUE_RE = re.compile(
+    r"^\s*[±+$¥￥]?(?:\d+(?:\.\d+)?|\.\d+)\s*"
+    r"(?:%|％|元|美元|倍|个?季度|季|天|bps?|点)?\s*[。.!！]?\s*$",
+    re.IGNORECASE,
+)
+_CLARIFICATION_CONTINUE_RE = re.compile(
+    r"(?:继续|接着|按(?:照)?(?:原|既有|上述|这些)(?:规则|参数|条件)?|"
+    r"使用(?:这些|上述)参数|补充(?:如下|参数)|"
+    r"\b(?:continue|resume|use\s+(?:these|the)\s+(?:values|parameters))\b)",
+    re.IGNORECASE,
+)
+_AGGREGATE_CONTEXT_INPUTS = {
+    "既有规则参数",
+    "existing rules",
+    "existing parameters",
+    "previous parameters",
+}
 _ZH_NEGATED_METRIC_SUBSTITUTION_RE = re.compile(
     r"(?:不要|不得|禁止|不能|勿)\s*(?:(?:用|使用|把|将)\s*)?"
     r"(?P<substitute>[^。；;\n]{1,96}?)\s*"
@@ -338,6 +416,7 @@ _OUTPUT_COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
         "reporting period",
         "fiscal period",
         "报告期",
+        "财报期",
         "期间",
         "年度",
         "季度",
@@ -408,8 +487,13 @@ class TaskContract:
             and item.slots.get("exactItemCountSubject") == "results"
             for item in self.required_requirements
         )
+        research_content = any(
+            item.kind == "topic" and item.slots.get("topic") == "requested-summary"
+            for item in self.required_requirements
+        )
         return bool(
             exact_item_count
+            or research_content
             or (substantive and (explicit_calculation or len(substantive) > 1 or shaped))
         )
 
@@ -442,6 +526,7 @@ class TaskRetrievalStep:
     entity_ids: tuple[str, ...] = ()
     periods: tuple[str, ...] = ()
     document_ids: tuple[str, ...] = ()
+    depends_on_step_ids: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -452,6 +537,11 @@ class TaskRetrievalStep:
             **({"entityIds": list(self.entity_ids)} if self.entity_ids else {}),
             **({"periods": list(self.periods)} if self.periods else {}),
             **({"documentIds": list(self.document_ids)} if self.document_ids else {}),
+            **(
+                {"dependsOnStepIds": list(self.depends_on_step_ids)}
+                if self.depends_on_step_ids
+                else {}
+            ),
             "strategy": self.strategy,
             "maxAttempts": self.max_attempts,
         }
@@ -477,10 +567,21 @@ class RetrievalAttempt:
     tool_name: str
     role: Literal["candidate", "content"]
     query_fingerprint: str
+    # Stable runtime identity for joining a visible pre-middleware tool result
+    # to the private citation sidecar attached after middleware completes.
+    # Content fingerprints remain a compatibility fallback for runtimes that
+    # cannot expose the underlying tool-call id.
+    citation_join_id: str | None
+    citation_join_fingerprint: str
     input_text: str
     model_content: str
     coverage_text: str
     coverage_scope: Literal["partial", "full-document", "full-record"] = "partial"
+    # ``None`` preserves the behaviour of callers that do not run the
+    # Citation pipeline.  The orchestrator passes an explicit boolean so a
+    # source-bearing research requirement cannot be completed by raw document
+    # substrate that produced no addressable Evidence.
+    citation_ready: bool | None = None
     scope_ids: tuple[str, ...] = ()
     period_keys: tuple[str, ...] = ()
     scope_pairs: tuple[tuple[str, str], ...] = ()
@@ -492,6 +593,10 @@ class MarkdownTable:
     headers: tuple[str, ...]
     rows: tuple[tuple[str, ...], ...]
     context: str = ""
+    # Preserve the source width before parser padding/truncation so output
+    # validation can distinguish a genuinely complete row from a visibly
+    # truncated Markdown row whose missing cells were normalized to blanks.
+    row_widths: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -503,11 +608,162 @@ class AnswerManifest:
     tables: tuple[MarkdownTable, ...]
 
 
+def _context_required_inputs(user_prompt: str) -> tuple[str, ...]:
+    """Find user-owned rule inputs referenced without an inline value.
+
+    The result is deliberately a prerequisite marker, not a guessed default.
+    Runtime history may still satisfy the dependency; otherwise the agent must
+    clarify before retrieval. Keeping this language-neutral primitive in the
+    shared resolver avoids per-company or per-strategy branches.
+    """
+
+    labels: list[str] = []
+    for pattern in (_ZH_CONTEXT_INPUT_RE, _EN_CONTEXT_INPUT_RE):
+        for match in pattern.finditer(user_prompt):
+            tail = user_prompt[match.end() : match.end() + 48]
+            if _INLINE_CONTEXT_VALUE_RE.search(tail):
+                continue
+            label = re.sub(r"\s+", " ", str(match.group("label") or "")).strip()
+            if label:
+                labels.append(label)
+    if _ZH_EXISTING_RULE_RE.search(user_prompt):
+        match = _ZH_EXISTING_RULE_RE.search(user_prompt)
+        assert match is not None
+        tail = user_prompt[match.end() : match.end() + 48]
+        if not _INLINE_CONTEXT_VALUE_RE.search(tail):
+            labels.append("既有规则参数")
+    return tuple(dict.fromkeys(labels))
+
+
+def pending_task_clarification(
+    contract: TaskContract,
+    original_request: str,
+    *,
+    supplements: Iterable[str] = (),
+) -> dict[str, Any] | None:
+    """Build the versioned session state for a contract awaiting user values."""
+
+    raw_inputs = contract.declared_scope.get("contextRequiredInputs")
+    missing_inputs = [
+        str(item).strip()
+        for item in raw_inputs
+        if str(item).strip()
+    ] if isinstance(raw_inputs, list) else []
+    if not missing_inputs or not original_request.strip():
+        return None
+    normalized_supplements = tuple(
+        dict.fromkeys(str(item).strip() for item in supplements if str(item).strip())
+    )[:8]
+    return {
+        "version": 1,
+        "originalRequest": original_request.strip(),
+        "missingInputs": missing_inputs,
+        "supplements": list(normalized_supplements),
+        "contractId": contract.contract_id,
+        "policyRevision": contract.policy_revision,
+    }
+
+
+def _named_context_assignments(value: str) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (
+            re.sub(r"\s+", " ", str(match.group("label") or "")).strip(),
+            re.sub(r"\s+", " ", str(match.group("value") or "")).strip(),
+        )
+        for match in _NAMED_CONTEXT_VALUE_RE.finditer(value)
+        if str(match.group("label") or "").strip()
+        and str(match.group("value") or "").strip()
+    )
+
+
+def _context_input_matches_label(required: str, supplied: str) -> bool:
+    required_key = _fold(required)
+    supplied_key = _fold(supplied)
+    return bool(
+        required_key
+        and supplied_key
+        and (required_key in supplied_key or supplied_key in required_key)
+    )
+
+
+def resume_pending_task_clarification(
+    pending: Mapping[str, Any],
+    user_prompt: str,
+) -> TaskClarificationResolution:
+    """Resolve a narrowly scoped parameter follow-up without hijacking new work.
+
+    A named assignment can satisfy a matching missing input.  Aggregate
+    dependencies (for example, ``既有规则参数``) additionally require an
+    explicit continuation cue, so an unrelated question containing a year or
+    another number cannot accidentally resume the old task.
+    """
+
+    current = user_prompt.strip()
+    original = str(pending.get("originalRequest") or "").strip()
+    raw_missing = pending.get("missingInputs")
+    missing = tuple(
+        dict.fromkeys(
+            str(item).strip()
+            for item in raw_missing
+            if str(item).strip()
+        )
+    ) if isinstance(raw_missing, list) else ()
+    raw_supplements = pending.get("supplements")
+    prior_supplements = tuple(
+        str(item).strip()
+        for item in raw_supplements
+        if str(item).strip()
+    ) if isinstance(raw_supplements, list) else ()
+    if pending.get("version") != 1 or not original or not missing or not current:
+        return TaskClarificationResolution(False, False, current)
+
+    assignments = _named_context_assignments(current)
+    has_continue_cue = bool(_CLARIFICATION_CONTINUE_RE.search(current))
+    numeric_only = bool(_SINGLE_CONTEXT_VALUE_RE.fullmatch(current))
+    aggregate_keys = {_fold(value) for value in _AGGREGATE_CONTEXT_INPUTS}
+    aggregate = any(_fold(item) in aggregate_keys for item in missing)
+    matching_inputs = {
+        required
+        for required in missing
+        for label, _value in assignments
+        if _context_input_matches_label(required, label)
+    }
+    continuation = bool(
+        matching_inputs
+        or (numeric_only and len(missing) == 1)
+        or (aggregate and assignments and has_continue_cue)
+    )
+    if not continuation:
+        return TaskClarificationResolution(False, False, current)
+
+    if aggregate:
+        remaining: tuple[str, ...] = () if assignments and has_continue_cue else missing
+    elif numeric_only and len(missing) == 1:
+        remaining = ()
+    else:
+        remaining = tuple(item for item in missing if item not in matching_inputs)
+    supplements = tuple(dict.fromkeys((*prior_supplements, current)))[:8]
+    effective_prompt = "\n\n".join(
+        (
+            original,
+            "用户后续明确补充：\n" + "\n".join(supplements),
+        )
+    )
+    return TaskClarificationResolution(
+        True,
+        not remaining,
+        effective_prompt,
+        supplements,
+        remaining,
+    )
+
+
 def parse_task_contract(
     user_prompt: str,
     *,
     policy_snapshot: Mapping[str, Any] | None = None,
     document_ids: Iterable[str] | None = None,
+    context_inputs_resolved: bool = False,
 ) -> TaskContract:
     """Expand deterministic, explicit task scope into atomic requirements."""
 
@@ -562,6 +818,9 @@ def parse_task_contract(
     calculation_prompt = _NEGATED_CALCULATION_RE.sub("", user_prompt)
     calculation_requested = (
         bool(_CALCULATION_RE.search(calculation_prompt)) and not explanatory_only
+    )
+    context_required_inputs = (
+        () if context_inputs_resolved else _context_required_inputs(user_prompt)
     )
     requirements: list[TaskRequirement] = []
 
@@ -733,6 +992,32 @@ def parse_task_contract(
                     )
                 )
 
+    if (
+        not explanatory_only
+        and not metrics
+        and not topics
+        and not locked_documents
+        and not any(requirement.kind == "topic" for requirement in requirements)
+        and (
+            _EXPLICIT_RETRIEVAL_REQUEST_RE.search(retrieval_prompt)
+            or _RESEARCH_CONTENT_REQUEST_RE.search(user_prompt)
+            or _SOURCE_BACKED_RANKING_RE.search(user_prompt)
+        )
+    ):
+        # Open research still has one indispensable content requirement even
+        # when no distribution ontology can name its free-form topic.  This
+        # prevents a successful discovery/search listing from being mistaken
+        # for original-content coverage while leaving ordinary explanatory
+        # knowledge answers unenforced.
+        requirements.append(
+            _requirement(
+                "topic",
+                "requested research content",
+                slots={"topic": "requested-summary"},
+                aliases={"topic": ("requested-summary",)},
+            )
+        )
+
     if len(entities) > 1:
         requirements.append(
             _requirement(
@@ -761,6 +1046,14 @@ def parse_task_contract(
 
     requested_table = output.table_only or bool(_TABLE_RE.search(user_prompt))
     exact_table_count = 1 if requested_table and _SINGLE_TABLE_RE.search(user_prompt) else None
+    source_backed_result_set = bool(
+        output.requested_result_count is not None
+        and (
+            _EXPLICIT_RETRIEVAL_REQUEST_RE.search(retrieval_prompt)
+            or _RESEARCH_CONTENT_REQUEST_RE.search(user_prompt)
+            or _SOURCE_BACKED_RANKING_RE.search(user_prompt)
+        )
+    )
     if (
         requested_table
         or output.requested_line_count
@@ -862,6 +1155,7 @@ def parse_task_contract(
                         if output.requested_item_count is not None
                         else {}
                     ),
+                    **({"requireCitationPerItem": True} if source_backed_result_set else {}),
                     **(
                         {"exactLineCount": output.requested_line_count}
                         if output.requested_line_count is not None
@@ -927,6 +1221,11 @@ def parse_task_contract(
         **({"documentIds": list(locked_documents)} if locked_documents else {}),
         **({"topics": [topic for topic, _ in topics]} if topics else {}),
         **(
+            {"contextRequiredInputs": list(context_required_inputs)}
+            if context_required_inputs
+            else {}
+        ),
+        **(
             {
                 "dimensions": {
                     dimension: [member for member, _aliases, _policy_ref in members]
@@ -941,6 +1240,8 @@ def parse_task_contract(
         "format": "table" if requested_table else "prose",
         "preserveUserOrder": True,
         "allowAdditionalSections": not output.strict,
+        "artifactMutationAllowed": output.artifact_mutation_allowed,
+        "automationMutationAllowed": output.automation_mutation_allowed,
         **(
             {"exactItemCount": output.requested_item_count}
             if output.requested_item_count is not None
@@ -984,7 +1285,9 @@ def parse_task_contract(
         declared_scope=declared_scope,
         output_contract=output_dict,
         policy_revision=policy_revision,
-        ambiguous=bool(latest_selector and not entities and not locked_documents),
+        ambiguous=bool(
+            context_required_inputs or (latest_selector and not entities and not locked_documents)
+        ),
     )
 
 
@@ -1001,6 +1304,10 @@ def build_task_retrieval_plan(
     so OSS, Commercial and distribution layers use one algorithm without
     embedding edition-specific tool names here.
     """
+
+    context_inputs = contract.declared_scope.get("contextRequiredInputs")
+    if isinstance(context_inputs, list) and context_inputs:
+        return TaskRetrievalPlan(contract_id=contract.contract_id, steps=())
 
     selected_ids = (
         {str(requirement_id) for requirement_id in requirement_ids if str(requirement_id)}
@@ -1049,6 +1356,12 @@ def build_task_retrieval_plan(
         }[requirement.kind]
         grouped.setdefault((strategy, entity, period, document), []).append(requirement)
 
+    declared_documents = contract.declared_scope.get("documentIds")
+    declared_document_ids = (
+        tuple(str(item) for item in declared_documents if str(item))
+        if isinstance(declared_documents, list)
+        else ()
+    )
     steps: list[TaskRetrievalStep] = []
     for (strategy, entity, period, document), requirements in grouped.items():
         requested_parts: list[str] = []
@@ -1064,35 +1377,59 @@ def build_task_retrieval_plan(
                 suffix = ",".join(f"{key}={value}" for key, value in sorted(dimensions.items()))
                 part = f"{part}[{suffix}]"
             requested_parts.append(part)
-        basis = {
-            "contractId": contract.contract_id,
-            "strategy": strategy,
-            "entity": entity,
-            "period": period,
-            "document": document,
-            "parts": requested_parts,
-        }
-        steps.append(
-            TaskRetrievalStep(
-                step_id="step_" + _digest(basis, 18),
-                requirement_ids=tuple(item.requirement_id for item in requirements),
-                requested_parts=tuple(dict.fromkeys(requested_parts)),
-                allowed_source_classes=source_constraints,
-                strategy=cast(
-                    Literal[
-                        "structured-fetch",
-                        "document-discovery",
-                        "document-scoped-search",
-                        "section-read",
-                    ],
-                    strategy,
-                ),
-                max_attempts=2 if inspect_partial else 1,
-                entity_ids=(entity,) if entity else (),
-                periods=(period,) if period else (),
-                document_ids=(document,) if document else (),
+        document_ids = (document,) if document else declared_document_ids
+        strategies = (strategy,)
+        if strategy == "document-discovery":
+            # A discovery result identifies candidate documents but does not
+            # expose original text that can support the requested topic.  For
+            # open document research, compile both stages explicitly.  A
+            # locked document scope can skip discovery and read its indexed
+            # chunks directly.
+            strategies = (
+                ("document-scoped-search",)
+                if document_ids
+                else ("document-discovery", "document-scoped-search")
             )
-        )
+        dependency_ids: tuple[str, ...] = ()
+        for planned_strategy in strategies:
+            basis = {
+                "contractId": contract.contract_id,
+                "strategy": planned_strategy,
+                "entity": entity,
+                "period": period,
+                "documents": document_ids,
+                "parts": requested_parts,
+            }
+            step_id = "step_" + _digest(basis, 18)
+            base_attempts = 2 if inspect_partial else 1
+            max_attempts = (
+                min(16, max(base_attempts, len(tuple(dict.fromkeys(requested_parts)))))
+                if planned_strategy == "structured-fetch"
+                else base_attempts
+            )
+            steps.append(
+                TaskRetrievalStep(
+                    step_id=step_id,
+                    requirement_ids=tuple(item.requirement_id for item in requirements),
+                    requested_parts=tuple(dict.fromkeys(requested_parts)),
+                    allowed_source_classes=source_constraints,
+                    strategy=cast(
+                        Literal[
+                            "structured-fetch",
+                            "document-discovery",
+                            "document-scoped-search",
+                            "section-read",
+                        ],
+                        planned_strategy,
+                    ),
+                    max_attempts=max_attempts,
+                    entity_ids=(entity,) if entity else (),
+                    periods=(period,) if period else (),
+                    document_ids=document_ids,
+                    depends_on_step_ids=dependency_ids,
+                )
+            )
+            dependency_ids = (step_id,)
     return TaskRetrievalPlan(contract_id=contract.contract_id, steps=tuple(steps))
 
 
@@ -1102,6 +1439,30 @@ def task_contract_prompt(
     retrieval_plan: TaskRetrievalPlan | None = None,
 ) -> str:
     """Return a compact host-owned checklist injected before generation."""
+
+    context_inputs = contract.declared_scope.get("contextRequiredInputs")
+    if isinstance(context_inputs, list) and context_inputs:
+        labels = ", ".join(str(item) for item in context_inputs if str(item).strip())
+        return "\n".join(
+            (
+                "Host-enforced task prerequisite:",
+                f"- The request depends on user-defined or existing values: {labels}.",
+                (
+                    "- Before any tool call, reuse those values only if their explicit values "
+                    "are visible in this conversation context."
+                ),
+                (
+                    "- If any value is absent, ask one concise clarification and stop this "
+                    "turn. Do not retrieve data, calculate, complete a partial report, or "
+                    "invent an industry/default value."
+                ),
+                (
+                    "- Do not treat an inferred or model-remembered value as user-provided. "
+                    "The next user turn will receive the full task coverage contract after "
+                    "the missing values are supplied."
+                ),
+            )
+        )
 
     if not contract.enforceable:
         return ""
@@ -1125,11 +1486,49 @@ def task_contract_prompt(
             "plain answer text; only use evidence links returned by the citation protocol."
         ),
         (
+            "- Browser views, screenshots, shell/CLI output, and ordinary tool results without "
+            "an evidence handle or Collection Address do not satisfy source-backed items. Use "
+            "a metadata-bearing source tool for every fact that appears in the answer."
+        ),
+        (
+            "- Attach evidence to every independently verifiable sentence or result item. One "
+            "link at a paragraph end does not automatically cover earlier claims."
+        ),
+        (
             "- Preserve the user's requested format, grouping and order. Do not replace "
             "per-entity or per-period output with a thematic recap."
         ),
         "Required items:",
     ]
+    if not contract.output_contract.get("artifactMutationAllowed", False):
+        lines.insert(
+            -1,
+            (
+                "- The user did not request a file artifact. Do not inspect file-creation "
+                "skills, write/edit files, or deliver artifacts; return the answer in chat."
+            ),
+        )
+    if not contract.output_contract.get("automationMutationAllowed", False):
+        lines.insert(
+            -1,
+            (
+                "- The user did not request creating or changing an automation. Phrases such "
+                "as 'can be used for a scheduled task' describe reusability only: do not "
+                "inspect automation/reminder skills or create a schedule."
+            ),
+        )
+    if any(
+        item.kind == "output-shape" and item.slots.get("requireCitationPerItem") is True
+        for item in required
+    ):
+        lines.insert(
+            -1,
+            (
+                "- This is a source-backed exact-N result set. Every result item must "
+                "contain at least one citation supporting that item; citations on an "
+                "introduction or sibling result do not cover the whole list."
+            ),
+        )
     for item in required[:48]:
         lines.append(f"- {item.description}")
     if len(required) > 48:
@@ -1147,6 +1546,11 @@ def task_contract_prompt(
                     "- One step may retrieve all requestedParts together. Do not repeat the "
                     "same query; use a second attempt only for a different compatible source "
                     "when the first source is partial."
+                ),
+                (
+                    "- document-discovery returns candidate metadata only. After selecting a "
+                    "compatible document, execute its dependent document-scoped-search and "
+                    "read original indexed chunks before writing any factual answer or citation."
                 ),
             )
         )
@@ -1166,6 +1570,11 @@ def task_contract_prompt(
             lines.append(
                 f"- {step.step_id}: {step.strategy}; {scope}; "
                 f"parts={','.join(step.requested_parts)}; maxAttempts={step.max_attempts}"
+                + (
+                    f"; dependsOn={','.join(step.depends_on_step_ids)}"
+                    if step.depends_on_step_ids
+                    else ""
+                )
             )
     return "\n".join(lines)
 
@@ -1199,25 +1608,60 @@ class TaskCoverageTracker:
             if entity
         }
 
-    def entity_aliases_snapshot(self) -> dict[str, tuple[str, ...]]:
+    def entity_aliases_snapshot(self, answer: str | None = None) -> dict[str, tuple[str, ...]]:
         """Return immutable-by-convention aliases learned in this turn.
 
         The Claim-Evidence Resolver uses this host-owned identity context to
         distinguish a company name in the answer from a symbol or identifier
-        in structured/document Evidence.  The aliases never become global
-        ontology and are discarded with the turn.
+        in structured/document Evidence.  For an exact-N result set, the
+        result headings are also a turn-local identity source: they let the
+        Resolver prove that a chunk about one returned company cannot support
+        a sibling company merely because both mention ``AI`` or ``growth``.
+        The aliases never become global ontology and are discarded with the
+        turn.
         """
 
-        return {entity: tuple(sorted(aliases)) for entity, aliases in self._entity_aliases.items()}
+        aliases_by_entity = {
+            entity: set(aliases) for entity, aliases in self._entity_aliases.items()
+        }
+        expected = next(
+            (
+                item.slots.get("exactItemCount")
+                for item in self.contract.requirements
+                if item.kind == "output-shape"
+                and item.slots.get("exactItemCountSubject") == "results"
+            ),
+            None,
+        )
+        if answer and isinstance(expected, int) and expected > 0:
+            for entity, aliases in _exact_result_entity_aliases(answer, expected=expected).items():
+                aliases_by_entity.setdefault(entity, set()).update(aliases)
+        return {entity: tuple(sorted(aliases)) for entity, aliases in aliases_by_entity.items()}
 
     def record_tool_result(
         self,
         tool_name: str | None,
         tool_input: Any,
         model_content: Any,
+        *,
+        citation_ready: bool | None = None,
+        citation_join_id: str | None = None,
     ) -> None:
         name = str(tool_name or "unknown-tool")
         input_text = _content_text(tool_input)[:20_000]
+        if _task_coverage_attempt_is_ignored(
+            name,
+            input_text,
+            config=self._config,
+        ):
+            return
+        citation_join_fingerprint = _digest(
+            {
+                "tool": name,
+                "modelContent": _content_text(_maybe_json(model_content))[:200_000],
+            },
+            20,
+        )
         input_scope_ids, input_period_keys, input_scope_pairs = _extract_scope_metadata(
             tool_input,
             None,
@@ -1311,16 +1755,70 @@ class TaskCoverageTracker:
                 tool_name=name,
                 role=role,
                 query_fingerprint=fingerprint,
+                citation_join_id=str(citation_join_id).strip() if citation_join_id else None,
+                citation_join_fingerprint=citation_join_fingerprint,
                 input_text=input_text,
                 model_content=content,
                 coverage_text=coverage_text,
                 coverage_scope=coverage_scope,
+                citation_ready=citation_ready,
                 scope_ids=scope_ids,
                 period_keys=period_keys,
                 scope_pairs=scope_pairs,
                 scope_context=lineage_context,
             )
         )
+
+    def mark_citation_ready(
+        self,
+        tool_name: str | None,
+        model_content: Any,
+        *,
+        citation_join_id: str | None = None,
+    ) -> int:
+        """Reconcile Evidence that arrives after its visible tool result.
+
+        Graph runtimes can surface a ToolMessage before the checkpoint exposes
+        its private citation artifact.  The later ``citation_evidence`` bridge
+        must update the existing attempt rather than append a fake second tool
+        call or leave Task Coverage permanently stale.  Prefer the immutable
+        tool-call id because middleware is allowed to replace/compact content;
+        exact normalized content remains a fallback for older runtimes.
+        """
+
+        name = str(tool_name or "unknown-tool")
+        stable_join_id = str(citation_join_id).strip() if citation_join_id else None
+        if stable_join_id:
+            updated = 0
+            for index, attempt in enumerate(self._attempts):
+                if (
+                    attempt.tool_name != name
+                    or attempt.citation_join_id != stable_join_id
+                    or attempt.citation_ready is True
+                ):
+                    continue
+                self._attempts[index] = replace(attempt, citation_ready=True)
+                updated += 1
+            return updated
+
+        join_fingerprint = _digest(
+            {
+                "tool": name,
+                "modelContent": _content_text(_maybe_json(model_content))[:200_000],
+            },
+            20,
+        )
+        updated = 0
+        for index, attempt in enumerate(self._attempts):
+            if (
+                attempt.tool_name != name
+                or attempt.citation_join_fingerprint != join_fingerprint
+                or attempt.citation_ready is True
+            ):
+                continue
+            self._attempts[index] = replace(attempt, citation_ready=True)
+            updated += 1
+        return updated
 
     def evaluate(
         self,
@@ -1344,6 +1842,22 @@ class TaskCoverageTracker:
                 require_expected_period=self._period_output_required(),
                 require_entity=require_entity_in_answer,
             )
+            quality_missing_result_items: list[str] | None = None
+            if (
+                requirement.kind == "output-shape"
+                and answer_status == "fulfilled"
+                and requirement.slots.get("requireCitationPerItem") is True
+            ):
+                expected_items = requirement.slots.get("exactItemCount")
+                if isinstance(expected_items, int):
+                    quality_missing_result_items = _unsupported_output_item_labels(
+                        manifest,
+                        citation_bundle,
+                        expected=expected_items,
+                    )
+                    if quality_missing_result_items:
+                        answer_status = "missing"
+                        reason_codes = ["result-item-citation-missing"]
             citation_proof_ids = _citation_proof_ids(
                 requirement,
                 citation_bundle,
@@ -1373,26 +1887,37 @@ class TaskCoverageTracker:
                 answer_status = "missing"
                 reason_codes = ["available-evidence-marked-unavailable"]
             remediation = _remediation(retrieval, model_input, answer_status)
-            rows.append(
-                {
-                    "requirementId": requirement.requirement_id,
-                    "description": requirement.description,
-                    "kind": requirement.kind,
-                    "requiredness": requirement.requiredness,
-                    "retrievalStatus": retrieval,
-                    "modelInputStatus": model_input,
-                    "answerStatus": answer_status,
-                    "attemptIds": attempt_ids,
-                    "remediation": remediation,
-                    "reasonCodes": reason_codes,
-                    "policyRefs": list(requirement.policy_refs),
-                    **(
-                        {"selectorResolution": {"period": expected_period}}
-                        if expected_period
-                        else {}
-                    ),
-                }
-            )
+            row: dict[str, Any] = {
+                "requirementId": requirement.requirement_id,
+                "description": requirement.description,
+                "kind": requirement.kind,
+                "requiredness": requirement.requiredness,
+                "retrievalStatus": retrieval,
+                "modelInputStatus": model_input,
+                "answerStatus": answer_status,
+                "attemptIds": attempt_ids,
+                "remediation": remediation,
+                "reasonCodes": reason_codes,
+                "policyRefs": list(requirement.policy_refs),
+                **({"selectorResolution": {"period": expected_period}} if expected_period else {}),
+            }
+            if (
+                requirement.kind == "output-shape"
+                and "result-item-citation-missing" in reason_codes
+            ):
+                expected_items = requirement.slots.get("exactItemCount")
+                if isinstance(expected_items, int):
+                    missing_items = (
+                        quality_missing_result_items
+                        if quality_missing_result_items is not None
+                        else _uncited_output_item_labels(
+                            manifest,
+                            expected=expected_items,
+                        )
+                    )
+                    if missing_items:
+                        row["missingResultItems"] = missing_items
+            rows.append(row)
         required = [row for row in rows if row["requiredness"] == "required"]
         answer_missing = [row for row in required if row["answerStatus"] != "fulfilled"]
         input_gaps = [
@@ -1401,7 +1926,14 @@ class TaskCoverageTracker:
             if row["kind"] not in {"output-shape", "comparison", "calculation"}
             and row["modelInputStatus"] != "visible"
         ]
-        status = "complete" if not answer_missing and not input_gaps else "partial"
+        context_inputs = self.contract.declared_scope.get("contextRequiredInputs")
+        status = (
+            "insufficient-input"
+            if isinstance(context_inputs, list) and context_inputs
+            else "complete"
+            if not answer_missing and not input_gaps
+            else "partial"
+        )
         metrics = {
             "taskRequirementCount": len(rows),
             "taskRequirementRequiredCount": len(required),
@@ -1435,6 +1967,11 @@ class TaskCoverageTracker:
                     "toolName": attempt.tool_name,
                     "role": attempt.role,
                     "coverageScope": attempt.coverage_scope,
+                    **(
+                        {"citationReady": attempt.citation_ready}
+                        if attempt.citation_ready is not None
+                        else {}
+                    ),
                     "queryFingerprint": attempt.query_fingerprint,
                 }
                 for attempt in self._attempts
@@ -1445,33 +1982,63 @@ class TaskCoverageTracker:
         self,
         rows: Iterable[Mapping[str, Any]],
     ) -> dict[str, Any]:
-        by_id = {
-            str(row.get("requirementId")): row
-            for row in rows
-            if isinstance(row, Mapping) and row.get("requirementId")
-        }
+        # Per-stage progress is role-specific (candidate vs original content),
+        # so it must inspect the retrieval attempts rather than the flattened
+        # requirement rows used by the public coverage audit.
+        del rows
         steps: list[dict[str, Any]] = []
         for step in self.retrieval_plan.steps:
-            requirement_rows = [
-                by_id[requirement_id]
-                for requirement_id in step.requirement_ids
-                if requirement_id in by_id
-            ]
+            requirements = {
+                requirement.requirement_id: requirement
+                for requirement in self.contract.requirements
+                if requirement.requirement_id in step.requirement_ids
+            }
+            desired_role = "candidate" if step.strategy == "document-discovery" else "content"
+            attempted_by_requirement: dict[str, list[str]] = {}
+            covered_by_requirement: dict[str, list[str]] = {}
+            for requirement_id, requirement in requirements.items():
+                target_scope = self._relative_scope(requirement)
+                aliases = self._entity_aliases_for(requirement)
+                for attempt in self._attempts:
+                    role_matches = attempt.role == desired_role
+                    # Direct scoped content already proves candidate selection,
+                    # so discovery does not remain falsely pending when a tool
+                    # can search original chunks without a separate listing.
+                    if step.strategy == "document-discovery" and attempt.role == "content":
+                        role_matches = True
+                    if not role_matches:
+                        continue
+                    returned_part = _attempt_matches_requirement(
+                        attempt,
+                        requirement,
+                        target_scope=target_scope,
+                        entity_aliases=aliases,
+                    )
+                    attempted_scope = returned_part or _attempt_matches_request_scope(
+                        attempt,
+                        requirement,
+                        target_scope=target_scope,
+                        entity_aliases=aliases,
+                    )
+                    if attempted_scope:
+                        attempted_by_requirement.setdefault(requirement_id, []).append(
+                            attempt.attempt_id
+                        )
+                    if returned_part:
+                        covered_by_requirement.setdefault(requirement_id, []).append(
+                            attempt.attempt_id
+                        )
             attempt_ids = tuple(
                 dict.fromkeys(
-                    str(attempt_id)
-                    for row in requirement_rows
-                    for attempt_id in (
-                        row.get("attemptIds") if isinstance(row.get("attemptIds"), list) else []
-                    )
-                    if str(attempt_id).startswith("attempt_")
+                    attempt_id
+                    for requirement_attempts in attempted_by_requirement.values()
+                    for attempt_id in requirement_attempts
                 )
             )
             missing = [
-                str(row.get("requirementId"))
-                for row in requirement_rows
-                if row.get("retrievalStatus") != "available"
-                or row.get("modelInputStatus") != "visible"
+                requirement_id
+                for requirement_id in step.requirement_ids
+                if requirement_id not in covered_by_requirement
             ]
             if not missing:
                 status = "covered"
@@ -1504,6 +2071,8 @@ class TaskCoverageTracker:
         }
 
     def should_request_revision(self, audit: Mapping[str, Any]) -> bool:
+        if audit.get("status") == "insufficient-input":
+            return False
         if not self.contract.enforceable:
             return False
         requirements = audit.get("requirements")
@@ -1634,7 +2203,12 @@ class TaskCoverageTracker:
         for requirement, replacement, handles in normalized:
             citation_links = " ".join(f"[source](evidence://{handle})" for handle in handles)
             value = f"{replacement} {citation_links}".strip()
-            updated = _patch_markdown_table_slot(patched, requirement, value=value)
+            updated = _patch_markdown_table_slot(
+                patched,
+                requirement,
+                value=value,
+                replace_existing=True,
+            )
             if updated == patched:
                 return TaskCoveragePatchResult(False, code="target-cell-not-found")
             patched = updated
@@ -1669,10 +2243,22 @@ class TaskCoverageTracker:
         candidate_evidence: Iterable[Mapping[str, Any]] = (),
     ) -> str:
         gaps = self._actionable_revision_gaps(audit)
+
+        def requires_result_item_retrieval(row: Mapping[str, Any]) -> bool:
+            reasons = row.get("reasonCodes")
+            return bool(
+                isinstance(reasons, list)
+                and "result-item-citation-missing" in reasons
+                and row.get("missingResultItems")
+            )
+
         retrieval_needed = [
             str(row.get("requirementId"))
             for row in gaps
-            if row.get("modelInputStatus") not in {"visible", "not-required"}
+            if (
+                row.get("modelInputStatus") not in {"visible", "not-required"}
+                or requires_result_item_retrieval(row)
+            )
             and row.get("requirementId")
         ]
         retrieval_plan = build_task_retrieval_plan(
@@ -1687,6 +2273,7 @@ class TaskCoverageTracker:
                 for row in gaps
                 if row.get("answerStatus") != "fulfilled"
                 and row.get("modelInputStatus") in {"visible", "not-required"}
+                and not requires_result_item_retrieval(row)
             ],
             "retrievalNeeded": retrieval_needed,
             "retrievalPlan": retrieval_plan.to_dict(),
@@ -1697,8 +2284,23 @@ class TaskCoverageTracker:
                     "retrievalStatus": row.get("retrievalStatus"),
                     "modelInputStatus": row.get("modelInputStatus"),
                     "answerStatus": row.get("answerStatus"),
+                    **(
+                        {"missingResultItems": list(row.get("missingResultItems") or [])}
+                        if row.get("missingResultItems")
+                        else {}
+                    ),
                 }
                 for row in gaps
+            ],
+            "resultItemRetrieval": [
+                {
+                    "requirementId": row.get("requirementId"),
+                    "items": list(row.get("missingResultItems") or []),
+                    "strategy": "batch-document-scoped-search",
+                    "sourceBoundary": "original-addressable-content",
+                }
+                for row in gaps
+                if requires_result_item_retrieval(row)
             ],
             "candidateEvidence": [dict(item) for item in candidate_evidence],
             "currentDraft": draft,
@@ -1725,13 +2327,18 @@ class TaskCoverageTracker:
                 + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
             )
         return (
-            "The host withheld the draft because it did not establish complete retrieval, model "
-            "input, and answer coverage for the user's explicit task. "
+            "The host already preserved and published the draft, but it did not establish "
+            "complete retrieval, model input, and answer coverage for the user's explicit task. "
             "Produce one complete replacement answer for the original request. Execute every "
             "step in retrievalPlan before drafting; retrieve only the requirements listed in "
             "retrievalNeeded and do not call any tool for answerPatchOnly. Values in currentDraft "
             "that belong to retrievalNeeded are untrusted and must not be copied unless a new "
             "scoped tool result supports them. "
+            "For resultItemRetrieval, reuse discovery candidates already present in this runtime "
+            "and retrieve original addressable content for every listed item. Prefer one batch "
+            "document-scoped search with selected document ids over repeated broad discovery or "
+            "one full-document call per item. A discovery summary or legacy source placeholder "
+            "is not evidence. "
             "The compact candidateEvidence catalogue below is the only evidence visible to this "
             "fresh revision runtime for answerPatchOnly; use only its exact evidenceHandle values "
             "and never invent a handle. Make at most one new scoped "
@@ -2296,6 +2903,11 @@ class TaskCoverageTracker:
             attempt.attempt_id
             for attempt in self._attempts
             if attempt.role == "content"
+            and not (
+                requirement.kind == "topic"
+                and requirement.slots.get("topic") == "requested-summary"
+                and attempt.citation_ready is False
+            )
             and attempt.coverage_scope in {"full-document", "full-record"}
             and _attempt_matches_requirement_scope(
                 attempt,
@@ -3224,6 +3836,49 @@ def _tool_result_mapping(
     return role, "result", "partial"
 
 
+def _task_coverage_attempt_is_ignored(
+    tool_name: str,
+    input_text: str,
+    *,
+    config: Mapping[str, Any],
+) -> bool:
+    """Return whether an observable tool call is not a source attempt.
+
+    Task Coverage audits retrieval, model input and answer coverage. Runtime
+    planning, skill loading, automation mutation and artifact delivery remain
+    fully visible in the conversation, but must not satisfy a source-bearing
+    requirement merely because their payload contains prose. The policy owns
+    these patterns so later distributions can add host-specific operations
+    without forking the shared resolver.
+    """
+
+    task_policy = config.get("task_coverage")
+    task_policy = task_policy if isinstance(task_policy, Mapping) else {}
+    retrieval = task_policy.get("retrieval")
+    retrieval = retrieval if isinstance(retrieval, Mapping) else {}
+
+    raw_tool_patterns = retrieval.get("ignored_tool_patterns")
+    tool_patterns = raw_tool_patterns if isinstance(raw_tool_patterns, list) else []
+    folded_name = tool_name.casefold()
+    if any(
+        isinstance(pattern, str)
+        and pattern
+        and fnmatch.fnmatchcase(folded_name, pattern.casefold())
+        for pattern in tool_patterns
+    ):
+        return True
+
+    raw_input_patterns = retrieval.get("ignored_input_patterns")
+    input_patterns = raw_input_patterns if isinstance(raw_input_patterns, list) else []
+    folded_input = input_text.casefold()
+    return any(
+        isinstance(pattern, str)
+        and pattern
+        and fnmatch.fnmatchcase(folded_input, pattern.casefold())
+        for pattern in input_patterns
+    )
+
+
 def task_coverage_tool_mapping(
     tool_name: str,
     *,
@@ -3395,6 +4050,92 @@ def _metric_value_aliases(metric: str, semantics: Mapping[str, Any]) -> tuple[st
     return tuple(dict.fromkeys(aliases))
 
 
+def _resolve_coverage_pointer(value: Any, pointer: str) -> tuple[bool, Any]:
+    if pointer == "":
+        return True, value
+    if not isinstance(pointer, str) or not pointer.startswith("/"):
+        return False, None
+    current = value
+    for raw_token in pointer[1:].split("/"):
+        token = raw_token.replace("~1", "/").replace("~0", "~")
+        if isinstance(current, Mapping) and token in current:
+            current = current[token]
+        elif isinstance(current, (list, tuple)) and token.isdigit():
+            index = int(token)
+            if index >= len(current):
+                return False, None
+            current = current[index]
+        else:
+            return False, None
+    return True, current
+
+
+def _structured_metric_value_state(
+    value: Any,
+    *,
+    aliases: Iterable[str],
+) -> bool | None:
+    """Return whether a standard Collection exposes a non-empty metric value.
+
+    ``False`` is authoritative only when a Collection hint maps the requested
+    canonical metric to one or more concrete fields and every returned value
+    is empty.  ``None`` keeps legacy untyped payloads on the existing textual
+    compatibility path.
+    """
+
+    alias_keys = {_fold(str(alias)) for alias in aliases if _fold(str(alias))}
+    if not alias_keys:
+        return None
+    stack: list[Any] = [value]
+    visited = 0
+    mapped = False
+    while stack and visited < 10_000:
+        node = stack.pop()
+        visited += 1
+        parsed = _maybe_json(node)
+        if parsed is not node:
+            stack.append(parsed)
+            continue
+        if isinstance(node, Mapping):
+            raw_hints = node.get("_valuz_evidence_hint")
+            hints = raw_hints if isinstance(raw_hints, list) else [raw_hints]
+            for hint in hints:
+                if not isinstance(hint, Mapping):
+                    continue
+                metric_fields = hint.get("metricFields")
+                content_root = hint.get("contentRoot")
+                if not isinstance(metric_fields, Mapping) or not isinstance(
+                    content_root,
+                    str,
+                ):
+                    continue
+                selected_fields = [
+                    str(pointer)
+                    for pointer, metric in metric_fields.items()
+                    if _fold(str(metric)) in alias_keys and isinstance(pointer, str)
+                ]
+                if not selected_fields:
+                    continue
+                found, records = _resolve_coverage_pointer(node, content_root)
+                if not found:
+                    continue
+                mapped = True
+                record_items = records if isinstance(records, (list, tuple)) else [records]
+                for record in record_items:
+                    for pointer in selected_fields:
+                        present, field_value = _resolve_coverage_pointer(record, pointer)
+                        if present and field_value not in (None, ""):
+                            return True
+            stack.extend(
+                child
+                for key, child in node.items()
+                if key != "_valuz_evidence_hint"
+            )
+        elif isinstance(node, (list, tuple)):
+            stack.extend(node)
+    return False if mapped else None
+
+
 def _requirement_dimension_aliases(
     requirement: TaskRequirement,
 ) -> tuple[tuple[str, tuple[str, ...]], ...]:
@@ -3437,6 +4178,16 @@ def _attempt_matches_requirement(
         return False
     metric = str(slots.get("metric") or "")
     metric_aliases = requirement.aliases.get("metric", ()) or ((metric,) if metric else ())
+    structured_value_state = (
+        _structured_metric_value_state(
+            attempt.model_content,
+            aliases=metric_aliases,
+        )
+        if requirement.kind == "structured-slot" and attempt.role == "content"
+        else None
+    )
+    if structured_value_state is False:
+        return False
     if metric_aliases and not any(
         _contains_alias(evidence_haystack, alias) for alias in metric_aliases
     ):
@@ -3444,7 +4195,7 @@ def _attempt_matches_requirement(
         # A company-level search result is still the auditable candidate for
         # each requested metric even when its metadata does not repeat every
         # field name; it remains `partial` until a content tool proves the part.
-        if attempt.role != "candidate" or not entity:
+        if structured_value_state is not True and (attempt.role != "candidate" or not entity):
             return False
     for _dimension, member_aliases in _requirement_dimension_aliases(requirement):
         if not any(_contains_alias(evidence_haystack, alias) for alias in member_aliases):
@@ -3457,6 +4208,18 @@ def _attempt_matches_requirement(
     if document_id and document_id not in scope_haystack:
         return False
     topic = str(slots.get("topic") or "")
+    if (
+        topic == "requested-summary"
+        and attempt.role == "content"
+        and attempt.citation_ready is False
+    ):
+        # Reading source text and producing user-resolvable Evidence are
+        # separate stages.  A raw full-document payload is useful model input,
+        # but in a citation-enabled turn it cannot satisfy the source-bearing
+        # research contract until a targeted chunk or addressable structured
+        # item has crossed the trust boundary.  ``None`` intentionally keeps
+        # non-citation callers backward compatible.
+        return False
     if topic and topic != "requested-summary":
         aliases = requirement.aliases.get("topic", (topic,))
         if not any(_topic_supported(alias, evidence_haystack) for alias in aliases):
@@ -4044,6 +4807,10 @@ def _output_shape_status(
     slots = requirement.slots
     if slots.get("format") == "table" and not manifest.tables:
         return "missing", ["markdown-table-missing"]
+    if slots.get("format") == "table" and any(
+        width != len(table.headers) for table in manifest.tables for width in table.row_widths
+    ):
+        return "missing", ["malformed-table-row"]
     exact_table_count = slots.get("exactTableCount")
     if isinstance(exact_table_count, int) and len(manifest.tables) != exact_table_count:
         return "missing", ["exact-table-count-mismatch"]
@@ -4114,9 +4881,13 @@ def _output_shape_status(
             return "missing", ["exact-line-count-mismatch"]
     exact_items = slots.get("exactItemCount")
     if isinstance(exact_items, int) and slots.get("exactItemCountSubject") != "fields":
-        item_count = _count_output_items(manifest)
+        item_count = _count_output_items(manifest, expected=exact_items)
         if item_count != exact_items:
             return "missing", ["exact-item-count-mismatch"]
+        if slots.get("requireCitationPerItem") is True:
+            cited_items = _count_cited_output_items(manifest, expected=exact_items)
+            if cited_items != exact_items:
+                return "missing", ["result-item-citation-missing"]
     required_metadata = slots.get("requiredMetadata")
     if isinstance(required_metadata, list):
         if "period" in required_metadata and not _period_keys_in_text(manifest.text):
@@ -4126,28 +4897,392 @@ def _output_shape_status(
     return "fulfilled", ["requested-output-shape-present"]
 
 
-def _count_output_items(manifest: AnswerManifest) -> int:
-    """Count one top-level result shape without including nested details."""
+def _count_output_items(manifest: AnswerManifest, *, expected: int | None = None) -> int:
+    """Count a coherent result layer without mixing parent and child headings."""
 
     text = manifest.text
-    numbered_headings = re.findall(
-        r"(?m)^\s{0,3}#{1,6}\s+(?:\d+[.)、]|[一二三四五六七八九十]+[、.)])\s*",
+    heading_counts: dict[int, int] = {}
+    for match in re.finditer(
+        r"(?m)^[ \t]{0,3}(?P<marks>#{1,6})\s+"
+        r"(?:\d+[.)、]|[一二三四五六七八九十]+[、.)])\s*",
+        text,
+    ):
+        level = len(match.group("marks"))
+        heading_counts[level] = heading_counts.get(level, 0) + 1
+    if heading_counts:
+        # A report often has numbered category headings (## 一、…) containing
+        # numbered result headings (### 1. …).  Exact-N acceptance should
+        # compare one structural layer, never their combined total.  Prefer an
+        # exact layer when the user supplied N; otherwise the deepest numbered
+        # layer is the most specific result shape.
+        if expected is not None and expected in heading_counts.values():
+            return expected
+        return heading_counts[max(heading_counts)]
+
+    bold_numbered_items = re.findall(
+        r"(?m)^[ \t]{0,3}\*{2}\s*(?:\d+[.)、]|[一二三四五六七八九十]+[、.)])\s*.+?\*{2}\s*$",
         text,
     )
-    if numbered_headings:
-        return len(numbered_headings)
+    if bold_numbered_items:
+        return len(bold_numbered_items)
 
-    numbered_items = re.findall(r"(?m)^\s{0,3}\d+[.)、]\s+", text)
+    numbered_items = re.findall(r"(?m)^[ \t]{0,3}\d+[.)、]\s+", text)
     if numbered_items:
-        return len(numbered_items)
+        if expected is None or len(numbered_items) == expected:
+            return len(numbered_items)
 
     bullet_rows = re.findall(r"(?m)^(?P<indent>[ \t]*)(?:[-*+])\s+", text)
     if bullet_rows:
         shallowest = min(len(indent.expandtabs(4)) for indent in bullet_rows)
-        return sum(len(indent.expandtabs(4)) == shallowest for indent in bullet_rows)
+        bullet_count = sum(len(indent.expandtabs(4)) == shallowest for indent in bullet_rows)
+        if expected is None or bullet_count == expected:
+            return bullet_count
 
-    table_rows = sum(len(table.rows) for table in manifest.tables)
-    return table_rows
+    table_counts = [len(table.rows) for table in manifest.tables]
+    if expected is not None:
+        if expected in table_counts:
+            return expected
+        if sum(table_counts) == expected:
+            return expected
+    if numbered_items:
+        return len(numbered_items)
+    if bullet_rows:
+        return bullet_count
+    return sum(table_counts)
+
+
+def _count_cited_output_items(manifest: AnswerManifest, *, expected: int) -> int:
+    """Count result items that contain their own canonical citation.
+
+    Exact-N research tasks are complete only when every returned result is
+    individually inspectable.  A citation in an introduction or in one sibling
+    result cannot cover the whole list.  This operates after Citation Guard
+    sealing, so only host-issued ``citation://`` links can satisfy it.
+    """
+
+    text = manifest.text
+
+    numbered_headings: dict[int, list[re.Match[str]]] = {}
+    for match in re.finditer(
+        r"(?m)^[ \t]{0,3}(?P<marks>#{1,6})\s+"
+        r"(?:\d+[.)、]|[一二三四五六七八九十]+[、.)])\s*",
+        text,
+    ):
+        numbered_headings.setdefault(len(match.group("marks")), []).append(match)
+    if numbered_headings:
+        level = next(
+            (
+                candidate
+                for candidate, matches in sorted(numbered_headings.items(), reverse=True)
+                if len(matches) == expected
+            ),
+            max(numbered_headings),
+        )
+        matches = numbered_headings[level]
+        return _count_cited_segments(text, matches)
+
+    bold_matches = list(
+        re.finditer(
+            r"(?m)^[ \t]{0,3}\*{2}\s*"
+            r"(?:\d+[.)、]|[一二三四五六七八九十]+[、.)])\s*.+?\*{2}\s*$",
+            text,
+        )
+    )
+    if bold_matches:
+        return _count_cited_segments(text, bold_matches)
+
+    numbered_matches = list(re.finditer(r"(?m)^[ \t]{0,3}\d+[.)、]\s+", text))
+    if len(numbered_matches) == expected:
+        return _count_cited_segments(text, numbered_matches)
+
+    bullet_matches = list(re.finditer(r"(?m)^(?P<indent>[ \t]*)(?:[-*+])\s+", text))
+    if bullet_matches:
+        shallowest = min(len(match.group("indent").expandtabs(4)) for match in bullet_matches)
+        top_level = [
+            match
+            for match in bullet_matches
+            if len(match.group("indent").expandtabs(4)) == shallowest
+        ]
+        if len(top_level) == expected:
+            return _count_cited_segments(text, top_level)
+
+    exact_table = next(
+        (table for table in manifest.tables if len(table.rows) == expected),
+        None,
+    )
+    if exact_table is not None:
+        return sum("citation://" in " ".join(row) for row in exact_table.rows)
+    rows = [row for table in manifest.tables for row in table.rows]
+    if len(rows) == expected:
+        return sum("citation://" in " ".join(row) for row in rows)
+    if numbered_matches:
+        return _count_cited_segments(text, numbered_matches)
+    if bullet_matches:
+        return _count_cited_segments(text, top_level)
+    return sum("citation://" in " ".join(row) for row in rows)
+
+
+def _uncited_output_item_labels(
+    manifest: AnswerManifest,
+    *,
+    expected: int,
+) -> list[str]:
+    """Return stable labels for exact-N result items missing a citation.
+
+    The labels are private revision context, not new task requirements.  They
+    let the continuation retrieve the original content for the actual missing
+    results in one scoped batch instead of repeating broad discovery or
+    guessing which siblings the aggregate output-shape row referred to.
+    Selection deliberately mirrors ``_count_cited_output_items`` so count and
+    remediation always operate on the same structural layer.
+    """
+
+    text = manifest.text
+    numbered_headings: dict[int, list[re.Match[str]]] = {}
+    for match in re.finditer(
+        r"(?m)^[ \t]{0,3}(?P<marks>#{1,6})\s+"
+        r"(?:\d+[.)、]|[一二三四五六七八九十]+[、.)])\s*",
+        text,
+    ):
+        numbered_headings.setdefault(len(match.group("marks")), []).append(match)
+    if numbered_headings:
+        level = next(
+            (
+                candidate
+                for candidate, matches in sorted(numbered_headings.items(), reverse=True)
+                if len(matches) == expected
+            ),
+            max(numbered_headings),
+        )
+        return _uncited_segment_labels(text, numbered_headings[level])
+
+    bold_matches = list(
+        re.finditer(
+            r"(?m)^[ \t]{0,3}\*{2}\s*"
+            r"(?:\d+[.)、]|[一二三四五六七八九十]+[、.)])\s*.+?\*{2}\s*$",
+            text,
+        )
+    )
+    if bold_matches:
+        return _uncited_segment_labels(text, bold_matches)
+
+    numbered_matches = list(re.finditer(r"(?m)^[ \t]{0,3}\d+[.)、]\s+", text))
+    if len(numbered_matches) == expected:
+        return _uncited_segment_labels(text, numbered_matches)
+
+    bullet_matches = list(re.finditer(r"(?m)^(?P<indent>[ \t]*)(?:[-*+])\s+", text))
+    top_level: list[re.Match[str]] = []
+    if bullet_matches:
+        shallowest = min(len(match.group("indent").expandtabs(4)) for match in bullet_matches)
+        top_level = [
+            match
+            for match in bullet_matches
+            if len(match.group("indent").expandtabs(4)) == shallowest
+        ]
+        if len(top_level) == expected:
+            return _uncited_segment_labels(text, top_level)
+
+    exact_table = next(
+        (table for table in manifest.tables if len(table.rows) == expected),
+        None,
+    )
+    if exact_table is not None:
+        return _uncited_table_row_labels(exact_table.rows)
+    rows = [row for table in manifest.tables for row in table.rows]
+    if len(rows) == expected:
+        return _uncited_table_row_labels(rows)
+    if numbered_matches:
+        return _uncited_segment_labels(text, numbered_matches)
+    if top_level:
+        return _uncited_segment_labels(text, top_level)
+    return _uncited_table_row_labels(rows)
+
+
+def _unsupported_output_item_labels(
+    manifest: AnswerManifest,
+    citation_bundle: Mapping[str, Any] | None,
+    *,
+    expected: int,
+) -> list[str] | None:
+    """Return exact-N items without one verifier-supported local citation.
+
+    A canonical citation URI proves that a host-issued source exists, but it
+    does not prove that the source belongs to this result item.  When deep
+    Claim Audit is available, require at least one passed/auto-bound/repaired
+    cited Claim inside each result boundary.  Without quality claims (for
+    example citation-only mode), return ``None`` and preserve the URI-only
+    baseline rather than silently enabling verification.
+    """
+
+    if not isinstance(citation_bundle, Mapping):
+        return None
+    quality = citation_bundle.get("quality")
+    quality = quality if isinstance(quality, Mapping) else {}
+    raw_claims = quality.get("claims")
+    if not isinstance(raw_claims, list) or not raw_claims:
+        return None
+    quality_by_id = {
+        str(claim.get("claimId")): claim
+        for claim in raw_claims
+        if isinstance(claim, Mapping) and claim.get("claimId")
+    }
+    groups = _output_item_claim_groups(manifest, expected=expected)
+    if len(groups) != expected:
+        return None
+
+    missing: list[str] = []
+    for label, claims in groups:
+        supported = False
+        for claim in claims:
+            audited = quality_by_id.get(str(getattr(claim, "claim_id", "")))
+            if not isinstance(audited, Mapping):
+                continue
+            citation_ids = audited.get("citationIds")
+            if (
+                audited.get("status") in {"passed", "auto-bound", "repaired"}
+                and isinstance(citation_ids, list)
+                and any(isinstance(item, str) and item for item in citation_ids)
+            ):
+                supported = True
+                break
+        if not supported and label:
+            missing.append(label)
+    return missing
+
+
+def _output_item_claim_groups(
+    manifest: AnswerManifest,
+    *,
+    expected: int,
+) -> list[tuple[str, list[Any]]]:
+    """Group extracted Claims by the same exact-N result boundary."""
+
+    text = manifest.text
+    matches_by_level: dict[int, list[re.Match[str]]] = {}
+    for match in re.finditer(
+        r"(?m)^[ \t]{0,3}(?P<marks>#{1,6})\s+"
+        r"(?:\d+[.)、]|[一二三四五六七八九十]+[、.)])\s*.+$",
+        text,
+    ):
+        matches_by_level.setdefault(len(match.group("marks")), []).append(match)
+    starts = next(
+        (
+            level_matches
+            for _level, level_matches in sorted(matches_by_level.items(), reverse=True)
+            if len(level_matches) == expected
+        ),
+        [],
+    )
+    if not starts:
+        bold = list(
+            re.finditer(
+                r"(?m)^[ \t]{0,3}\*{2}\s*"
+                r"(?:\d+[.)、]|[一二三四五六七八九十]+[、.)])\s*.+?\*{2}\s*$",
+                text,
+            )
+        )
+        if len(bold) == expected:
+            starts = bold
+    if not starts:
+        numbered = list(re.finditer(r"(?m)^[ \t]{0,3}\d+[.)、]\s+", text))
+        if len(numbered) == expected:
+            starts = numbered
+    if not starts:
+        bullets = list(re.finditer(r"(?m)^(?P<indent>[ \t]*)(?:[-*+])\s+", text))
+        if bullets:
+            shallowest = min(len(match.group("indent").expandtabs(4)) for match in bullets)
+            top_level = [
+                match for match in bullets if len(match.group("indent").expandtabs(4)) == shallowest
+            ]
+            if len(top_level) == expected:
+                starts = top_level
+    if starts:
+        output: list[tuple[str, list[Any]]] = []
+        for index, match in enumerate(starts):
+            end = starts[index + 1].start() if index + 1 < len(starts) else len(text)
+            segment_claims = [
+                claim
+                for claim in manifest.claims
+                if isinstance(getattr(claim, "location", None), Mapping)
+                and isinstance(claim.location.get("sourceStart"), int)
+                and match.start() <= claim.location["sourceStart"] < end
+            ]
+            first_line = text[match.start() : end].splitlines()[0]
+            output.append((_output_item_label(first_line), segment_claims))
+        return output
+
+    table_groups: dict[int, dict[int, list[Any]]] = {}
+    for claim in manifest.claims:
+        location = getattr(claim, "location", None)
+        if not isinstance(location, Mapping) or location.get("kind") != "table-cell":
+            continue
+        block_index = location.get("blockIndex")
+        row_index = location.get("rowIndex")
+        if not isinstance(block_index, int) or not isinstance(row_index, int):
+            continue
+        table_groups.setdefault(block_index, {}).setdefault(row_index, []).append(claim)
+    rows = next(
+        (
+            row_claims
+            for _block, row_claims in sorted(table_groups.items())
+            if len(row_claims) == expected
+        ),
+        {},
+    )
+    return [
+        (
+            _output_item_label(str(row_claims[0].exact).split("—", 1)[0]),
+            row_claims,
+        )
+        for _row_index, row_claims in sorted(rows.items())
+        if row_claims
+    ]
+
+
+def _uncited_segment_labels(text: str, starts: list[re.Match[str]]) -> list[str]:
+    labels: list[str] = []
+    for index, match in enumerate(starts):
+        end = starts[index + 1].start() if index + 1 < len(starts) else len(text)
+        segment = text[match.start() : end]
+        if "citation://" in segment:
+            continue
+        first_line = next((line.strip() for line in segment.splitlines() if line.strip()), "")
+        label = _output_item_label(first_line or segment)
+        if label:
+            labels.append(label)
+    return labels
+
+
+def _uncited_table_row_labels(rows: Iterable[tuple[str, ...]]) -> list[str]:
+    labels: list[str] = []
+    for row in rows:
+        if "citation://" in " ".join(row):
+            continue
+        cells = [_output_item_label(cell) for cell in row]
+        cells = [cell for cell in cells if cell]
+        if cells:
+            labels.append(" / ".join(cells[:3])[:160])
+    return labels
+
+
+def _output_item_label(value: str) -> str:
+    label = _strip_markdown(value)
+    label = re.sub(
+        r"^\s*(?:#{1,6}\s*)?(?:\*{2}\s*)?"
+        r"(?:\d+[.)、]|[一二三四五六七八九十]+[、.)]|[-*+])\s*",
+        "",
+        label,
+    )
+    label = re.sub(r"\s+", " ", label).strip(" *`#>|\t\r\n")
+    return label[:160]
+
+
+def _count_cited_segments(text: str, starts: list[re.Match[str]]) -> int:
+    return sum(
+        "citation://" in text[match.start() : starts[index + 1].start()]
+        for index, match in enumerate(starts)
+        if index + 1 < len(starts)
+    ) + (1 if starts and "citation://" in text[starts[-1].start() :] else 0)
 
 
 def _remediation(retrieval: str, model_input: str, answer: str) -> str:
@@ -4227,11 +5362,13 @@ def _parse_markdown_tables(text: str) -> tuple[MarkdownTable, ...]:
             continue
         table_start = index
         rows: list[tuple[str, ...]] = []
+        row_widths: list[int] = []
         index += 2
         while index < len(lines):
             row = _split_table_row(lines[index])
             if not row:
                 break
+            row_widths.append(len(row))
             if len(row) < len(header):
                 row = (*row, *("" for _ in range(len(header) - len(row))))
             rows.append(tuple(row[: len(header)]))
@@ -4241,6 +5378,7 @@ def _parse_markdown_tables(text: str) -> tuple[MarkdownTable, ...]:
                 tuple(header),
                 tuple(rows),
                 _nearest_table_context(lines, table_start),
+                tuple(row_widths),
             )
         )
     return tuple(tables)
@@ -4456,6 +5594,7 @@ def _patch_markdown_table_slot(
     requirement: TaskRequirement,
     *,
     value: str,
+    replace_existing: bool = False,
 ) -> str:
     lines = text.splitlines()
     entity = str(requirement.slots.get("entityName") or requirement.slots.get("entityId") or "")
@@ -4490,7 +5629,9 @@ def _patch_markdown_table_slot(
             padded.extend("" for _ in range(len(headers) - len(padded)))
             changed = False
             for column in metric_indexes:
-                if column < len(padded) and not _meaningful_cell(_strip_markdown(padded[column])):
+                if column < len(padded) and (
+                    replace_existing or not _meaningful_cell(_strip_markdown(padded[column]))
+                ):
                     padded[column] = value
                     changed = True
             if changed:
@@ -4697,6 +5838,57 @@ def _indexed_search_has_explicitly_empty_chunks(content: Any) -> bool:
 def _strip_markdown(value: str) -> str:
     value = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", value)
     return re.sub(r"[`*_>#]", "", value)
+
+
+def _exact_result_entity_aliases(
+    answer: str,
+    *,
+    expected: int,
+) -> dict[str, set[str]]:
+    """Derive bounded per-result identity aliases from exact-N headings.
+
+    These aliases are private turn context.  Only one coherent Markdown
+    heading level with exactly ``expected`` numbered results is accepted, so
+    numbered subsections or an unrelated recap cannot expand the identity
+    ontology used by Claim–Evidence resolution.
+    """
+
+    matches_by_level: dict[int, list[re.Match[str]]] = {}
+    for match in re.finditer(
+        r"(?m)^[ \t]{0,3}(?P<marks>#{1,6})\s+"
+        r"(?:\d+[.)、]|[一二三四五六七八九十]+[、.)])\s*"
+        r"(?P<label>[^\n]{2,180})$",
+        answer,
+    ):
+        matches_by_level.setdefault(len(match.group("marks")), []).append(match)
+    matches = next(
+        (
+            level_matches
+            for _level, level_matches in sorted(matches_by_level.items(), reverse=True)
+            if len(level_matches) == expected
+        ),
+        (),
+    )
+    output: dict[str, set[str]] = {}
+    for match in matches:
+        label = _strip_markdown(match.group("label")).strip()
+        core = re.split(r"\s*[—–]\s*", label, maxsplit=1)[0].strip()
+        name_match = re.match(
+            r"(?P<name>[^（(]{2,100}?)(?:\s*[（(](?P<meta>[^)）]{1,80})[)）])?$",
+            core,
+        )
+        if name_match is None:
+            continue
+        entity = re.sub(r"\s+", " ", name_match.group("name")).strip(" ：:,，")
+        if len(re.sub(r"\s+", "", entity)) < 2:
+            continue
+        aliases = {entity}
+        aliases.update(re.findall(r"(?<!\d)\d{5,6}(?!\d)", core))
+        metadata = str(name_match.group("meta") or "").strip()
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9.:-]{1,15}", metadata):
+            aliases.add(metadata)
+        output.setdefault(entity, set()).update(aliases)
+    return output
 
 
 def _extract_scope_metadata(
@@ -5015,11 +6207,14 @@ __all__ = [
     "TASK_COVERAGE_RESOLVER_REVISION",
     "AnswerManifest",
     "TaskContract",
+    "TaskClarificationResolution",
     "TaskCoveragePatchResult",
     "TaskCoverageTracker",
     "TaskRequirement",
     "build_answer_manifest",
     "parse_task_contract",
+    "pending_task_clarification",
+    "resume_pending_task_clarification",
     "task_contract_prompt",
     "task_coverage_improves",
     "task_coverage_tool_mapping",

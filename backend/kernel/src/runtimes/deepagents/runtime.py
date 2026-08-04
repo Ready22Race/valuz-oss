@@ -87,6 +87,7 @@ async def _preserve_mcp_source_metadata(request: Any, handler: Any) -> Any:
         server_name=str(getattr(request, "server_name", "") or "unknown"),
     )
 
+
 # Apply third-party deepagents shims once, before any graph is built. See
 # ``_patches`` — raises *subagents* above langgraph's default 25-step recursion
 # limit (which they otherwise never escape). The *main* graph's limit is fixed
@@ -238,6 +239,7 @@ class DeepAgentsRuntime:
         self._cached_permission_mode: Literal["default", "auto_review", "full_access"] = (
             "full_access"
         )
+
         # Last value actually applied to a turn. Used by ``run()`` to
         # detect a PATCH on ``session.permission_mode`` /
         # ``session.model_settings.effort`` between turns and trigger a
@@ -274,6 +276,27 @@ class DeepAgentsRuntime:
         # runtimes' phases. Held as a single instance — matcher is
         # stateless and re-instantiation per call would be wasteful.
         self._approval_rule_matcher: RuntimeApprovalRuleMatcher = ExactArgsRuleMatcher()
+
+    async def _emit_citation_evidence(
+        self,
+        citation_join_id: str,
+        tool_name: str | None,
+        model_content: Any,
+        citation_content: str,
+    ) -> None:
+        """Bridge a completed middleware sidecar into the generic event layer."""
+
+        await self.event_sink.emit(
+            Event(
+                type="citation_evidence",
+                data={
+                    "tool_name": tool_name,
+                    "model_content": model_content,
+                    "content": citation_content,
+                    "citation_join_id": citation_join_id,
+                },
+            )
+        )
 
     APPROVAL_TIMEOUT_SECONDS: float = 3600.0  # 1h; class attr for test override
 
@@ -472,6 +495,11 @@ class DeepAgentsRuntime:
                             "content": _stringify_tool_output(output),
                             "is_error": is_error,
                         }
+                        raw_tool_call_id = getattr(output, "tool_call_id", None)
+                        if raw_tool_call_id is None and isinstance(output, dict):
+                            raw_tool_call_id = output.get("tool_call_id")
+                        if raw_tool_call_id:
+                            event_data["citation_join_id"] = str(raw_tool_call_id)
                         if citation_content is not None:
                             event_data["_citation_content"] = citation_content
                         await self.event_sink.emit(
@@ -506,6 +534,7 @@ class DeepAgentsRuntime:
                                 "tool_name": tool_name,
                                 "model_content": model_content,
                                 "content": citation_content,
+                                "citation_join_id": key,
                             },
                         )
                     )
@@ -1072,7 +1101,13 @@ class DeepAgentsRuntime:
                 ResearchToolBudgetMiddleware(
                     lead_owned_evidence=_session_citation_mode_enabled(session)
                 ),
-                CitationEvidenceCompactionMiddleware(),
+                CitationEvidenceCompactionMiddleware(
+                    citation_artifact_emitter=(
+                        self._emit_citation_evidence
+                        if _session_citation_mode_enabled(session)
+                        else None
+                    )
+                ),
             ],
         }
         # DeepAgents prepends our ``system_prompt`` argument to its base

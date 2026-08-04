@@ -29,9 +29,12 @@ _MAX_STRING_CHARS = 4_096
 _SUPPORTED_RESOURCE_KINDS = {
     "document-discovery",
     "document-chunks",
+    "document-summary",
     "structured-collection",
     "operational",
 }
+
+
 @dataclass(frozen=True)
 class McpSourceAdaptation:
     """Validated model/private projection for one MCP tool result."""
@@ -189,6 +192,16 @@ def adapt_mcp_source_result(
             if chunk_envelopes is None:
                 return None
             envelopes.extend(chunk_envelopes)
+        elif kind == "document-summary":
+            summary_envelopes = _document_summary_envelopes(
+                target,
+                descriptor=descriptor,
+                resource=raw_resource,
+                captured_at=captured_at,
+            )
+            if summary_envelopes is None:
+                return None
+            envelopes.extend(summary_envelopes)
         elif kind == "document-discovery":
             # Discovery rows select what to read next.  Even their title or
             # doc_id cannot support a business claim, and exposing a generic
@@ -366,6 +379,103 @@ def _document_envelopes(
             }
         )
     return output
+
+
+def _document_summary_envelopes(
+    target: Any,
+    *,
+    descriptor: Mapping[str, Any],
+    resource: Mapping[str, Any],
+    captured_at: str,
+) -> list[dict[str, Any]] | None:
+    """Materialize one fetched document summary as direct text Evidence.
+
+    This resource covers provider-authored text that is already present once in
+    the opened-document result but is not represented by any returned chunk.
+    It deliberately has no fake chunk id, page, or bbox.  Raw-document tools
+    remain retrieval substrates and cannot promote the whole body through this
+    lower-confidence summary path.
+    """
+
+    operation = descriptor.get("operation")
+    operation = operation if isinstance(operation, Mapping) else {}
+    operation_tool = str(operation.get("toolName") or "").rsplit("__", 1)[-1]
+    if operation_tool == "document_raw_content":
+        return []
+    if resource.get("authority") != "derived":
+        return None
+    resource_id = _bounded_string(resource.get("resourceId"), 512)
+    root_pointer = _pointer(resource.get("rootPointer"))
+    text_pointer = _pointer(resource.get("textPointer"))
+    document = resource.get("document")
+    locator_spec = resource.get("locator")
+    if (
+        not resource_id
+        or root_pointer is None
+        or text_pointer is None
+        or not isinstance(document, Mapping)
+        or document.get("scope") != "resource"
+        or not isinstance(locator_spec, Mapping)
+        or locator_spec.get("kind") != "external"
+    ):
+        return None
+    found, root = _resolve_pointer(target, root_pointer)
+    if not found or not isinstance(root, Mapping):
+        return None
+    found, text = _resolve_pointer(root, text_pointer)
+    if not found or not isinstance(text, str) or not text.strip():
+        return None
+    quote = text.strip()
+    if len(quote) > _MAX_QUOTE_CHARS:
+        return None
+    source_id = _mapped_value(root, document.get("sourceId"))
+    document_id = _mapped_value(root, document.get("documentId")) or source_id
+    if not source_id or not document_id:
+        return None
+    version = _mapped_value(root, document.get("documentVersion"))
+    published_at = _mapped_value(root, document.get("publishedAt"))
+    url = _mapped_value(root, document.get("url"))
+    category = _mapped_value(root, document.get("providerCategory"))
+    title = _mapped_value(root, document.get("title")) or _fallback_document_title(
+        url,
+        category=category,
+    )
+    source = _document_source(
+        descriptor,
+        source_id=str(source_id),
+        document_id=str(document_id),
+        title=str(title),
+        version=str(version or published_at or "") or None,
+        published_at=published_at,
+        url=url,
+        category=category or "document_summary",
+        captured_at=captured_at,
+    )
+    fragment = _bounded_string(locator_spec.get("fragment"), 512)
+    if not fragment:
+        return None
+    provider = descriptor.get("provider")
+    provider = provider if isinstance(provider, Mapping) else {}
+    digest = hashlib.sha256(
+        (
+            f"{provider.get('id')}\0{resource_id}\0{document_id}\0"
+            f"{text_pointer}\0{hashlib.sha256(quote.encode()).hexdigest()}"
+        ).encode()
+    ).hexdigest()[:24]
+    return [
+        {
+            "evidenceHandle": f"ev_mcp_{digest}",
+            "source": source,
+            "evidence": {
+                "kind": "text",
+                "quote": quote,
+                "snippet": quote[:4_000],
+                "capturedAt": captured_at,
+                "contentHash": f"sha256:{hashlib.sha256(quote.encode()).hexdigest()}",
+            },
+            "locator": {"kind": "external", "fragment": fragment},
+        }
+    ]
 
 
 def _fallback_document_title(value: Any, *, category: Any) -> str:

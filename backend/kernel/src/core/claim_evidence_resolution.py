@@ -182,9 +182,7 @@ class EvidenceCandidateIndex:
                     entity_text,
                     str(evidence.get("field") or ""),
                     str(evidence.get("metric") or ""),
-                    " ".join(
-                        str(evidence.get(key) or "") for key in ("period", "asOf")
-                    ),
+                    " ".join(str(evidence.get(key) or "") for key in ("period", "asOf")),
                     _text_evidence(evidence) if kind == "text" else "",
                 )
             )
@@ -787,6 +785,21 @@ def _deterministic_support(
         )
     ):
         return support
+    if bool(claim_unit) != bool(evidence_unit):
+        # A missing unit is unknown, not a contradiction.  Exact canonical
+        # metric/value identity can still support a unique binding, but only
+        # without applying any scale conversion.  The quality layer keeps the
+        # missing-unit issue on the resulting citation so this never invents a
+        # currency or display unit.
+        if structured_values_equivalent(
+            claim_value,
+            "",
+            evidence_value,
+            "",
+            semantics=semantics,
+        ):
+            return EvidenceSupport("supported", 3)
+        return support
     if not structured_values_equivalent(
         claim_value,
         claim_unit,
@@ -795,7 +808,7 @@ def _deterministic_support(
         semantics=semantics,
     ):
         return EvidenceSupport("contradicted", 4)
-    return support
+    return EvidenceSupport("supported", 3)
 
 
 def _candidate_signals(
@@ -1022,6 +1035,10 @@ def _evidence_entity_text(
             source.get("title"),
             source.get("organization"),
             source.get("sourceId"),
+            evidence.get("prefix"),
+            evidence.get("quote"),
+            evidence.get("suffix"),
+            evidence.get("snippet"),
         )
     )
 

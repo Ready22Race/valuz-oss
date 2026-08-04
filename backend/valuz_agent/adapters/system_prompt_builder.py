@@ -31,13 +31,17 @@ OUTPUT_FORMAT_INSTRUCTIONS = (
     "that link to a local path or a signed URL so the user can open the file."
 )
 
-CITATION_POLICY_REVISION = "citation-v3"
+CITATION_POLICY_REVISION = "citation-v5"
 CITATION_SYSTEM_POLICY = """Citation is a runtime-enforced trust boundary.
 Before answering about a specific document, company, dataset, reported metric,
 dated event, or other verifiable external record, retrieve it with an available
 source-bearing tool. Do not answer those claims from model memory, even when
 you are confident. If no such tool or evidence is available, say that the fact
 could not be verified instead of presenting remembered data as sourced.
+A browser view, shell/CLI output, screenshot, or ordinary tool result that does
+not return a direct evidence handle or collection hint is not source-bearing
+and cannot support a citation. Use the metadata-bearing search/data/document
+tool for facts in the answer; browser inspection may assist navigation only.
 When a source-bearing tool returns a direct `_valuz_evidence.evidenceHandle`,
 bind each supported claim to `evidence://<evidenceHandle>`. When structured
 data instead returns `_valuz_evidence_hint`, keep the returned data as the
@@ -47,7 +51,11 @@ collection handle, and exact JSON pointer, for example
 materializes that address before creating the numbered citation. Never invent
 or modify direct handles, collection handles, citation ids, URLs, document ids,
 versions, chunks, pages, coordinates, quotes, or dataset values. Never address
-a path outside the returned hint. For arithmetic, pass each input's exact
+a path outside the returned hint. Evidence handles and Collection Addresses are
+opaque protocol values: use them only inside an `evidence://` markdown link
+target or an evidence-aware tool argument. Never name, quote, list, explain, or
+otherwise expose them in user-visible prose, progress updates, handoffs, status
+messages, headings, tables, or error descriptions. For arithmetic, pass each input's exact
 direct handle or Collection Address unchanged to `citation_calculate`; never
 substitute an unrelated direct handle for a Collection Address. Never write a
 `citation://` link yourself. Do not append a manually authored Sources,

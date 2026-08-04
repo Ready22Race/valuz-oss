@@ -92,6 +92,15 @@ _SOURCE_SECTION_HEADING_RE = re.compile(
     r"[ \t]*[:：]?[ \t]*(?:\*\*|__)?[ \t]*$"
 )
 _TRAILING_INLINE_SOURCE_NOTE_RE = re.compile(r"(?im)^[ \t]*(?:数据|资料|信息)?来源\s*[:：][\s\S]*$")
+_LEGACY_REPORTIFY_SOURCE_LINK_RE = re.compile(
+    r"\[(?:source|来源)\]\(\s*:[^)\s]{1,512}:(?:summary|content|chunk)\s*\)",
+    re.IGNORECASE,
+)
+_INVALID_RELATIVE_SOURCE_LINK_RE = re.compile(
+    r"\[(?:source|来源)\]\(\s*(?!(?:https?://|citation://|evidence://))"
+    r"[^)\s]{1,512}\s*\)",
+    re.IGNORECASE,
+)
 _CANONICAL_CITATION_URI_RE = re.compile(r"citation://([A-Za-z0-9_-]{1,160})")
 _MARKDOWN_DESTINATION_RE = re.compile(r"\]\(([^)\n]+)\)")
 _EXPLICIT_CITATION_RE = re.compile(
@@ -130,6 +139,7 @@ _BULK_TEXT_RESULT_KEYS = {
     "markdown",
     "metadatas",
     "raw_content",
+    "summary",
     "text",
 }
 _SECRET_QUERY_KEYS = {
@@ -352,6 +362,55 @@ class EvidenceRegistry:
             tool_name=tool_name,
             trusted_private=trusted_private,
         )
+
+    def projection_is_registered(
+        self,
+        content: Any,
+        *,
+        trusted_private: bool = False,
+    ) -> bool:
+        """Return whether ``content`` names Evidence accepted by this Registry.
+
+        Registration is idempotent, so a repeated valid tool projection can
+        add zero new handles while still being citation-ready.  Task Coverage
+        uses this check after registration instead of treating the insertion
+        count as a validity signal.
+        """
+
+        max_chars = (
+            self._MAX_PRIVATE_TOOL_RESULT_CHARS if trusted_private else self._MAX_TOOL_RESULT_CHARS
+        )
+        payload = _decode_json_payload(content, max_chars=max_chars)
+        if payload is None:
+            return False
+        stack: list[tuple[Any, int]] = [(payload, 0)]
+        visited = 0
+        while stack and visited < self._MAX_VISITED_NODES:
+            node, depth = stack.pop()
+            visited += 1
+            if depth > self._MAX_DEPTH:
+                continue
+            if isinstance(node, dict):
+                for candidate in _as_envelope_items(node.get(EVIDENCE_ENVELOPE_KEY)):
+                    if candidate.get("kind") == "structured-evidence-collection":
+                        handle = candidate.get("collectionHandle")
+                        if isinstance(handle, str) and handle in self._collections:
+                            return True
+                    handle = candidate.get("evidenceHandle")
+                    if isinstance(handle, str) and handle in self._records:
+                        return True
+                stack.extend(
+                    (value, depth + 1)
+                    for key, value in node.items()
+                    if key != EVIDENCE_ENVELOPE_KEY
+                )
+            elif isinstance(node, list):
+                stack.extend((value, depth + 1) for value in node)
+            elif isinstance(node, str):
+                nested = _decode_json_payload(node, max_chars=max_chars)
+                if nested is not None:
+                    stack.append((nested, depth + 1))
+        return False
 
     def _capture_collection_hints(self, content: Any, *, trusted_private: bool) -> None:
         max_chars = (
@@ -1279,9 +1338,10 @@ def _normalize_markdown_table_citation_suffixes(text: str) -> str:
     """Move citations emitted after a table row boundary into the last cell.
 
     A model may close the Markdown row and then append an evidence link, for
-    example ``| value | formula |[source](evidence://...)``. After canonical
-    citation sealing that suffix would be parsed as an extra column. Keep the
-    binding on the same row while restoring a stable column count.
+    example ``| value | formula |[source](evidence://...)`` or emit the same
+    link as a citation-only fourth cell in a three-column table. After
+    canonical citation sealing either form would be parsed as an extra column.
+    Keep the binding on the same row while restoring the declared column count.
     """
 
     suffix = re.compile(
@@ -1303,12 +1363,70 @@ def _normalize_markdown_table_citation_suffixes(text: str) -> str:
             citations = match.group("citations").strip()
             body = f"{row} {citations} |"
         output.append(f"{body}{newline}")
-    return "".join(output)
+    normalized = "".join(output)
+
+    citation_only = re.compile(
+        r"^(?:\s*\[[^\]\n]{1,240}\]"
+        r"\(citation://[A-Za-z0-9_-]{1,160}\)\s*)+$"
+    )
+
+    def split_row(line: str) -> tuple[str, ...]:
+        if "|" not in line:
+            return ()
+        value = line.strip()
+        if value.startswith("|"):
+            value = value[1:]
+        if value.endswith("|"):
+            value = value[:-1]
+        cells = tuple(cell.strip() for cell in re.split(r"(?<!\\)\|", value))
+        return cells if len(cells) >= 2 else ()
+
+    lines = normalized.splitlines(keepends=True)
+    index = 0
+    while index + 1 < len(lines):
+        header = split_row(lines[index])
+        separator = split_row(lines[index + 1])
+        if (
+            not header
+            or len(header) != len(separator)
+            or not all(re.fullmatch(r":?-{3,}:?", cell.replace(" ", "")) for cell in separator)
+        ):
+            index += 1
+            continue
+        expected_width = len(header)
+        row_index = index + 2
+        while row_index < len(lines):
+            row = split_row(lines[row_index])
+            if not row:
+                break
+            if len(row) > expected_width:
+                overflow = row[expected_width:]
+                if all(not cell or citation_only.fullmatch(cell) for cell in overflow):
+                    citations = " ".join(cell.strip() for cell in overflow if cell.strip())
+                    declared = list(row[:expected_width])
+                    if citations:
+                        declared[-1] = f"{declared[-1].rstrip()} {citations}".strip()
+                    newline = "\r\n" if lines[row_index].endswith("\r\n") else "\n"
+                    if not lines[row_index].endswith(("\r\n", "\n")):
+                        newline = ""
+                    lines[row_index] = f"| {' | '.join(declared)} |{newline}"
+            row_index += 1
+        index = row_index
+    return "".join(lines)
 
 
 def _strip_protocol_source_placeholders(text: str) -> str:
-    """Remove leaked line-ending ``source`` tokens without touching prose."""
+    """Remove leaked source-protocol tokens without touching prose.
 
+    Older Reportify discovery results exposed ``[source](:<id>:summary)`` to
+    the model.  That destination is neither a navigable URL nor a Valuz
+    Evidence handle; rendering it gives users a dead link and falsely looks
+    like a citation.  Keep the surrounding business prose and let Claim Audit
+    report the now-unbound claim normally.
+    """
+
+    text = _LEGACY_REPORTIFY_SOURCE_LINK_RE.sub("", text)
+    text = _INVALID_RELATIVE_SOURCE_LINK_RE.sub("", text)
     output: list[str] = []
     suffix = re.compile(
         r"(?:[ \t]+|(?<=[。！？；;]))source([.!?。！？；;]?)([ \t]*\|)?\s*$",
@@ -1618,6 +1736,9 @@ def _collection_hint(collection: EvidenceCollectionRecord) -> dict[str, Any]:
     metric_semantics = collection.semantics.get("metric")
     if isinstance(metric_semantics, dict) and metric_semantics.get("mode") == "field-name":
         hint["metricMode"] = "field-name"
+    elif isinstance(metric_semantics, dict) and metric_semantics.get("mode") == "field-map":
+        hint["metricMode"] = "field-map"
+        hint["metricFields"] = copy.deepcopy(metric_semantics.get("fields", {}))
     if "fieldSchemaRef" in collection.addressing:
         hint["fieldSchemaRef"] = copy.deepcopy(collection.addressing["fieldSchemaRef"])
     if "allowedItemPaths" in collection.addressing:
@@ -1672,7 +1793,7 @@ def _attach_text_evidence_hints(
                     if any(
                         quote in value
                         for key, value in node.items()
-                        if key in {"content", "text", "html", "markdown", "raw_content"}
+                        if key in {"content", "text", "html", "markdown", "raw_content", "summary"}
                         and isinstance(value, str)
                     )
                 ]
@@ -1770,11 +1891,11 @@ def _compact_citation_value(
             original_count = len(direct_items)
             has_local_scalar_content = any(
                 isinstance(output.get(key), str)
-                for key in ("content", "html", "markdown", "raw_content", "text")
+                for key in ("content", "html", "markdown", "raw_content", "summary", "text")
             )
             local_text = "\n".join(
                 str(output.get(key) or "")
-                for key in ("content", "html", "markdown", "raw_content", "text")
+                for key in ("content", "html", "markdown", "raw_content", "summary", "text")
                 if isinstance(output.get(key), str)
             )
             compact_excerpt = (
@@ -2264,7 +2385,10 @@ def _scalar_index_keys(value: Any, *, field: str = "") -> tuple[str, ...]:
         keys.add(f"n:{numeric}")
         normalized_field = field.casefold()
         if (
-            any(term in normalized_field for term in ("rate", "ratio", "margin", "yoy", "growth"))
+            any(
+                term in normalized_field
+                for term in ("rate", "ratio", "margin", "yoy", "growth", "percent")
+            )
             and abs(Decimal(numeric)) <= 1
         ):
             scaled = _decimal_key(Decimal(numeric) * 100)
@@ -2464,6 +2588,25 @@ def _normalize_collection_semantics(value: Any) -> dict[str, Any] | None:
                 "mode": "field-name",
                 "valueRoots": normalized_roots,
                 "excludedFields": normalized_excluded,
+            }
+            continue
+        if group == "metric" and mapping.get("mode") == "field-map":
+            fields = mapping.get("fields")
+            if not isinstance(fields, dict) or not fields or len(fields) > 256:
+                return None
+            normalized_fields: dict[str, str] = {}
+            for raw_pointer, raw_metric in fields.items():
+                if (
+                    not isinstance(raw_pointer, str)
+                    or not raw_pointer.startswith("/")
+                    or _json_pointer_tokens(raw_pointer) is None
+                    or not _bounded_nonempty_string(raw_metric, _MAX_SOURCE_TEXT_CHARS)
+                ):
+                    return None
+                normalized_fields[raw_pointer] = str(raw_metric)
+            output[group] = {
+                "mode": "field-map",
+                "fields": normalized_fields,
             }
             continue
         if len(mapping) > 32:
@@ -2839,7 +2982,7 @@ def _materialize_collection_address(
     normalized_field = field.casefold()
     numeric = _decimal_key(raw_value)
     if numeric is not None and any(
-        term in normalized_field for term in ("rate", "ratio", "margin", "yoy", "growth")
+        term in normalized_field for term in ("rate", "ratio", "margin", "yoy", "growth", "percent")
     ):
         decimal = Decimal(numeric)
         if abs(decimal) <= 1:
@@ -2984,7 +3127,12 @@ def _materialize_collection_address(
         "toolName": collection.common["toolName"],
         "recordKey": "|".join(identity_values) or record_pointer or pointer,
         "field": pointer,
-        "metric": field,
+        "metric": _collection_metric_for_pointer(
+            collection,
+            pointer=pointer,
+            record_pointer=record_pointer,
+            fallback=field,
+        ),
         "value": value,
         "capturedAt": collection.common["capturedAt"],
     }
@@ -3097,6 +3245,32 @@ def _collection_semantic_value(
         ):
             return value
     return None
+
+
+def _collection_metric_for_pointer(
+    collection: EvidenceCollectionRecord,
+    *,
+    pointer: str,
+    record_pointer: str | None,
+    fallback: str,
+) -> str:
+    mapping = collection.semantics.get("metric")
+    if not isinstance(mapping, dict) or mapping.get("mode") != "field-map":
+        return fallback
+    fields = mapping.get("fields")
+    if not isinstance(fields, dict):
+        return fallback
+    if record_pointer and pointer.startswith(f"{record_pointer.rstrip('/')}/"):
+        relative = pointer[len(record_pointer) :]
+    else:
+        items_pointer = str(collection.addressing.get("itemsPointer") or "")
+        relative = (
+            pointer[len(items_pointer) :]
+            if items_pointer and pointer.startswith(items_pointer)
+            else ""
+        )
+    metric = fields.get(relative)
+    return str(metric) if _bounded_nonempty_string(metric, _MAX_SOURCE_TEXT_CHARS) else fallback
 
 
 def _validate_evidence_item(

@@ -7,6 +7,7 @@ from src.core.claim_audit import (
     _claim_amounts,
     auto_bind_composite_text_claims,
     auto_bind_unique_claims,
+    bind_claims_to_evidence,
     calculation_formula_matches_evidence,
     extract_claims,
     extract_claims_with_status,
@@ -846,6 +847,53 @@ def test_one_citation_in_value_cell_does_not_leak_across_the_same_table_row() ->
     assert claims[1].attached_citation_ids == ("cit_row",)
 
 
+def test_ranked_table_uses_named_entity_column_for_value_claims() -> None:
+    answer = (
+        "| 排名 | 模型 | 本周用量 | 周环比（vs 7.13—7.19） |\n"
+        "|---:|---|---:|---:|\n"
+        "| 1 | MiMo-V2.5 | 10.5T | +12% |"
+    )
+    claims = extract_claims(
+        answer,
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    usage_claim = next(claim for claim in claims if claim.location.get("columnIndex") == 2)
+    growth_claim = next(claim for claim in claims if claim.location.get("columnIndex") == 3)
+    assert usage_claim.exact == "MiMo-V2.5 — 本周用量: 10.5T"
+    assert growth_claim.exact == "MiMo-V2.5 — 周环比（vs 7.13—7.19）: +12%"
+
+    evidence = {
+        "source": {"title": "OpenRouter weekly ranking"},
+        "evidence": {
+            "kind": "text",
+            "quote": "MiMo-V2.5以10.5T Token居首，份额环比增长12.2%。",
+        },
+    }
+    assert (
+        verify_evidence_support(usage_claim, evidence, semantics=_FINANCE_SEMANTICS).status
+        == "supported"
+    )
+    assert (
+        verify_evidence_support(growth_claim, evidence, semantics=_FINANCE_SEMANTICS).status
+        == "supported"
+    )
+    bound = bind_claims_to_evidence(
+        answer,
+        [
+            {
+                "evidenceHandle": "ev_openrouter_mimo",
+                **evidence,
+            }
+        ],
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+    assert bound.auto_bound_claim_handles[growth_claim.claim_id] == ("ev_openrouter_mimo",)
+    assert "+12% [source](evidence://ev_openrouter_mimo)" in bound.text
+
+
 def test_table_visual_placeholders_are_not_factual_claims() -> None:
     claims = extract_claims(
         "| 指标 | Q1 FY26 | Q2 FY26 | Q3 FY26 |\n"
@@ -1227,6 +1275,106 @@ def test_auto_bind_accepts_attribution_when_named_speaker_is_in_exact_chunk() ->
 
     assert result.text.count("evidence://ev_msft_q2_capacity_12345678") == 1
     assert len(result.claim_handles) == 1
+
+
+def test_paragraph_terminal_handles_bound_only_supported_preceding_claims() -> None:
+    revenue_a = {
+        "evidenceHandle": "ev_company_a_revenue_12345678",
+        "source": {
+            "sourceId": "company-a-report",
+            "providerId": "docs",
+            "sourceType": "document",
+            "title": "甲公司 2025 年报",
+        },
+        "evidence": {
+            "kind": "text",
+            "quote": "甲公司2025年营业收入为100亿元。",
+        },
+    }
+    revenue_b = {
+        "evidenceHandle": "ev_company_b_revenue_12345678",
+        "source": {
+            "sourceId": "company-b-report",
+            "providerId": "docs",
+            "sourceType": "document",
+            "title": "乙公司 2025 年报",
+        },
+        "evidence": {
+            "kind": "text",
+            "quote": "乙公司2025年营业收入为100亿元。",
+        },
+    }
+    answer = (
+        "甲公司2025年营业收入为100亿元。业务保持稳定 "
+        "[source](evidence://ev_company_a_revenue_12345678)。\n\n"
+        "乙公司2025年营业收入为100亿元。业务仍在调整 "
+        "[source](evidence://ev_company_b_revenue_12345678)。"
+    )
+
+    result = bind_claims_to_evidence(
+        answer,
+        [revenue_a, revenue_b],
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    first, second = result.text.split("\n\n")
+    assert first.count("evidence://ev_company_a_revenue_12345678") == 2
+    assert "evidence://ev_company_b_revenue_12345678" not in first
+    assert second.count("evidence://ev_company_b_revenue_12345678") == 2
+    assert "evidence://ev_company_a_revenue_12345678" not in second
+
+
+def test_numbered_result_section_handles_are_candidates_without_sibling_spill() -> None:
+    evidence_a = {
+        "evidenceHandle": "ev_company_a_product_12345678",
+        "source": {
+            "sourceId": "company-a-report",
+            "providerId": "docs",
+            "sourceType": "document",
+            "title": "甲公司 AI 产品报告",
+        },
+        "evidence": {
+            "kind": "text",
+            "quote": "甲公司AI办公产品已经规模落地，企业客户续约率提升20%。",
+        },
+    }
+    evidence_b = {
+        "evidenceHandle": "ev_company_b_product_12345678",
+        "source": {
+            "sourceId": "company-b-report",
+            "providerId": "docs",
+            "sourceType": "document",
+            "title": "乙公司 AI 产品报告",
+        },
+        "evidence": {
+            "kind": "text",
+            "quote": "乙公司AI安全产品已经规模落地，企业客户续约率提升20%。",
+        },
+    }
+    answer = (
+        "### 1. 甲公司\n\n"
+        "甲公司AI办公产品已经规模落地 "
+        "[source](evidence://ev_company_a_product_12345678)。\n\n"
+        "企业客户续约率提升20%。\n\n"
+        "### 2. 乙公司\n\n"
+        "乙公司AI安全产品已经规模落地 "
+        "[source](evidence://ev_company_b_product_12345678)。\n\n"
+        "企业客户续约率提升20%。"
+    )
+
+    result = bind_claims_to_evidence(
+        answer,
+        [evidence_a, evidence_b],
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    first, second = result.text.split("### 2. 乙公司", 1)
+    assert first.count("evidence://ev_company_a_product_12345678") == 2
+    assert "evidence://ev_company_b_product_12345678" not in first
+    assert second.count("evidence://ev_company_b_product_12345678") == 2
+    assert "evidence://ev_company_a_product_12345678" not in second
 
 
 def test_equivalent_recap_claim_reuses_verified_period_binding() -> None:

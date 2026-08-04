@@ -23,14 +23,8 @@ if str(KERNEL_ROOT) not in sys.path:
 from src.core.claim_audit import ClaimCandidate  # noqa: E402
 from src.core.claim_evidence_resolution import resolve_claim_evidence  # noqa: E402
 
-DEFAULT_FIXTURE = (
-    BACKEND_ROOT
-    / "tests/evaluation/fixtures/claim_evidence_resolution_cases.json"
-)
-DEFAULT_POLICY = (
-    BACKEND_ROOT
-    / "valuz_agent/resources/citation-policies/oss/policy.yaml"
-)
+DEFAULT_FIXTURE = BACKEND_ROOT / "tests/evaluation/fixtures/claim_evidence_resolution_cases.json"
+DEFAULT_POLICY = BACKEND_ROOT / "valuz_agent/resources/citation-policies/oss/policy.yaml"
 _POLICY_LAYER_ORDER = {"oss": 0, "commercial": 1, "distribution": 2}
 _OWNER_LAYER_ORDER = {
     "oss": 0,
@@ -107,8 +101,7 @@ def load_evaluation_payload(
         expected_prefix = _OWNER_CASE_PREFIX[owner_layer]
         families = payload.get("generated_case_families") or []
         if not isinstance(families, list) or any(
-            not isinstance(family, str) or family not in _GENERATED_FAMILIES
-            for family in families
+            not isinstance(family, str) or family not in _GENERATED_FAMILIES for family in families
         ):
             raise ValueError(f"Resolver fixture generated_case_families is invalid: {path}")
         if fixture_index >= len(policy_deltas):
@@ -264,13 +257,9 @@ def _generate_policy_cases(
     generated: list[dict[str, Any]] = []
     for family in families:
         if family == "unit-ontology":
-            generated.extend(
-                _generate_unit_cases(owner_layer, policy_delta, effective_semantics)
-            )
+            generated.extend(_generate_unit_cases(owner_layer, policy_delta, effective_semantics))
         elif family == "metric-ontology":
-            generated.extend(
-                _generate_metric_cases(owner_layer, policy_delta, effective_semantics)
-            )
+            generated.extend(_generate_metric_cases(owner_layer, policy_delta, effective_semantics))
         elif family == "dimension-ontology":
             generated.extend(_generate_dimension_cases(owner_layer, policy_delta))
         elif family == "calculation-dependencies":
@@ -483,8 +472,7 @@ def _generate_metric_cases(
                             expected_binding="auto-bind",
                             policy_refs=[policy_ref],
                             notes=(
-                                f"Generated from {policy_ref}; verifies categorical "
-                                "value aliases."
+                                f"Generated from {policy_ref}; verifies categorical value aliases."
                             ),
                         )
                     )
@@ -707,15 +695,10 @@ def _generate_calculation_dependency_cases(
         for input_index, input_metric in enumerate(inputs):
             definition = metrics.get(input_metric)
             aliases = (
-                _string_list(definition.get("aliases"))
-                if isinstance(definition, Mapping)
-                else []
+                _string_list(definition.get("aliases")) if isinstance(definition, Mapping) else []
             )
             label = aliases[0] if aliases else input_metric
-            handle = (
-                f"ev_{_slug(owner_layer)}_dependency_"
-                f"{dependency_index}_{input_index}"
-            )
+            handle = f"ev_{_slug(owner_layer)}_dependency_{dependency_index}_{input_index}"
             policy_ref = f"semantics.calculation_dependencies.{derived_metric}"
             cases.append(
                 _generated_case(
@@ -752,8 +735,7 @@ def _generate_calculation_dependency_cases(
                     expected_binding="auto-bind",
                     policy_refs=[policy_ref],
                     notes=(
-                        f"Generated from {policy_ref}; verifies declared derived/base "
-                        "composition."
+                        f"Generated from {policy_ref}; verifies declared derived/base composition."
                     ),
                 )
             )
@@ -867,17 +849,13 @@ def _semantic_policy_refs(semantics: Mapping[str, Any]) -> list[str]:
         for dimension, raw_values in dimensions.items():
             if isinstance(raw_values, Mapping):
                 refs.extend(
-                    f"semantics.dimensions.{dimension}.{value_id}"
-                    for value_id in raw_values
+                    f"semantics.dimensions.{dimension}.{value_id}" for value_id in raw_values
                 )
             else:
                 refs.append(f"semantics.dimensions.{dimension}")
     dependencies = semantics.get("calculation_dependencies")
     if isinstance(dependencies, Mapping):
-        refs.extend(
-            f"semantics.calculation_dependencies.{metric_id}"
-            for metric_id in dependencies
-        )
+        refs.extend(f"semantics.calculation_dependencies.{metric_id}" for metric_id in dependencies)
     known = {
         "unit_ontology",
         "metric_ontology",
@@ -968,6 +946,14 @@ def evaluate_fixture(payload: dict[str, Any]) -> dict[str, Any]:
             claim,
             case.get("evidence_pool") or (),
             semantics=semantics,
+            entity_aliases=(
+                {
+                    str(entity): tuple(_string_list(aliases))
+                    for entity, aliases in case["entity_aliases"].items()
+                }
+                if isinstance(case.get("entity_aliases"), Mapping)
+                else None
+            ),
         )
         gold = tuple(str(value) for value in case.get("gold_evidence_ids") or ())
         ranks = [
@@ -1059,9 +1045,7 @@ def _policy_coverage(
             "required_reference_count": len(layer_targets),
             "covered_reference_count": len(layer_targets & layer_covered),
             "coverage_rate": (
-                len(layer_targets & layer_covered) / len(layer_targets)
-                if layer_targets
-                else 1.0
+                len(layer_targets & layer_covered) / len(layer_targets) if layer_targets else 1.0
             ),
             "uncovered_references": layer_uncovered,
         }
@@ -1071,12 +1055,10 @@ def _policy_coverage(
         "coverage_rate": len(targets & covered) / len(targets) if targets else 1.0,
         "failed_reference_count": len(uncovered) + len(unknown),
         "uncovered_references": [
-            {"owner_layer": owner, "policy_ref": policy_ref}
-            for owner, policy_ref in uncovered
+            {"owner_layer": owner, "policy_ref": policy_ref} for owner, policy_ref in uncovered
         ],
         "unknown_references": [
-            {"owner_layer": owner, "policy_ref": policy_ref}
-            for owner, policy_ref in unknown
+            {"owner_layer": owner, "policy_ref": policy_ref} for owner, policy_ref in unknown
         ],
         "layerCoverage": by_layer,
     }
@@ -1112,30 +1094,20 @@ def _case_metrics(cases: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
                 sum(reciprocal_ranks) / len(reciprocal_ranks) if reciprocal_ranks else 1.0
             ),
             "status_accuracy": (
-                sum(bool(case.get("status_ok")) for case in cases) / count
-                if count
-                else 1.0
+                sum(bool(case.get("status_ok")) for case in cases) / count if count else 1.0
             ),
             "binding_action_accuracy": (
-                sum(bool(case.get("binding_ok")) for case in cases) / count
-                if count
-                else 1.0
+                sum(bool(case.get("binding_ok")) for case in cases) / count if count else 1.0
             ),
             "repair_action_accuracy": (
-                sum(bool(case.get("repair_ok")) for case in cases) / count
-                if count
-                else 1.0
+                sum(bool(case.get("repair_ok")) for case in cases) / count if count else 1.0
             ),
             "unresolved_repair_rate": (
                 unresolved_repaired / unresolved_cases if unresolved_cases else 0.0
             ),
             "case_count": count,
             "failed_case_count": sum(
-                not (
-                    case.get("status_ok")
-                    and case.get("binding_ok")
-                    and case.get("repair_ok")
-                )
+                not (case.get("status_ok") and case.get("binding_ok") and case.get("repair_ok"))
                 for case in cases
             ),
         }

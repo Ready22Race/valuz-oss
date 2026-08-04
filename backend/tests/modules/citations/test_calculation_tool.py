@@ -103,6 +103,38 @@ async def test_calculation_tool_converts_unscaled_ratio_to_percentage_points() -
     )
 
 
+async def test_calculation_tool_accepts_unicode_identifier_names() -> None:
+    result = await _citation_calculate_handler(
+        {
+            "expression": "(本周用量 - 上周用量) / 上周用量",
+            "inputs": [
+                {
+                    "name": "本周用量",
+                    "value": "8.25",
+                    "unit": "T tokens",
+                    "evidenceHandle": "ev_current_12345678",
+                },
+                {
+                    "name": "上周用量",
+                    "value": "3.94",
+                    "unit": "T tokens",
+                    "evidenceHandle": "ev_prior_12345678",
+                },
+            ],
+            "unit": "%",
+            "decimalPlaces": 1,
+            "metric": "token_usage_growth",
+        },
+        ExecContext(session_id="s1"),
+    )
+
+    assert result.is_error is False
+    payload = json.loads(result.content)
+    assert payload["result"] == "109.4"
+    evidence = payload["_valuz_evidence"]["evidence"]
+    assert [item["name"] for item in evidence["inputs"]] == ["本周用量", "上周用量"]
+
+
 async def test_calculation_tool_preserves_structured_collection_addresses() -> None:
     current = "evc_income_current_12345678#/data/1/total_revenue/operating_revenue"
     prior = "evc_income_prior_12345678#/data/0/total_revenue/operating_revenue"
@@ -132,10 +164,10 @@ async def test_calculation_tool_preserves_structured_collection_addresses() -> N
     assert result.is_error is False
     payload = json.loads(result.content)
     assert payload["result"] == "15.71"
-    assert [
-        item["citationId"]
-        for item in payload["_valuz_evidence"]["evidence"]["inputs"]
-    ] == [current, prior]
+    assert [item["citationId"] for item in payload["_valuz_evidence"]["evidence"]["inputs"]] == [
+        current,
+        prior,
+    ]
     registry = EvidenceRegistry()
     assert registry.register_tool_result(result.content, tool_name="citation_calculate") == 1
 

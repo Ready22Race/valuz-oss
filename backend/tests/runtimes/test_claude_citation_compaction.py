@@ -249,7 +249,154 @@ async def test_post_tool_hook_builds_document_evidence_from_mcp_result_meta() ->
     assert sidecar["_valuz_evidence"][0]["locator"]["page"] == 9
 
 
-async def test_post_tool_hook_rebases_filtered_discovery_collection() -> None:
+async def test_post_tool_hook_builds_uncovered_provider_summary_evidence() -> None:
+    runtime = ClaudeAgentRuntime(AgentConfig(id="a", name="a"), "", _RecordingSink())
+    hook = runtime._map_hooks()["PostToolUse"][0].hooks[0]
+    summary = "Alpha used 8.25T tokens; Beta used 7.31T tokens this week."
+    payload = {
+        "doc_id": "openrouter-ranking",
+        "title": "OpenRouter model rankings",
+        "url": "https://openrouter.ai/rankings",
+        "category": "webpages",
+        "summary": summary,
+        "chunks": [
+            {
+                "id": "intro",
+                "content": "Live model rankings based on real usage.",
+            }
+        ],
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    raw_result = {
+        "content": [{"type": "text", "text": json.dumps(payload)}],
+        "structuredContent": payload,
+        "_meta": {
+            "cn.valuz/citation-source": {
+                "version": 1,
+                "provider": {"id": "reportify", "name": "Reportify"},
+                "operation": {"toolName": "document_fetch"},
+                "result": {
+                    "target": "structuredContent",
+                    "hash": {"algorithm": "sha256", "value": digest},
+                    "capturedAt": "2026-08-04T00:00:00Z",
+                },
+                "resources": [
+                    {
+                        "resourceId": "document-fetch-summary",
+                        "kind": "document-summary",
+                        "authority": "derived",
+                        "rootPointer": "",
+                        "document": {
+                            "scope": "resource",
+                            "sourceId": "/doc_id",
+                            "documentId": "/doc_id",
+                            "title": "/title",
+                            "url": "/url",
+                            "providerCategory": "/category",
+                        },
+                        "textPointer": "/summary",
+                        "locator": {
+                            "kind": "external",
+                            "fragment": "provider-summary",
+                        },
+                    }
+                ],
+            }
+        },
+    }
+
+    output = await hook(
+        {
+            "tool_name": "mcp__reportify__document_fetch",
+            "tool_input": {"doc_id": "openrouter-ranking"},
+            "tool_response": raw_result,
+        },
+        "mcp-meta-document-summary",
+        None,  # type: ignore[arg-type]
+    )
+
+    compacted = output["hookSpecificOutput"]["updatedMCPToolOutput"]
+    assert compacted["summary"] == summary
+    assert compacted["evidenceHandle"].startswith("ev_mcp_")
+    sidecar = json.loads(runtime._citation_tool_result_sidecars["mcp-meta-document-summary"])
+    assert len(sidecar["_valuz_evidence"]) == 1
+    evidence = sidecar["_valuz_evidence"][0]
+    assert evidence["evidence"]["quote"] == summary
+    assert evidence["locator"] == {
+        "kind": "external",
+        "fragment": "provider-summary",
+    }
+
+
+async def test_post_tool_hook_recovers_kb_chunks_from_stale_non_citable_meta() -> None:
+    runtime = ClaudeAgentRuntime(AgentConfig(id="a", name="a"), "", _RecordingSink())
+    hook = runtime._map_hooks()["PostToolUse"][0].hooks[0]
+    payload = {
+        "chunks": [
+            {
+                "id": "chunk-7",
+                "content": "MLCC 2025-2028E revenue CAGR is 24%.",
+                "metadata": {"document_page": 7},
+                "doc": {
+                    "doc_id": "report-1",
+                    "title": "Asian MLCC Industry",
+                    "url": "https://reportify.cn/reports/report-1",
+                    "category": "global_research",
+                },
+            }
+        ]
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    raw_result = {
+        "content": [{"type": "text", "text": json.dumps(payload)}],
+        "structuredContent": payload,
+        "_meta": {
+            "cn.valuz/citation-source": {
+                "version": 1,
+                "provider": {"id": "reportify"},
+                "operation": {"toolName": "kb_search"},
+                "result": {
+                    "target": "structuredContent",
+                    "hash": {"algorithm": "sha256", "value": digest},
+                    "capturedAt": "2026-08-04T00:00:00Z",
+                },
+                "resources": [
+                    {
+                        "resourceId": "stale-search",
+                        "kind": "document-discovery",
+                        "authority": "discovery-only",
+                        "rootPointer": "",
+                        "itemsPointer": "/chunks",
+                        "mapping": {"sourceId": "/id", "title": "/id"},
+                    }
+                ],
+            }
+        },
+    }
+
+    output = await hook(
+        {
+            "tool_name": "mcp__reportify__kb_search",
+            "tool_input": {"doc_ids": ["report-1"], "query": "MLCC CAGR"},
+            "tool_response": raw_result,
+        },
+        "mcp-stale-kb-search",
+        None,  # type: ignore[arg-type]
+    )
+
+    compacted = output["hookSpecificOutput"]["updatedMCPToolOutput"]
+    assert compacted["chunks"][0]["content"] == payload["chunks"][0]["content"]
+    assert compacted["chunks"][0]["evidenceHandle"].startswith("ev_chunk_")
+    sidecar = json.loads(runtime._citation_tool_result_sidecars["mcp-stale-kb-search"])
+    assert sidecar["_valuz_evidence"][0]["source"]["documentId"] == "report-1"
+    assert sidecar["_valuz_evidence"][0]["locator"]["chunkId"] == "chunk-7"
+
+
+async def test_post_tool_hook_keeps_filtered_discovery_non_citable() -> None:
     runtime = ClaudeAgentRuntime(AgentConfig(id="a", name="a"), "", _RecordingSink())
     hook = runtime._map_hooks()["PostToolUse"][0].hooks[0]
     payload = {
@@ -309,28 +456,12 @@ async def test_post_tool_hook_rebases_filtered_discovery_collection() -> None:
     compacted = output["hookSpecificOutput"]["updatedMCPToolOutput"]
     assert len(compacted["docs"]) == 4
     assert "_valuz_evidence" not in compacted
-    hint = compacted["_valuz_evidence_hint"]
-    private = runtime._citation_tool_result_sidecars["mcp-meta-discovery"]
-    descriptor = json.loads(private)["_valuz_evidence"][0]
-    assert descriptor["collectionHandle"] == hint["collectionHandle"]
+    assert "_valuz_evidence_hint" not in compacted
+    assert compacted["_valuz_discovery"]["citationEvidence"] == ("original-indexed-chunk-required")
+    assert "mcp-meta-discovery" not in runtime._citation_tool_result_sidecars
     registry = EvidenceRegistry()
-    assert (
-        registry.register_tool_projection(
-            compacted,
-            private,
-            tool_name="reports_search",
-            trusted_private=True,
-        )
-        == 1
-    )
+    assert registry.register_tool_result(compacted, tool_name="reports_search") == 0
     assert registry.rejected_count == 0
-    assert (
-        registry.materialize_reference(
-            hint["collectionHandle"],
-            "#/docs/3/title",
-        )
-        is not None
-    )
 
 
 async def test_post_tool_hook_keeps_larger_transcript_window_visible() -> None:

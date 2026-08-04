@@ -16,6 +16,8 @@ def test_citation_policy_is_appended_without_changing_user_sections() -> None:
     assert "evidence://<evidenceHandle>" in result
     assert "Do not answer those claims from model memory" in result
     assert "Never write a\n`citation://` link yourself" in result
+    assert "Never name, quote, list, explain" in result
+    assert "progress updates, handoffs, status" in result
 
 
 def test_citation_policy_install_is_idempotent() -> None:

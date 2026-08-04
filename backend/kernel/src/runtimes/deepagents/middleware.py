@@ -60,13 +60,14 @@ _DISCOVERY_RESULT_LIMIT = 4
 _DISCOVERY_SUMMARY_LIMIT = 360
 _DOCUMENT_FETCH_FAILURE_LIMIT = 2
 _DOCUMENT_FETCH_BLOCK_SECONDS = 60.0
-_STRUCTURED_FALLBACK_EVIDENCE_LIMIT = 128
 _RAW_DOCUMENT_CACHE_LIMIT = 8
 _FINANCIAL_STATEMENT_TOOLS = {
     "income_statement",
     "balance_sheet",
     "cashflow_statement",
 }
+_ARTIFACT_MUTATION_TOOLS = frozenset({"write_file", "edit_file", "deliver_artifacts"})
+_AUTOMATION_MUTATION_TOOLS = frozenset({"automation"})
 _REQUESTED_YEAR_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
 
 
@@ -157,6 +158,8 @@ class ResearchToolBudgetMiddleware(AgentMiddleware):
         self._no_research_scope = False
         self._requested_period_count: int | None = None
         self._requested_years: tuple[int, ...] = ()
+        self._artifact_mutation_allowed = False
+        self._automation_mutation_allowed = False
 
     def before_agent(self, state: Any, runtime: Any) -> None:
         del runtime
@@ -167,7 +170,10 @@ class ResearchToolBudgetMiddleware(AgentMiddleware):
         self._forced_finalization_attempts = 0
         self._no_research_scope = is_stable_general_knowledge_query(_state_last_human_text(state))
         prompt = _state_last_human_text(state)
-        self._requested_period_count = parse_output_contract(prompt).requested_period_count
+        output_contract = parse_output_contract(prompt)
+        self._requested_period_count = output_contract.requested_period_count
+        self._artifact_mutation_allowed = output_contract.artifact_mutation_allowed
+        self._automation_mutation_allowed = output_contract.automation_mutation_allowed
         self._requested_years = tuple(
             sorted({int(match.group(0)) for match in _REQUESTED_YEAR_RE.finditer(prompt)})
         )
@@ -177,6 +183,13 @@ class ResearchToolBudgetMiddleware(AgentMiddleware):
         request: Any,
         handler: Callable[[Any], Awaitable[Any]],
     ) -> Any:
+        if hasattr(request, "override"):
+            visible_tools = list(getattr(request, "tools", None) or [])
+            allowed_tools = [
+                tool for tool in visible_tools if not self._tool_exceeds_user_scope(tool)
+            ]
+            if len(allowed_tools) != len(visible_tools):
+                request = request.override(tools=allowed_tools)
         if self._no_research_scope and hasattr(request, "override"):
             messages = list(getattr(request, "messages", None) or [])
             direct_instruction = (
@@ -239,6 +252,18 @@ class ResearchToolBudgetMiddleware(AgentMiddleware):
             )
         self._model_calls += 1
         return await handler(request)
+
+    def _tool_exceeds_user_scope(self, tool: Any) -> bool:
+        if isinstance(tool, Mapping):
+            raw_name = tool.get("name")
+        else:
+            raw_name = getattr(tool, "name", None)
+        normalized = str(raw_name or "").rsplit("__", 1)[-1]
+        if normalized in _ARTIFACT_MUTATION_TOOLS:
+            return not self._artifact_mutation_allowed
+        if normalized in _AUTOMATION_MUTATION_TOOLS:
+            return not self._automation_mutation_allowed
+        return False
 
     async def awrap_tool_call(
         self,
@@ -340,16 +365,18 @@ class ResearchToolBudgetMiddleware(AgentMiddleware):
             )
             tool_call = request.tool_call
         document_ids = _tool_document_ids(args)
-        if tool_name == "kb_search" and any(
-            document_id in self._transcript_document_ids for document_id in document_ids
-        ):
-            requested_num = args.get("num")
-            if not isinstance(requested_num, int) or requested_num > TRANSCRIPT_INDEXED_CHUNK_LIMIT:
-                args = {**args, "num": TRANSCRIPT_INDEXED_CHUNK_LIMIT}
-                request = request.override(
-                    tool_call={**tool_call, "args": args},
-                )
-                tool_call = request.tool_call
+        if normalized_tool_name == "kb_search" and document_ids:
+            if any(document_id in self._transcript_document_ids for document_id in document_ids):
+                requested_num = args.get("num")
+                if (
+                    not isinstance(requested_num, int)
+                    or requested_num > TRANSCRIPT_INDEXED_CHUNK_LIMIT
+                ):
+                    args = {**args, "num": TRANSCRIPT_INDEXED_CHUNK_LIMIT}
+                    request = request.override(
+                        tool_call={**tool_call, "args": args},
+                    )
+                    tool_call = request.tool_call
             decision = self._research_budget.allow_indexed_document_search(document_ids)
             if not decision.allowed:
                 return ToolMessage(
@@ -572,10 +599,17 @@ class CitationEvidenceCompactionMiddleware(AgentMiddleware):
     The private sidecar is never a second copy of the original result.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        citation_artifact_emitter: (
+            Callable[[str, str | None, Any, str], Awaitable[None]] | None
+        ) = None,
+    ) -> None:
         self._raw_documents: dict[str, dict[str, Any]] = {}
         self._document_titles: dict[str, str] = {}
         self._evidence_registry = EvidenceRegistry()
+        self._citation_artifact_emitter = citation_artifact_emitter
 
     async def awrap_tool_call(
         self,
@@ -624,23 +658,38 @@ class CitationEvidenceCompactionMiddleware(AgentMiddleware):
                     tool_name=str(tool_name or ""),
                     tool_call_id=str(result.tool_call_id or request_call.get("id") or ""),
                 )
-                if not adaptation.citable:
-                    if adaptation.resource_kinds == {"operational"}:
-                        return result.model_copy(update={"artifact": artifact or None})
-                    discovery = _compact_discovery_tool_content(
-                        adaptation.model_content,
-                        tool_name,
-                        tool_args=tool_args,
-                        allow_summary_evidence=False,
-                    )
-                    visible = discovery[0] if discovery is not None else adaptation.model_content
-                    return result.model_copy(
-                        update={
-                            "content": _serialize_tool_content(visible),
-                            "artifact": artifact or None,
-                        }
-                    )
                 model_projection = adaptation.model_content
+                if not adaptation.citable:
+                    # A provider descriptor can lag behind its response shape
+                    # during a rolling MCP deployment.  Do not let a stale
+                    # discovery/non-citable declaration suppress exact
+                    # indexed chunks from kb_search: the local trust-boundary
+                    # adapter can still prove documentId + chunkId + quote
+                    # directly from this immutable result.  Other tools keep
+                    # the provider's non-citable declaration unchanged.
+                    indexed = augment_indexed_document_evidence(
+                        model_projection,
+                        tool_name=str(tool_name or ""),
+                        captured_at=captured_at,
+                    )
+                    if indexed is not None:
+                        model_projection = indexed
+                    else:
+                        if adaptation.resource_kinds == {"operational"}:
+                            return result.model_copy(update={"artifact": artifact or None})
+                        discovery = _compact_discovery_tool_content(
+                            model_projection,
+                            tool_name,
+                            tool_args=tool_args,
+                            allow_summary_evidence=False,
+                        )
+                        visible = discovery[0] if discovery is not None else model_projection
+                        return result.model_copy(
+                            update={
+                                "content": _serialize_tool_content(visible),
+                                "artifact": artifact or None,
+                            }
+                        )
                 if "document-discovery" in adaptation.resource_kinds:
                     discovery = _compact_discovery_tool_content(
                         model_projection,
@@ -660,11 +709,11 @@ class CitationEvidenceCompactionMiddleware(AgentMiddleware):
                 private_content = private_citation_tool_content(model_projection)
                 if private_content is not None:
                     artifact[_CITATION_ARTIFACT_KEY] = private_content
-                    self._evidence_registry.register_tool_projection(
-                        compacted,
-                        private_content,
+                    await self._publish_citation_artifact(
+                        tool_call_id=str(result.tool_call_id or request_call.get("id") or ""),
                         tool_name=str(tool_name or "") or None,
-                        trusted_private=True,
+                        model_content=compacted,
+                        citation_content=private_content,
                     )
                 return result.model_copy(
                     update={
@@ -701,6 +750,12 @@ class CitationEvidenceCompactionMiddleware(AgentMiddleware):
                     {"_valuz_evidence": [envelope]},
                     ensure_ascii=False,
                     separators=(",", ":"),
+                )
+                await self._publish_citation_artifact(
+                    tool_call_id=str(result.tool_call_id or request_call.get("id") or ""),
+                    tool_name=str(tool_name or "") or None,
+                    model_content=visible,
+                    citation_content=artifact[_CITATION_ARTIFACT_KEY],
                 )
                 return result.model_copy(update={"content": visible, "artifact": artifact})
 
@@ -744,6 +799,12 @@ class CitationEvidenceCompactionMiddleware(AgentMiddleware):
                     ensure_ascii=False,
                     separators=(",", ":"),
                 )
+                await self._publish_citation_artifact(
+                    tool_call_id=str(result.tool_call_id or request_call.get("id") or ""),
+                    tool_name=str(tool_name or "") or None,
+                    model_content=compact_discovery,
+                    citation_content=artifact[_CITATION_ARTIFACT_KEY],
+                )
             return result.model_copy(update={"content": compact_discovery, "artifact": artifact})
         compacted = compact_citation_tool_content(
             result.content,
@@ -758,13 +819,45 @@ class CitationEvidenceCompactionMiddleware(AgentMiddleware):
             result.content
         )
         artifact[_CITATION_ARTIFACT_KEY] = private_content
-        self._evidence_registry.register_tool_projection(
-            compacted,
-            private_content,
+        await self._publish_citation_artifact(
+            tool_call_id=str(result.tool_call_id or request_call.get("id") or ""),
             tool_name=str(tool_name or "") or None,
-            trusted_private=True,
+            model_content=compacted,
+            citation_content=private_content,
         )
         return result.model_copy(update={"content": compacted, "artifact": artifact})
+
+    async def _publish_citation_artifact(
+        self,
+        *,
+        tool_call_id: str,
+        tool_name: str | None,
+        model_content: Any,
+        citation_content: str,
+    ) -> None:
+        """Register and stream a sidecar before graph history can compact it.
+
+        LangChain's public ``on_tool_end`` callback precedes post-tool
+        middleware, while a long graph may summarize away early ToolMessages
+        before the final checkpoint.  Publishing here closes that timing gap;
+        checkpoint replay remains a compatibility fallback and registration is
+        idempotent.
+        """
+
+        self._evidence_registry.register_tool_projection(
+            model_content,
+            citation_content,
+            tool_name=tool_name,
+            trusted_private=True,
+        )
+        if self._citation_artifact_emitter is None or not tool_call_id:
+            return
+        await self._citation_artifact_emitter(
+            tool_call_id,
+            tool_name,
+            model_content,
+            citation_content,
+        )
 
     def _remember_document_titles(self, content: Any) -> None:
         for document_id, title in _document_title_pairs(content):
@@ -947,22 +1040,70 @@ def _append_complete_document_coverage_note(
     return result.model_copy(update={"content": blocks})
 
 
-_STRUCTURED_FALLBACK_TOOLS = {
-    "income_statement",
-    "balance_sheet",
-    "cashflow_statement",
-    "revenue_breakdown",
-    "company_income_statement",
-    "company_balance_sheet",
-    "company_cashflow_statement",
+_STRUCTURED_FALLBACK_SPECS: dict[str, dict[str, Any]] = {
+    "income_statement": {"contentRoot": "/data"},
+    "balance_sheet": {"contentRoot": "/data"},
+    "cashflow_statement": {"contentRoot": "/data"},
+    "revenue_breakdown": {"contentRoot": "/data"},
+    "company_income_statement": {"contentRoot": "/data"},
+    "company_balance_sheet": {"contentRoot": "/data"},
+    "company_cashflow_statement": {"contentRoot": "/data"},
+    # Compatibility adapters for Reportify MCP deployments that predate the
+    # source-metadata transport. Each tool call still becomes one immutable
+    # Collection; no row or scalar Evidence is generated eagerly.
+    "factors_compute": {
+        "contentRoot": "/datas",
+        "itemsPointer": "/datas",
+        "identityFields": ["/symbol", "/date"],
+        "sourceCategory": "structured_market_data",
+        "semantics": {
+            "entity": {"symbol": "/symbol", "name": "/name"},
+            "asOf": {"date": "/date"},
+            "metric": {"mode": "field-name", "valueRoots": [""]},
+        },
+    },
+    "stock_quote": {
+        "contentRoot": "/data",
+        "itemsPointer": "/data/items",
+        "identityFields": ["/symbol", "/date"],
+        "sourceCategory": "structured_market_data",
+        "semantics": {
+            "entity": {"symbol": "/symbol", "name": "/stock_name"},
+            "asOf": {"date": "/date"},
+            "metric": {"mode": "field-name", "valueRoots": [""]},
+        },
+    },
 }
-_STRUCTURED_CONTEXT_KEYS = {
-    "currency",
-    "end_date",
-    "fiscal_year",
-    "name",
-    "period",
+
+
+_SIMPLE_FACTOR_METRICS = {
+    "PS": "price_to_sales",
+    "PS_TTM": "price_to_sales_ttm",
+    "PE": "price_to_earnings",
+    "PE_TTM": "price_to_earnings_ttm",
+    "PB": "price_to_book",
+    "PCF": "price_to_cash_flow",
 }
+
+
+def _canonical_metric_for_factor_formula(formula: str) -> str | None:
+    """Map a small, auditable factor grammar to canonical metric ids."""
+
+    normalized = re.sub(r"\s+", "", str(formula or "")).upper()
+    simple = re.fullmatch(r"([A-Z][A-Z0-9_]*)\(\)", normalized)
+    if simple and simple.group(1) in _SIMPLE_FACTOR_METRICS:
+        return _SIMPLE_FACTOR_METRICS[simple.group(1)]
+    moving_average = re.fullmatch(r"MA\(CLOSE,(\d{1,4})\)", normalized)
+    if moving_average:
+        window = int(moving_average.group(1))
+        if 1 <= window <= 1_000:
+            return f"moving_average_{window}"
+    rsi = re.fullmatch(r"RSI\((\d{1,3})\)", normalized)
+    if rsi:
+        window = int(rsi.group(1))
+        if 1 <= window <= 999:
+            return f"rsi_{window}"
+    return None
 
 
 def _augment_structured_tool_content(
@@ -972,17 +1113,17 @@ def _augment_structured_tool_content(
     tool_args: dict[str, Any],
     captured_at: str,
 ) -> Any | None:
-    """Add exact per-field envelopes when a trusted data tool only cites status.
+    """Add one lazy Collection when a trusted legacy data tool lacks Metadata.
 
     Some connector versions attach one envelope for the top-level HTTP
-    ``status`` but none for the actual nested financial values. The tool result
-    is already inside the trusted runtime boundary, so deriving immutable
-    per-scalar snapshots here is safer than letting the model cite ``status``
-    or an unrelated document cover page.
+    ``status`` but none for the actual structured values. The compatibility
+    adapter freezes the exact result root once and exposes JSON-pointer
+    addresses. Only fields used by final claims are materialized later.
     """
 
-    name = str(tool_name or "")
-    if name not in _STRUCTURED_FALLBACK_TOOLS:
+    name = str(tool_name or "").rsplit("__", 1)[-1]
+    spec = _STRUCTURED_FALLBACK_SPECS.get(name)
+    if spec is None:
         return None
     if isinstance(content, str):
         return _augment_structured_json_text(
@@ -990,6 +1131,7 @@ def _augment_structured_tool_content(
             tool_name=name,
             tool_args=tool_args,
             captured_at=captured_at,
+            spec=spec,
         )
     if not isinstance(content, list):
         return None
@@ -1006,6 +1148,7 @@ def _augment_structured_tool_content(
                 tool_name=name,
                 tool_args=tool_args,
                 captured_at=captured_at,
+                spec=spec,
             )
             if isinstance(raw_text, str)
             else None
@@ -1024,6 +1167,7 @@ def _augment_structured_json_text(
     tool_name: str,
     tool_args: dict[str, Any],
     captured_at: str,
+    spec: dict[str, Any],
 ) -> str | None:
     try:
         payload = json.loads(raw_text)
@@ -1043,6 +1187,7 @@ def _augment_structured_json_text(
                     tool_name=tool_name,
                     tool_args=tool_args,
                     captured_at=captured_at,
+                    spec=spec,
                 )
                 if isinstance(text, str)
                 else None
@@ -1053,7 +1198,17 @@ def _augment_structured_json_text(
             output.append({**block, "text": nested})
             changed = True
         return json.dumps(output, ensure_ascii=False, separators=(",", ":")) if changed else None
-    if not isinstance(payload, dict) or not isinstance(payload.get("data"), (dict, list)):
+    if not isinstance(payload, dict):
+        return None
+    if isinstance(payload.get("_valuz_evidence_hint"), (dict, list)):
+        # A prior middleware pass already split this projection into a visible
+        # hint and a private descriptor. Preserve that exact immutable handle;
+        # the ToolMessage artifact carries the descriptor across wrappers.
+        return None
+    content_root = str(spec.get("contentRoot") or "")
+    root_key = content_root.removeprefix("/")
+    snapshot = payload.get(root_key)
+    if "/" in root_key or not isinstance(snapshot, (dict, list)):
         return None
     existing = payload.get("_valuz_evidence")
     existing_items = (
@@ -1070,10 +1225,12 @@ def _augment_structured_json_text(
     if valid_existing:
         return None
     synthesized = _structured_fallback_collection(
-        payload["data"],
+        snapshot,
         tool_name=tool_name,
         tool_args=tool_args,
         captured_at=captured_at,
+        payload=payload,
+        spec=spec,
     )
     if synthesized is None:
         return None
@@ -1088,22 +1245,32 @@ def _structured_fallback_collection(
     tool_name: str,
     tool_args: dict[str, Any],
     captured_at: str,
+    payload: dict[str, Any],
+    spec: dict[str, Any],
 ) -> dict[str, Any] | None:
-    identifier = next(
-        (
-            str(tool_args.get(key)).strip()
-            for key in ("symbol", "ticker", "code", "symbols", "names")
-            if str(tool_args.get(key) or "").strip()
-        ),
-        "result",
-    )
+    identifier_values: list[str] = []
+    for key in ("symbol", "ticker", "code", "symbols", "names"):
+        raw_identifier = tool_args.get(key)
+        if isinstance(raw_identifier, list):
+            identifier_values = [str(item).strip() for item in raw_identifier if str(item).strip()]
+        elif str(raw_identifier or "").strip():
+            identifier_values = [str(raw_identifier).strip()]
+        if identifier_values:
+            break
+    identifier = ",".join(identifier_values[:8]) or "result"
     source_id = f"tool-result:{tool_name}:{identifier}"[:512]
+    metadata = payload.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    formula = str(metadata.get("formula") or tool_args.get("formula") or "").strip()
+    title_parts = [tool_name, identifier]
+    if formula:
+        title_parts.append(formula)
     source: dict[str, Any] = {
         "sourceId": source_id,
         "providerId": "valuz-stock",
         "sourceType": "tool-result",
-        "sourceCategory": "financials",
-        "title": f"{tool_name} · {identifier}"[:1_024],
+        "sourceCategory": str(spec.get("sourceCategory") or "financials"),
+        "title": " · ".join(title_parts)[:1_024],
         "retrievedAt": captured_at,
     }
     try:
@@ -1116,46 +1283,60 @@ def _structured_fallback_collection(
     except (TypeError, ValueError):
         return None
     content_hash = f"sha256:{hashlib.sha256(serialized.encode()).hexdigest()}"
-    digest = hashlib.sha256(f"{source_id}\0{tool_name}\0{content_hash}".encode()).hexdigest()[:24]
     common: dict[str, Any] = {
         "datasetId": f"tool-result:{tool_name}",
         "toolName": tool_name,
         "capturedAt": captured_at,
     }
+    as_of = payload.get("as_of") or metadata.get("as_of")
+    if as_of not in (None, ""):
+        common["asOf"] = str(as_of)
     if isinstance(data, dict) and data.get("currency"):
         common["currency"] = str(data["currency"])
-    if identifier != "result":
-        common["entityId"] = identifier
+    if len(identifier_values) == 1:
+        common["entityId"] = identifier_values[0]
+    content_root = str(spec.get("contentRoot") or "/data")
+    addressing: dict[str, Any] = {
+        "mode": "json-pointer",
+        "contentRoot": content_root,
+        "identityFields": list(spec.get("identityFields") or []),
+        "allowedPathRoots": [content_root],
+    }
+    items_pointer = spec.get("itemsPointer")
+    if isinstance(items_pointer, str) and items_pointer:
+        addressing["itemsPointer"] = items_pointer
+    semantics = dict(spec.get("semantics") or {})
+    if tool_name == "factors_compute":
+        canonical_metric = _canonical_metric_for_factor_formula(formula)
+        if canonical_metric:
+            semantics["metric"] = {
+                "mode": "field-map",
+                "fields": {"/factor_value": canonical_metric},
+            }
+    descriptor_identity = json.dumps(
+        {
+            "source": source,
+            "common": common,
+            "addressing": addressing,
+            "semantics": semantics,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(
+        f"{source_id}\0{tool_name}\0{content_hash}\0{descriptor_identity}".encode()
+    ).hexdigest()[:24]
     return {
         "version": 1,
         "kind": "structured-evidence-collection",
         "collectionHandle": f"evc_tool_{digest}",
         "source": source,
         "common": common,
-        "addressing": {
-            "mode": "json-pointer",
-            "contentRoot": "/data",
-            "identityFields": [],
-            "allowedPathRoots": ["/data"],
-        },
+        "addressing": addressing,
+        "semantics": semantics,
         "contentHash": content_hash,
     }
-
-
-def _structured_fallback_value(
-    field: str, value: int | float, *, root_currency: str
-) -> tuple[int | float, str]:
-    normalized = field.casefold()
-    if normalized.endswith("_rate") and abs(float(value)) <= 1:
-        return float(value) * 100, "percent"
-    if any(term in normalized for term in ("percentage", "growth", "yoy", "rate")):
-        return value, "percent"
-    if root_currency and any(
-        term in normalized
-        for term in ("revenue", "cost", "profit", "asset", "liabil", "cash", "income")
-    ):
-        return value, root_currency
-    return value, ""
 
 
 def _compact_discovery_tool_content(

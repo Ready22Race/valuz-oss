@@ -203,6 +203,132 @@ def test_document_chunks_create_direct_evidence_with_pdf_locator() -> None:
     assert registry.resolve(envelope["evidenceHandle"]) is not None
 
 
+def test_document_summary_creates_direct_evidence_without_copying_model_content() -> None:
+    summary = (
+        "Top Models Weekly usage. 1. Alpha 8.25T tokens. "
+        "2. Beta 7.31T tokens. 3. Gamma 5.26T tokens."
+    )
+    payload = {
+        "doc_id": "doc-live-ranking",
+        "title": "Live model ranking",
+        "url": "https://example.com/rankings",
+        "category": "webpages",
+        "summary": summary,
+        "chunks": [
+            {
+                "id": "chunk-intro",
+                "content": "Live rankings based on real usage.",
+            }
+        ],
+    }
+    descriptor = _descriptor(
+        payload,
+        tool_name="document_fetch",
+        resources=[
+            {
+                "resourceId": "document-fetch-summary",
+                "kind": "document-summary",
+                "authority": "derived",
+                "rootPointer": "",
+                "document": {
+                    "scope": "resource",
+                    "sourceId": "/doc_id",
+                    "documentId": "/doc_id",
+                    "title": "/title",
+                    "url": "/url",
+                    "providerCategory": "/category",
+                },
+                "textPointer": "/summary",
+                "locator": {
+                    "kind": "external",
+                    "fragment": "provider-summary",
+                },
+            }
+        ],
+    )
+
+    adapted = adapt_mcp_source_result(
+        [],
+        tool_name="mcp__reportify__document_fetch",
+        descriptor=descriptor,
+        structured_content=payload,
+    )
+
+    assert adapted is not None and adapted.citable
+    assert adapted.resource_kinds == frozenset({"document-summary"})
+    envelope = adapted.model_content["_valuz_evidence"][0]
+    assert envelope["source"] == {
+        "sourceId": "doc-live-ranking",
+        "documentId": "doc-live-ranking",
+        "providerId": "reportify",
+        "sourceType": "document",
+        "sourceCategory": "webpages",
+        "title": "Live model ranking",
+        "retrievedAt": "2026-08-03T00:00:00Z",
+        "canonicalUrl": "https://example.com/rankings",
+    }
+    assert envelope["evidence"]["quote"] == summary
+    assert envelope["locator"] == {
+        "kind": "external",
+        "fragment": "provider-summary",
+    }
+
+    compacted = compact_citation_tool_content(adapted.model_content)
+    private = private_citation_tool_content(adapted.model_content)
+    assert compacted is not None and private is not None
+    assert compacted["summary"] == summary
+    assert compacted["evidenceHandle"] == envelope["evidenceHandle"]
+    assert compacted["citationLink"] == f"[source](evidence://{envelope['evidenceHandle']})"
+    assert "_valuz_evidence" not in compacted
+    assert json.dumps(compacted, ensure_ascii=False).count(summary) == 1
+    registry = EvidenceRegistry()
+    assert registry.register_tool_projection(compacted, private, trusted_private=True) == 1
+    assert registry.resolve(envelope["evidenceHandle"]) is not None
+
+
+def test_raw_document_metadata_cannot_elevate_provider_summary() -> None:
+    payload = {
+        "doc_id": "doc-annual-report",
+        "original_url": "https://example.com/annual-report.pdf",
+        "summary": "The complete original document body.",
+    }
+    descriptor = _descriptor(
+        payload,
+        tool_name="document_raw_content",
+        resources=[
+            {
+                "resourceId": "document-fetch-summary",
+                "kind": "document-summary",
+                "authority": "derived",
+                "rootPointer": "",
+                "document": {
+                    "scope": "resource",
+                    "sourceId": "/doc_id",
+                    "documentId": "/doc_id",
+                    "url": "/original_url",
+                },
+                "textPointer": "/summary",
+                "locator": {
+                    "kind": "external",
+                    "fragment": "provider-summary",
+                },
+            }
+        ],
+    )
+
+    adapted = adapt_mcp_source_result(
+        [],
+        tool_name="document_raw_content",
+        descriptor=descriptor,
+        structured_content=payload,
+    )
+
+    assert adapted is not None
+    assert adapted.citable is False
+    assert adapted.evidence_count == 0
+    assert "_valuz_evidence" not in adapted.model_content
+
+
 def test_raw_document_metadata_cannot_turn_the_whole_body_into_one_chunk() -> None:
     payload = {
         "doc_id": "doc-annual-report",
