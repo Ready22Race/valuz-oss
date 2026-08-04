@@ -13,7 +13,7 @@ import * as OpenUI from "@openuidev/react-ui";
 import { Modal as OpenUIModal } from "@openuidev/react-ui/Modal";
 import { blockComponents, blockNames } from "@valuz/genui-blocks";
 import { ChevronLeft, ChevronRight } from "lucide-react";
-import { type CSSProperties, type ReactNode, useMemo } from "react";
+import { createContext, useContext, useMemo, type CSSProperties, type ReactNode } from "react";
 import { z } from "zod/v3";
 
 export interface A2UIRendererProps {
@@ -202,17 +202,46 @@ const legacyOpenuiA2UICatalog = new Catalog(
   createOpenUIComponents(),
 );
 
+/**
+ * id → component, for resolving references that A2UI expresses as ids.
+ *
+ * A2UI nests by id: a chart carries `children: ["sector-series"]`, and the
+ * Series is a sibling component elsewhere in the message. The runtime resolves
+ * that for *rendering* (via `buildChild`), but chart data is not rendered — it
+ * is read out of props — so a chart whose series arrives by reference had no
+ * way to reach it. It rendered its category axis with no series at all: a tall
+ * empty plot rather than an error.
+ */
+const A2UIComponentIndex = createContext<Map<string, Record<string, unknown>>>(new Map());
+
 export function A2UIRenderer({ body }: A2UIRendererProps) {
   const surfaces = useMemo(() => buildSurfaces(body), [body]);
+  const index = useMemo(() => buildComponentIndex(body), [body]);
   if (!surfaces.length) return null;
 
   return (
-    <div data-slot="a2ui-renderer">
-      {surfaces.map((surface) => (
-        <A2uiSurface key={surface.id} surface={surface} />
-      ))}
-    </div>
+    <A2UIComponentIndex.Provider value={index}>
+      <div data-slot="a2ui-renderer">
+        {surfaces.map((surface) => (
+          <A2uiSurface key={surface.id} surface={surface} />
+        ))}
+      </div>
+    </A2UIComponentIndex.Provider>
   );
+}
+
+function buildComponentIndex(body: string): Map<string, Record<string, unknown>> {
+  const index = new Map<string, Record<string, unknown>>();
+  for (const message of normalizeMessages(parseA2UIMessages(body))) {
+    const update = (message as Record<string, unknown>).updateComponents;
+    if (!isRecord(update)) continue;
+    for (const component of toArray(update.components)) {
+      if (!isRecord(component)) continue;
+      const id = readText(component.id);
+      if (id) index.set(id, component);
+    }
+  }
+  return index;
 }
 
 function buildSurfaces(body: string): SurfaceModel<ReactComponentImplementation>[] {
@@ -262,6 +291,13 @@ function OpenUIComponent({
   buildChild: BuildChild;
 }) {
   const children = readChildren(props, buildChild);
+  const componentIndex = useContext(A2UIComponentIndex);
+  // Expand id references into the components they name, so a chart whose
+  // series arrives as `children: ["sector-series"]` can read it.
+  const resolveRefs = (value: unknown): unknown[] =>
+    toArray(value).map((item) =>
+      typeof item === "string" ? (componentIndex.get(item) ?? item) : item,
+    );
 
   switch (name) {
     case "Stack":
@@ -380,7 +416,7 @@ function OpenUIComponent({
     case "Table":
       return <MappedTable props={props} buildChild={buildChild} />;
     case "BarChart": {
-      const data = buildChartData(props);
+      const data = buildChartData(props, resolveRefs);
       if (!data.length) return null;
       return (
         <OpenUI.BarChartCondensed
@@ -394,7 +430,7 @@ function OpenUIComponent({
       );
     }
     case "LineChart": {
-      const data = buildChartData(props);
+      const data = buildChartData(props, resolveRefs);
       if (!data.length) return null;
       return (
         <OpenUI.LineChartCondensed
@@ -408,7 +444,7 @@ function OpenUIComponent({
       );
     }
     case "AreaChart": {
-      const data = buildChartData(props);
+      const data = buildChartData(props, resolveRefs);
       if (!data.length) return null;
       return (
         <OpenUI.AreaChartCondensed
@@ -422,7 +458,7 @@ function OpenUIComponent({
       );
     }
     case "HorizontalBarChart": {
-      const data = buildChartData(props);
+      const data = buildChartData(props, resolveRefs);
       if (!data.length) return null;
       return (
         <OpenUI.HorizontalBarChart
@@ -435,7 +471,7 @@ function OpenUIComponent({
       );
     }
     case "RadarChart": {
-      const data = buildChartData(props);
+      const data = buildChartData(props, resolveRefs);
       if (!data.length) return null;
       return (
         <OpenUI.RadarChart
@@ -1253,12 +1289,22 @@ function renderCell(value: unknown, buildChild: BuildChild): ReactNode {
   return JSON.stringify(value);
 }
 
-function buildChartData(props: Record<string, unknown>) {
-  const rowsFromSeriesData = buildRowsFromSeriesData(props.series ?? props.children);
+function buildChartData(
+  props: Record<string, unknown>,
+  resolve: (value: unknown) => unknown[] = toArray,
+) {
+  // `series` may be inline, or `children` may name sibling components by id.
+  const declared = resolve(props.series ?? props.children);
+  const rowsFromSeriesData = buildRowsFromSeriesData(declared);
   if (rowsFromSeriesData.length) return rowsFromSeriesData;
 
   const labels = toArray(props.labels).map(readText);
-  const series = readSeries(props.series);
+  const series = readSeries(declared);
+  // Labels alone are not data. Returning a row per label would clear the
+  // caller's `!data.length` guard while carrying no numeric key at all, and the
+  // chart would reserve a full-height plot to draw nothing in — which is how
+  // this surfaced: a category axis of sixteen sectors above an empty box.
+  if (!series.length) return [];
   return labels.map((label, index) => {
     const row: Record<string, string | number> = { category: label };
     for (const item of series) {

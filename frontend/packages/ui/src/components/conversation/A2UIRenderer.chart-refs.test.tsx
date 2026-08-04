@@ -1,0 +1,98 @@
+import { render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+
+// Charts are stubbed to print the data they were handed. That is the whole
+// point of this file: the defect was in the *data* a chart received, not in how
+// it drew — so asserting on rendered plot DOM would test recharts, not us.
+vi.mock("@openuidev/react-ui", () => ({
+  HorizontalBarChart: ({ data }: { data: Record<string, unknown>[] }) => (
+    <div data-testid="horizontal-chart">{JSON.stringify(data)}</div>
+  ),
+  BarChartCondensed: ({ data }: { data: Record<string, unknown>[] }) => (
+    <div data-testid="bar-chart">{JSON.stringify(data)}</div>
+  ),
+}));
+vi.mock("@openuidev/react-ui/Modal", () => ({ Modal: () => null }));
+
+import { A2UIRenderer } from "./A2UIRenderer";
+
+/**
+ * Regression for a chart that rendered as a tall empty box.
+ *
+ * A2UI nests by id: the model emitted the sector chart as
+ * `{ component: "HorizontalBarChart", labels: [...], children: ["sector-series"] }`
+ * with the Series as a sibling component. Chart data is read out of props
+ * rather than rendered, so the reference never resolved and the chart received
+ * one row per label with no numeric key on any of them. That is worse than no
+ * data: it cleared the empty-data guard, so the chart reserved a full-height
+ * plot and drew nothing in it.
+ *
+ * The payload shape below is the one taken from the session that surfaced it.
+ */
+
+function a2ui(components: Record<string, unknown>[]): string {
+  return [
+    { version: "v0.9", createSurface: { surfaceId: "s", catalogId: "openui" } },
+    { version: "v0.9", updateComponents: { surfaceId: "s", components } },
+  ]
+    .map((m) => JSON.stringify(m))
+    .join("\n");
+}
+
+describe("A2UI charts whose series arrives by reference", () => {
+  it("resolves a series named in children", () => {
+    render(
+      <A2UIRenderer
+        body={a2ui([
+          {
+            id: "root",
+            component: "HorizontalBarChart",
+            labels: ["半导体", "新能源车", "军工"],
+            children: ["sector-series"],
+          },
+          {
+            id: "sector-series",
+            component: "Series",
+            category: "涨跌幅",
+            values: [3.2, 2.1, -1.4],
+          },
+        ])}
+      />,
+    );
+    const data = JSON.parse(screen.getByTestId("horizontal-chart").textContent ?? "[]");
+    expect(data).toEqual([
+      { category: "半导体", 涨跌幅: 3.2 },
+      { category: "新能源车", 涨跌幅: 2.1 },
+      { category: "军工", 涨跌幅: -1.4 },
+    ]);
+  });
+
+  it("still handles an inline series", () => {
+    render(
+      <A2UIRenderer
+        body={a2ui([
+          {
+            id: "root",
+            component: "BarChart",
+            labels: ["Q1", "Q2"],
+            series: [{ component: "Series", category: "Revenue", values: [10, 12] }],
+          },
+        ])}
+      />,
+    );
+    const data = JSON.parse(screen.getByTestId("bar-chart").textContent ?? "[]");
+    expect(data).toEqual([
+      { category: "Q1", Revenue: 10 },
+      { category: "Q2", Revenue: 12 },
+    ]);
+  });
+
+  it("renders no chart when the series is genuinely absent", () => {
+    render(
+      <A2UIRenderer
+        body={a2ui([{ id: "root", component: "HorizontalBarChart", labels: ["A", "B"] }])}
+      />,
+    );
+    expect(screen.queryByTestId("horizontal-chart")).toBeNull();
+  });
+});

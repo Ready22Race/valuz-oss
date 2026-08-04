@@ -222,16 +222,19 @@
 }
 
 /*
- * Advance/decline colour. Single-class selectors on purpose: a host that has an
- * opinion about which way is red — Greater China markets invert the convention
- * — states it with an attribute selector and wins without `!important`.
+ * Advance/decline colour, in the Greater China convention: up is red, down is
+ * green. `trendTone()` in lib/tone.ts is the statement of that convention and
+ * this must agree with it — a breadth bar disagreeing with the quote card above
+ * it reads as a data error, not a styling one. Single-class selectors on
+ * purpose, so a host serving Western markets overrides with an attribute
+ * selector and wins without `!important`.
  */
 .vgb-breadth-bar-up {
-  background: var(--openui-text-success-primary);
+  background: var(--openui-text-danger-primary);
 }
 
 .vgb-breadth-bar-down {
-  background: var(--openui-text-danger-primary);
+  background: var(--openui-text-success-primary);
 }
 
 .vgb-breadth-bar-flat {
@@ -279,4 +282,34 @@
     justify-self: start;
     text-align: left;
   }
+}
+
+/* ── Trend colour ─────────────────────────────────────────────────── */
+
+/*
+ * Blocks emit `data-a2ui-trend` and, until now, nothing coloured it — an index
+ * card's change figure rendered in body text, so a fall looked identical to a
+ * rise. Same convention as everywhere else: up red, down green (see
+ * `trendTone()` in lib/tone.ts).
+ *
+ * Scoped to the change figures rather than the whole card: colouring the name
+ * and the price too would turn a red day into a wall of red and cost the
+ * change figure the emphasis that makes it readable at a glance.
+ */
+[data-a2ui-trend="up"] .vgb-market-card-change,
+[data-a2ui-trend="up"] .vgb-market-card-delta,
+[data-a2ui-trend="up"] .vgb-data-list-meta {
+  color: var(--openui-text-danger-primary);
+}
+
+[data-a2ui-trend="down"] .vgb-market-card-change,
+[data-a2ui-trend="down"] .vgb-market-card-delta,
+[data-a2ui-trend="down"] .vgb-data-list-meta {
+  color: var(--openui-text-success-primary);
+}
+
+[data-a2ui-trend="flat"] .vgb-market-card-change,
+[data-a2ui-trend="flat"] .vgb-market-card-delta,
+[data-a2ui-trend="flat"] .vgb-data-list-meta {
+  color: var(--openui-text-neutral-secondary);
 }

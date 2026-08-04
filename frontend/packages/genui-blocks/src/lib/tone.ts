@@ -48,14 +48,25 @@ export function toneBorder(tone: Tone | undefined): string {
 }
 
 /**
- * Trend colour. Deliberately *not* hardcoded to green-up/red-down: financial
- * markets in Greater China invert that convention, and the host expresses its
- * choice through the theme's success/danger tokens. Callers that need the
- * inversion swap those two tokens once, in the theme, instead of per block.
+ * Trend colour, in the Greater China convention: **up is red, down is green.**
+ *
+ * This is the opposite of the Western convention and it is not a preference —
+ * to a reader of A-share markets, a green number means a fall. Getting it
+ * backwards does not look like a styling bug, it looks like the opposite
+ * number.
+ *
+ * This function is the single place the convention is decided for every block.
+ * The rest of the repo already agrees with it: the host stylesheet colours
+ * OpenUI's `openui-tag-success` (a rise) with `--error-text`. `market.css`
+ * repeats the mapping in CSS for elements that carry `data-a2ui-trend` rather
+ * than an inline colour — change both together, or a card and the tile beside
+ * it will disagree.
+ *
+ * A host serving Western markets inverts it here, once.
  */
 export function trendTone(trend: Trend | undefined): Tone {
-  if (trend === "up") return "success";
-  if (trend === "down") return "danger";
+  if (trend === "up") return "danger";
+  if (trend === "down") return "success";
   return "neutral";
 }
 
