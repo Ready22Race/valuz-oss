@@ -14,6 +14,9 @@ vi.mock("@openuidev/react-ui", () => ({
   // real style-injection/context machinery here.
   ThemeProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
 }));
+vi.mock("@openuidev/react-ui/Modal", () => ({
+  Modal: ({ children }: { children: ReactNode }) => <>{children}</>,
+}));
 vi.mock("@openuidev/react-ui/genui-lib", () => ({
   openuiLibrary: {},
 }));
@@ -76,11 +79,25 @@ describe("GenerativeUICard", () => {
     expect(styles).toContain(
       "> :not([class]):has(> .openui-tag):has(> :nth-child(2) .openui-markdown-renderer)",
     );
-    expect(styles).toContain("flex: 1 1 15rem");
+    expect(styles).toContain("flex: 1 1 16rem");
     expect(styles).toContain(
       "padding: var(--openui-space-l)",
     );
-    expect(styles).toContain("background: var(--color-surface-soft)");
+    expect(styles).toContain("background: var(--openui-foreground)");
+    expect(styles).toContain("border-color: var(--openui-border-default)");
+    expect(styles).not.toContain("box-shadow: var(--openui-shadow-s)");
+    expect(styles).toContain('[data-a2ui-card-content]');
+    expect(styles).toContain('[data-a2ui-metric-value]');
+    expect(styles).toContain('[data-a2ui-component="market-index-grid"]');
+    expect(styles).toContain('[data-a2ui-component="market-index-card"]');
+    expect(styles).toContain("[data-a2ui-market-index-value]");
+    expect(styles).toContain('[data-a2ui-component="finance-metric"]');
+    expect(styles).toContain('[data-a2ui-component="data-list"]');
+    expect(styles).toContain("[data-a2ui-data-list-row]");
+    expect(styles).toContain("[data-a2ui-data-list-main]");
+    expect(styles).toContain('[data-a2ui-component="market-breadth"]');
+    expect(styles).toContain("[data-a2ui-market-breadth-track]");
+    expect(styles).toContain("repeat(auto-fit, minmax(min(100%, 14.5rem), 1fr))");
     expect(styles).toContain("background: transparent");
     expect(styles).toContain(".openui-table-container");
     expect(styles).toContain("border-radius: 0");

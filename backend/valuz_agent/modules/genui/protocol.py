@@ -23,7 +23,13 @@ A2UI_GENERATIVE_UI_INSTRUCTIONS = (
     "readable full-width section, and tables may scroll horizontally only when "
     "their columns cannot stay readable. Use OpenUI component names from the "
     "catalog below so the @a2ui/react renderer can map them to OpenUI React "
-    "components one-for-one."
+    "components one-for-one. For financial market dashboards, prefer the Valuz "
+    "semantic components in the catalog: they are rendered as OpenUI surfaces "
+    "but avoid fragile Card/TextContent/Chart compositions. Do not create "
+    "placeholder charts: only render chart components when the request or data "
+    "contains real chart series, labels, slices, or points. When the data is a "
+    "current snapshot rather than a time series, use MarketIndexGrid, "
+    "FinanceMetric, MarketBreadth, DataList, or Table instead of an empty chart."
 )
 
 A2UI_OPENUI_COMPONENT_CATALOG = """
@@ -42,11 +48,30 @@ OpenUI component catalog supported by the A2UI renderer:
   SwitchGroup, SwitchItem.
 - Actions/display: Button, Buttons, TagBlock, Tag, Metric, KPI, ListBlock,
   ListItem, List.
+- Valuz semantic components:
+  - MarketIndexGrid: props title, description, indices. Use for groups of
+    market/index quote cards. Each index item may include name, code, latest,
+    change, changePct, turnover, source, asOf.
+  - MarketIndexCard: props name, code, latest, change, changePct, turnover,
+    source, asOf. Use only for one standalone quote.
+  - FinanceMetric: props label, value, unit, change, changePct, description.
+    Use for PE/PB/market cap/revenue/margin/ROE/turnover-rate/valuation metrics.
+  - MarketBreadth: props title, up, down, flat, total, source. Use for
+    up/down/flat breadth summaries.
+  - DataList: props title, description, items. Use for rankings, ordered
+    records, sector movers, stock movers, holdings, news, risk flags, and other
+    compact repeated textual data. Each item may include rank, name/title,
+    description, value, changePct/meta, trend. Prefer DataList over free-form
+    Row/Grid/TextContent lists; the renderer aligns rows as rank / main / value / meta
+    and wraps responsively.
 Use official A2UI v0.9 component objects with component properties at the top
 level, not nested under "props":
 {"id":"title","component":"TextContent","text":"Revenue","size":"large-heavy"}
 Use flat component ids for layout children:
 {"id":"root","component":"Stack","children":["title","chart"],"direction":"column","gap":"m"}
+Do not create placeholder charts or charts with empty series. If supplied data
+does not include chart-ready arrays, show the raw values with DataList, Table,
+MarketIndexGrid, FinanceMetric, or MarketBreadth.
 """
 
 

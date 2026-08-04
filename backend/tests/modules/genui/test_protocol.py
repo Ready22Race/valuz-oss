@@ -44,6 +44,14 @@ def test_a2ui_prompt_describes_message_stream_and_openui_catalog():
     assert '"text":"Revenue"' in prompt
     assert 'not nested under "props"' in prompt
     assert '"revenue": 12' in prompt
+    assert "Valuz semantic components" in prompt
+    assert "MarketIndexGrid" in prompt
+    assert "MarketIndexCard" in prompt
+    assert "FinanceMetric" in prompt
+    assert "MarketBreadth" in prompt
+    assert "DataList" in prompt
+    assert "rank / main / value / meta" in prompt
+    assert "Do not create placeholder charts" in prompt
 
 
 def test_a2ui_session_instruction_and_output_format_are_not_openui_lang():

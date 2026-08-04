@@ -57,9 +57,16 @@ const GENERATIVE_UI_LAYOUT_CSS = `
      module to start from the same fixed width. */
   ${OPENUI_SCOPE_SELECTOR} .openui-card {
     flex-basis: max-content !important;
+    gap: var(--openui-space-m) !important;
   }
 
-  ${OPENUI_SCOPE_SELECTOR} .openui-card-card,
+  ${OPENUI_SCOPE_SELECTOR} .openui-card-card {
+    border-color: var(--openui-border-default);
+    background: var(--openui-foreground);
+    box-shadow: none;
+    border-radius: 8px;
+  }
+
   ${OPENUI_SCOPE_SELECTOR} .openui-card-clear {
     border-color: transparent;
     background: transparent;
@@ -67,18 +74,21 @@ const GENERATIVE_UI_LAYOUT_CSS = `
   }
 
   ${OPENUI_SCOPE_SELECTOR} .openui-card-sunk {
-    border-color: transparent;
-    background: var(--color-surface-soft);
+    border-color: var(--openui-border-default);
+    background: var(--openui-foreground);
     box-shadow: none;
+    border-radius: 8px;
   }
 
-  /* A compact row of three or more cards is the KPI strip. Keep headings and
-     larger content sections unframed, and give only these metrics a soft tile. */
+  /* A compact row of three or more cards is the KPI strip. Give these tiles
+     enough width and surface structure to read like a dashboard without adding
+     elevation shadows. */
   ${OPENUI_SCOPE_SELECTOR}
     :has(> .openui-card:nth-child(3)) > .openui-card {
-    flex: 1 1 15rem !important;
-    border-color: transparent;
-    background: var(--color-surface-soft);
+    flex: 1 1 16rem !important;
+    border-color: var(--openui-border-default);
+    background: var(--openui-foreground);
+    box-shadow: none;
     border-radius: 8px;
     padding: var(--openui-space-l);
   }
@@ -89,8 +99,10 @@ const GENERATIVE_UI_LAYOUT_CSS = `
   ${OPENUI_SCOPE_SELECTOR}
     :has(> :nth-child(3))
     > :not([class]):has(> .openui-tag):has(> :nth-child(2) .openui-markdown-renderer) {
-    flex: 1 1 15rem;
-    background: var(--color-surface-soft);
+    flex: 1 1 16rem;
+    border: 1px solid var(--openui-border-default);
+    background: var(--openui-foreground);
+    box-shadow: none;
     border-radius: 8px;
     padding: var(--openui-space-l);
   }
@@ -204,10 +216,152 @@ const GENERATIVE_UI_LAYOUT_CSS = `
 
   ${OPENUI_SCOPE_SELECTOR} [data-a2ui-component="grid"] {
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+    gap: var(--openui-space-m-l) !important;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} [data-a2ui-component="row"] {
+    gap: var(--openui-space-m-l) !important;
   }
 
   ${OPENUI_SCOPE_SELECTOR} [data-a2ui-component="row"] > * {
-    flex: 1 1 14rem;
+    flex: 1 1 16rem;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} [data-a2ui-card-content] {
+    gap: var(--openui-space-m) !important;
+    min-height: 100%;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR}
+    [data-a2ui-card-content] > .text-content:first-child
+    [data-a2ui-text-size] {
+    color: var(--openui-text-neutral-primary) !important;
+    font: var(--openui-text-label-default-heavy) !important;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR}
+    [data-a2ui-card-content] > .text-content:nth-child(n + 4)
+    [data-a2ui-text-size="small"] {
+    color: var(--openui-text-neutral-secondary) !important;
+    font: var(--openui-text-label-sm) !important;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} [data-a2ui-metric-value] {
+    font: var(--openui-text-numbers-heading-md) !important;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} [data-a2ui-component="market-index-grid"] {
+    width: 100%;
+    flex: 1 1 100%;
+    gap: var(--openui-space-m-l) !important;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} [data-a2ui-market-index-grid-list] {
+    display: grid !important;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 14.5rem), 1fr));
+    gap: var(--openui-space-m-l) !important;
+    align-items: stretch;
+    width: 100%;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} [data-a2ui-market-index-grid-list] > .openui-card {
+    width: 100%;
+    min-width: 0;
+    height: auto !important;
+    align-self: start;
+    flex: 1 1 auto !important;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} [data-a2ui-component="market-index-card"] {
+    min-height: 7.25rem;
+    justify-content: flex-start;
+    gap: var(--openui-space-xs) !important;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} [data-a2ui-market-index-heading] {
+    border-bottom: 1px solid var(--openui-border-default);
+    padding-bottom: var(--openui-space-s);
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} [data-a2ui-market-index-name] {
+    line-height: 1.25;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} [data-a2ui-market-index-code] {
+    flex: 0 0 auto;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} [data-a2ui-market-index-value] {
+    margin-top: var(--openui-space-2xs);
+    line-height: 1.15;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} [data-a2ui-market-index-change-row] {
+    min-height: 1.5rem;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} [data-a2ui-market-index-meta],
+  ${OPENUI_SCOPE_SELECTOR} [data-a2ui-market-index-footnote] {
+    line-height: 1.35;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} [data-a2ui-component="finance-metric"] {
+    min-height: 6.5rem;
+    justify-content: space-between;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} [data-a2ui-finance-metric-value-row] {
+    line-height: 1.15;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} [data-a2ui-component="data-list"] {
+    width: 100%;
+    flex: 1 1 100%;
+    gap: var(--openui-space-s) !important;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} [data-a2ui-data-list-rows] {
+    width: 100%;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} [data-a2ui-data-list-row] {
+    grid-template-columns: max-content minmax(0, 1fr) max-content max-content;
+    column-gap: var(--openui-space-m);
+    row-gap: var(--openui-space-2xs);
+    min-height: 2.75rem;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} [data-a2ui-data-list-main] {
+    overflow: hidden;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} [data-a2ui-data-list-title] {
+    line-height: 1.35;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} [data-a2ui-data-list-value],
+  ${OPENUI_SCOPE_SELECTOR} [data-a2ui-data-list-meta] {
+    justify-self: end;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} [data-a2ui-component="market-breadth"] {
+    width: 100%;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} [data-a2ui-market-breadth-track] {
+    width: 100%;
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} [data-a2ui-market-breadth-bar="up"] {
+    background: var(--error-text);
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} [data-a2ui-market-breadth-bar="down"] {
+    background: var(--success-text);
+  }
+
+  ${OPENUI_SCOPE_SELECTOR} [data-a2ui-market-breadth-bar="flat"] {
+    background: var(--openui-border-default);
   }
 
   /* OpenUI chart roots sit inside anonymous flex wrappers that otherwise shrink
@@ -283,7 +437,7 @@ const GENERATIVE_UI_LAYOUT_CSS = `
     ${OPENUI_SCOPE_SELECTOR}
       :has(> :nth-child(3))
       > :not([class]):has(> .openui-tag):has(> :nth-child(2) .openui-markdown-renderer) {
-      flex-basis: min(100%, 14rem) !important;
+      flex-basis: min(100%, 15rem) !important;
     }
   }
 
@@ -310,6 +464,18 @@ const GENERATIVE_UI_LAYOUT_CSS = `
 
     ${OPENUI_SCOPE_SELECTOR} [data-a2ui-component="row"] > * {
       flex-basis: 100%;
+    }
+
+    ${OPENUI_SCOPE_SELECTOR} [data-a2ui-market-index-grid-list],
+    ${OPENUI_SCOPE_SELECTOR} [data-a2ui-data-list-row],
+    ${OPENUI_SCOPE_SELECTOR} [data-a2ui-market-breadth-stats] {
+      grid-template-columns: 1fr !important;
+    }
+
+    ${OPENUI_SCOPE_SELECTOR} [data-a2ui-data-list-value],
+    ${OPENUI_SCOPE_SELECTOR} [data-a2ui-data-list-meta] {
+      justify-self: start;
+      text-align: left !important;
     }
   }
 `;

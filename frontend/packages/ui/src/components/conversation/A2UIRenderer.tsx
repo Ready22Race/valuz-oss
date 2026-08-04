@@ -12,7 +12,7 @@ import {
 import * as OpenUI from "@openuidev/react-ui";
 import { Modal as OpenUIModal } from "@openuidev/react-ui/Modal";
 import { ChevronLeft, ChevronRight } from "lucide-react";
-import { type ReactNode, useMemo } from "react";
+import { type CSSProperties, type ReactNode, useMemo } from "react";
 import { z } from "zod/v3";
 
 export interface A2UIRendererProps {
@@ -48,6 +48,8 @@ const OPENUI_COMPONENT_NAMES = [
   "CodeBlock",
   "Col",
   "DatePicker",
+  "DataList",
+  "DataListItem",
   "Form",
   "FormControl",
   "Grid",
@@ -65,6 +67,10 @@ const OPENUI_COMPONENT_NAMES = [
   "ListItem",
   "MarkDownRenderer",
   "Markdown",
+  "FinanceMetric",
+  "MarketBreadth",
+  "MarketIndexCard",
+  "MarketIndexGrid",
   "Metric",
   "Modal",
   "Paragraph",
@@ -213,11 +219,19 @@ function OpenUIComponent({
         </StackBox>
       );
     case "Card":
+      return (
+        <CardBox variant={readVariant(props.variant)}>
+          {children}
+        </CardBox>
+      );
     case "Section":
       return (
-        <OpenUI.Card variant={readVariant(props.variant)} width="full">
+        <SectionBox
+          title={readText(props.title)}
+          description={readText(props.description ?? props.subtitle)}
+        >
           {children}
-        </OpenUI.Card>
+        </SectionBox>
       );
     case "CardHeader":
       return (
@@ -230,12 +244,17 @@ function OpenUIComponent({
     case "Paragraph":
     case "Heading":
     case "Title":
-    case "TextContent":
+    case "TextContent": {
+      const content =
+        props.text !== undefined || props.value !== undefined
+          ? readText(props.text ?? props.value)
+          : children;
       return (
-        <OpenUI.TextContent>
-          {readText(props.text ?? props.children ?? props.value)}
-        </OpenUI.TextContent>
+        <TextBlock size={readString(props.size) ?? defaultTextSizeForComponent(name)}>
+          {content}
+        </TextBlock>
       );
+    }
     case "Markdown":
     case "MarkDownRenderer":
       return (
@@ -262,12 +281,33 @@ function OpenUIComponent({
     case "Metric":
     case "KPI":
       return (
-        <OpenUI.Card variant="sunk" width="full">
-          <OpenUI.TextContent>{readText(props.label ?? props.title)}</OpenUI.TextContent>
-          <OpenUI.TextContent>
-            {readText(props.value ?? props.text)}
-          </OpenUI.TextContent>
-        </OpenUI.Card>
+        <MetricBox
+          label={readText(props.label ?? props.title)}
+          value={readText(props.value ?? props.text)}
+        />
+      );
+    case "DataList":
+    case "List":
+    case "ListBlock":
+      return (
+        <DataListBox props={props}>
+          {children}
+        </DataListBox>
+      );
+    case "DataListItem":
+    case "ListItem":
+      return <DataListRow item={readDataListItem(props)} />;
+    case "FinanceMetric":
+      return <FinanceMetricBox props={props} />;
+    case "MarketBreadth":
+      return <MarketBreadthBox props={props} />;
+    case "MarketIndexCard":
+      return <MarketIndexCardBox index={readMarketIndexItem(props)} />;
+    case "MarketIndexGrid":
+      return (
+        <MarketIndexGridBox props={props}>
+          {children}
+        </MarketIndexGridBox>
       );
     case "CodeBlock":
       return (
@@ -294,10 +334,12 @@ function OpenUIComponent({
       return <OpenUI.ImageGallery images={readImages(props.images)} />;
     case "Table":
       return <MappedTable props={props} buildChild={buildChild} />;
-    case "BarChart":
+    case "BarChart": {
+      const data = buildChartData(props);
+      if (!data.length) return null;
       return (
         <OpenUI.BarChartCondensed
-          data={buildChartData(props)}
+          data={data}
           categoryKey="category"
           variant={readString(props.variant) as never}
           xAxisLabel={readString(props.xLabel)}
@@ -305,10 +347,13 @@ function OpenUIComponent({
           isAnimationActive={false}
         />
       );
-    case "LineChart":
+    }
+    case "LineChart": {
+      const data = buildChartData(props);
+      if (!data.length) return null;
       return (
         <OpenUI.LineChartCondensed
-          data={buildChartData(props)}
+          data={data}
           categoryKey="category"
           variant={readString(props.variant) as never}
           xAxisLabel={readString(props.xLabel)}
@@ -316,10 +361,13 @@ function OpenUIComponent({
           isAnimationActive={false}
         />
       );
-    case "AreaChart":
+    }
+    case "AreaChart": {
+      const data = buildChartData(props);
+      if (!data.length) return null;
       return (
         <OpenUI.AreaChartCondensed
-          data={buildChartData(props)}
+          data={data}
           categoryKey="category"
           variant={readString(props.variant) as never}
           xAxisLabel={readString(props.xLabel)}
@@ -327,46 +375,60 @@ function OpenUIComponent({
           isAnimationActive={false}
         />
       );
-    case "HorizontalBarChart":
+    }
+    case "HorizontalBarChart": {
+      const data = buildChartData(props);
+      if (!data.length) return null;
       return (
         <OpenUI.HorizontalBarChart
-          data={buildChartData(props)}
+          data={data}
           categoryKey="category"
           variant={readString(props.variant) as never}
           isAnimationActive={false}
+          height={readNumber(props.height)}
         />
       );
-    case "RadarChart":
+    }
+    case "RadarChart": {
+      const data = buildChartData(props);
+      if (!data.length) return null;
       return (
         <OpenUI.RadarChart
-          data={buildChartData(props)}
+          data={data}
           categoryKey="category"
           variant={readString(props.variant) as never}
           isAnimationActive={false}
         />
       );
+    }
     case "PieChart":
       return <PieLikeChart Component={OpenUI.PieChart} props={props} />;
     case "RadialChart":
       return <PieLikeChart Component={OpenUI.RadialChart} props={props} />;
-    case "SingleStackedBarChart":
+    case "SingleStackedBarChart": {
+      const data = buildSliceData(props);
+      if (!data.length) return null;
       return (
         <OpenUI.SingleStackedBar
-          data={buildSliceData(props)}
+          data={data}
           categoryKey="category"
           dataKey="value"
           animated={false}
         />
       );
-    case "ScatterChart":
+    }
+    case "ScatterChart": {
+      const data = buildScatterData(props);
+      if (!data.length) return null;
       return (
         <OpenUI.ScatterChart
-          data={buildScatterData(props)}
+          data={data}
           xAxisDataKey="x"
           yAxisDataKey="y"
           isAnimationActive={false}
         />
       );
+    }
     case "Form":
       return (
         <div role="form" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -500,7 +562,7 @@ function OpenUIComponent({
         </OpenUIModal>
       );
     default:
-      return <OpenUI.TextContent>{readText(props.text ?? props.label ?? name)}</OpenUI.TextContent>;
+      return <TextBlock>{readText(props.text ?? props.label ?? name)}</TextBlock>;
   }
 }
 
@@ -536,6 +598,719 @@ function StackBox({
       {children}
     </div>
   );
+}
+
+function CardBox({
+  children,
+  variant,
+}: {
+  children: ReactNode;
+  variant: "card" | "clear" | "sunk";
+}) {
+  return (
+    <OpenUI.Card variant={variant} width="full">
+      <div
+        data-a2ui-card-content
+        style={{
+          display: "flex",
+          minWidth: 0,
+          flexDirection: "column",
+          gap: "var(--openui-space-m)",
+        }}
+      >
+        {children}
+      </div>
+    </OpenUI.Card>
+  );
+}
+
+function SectionBox({
+  children,
+  description,
+  title,
+}: {
+  children: ReactNode;
+  description?: string;
+  title?: string;
+}) {
+  return (
+    <section
+      data-a2ui-component="section"
+      style={{
+        display: "flex",
+        minWidth: 0,
+        flexDirection: "column",
+        gap: "var(--openui-space-m)",
+      }}
+    >
+      {title ? (
+        <OpenUI.CardHeader title={title} subtitle={description} />
+      ) : null}
+      {children}
+    </section>
+  );
+}
+
+function TextBlock({
+  children,
+  size = "default",
+}: {
+  children: ReactNode;
+  size?: string;
+}) {
+  return (
+    <OpenUI.TextContent variant="clear">
+      <span data-a2ui-text-size={size} style={textStyleForSize(size)}>
+        {children}
+      </span>
+    </OpenUI.TextContent>
+  );
+}
+
+function MetricBox({ label, value }: { label: string; value: string }) {
+  return (
+    <div
+      data-a2ui-component="metric"
+      style={{
+        display: "flex",
+        minWidth: 0,
+        flexDirection: "column",
+        gap: "var(--openui-space-2xs)",
+      }}
+    >
+      {label ? (
+        <span
+          data-a2ui-metric-label
+          style={{
+            color: "var(--openui-text-neutral-secondary)",
+            font: "var(--openui-text-label-sm)",
+            letterSpacing: 0,
+            overflowWrap: "anywhere",
+          }}
+        >
+          {label}
+        </span>
+      ) : null}
+      {value ? (
+        <span
+          data-a2ui-metric-value
+          style={{
+            color: "var(--openui-text-neutral-primary)",
+            font: "var(--openui-text-numbers-heading-md)",
+            fontVariantNumeric: "tabular-nums",
+            letterSpacing: 0,
+            overflowWrap: "anywhere",
+          }}
+        >
+          {value}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+type DataListItem = {
+  description: string;
+  meta: string;
+  rank: string;
+  title: string;
+  trend: string;
+  value: string;
+};
+
+function DataListBox({
+  children,
+  props,
+}: {
+  children: ReactNode;
+  props: Record<string, unknown>;
+}) {
+  const items = readDataListItems(props.items ?? props.rows ?? props.data);
+  const title = readText(props.title ?? props.label);
+  const description = readText(props.description ?? props.subtitle);
+
+  return (
+    <section
+      data-a2ui-component="data-list"
+      role="list"
+      style={{
+        display: "flex",
+        minWidth: 0,
+        width: "100%",
+        flexDirection: "column",
+        gap: "var(--openui-space-s)",
+      }}
+    >
+      {title ? <OpenUI.CardHeader title={title} subtitle={description} /> : null}
+      <div
+        data-a2ui-data-list-rows
+        style={{
+          display: "flex",
+          minWidth: 0,
+          flexDirection: "column",
+          borderTop: "1px solid var(--openui-border-default)",
+        }}
+      >
+        {items.length
+          ? items.map((item, index) => (
+              <DataListRow key={`${item.rank}-${item.title}-${index}`} item={item} />
+            ))
+          : children}
+      </div>
+    </section>
+  );
+}
+
+function DataListRow({ item }: { item: DataListItem }) {
+  const trend = inferTrend(item.trend || item.meta);
+
+  return (
+    <div
+      data-a2ui-data-list-row
+      data-a2ui-trend={trend}
+      role="listitem"
+      style={{
+        display: "grid",
+        minWidth: 0,
+        gridTemplateColumns: item.rank
+          ? "max-content minmax(0, 1fr) max-content max-content"
+          : "minmax(0, 1fr) max-content max-content",
+        gap: "var(--openui-space-s)",
+        alignItems: "center",
+        paddingBlock: "var(--openui-space-s)",
+        borderBottom: "1px solid var(--openui-border-default)",
+      }}
+    >
+      {item.rank ? (
+        <span
+          data-a2ui-data-list-rank
+          style={{
+            color: "var(--openui-text-neutral-secondary)",
+            font: "var(--openui-text-label-sm)",
+            fontVariantNumeric: "tabular-nums",
+            minWidth: "1.5rem",
+          }}
+        >
+          {item.rank}
+        </span>
+      ) : null}
+      <span
+        data-a2ui-data-list-main
+        style={{
+          display: "flex",
+          minWidth: 0,
+          flexDirection: "column",
+          gap: "var(--openui-space-2xs)",
+        }}
+      >
+        <span
+          data-a2ui-data-list-title
+          style={{
+            color: "var(--openui-text-neutral-primary)",
+            font: "var(--openui-text-body-default-heavy)",
+            overflowWrap: "anywhere",
+          }}
+        >
+          {item.title}
+        </span>
+        {item.description ? (
+          <span
+            data-a2ui-data-list-description
+            style={{
+              color: "var(--openui-text-neutral-secondary)",
+              font: "var(--openui-text-label-sm)",
+              overflowWrap: "anywhere",
+            }}
+          >
+            {item.description}
+          </span>
+        ) : null}
+      </span>
+      {item.value ? (
+        <span
+          data-a2ui-data-list-value
+          style={{
+            color: "var(--openui-text-neutral-secondary)",
+            font: "var(--openui-text-label-sm)",
+            fontVariantNumeric: "tabular-nums",
+            textAlign: "right",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {item.value}
+        </span>
+      ) : null}
+      {item.meta ? (
+        <span
+          data-a2ui-data-list-meta
+          style={{
+            color: "var(--openui-text-neutral-primary)",
+            font: "var(--openui-text-label-sm)",
+            fontVariantNumeric: "tabular-nums",
+            textAlign: "right",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {item.meta}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+type MarketIndexItem = {
+  asOf: string;
+  change: string;
+  changePct: string;
+  code: string;
+  latest: string;
+  name: string;
+  source: string;
+  trend: string;
+  turnover: string;
+};
+
+function MarketIndexGridBox({
+  children,
+  props,
+}: {
+  children: ReactNode;
+  props: Record<string, unknown>;
+}) {
+  const items = readMarketIndexItems(props.indices ?? props.items ?? props.data);
+  const title = readText(props.title ?? props.label);
+  const description = readText(props.description ?? props.subtitle);
+
+  return (
+    <section
+      data-a2ui-component="market-index-grid"
+      style={{
+        display: "flex",
+        minWidth: 0,
+        width: "100%",
+        flexDirection: "column",
+        gap: "var(--openui-space-m)",
+      }}
+    >
+      {title ? <OpenUI.CardHeader title={title} subtitle={description} /> : null}
+      <div
+        data-a2ui-market-index-grid-list
+        style={{
+          display: "grid",
+          gridTemplateColumns:
+            "repeat(auto-fit, minmax(min(100%, 14.5rem), 1fr))",
+          gap: "var(--openui-space-m-l)",
+          alignItems: "stretch",
+        }}
+      >
+        {items.length
+          ? items.map((item, index) => (
+              <MarketIndexCardBox
+                key={`${item.name}-${item.code}-${index}`}
+                index={item}
+              />
+            ))
+          : children}
+      </div>
+    </section>
+  );
+}
+
+function MarketIndexCardBox({ index }: { index: MarketIndexItem }) {
+  const trend = inferTrend(index.trend || index.changePct || index.change);
+
+  return (
+    <OpenUI.Card variant="card" width="full">
+      <article
+        data-a2ui-component="market-index-card"
+        data-a2ui-trend={trend}
+        style={{
+          display: "flex",
+          minHeight: "100%",
+          minWidth: 0,
+          flexDirection: "column",
+          gap: "var(--openui-space-s)",
+        }}
+      >
+        <div
+          data-a2ui-market-index-heading
+          style={{
+            display: "flex",
+            minWidth: 0,
+            alignItems: "baseline",
+            justifyContent: "space-between",
+            gap: "var(--openui-space-s)",
+          }}
+        >
+          <span
+            data-a2ui-market-index-name
+            style={{
+              color: "var(--openui-text-neutral-primary)",
+              font: "var(--openui-text-label-default-heavy)",
+              overflowWrap: "anywhere",
+            }}
+          >
+            {index.name || "指数"}
+          </span>
+          {index.code ? (
+            <span
+              data-a2ui-market-index-code
+              style={{
+                color: "var(--openui-text-neutral-secondary)",
+                font: "var(--openui-text-label-sm)",
+                fontVariantNumeric: "tabular-nums",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {index.code}
+            </span>
+          ) : null}
+        </div>
+        {index.latest ? (
+          <div
+            data-a2ui-market-index-value
+            style={{
+              color: "var(--openui-text-neutral-primary)",
+              font: "var(--openui-text-numbers-heading-md)",
+              fontVariantNumeric: "tabular-nums",
+              letterSpacing: 0,
+            }}
+          >
+            {index.latest}
+          </div>
+        ) : null}
+        {index.changePct || index.change ? (
+          <div
+            data-a2ui-market-index-change-row
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: "var(--openui-space-xs)",
+              alignItems: "center",
+              marginTop: "auto",
+            }}
+          >
+            {index.changePct ? (
+              <span
+                data-a2ui-market-index-change
+                style={{
+                  color: "var(--openui-text-neutral-primary)",
+                  font: "var(--openui-text-body-default-heavy)",
+                  fontVariantNumeric: "tabular-nums",
+                }}
+              >
+                {index.changePct}
+              </span>
+            ) : null}
+            {index.change ? (
+              <span
+                data-a2ui-market-index-delta
+                style={{
+                  color: "var(--openui-text-neutral-secondary)",
+                  font: "var(--openui-text-label-sm)",
+                  fontVariantNumeric: "tabular-nums",
+                }}
+              >
+                涨跌额 {index.change}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+        {index.turnover ? (
+          <div
+            data-a2ui-market-index-meta
+            style={{
+              color: "var(--openui-text-neutral-secondary)",
+              font: "var(--openui-text-label-sm)",
+              overflowWrap: "anywhere",
+            }}
+          >
+            成交额 {index.turnover}
+          </div>
+        ) : null}
+        {index.asOf || index.source ? (
+          <div
+            data-a2ui-market-index-footnote
+            style={{
+              color: "var(--openui-text-neutral-tertiary)",
+              font: "var(--openui-text-label-sm)",
+              overflowWrap: "anywhere",
+            }}
+          >
+            {[index.asOf, index.source].filter(Boolean).join(" · ")}
+          </div>
+        ) : null}
+      </article>
+    </OpenUI.Card>
+  );
+}
+
+function FinanceMetricBox({ props }: { props: Record<string, unknown> }) {
+  const value = readText(props.value ?? props.latest ?? props.text);
+  const unit = readText(props.unit);
+  const change =
+    readText(props.changePct ?? props.change_pct ?? props.pct) ||
+    readText(props.change);
+  const trend = inferTrend(readText(props.trend) || change);
+
+  return (
+    <OpenUI.Card variant="card" width="full">
+      <article
+        data-a2ui-component="finance-metric"
+        data-a2ui-trend={trend}
+        style={{
+          display: "flex",
+          minHeight: "100%",
+          minWidth: 0,
+          flexDirection: "column",
+          gap: "var(--openui-space-xs)",
+        }}
+      >
+        <span
+          data-a2ui-finance-metric-label
+          style={{
+            color: "var(--openui-text-neutral-primary)",
+            font: "var(--openui-text-label-default-heavy)",
+            overflowWrap: "anywhere",
+          }}
+        >
+          {readText(props.label ?? props.title)}
+        </span>
+        {readText(props.description ?? props.subtitle) ? (
+          <span
+            data-a2ui-finance-metric-description
+            style={{
+              color: "var(--openui-text-neutral-secondary)",
+              font: "var(--openui-text-label-sm)",
+            }}
+          >
+            {readText(props.description ?? props.subtitle)}
+          </span>
+        ) : null}
+        <div
+          data-a2ui-finance-metric-value-row
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            alignItems: "baseline",
+            gap: "var(--openui-space-2xs)",
+            marginTop: "var(--openui-space-xs)",
+          }}
+        >
+          <span
+            data-a2ui-finance-metric-value
+            style={{
+              color: "var(--openui-text-neutral-primary)",
+              font: "var(--openui-text-numbers-heading-md)",
+              fontVariantNumeric: "tabular-nums",
+              letterSpacing: 0,
+            }}
+          >
+            {value}
+          </span>
+          {unit ? (
+            <span
+              data-a2ui-finance-metric-unit
+              style={{
+                color: "var(--openui-text-neutral-secondary)",
+                font: "var(--openui-text-label-sm)",
+              }}
+            >
+              {unit}
+            </span>
+          ) : null}
+        </div>
+        {change ? (
+          <span
+            data-a2ui-finance-metric-change
+            style={{
+              color: "var(--openui-text-neutral-secondary)",
+              font: "var(--openui-text-label-sm)",
+              fontVariantNumeric: "tabular-nums",
+            }}
+          >
+            {change}
+          </span>
+        ) : null}
+      </article>
+    </OpenUI.Card>
+  );
+}
+
+function MarketBreadthBox({ props }: { props: Record<string, unknown> }) {
+  const up = readLooseNumber(props.up ?? props.rise ?? props.gainers) ?? 0;
+  const down = readLooseNumber(props.down ?? props.fall ?? props.losers) ?? 0;
+  const flat = readLooseNumber(props.flat ?? props.unchanged) ?? 0;
+  const total = readLooseNumber(props.total) ?? up + down + flat;
+  const source = readText(props.source);
+  const upShare = total ? up / total : 0;
+  const downShare = total ? down / total : 0;
+  const flatShare = total ? flat / total : 0;
+
+  return (
+    <OpenUI.Card variant="card" width="full">
+      <article
+        data-a2ui-component="market-breadth"
+        style={{
+          display: "flex",
+          minWidth: 0,
+          flexDirection: "column",
+          gap: "var(--openui-space-m)",
+        }}
+      >
+        <div
+          data-a2ui-market-breadth-heading
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            alignItems: "baseline",
+            justifyContent: "space-between",
+            gap: "var(--openui-space-xs)",
+          }}
+        >
+          <span
+            style={{
+              color: "var(--openui-text-neutral-primary)",
+              font: "var(--openui-text-label-default-heavy)",
+            }}
+          >
+            {readText(props.title ?? props.label) || "涨跌分布"}
+          </span>
+          <span
+            style={{
+              color: "var(--openui-text-neutral-secondary)",
+              font: "var(--openui-text-label-sm)",
+              fontVariantNumeric: "tabular-nums",
+            }}
+          >
+            合计 {formatCount(total)}
+          </span>
+        </div>
+        <div
+          data-a2ui-market-breadth-track
+          style={{
+            display: "flex",
+            minHeight: 8,
+            overflow: "hidden",
+            borderRadius: 999,
+            background: "var(--openui-background-neutral-muted)",
+          }}
+        >
+          <span
+            data-a2ui-market-breadth-bar="up"
+            style={{ flex: `${upShare} 1 0` }}
+          />
+          <span
+            data-a2ui-market-breadth-bar="down"
+            style={{ flex: `${downShare} 1 0` }}
+          />
+          <span
+            data-a2ui-market-breadth-bar="flat"
+            style={{ flex: `${flatShare} 1 0` }}
+          />
+        </div>
+        <div
+          data-a2ui-market-breadth-stats
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+            gap: "var(--openui-space-s)",
+          }}
+        >
+          <BreadthStat label="上涨" value={up} />
+          <BreadthStat label="下跌" value={down} />
+          <BreadthStat label="平盘" value={flat} />
+        </div>
+        {source ? (
+          <div
+            data-a2ui-market-breadth-source
+            style={{
+              color: "var(--openui-text-neutral-secondary)",
+              font: "var(--openui-text-label-sm)",
+            }}
+          >
+            数据来源：{source}
+          </div>
+        ) : null}
+      </article>
+    </OpenUI.Card>
+  );
+}
+
+function BreadthStat({ label, value }: { label: string; value: number }) {
+  return (
+    <span
+      style={{
+        display: "flex",
+        minWidth: 0,
+        flexDirection: "column",
+        gap: "var(--openui-space-2xs)",
+      }}
+    >
+      <span
+        style={{
+          color: "var(--openui-text-neutral-secondary)",
+          font: "var(--openui-text-label-sm)",
+        }}
+      >
+        {label} {formatCount(value)}
+      </span>
+    </span>
+  );
+}
+
+function defaultTextSizeForComponent(name: string): string {
+  if (name === "Heading" || name === "Title") return "large-heavy";
+  return "default";
+}
+
+function textStyleForSize(size: string): CSSProperties {
+  const base: CSSProperties = {
+    display: "block",
+    minWidth: 0,
+    overflowWrap: "anywhere",
+    letterSpacing: 0,
+  };
+
+  switch (size) {
+    case "small":
+      return {
+        ...base,
+        color: "var(--openui-text-neutral-secondary)",
+        font: "var(--openui-text-body-sm)",
+      };
+    case "small-heavy":
+      return {
+        ...base,
+        color: "var(--openui-text-neutral-primary)",
+        font: "var(--openui-text-body-sm-heavy)",
+      };
+    case "medium-heavy":
+      return {
+        ...base,
+        color: "var(--openui-text-neutral-primary)",
+        font: "var(--openui-text-body-default-heavy)",
+        fontVariantNumeric: "tabular-nums",
+      };
+    case "large":
+      return {
+        ...base,
+        color: "var(--openui-text-neutral-primary)",
+        font: "var(--openui-text-body-lg)",
+      };
+    case "large-heavy":
+      return {
+        ...base,
+        color: "var(--openui-text-neutral-primary)",
+        font: "var(--openui-text-heading-md)",
+      };
+    default:
+      return {
+        ...base,
+        color: "var(--openui-text-neutral-primary)",
+        font: "var(--openui-text-body-default)",
+      };
+  }
 }
 
 function MappedTable({
@@ -707,9 +1482,12 @@ function PieLikeChart({
   Component: typeof OpenUI.PieChart | typeof OpenUI.RadialChart;
   props: Record<string, unknown>;
 }) {
+  const data = buildSliceData(props);
+  if (!data.length) return null;
+
   return (
     <Component
-      data={buildSliceData(props)}
+      data={data}
       categoryKey="category"
       dataKey="value"
       variant={readString(props.variant) as never}
@@ -998,6 +1776,100 @@ function readTags(value: unknown): string[] {
     .filter(Boolean);
 }
 
+function readDataListItems(value: unknown): DataListItem[] {
+  return toArray(value)
+    .map((item) => readDataListItem(item))
+    .filter((item) => item.title || item.value || item.meta);
+}
+
+function readDataListItem(value: unknown): DataListItem {
+  if (typeof value === "string" || typeof value === "number") {
+    return {
+      description: "",
+      meta: "",
+      rank: "",
+      title: readText(value),
+      trend: "",
+      value: "",
+    };
+  }
+
+  const record = isRecord(value)
+    ? isA2UIComponent(value)
+      ? mergeProps(value)
+      : value
+    : {};
+  const meta =
+    readTextFromKeys(record, [
+      "meta",
+      "changePct",
+      "change_pct",
+      "pct",
+      "percent",
+      "delta",
+    ]) || readTextFromKeys(record, ["change"]);
+
+  return {
+    description: readTextFromKeys(record, [
+      "description",
+      "subtitle",
+      "subTitle",
+      "details",
+    ]),
+    meta,
+    rank: readTextFromKeys(record, ["rank", "index", "position", "no"]),
+    title: readTextFromKeys(record, ["title", "label", "name", "text"]),
+    trend: readTextFromKeys(record, ["trend", "direction"]) || inferTrend(meta),
+    value: readTextFromKeys(record, ["value", "amount", "score", "metric"]),
+  };
+}
+
+function readMarketIndexItems(value: unknown): MarketIndexItem[] {
+  return toArray(value)
+    .filter(isRecord)
+    .map((item) => readMarketIndexItem(item));
+}
+
+function readMarketIndexItem(value: unknown): MarketIndexItem {
+  const record = isRecord(value)
+    ? isA2UIComponent(value)
+      ? mergeProps(value)
+      : value
+    : {};
+  const changePct = readTextFromKeys(record, [
+    "changePct",
+    "change_pct",
+    "pct",
+    "percent",
+    "changePercent",
+  ]);
+  const change = readTextFromKeys(record, ["change", "delta", "changeValue"]);
+
+  return {
+    asOf: readTextFromKeys(record, ["asOf", "time", "timestamp"]),
+    change,
+    changePct,
+    code: readTextFromKeys(record, ["code", "symbol", "ticker"]),
+    latest: readTextFromKeys(record, ["latest", "value", "price", "last"]),
+    name: readTextFromKeys(record, ["name", "label", "title"]),
+    source: readTextFromKeys(record, ["source"]),
+    trend: readTextFromKeys(record, ["trend", "direction"]) || inferTrend(changePct || change),
+    turnover: readTextFromKeys(record, ["turnover", "amount", "volume"]),
+  };
+}
+
+function readTextFromKeys(
+  record: Record<string, unknown>,
+  keys: string[],
+): string {
+  for (const key of keys) {
+    if (!(key in record)) continue;
+    const text = readText(record[key]);
+    if (text) return text;
+  }
+  return "";
+}
+
 function renderCell(value: unknown, buildChild: BuildChild): ReactNode {
   if (typeof value === "string" && value.startsWith("#")) return buildChild(value.slice(1));
   if (typeof value === "string") return value;
@@ -1017,6 +1889,9 @@ function renderCell(value: unknown, buildChild: BuildChild): ReactNode {
 }
 
 function buildChartData(props: Record<string, unknown>) {
+  const rowsFromSeriesData = buildRowsFromSeriesData(props.series ?? props.children);
+  if (rowsFromSeriesData.length) return rowsFromSeriesData;
+
   const labels = toArray(props.labels).map(readText);
   const series = readSeries(props.series);
   return labels.map((label, index) => {
@@ -1028,6 +1903,29 @@ function buildChartData(props: Record<string, unknown>) {
   });
 }
 
+function buildRowsFromSeriesData(value: unknown): Record<string, string | number>[] {
+  const rows = new Map<string, Record<string, string | number>>();
+  for (const item of toArray(value).filter(isRecord)) {
+    const record = isA2UIComponent(item) ? mergeProps(item) : item;
+    const seriesKey = readText(
+      record.category ?? record.name ?? record.label ?? "value",
+    );
+    const points = toArray(record.data ?? record.points);
+    let consumedNamedPoint = false;
+    for (const point of points) {
+      if (!isRecord(point)) continue;
+      const category = readText(point.category ?? point.name ?? point.label);
+      if (!category) continue;
+      const row = rows.get(category) ?? { category };
+      row[seriesKey] = readNumber(point.value ?? point.y ?? point.data) ?? 0;
+      rows.set(category, row);
+      consumedNamedPoint = true;
+    }
+    if (!consumedNamedPoint) continue;
+  }
+  return Array.from(rows.values());
+}
+
 function buildSliceData(props: Record<string, unknown>) {
   const labels = toArray(props.labels).map(readText);
   const values = toArray(props.values).map((value) => Number(value) || 0);
@@ -1037,12 +1935,15 @@ function buildSliceData(props: Record<string, unknown>) {
       value: values[index] ?? 0,
     }));
   }
-  return toArray(props.slices)
+  return toArray(props.slices ?? props.children)
     .filter(isRecord)
-    .map((slice) => ({
-      category: readText(slice.category ?? slice.label),
-      value: readNumber(slice.value) ?? 0,
-    }));
+    .map((slice) => {
+      const record = isA2UIComponent(slice) ? mergeProps(slice) : slice;
+      return {
+        category: readText(record.category ?? record.label ?? record.name),
+        value: readNumber(record.value ?? record.data) ?? 0,
+      };
+    });
 }
 
 function buildScatterData(props: Record<string, unknown>) {
@@ -1090,11 +1991,21 @@ function normalizeCatalogId(value: unknown): string {
 function normalizeOpenUIComponentName(value: unknown): string {
   if (typeof value !== "string" || !value) return "TextContent";
   const aliases: Record<string, string> = {
+    Breadth: "MarketBreadth",
+    FinancialMetric: "FinanceMetric",
     Heading: "TextContent",
+    IndexCard: "MarketIndexCard",
+    IndexGrid: "MarketIndexGrid",
+    IndustryRankingList: "DataList",
     KPI: "Metric",
+    Leaderboard: "DataList",
+    MarketIndices: "MarketIndexGrid",
     Markdown: "MarkDownRenderer",
     Paragraph: "TextContent",
-    Section: "Card",
+    RankedList: "DataList",
+    RankingList: "DataList",
+    SectorRankingList: "DataList",
+    StockIndexCard: "MarketIndexCard",
     Title: "TextContent",
   };
   return aliases[value] ?? value;
@@ -1102,7 +2013,11 @@ function normalizeOpenUIComponentName(value: unknown): string {
 
 function structuralKeysForComponent(value: unknown): string[] {
   const name = normalizeOpenUIComponentName(value);
-  if (["Stack", "Row", "Grid", "Card"].includes(name)) return ["children"];
+  if (
+    ["Stack", "Row", "Grid", "Card", "Section", "DataList", "MarketIndexGrid"].includes(
+      name,
+    )
+  ) return ["children"];
   if (name === "Form") return ["fields", "buttons", "children"];
   if (name === "FormControl") return ["children"];
   if (name === "Buttons") return ["buttons", "children"];
@@ -1147,6 +2062,15 @@ function readNumber(value: unknown): number | undefined {
   if (typeof value === "number") return value;
   if (typeof value === "string" && value.trim()) {
     const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
+
+function readLooseNumber(value: unknown): number | undefined {
+  if (typeof value === "number") return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value.replace(/,/g, ""));
     return Number.isFinite(parsed) ? parsed : undefined;
   }
   return undefined;
@@ -1207,6 +2131,33 @@ function readTagVariant(
     value === "neutral"
     ? value
     : undefined;
+}
+
+function inferTrend(value: string): "up" | "down" | "flat" {
+  const normalized = value.trim().toLowerCase();
+  if (
+    normalized.startsWith("+") ||
+    normalized === "up" ||
+    normalized === "rise" ||
+    normalized === "positive"
+  ) {
+    return "up";
+  }
+  if (
+    normalized.startsWith("-") ||
+    normalized === "down" ||
+    normalized === "fall" ||
+    normalized === "negative"
+  ) {
+    return "down";
+  }
+  return "flat";
+}
+
+function formatCount(value: number): string {
+  return new Intl.NumberFormat("en-US", {
+    maximumFractionDigits: 2,
+  }).format(value);
 }
 
 function gapToCss(value: string): string {
