@@ -206,21 +206,21 @@ class Settings(BaseSettings):
 
     # ── Logging paths ────────────────────────────────────────────────
     # ``infra.logging.configure_logging`` writes structured JSON lines
-    # to ``log_file`` via a RotatingFileHandler so the desktop ``服务``
+    # to ``log_file_path`` via a RotatingFileHandler so the desktop ``服务``
     # panel can display + offer "open in editor" without depending on
     # whichever shell launched the process. Defaults to ``logs/`` under the
     # SHARED data root (``{user_id}``-stripped — logs are process-wide, not
     # user-owned), so pointing VALUZ_DATA_DIR elsewhere moves the logs with
     # it and a dev/test backend can't write into the packaged app's logs by
-    # omission. Override with VALUZ_LOG_DIR to place them elsewhere.
-    # ``log_dir`` is created on first write — we don't ``mkdir`` here so the
-    # field stays pure.
-    log_dir: Path = Field(default_factory=lambda data: shared_root_of(data["data_dir"]) / "logs")
-    log_filename: str = "backend.log"
-
-    @property
-    def log_file(self) -> Path:
-        return self.log_dir / self.log_filename
+    # omission. Override the complete path with VALUZ_LOG_FILE_PATH; the former
+    # VALUZ_LOG_DIR / VALUZ_LOG_FILENAME split is not supported.
+    # The parent directory is created on first write — we don't ``mkdir`` here
+    # so the field stays pure.
+    log_file_path: Path = Field(
+        default_factory=lambda data: shared_root_of(data["data_dir"])
+        / "logs"
+        / "backend.log",
+    )
 
     # Optional legacy skill-creator staging directory. May contain
     # ``{user_id}``; when unset it lives under ``data_dir(user_id)``.
