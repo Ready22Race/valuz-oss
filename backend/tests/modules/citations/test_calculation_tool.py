@@ -172,6 +172,67 @@ async def test_calculation_tool_preserves_structured_collection_addresses() -> N
     assert registry.register_tool_result(result.content, tool_name="citation_calculate") == 1
 
 
+async def test_calculation_tool_accepts_explicit_user_input_provenance() -> None:
+    result = await _citation_calculate_handler(
+        {
+            "expression": "((price / cost) - 1)",
+            "inputs": [
+                {
+                    "name": "price",
+                    "value": "193.775",
+                    "unit": "USD",
+                    "evidenceHandle": "ev_price_12345678",
+                },
+                {
+                    "name": "cost",
+                    "value": "150",
+                    "unit": "USD",
+                    "origin": "user-input",
+                },
+            ],
+            "unit": "%",
+            "decimalPlaces": 1,
+            "metric": "return_since_cost",
+        },
+        ExecContext(session_id="s1"),
+    )
+
+    assert result.is_error is False
+    payload = json.loads(result.content)
+    assert payload["result"] == "29.2"
+    inputs = payload["_valuz_evidence"]["evidence"]["inputs"]
+    assert inputs == [
+        {
+            "name": "price",
+            "citationId": "ev_price_12345678",
+            "value": "193.775",
+            "unit": "USD",
+        },
+        {
+            "name": "cost",
+            "origin": "user-input",
+            "value": "150",
+            "unit": "USD",
+        },
+    ]
+    registry = EvidenceRegistry()
+    assert registry.register_tool_result(result.content, tool_name="citation_calculate") == 1
+
+
+async def test_calculation_tool_rejects_unattributed_input() -> None:
+    result = await _citation_calculate_handler(
+        {
+            "expression": "cost * 1.2",
+            "inputs": [{"name": "cost", "value": "150", "unit": "USD"}],
+            "unit": "USD",
+        },
+        ExecContext(session_id="s1"),
+    )
+
+    assert result.is_error is True
+    assert "invalid_input_origin" in result.content
+
+
 def test_calculation_tool_is_available_to_every_session() -> None:
     (tool,) = build_citation_calculation_tool_defs()
     assert tool.name == "citation_calculate"

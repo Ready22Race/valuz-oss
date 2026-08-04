@@ -8,16 +8,11 @@ import time
 from typing import Any, cast
 
 from langchain.agents.middleware.types import ToolCallRequest
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import ToolMessage
 from src.core.citation import EvidenceRegistry
-from src.core.citation_research_budget import (
-    CitationResearchBudget,
-    is_stable_general_knowledge_query,
-)
 from src.core.mcp_source_metadata import MCP_SOURCE_TRANSPORT_KEY
 from src.runtimes.deepagents.middleware import (
     CitationEvidenceCompactionMiddleware,
-    ResearchToolBudgetMiddleware,
     ToolErrorTolerantMiddleware,
     _canonical_metric_for_factor_formula,
     citation_artifact_content,
@@ -316,112 +311,6 @@ async def test_indexed_chunks_gain_evidence_before_deepagents_compaction() -> No
     assert private is not None
     registry = EvidenceRegistry()
     assert registry.register_tool_result(private, trusted_private=True) == 1
-
-
-async def test_singular_kb_document_scope_is_normalized_before_provider_call() -> None:
-    middleware = ResearchToolBudgetMiddleware()
-    middleware.before_agent(None, None)
-    handled_args: list[dict[str, Any]] = []
-
-    class Request:
-        def __init__(self, tool_call: dict[str, Any]) -> None:
-            self.tool_call = tool_call
-
-        def override(self, **updates: Any) -> Request:
-            return Request(updates.get("tool_call", self.tool_call))
-
-    async def handler(request: ToolCallRequest) -> ToolMessage:
-        handled_args.append(dict(request.tool_call["args"]))
-        return ToolMessage(
-            content=json.dumps({"chunks": []}),
-            tool_call_id=request.tool_call["id"],
-            name=request.tool_call["name"],
-        )
-
-    await middleware.awrap_tool_call(
-        cast(
-            ToolCallRequest,
-            Request(
-                {
-                    "id": "kb-singular",
-                    "name": "kb_search",
-                    "args": {"doc_id": "sk-q2", "query": "operating cash flow"},
-                }
-            ),
-        ),
-        handler,
-    )
-
-    assert handled_args == [{"query": "operating cash flow", "doc_ids": ["sk-q2"]}]
-
-
-async def test_scoped_kb_search_has_its_own_budget_for_every_document_type() -> None:
-    middleware = ResearchToolBudgetMiddleware()
-    middleware.before_agent(None, None)
-    handled: list[str] = []
-
-    class Request:
-        def __init__(self, tool_call: dict[str, Any]) -> None:
-            self.tool_call = tool_call
-
-        def override(self, **updates: Any) -> Request:
-            return Request(updates.get("tool_call", self.tool_call))
-
-    async def handler(request: ToolCallRequest) -> ToolMessage:
-        handled.append(str(request.tool_call["id"]))
-        return ToolMessage(
-            content="result",
-            tool_call_id=request.tool_call["id"],
-            name=request.tool_call["name"],
-        )
-
-    for index in range(6):
-        result = await middleware.awrap_tool_call(
-            cast(
-                ToolCallRequest,
-                Request(
-                    {
-                        "id": f"discovery-{index}",
-                        "name": "news_search",
-                        "args": {"query": f"candidate {index}"},
-                    }
-                ),
-            ),
-            handler,
-        )
-        assert result.status != "error"
-
-    async def search_document(doc_id: str, call_id: str) -> ToolMessage:
-        return cast(
-            ToolMessage,
-            await middleware.awrap_tool_call(
-                cast(
-                    ToolCallRequest,
-                    Request(
-                        {
-                            "id": call_id,
-                            "name": "kb_search",
-                            "args": {
-                                "doc_ids": [doc_id],
-                                "query": "revenue cash flow",
-                            },
-                        }
-                    ),
-                ),
-                handler,
-            ),
-        )
-
-    first_doc = await search_document("report-a", "kb-report-a")
-    second_doc = await search_document("report-b", "kb-report-b")
-    repeated = await search_document("report-a", "kb-report-a-repeat")
-
-    assert first_doc.status != "error"
-    assert second_doc.status != "error"
-    assert repeated.status == "error"
-    assert "already had its one targeted indexed search" in str(repeated.content)
-    assert "kb-report-a" in handled
-    assert "kb-report-b" in handled
 
 
 async def test_compaction_does_not_register_out_of_scope_indexed_chunks() -> None:
@@ -812,12 +701,10 @@ async def test_reportify_discovery_metadata_stays_non_citable() -> None:
     assert isinstance(result, ToolMessage)
     assert isinstance(result.content, str)
     visible_payload = json.loads(result.content)
+    assert visible_payload["docs"] == payload["docs"]
     assert "evidenceHandle" not in visible_payload["docs"][0]
     assert "_valuz_evidence_hint" not in visible_payload
-    assert visible_payload["_valuz_discovery"]["citationEvidence"] == (
-        "original-indexed-chunk-required"
-    )
-    assert visible_payload["_valuz_discovery"]["originalDocumentPreferred"] is True
+    assert "_valuz_discovery" not in visible_payload
     assert citation_artifact_content(result) is None
     registry = EvidenceRegistry()
     assert registry.register_tool_result(result.content, tool_name="reports_search") == 0
@@ -1025,7 +912,7 @@ async def test_kb_search_exact_chunks_survive_stale_non_citable_metadata() -> No
     assert evidence["locator"]["chunkId"] == "chunk-7"
 
 
-async def test_discovery_search_summaries_are_bounded_for_model_history() -> None:
+async def test_discovery_search_summaries_preserve_provider_content_and_order() -> None:
     payload = {
         "docs": [
             {
@@ -1064,18 +951,10 @@ async def test_discovery_search_summaries_are_bounded_for_model_history() -> Non
 
     assert isinstance(result, ToolMessage)
     compacted = json.loads(result.content[0]["text"])
-    assert len(compacted["docs"]) == 4
-    assert len(compacted["docs"][0]["summary"]) <= 361
+    assert len(compacted["docs"]) == 12
+    assert compacted["docs"][0]["summary"] == payload["docs"][0]["summary"]
     assert compacted["docs"][0]["evidenceHandle"].startswith("ev_summary_")
-    assert compacted["_valuz_discovery"] == {
-        "returned": 12,
-        "shown": 4,
-        "filteredOut": 0,
-        "duplicatesRemoved": 0,
-        "summariesTruncated": True,
-        "citationEvidence": "summary-fallback",
-        "originalDocumentPreferred": True,
-    }
+    assert "_valuz_discovery" not in compacted
     private_content = citation_artifact_content(result)
     assert private_content is not None
     assert len(emitted) == 1
@@ -1090,7 +969,7 @@ async def test_discovery_search_summaries_are_bounded_for_model_history() -> Non
             tool_name="news_search",
             trusted_private=True,
         )
-        == 4
+        == 12
     )
 
 
@@ -1115,12 +994,13 @@ async def test_discovery_compaction_uses_request_name_when_tool_message_omits_it
 
     assert isinstance(result, ToolMessage)
     compacted = json.loads(str(result.content))
-    assert compacted["_valuz_discovery"]["citationEvidence"] == "summary-fallback"
-    assert len(compacted["docs"][0]["summary"]) <= 361
+    assert "_valuz_discovery" not in compacted
+    assert len(compacted["docs"][0]["summary"]) == 2_000
+    assert compacted["docs"][0]["evidenceHandle"].startswith("ev_summary_")
     assert citation_artifact_content(result) is not None
 
 
-async def test_transcript_discovery_excludes_secondary_company_mentions() -> None:
+async def test_transcript_discovery_does_not_filter_secondary_company_mentions() -> None:
     payload = {
         "docs": [
             {
@@ -1180,15 +1060,12 @@ async def test_transcript_discovery_excludes_secondary_company_mentions() -> Non
     )
 
     compacted = json.loads(result.content[0]["text"])
-    assert [doc["doc_id"] for doc in compacted["docs"]] == ["msft-q1"]
-    assert "summary" not in compacted["docs"][0]
-    assert compacted["_valuz_discovery"]["filteredOut"] == 1
-    assert compacted["_valuz_discovery"]["duplicatesRemoved"] == 0
-    assert compacted["_valuz_discovery"]["citationEvidence"] == ("original-indexed-chunk-required")
+    assert compacted["docs"] == payload["docs"]
+    assert "_valuz_discovery" not in compacted
     assert citation_artifact_content(result) is None
 
 
-async def test_transcript_discovery_collapses_duplicate_issuer_period_rows() -> None:
+async def test_transcript_discovery_preserves_duplicate_provider_rows() -> None:
     common = {
         "title": "Microsoft(MSFT) - 2026 Q1 - Earnings Call Transcript",
         "summary": "Azure revenue grew 40% in the quarter.",
@@ -1233,10 +1110,12 @@ async def test_transcript_discovery_collapses_duplicate_issuer_period_rows() -> 
     result = await CitationEvidenceCompactionMiddleware().awrap_tool_call(request, handler)
 
     compacted = json.loads(str(result.content))
-    assert [doc["doc_id"] for doc in compacted["docs"]] == ["msft-q1-first"]
-    assert "summary" not in compacted["docs"][0]
-    assert compacted["_valuz_discovery"]["filteredOut"] == 0
-    assert compacted["_valuz_discovery"]["duplicatesRemoved"] == 1
+    assert [doc["doc_id"] for doc in compacted["docs"]] == [
+        "msft-q1-first",
+        "msft-q1-duplicate",
+    ]
+    assert compacted["docs"][0]["summary"] == common["summary"]
+    assert "_valuz_discovery" not in compacted
     assert citation_artifact_content(result) is None
 
 
@@ -1268,8 +1147,9 @@ async def test_discovery_compaction_handles_json_encoded_mcp_content_blocks() ->
 
     outer = json.loads(str(result.content))
     inner = json.loads(outer[0]["text"])
-    assert inner["_valuz_discovery"]["citationEvidence"] == "summary-fallback"
-    assert len(inner["docs"][0]["summary"]) <= 361
+    assert "_valuz_discovery" not in inner
+    assert len(inner["docs"][0]["summary"]) == 2_000
+    assert inner["docs"][0]["evidenceHandle"].startswith("ev_summary_")
     assert citation_artifact_content(result) is not None
 
 
@@ -1664,6 +1544,180 @@ async def test_grep_over_raw_document_returns_traceable_focused_evidence() -> No
     assert registry.register_tool_result(private_content, trusted_private=True) == 1
 
 
+async def test_namespaced_grep_matches_pdf_line_breaks_in_cached_raw_document() -> None:
+    middleware = CitationEvidenceCompactionMiddleware()
+    raw_payload = {
+        "doc_id": "doc-pdf-line-wrap",
+        "title": "Wrapped annual report",
+        "url": "https://reportify.cn/financials/doc-pdf-line-wrap",
+        "file_url": "https://files.example/wrapped-report.pdf",
+        "content": (
+            "五、报告期内主要经营情况\n"
+            "年度内公司实现营业总收入 1,741.44 亿元，同比增长 15.66%；归属\n"
+            "于上市公司股东的净利润 862.28 亿元，同比增长 15.38%。\n"
+        ),
+    }
+    raw_result = ToolMessage(
+        content=[{"type": "text", "text": json.dumps(raw_payload, ensure_ascii=False)}],
+        tool_call_id="toolu-wrapped-raw",
+        name="mcp__reportify__document_raw_content",
+    )
+
+    async def raw_handler(_request: ToolCallRequest) -> ToolMessage:
+        return raw_result
+
+    def request(call_id: str, name: str, args: dict[str, Any]) -> Any:
+        return cast(
+            Any,
+            type(
+                "Request",
+                (),
+                {"tool_call": {"id": call_id, "name": name, "args": args}},
+            )(),
+        )
+
+    await middleware.awrap_tool_call(
+        request(
+            "toolu-wrapped-raw",
+            "mcp__reportify__document_raw_content",
+            {"doc_id": "doc-pdf-line-wrap"},
+        ),
+        raw_handler,
+    )
+    grep_result = ToolMessage(
+        content="No matches found",
+        tool_call_id="toolu-wrapped-grep",
+        name="builtin__grep",
+    )
+
+    async def grep_handler(_request: ToolCallRequest) -> ToolMessage:
+        return grep_result
+
+    focused = await middleware.awrap_tool_call(
+        request(
+            "toolu-wrapped-grep",
+            "builtin__grep",
+            {
+                "pattern": "归属于上市公司股东的净利润",
+                "path": "/large_tool_results/toolu-wrapped-raw",
+            },
+        ),
+        grep_handler,
+    )
+
+    visible = json.loads(str(focused.content))
+    assert "862.28" in visible["matches"]
+    private_content = citation_artifact_content(focused)
+    assert private_content is not None
+    evidence = json.loads(private_content)["_valuz_evidence"][0]
+    assert "归属\n于上市公司股东的净利润" in evidence["evidence"]["quote"]
+
+
+async def test_grep_reuses_unique_registered_chunk_instead_of_external_locator() -> None:
+    middleware = CitationEvidenceCompactionMiddleware()
+
+    def request(call_id: str, name: str, args: dict[str, Any]) -> Any:
+        return cast(
+            Any,
+            type(
+                "Request",
+                (),
+                {"tool_call": {"id": call_id, "name": name, "args": args}},
+            )(),
+        )
+
+    indexed_payload = {
+        "chunks": [
+            {
+                "id": "chunk-page-8",
+                "content": (
+                    "年度内公司实现营业总收入 1,741.44 亿元，同比增长 15.66%；"
+                    "归属于上市公司股东的净利润 862.28 亿元，同比增长 15.38%。"
+                ),
+                "metadata": {"document_page": 8},
+                "doc": {
+                    "doc_id": "doc-located",
+                    "title": "Located annual report",
+                    "category": "financials",
+                    "url": "https://reportify.cn/financials/doc-located",
+                },
+            }
+        ]
+    }
+    indexed_result = ToolMessage(
+        content=json.dumps(indexed_payload, ensure_ascii=False),
+        tool_call_id="toolu-indexed",
+        name="kb_search",
+    )
+
+    async def indexed_handler(_request: ToolCallRequest) -> ToolMessage:
+        return indexed_result
+
+    await middleware.awrap_tool_call(
+        request("toolu-indexed", "kb_search", {"doc_id": "doc-located"}),
+        indexed_handler,
+    )
+
+    raw_payload = {
+        "doc_id": "doc-located",
+        "title": "Located annual report",
+        "url": "https://reportify.cn/financials/doc-located",
+        "file_url": "https://files.example/located.pdf",
+        "content": (
+            "年度内公司实现营业总收入 1,741.44 亿元，同比增长 15.66%；归属\n"
+            "于上市公司股东的净利润 862.28 亿元，同比增长 15.38%。"
+        ),
+    }
+    raw_result = ToolMessage(
+        content=json.dumps(raw_payload, ensure_ascii=False),
+        tool_call_id="toolu-located-raw",
+        name="document_raw_content",
+    )
+
+    async def raw_handler(_request: ToolCallRequest) -> ToolMessage:
+        return raw_result
+
+    await middleware.awrap_tool_call(
+        request(
+            "toolu-located-raw",
+            "document_raw_content",
+            {"doc_id": "doc-located"},
+        ),
+        raw_handler,
+    )
+    grep_result = ToolMessage(
+        content="No matches found",
+        tool_call_id="toolu-located-grep",
+        name="grep",
+    )
+
+    async def grep_handler(_request: ToolCallRequest) -> ToolMessage:
+        return grep_result
+
+    focused = await middleware.awrap_tool_call(
+        request(
+            "toolu-located-grep",
+            "grep",
+            {
+                "pattern": "归属于上市公司股东的净利润",
+                "path": "/large_tool_results/toolu-located-raw",
+            },
+        ),
+        grep_handler,
+    )
+
+    private_content = citation_artifact_content(focused)
+    assert private_content is not None
+    evidence = json.loads(private_content)["_valuz_evidence"][0]
+    assert evidence["evidenceHandle"].startswith("ev_chunk_")
+    assert evidence["locator"] == {
+        "kind": "pdf",
+        "page": 8,
+        "chunkId": "chunk-page-8",
+        "quote": {"exact": indexed_payload["chunks"][0]["content"]},
+    }
+
+
 async def test_non_citable_raw_metadata_still_feeds_focused_grep_evidence() -> None:
     middleware = CitationEvidenceCompactionMiddleware()
 
@@ -1799,835 +1853,7 @@ async def test_non_citable_raw_metadata_still_feeds_focused_grep_evidence() -> N
     assert evidence["locator"]["kind"] == "external"
 
 
-async def test_document_discovery_calls_are_bounded_per_agent_turn() -> None:
-    middleware = ResearchToolBudgetMiddleware()
-    middleware.before_agent(None, None)
-    calls = 0
-
-    async def handler(request: ToolCallRequest) -> ToolMessage:
-        nonlocal calls
-        calls += 1
-        return ToolMessage(
-            content="candidate",
-            tool_call_id=request.tool_call["id"],
-            name=request.tool_call["name"],
-        )
-
-    results: list[ToolMessage] = []
-    for index in range(7):
-        request = cast(
-            Any,
-            type(
-                "Request",
-                (),
-                {"tool_call": {"id": f"call-{index}", "name": "news_search"}},
-            )(),
-        )
-        result = await middleware.awrap_tool_call(request, handler)
-        assert isinstance(result, ToolMessage)
-        results.append(result)
-
-    assert calls == 6
-    assert results[-1].status == "error"
-    assert "budget for this turn is exhausted" in str(results[-1].content)
-
-    middleware.before_agent(None, None)
-    reset_request = cast(
-        Any,
-        type(
-            "Request",
-            (),
-            {"tool_call": {"id": "call-reset", "name": "webpage_search"}},
-        )(),
-    )
-    reset_result = await middleware.awrap_tool_call(reset_request, handler)
-    assert isinstance(reset_result, ToolMessage)
-    assert reset_result.status != "error"
-    assert calls == 7
-
-
-async def test_annual_statement_limit_reaches_oldest_requested_year() -> None:
-    middleware = ResearchToolBudgetMiddleware()
-    middleware.before_agent(
-        {"messages": [HumanMessage(content="查询 2024 年和 2023 年营业收入并计算同比增速")]},
-        None,
-    )
-    seen_args: list[dict[str, Any]] = []
-
-    class Request:
-        def __init__(self, tool_call: dict[str, Any]) -> None:
-            self.tool_call = tool_call
-
-        def override(self, **updates: Any) -> Request:
-            return Request(updates.get("tool_call", self.tool_call))
-
-    async def handler(request: ToolCallRequest) -> ToolMessage:
-        seen_args.append(cast(dict[str, Any], request.tool_call["args"]))
-        return ToolMessage(
-            content="statement",
-            tool_call_id=request.tool_call["id"],
-            name=request.tool_call["name"],
-        )
-
-    await middleware.awrap_tool_call(
-        cast(
-            ToolCallRequest,
-            Request(
-                {
-                    "id": "annual-statement",
-                    "name": "income_statement",
-                    "args": {"symbol": "600519", "period": "annual", "limit": 2},
-                }
-            ),
-        ),
-        handler,
-    )
-
-    assert len(seen_args) == 1
-    assert seen_args[0]["limit"] >= 3
-
-
-def test_indexed_document_search_has_an_independent_bounded_budget() -> None:
-    budget = CitationResearchBudget()
-
-    for _ in range(4):
-        assert budget.allow_discovery().allowed is True
-    for index in range(6):
-        assert budget.allow_indexed_document_search([f"transcript-{index}"]).allowed is True
-
-    assert budget.discovery_calls == 4
-    exhausted = budget.allow_indexed_document_search(["transcript-6"])
-    assert exhausted.allowed is False
-    assert exhausted.code == "indexed-document-search-budget-exhausted"
-    assert budget.has_research_activity is True
-
-
-async def test_complete_document_blocks_redundant_raw_reload_and_refetch() -> None:
-    middleware = ResearchToolBudgetMiddleware()
-    middleware.before_agent(None, None)
-    calls: list[str] = []
-
-    async def handler(request: ToolCallRequest) -> ToolMessage:
-        calls.append(request.tool_call["name"])
-        return ToolMessage(
-            content=json.dumps(
-                {
-                    "doc_id": "doc-complete",
-                    "total_chunks": 44,
-                    "chunk_offset": 0,
-                    "next_chunk_offset": None,
-                    "_valuz_evidence": [],
-                }
-            ),
-            tool_call_id=request.tool_call["id"],
-            name=request.tool_call["name"],
-        )
-
-    fetch_request = cast(
-        Any,
-        type(
-            "Request",
-            (),
-            {
-                "tool_call": {
-                    "id": "fetch-complete",
-                    "name": "document_fetch",
-                    "args": {"doc_id": "doc-complete", "chunk_limit": 60},
-                }
-            },
-        )(),
-    )
-    fetch_result = await middleware.awrap_tool_call(fetch_request, handler)
-    assert isinstance(fetch_result, ToolMessage)
-    assert fetch_result.status != "error"
-    assert isinstance(fetch_result.content, list)
-    coverage_note = str(fetch_result.content[-1]["text"])
-    assert "reached this document's final chunk" in coverage_note
-    assert "do not mention them" in coverage_note
-
-    raw_request = cast(
-        Any,
-        type(
-            "Request",
-            (),
-            {
-                "tool_call": {
-                    "id": "raw-redundant",
-                    "name": "document_raw_content",
-                    "args": {"doc_id": "doc-complete"},
-                }
-            },
-        )(),
-    )
-    raw_result = await middleware.awrap_tool_call(raw_request, handler)
-    assert isinstance(raw_result, ToolMessage)
-    assert raw_result.status == "error"
-    assert "already read through its final indexed chunk" in str(raw_result.content)
-
-    refetch_request = cast(
-        Any,
-        type(
-            "Request",
-            (),
-            {
-                "tool_call": {
-                    "id": "fetch-redundant",
-                    "name": "document_fetch",
-                    "args": {"doc_id": "doc-complete", "chunk_limit": 60},
-                }
-            },
-        )(),
-    )
-    refetch_result = await middleware.awrap_tool_call(refetch_request, handler)
-    assert isinstance(refetch_result, ToolMessage)
-    assert refetch_result.status == "error"
-    assert calls == ["document_fetch"]
-
-
-async def test_complete_document_keeps_coverage_internal_without_fake_evidence() -> None:
-    full_payload = {
-        "doc_id": "doc-complete",
-        "total_chunks": 44,
-        "chunk_offset": 0,
-        "next_chunk_offset": None,
-        "_valuz_evidence": [
-            {
-                "evidenceHandle": "ev_text_coverage_12345678",
-                "source": {
-                    "sourceId": "doc-complete",
-                    "documentId": "doc-complete",
-                    "documentVersion": "sha256:complete",
-                    "providerId": "valuz-search",
-                    "sourceType": "document",
-                    "title": "Complete transcript",
-                    "retrievedAt": "2026-08-02T08:00:00Z",
-                },
-                "evidence": {
-                    "kind": "text",
-                    "quote": "The final indexed paragraph.",
-                    "snippet": "The final indexed paragraph.",
-                    "capturedAt": "2026-08-02T08:00:00Z",
-                },
-            }
-        ],
-    }
-    original = ToolMessage(
-        content=[{"type": "text", "text": json.dumps(full_payload)}],
-        tool_call_id="fetch-complete",
-        name="document_fetch",
-    )
-    compaction = CitationEvidenceCompactionMiddleware()
-    budget = ResearchToolBudgetMiddleware()
-    budget.before_agent(None, None)
-    request = cast(
-        Any,
-        type(
-            "Request",
-            (),
-            {
-                "tool_call": {
-                    "id": "fetch-complete",
-                    "name": "document_fetch",
-                    "args": {"doc_id": "doc-complete", "chunk_limit": 60},
-                }
-            },
-        )(),
-    )
-
-    async def original_handler(_request: ToolCallRequest) -> ToolMessage:
-        return original
-
-    async def budget_handler(budget_request: ToolCallRequest) -> ToolMessage:
-        result = await budget.awrap_tool_call(budget_request, original_handler)
-        assert isinstance(result, ToolMessage)
-        return result
-
-    # Middleware wraps in declared order: compaction receives the result after
-    # the research budget marks the final document window complete.
-    result = await compaction.awrap_tool_call(request, budget_handler)
-
-    assert isinstance(result, ToolMessage)
-    private = citation_artifact_content(result)
-    assert private is not None
-    payload = json.loads(private)
-    if isinstance(payload, list):
-        payload = json.loads(payload[0]["text"])
-    assert not any(
-        item.get("evidence", {}).get("field") == "document_coverage_complete"
-        for item in payload["_valuz_evidence"]
-    )
-    assert "reached this document's final chunk" in str(result.content[-1]["text"])
-    assert "evidence://ev_doc_coverage_" not in str(result.content[-1]["text"])
-
-
-async def test_hidden_repair_with_candidate_catalog_cannot_restart_research() -> None:
-    middleware = ResearchToolBudgetMiddleware()
-    middleware.before_agent(
-        {
-            "messages": [
-                HumanMessage(
-                    content=(
-                        "Repair now.\n\nRestricted repair context (JSON):\n"
-                        '{"candidateEvidence":[{"evidenceHandle":"ev_test_12345678"}]}'
-                    )
-                )
-            ]
-        },
-        None,
-    )
-    calls = 0
-
-    async def handler(request: ToolCallRequest) -> ToolMessage:
-        nonlocal calls
-        calls += 1
-        return ToolMessage(
-            content="unexpected",
-            tool_call_id=request.tool_call["id"],
-            name=request.tool_call["name"],
-        )
-
-    request = cast(
-        Any,
-        type(
-            "Request",
-            (),
-            {"tool_call": {"id": "repair-search", "name": "conferences_search"}},
-        )(),
-    )
-    result = await middleware.awrap_tool_call(request, handler)
-
-    assert calls == 0
-    assert isinstance(result, ToolMessage)
-    assert result.status == "error"
-    assert "already has a registered evidence catalogue" in str(result.content)
-
-
-async def test_citation_mode_keeps_evidence_retrieval_in_lead_agent() -> None:
-    middleware = ResearchToolBudgetMiddleware(lead_owned_evidence=True)
-    middleware.before_agent(None, None)
-    calls = 0
-
-    async def handler(request: ToolCallRequest) -> ToolMessage:
-        nonlocal calls
-        calls += 1
-        return ToolMessage(
-            content="unexpected delegated result",
-            tool_call_id=request.tool_call["id"],
-            name=request.tool_call["name"],
-        )
-
-    request = cast(
-        Any,
-        type(
-            "Request",
-            (),
-            {"tool_call": {"id": "delegate-1", "name": "task", "args": {}}},
-        )(),
-    )
-    result = await middleware.awrap_tool_call(request, handler)
-
-    assert calls == 0
-    assert isinstance(result, ToolMessage)
-    assert result.status == "error"
-    assert "lead agent to own the evidence catalogue" in str(result.content)
-
-
-async def test_company_lookup_does_not_consume_document_discovery_budget() -> None:
-    middleware = ResearchToolBudgetMiddleware()
-    middleware.before_agent(None, None)
-    calls = 0
-
-    async def handler(request: ToolCallRequest) -> ToolMessage:
-        nonlocal calls
-        calls += 1
-        return ToolMessage(
-            content="company",
-            tool_call_id=request.tool_call["id"],
-            name=request.tool_call["name"],
-        )
-
-    for index in range(10):
-        request = cast(
-            Any,
-            type(
-                "Request",
-                (),
-                {"tool_call": {"id": f"company-{index}", "name": "company_search"}},
-            )(),
-        )
-        result = await middleware.awrap_tool_call(request, handler)
-        assert isinstance(result, ToolMessage)
-        assert result.status != "error"
-
-    assert calls == 10
-
-
-async def test_broad_transcript_discovery_expands_candidate_window() -> None:
-    middleware = ResearchToolBudgetMiddleware()
-    middleware.before_agent(None, None)
-    seen_args: list[dict[str, Any]] = []
-
-    class Request:
-        def __init__(self, tool_call: dict[str, Any]) -> None:
-            self.tool_call = tool_call
-
-        def override(self, **updates: Any) -> Request:
-            return Request(updates.get("tool_call", self.tool_call))
-
-    async def handler(request: ToolCallRequest) -> ToolMessage:
-        seen_args.append(cast(dict[str, Any], request.tool_call["args"]))
-        return ToolMessage(
-            content=json.dumps({"docs": []}),
-            tool_call_id=request.tool_call["id"],
-            name=request.tool_call["name"],
-        )
-
-    await middleware.awrap_tool_call(
-        cast(
-            ToolCallRequest,
-            Request(
-                {
-                    "id": "broad-transcripts",
-                    "name": "conferences_search",
-                    "args": {"symbols": ["US:MSFT"], "num": 8},
-                }
-            ),
-        ),
-        handler,
-    )
-
-    assert seen_args == [{"symbols": ["US:MSFT"], "num": 20}]
-
-
-async def test_document_fetch_chunk_size_and_call_count_are_bounded() -> None:
-    middleware = ResearchToolBudgetMiddleware()
-    middleware.before_agent(None, None)
-    seen_limits: list[int] = []
-
-    class Request:
-        def __init__(self, tool_call: dict[str, Any]) -> None:
-            self.tool_call = tool_call
-
-        def override(self, **updates: Any) -> Request:
-            return Request(updates.get("tool_call", self.tool_call))
-
-    async def handler(request: ToolCallRequest) -> ToolMessage:
-        seen_limits.append(cast(dict[str, Any], request.tool_call["args"])["chunk_limit"])
-        return ToolMessage(
-            content="document",
-            tool_call_id=request.tool_call["id"],
-            name=request.tool_call["name"],
-        )
-
-    results: list[ToolMessage] = []
-    for index in range(4):
-        request = cast(
-            ToolCallRequest,
-            Request(
-                {
-                    "id": f"document-{index}",
-                    "name": "document_fetch",
-                    "args": {"doc_id": f"doc-{index}", "chunk_limit": 100},
-                }
-            ),
-        )
-        result = await middleware.awrap_tool_call(request, handler)
-        assert isinstance(result, ToolMessage)
-        results.append(result)
-
-    assert seen_limits == [60] * 3
-    assert results[-1].status == "error"
-    assert "fetch budget for this turn is exhausted" in str(results[-1].content)
-
-
-async def test_document_fetch_blocks_repeated_distant_offset_guessing() -> None:
-    middleware = ResearchToolBudgetMiddleware()
-    middleware.before_agent(None, None)
-    handled_offsets: list[int] = []
-
-    class Request:
-        def __init__(self, tool_call: dict[str, Any]) -> None:
-            self.tool_call = tool_call
-
-        def override(self, **updates: Any) -> Request:
-            return Request(updates.get("tool_call", self.tool_call))
-
-    async def handler(request: ToolCallRequest) -> ToolMessage:
-        handled_offsets.append(cast(dict[str, Any], request.tool_call["args"])["chunk_offset"])
-        return ToolMessage(
-            content="document",
-            tool_call_id=request.tool_call["id"],
-            name=request.tool_call["name"],
-        )
-
-    results: list[ToolMessage] = []
-    for index, offset in enumerate((0, 80, 160)):
-        result = await middleware.awrap_tool_call(
-            cast(
-                ToolCallRequest,
-                Request(
-                    {
-                        "id": f"document-{index}",
-                        "name": "document_fetch",
-                        "args": {
-                            "doc_id": "doc-1",
-                            "chunk_offset": offset,
-                            "chunk_limit": 12,
-                        },
-                    }
-                ),
-            ),
-            handler,
-        )
-        assert isinstance(result, ToolMessage)
-        results.append(result)
-
-    assert handled_offsets == [0]
-    assert results[-1].status == "error"
-    assert "full-text/raw-content" in str(results[-1].content)
-
-
-async def test_transcript_uses_one_indexed_search_and_blocks_original_reads() -> None:
-    middleware = ResearchToolBudgetMiddleware()
-    middleware.before_agent(None, None)
-    handled_tools: list[str] = []
-    handled_args: list[dict[str, Any]] = []
-
-    class Request:
-        def __init__(self, tool_call: dict[str, Any]) -> None:
-            self.tool_call = tool_call
-
-        def override(self, **updates: Any) -> Request:
-            return Request(updates.get("tool_call", self.tool_call))
-
-    async def handler(request: ToolCallRequest) -> ToolMessage:
-        handled_tools.append(str(request.tool_call["name"]))
-        handled_args.append(cast(dict[str, Any], request.tool_call["args"]))
-        return ToolMessage(
-            content="document",
-            tool_call_id=request.tool_call["id"],
-            name=request.tool_call["name"],
-        )
-
-    async def discovery_handler(request: ToolCallRequest) -> ToolMessage:
-        return ToolMessage(
-            content=json.dumps({"docs": [{"doc_id": "doc-1"}]}),
-            tool_call_id=request.tool_call["id"],
-            name=request.tool_call["name"],
-        )
-
-    await middleware.awrap_tool_call(
-        cast(
-            ToolCallRequest,
-            Request(
-                {
-                    "id": "discovery-1",
-                    "name": "conferences_search",
-                    "args": {"symbols": ["US:MSFT"]},
-                }
-            ),
-        ),
-        discovery_handler,
-    )
-
-    raw_result = await middleware.awrap_tool_call(
-        cast(
-            ToolCallRequest,
-            Request(
-                {
-                    "id": "raw-1",
-                    "name": "document_raw_content",
-                    "args": {"doc_id": "doc-1"},
-                }
-            ),
-        ),
-        handler,
-    )
-    first_search = await middleware.awrap_tool_call(
-        cast(
-            ToolCallRequest,
-            Request(
-                {
-                    "id": "kb-1",
-                    "name": "kb_search",
-                    "args": {"doc_ids": ["doc-1"], "query": "AI demand capex"},
-                }
-            ),
-        ),
-        handler,
-    )
-    repeated_search = await middleware.awrap_tool_call(
-        cast(
-            ToolCallRequest,
-            Request(
-                {
-                    "id": "kb-2",
-                    "name": "kb_search",
-                    "args": {"doc_ids": ["doc-1"], "query": "supply constraint"},
-                }
-            ),
-        ),
-        handler,
-    )
-    fetch_result = await middleware.awrap_tool_call(
-        cast(
-            ToolCallRequest,
-            Request(
-                {
-                    "id": "fetch-1",
-                    "name": "document_fetch",
-                    "args": {"doc_id": "doc-1", "chunk_limit": 60},
-                }
-            ),
-        ),
-        handler,
-    )
-
-    assert raw_result.status == "error"
-    assert "exactly one kb_search" in str(raw_result.content)
-    assert first_search.status != "error"
-    assert repeated_search.status == "error"
-    assert "already had its one targeted indexed search" in str(repeated_search.content)
-    assert fetch_result.status == "error"
-    assert "Use the returned chunks" in str(fetch_result.content)
-    assert handled_tools == ["kb_search"]
-    assert handled_args == [{"doc_ids": ["doc-1"], "query": "AI demand capex", "num": 10}]
-
-
-async def test_filing_fetch_blocks_adjacent_sequential_window() -> None:
-    middleware = ResearchToolBudgetMiddleware()
-    middleware.before_agent(None, None)
-
-    class Request:
-        def __init__(self, tool_call: dict[str, Any]) -> None:
-            self.tool_call = tool_call
-
-        def override(self, **updates: Any) -> Request:
-            return Request(updates.get("tool_call", self.tool_call))
-
-    async def handler(request: ToolCallRequest) -> ToolMessage:
-        return ToolMessage(
-            content="document",
-            tool_call_id=request.tool_call["id"],
-            name=request.tool_call["name"],
-        )
-
-    first = await middleware.awrap_tool_call(
-        cast(
-            ToolCallRequest,
-            Request(
-                {
-                    "id": "filing-0",
-                    "name": "document_fetch",
-                    "args": {"doc_id": "filing-1", "chunk_offset": 0},
-                }
-            ),
-        ),
-        handler,
-    )
-    second = await middleware.awrap_tool_call(
-        cast(
-            ToolCallRequest,
-            Request(
-                {
-                    "id": "filing-60",
-                    "name": "document_fetch",
-                    "args": {"doc_id": "filing-1", "chunk_offset": 60},
-                }
-            ),
-        ),
-        handler,
-    )
-
-    assert first.status != "error"
-    assert second.status == "error"
-    assert "Do not page sequentially" in str(second.content)
-
-
-async def test_research_model_loop_is_bounded_after_discovery() -> None:
-    middleware = ResearchToolBudgetMiddleware()
-    middleware.before_agent(None, None)
-    middleware._research_budget.discovery_calls = 1
-    calls = 0
-
-    seen_tools: list[list[Any] | None] = []
-
-    async def handler(request: Any) -> AIMessage:
-        nonlocal calls
-        calls += 1
-        seen_tools.append(getattr(request, "tools", None))
-        return AIMessage(content="最终回答")
-
-    class Request:
-        def __init__(
-            self,
-            *,
-            messages: list[Any] | None = None,
-            tools: list[Any] | None = None,
-            tool_choice: Any = "auto",
-        ) -> None:
-            self.messages = messages or [HumanMessage(content="请检索并回答")]
-            self.state = {"messages": self.messages}
-            self.tools = tools
-            self.tool_choice = tool_choice
-
-        def override(self, **updates: Any) -> Request:
-            return Request(
-                messages=updates.get("messages", self.messages),
-                tools=updates.get("tools", self.tools),
-                tool_choice=updates.get("tool_choice", self.tool_choice),
-            )
-
-    request = Request()
-    for _ in range(10):
-        await middleware.awrap_model_call(request, handler)
-    capped = await middleware.awrap_model_call(request, handler)
-    second_capped = await middleware.awrap_model_call(request, handler)
-    fallback = await middleware.awrap_model_call(request, handler)
-
-    assert calls == 12
-    assert isinstance(capped, AIMessage)
-    assert capped.content == "最终回答"
-    assert isinstance(second_capped, AIMessage)
-    assert second_capped.content == "最终回答"
-    assert isinstance(fallback, AIMessage)
-    assert "缩小查询范围" in str(fallback.content)
-    assert seen_tools[-2:] == [[], []]
-
-
-async def test_non_research_model_loop_is_not_bounded_by_research_budget() -> None:
-    middleware = ResearchToolBudgetMiddleware()
-    middleware.before_agent(None, None)
-    calls = 0
-
-    async def handler(_request: Any) -> object:
-        nonlocal calls
-        calls += 1
-        return object()
-
-    for _ in range(12):
-        await middleware.awrap_model_call(cast(Any, object()), handler)
-
-    assert calls == 12
-
-
-def test_stable_general_knowledge_scope_is_conservative() -> None:
-    assert is_stable_general_knowledge_query("ROE 是什么意思？计算公式是什么？请用通俗语言解释。")
-    assert is_stable_general_knowledge_query(
-        "What is free cash flow? Explain the formula in plain language."
-    )
-    assert is_stable_general_knowledge_query(
-        "ROE 是什么意思？为什么银行和制造业不能直接用同一个 ROE 阈值比较？"
-        "用通俗语言回答，不需要查询具体公司数据。"
-    )
-    assert not is_stable_general_knowledge_query("请查询贵州茅台 2024 年 ROE 并引用年报。")
-    assert not is_stable_general_knowledge_query(
-        "What is Microsoft's current ROE? Cite the latest filing."
-    )
-
-
-async def test_stable_general_knowledge_turn_disables_tools_for_model() -> None:
-    middleware = ResearchToolBudgetMiddleware()
-    state = {
-        "messages": [HumanMessage(content="ROE 是什么意思？计算公式是什么？请用通俗语言解释。")]
-    }
-    middleware.before_agent(state, None)
-    seen: dict[str, Any] = {}
-
-    async def handler(request: Any) -> AIMessage:
-        seen["tools"] = request.tools
-        seen["tool_choice"] = request.tool_choice
-        seen["last_message"] = request.messages[-1].content
-        return AIMessage(content="直接回答")
-
-    class Request:
-        def __init__(
-            self,
-            *,
-            messages: list[Any] | None = None,
-            tools: list[Any] | None = None,
-            tool_choice: Any = "auto",
-        ) -> None:
-            self.messages = messages or list(state["messages"])
-            self.tools = tools if tools is not None else [object()]
-            self.tool_choice = tool_choice
-
-        def override(self, **updates: Any) -> Request:
-            return Request(
-                messages=updates.get("messages", self.messages),
-                tools=updates.get("tools", self.tools),
-                tool_choice=updates.get("tool_choice", self.tool_choice),
-            )
-
-    result = await middleware.awrap_model_call(Request(), handler)
-
-    assert result.content == "直接回答"
-    assert seen["tools"] == []
-    assert seen["tool_choice"] is None
-    assert "without tools" in str(seen["last_message"])
-
-
-async def test_model_only_sees_side_effect_tools_explicitly_requested_by_user() -> None:
-    class Tool:
-        def __init__(self, name: str) -> None:
-            self.name = name
-
-    class Request:
-        def __init__(
-            self,
-            *,
-            messages: list[Any],
-            tools: list[Any],
-            tool_choice: Any = "auto",
-        ) -> None:
-            self.messages = messages
-            self.state = {"messages": messages}
-            self.tools = tools
-            self.tool_choice = tool_choice
-
-        def override(self, **updates: Any) -> Request:
-            return Request(
-                messages=updates.get("messages", self.messages),
-                tools=updates.get("tools", self.tools),
-                tool_choice=updates.get("tool_choice", self.tool_choice),
-            )
-
-    tools = [
-        Tool("news_search"),
-        Tool("write_file"),
-        Tool("deliver_artifacts"),
-        Tool("mcp__valuz__automation"),
-    ]
-
-    async def visible_names(prompt: str) -> list[str]:
-        middleware = ResearchToolBudgetMiddleware()
-        messages = [HumanMessage(content=prompt)]
-        middleware.before_agent({"messages": messages}, None)
-        seen: list[str] = []
-
-        async def handler(request: Any) -> AIMessage:
-            seen.extend(tool.name for tool in request.tools)
-            return AIMessage(content="done")
-
-        await middleware.awrap_model_call(
-            Request(messages=messages, tools=tools),
-            handler,
-        )
-        return seen
-
-    descriptive = await visible_names("生成 AI 领域周度新闻汇总，并可用于定时任务。")
-    explicit = await visible_names("生成 AI 新闻汇总，保存为 PDF，并创建每周一的定时任务。")
-
-    assert descriptive == ["news_search"]
-    assert explicit == [
-        "news_search",
-        "write_file",
-        "deliver_artifacts",
-        "mcp__valuz__automation",
-    ]
-
-
-async def test_repeated_document_not_found_is_short_circuited() -> None:
+async def test_repeated_document_not_found_is_returned_without_host_short_circuit() -> None:
     middleware = ToolErrorTolerantMiddleware()
     calls = 0
 
@@ -2651,5 +1877,5 @@ async def test_repeated_document_not_found_is_short_circuited() -> None:
     assert isinstance(first, ToolMessage) and first.status == "error"
     assert isinstance(second, ToolMessage) and second.status == "error"
     assert isinstance(third, ToolMessage) and third.status == "error"
-    assert calls == 2
-    assert "Do not call document_fetch again" in str(third.content)
+    assert calls == 3
+    assert "HTTP error 404" in str(third.content)

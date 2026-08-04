@@ -349,7 +349,12 @@ def _document_envelopes(
             source_id=str(source_id),
             document_id=str(document_id),
             title=str(title),
-            version=str(version or published_at or "") or None,
+            # Publication time identifies when a document was issued, not
+            # which immutable content/locator snapshot produced this chunk.
+            # Substituting it for a missing version makes a later canonical
+            # content hash look like a document change even when the cited
+            # chunk and quote are unchanged.
+            version=str(version or "") or None,
             published_at=published_at,
             url=url,
             category=category,

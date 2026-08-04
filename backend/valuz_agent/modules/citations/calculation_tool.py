@@ -38,8 +38,16 @@ _PARAMS = {
                     "value": {"type": ["number", "string"]},
                     "unit": {"type": "string"},
                     "evidenceHandle": {"type": "string"},
+                    "origin": {
+                        "type": "string",
+                        "enum": ["user-input"],
+                        "description": (
+                            "Use only when this exact input value was explicitly supplied "
+                            "by the user. Retrieved facts must use evidenceHandle instead."
+                        ),
+                    },
                 },
-                "required": ["name", "value", "evidenceHandle"],
+                "required": ["name", "value"],
             },
         },
         "unit": {"type": "string"},
@@ -162,9 +170,14 @@ async def _citation_calculate_handler(
                 raise ValueError("invalid_input")
             name = _input_name(raw.get("name"))
             handle = raw.get("evidenceHandle")
+            origin = raw.get("origin")
             if name is None or name in values:
                 raise ValueError("invalid_input_name")
-            if not isinstance(handle, str) or not (
+            has_handle = isinstance(handle, str) and bool(handle)
+            has_user_origin = origin == "user-input"
+            if has_handle == has_user_origin:
+                raise ValueError("invalid_input_origin")
+            if has_handle and not (
                 _HANDLE_RE.fullmatch(handle) or _COLLECTION_ADDRESS_RE.fullmatch(handle)
             ):
                 raise ValueError("invalid_evidence_handle")
@@ -172,9 +185,12 @@ async def _citation_calculate_handler(
             values[name] = value
             item: dict[str, Any] = {
                 "name": name,
-                "citationId": handle,
                 "value": format(value, "f"),
             }
+            if has_handle:
+                item["citationId"] = handle
+            else:
+                item["origin"] = "user-input"
             if isinstance(raw.get("unit"), str) and raw["unit"].strip():
                 item["unit"] = raw["unit"].strip()
             inputs.append(item)
@@ -240,13 +256,16 @@ def build_citation_calculation_tool_defs() -> tuple[ToolDef, ...]:
         ToolDef(
             name=CITATION_CALCULATE_TOOL_NAME,
             description=(
-                "Compute a derived numeric result deterministically from values that already "
-                "have direct evidence handles or exact structured Collection Addresses, and "
+                "Compute a derived numeric result deterministically from retrieved values that "
+                "have direct evidence handles or exact structured Collection Addresses, plus "
+                "optional values explicitly supplied by the user using origin='user-input', and "
                 "return a calculation evidence handle. Use this "
                 "for growth rates, margins, ratios, differences, sums, and other arithmetic "
                 "that appears in a citation-aware answer. Cite the returned handle on the "
                 "derived claim; do not calculate those values only in prose. When unit is %, "
-                "a unitless ratio expression is converted to percentage points automatically."
+                "a unitless ratio expression is converted to percentage points automatically. "
+                "Never mark a retrieved or model-invented value as user-input; the host verifies "
+                "every such value against the task prompt before accepting the calculation."
             ),
             parameters=_PARAMS,
             handler=_citation_calculate_handler,

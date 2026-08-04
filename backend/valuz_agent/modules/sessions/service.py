@@ -803,6 +803,7 @@ class SessionService:
         # flow through this code path.
         from valuz_agent.adapters.agent_resolver import CHAT_TASK_PLAYBOOK
         from valuz_agent.adapters.system_prompt_builder import (
+            AUTHORIZATION_BOUNDARY_INSTRUCTIONS,
             OUTPUT_FORMAT_INSTRUCTIONS,
             assemble_session_instructions,
         )
@@ -834,6 +835,7 @@ class SessionService:
                     "global-instructions",
                     prompt_snapshot.content if prompt_snapshot is not None else "",
                 ),
+                ("authorization-boundary", AUTHORIZATION_BOUNDARY_INSTRUCTIONS),
                 ("agent-instructions", agent.instructions or ""),
                 ("project-instructions", project_prompt),
                 ("memory", mem_block),

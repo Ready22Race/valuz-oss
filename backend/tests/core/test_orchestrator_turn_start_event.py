@@ -21,12 +21,11 @@ import valuz_agent.boot.kernel  # noqa: F401 — sets sys.path for ``src`` / ``a
 
 from src.core.agent_config import AgentConfig
 from src.core.events import Event
-from src.core.orchestrator import SessionOrchestrator, _task_prompt_after_pending_clarification
+from src.core.orchestrator import SessionOrchestrator
 from src.core.types import (
     BARE_COMPLETION_METADATA_KEY,
     EndTurn,
     Error,
-    McpHttpServerConfig,
     Session,
     UserMessage,
 )
@@ -88,85 +87,7 @@ class _FakeRuntime:
         pass
 
 
-def test_pending_task_clarification_is_session_local_and_restores_effective_prompt(
-    tmp_path,
-) -> None:
-    original = "检查固定止损线和估值阈值是否触发，不重新制定规则。"
-    session = Session(
-        id="sess-pending",
-        agent_config=AgentConfig(id="agent-1", name="tester"),
-        cwd=str(tmp_path),
-        user_id="owner-1",
-        metadata={
-            "valuz": {
-                "pending_task_clarification": {
-                    "version": 1,
-                    "originalRequest": original,
-                    "missingInputs": ["固定止损线", "估值阈值"],
-                    "supplements": [],
-                    "contractId": "tc_pending",
-                    "policyRevision": "finance-v1",
-                }
-            }
-        },
-    )
-
-    effective, resolved = _task_prompt_after_pending_clarification(
-        session,
-        "固定止损线为 160 美元。",
-        enabled=True,
-    )
-
-    assert original in effective
-    assert resolved is False
-    pending = session.metadata["valuz"]["pending_task_clarification"]
-    assert pending["missingInputs"] == ["估值阈值"]
-    assert pending["supplements"] == ["固定止损线为 160 美元。"]
-
-    effective, resolved = _task_prompt_after_pending_clarification(
-        session,
-        "估值阈值为 25 倍，继续按原规则检查。",
-        enabled=True,
-    )
-
-    assert original in effective
-    assert "固定止损线为 160 美元" in effective
-    assert "估值阈值为 25 倍" in effective
-    assert resolved is True
-    assert "pending_task_clarification" in session.metadata["valuz"]
-
-
-def test_unrelated_turn_discards_pending_task_without_rewriting_prompt(tmp_path) -> None:
-    current = "请查 2024 年营业收入。"
-    session = Session(
-        id="sess-pending-new-task",
-        agent_config=AgentConfig(id="agent-1", name="tester"),
-        cwd=str(tmp_path),
-        user_id="owner-1",
-        metadata={
-            "valuz": {
-                "pending_task_clarification": {
-                    "version": 1,
-                    "originalRequest": "检查固定止损线。",
-                    "missingInputs": ["固定止损线"],
-                    "supplements": [],
-                }
-            }
-        },
-    )
-
-    effective, resolved = _task_prompt_after_pending_clarification(
-        session,
-        current,
-        enabled=True,
-    )
-
-    assert effective == current
-    assert resolved is False
-    assert "pending_task_clarification" not in session.metadata["valuz"]
-
-
-async def test_run_turn_persists_then_consumes_pending_task_clarification(
+async def test_run_turn_does_not_create_pending_task_clarification(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -194,9 +115,7 @@ async def test_run_turn_persists_then_consumes_pending_task_clarification(
         ),
     )
 
-    pending = store._session.metadata["valuz"]["pending_task_clarification"]
-    assert pending["originalRequest"].startswith("按用户给定的连续季度阈值")
-    assert pending["missingInputs"]
+    assert "pending_task_clarification" not in store._session.metadata["valuz"]
 
     await orch.run_turn(
         "owner-1",
@@ -207,7 +126,7 @@ async def test_run_turn_persists_then_consumes_pending_task_clarification(
     assert "pending_task_clarification" not in store._session.metadata["valuz"]
 
 
-async def test_missing_context_short_circuits_before_runtime_or_tools(
+async def test_missing_context_is_left_to_the_native_runtime(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -222,12 +141,11 @@ async def test_missing_context_short_circuits_before_runtime_or_tools(
     store = _FakeStore(session)
     orch = SessionOrchestrator(store)  # type: ignore[arg-type]
 
-    def fail_if_runtime_is_created(*_args, **_kwargs):
-        raise AssertionError("runtime must not be created before required user input")
+    runtime = _FakeRuntime(store)
 
     monkeypatch.setattr(
         "src.runtimes.factory.create_runtime",
-        fail_if_runtime_is_created,
+        lambda *_args, **_kwargs: runtime,
     )
 
     message = await orch.run_turn(
@@ -236,14 +154,13 @@ async def test_missing_context_short_circuits_before_runtime_or_tools(
         UserMessage(text="按用户给定的连续季度阈值判断是否触发，不重新制定规则。"),
     )
 
-    assert message.status == "completed"
-    assert "请先补充" in (message.assistant_message or "")
-    assert message.metadata["task_coverage"]["status"] == "insufficient-input"
+    assert runtime.types_at_run == ["user_message", "session_update"]
+    assert message.assistant_message is None
     assert not any(event.type in {"tool_use", "tool_result"} for event in store.appended)
-    assert "pending_task_clarification" in store._session.metadata["valuz"]
+    assert "pending_task_clarification" not in store._session.metadata["valuz"]
 
 
-async def test_failed_resumed_turn_keeps_pending_task_clarification_for_retry(
+async def test_failed_turn_does_not_restore_legacy_pending_task_clarification(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -289,7 +206,7 @@ async def test_failed_resumed_turn_keeps_pending_task_clarification_for_retry(
     )
 
     assert message.status == "errored"
-    assert "pending_task_clarification" in store._session.metadata["valuz"]
+    assert "pending_task_clarification" not in store._session.metadata["valuz"]
 
 
 async def test_run_turn_emits_running_session_update_before_runtime(tmp_path, monkeypatch) -> None:
@@ -406,52 +323,6 @@ class _CitationRepairRuntime:
         self.closed = True
 
 
-async def test_continuation_uses_refreshed_mcp_snapshot_and_keeps_it_in_memory(
-    tmp_path,
-) -> None:
-    agent = AgentConfig(id="agent-1", name="tester")
-    stale = McpHttpServerConfig(
-        name="reportify",
-        url="https://mcp.example.test",
-        headers={"Authorization": "Bearer stale"},
-    )
-    fresh = McpHttpServerConfig(
-        name="reportify",
-        url="https://mcp.example.test",
-        headers={"Authorization": "Bearer fresh"},
-    )
-    session = Session(
-        id="sess-refresh-continuation",
-        agent_config=agent,
-        cwd=str(tmp_path),
-        user_id="owner-1",
-        status="running",
-        mcp_servers=(stale,),
-    )
-    store = _FakeStore(session)
-    orch = SessionOrchestrator(store)  # type: ignore[arg-type]
-
-    async def refresh(user_id: str, session_id: str) -> bool:
-        assert (user_id, session_id) == ("owner-1", session.id)
-        durable = copy.deepcopy(session)
-        durable.mcp_servers = (fresh,)
-        store._session = durable
-        return True
-
-    orch.set_citation_repair_refresh_hook(refresh)
-
-    await orch._refresh_continuation_credentials(  # noqa: SLF001
-        "owner-1",
-        session.id,
-        session,
-        continuation="task coverage",
-    )
-
-    assert session.mcp_servers == (fresh,)
-    await store.save_session(session)
-    assert store._session.mcp_servers == (fresh,)
-
-
 async def test_run_turn_does_not_repair_an_unresolved_claim(tmp_path, monkeypatch) -> None:
     agent = AgentConfig(id="agent-1", name="tester")
     session = Session(
@@ -461,7 +332,12 @@ async def test_run_turn_does_not_repair_an_unresolved_claim(tmp_path, monkeypatc
         user_id="owner-1",
         status="created",
         skills=("/bundled/skills/citation",),
-        metadata={"valuz": {"citation_verification_enabled": True}},
+        metadata={
+            "valuz": {
+                "citation_verification_enabled": True,
+                "task_coverage_enabled": False,
+            }
+        },
     )
     store = _FakeStore(session)
     orch = SessionOrchestrator(store)  # type: ignore[arg-type]
@@ -489,47 +365,3 @@ async def test_run_turn_does_not_repair_an_unresolved_claim(tmp_path, monkeypatc
     assert "Revenue declined." in message.assistant_message
     assert [event.type for event in store.appended].count("assistant_message") == 1
     assert [event.type for event in store.appended].count("session_idle") == 1
-
-
-async def test_unresolved_claim_does_not_refresh_credentials_for_repair(
-    tmp_path, monkeypatch
-) -> None:
-    agent = AgentConfig(id="agent-1", name="tester")
-    session = Session(
-        id="sess-refresh",
-        agent_config=agent,
-        cwd=str(tmp_path),
-        user_id="owner-1",
-        status="created",
-        skills=("/bundled/skills/citation",),
-        metadata={"valuz": {"citation_verification_enabled": True}},
-    )
-    store = _FakeStore(session)
-    orch = SessionOrchestrator(store)  # type: ignore[arg-type]
-    runtimes: list[_CitationRepairRuntime] = []
-    refresh_calls: list[tuple[str, str]] = []
-
-    async def refresh(user_id: str, session_id: str) -> bool:
-        refresh_calls.append((user_id, session_id))
-        return True
-
-    orch.set_citation_repair_refresh_hook(refresh)
-
-    def create_runtime(*args, **kwargs) -> _CitationRepairRuntime:  # noqa: ANN002, ANN003
-        runtime = _CitationRepairRuntime(args[2])
-        runtimes.append(runtime)
-        return runtime
-
-    monkeypatch.setattr("src.runtimes.factory.create_runtime", create_runtime)
-
-    message = await orch.run_turn(
-        "owner-1",
-        "sess-refresh",
-        UserMessage(text="Answer with citations"),
-    )
-
-    assert refresh_calls == []
-    assert len(runtimes) == 1
-    assert runtimes[0].prompts == ["Answer with citations"]
-    assert message.assistant_message is not None
-    assert "Revenue declined." in message.assistant_message

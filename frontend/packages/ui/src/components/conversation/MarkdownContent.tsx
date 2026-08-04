@@ -57,6 +57,7 @@ import {
   citationOffsetFromHref,
   CitationPill,
   CitationSourceCards,
+  projectEvidenceMarkdownLinks,
   rewriteCitationMarkdownLinks,
   type CitationQualityDisplayIssue,
 } from "./CitationInline";
@@ -427,6 +428,19 @@ interface MarkdownContentProps {
   citationBundle?: CitationBundleV1;
   messageId?: string;
   onCitationClick?: (input: OpenCitationInput) => void;
+  /**
+   * A conversation turn may contain more than one durable assistant message
+   * (for example a completed answer followed by a repair patch).  The turn
+   * owns citation numbering and the single source list in that case; each
+   * Markdown fragment still renders its own audited claim locations.
+   */
+  citationDisplayOrderOverride?: ReadonlyMap<string, number>;
+  citationLookupBundleOverride?: CitationBundleV1;
+  citationMessageIdByCitationIdOverride?: ReadonlyMap<
+    string,
+    string | undefined
+  >;
+  showCitationSources?: boolean;
 }
 
 /**
@@ -896,6 +910,10 @@ export const MarkdownContent = memo(function MarkdownContent({
   citationBundle,
   messageId,
   onCitationClick,
+  citationDisplayOrderOverride,
+  citationLookupBundleOverride,
+  citationMessageIdByCitationIdOverride,
+  showCitationSources = true,
 }: MarkdownContentProps) {
   const { t } = useI18n();
   const [pendingUrl, setPendingUrl] = useState<string | null>(null);
@@ -904,26 +922,40 @@ export const MarkdownContent = memo(function MarkdownContent({
   // the UI communicates concrete issues at the relevant citation instead of
   // replacing the entire response with a generic failure sentence.
   const displayContent = stripStandaloneCitationLines(
-    stripDecorativeHeadingCitations(stripProtocolSourcePlaceholders(content)),
+    stripDecorativeHeadingCitations(
+      stripProtocolSourcePlaceholders(
+        projectEvidenceMarkdownLinks(content, citationBundle),
+      ),
+    ),
   );
-  const citationOrder = useMemo(
+  const localCitationOrder = useMemo(
     () => citationDisplayOrder(displayContent),
     [displayContent],
   );
+  const citationOrder = citationDisplayOrderOverride ?? localCitationOrder;
   const citationOccurrenceOffsets = useMemo(
     () => citationOccurrences(displayContent),
     [displayContent],
   );
-  const citationsById = useMemo(
-    () =>
-      new Map(
-        citationBundle?.citations.map((citation) => [
-          citation.citationId,
-          citation,
-        ]) ?? [],
-      ),
-    [citationBundle],
-  );
+  const citationsById = useMemo(() => {
+    const citations = new Map<
+      string,
+      CitationBundleV1["citations"][number]
+    >();
+    // A single user turn can contain several durable assistant messages
+    // (for example, an answer followed by a local repair). Citations are
+    // numbered and listed across that whole trailing answer run, so inline
+    // pills must resolve against the same turn-level registry as the source
+    // list. Keep the local bundle last so its current annotations win when
+    // both registries contain the same citation.
+    for (const citation of citationLookupBundleOverride?.citations ?? []) {
+      citations.set(citation.citationId, citation);
+    }
+    for (const citation of citationBundle?.citations ?? []) {
+      citations.set(citation.citationId, citation);
+    }
+    return citations;
+  }, [citationBundle, citationLookupBundleOverride]);
   const qualityIssueLabel = useCallback(
     (issue: CitationQualityIssueV1): string => {
       const code = issue.code;
@@ -1304,7 +1336,10 @@ export const MarkdownContent = memo(function MarkdownContent({
                 occurrenceIssues ??
                 qualityIssuePlacement.byCitationId.get(citationId)
               }
-              messageId={messageId}
+              messageId={
+                citationMessageIdByCitationIdOverride?.get(citationId) ??
+                messageId
+              }
               onCitationClick={onCitationClick}
             />
           );
@@ -1354,6 +1389,7 @@ export const MarkdownContent = memo(function MarkdownContent({
       claimQualityById,
       isLocalFileHref,
       messageId,
+      citationMessageIdByCitationIdOverride,
       onCitationClick,
       onLocalFileLinkClick,
       qualityIssuePlacement.byCitationId,
@@ -1386,12 +1422,15 @@ export const MarkdownContent = memo(function MarkdownContent({
           {renderedContent}
         </Streamdown>
       </div>
-      <CitationSourceCards
-        content={displayContent}
-        citationBundle={citationBundle}
-        messageId={messageId}
-        onCitationClick={onCitationClick}
-      />
+      {showCitationSources ? (
+        <CitationSourceCards
+          content={displayContent}
+          citationBundle={citationBundle}
+          messageId={messageId}
+          onCitationClick={onCitationClick}
+          displayOrder={citationOrder}
+        />
+      ) : null}
       <ExternalLinkConfirmDialog
         url={pendingUrl}
         onClose={() => setPendingUrl(null)}

@@ -1,12 +1,13 @@
-"""Runtime-neutral citation evidence registry and final-answer guard.
+"""Runtime-neutral citation evidence registry and post-message sidecar builder.
 
 Tools are the trust boundary for citations.  A source-bearing tool may attach
 one or more ``_valuz_evidence`` envelopes to its JSON result.  The model sees
 only an opaque ``evidenceHandle`` and may bind a claim with a Markdown link to
-``evidence://<handle>``.  Before the final assistant event is persisted or
-broadcast, :class:`CitationGuard` replaces those temporary links with
-``citation://<citationId>`` and builds the canonical ``CitationBundleV1`` from
-the registered tool envelopes.
+``evidence://<handle>``.  After each Runtime-authored assistant message has
+already been persisted and broadcast, :class:`CitationGuard` builds the
+canonical ``CitationBundleV1`` sidecar from the registered tool envelopes.
+The renderer projects trusted handles as ``[n]`` without replacing the stored
+assistant body.
 
 The model never gets to author source metadata, quotes, document ids or
 locators.  Unknown handles are unlinked and reported through integrity
@@ -22,7 +23,7 @@ import math
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import parse_qsl, unquote, urlsplit
 
@@ -36,7 +37,7 @@ from src.core.claim_audit import (
     structured_value_present,
     structured_values_equivalent,
 )
-from src.core.claim_evidence_resolution import EvidenceCandidateIndex
+from src.core.claim_evidence_resolution import EvidenceCandidateIndex, SemanticVerifierPort
 
 POLICY_REVISION = "citation-v1"
 EVIDENCE_ENVELOPE_KEY = "_valuz_evidence"
@@ -76,7 +77,7 @@ _INTRA_DECIMAL_CITATION_RE = re.compile(
     r"(?P<unit>[ \t]*(?:%|bp|bps|百万元|亿元|万元|元|倍|CNY|USD|EUR|GBP|JPY|HKD))?",
     re.IGNORECASE,
 )
-_REPAIR_MARKER_RE = re.compile(
+_FALLBACK_MARKER_RE = re.compile(
     r"(?:\[\[evidence:([A-Za-z0-9_-]{1,160})\]\]|"
     r"<evidence:([A-Za-z0-9_-]{1,160})>)"
 )
@@ -473,11 +474,97 @@ class EvidenceRegistry:
         if exact is not None:
             return exact
         match = re.fullmatch(r"ev_[A-Za-z0-9_]+_([0-9a-f]{24})", handle)
-        if match is None:
+        if match is not None:
+            suffix = f"_{match.group(1)}"
+            candidates = [
+                record for key, record in self._records.items() if key.endswith(suffix)
+            ]
+            if len(candidates) == 1:
+                return candidates[0]
+
+        # Text MCP results expose a stable chunk id next to the excerpt. Some
+        # Runtime models preserve that exact id but render it as
+        # ``ev_mcp_<chunkId>`` instead of copying the opaque Registry handle.
+        # This is a deterministic locator alias, not fuzzy Claim matching:
+        # accept it only when one message-local Evidence record has that exact
+        # chunk id. Repeated ids across documents remain unresolved.
+        chunk_alias = re.fullmatch(r"ev_mcp_([A-Za-z0-9_-]{4,128})", handle)
+        if chunk_alias is None:
             return None
-        suffix = f"_{match.group(1)}"
-        candidates = [record for key, record in self._records.items() if key.endswith(suffix)]
-        return candidates[0] if len(candidates) == 1 else None
+        chunk_id = chunk_alias.group(1)
+        chunk_candidates = [
+            record
+            for record in self._records.values()
+            if str(
+                (record.locator or {}).get("chunkId")
+                or (record.locator or {}).get("chunk_id")
+                or record.evidence.get("chunkId")
+                or record.evidence.get("chunk_id")
+                or ""
+            )
+            == chunk_id
+        ]
+        return chunk_candidates[0] if len(chunk_candidates) == 1 else None
+
+    def preferred_document_record(self, record: EvidenceRecord) -> EvidenceRecord:
+        """Prefer one uniquely equivalent located chunk over a broad excerpt.
+
+        A raw-document grep can run before a later ``kb_search`` registers the
+        page/chunk that contains the same text.  The earlier tool call cannot
+        see that future record, so normalize once more at the final projection
+        boundary when the Registry is complete.  This is evidence-level exact
+        containment, not Claim matching: multiple distinct located candidates
+        deliberately keep the original broad record.
+        """
+
+        locator_kind = str((record.locator or {}).get("kind") or "")
+        if (
+            record.source.get("sourceType") != "document"
+            or locator_kind in {"pdf", "chunk", "html"}
+        ):
+            return record
+        document_identity = _document_source_identity(record.source)
+        broad_quote = _document_match_text(record.evidence)
+        if not document_identity or len(broad_quote) < 20:
+            return record
+        external_fragment = ""
+        if locator_kind == "external":
+            fragment = (record.locator or {}).get("fragment")
+            if isinstance(fragment, str):
+                external_fragment = re.sub(r"\s+", "", fragment).casefold()
+            if len(external_fragment) < 4:
+                return record
+
+        matches: dict[str, EvidenceRecord] = {}
+        for candidate in self._records.values():
+            if candidate.handle == record.handle:
+                continue
+            candidate_locator = candidate.locator or {}
+            if candidate_locator.get("kind") not in {"pdf", "chunk", "html"}:
+                continue
+            if _document_source_identity(candidate.source) != document_identity:
+                continue
+            focused_quote = _document_match_text(candidate.evidence)
+            if len(focused_quote) < 20 or focused_quote not in broad_quote:
+                continue
+            if external_fragment:
+                if external_fragment not in focused_quote:
+                    continue
+            elif focused_quote != broad_quote:
+                # Without a focused external fragment, only an identical
+                # quote is an evidence-level normalization. A proper subset
+                # could point at a different fact inside the broad excerpt.
+                continue
+            identity = json.dumps(
+                {
+                    "locator": candidate_locator,
+                    "quote": focused_quote,
+                },
+                sort_keys=True,
+                ensure_ascii=False,
+            )
+            matches.setdefault(identity, candidate)
+        return next(iter(matches.values())) if len(matches) == 1 else record
 
     def materialize_reference(self, handle: str, fragment: str | None) -> EvidenceRecord | None:
         """Resolve one model-proposed Collection Address into immutable Evidence."""
@@ -486,11 +573,32 @@ class EvidenceRegistry:
             return self.resolve(handle)
         self._address_requested_count += 1
         collection = self._collections.get(handle)
-        if collection is None or not fragment.startswith("#/"):
+        if not fragment.startswith("#/"):
             self._materialization_rejected_count += 1
             return None
         pointer = unquote(fragment[1:])
-        record = _materialize_collection_address(collection, pointer)
+        if collection is not None:
+            record = _materialize_collection_address(collection, pointer)
+        else:
+            # A Runtime may copy a valid JSON Pointer while mistyping the
+            # opaque Collection handle.  Do not fuzzy-match the handle.  The
+            # pointer itself is nevertheless a deterministic address, so it
+            # can be normalized when exactly one registered Collection in the
+            # message-local Registry accepts it.  Multiple valid Collections
+            # remain ambiguous (for example two companies exposing the same
+            # field path) and are rejected instead of guessed.
+            matches = [
+                candidate
+                for candidate_collection in self._collections.values()
+                if (
+                    candidate := _materialize_collection_address(
+                        candidate_collection,
+                        pointer,
+                    )
+                )
+                is not None
+            ]
+            record = matches[0] if len(matches) == 1 else None
         if record is None:
             self._materialization_rejected_count += 1
             return None
@@ -570,6 +678,30 @@ class EvidenceRegistry:
             self.materialize_reference(handle, fragment)
         return len(self._records) - before
 
+    def read_snapshot(self) -> EvidenceRegistry:
+        """Return a cheap message-local view of the Registry.
+
+        Evidence records and Collections are immutable after registration.
+        Copy the lookup tables and counters, not the potentially large source
+        payloads, so an assistant message can be audited later without seeing
+        Evidence that arrived after that message was published.
+        """
+
+        snapshot = EvidenceRegistry(allowed_document_ids=self._allowed_document_ids)
+        snapshot._records = dict(self._records)
+        snapshot._collections = dict(self._collections)
+        snapshot._pending_collection_snapshots = dict(
+            self._pending_collection_snapshots
+        )
+        snapshot._rejected_count = self._rejected_count
+        snapshot._address_requested_count = self._address_requested_count
+        snapshot._materialized_count = self._materialized_count
+        snapshot._materialization_rejected_count = (
+            self._materialization_rejected_count
+        )
+        snapshot._overflow_reasons = set(self._overflow_reasons)
+        return snapshot
+
     def values(self) -> Iterable[EvidenceRecord]:
         return self._records.values()
 
@@ -617,6 +749,21 @@ class EvidenceRegistry:
         )
 
 
+def _document_source_identity(source: Mapping[str, Any]) -> str:
+    for key in ("documentId", "sourceId", "canonicalUrl"):
+        value = source.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _document_match_text(evidence: Mapping[str, Any]) -> str:
+    value = evidence.get("quote") or evidence.get("snippet")
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r"\s+", "", value).casefold()
+
+
 class CitationGuard:
     """Bind a final assistant body to evidence registered during this turn."""
 
@@ -631,9 +778,11 @@ class CitationGuard:
         force_required: bool = False,
         enabled: bool = True,
         verification_enabled: bool = True,
+        semantic_verifier: SemanticVerifierPort | None = None,
     ) -> None:
         self._registry = registry
         self._message_id = message_id
+        self._user_prompt = user_prompt or ""
         prompt_without_negated_citation = _NEGATED_CITATION_RE.sub("", user_prompt or "")
         self._explicitly_requested = bool(
             _EXPLICIT_CITATION_RE.search(prompt_without_negated_citation)
@@ -643,14 +792,15 @@ class CitationGuard:
         self._force_required = force_required
         self._enabled = enabled
         self._verification_enabled = verification_enabled
+        self._semantic_verifier = semantic_verifier
 
     @property
     def requires_citation(self) -> bool:
-        """Whether the current turn must be sealed before text is published.
+        """Whether current evidence/prompt policy requires Citation auditing.
 
         The registry can become non-empty after construction, so this is a
-        property rather than a cached flag.  Callers use it to keep candidate
-        answer deltas provisional once source-bearing evidence is available.
+        property rather than a cached flag. It controls only the post-message
+        sidecar result and never makes Runtime text provisional.
         """
 
         return self._enabled and (
@@ -659,18 +809,120 @@ class CitationGuard:
             or self._explicitly_requested
         )
 
+    def finalize_projection(self, text: str) -> GuardResult:
+        """Build a Citation sidecar from explicit Runtime bindings only.
+
+        This is the Citation-only path.  It deliberately does not extract
+        Claims, search the Registry, auto-bind, invoke a semantic verifier, or
+        rewrite the Runtime-authored body.  The renderer projects trusted
+        ``evidence://`` links from the returned handle mapping after the raw
+        assistant event has already been persisted and broadcast.
+        """
+
+        if not self._enabled:
+            return GuardResult(text=text, bundle=None)
+        if "evidence://" not in text and "citation://" not in text:
+            return GuardResult(text=text, bundle=None)
+
+        citations: list[dict[str, Any]] = []
+        cited_handles: list[str] = []
+        unknown_ids: list[str] = []
+        missing_locator_ids: list[str] = []
+        handle_to_citation_id: dict[str, str] = {}
+
+        def append_handle(identifier: str, fragment: str | None) -> None:
+            record: EvidenceRecord | None = None
+            canonical_handle = identifier
+            if fragment:
+                record = self._registry.materialize_reference(identifier, fragment)
+                if record is not None:
+                    canonical_handle = record.handle
+            if record is None:
+                record = self._registry.resolve(identifier)
+                if record is not None:
+                    canonical_handle = record.handle
+            if record is None:
+                _append_unique(unknown_ids, f"{identifier}{fragment or ''}")
+                return
+            record = self._registry.preferred_document_record(record)
+            canonical_handle = record.handle
+            citation_id = self._citation_id(canonical_handle)
+            handle_to_citation_id[identifier] = citation_id
+            handle_to_citation_id[f"{identifier}{fragment or ''}"] = citation_id
+            handle_to_citation_id[canonical_handle] = citation_id
+            if canonical_handle in cited_handles:
+                return
+            cited_handles.append(canonical_handle)
+            annotations: dict[str, Any] = {
+                "binding": {"evidenceHandle": canonical_handle}
+            }
+            if record.tool_name:
+                annotations["provenance"] = {"toolName": record.tool_name}
+            citation: dict[str, Any] = {
+                "citationId": citation_id,
+                "source": copy.deepcopy(record.source),
+                "evidence": copy.deepcopy(record.evidence),
+                "resolutionStatus": "ready",
+                "annotations": annotations,
+            }
+            if record.locator is not None:
+                citation["locator"] = copy.deepcopy(record.locator)
+            elif record.source.get("sourceType") == "document":
+                citation["resolutionStatus"] = "degraded"
+                missing_locator_ids.append(citation_id)
+            citations.append(citation)
+
+        for match in _MARKDOWN_LINK_RE.finditer(text):
+            _label, scheme, identifier, fragment = match.groups()
+            if scheme == "evidence":
+                append_handle(identifier, fragment)
+            else:
+                # Runtime providers cannot mint canonical Citation ids.
+                _append_unique(unknown_ids, f"{identifier}{fragment or ''}")
+
+        status = (
+            "degraded"
+            if unknown_ids or missing_locator_ids
+            else "passed"
+            if citations
+            else "not-required"
+        )
+        bundle = {
+            "version": 1,
+            "citations": citations,
+            "projection": {
+                "evidenceHandleToCitationId": handle_to_citation_id,
+            },
+            "integrity": {
+                "status": status,
+                "unknownCitationIds": unknown_ids,
+                "unusedCitationIds": [],
+                "missingLocatorCitationIds": missing_locator_ids,
+                "repairAttempts": 0,
+                "policyRevision": POLICY_REVISION,
+                "evidenceRegisteredCount": len(self._registry),
+                "evidenceCollectionCount": self._registry.collection_count,
+                "evidenceAddressRequestedCount": self._registry.address_requested_count,
+                "evidenceMaterializedCount": self._registry.materialized_count,
+                "evidenceMaterializationRejectedCount": (
+                    self._registry.materialization_rejected_count
+                ),
+                "evidenceRejectedCount": self._registry.rejected_count,
+                "evidenceOverflowReasons": list(self._registry.overflow_reasons),
+            },
+        }
+        return GuardResult(text=text, bundle=bundle)
+
     def finalize(
         self,
         text: str,
         *,
-        repair_attempts: int = 0,
-        preserve_registered_citation_ids: bool = False,
         entity_aliases: Mapping[str, Iterable[str]] | None = None,
     ) -> GuardResult:
         """Return a safe canonical body and its ``CitationBundleV1``.
 
         Expected ``evidence://`` links are normal protocol binding and do not
-        count as a repair.  The single deterministic repair pass accepts the
+        count as a repair. Deterministic protocol normalization accepts the
         documented fallback markers ``[[evidence:HANDLE]]`` and
         ``<evidence:HANDLE>``.  Unknown evidence/citation ids are converted to
         plain labels so the client can never resolve them as trusted sources.
@@ -682,7 +934,7 @@ class CitationGuard:
                 text,
             )
             plain_text = _BARE_EVIDENCE_RE.sub("", plain_text)
-            plain_text = _REPAIR_MARKER_RE.sub("", plain_text)
+            plain_text = _FALLBACK_MARKER_RE.sub("", plain_text)
             plain_text, _ = _strip_malformed_protocol_syntax(plain_text)
             return GuardResult(
                 text=_strip_protocol_source_placeholders(plain_text).strip(),
@@ -722,28 +974,20 @@ class CitationGuard:
         if not required and not has_protocol_binding:
             return GuardResult(text=text, bundle=None)
 
-        # A hidden claim-patch repair is applied to the already sealed first
-        # draft.  Its untouched spans therefore contain canonical
-        # ``citation://`` ids emitted by this guard, not model-authored
-        # ``evidence://`` handles.  Preserve only ids that map back to this
-        # turn's immutable registry during that host-controlled second pass.
-        # The first pass still rejects every model-minted canonical id.
-        allow_registered_citation_ids = int(repair_attempts) > 0 or preserve_registered_citation_ids
-        repaired_text, repaired_handles = self._repair_markers(text)
-        repaired_text = self._materialize_collection_addresses(repaired_text)
-        repaired_text = _move_citation_after_split_number(repaired_text)
-        repaired_text = _move_calculation_citations_to_value_cells(
-            repaired_text,
+        # Runtime providers cannot mint or replay canonical ``citation://``
+        # ids. Only Registry-backed ``evidence://`` handles and Collection
+        # Addresses enter the projection boundary.
+        normalized_text = self._normalize_fallback_markers(text)
+        normalized_text = self._materialize_collection_addresses(normalized_text)
+        normalized_text = _move_citation_after_split_number(normalized_text)
+        normalized_text = _move_calculation_citations_to_value_cells(
+            normalized_text,
             self._registry,
             semantics=semantics,
         )
-        repair_attempts = max(
-            1 if repaired_handles else 0,
-            min(max(int(repair_attempts), 0), 1),
-        )
         self._registry.materialize_calculation_inputs()
         self._registry.materialize_claim_candidates(
-            repaired_text,
+            normalized_text,
             mode=str(policy_mode or "required-on-evidence"),
             semantics=semantics,
         )
@@ -752,25 +996,26 @@ class CitationGuard:
             semantics=semantics,
         )
         binding_result = bind_claims_to_evidence(
-            repaired_text,
+            normalized_text,
             candidate_index,
             mode=str(policy_mode or "required-on-evidence"),
+            user_prompt=self._user_prompt,
             semantics=semantics,
             entity_aliases=entity_aliases,
         )
-        repaired_text = binding_result.text
+        normalized_text = binding_result.text
         propagated_bind_result = propagate_equivalent_claim_bindings(
-            repaired_text,
+            normalized_text,
             candidate_index,
             mode=str(policy_mode or "required-on-evidence"),
             semantics=semantics,
         )
-        repaired_text = propagated_bind_result.text
+        normalized_text = propagated_bind_result.text
         # Auto/rebinding can insert a trusted link after the first boundary
         # normalization pass.  Normalize once more before canonicalizing the
         # links and calculating claim locations so a citation can never split
         # a business number in the published text.
-        repaired_text = _move_citation_after_split_number(repaired_text)
+        normalized_text = _move_citation_after_split_number(normalized_text)
         auto_bound_claims_by_handle: dict[str, list[str]] = {}
         for claim_id, handles in binding_result.auto_bound_claim_handles.items():
             for handle in handles:
@@ -787,22 +1032,19 @@ class CitationGuard:
         cited_handles: list[str] = []
         unknown_ids: list[str] = []
         missing_locator_ids: list[str] = []
-        canonical_to_handle = {
-            self._citation_id(record.handle): record.handle for record in self._registry.values()
-        }
-
+        handle_to_citation_id: dict[str, str] = {}
         def append_handle(identifier: str) -> str | None:
+            requested_identifier = identifier
             record = self._registry.resolve(identifier)
             if record is not None:
+                record = self._registry.preferred_document_record(record)
                 identifier = record.handle
-            if record is None:
-                handle = canonical_to_handle.get(identifier)
-                record = self._registry.get(handle) if handle else None
-                identifier = handle or identifier
             if record is None:
                 _append_unique(unknown_ids, identifier)
                 return None
             citation_id = self._citation_id(identifier)
+            handle_to_citation_id[requested_identifier] = citation_id
+            handle_to_citation_id[identifier] = citation_id
             if identifier in cited_handles:
                 return citation_id
             # Mark before traversing calculation inputs so a malformed cyclic
@@ -853,7 +1095,9 @@ class CitationGuard:
                 "evidence": evidence,
                 "resolutionStatus": "ready",
             }
-            annotations: dict[str, Any] = {}
+            annotations: dict[str, Any] = {
+                "binding": {"evidenceHandle": identifier}
+            }
             if record.tool_name:
                 annotations["provenance"] = {"toolName": record.tool_name}
             auto_bound_claim_ids = auto_bound_claims_by_handle.get(identifier)
@@ -865,7 +1109,7 @@ class CitationGuard:
                 or equivalent_claim_ids
                 or calculation_input_auto_bindings
             ):
-                binding: dict[str, Any] = {}
+                binding = annotations["binding"]
                 if auto_bound_claim_ids:
                     binding["autoBoundClaimIds"] = list(auto_bound_claim_ids)
                 if auto_rebound_claim_ids:
@@ -891,13 +1135,6 @@ class CitationGuard:
                 if fragment:
                     _append_unique(unknown_ids, f"{identifier}{fragment}")
                     return _untrusted_link_label(label)
-                if allow_registered_citation_ids and identifier in canonical_to_handle:
-                    citation_id = append_handle(identifier)
-                    if citation_id is not None:
-                        return (
-                            f"[{_citation_display_number(citations, citation_id)}]"
-                            f"(citation://{citation_id})"
-                        )
                 # The model cannot mint canonical ids.  Even if it guessed an
                 # id that would hash to a registered handle, only handles in a
                 # tool envelope are accepted at this boundary.
@@ -908,8 +1145,8 @@ class CitationGuard:
                 return _untrusted_link_label(label)
             return f"[{_citation_display_number(citations, citation_id)}](citation://{citation_id})"
 
-        numbered_bindings = _numbered_evidence_bindings(repaired_text)
-        canonical_text = _MARKDOWN_LINK_RE.sub(replace_link, repaired_text)
+        numbered_bindings = _numbered_evidence_bindings(normalized_text)
+        canonical_text = _MARKDOWN_LINK_RE.sub(replace_link, normalized_text)
         if unknown_ids:
             # Removing an untrusted citation marker must not leave a visible
             # gap before the sentence punctuation (``fact [source](...) .``).
@@ -924,10 +1161,9 @@ class CitationGuard:
             citation_id = append_handle(handle)
             if citation_id is None:
                 return ""
-            # Bare handles are not valid final prose, but the deterministic
-            # repair can safely wrap a known handle without inventing evidence.
-            nonlocal repair_attempts
-            repair_attempts = 1
+            # Bare handles are not valid final prose, but deterministic
+            # normalization can safely wrap a known handle without inventing
+            # Evidence.
             return f"[{_citation_display_number(citations, citation_id)}](citation://{citation_id})"
 
         canonical_text = _BARE_EVIDENCE_RE.sub(replace_bare, canonical_text)
@@ -958,8 +1194,6 @@ class CitationGuard:
             )
             if source_link is not None:
                 return match.group(0)
-            nonlocal repair_attempts
-            repair_attempts = 1
             return f"[{match.group(1)}](citation://{citation_id})"
 
         canonical_text = _BARE_NUMBERED_MARKER_RE.sub(
@@ -982,11 +1216,6 @@ class CitationGuard:
         )
         if degraded:
             status = "degraded"
-            # A missing/unknown binding consumes the one guard repair budget,
-            # even when there is nothing safe to repair.
-            repair_attempts = 1
-        elif repair_attempts:
-            status = "repaired"
         elif required:
             status = "passed"
         else:
@@ -995,6 +1224,9 @@ class CitationGuard:
         bundle = {
             "version": 1,
             "citations": citations,
+            "projection": {
+                "evidenceHandleToCitationId": handle_to_citation_id,
+            },
             "integrity": {
                 "status": status,
                 "unknownCitationIds": unknown_ids,
@@ -1005,7 +1237,9 @@ class CitationGuard:
                 ),
                 "unusedCitationIds": unused_ids,
                 "missingLocatorCitationIds": missing_locator_ids,
-                "repairAttempts": repair_attempts,
+                # Kept at zero only for historical CitationBundleV1 readers.
+                # New production turns never run the removed repair pipeline.
+                "repairAttempts": 0,
                 "policyRevision": POLICY_REVISION,
                 "evidenceRegisteredCount": len(self._registry),
                 "evidenceCollectionCount": self._registry.collection_count,
@@ -1024,20 +1258,19 @@ class CitationGuard:
                 bundle,
                 self._quality_policy,
                 available_evidence=candidate_index,
+                user_prompt=self._user_prompt,
                 entity_aliases=entity_aliases,
+                semantic_verifier=self._semantic_verifier,
             )
             _focus_text_citation_snippets(bundle)
         return GuardResult(text=canonical_text, bundle=bundle)
 
-    def _repair_markers(self, text: str) -> tuple[str, list[str]]:
-        repaired: list[str] = []
-
+    def _normalize_fallback_markers(self, text: str) -> str:
         def replace(match: re.Match[str]) -> str:
             handle = match.group(1) or match.group(2)
-            repaired.append(handle)
             return f"[source](evidence://{handle})"
 
-        return _REPAIR_MARKER_RE.sub(replace, text), repaired
+        return _FALLBACK_MARKER_RE.sub(replace, text)
 
     def _materialize_collection_addresses(self, text: str) -> str:
         """Replace valid provisional Collection Addresses with direct handles."""
@@ -2383,6 +2616,20 @@ def _scalar_index_keys(value: Any, *, field: str = "") -> tuple[str, ...]:
     numeric = _decimal_key(value)
     if numeric is not None:
         keys.add(f"n:{numeric}")
+        decimal = Decimal(numeric)
+        # Candidate materialization is a recall stage, not a support verdict.
+        # Index the bounded set of ordinary display roundings so an API value
+        # such as 193.775 remains discoverable when the answer renders 193.78.
+        # The deterministic verifier still compares the original immutable
+        # value against the claim before any binding can be accepted.
+        for decimal_places in range(5):
+            quantum = Decimal(1).scaleb(-decimal_places)
+            rounded = decimal.quantize(quantum, rounding=ROUND_HALF_UP)
+            if rounded == 0 and decimal != 0:
+                continue
+            rounded_key = _decimal_key(rounded)
+            if rounded_key is not None:
+                keys.add(f"n:{rounded_key}")
         normalized_field = field.casefold()
         if (
             any(
@@ -3437,18 +3684,23 @@ def _normalize_evidence(value: dict[str, Any]) -> dict[str, Any] | None:
         return None
     normalized_inputs: list[dict[str, Any]] = []
     for item in inputs:
-        if (
-            not isinstance(item, dict)
-            or not _bounded_nonempty_string(item.get("name"), _MAX_SOURCE_TEXT_CHARS)
-            or not _bounded_nonempty_string(item.get("citationId"), _MAX_SOURCE_ID_CHARS)
-            or not _safe_scalar(
-                item.get("value"),
-                allow_none=False,
-                max_string_chars=_MAX_STRUCTURED_STRING_CHARS,
-            )
+        if not isinstance(item, dict) or not _bounded_nonempty_string(
+            item.get("name"), _MAX_SOURCE_TEXT_CHARS
         ):
             return None
-        normalized_inputs.append(_pick_fields(item, ("name", "citationId", "value", "unit")))
+        citation_id = item.get("citationId")
+        origin = item.get("origin")
+        has_citation = _bounded_nonempty_string(citation_id, _MAX_SOURCE_ID_CHARS)
+        has_user_origin = origin == "user-input"
+        if has_citation == has_user_origin or not _safe_scalar(
+            item.get("value"),
+            allow_none=False,
+            max_string_chars=_MAX_STRUCTURED_STRING_CHARS,
+        ):
+            return None
+        normalized_inputs.append(
+            _pick_fields(item, ("name", "citationId", "origin", "value", "unit"))
+        )
     result = _pick_fields(
         value,
         (

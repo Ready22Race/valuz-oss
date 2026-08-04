@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import shlex
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
@@ -183,7 +184,7 @@ def _is_low_value_transcript_chunk(chunk: dict[str, Any]) -> bool:
     greetings, replay instructions and forward-looking disclaimers ahead of
     the semantically matched business passages. Those chunks are authentic but
     cannot support a user-facing business claim; registering them wastes model
-    and repair evidence slots. Apply this only to transcript/minutes sources
+    and focused Evidence slots. Apply this only to transcript/minutes sources
     and only for unambiguous boilerplate templates.
     """
 
@@ -352,11 +353,7 @@ def grep_document_evidence(
     raw_text = str(raw_document.get("content") or "")
     if not pattern or not raw_text:
         return None
-    try:
-        matcher = re.compile(pattern, re.IGNORECASE)
-    except re.error:
-        matcher = re.compile(re.escape(pattern), re.IGNORECASE)
-    matches = list(matcher.finditer(raw_text))[:500]
+    matches = _document_matches(raw_text, pattern)[:500]
     if not matches:
         return None
 
@@ -422,6 +419,78 @@ def grep_document_evidence(
         separators=(",", ":"),
     )
     return visible, envelope
+
+
+@dataclass(frozen=True)
+class _DocumentMatch:
+    start_offset: int
+    end_offset: int
+
+    def start(self) -> int:
+        return self.start_offset
+
+    def end(self) -> int:
+        return self.end_offset
+
+
+def _document_matches(raw_text: str, pattern: str) -> list[re.Match[str] | _DocumentMatch]:
+    """Find exact regex matches, then tolerate PDF-only whitespace wrapping.
+
+    PDF text extraction commonly inserts a newline in the middle of one CJK
+    word (for example ``归属\n于``). The user's/tool's literal query is still
+    exact, but ordinary regex matching cannot see it. Only when the original
+    regex has no match do we retry literal alternatives against a whitespace-
+    free view and map the offsets back to the immutable raw text. Regex
+    semantics never get broadened and the Evidence quote remains byte-for-byte
+    from the retrieved document.
+    """
+
+    try:
+        matcher = re.compile(pattern, re.IGNORECASE)
+    except re.error:
+        matcher = re.compile(re.escape(pattern), re.IGNORECASE)
+    direct = list(matcher.finditer(raw_text))
+    if direct:
+        return direct
+
+    normalized_chars: list[str] = []
+    raw_offsets: list[int] = []
+    for index, char in enumerate(raw_text):
+        if char.isspace():
+            continue
+        normalized_chars.append(char.casefold())
+        raw_offsets.append(index)
+    if not normalized_chars:
+        return []
+    normalized_text = "".join(normalized_chars)
+
+    output: list[_DocumentMatch] = []
+    seen: set[tuple[int, int]] = set()
+    for alternative in pattern.split("|"):
+        literal = re.sub(r"\\(.)", r"\1", alternative).strip()
+        # This fallback is deliberately literal. Do not reinterpret arbitrary
+        # regular expressions or loosen short tokens that would create noisy
+        # evidence windows throughout a long report.
+        if len(literal) < 4 or re.search(r"[.^$*+?{}\[\]()]", literal):
+            continue
+        normalized_literal = "".join(
+            char.casefold() for char in literal if not char.isspace()
+        )
+        if len(normalized_literal) < 4:
+            continue
+        cursor = 0
+        while True:
+            found = normalized_text.find(normalized_literal, cursor)
+            if found < 0:
+                break
+            start = raw_offsets[found]
+            end = raw_offsets[found + len(normalized_literal) - 1] + 1
+            identity = (start, end)
+            if identity not in seen:
+                seen.add(identity)
+                output.append(_DocumentMatch(start, end))
+            cursor = found + max(1, len(normalized_literal))
+    return sorted(output, key=lambda item: item.start())
 
 
 def request_search_terms(request: str) -> tuple[str, ...]:
@@ -514,7 +583,10 @@ def targeted_document_evidence(
     )
 
 
-def _document_match_score(raw_text: str, match: re.Match[str]) -> tuple[int, int]:
+def _document_match_score(
+    raw_text: str,
+    match: re.Match[str] | _DocumentMatch,
+) -> tuple[int, int]:
     """Prefer numeric/table rows over an earlier prose definition match."""
 
     start = max(0, match.start() - 800)
@@ -532,7 +604,10 @@ def _document_match_score(raw_text: str, match: re.Match[str]) -> tuple[int, int
     return score, -match.start()
 
 
-def _document_match_excerpt(raw_text: str, match: re.Match[str]) -> str:
+def _document_match_excerpt(
+    raw_text: str,
+    match: re.Match[str] | _DocumentMatch,
+) -> str:
     """Return a bounded row/paragraph window around one exact match.
 
     A multi-thousand-character window made a table-header occurrence outrank
