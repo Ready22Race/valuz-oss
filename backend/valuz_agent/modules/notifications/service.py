@@ -158,6 +158,18 @@ class NotificationService:
             unread = await ds.count_unread(user_id)
         return [_entry(r) for r in rows], unread
 
+    async def history(
+        self, user_id: str, *, limit: int = 50, before: int | None = None
+    ) -> tuple[list[NotificationEntry], bool]:
+        """Resolved notifications page, newest first — the drawer's History
+        tab. Returns ``(entries, has_more)``; fetches one extra row to learn
+        whether another page exists below."""
+        async with async_unit_of_work(commit=False) as db:
+            rows = await NotificationDatastore(db).list_history(
+                user_id, limit=limit + 1, before=before
+            )
+        return [_entry(r) for r in rows[:limit]], len(rows) > limit
+
     async def mark_read(self, user_id: str, notification_id: str) -> None:
         async with async_unit_of_work() as db:
             await NotificationDatastore(db).mark_read(user_id, notification_id)
@@ -170,6 +182,11 @@ class NotificationService:
         """User-driven resolve (e.g. swiping away a failure they acknowledge)."""
         async with async_unit_of_work() as db:
             await NotificationDatastore(db).resolve_by_id(user_id, notification_id)
+
+    async def dismiss_all(self, user_id: str) -> None:
+        """User-driven resolve of every open entry (the drawer's "clear all")."""
+        async with async_unit_of_work() as db:
+            await NotificationDatastore(db).resolve_all_open(user_id)
 
 
 # Process singleton.

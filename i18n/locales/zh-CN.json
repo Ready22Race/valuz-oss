@@ -2818,10 +2818,17 @@
     "kindQuestion": "待回答",
     "kindFailure": "任务受阻",
     "resume": "恢复任务",
-    "dismiss": "忽略",
+    "dismiss": "清除",
     "openTask": "查看任务",
     "notifBackupFailedTitle": "本地备份失败",
     "kindBackupFailed": "备份失败",
-    "openBackupSettings": "打开备份设置"
+    "openBackupSettings": "打开备份设置",
+    "tabOpen": "未处理",
+    "tabHistory": "历史",
+    "clearAll": "全部清除",
+    "historyEmpty": "暂无历史消息",
+    "historyLoadFailed": "历史消息加载失败",
+    "loadMore": "加载更多",
+    "kindCompleted": "已完成"
   }
 }
