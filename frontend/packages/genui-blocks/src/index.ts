@@ -19,6 +19,7 @@ export {
 // Metric tiles
 export * from "./MiniCard";
 export * from "./Metric";
+export * from "./IconTag";
 
 // Cards & tiles
 export * from "./CardBlock";

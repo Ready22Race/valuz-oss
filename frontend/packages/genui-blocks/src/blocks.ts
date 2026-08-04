@@ -6,6 +6,7 @@ import { CompositeCard } from "./CompositeCard";
 import { ContextCard } from "./ContextCard";
 import { DataList, DataListItem } from "./DataList";
 import { DataTileCard } from "./DataTileCard";
+import { IconTag, IconText } from "./IconTag";
 import { MarketBreadth } from "./MarketBreadth";
 import { MarketIndexCard, MarketIndexGrid } from "./MarketIndexGrid";
 import { Mermaid, MermaidBadge } from "./Mermaid";
@@ -56,6 +57,8 @@ export const blockComponents: BlockComponent[] = [
   MiniCard,
   MiniCardBlock,
   Metric,
+  IconTag,
+  IconText,
   // Cards & tiles
   SmallCardBlock,
   MediumCardBlock,
@@ -100,9 +103,9 @@ export const blockComponents: BlockComponent[] = [
 export const blockComponentGroups: ComponentGroup[] = [
   {
     name: "Metric Tiles",
-    components: ["MiniCardBlock", "MiniCard", "Metric"],
+    components: ["MiniCardBlock", "MiniCard", "Metric", "IconTag", "IconText"],
     notes: [
-      "Prefer MiniCardBlock over a row of Cards whenever every entry is a single label + figure; Metric is the unframed version, for use inside a surface that already has a frame.",
+      "Prefer MiniCardBlock over a row of Cards whenever every entry is a single label + figure; Metric is the unframed version, for use inside a surface that already has a frame. IconTag marks something with a lucide icon, and IconText pairs one with a line of text.",
     ],
   },
   {

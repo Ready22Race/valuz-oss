@@ -2,6 +2,7 @@
 
 import { defineComponent } from "@openuidev/react-lang";
 
+import { BlockIcon } from "../lib/icon";
 import { toneSurface, toneText } from "../lib/tone";
 import { DataTileCardSchema } from "./schema";
 
@@ -13,7 +14,7 @@ export const DataTileCard = defineComponent({
   description:
     "An amount over a one-line breakdown that qualifies it — \"$4.2M\" above \"across 12 accounts\". " +
     "Use it when the figure needs that second line to be understood; when it does not, MiniCard or ValueCard is lighter. " +
-    "value is the formatted amount, breakdown the qualifying line, label an optional metric name above the value, and icon a single emoji or character (\"💰\", \"↑\") — there is no icon library, so never pass an icon name. " +
+    "value is the formatted amount, breakdown the qualifying line, label an optional metric name above the value, and icon a lucide icon name in kebab-case (\"wallet\", \"trending-up\", \"users\") — an unknown name simply renders no icon. " +
     "Lay several out with SmallCardBlock or MediumCardBlock.",
   component: ({ props }) => (
     <div className="vgb-tile vgb-data-tile" data-slot="vgb-data-tile-card">
@@ -23,7 +24,7 @@ export const DataTileCard = defineComponent({
           aria-hidden="true"
           style={{ backgroundColor: toneSurface(props.tone), color: toneText(props.tone) }}
         >
-          {props.icon}
+          <BlockIcon name={props.icon} size="55%" />
         </span>
       ) : null}
       <span className="vgb-data-tile-text">
