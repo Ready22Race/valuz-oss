@@ -190,6 +190,25 @@ _INTERNAL_HANDOFF_RE = re.compile(
     r"[\s\S]*?^##\s+ARTIFACTS\b[\s\S]*?^##\s+NEXT STEPS\b",
     re.IGNORECASE | re.MULTILINE,
 )
+
+
+def _tool_preserves_answer_candidate(tool_name: object) -> bool:
+    """Return whether a post-answer tool is bookkeeping rather than research.
+
+    Runtime visibility is independent from answer selection: every assistant
+    segment remains persisted and broadcast.  Task Coverage, however, must not
+    count a research preamble merely because it contains a numbered list or a
+    draft table.  The one cross-runtime tool we intentionally allow after a
+    completed answer is the TODO-list bookkeeping tool; runtimes may expose it
+    with a provider namespace or one of the common SDK spellings.
+    """
+
+    raw = str(tool_name or "").casefold().rsplit("__", 1)[-1]
+    raw = raw.rsplit(".", 1)[-1].rsplit("/", 1)[-1]
+    leaf = re.sub(r"[^a-z0-9]+", "_", raw).strip("_")
+    return leaf in {"write_todos", "todo_write", "todowrite", "update_todo_list"}
+
+
 _LEADING_PROGRESS_RE = re.compile(
     r"^(?:"
     r"(?:已?获得|获得了).{0,160}(?:现在|接下来|随后).{0,40}"
@@ -308,6 +327,16 @@ _CROSS_PERIOD_RECAP_HEADING_RE = re.compile(
     r"(?:横向|纵向|整体|综合)?\s*(?:对比|比较|小结|总结|归纳)\s*$|"
     r"(?:cross[ -]period|comparison|trend|overview))",
     re.IGNORECASE,
+)
+_EXACT_RESULT_RECAP_HEADING_RE = re.compile(
+    r"^\s*#{1,6}\s+(?:附[:：]?\s*)?(?=.{1,48}$)(?:"
+    r".*(?:一览|总览|汇总(?:对比)?(?:表)?|对比(?:汇总)?(?:表)?|比较(?:汇总)?(?:表)?|"
+    r"总表|概览)|summary|recap)\s*$",
+    re.IGNORECASE,
+)
+_NUMBERED_RESULT_HEADING_RE = re.compile(
+    r"^[ \t]{0,3}(?P<marks>#{1,6})\s+"
+    r"(?:\d+[.)、]|[一二三四五六七八九十]+[、.)])\s*.+$"
 )
 _REPAIR_RELEVANCE_TRANSLATION = str.maketrans(
     {
@@ -679,6 +708,70 @@ def _strip_unrequested_cross_period_recap(text: str, user_prompt: str) -> str:
             kept.pop()
         return "\n".join(kept).strip()
     return text
+
+
+def _strip_unrequested_exact_result_recap(text: str, user_prompt: str) -> str:
+    """Drop a duplicated trailing exact-N recap table unless requested.
+
+    Research runtimes sometimes render the requested N detailed results and
+    then repeat those same results in a trailing ``summary`` table.  The table
+    creates a second set of detached claims and can make an otherwise complete
+    answer look under-cited.  This guard is intentionally conservative: it
+    requires an explicit exact-N contract, N numbered result sections at one
+    Markdown heading level, and an N-row table below a recognized recap
+    heading.  A user request for a table always wins.
+    """
+
+    contract = parse_output_contract(user_prompt)
+    result_count = contract.requested_result_count
+    if result_count is None or result_count < 1:
+        return text
+    if _PRIMARY_MARKDOWN_TABLE_REQUEST_RE.search(user_prompt):
+        return text
+
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if not _EXACT_RESULT_RECAP_HEADING_RE.match(line):
+            continue
+        prefix = lines[:index]
+        heading_counts: dict[int, int] = {}
+        for prefix_line in prefix:
+            match = _NUMBERED_RESULT_HEADING_RE.match(prefix_line)
+            if match is None:
+                continue
+            level = len(match.group("marks"))
+            heading_counts[level] = heading_counts.get(level, 0) + 1
+        if result_count not in heading_counts.values():
+            continue
+        if result_count not in _markdown_table_data_row_counts(lines[index + 1 :]):
+            continue
+        kept = prefix
+        while kept and kept[-1].strip() in {"", "---", "***", "___"}:
+            kept.pop()
+        return "\n".join(kept).strip()
+    return text
+
+
+def _markdown_table_data_row_counts(lines: list[str]) -> tuple[int, ...]:
+    """Return data-row counts for valid Markdown tables in ``lines``."""
+
+    row_counts: list[int] = []
+    index = 0
+    while index + 1 < len(lines):
+        if not lines[index].strip().startswith("|"):
+            index += 1
+            continue
+        block_start = index
+        while index < len(lines) and lines[index].strip().startswith("|"):
+            index += 1
+        block = lines[block_start:index]
+        if len(block) < 3 or not re.fullmatch(
+            r"\s*\|(?:\s*:?-{3,}:?\s*\|)+\s*",
+            block[1],
+        ):
+            continue
+        row_counts.append(len(block) - 2)
+    return tuple(row_counts)
 
 
 def _strip_unrequested_period_leadin(text: str, user_prompt: str) -> str:
@@ -1796,6 +1889,12 @@ class _MessageObserverSink:
         self._task_coverage_baseline_event: Event | None = None
         self._task_coverage_revision_allowed_handles: tuple[str, ...] = ()
         self._task_coverage_revision_uses_local_patch = False
+        # A rejected revision is still runtime-authored assistant output and
+        # therefore remains visible.  The builder publishes that candidate
+        # directly, restores the already-published baseline as the selected
+        # final state, and uses this one-shot flag to stop the caller from
+        # emitting the baseline a second time.
+        self._final_candidate_published_in_builder = False
         self._final_answer_recovery_requested = False
         self._final_answer_recovery_attempts = 0
         self.num_turns: int = 0
@@ -1828,12 +1927,24 @@ class _MessageObserverSink:
             if self._citation_enabled and isinstance(citation_content, str):
                 tool_name = event.data.get("tool_name")
                 model_content = event.data.get("model_content")
-                self._evidence_registry.register_tool_projection(
+                registered_count = self._evidence_registry.register_tool_projection(
                     model_content if model_content is not None else citation_content,
                     citation_content,
                     tool_name=str(tool_name) if tool_name else None,
                     trusted_private=True,
                 )
+                citation_ready = bool(registered_count) or (
+                    self._evidence_registry.projection_is_registered(
+                        citation_content,
+                        trusted_private=True,
+                    )
+                )
+                if citation_ready and self._task_coverage_tracker is not None:
+                    self._task_coverage_tracker.mark_citation_ready(
+                        str(tool_name) if tool_name else None,
+                        model_content if model_content is not None else citation_content,
+                        citation_join_id=event.data.get("citation_join_id"),
+                    )
             # This is a private bridge between the graph checkpoint and the
             # citation registry, not a user-visible tool invocation.
             return
@@ -1852,12 +1963,13 @@ class _MessageObserverSink:
             # Claude can occasionally report only the last paragraph in its
             # canonical AssistantMessage even though the immediately preceding
             # top-level text_delta stream contains the complete final answer.
-            # Citation turns intentionally hide those deltas until sealing, so
-            # blindly preferring that short canonical block discards the whole
-            # researched answer and leaves the user with an epilogue such as
-            # "以上即为……".  The stream is safe to promote only when it is a
-            # materially longer superset containing the canonical block; tool
-            # boundaries already clear research preambles from this buffer.
+            # Those deltas have already remained visible on the live stream;
+            # blindly preferring a short canonical block for durable history
+            # would nevertheless discard the researched answer on refresh and
+            # leave only an epilogue such as "以上即为……".  Promote the stream
+            # only when it is a materially longer superset containing the
+            # canonical block; tool boundaries already clear research
+            # preambles from this buffer.
             if self._citation_guard.requires_citation and len(streamed_text) >= max(
                 400, len(canonical_text) * 2
             ):
@@ -1889,7 +2001,28 @@ class _MessageObserverSink:
             and is_top_level
             and event.type in {"text_delta", "tool_use"}
         ):
-            await self._flush_pending_assistant(final=False)
+            await self._flush_pending_assistant(
+                final=False,
+                include_in_answer_coverage=(
+                    event.type != "tool_use"
+                    or _tool_preserves_answer_candidate(event.data.get("name"))
+                ),
+            )
+
+        if (
+            event.type == "tool_use"
+            and is_top_level
+            and not _tool_preserves_answer_candidate(event.data.get("name"))
+        ):
+            # A content-changing tool boundary starts a new answer candidate.
+            # Earlier runtime text remains persisted and visible, but must not
+            # be concatenated with the later candidate for exact-N/table/field
+            # validation.  This also repairs the ordering where a runtime emits
+            # the next block's first text_delta before its following tool_use:
+            # that delta can force the prior canonical block to flush, so the
+            # boundary itself is the authoritative point to reset Coverage.
+            self._coverage_answer_chunks.clear()
+            self._coverage_citation_bundles.clear()
 
         if event.type == "assistant_message":
             # Subagent text is an out-of-band flow and must not take ownership
@@ -1915,6 +2048,7 @@ class _MessageObserverSink:
             citation_content = event.data.get("_citation_content")
             visible_content = event.data.get("content")
             compacted_content = compact_citation_tool_content(visible_content)
+            citation_ready: bool | None = None
             if self._citation_enabled:
                 private_projection = (
                     citation_content
@@ -1923,13 +2057,27 @@ class _MessageObserverSink:
                     if compacted_content is not None
                     else None
                 )
-                self._evidence_registry.register_tool_projection(
+                registered_count = self._evidence_registry.register_tool_projection(
                     compacted_content if compacted_content is not None else visible_content,
                     private_projection,
                     tool_name=tool_name,
                     trusted_private=(
                         private_projection is not None or compacted_content is not None
                     ),
+                )
+                readiness_projection = (
+                    private_projection
+                    if private_projection is not None
+                    else compacted_content
+                    if compacted_content is not None
+                    else visible_content
+                )
+                citation_ready = bool(registered_count) or (
+                    readiness_projection is not None
+                    and self._evidence_registry.projection_is_registered(
+                        readiness_projection,
+                        trusted_private=private_projection is not None,
+                    )
                 )
             if self._task_coverage_tracker is not None:
                 # Coverage must evaluate what the model could actually use.
@@ -1948,6 +2096,8 @@ class _MessageObserverSink:
                     tool_name,
                     self._tool_inputs.get(tool_use_id) if isinstance(tool_use_id, str) else None,
                     coverage_content,
+                    citation_ready=citation_ready,
+                    citation_join_id=event.data.get("citation_join_id"),
                 )
             if "_citation_content" in event.data or compacted_content is not None:
                 # The full evidence payload is turn-private: the Registry has
@@ -2131,7 +2281,7 @@ class _MessageObserverSink:
                 raw_text,
                 repair_attempts=0,
                 entity_aliases=(
-                    self._task_coverage_tracker.entity_aliases_snapshot()
+                    self._task_coverage_tracker.entity_aliases_snapshot(raw_text)
                     if self._task_coverage_tracker is not None
                     else None
                 ),
@@ -2196,6 +2346,8 @@ class _MessageObserverSink:
         # prefixed to the repair attempt's own visible stream.
         self._assistant_delta_chunks.clear()
         self._pending_assistant = None
+        self._coverage_answer_chunks.clear()
+        self._coverage_citation_bundles.clear()
 
     def begin_task_coverage_revision(self) -> None:
         """Consume the one global candidate-revision budget for task coverage."""
@@ -2207,6 +2359,8 @@ class _MessageObserverSink:
         self._usage_before_citation_repair = dict(self.usage) if self.usage is not None else None
         self._assistant_delta_chunks.clear()
         self._pending_assistant = None
+        self._coverage_answer_chunks.clear()
+        self._coverage_citation_bundles.clear()
 
     def begin_final_answer_recovery(self) -> None:
         """Consume the only no-final-answer continuation for this turn."""
@@ -2217,6 +2371,8 @@ class _MessageObserverSink:
         self._final_answer_recovery_attempts += 1
         self._assistant_delta_chunks.clear()
         self._pending_assistant = None
+        self._coverage_answer_chunks.clear()
+        self._coverage_citation_bundles.clear()
 
     async def _publish_final_answer_fallback(self) -> None:
         has_chinese = bool(re.search(r"[\u3400-\u9fff]", self._user_prompt))
@@ -2326,6 +2482,7 @@ class _MessageObserverSink:
         *,
         final: bool,
         allow_repair: bool = True,
+        include_in_answer_coverage: bool = True,
     ) -> bool:
         pending = self._pending_assistant
         if pending is None:
@@ -2347,6 +2504,9 @@ class _MessageObserverSink:
                 allow_repair=allow_repair,
             )
             if event is None:
+                if self._final_candidate_published_in_builder:
+                    self._final_candidate_published_in_builder = False
+                    return True
                 if not str(raw_text).strip():
                     return False
                 # Preserve the runtime message while keeping the final-answer
@@ -2366,12 +2526,40 @@ class _MessageObserverSink:
                 timestamp=pending.timestamp,
             )
         self._record_assistant_message(event)
-        if not final:
+        if not final and include_in_answer_coverage:
             self._record_intermediate_answer_coverage(event)
         if final and canonical_final:
             self._final_assistant_published = True
         await self._inner.emit(event)
         return True
+
+    async def _publish_rejected_revision_candidate(
+        self,
+        candidate: Event,
+        *,
+        selected_baseline: Event,
+    ) -> None:
+        """Persist a rejected model revision without selecting it as final.
+
+        Citation and Task Coverage may reject a candidate as a replacement,
+        but that policy decision must not rewrite runtime history.  The first
+        draft was already published before the revision began, so publish the
+        candidate once and restore the baseline sidecars as the message-level
+        final selection without duplicating the baseline in the transcript.
+        """
+
+        self._record_assistant_message(candidate)
+        await self._inner.emit(candidate)
+        baseline_bundle = selected_baseline.data.get("citation_bundle")
+        self.citation_bundle = (
+            copy.deepcopy(baseline_bundle) if isinstance(baseline_bundle, dict) else None
+        )
+        baseline_coverage = selected_baseline.data.get("task_coverage")
+        self.task_coverage = (
+            copy.deepcopy(baseline_coverage) if isinstance(baseline_coverage, dict) else None
+        )
+        self._final_candidate_published_in_builder = True
+        self._final_assistant_published = True
 
     async def _build_final_assistant_event(
         self,
@@ -2425,10 +2613,18 @@ class _MessageObserverSink:
                 )
                 self._citation_repair_baseline_event = None
                 logger.warning(
-                    "citation_guard rejected claim patch reason=%s and published baseline",
+                    "citation_guard rejected claim patch reason=%s and retained baseline",
                     patch_result.code,
                 )
-                return rejected
+                await self._publish_rejected_revision_candidate(
+                    Event(
+                        type="assistant_message",
+                        data={**dict(base_data or {}), "text": raw_text},
+                        **({"timestamp": timestamp} if timestamp is not None else {}),
+                    ),
+                    selected_baseline=rejected,
+                )
+                return None
             raw_text = patch_result.text
         if (
             self._task_coverage_revision_attempts
@@ -2456,10 +2652,18 @@ class _MessageObserverSink:
                     rejected.data["task_coverage"] = rejected_coverage
                 self._task_coverage_baseline_event = None
                 logger.warning(
-                    "task_coverage rejected local patch reason=%s and published baseline",
+                    "task_coverage rejected local patch reason=%s and retained baseline",
                     patch_result.code,
                 )
-                return rejected
+                await self._publish_rejected_revision_candidate(
+                    Event(
+                        type="assistant_message",
+                        data={**dict(base_data or {}), "text": raw_text},
+                        **({"timestamp": timestamp} if timestamp is not None else {}),
+                    ),
+                    selected_baseline=rejected,
+                )
+                return None
             raw_text = patch_result.text
             task_revision_patch_ids = patch_result.requirement_ids
             task_revision_used_local_patch = True
@@ -2474,6 +2678,7 @@ class _MessageObserverSink:
         raw_text = _strip_unrequested_derived_restatement(raw_text, self._user_prompt)
         raw_text = _strip_unrequested_period_leadin(raw_text, self._user_prompt)
         raw_text = _strip_unrequested_cross_period_recap(raw_text, self._user_prompt)
+        raw_text = _strip_unrequested_exact_result_recap(raw_text, self._user_prompt)
         raw_text = _strip_unrequested_retrieval_internals(raw_text, self._user_prompt)
         raw_text = _strip_requested_primary_markdown_table(raw_text, self._user_prompt)
         raw_text = _strip_empty_markdown_labels(raw_text)
@@ -2559,7 +2764,7 @@ class _MessageObserverSink:
             repair_attempts=self._citation_repair_attempts,
             preserve_registered_citation_ids=task_revision_used_local_patch,
             entity_aliases=(
-                self._task_coverage_tracker.entity_aliases_snapshot()
+                self._task_coverage_tracker.entity_aliases_snapshot(raw_text)
                 if self._task_coverage_tracker is not None
                 else None
             ),
@@ -2644,10 +2849,12 @@ class _MessageObserverSink:
                     )
                     rejected.data["task_coverage"] = rejected_coverage
                 self._task_coverage_baseline_event = None
-                logger.warning(
-                    "task_coverage rejected candidate revision because coverage did not improve"
+                logger.warning("task_coverage rejected candidate revision and retained baseline")
+                await self._publish_rejected_revision_candidate(
+                    event,
+                    selected_baseline=rejected,
                 )
-                return rejected
+                return None
             if isinstance(coverage_audit, dict):
                 coverage_audit["revisionOutcome"] = "accepted"
                 data["task_coverage"] = coverage_audit
@@ -2737,7 +2944,11 @@ class _MessageObserverSink:
                 logger.warning(
                     "citation_guard rejected automatic repair because quality did not improve"
                 )
-                return rejected
+                await self._publish_rejected_revision_candidate(
+                    event,
+                    selected_baseline=rejected,
+                )
+                return None
             self._mark_repair_outcome(event, outcome="accepted")
             self._citation_repair_baseline_event = None
             if needs_repair:
@@ -2805,7 +3016,7 @@ class _MessageObserverSink:
                     registry_records,
                     semantics=semantics,
                     entity_aliases=(
-                        self._task_coverage_tracker.entity_aliases_snapshot()
+                        self._task_coverage_tracker.entity_aliases_snapshot(draft_text)
                         if self._task_coverage_tracker is not None
                         else None
                     ),
@@ -3099,7 +3310,17 @@ class _MessageObserverSink:
                 + len(integrity.get("missingLocatorCitationIds") or [])
             ),
             "unknown": len(integrity.get("unknownCitationIds") or []),
+            "missing_locator": len(integrity.get("missingLocatorCitationIds") or []),
             "mismatch": int(metrics.get("claimSemanticMismatchCount") or 0),
+            "hard_conflict": sum(
+                1
+                for claim in claims
+                if isinstance(claim, dict)
+                and any(
+                    str(code) in _ACTIONABLE_REPAIR_ISSUE_CODES
+                    for code in (claim.get("issueCodes") or [])
+                )
+            ),
             "supported": sum(
                 1
                 for claim in claims
@@ -3234,7 +3455,8 @@ class _MessageObserverSink:
         return (
             problem_quality_preserved
             and issue_rate_preserved("unknown")
-            and issue_rate_preserved("mismatch")
+            and issue_rate_preserved("missing_locator")
+            and after["hard_conflict"] <= before["hard_conflict"]
             and after["supported"] >= before["supported"]
         )
 
@@ -3423,9 +3645,51 @@ class SessionOrchestrator:
         self,
         hook: CitationRepairRefreshHook | None,
     ) -> None:
-        """Install the host credential-refresh seam for citation repair runs."""
+        """Install the host credential-refresh seam for continuation runs."""
 
         self._citation_repair_refresh_hook = hook
+
+    async def _refresh_continuation_credentials(
+        self,
+        user_id: str,
+        session_id: str,
+        session: Any,
+        *,
+        continuation: str,
+    ) -> None:
+        """Refresh and adopt MCP credentials before a second runtime pass.
+
+        The host hook updates the durable Session row.  The orchestrator still
+        owns the in-memory Session loaded at turn start; without this reload a
+        long turn builds its coverage revision from the expired header snapshot
+        and later saves that stale snapshot over the refreshed row.  Copy only
+        the connector configs because runtime-owned status, stop reason, native
+        thread id and todos belong to the active turn.
+        """
+
+        if self._citation_repair_refresh_hook is None:
+            return
+        try:
+            changed = await self._citation_repair_refresh_hook(user_id, session_id)
+        except Exception:
+            logger.warning(
+                "%s credential refresh failed for session %s",
+                continuation,
+                session_id,
+                exc_info=True,
+            )
+            return
+        if not changed:
+            return
+        fresh = await self._store.load_session(user_id, session_id)
+        if fresh is None:
+            logger.warning(
+                "%s credential refresh could not reload session %s",
+                continuation,
+                session_id,
+            )
+            return
+        session.mcp_servers = fresh.mcp_servers
 
     def _get_or_create_bus(self, session_id: str) -> SessionEventBus:
         bus = self._buses.get(session_id)
@@ -3765,15 +4029,12 @@ class SessionOrchestrator:
             ):
                 observer.begin_task_coverage_revision()
                 session.status = "running"
-                if self._citation_repair_refresh_hook is not None:
-                    try:
-                        await self._citation_repair_refresh_hook(user_id, session_id)
-                    except Exception:
-                        logger.warning(
-                            "task coverage credential refresh failed for session %s",
-                            session_id,
-                            exc_info=True,
-                        )
+                await self._refresh_continuation_credentials(
+                    user_id,
+                    session_id,
+                    session,
+                    continuation="task coverage",
+                )
 
                 # Run the one candidate revision in a fresh full-capability
                 # runtime. It can retrieve only missing requirements without
@@ -3841,18 +4102,12 @@ class SessionOrchestrator:
                 # resources: all admissible evidence is sealed into its compact
                 # prompt, so a quality pass cannot start a second
                 # research run or cross an expiring tool credential.
-                if self._citation_repair_refresh_hook is not None:
-                    try:
-                        await self._citation_repair_refresh_hook(
-                            user_id,
-                            session_id,
-                        )
-                    except Exception:
-                        logger.warning(
-                            "citation repair credential refresh failed for session %s",
-                            session_id,
-                            exc_info=True,
-                        )
+                await self._refresh_continuation_credentials(
+                    user_id,
+                    session_id,
+                    session,
+                    continuation="citation repair",
+                )
 
                 # A claim repair needs only the original request, sealed draft,
                 # compact issue list, and bounded candidate evidence copied into

@@ -227,6 +227,37 @@
       ]
     },
     {
+      "task_coverage_case_id": "OSS-TASK-RANKING-001",
+      "business_group": "source-backed-top-n-requires-addressable-content",
+      "prompt": "统计最近一周模型 Token 用量 Top10，并计算周环比和月环比。",
+      "tools": [
+        {
+          "name": "browser_execute",
+          "input": {"script": "collect weekly usage"},
+          "result": "1. Model A 100 tokens；2. Model B 90 tokens。",
+          "citation_ready": false
+        }
+      ],
+      "answer": "1. Model 1：100 tokens，周环比 1%，月环比 2%。\n2. Model 2：99 tokens，周环比 1%，月环比 2%。\n3. Model 3：98 tokens，周环比 1%，月环比 2%。\n4. Model 4：97 tokens，周环比 1%，月环比 2%。\n5. Model 5：96 tokens，周环比 1%，月环比 2%。\n6. Model 6：95 tokens，周环比 1%，月环比 2%。\n7. Model 7：94 tokens，周环比 1%，月环比 2%。\n8. Model 8：93 tokens，周环比 1%，月环比 2%。\n9. Model 9：92 tokens，周环比 1%，月环比 2%。\n10. Model 10：91 tokens，周环比 1%，月环比 2%。",
+      "expected_contract": {
+        "task_type": "calculation",
+        "requirement_count": 3,
+        "kind_counts": {"topic": 1, "calculation": 1, "output-shape": 1},
+        "entities": [],
+        "enforceable": true
+      },
+      "expected_coverage": {
+        "status": "partial",
+        "retrieval_available_count": 0,
+        "answer_missing_count": 1,
+        "revision_requested": true
+      },
+      "policy_refs": [
+        "task_coverage.contract.output_constraints.exact-count",
+        "task_coverage.retrieval.candidate_selection.required-parts-covered"
+      ]
+    },
+    {
       "task_coverage_case_id": "OSS-TASK-DOC-002",
       "business_group": "locked-document-rejects-index-leakage",
       "prompt": "总结当前文档。",

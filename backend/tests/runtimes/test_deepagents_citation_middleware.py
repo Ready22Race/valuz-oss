@@ -354,6 +354,75 @@ async def test_singular_kb_document_scope_is_normalized_before_provider_call() -
     assert handled_args == [{"query": "operating cash flow", "doc_ids": ["sk-q2"]}]
 
 
+async def test_scoped_kb_search_has_its_own_budget_for_every_document_type() -> None:
+    middleware = ResearchToolBudgetMiddleware()
+    middleware.before_agent(None, None)
+    handled: list[str] = []
+
+    class Request:
+        def __init__(self, tool_call: dict[str, Any]) -> None:
+            self.tool_call = tool_call
+
+        def override(self, **updates: Any) -> Request:
+            return Request(updates.get("tool_call", self.tool_call))
+
+    async def handler(request: ToolCallRequest) -> ToolMessage:
+        handled.append(str(request.tool_call["id"]))
+        return ToolMessage(
+            content="result",
+            tool_call_id=request.tool_call["id"],
+            name=request.tool_call["name"],
+        )
+
+    for index in range(6):
+        result = await middleware.awrap_tool_call(
+            cast(
+                ToolCallRequest,
+                Request(
+                    {
+                        "id": f"discovery-{index}",
+                        "name": "news_search",
+                        "args": {"query": f"candidate {index}"},
+                    }
+                ),
+            ),
+            handler,
+        )
+        assert result.status != "error"
+
+    async def search_document(doc_id: str, call_id: str) -> ToolMessage:
+        return cast(
+            ToolMessage,
+            await middleware.awrap_tool_call(
+                cast(
+                    ToolCallRequest,
+                    Request(
+                        {
+                            "id": call_id,
+                            "name": "kb_search",
+                            "args": {
+                                "doc_ids": [doc_id],
+                                "query": "revenue cash flow",
+                            },
+                        }
+                    ),
+                ),
+                handler,
+            ),
+        )
+
+    first_doc = await search_document("report-a", "kb-report-a")
+    second_doc = await search_document("report-b", "kb-report-b")
+    repeated = await search_document("report-a", "kb-report-a-repeat")
+
+    assert first_doc.status != "error"
+    assert second_doc.status != "error"
+    assert repeated.status == "error"
+    assert "already had its one targeted indexed search" in str(repeated.content)
+    assert "kb-report-a" in handled
+    assert "kb-report-b" in handled
+
+
 async def test_compaction_does_not_register_out_of_scope_indexed_chunks() -> None:
     original = ToolMessage(
         content=json.dumps(
@@ -754,6 +823,207 @@ async def test_reportify_discovery_metadata_stays_non_citable() -> None:
     assert registry.rejected_count == 0
 
 
+async def test_reportify_document_summary_metadata_survives_transport_as_one_evidence() -> None:
+    summary = "Alpha used 8.25T tokens; Beta used 7.31T tokens this week."
+    payload = {
+        "doc_id": "openrouter-ranking",
+        "title": "OpenRouter model rankings",
+        "url": "https://openrouter.ai/rankings",
+        "category": "webpages",
+        "summary": summary,
+        "chunks": [
+            {
+                "id": "intro",
+                "content": "Live model rankings based on real usage.",
+            }
+        ],
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    descriptor = {
+        "version": 1,
+        "provider": {"id": "reportify", "name": "Reportify"},
+        "operation": {"toolName": "document_fetch"},
+        "result": {
+            "target": "structuredContent",
+            "hash": {"algorithm": "sha256", "value": digest},
+            "capturedAt": "2026-08-04T00:00:00Z",
+        },
+        "resources": [
+            {
+                "resourceId": "document-fetch-chunks",
+                "kind": "document-chunks",
+                "authority": "authoritative",
+                "rootPointer": "",
+                "document": {
+                    "scope": "resource",
+                    "sourceId": "/doc_id",
+                    "documentId": "/doc_id",
+                    "title": "/title",
+                    "url": "/url",
+                    "providerCategory": "/category",
+                },
+                "itemsPointer": "/chunks",
+                "mapping": {"chunkId": "/id", "text": "/content"},
+            },
+            {
+                "resourceId": "document-fetch-summary",
+                "kind": "document-summary",
+                "authority": "derived",
+                "rootPointer": "",
+                "document": {
+                    "scope": "resource",
+                    "sourceId": "/doc_id",
+                    "documentId": "/doc_id",
+                    "title": "/title",
+                    "url": "/url",
+                    "providerCategory": "/category",
+                },
+                "textPointer": "/summary",
+                "locator": {
+                    "kind": "external",
+                    "fragment": "provider-summary",
+                },
+            },
+        ],
+    }
+    original = ToolMessage(
+        content=[{"type": "text", "text": json.dumps(payload)}],
+        artifact={
+            "structured_content": {
+                MCP_SOURCE_TRANSPORT_KEY: {
+                    "serverName": "reportify",
+                    "descriptor": descriptor,
+                    "hasStructuredContent": True,
+                    "structuredContent": payload,
+                }
+            }
+        },
+        tool_call_id="call-document-fetch",
+        name="document_fetch",
+    )
+
+    async def handler(_request: ToolCallRequest) -> ToolMessage:
+        return original
+
+    request = cast(
+        Any,
+        type(
+            "Request",
+            (),
+            {
+                "tool_call": {
+                    "id": "call-document-fetch",
+                    "name": "document_fetch",
+                    "args": {"doc_id": "openrouter-ranking"},
+                }
+            },
+        )(),
+    )
+    result = await CitationEvidenceCompactionMiddleware().awrap_tool_call(request, handler)
+
+    assert isinstance(result, ToolMessage)
+    assert isinstance(result.content, str)
+    visible = json.loads(result.content)
+    assert visible["summary"] == summary
+    assert visible["evidenceHandle"].startswith("ev_mcp_")
+    assert visible["citationLink"] == f"[source](evidence://{visible['evidenceHandle']})"
+    assert "_valuz_evidence" not in visible
+    private = citation_artifact_content(result)
+    assert private is not None
+    private_payload = json.loads(private)
+    evidence = private_payload["_valuz_evidence"]
+    assert len(evidence) == 2
+    summary_evidence = next(item for item in evidence if item["evidence"]["quote"] == summary)
+    assert summary_evidence["evidenceHandle"] == visible["evidenceHandle"]
+    assert summary_evidence["locator"] == {
+        "kind": "external",
+        "fragment": "provider-summary",
+    }
+
+
+async def test_kb_search_exact_chunks_survive_stale_non_citable_metadata() -> None:
+    payload = {
+        "chunks": [
+            {
+                "id": "chunk-7",
+                "content": "MLCC 2025-2028E revenue CAGR is 24%.",
+                "metadata": {"document_page": 7},
+                "doc": {
+                    "doc_id": "report-1",
+                    "title": "Asian MLCC Industry",
+                    "url": "https://reportify.cn/reports/report-1",
+                    "category": "global_research",
+                },
+            }
+        ]
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    stale_descriptor = {
+        "version": 1,
+        "provider": {"id": "reportify"},
+        "operation": {"toolName": "kb_search"},
+        "result": {
+            "target": "structuredContent",
+            "hash": {"algorithm": "sha256", "value": digest},
+            "capturedAt": "2026-08-04T00:00:00Z",
+        },
+        "resources": [
+            {
+                "resourceId": "stale-search",
+                "kind": "document-discovery",
+                "authority": "discovery-only",
+                "rootPointer": "",
+                "itemsPointer": "/chunks",
+                "mapping": {"sourceId": "/id", "title": "/id"},
+            }
+        ],
+    }
+    original = ToolMessage(
+        content=[{"type": "text", "text": json.dumps(payload)}],
+        artifact={
+            "structured_content": {
+                MCP_SOURCE_TRANSPORT_KEY: {
+                    "descriptor": stale_descriptor,
+                    "hasStructuredContent": True,
+                    "structuredContent": payload,
+                }
+            }
+        },
+        tool_call_id="call-kb-search",
+        name="kb_search",
+    )
+
+    async def handler(_request: ToolCallRequest) -> ToolMessage:
+        return original
+
+    request = cast(
+        Any,
+        type(
+            "Request",
+            (),
+            {"tool_call": {"id": "call-kb-search", "name": "kb_search", "args": {}}},
+        )(),
+    )
+    result = await CitationEvidenceCompactionMiddleware().awrap_tool_call(request, handler)
+
+    assert isinstance(result, ToolMessage)
+    assert isinstance(result.content, str)
+    visible = json.loads(result.content)
+    assert visible["chunks"][0]["content"] == payload["chunks"][0]["content"]
+    assert visible["chunks"][0]["evidenceHandle"].startswith("ev_chunk_")
+    assert visible["chunks"][0]["citationLink"].startswith("[source](evidence://ev_chunk_")
+    private = citation_artifact_content(result)
+    assert private is not None
+    private_payload = json.loads(private)
+    evidence = private_payload["_valuz_evidence"][0]
+    assert evidence["source"]["documentId"] == "report-1"
+    assert evidence["locator"]["chunkId"] == "chunk-7"
+
+
 async def test_discovery_search_summaries_are_bounded_for_model_history() -> None:
     payload = {
         "docs": [
@@ -774,7 +1044,19 @@ async def test_discovery_search_summaries_are_bounded_for_model_history() -> Non
     async def handler(_request: ToolCallRequest) -> ToolMessage:
         return original
 
-    result = await CitationEvidenceCompactionMiddleware().awrap_tool_call(
+    emitted: list[tuple[str, str | None, Any, str]] = []
+
+    async def emit_artifact(
+        join_id: str,
+        tool_name: str | None,
+        model_content: Any,
+        citation_content: str,
+    ) -> None:
+        emitted.append((join_id, tool_name, model_content, citation_content))
+
+    result = await CitationEvidenceCompactionMiddleware(
+        citation_artifact_emitter=emit_artifact
+    ).awrap_tool_call(
         cast(Any, object()),
         handler,
     )
@@ -795,6 +1077,11 @@ async def test_discovery_search_summaries_are_bounded_for_model_history() -> Non
     }
     private_content = citation_artifact_content(result)
     assert private_content is not None
+    assert len(emitted) == 1
+    assert emitted[0][0] == "call-1"
+    assert emitted[0][1] == "news_search"
+    assert emitted[0][2] == result.content
+    assert emitted[0][3] == private_content
     registry = EvidenceRegistry()
     assert (
         registry.register_tool_result(
@@ -2095,6 +2382,66 @@ async def test_stable_general_knowledge_turn_disables_tools_for_model() -> None:
     assert seen["tools"] == []
     assert seen["tool_choice"] is None
     assert "without tools" in str(seen["last_message"])
+
+
+async def test_model_only_sees_side_effect_tools_explicitly_requested_by_user() -> None:
+    class Tool:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    class Request:
+        def __init__(
+            self,
+            *,
+            messages: list[Any],
+            tools: list[Any],
+            tool_choice: Any = "auto",
+        ) -> None:
+            self.messages = messages
+            self.state = {"messages": messages}
+            self.tools = tools
+            self.tool_choice = tool_choice
+
+        def override(self, **updates: Any) -> Request:
+            return Request(
+                messages=updates.get("messages", self.messages),
+                tools=updates.get("tools", self.tools),
+                tool_choice=updates.get("tool_choice", self.tool_choice),
+            )
+
+    tools = [
+        Tool("news_search"),
+        Tool("write_file"),
+        Tool("deliver_artifacts"),
+        Tool("mcp__valuz__automation"),
+    ]
+
+    async def visible_names(prompt: str) -> list[str]:
+        middleware = ResearchToolBudgetMiddleware()
+        messages = [HumanMessage(content=prompt)]
+        middleware.before_agent({"messages": messages}, None)
+        seen: list[str] = []
+
+        async def handler(request: Any) -> AIMessage:
+            seen.extend(tool.name for tool in request.tools)
+            return AIMessage(content="done")
+
+        await middleware.awrap_model_call(
+            Request(messages=messages, tools=tools),
+            handler,
+        )
+        return seen
+
+    descriptive = await visible_names("生成 AI 领域周度新闻汇总，并可用于定时任务。")
+    explicit = await visible_names("生成 AI 新闻汇总，保存为 PDF，并创建每周一的定时任务。")
+
+    assert descriptive == ["news_search"]
+    assert explicit == [
+        "news_search",
+        "write_file",
+        "deliver_artifacts",
+        "mcp__valuz__automation",
+    ]
 
 
 async def test_repeated_document_not_found_is_short_circuited() -> None:

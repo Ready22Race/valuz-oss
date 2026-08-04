@@ -182,9 +182,7 @@ class EvidenceCandidateIndex:
                     entity_text,
                     str(evidence.get("field") or ""),
                     str(evidence.get("metric") or ""),
-                    " ".join(
-                        str(evidence.get(key) or "") for key in ("period", "asOf")
-                    ),
+                    " ".join(str(evidence.get(key) or "") for key in ("period", "asOf")),
                     _text_evidence(evidence) if kind == "text" else "",
                 )
             )
@@ -1022,6 +1020,10 @@ def _evidence_entity_text(
             source.get("title"),
             source.get("organization"),
             source.get("sourceId"),
+            evidence.get("prefix"),
+            evidence.get("quote"),
+            evidence.get("suffix"),
+            evidence.get("snippet"),
         )
     )
 

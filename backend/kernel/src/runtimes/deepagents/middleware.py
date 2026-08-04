@@ -67,6 +67,8 @@ _FINANCIAL_STATEMENT_TOOLS = {
     "balance_sheet",
     "cashflow_statement",
 }
+_ARTIFACT_MUTATION_TOOLS = frozenset({"write_file", "edit_file", "deliver_artifacts"})
+_AUTOMATION_MUTATION_TOOLS = frozenset({"automation"})
 _REQUESTED_YEAR_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
 
 
@@ -157,6 +159,8 @@ class ResearchToolBudgetMiddleware(AgentMiddleware):
         self._no_research_scope = False
         self._requested_period_count: int | None = None
         self._requested_years: tuple[int, ...] = ()
+        self._artifact_mutation_allowed = False
+        self._automation_mutation_allowed = False
 
     def before_agent(self, state: Any, runtime: Any) -> None:
         del runtime
@@ -167,7 +171,10 @@ class ResearchToolBudgetMiddleware(AgentMiddleware):
         self._forced_finalization_attempts = 0
         self._no_research_scope = is_stable_general_knowledge_query(_state_last_human_text(state))
         prompt = _state_last_human_text(state)
-        self._requested_period_count = parse_output_contract(prompt).requested_period_count
+        output_contract = parse_output_contract(prompt)
+        self._requested_period_count = output_contract.requested_period_count
+        self._artifact_mutation_allowed = output_contract.artifact_mutation_allowed
+        self._automation_mutation_allowed = output_contract.automation_mutation_allowed
         self._requested_years = tuple(
             sorted({int(match.group(0)) for match in _REQUESTED_YEAR_RE.finditer(prompt)})
         )
@@ -177,6 +184,13 @@ class ResearchToolBudgetMiddleware(AgentMiddleware):
         request: Any,
         handler: Callable[[Any], Awaitable[Any]],
     ) -> Any:
+        if hasattr(request, "override"):
+            visible_tools = list(getattr(request, "tools", None) or [])
+            allowed_tools = [
+                tool for tool in visible_tools if not self._tool_exceeds_user_scope(tool)
+            ]
+            if len(allowed_tools) != len(visible_tools):
+                request = request.override(tools=allowed_tools)
         if self._no_research_scope and hasattr(request, "override"):
             messages = list(getattr(request, "messages", None) or [])
             direct_instruction = (
@@ -239,6 +253,18 @@ class ResearchToolBudgetMiddleware(AgentMiddleware):
             )
         self._model_calls += 1
         return await handler(request)
+
+    def _tool_exceeds_user_scope(self, tool: Any) -> bool:
+        if isinstance(tool, Mapping):
+            raw_name = tool.get("name")
+        else:
+            raw_name = getattr(tool, "name", None)
+        normalized = str(raw_name or "").rsplit("__", 1)[-1]
+        if normalized in _ARTIFACT_MUTATION_TOOLS:
+            return not self._artifact_mutation_allowed
+        if normalized in _AUTOMATION_MUTATION_TOOLS:
+            return not self._automation_mutation_allowed
+        return False
 
     async def awrap_tool_call(
         self,
@@ -340,16 +366,18 @@ class ResearchToolBudgetMiddleware(AgentMiddleware):
             )
             tool_call = request.tool_call
         document_ids = _tool_document_ids(args)
-        if tool_name == "kb_search" and any(
-            document_id in self._transcript_document_ids for document_id in document_ids
-        ):
-            requested_num = args.get("num")
-            if not isinstance(requested_num, int) or requested_num > TRANSCRIPT_INDEXED_CHUNK_LIMIT:
-                args = {**args, "num": TRANSCRIPT_INDEXED_CHUNK_LIMIT}
-                request = request.override(
-                    tool_call={**tool_call, "args": args},
-                )
-                tool_call = request.tool_call
+        if normalized_tool_name == "kb_search" and document_ids:
+            if any(document_id in self._transcript_document_ids for document_id in document_ids):
+                requested_num = args.get("num")
+                if (
+                    not isinstance(requested_num, int)
+                    or requested_num > TRANSCRIPT_INDEXED_CHUNK_LIMIT
+                ):
+                    args = {**args, "num": TRANSCRIPT_INDEXED_CHUNK_LIMIT}
+                    request = request.override(
+                        tool_call={**tool_call, "args": args},
+                    )
+                    tool_call = request.tool_call
             decision = self._research_budget.allow_indexed_document_search(document_ids)
             if not decision.allowed:
                 return ToolMessage(
@@ -572,10 +600,17 @@ class CitationEvidenceCompactionMiddleware(AgentMiddleware):
     The private sidecar is never a second copy of the original result.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        citation_artifact_emitter: (
+            Callable[[str, str | None, Any, str], Awaitable[None]] | None
+        ) = None,
+    ) -> None:
         self._raw_documents: dict[str, dict[str, Any]] = {}
         self._document_titles: dict[str, str] = {}
         self._evidence_registry = EvidenceRegistry()
+        self._citation_artifact_emitter = citation_artifact_emitter
 
     async def awrap_tool_call(
         self,
@@ -624,23 +659,38 @@ class CitationEvidenceCompactionMiddleware(AgentMiddleware):
                     tool_name=str(tool_name or ""),
                     tool_call_id=str(result.tool_call_id or request_call.get("id") or ""),
                 )
-                if not adaptation.citable:
-                    if adaptation.resource_kinds == {"operational"}:
-                        return result.model_copy(update={"artifact": artifact or None})
-                    discovery = _compact_discovery_tool_content(
-                        adaptation.model_content,
-                        tool_name,
-                        tool_args=tool_args,
-                        allow_summary_evidence=False,
-                    )
-                    visible = discovery[0] if discovery is not None else adaptation.model_content
-                    return result.model_copy(
-                        update={
-                            "content": _serialize_tool_content(visible),
-                            "artifact": artifact or None,
-                        }
-                    )
                 model_projection = adaptation.model_content
+                if not adaptation.citable:
+                    # A provider descriptor can lag behind its response shape
+                    # during a rolling MCP deployment.  Do not let a stale
+                    # discovery/non-citable declaration suppress exact
+                    # indexed chunks from kb_search: the local trust-boundary
+                    # adapter can still prove documentId + chunkId + quote
+                    # directly from this immutable result.  Other tools keep
+                    # the provider's non-citable declaration unchanged.
+                    indexed = augment_indexed_document_evidence(
+                        model_projection,
+                        tool_name=str(tool_name or ""),
+                        captured_at=captured_at,
+                    )
+                    if indexed is not None:
+                        model_projection = indexed
+                    else:
+                        if adaptation.resource_kinds == {"operational"}:
+                            return result.model_copy(update={"artifact": artifact or None})
+                        discovery = _compact_discovery_tool_content(
+                            model_projection,
+                            tool_name,
+                            tool_args=tool_args,
+                            allow_summary_evidence=False,
+                        )
+                        visible = discovery[0] if discovery is not None else model_projection
+                        return result.model_copy(
+                            update={
+                                "content": _serialize_tool_content(visible),
+                                "artifact": artifact or None,
+                            }
+                        )
                 if "document-discovery" in adaptation.resource_kinds:
                     discovery = _compact_discovery_tool_content(
                         model_projection,
@@ -660,11 +710,11 @@ class CitationEvidenceCompactionMiddleware(AgentMiddleware):
                 private_content = private_citation_tool_content(model_projection)
                 if private_content is not None:
                     artifact[_CITATION_ARTIFACT_KEY] = private_content
-                    self._evidence_registry.register_tool_projection(
-                        compacted,
-                        private_content,
+                    await self._publish_citation_artifact(
+                        tool_call_id=str(result.tool_call_id or request_call.get("id") or ""),
                         tool_name=str(tool_name or "") or None,
-                        trusted_private=True,
+                        model_content=compacted,
+                        citation_content=private_content,
                     )
                 return result.model_copy(
                     update={
@@ -701,6 +751,12 @@ class CitationEvidenceCompactionMiddleware(AgentMiddleware):
                     {"_valuz_evidence": [envelope]},
                     ensure_ascii=False,
                     separators=(",", ":"),
+                )
+                await self._publish_citation_artifact(
+                    tool_call_id=str(result.tool_call_id or request_call.get("id") or ""),
+                    tool_name=str(tool_name or "") or None,
+                    model_content=visible,
+                    citation_content=artifact[_CITATION_ARTIFACT_KEY],
                 )
                 return result.model_copy(update={"content": visible, "artifact": artifact})
 
@@ -744,6 +800,12 @@ class CitationEvidenceCompactionMiddleware(AgentMiddleware):
                     ensure_ascii=False,
                     separators=(",", ":"),
                 )
+                await self._publish_citation_artifact(
+                    tool_call_id=str(result.tool_call_id or request_call.get("id") or ""),
+                    tool_name=str(tool_name or "") or None,
+                    model_content=compact_discovery,
+                    citation_content=artifact[_CITATION_ARTIFACT_KEY],
+                )
             return result.model_copy(update={"content": compact_discovery, "artifact": artifact})
         compacted = compact_citation_tool_content(
             result.content,
@@ -758,13 +820,45 @@ class CitationEvidenceCompactionMiddleware(AgentMiddleware):
             result.content
         )
         artifact[_CITATION_ARTIFACT_KEY] = private_content
-        self._evidence_registry.register_tool_projection(
-            compacted,
-            private_content,
+        await self._publish_citation_artifact(
+            tool_call_id=str(result.tool_call_id or request_call.get("id") or ""),
             tool_name=str(tool_name or "") or None,
-            trusted_private=True,
+            model_content=compacted,
+            citation_content=private_content,
         )
         return result.model_copy(update={"content": compacted, "artifact": artifact})
+
+    async def _publish_citation_artifact(
+        self,
+        *,
+        tool_call_id: str,
+        tool_name: str | None,
+        model_content: Any,
+        citation_content: str,
+    ) -> None:
+        """Register and stream a sidecar before graph history can compact it.
+
+        LangChain's public ``on_tool_end`` callback precedes post-tool
+        middleware, while a long graph may summarize away early ToolMessages
+        before the final checkpoint.  Publishing here closes that timing gap;
+        checkpoint replay remains a compatibility fallback and registration is
+        idempotent.
+        """
+
+        self._evidence_registry.register_tool_projection(
+            model_content,
+            citation_content,
+            tool_name=tool_name,
+            trusted_private=True,
+        )
+        if self._citation_artifact_emitter is None or not tool_call_id:
+            return
+        await self._citation_artifact_emitter(
+            tool_call_id,
+            tool_name,
+            model_content,
+            citation_content,
+        )
 
     def _remember_document_titles(self, content: Any) -> None:
         for document_id, title in _document_title_pairs(content):

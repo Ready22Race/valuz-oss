@@ -2147,6 +2147,23 @@ class ClaudeAgentRuntime:
                     "operational"
                 }:
                     effective_tool_response = source_adaptation.model_content
+                simple_name = tool_name.rsplit("__", 1)[-1].lower()
+                if (
+                    source_adaptation is not None
+                    and not source_adaptation.citable
+                    and simple_name == "kb_search"
+                ):
+                    # Keep parity with DeepAgents during rolling MCP metadata
+                    # upgrades: an exact indexed chunk remains locally
+                    # provable even when the provider temporarily labels the
+                    # result as discovery/non-citable.
+                    augmented_indexed_content = augment_indexed_document_evidence(
+                        effective_tool_response,
+                        tool_name=tool_name,
+                        captured_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                    )
+                    if augmented_indexed_content is not None:
+                        effective_tool_response = augmented_indexed_content
                 self._record_citation_discovery_documents(
                     tool_name=tool_name,
                     tool_response=effective_tool_response,
@@ -2156,7 +2173,6 @@ class ClaudeAgentRuntime:
                     tool_input=data.get("tool_input"),
                     tool_response=effective_tool_response,
                 )
-                simple_name = tool_name.rsplit("__", 1)[-1].lower()
                 if simple_name == "document_raw_content":
                     raw_document = extract_raw_document(effective_tool_response)
                     if raw_document is not None:
@@ -2270,6 +2286,7 @@ class ClaudeAgentRuntime:
                     effective_tool_response,
                     tool_name=tool_name,
                     tool_input=data.get("tool_input"),
+                    allow_summary_evidence=(source_adaptation is None or source_adaptation.citable),
                 )
                 model_projection = (
                     discovery_projection
@@ -3514,6 +3531,7 @@ def _compact_claude_discovery_tool_response(
     *,
     tool_name: str,
     tool_input: Any,
+    allow_summary_evidence: bool = True,
 ) -> Any | None:
     """Bound discovery rows before Claude stores them in model history.
 
@@ -3543,6 +3561,7 @@ def _compact_claude_discovery_tool_response(
         value,
         tool_name=simple_name,
         tool_input=tool_input if isinstance(tool_input, Mapping) else {},
+        allow_summary_evidence=allow_summary_evidence,
     )
     if compacted is None:
         return None
@@ -3556,6 +3575,7 @@ def _compact_claude_discovery_value(
     *,
     tool_name: str,
     tool_input: Mapping[str, Any],
+    allow_summary_evidence: bool,
 ) -> Any | None:
     if isinstance(value, list):
         changed = False
@@ -3570,6 +3590,7 @@ def _compact_claude_discovery_value(
                     text,
                     tool_name=tool_name,
                     tool_input=tool_input,
+                    allow_summary_evidence=allow_summary_evidence,
                 )
                 if isinstance(text, str)
                 else None
@@ -3621,7 +3642,9 @@ def _compact_claude_discovery_value(
             "duplicatesRemoved": len(primary_docs) - len(deduplicated),
             "summariesTruncated": not transcript_discovery,
             "citationEvidence": (
-                "original-indexed-chunk-required" if transcript_discovery else "summary-fallback"
+                "original-indexed-chunk-required"
+                if transcript_discovery or not allow_summary_evidence
+                else "summary-fallback"
             ),
             "originalDocumentPreferred": True,
         },

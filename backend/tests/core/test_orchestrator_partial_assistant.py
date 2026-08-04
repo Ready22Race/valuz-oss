@@ -26,6 +26,7 @@ from src.core.orchestrator import (
     _strip_empty_markdown_tables,
     _strip_unrequested_derived_restatement,
     _strip_unrequested_cross_period_recap,
+    _strip_unrequested_exact_result_recap,
     _strip_unrequested_period_leadin,
     _strip_leading_assistant_progress,
     _strip_requested_primary_markdown_table,
@@ -33,6 +34,7 @@ from src.core.orchestrator import (
     _strip_strict_table_trailing_blocks,
     _strip_unrequested_source_excerpt,
     _strip_unrequested_retrieval_internals,
+    _tool_preserves_answer_candidate,
 )
 from src.core.task_coverage import parse_task_contract
 
@@ -55,6 +57,19 @@ def test_strict_table_answer_drops_unrequested_formula_recap() -> None:
     assert result == "\n".join(text.splitlines()[:5])
 
 
+@pytest.mark.parametrize(
+    "tool_name",
+    ["write_todos", "TodoWrite", "mcp__write_todos", "planner.update-todo-list"],
+)
+def test_only_todo_bookkeeping_tools_preserve_prior_answer_candidate(tool_name: str) -> None:
+    assert _tool_preserves_answer_candidate(tool_name) is True
+
+
+@pytest.mark.parametrize("tool_name", ["kb_search", "citation_calculate", "webpage_search"])
+def test_research_tools_end_prior_answer_candidate(tool_name: str) -> None:
+    assert _tool_preserves_answer_candidate(tool_name) is False
+
+
 def test_strict_single_table_keeps_most_complete_duplicate() -> None:
     text = """| 公司 | 营业收入 | 净利润 |
 |---|---:|---:|
@@ -75,6 +90,27 @@ def test_strict_single_table_keeps_most_complete_duplicate() -> None:
     assert result.count("| 公司 | 营业收入 | 净利润 |") == 1
     assert "| 乙公司 | 90 | 18 |" in result
     assert "| 乙公司 | 90 |\n" not in result
+
+
+@pytest.mark.parametrize(
+    "recap_heading",
+    ["### 附：10家标的汇总", "### 汇总对比", "### 10家标的汇总对比"],
+)
+def test_exact_result_answer_drops_rich_duplicate_recap_table(
+    recap_heading: str,
+) -> None:
+    sections = "\n\n".join(
+        f"### {index}. 公司{index}\n\n核心产品：AI 应用 {index}。" for index in range(1, 11)
+    )
+    rows = "\n".join(f"| {index} | 公司{index} | AI 应用 {index} |" for index in range(1, 11))
+    text = f"{sections}\n\n{recap_heading}\n\n| # | 公司 | 核心方向 |\n|---|---|---|\n{rows}"
+
+    result = _strip_unrequested_exact_result_recap(
+        text,
+        "推荐 10 家国内 A 股 AI 应用公司，并简述各自核心产品。",
+    )
+
+    assert result == sections
 
 
 def test_strict_exact_items_drop_cited_verification_preamble() -> None:
@@ -338,6 +374,58 @@ def test_requested_cross_period_recap_table_is_preserved() -> None:
         _strip_unrequested_cross_period_recap(
             text,
             "请按季度总结，并增加跨季度趋势表。",
+        )
+        == text
+    )
+
+
+def test_unrequested_exact_result_recap_table_is_removed() -> None:
+    sections = "\n\n".join(
+        f"## {index}. 公司 {index}\n\n核心产品 {index} [来源](evidence://ev_{index:08d})。"
+        for index in range(1, 11)
+    )
+    rows = "\n".join(f"| 公司 {index} | 产品 {index} |" for index in range(1, 11))
+    text = (
+        f"{sections}\n\n## 综合一览\n\n"
+        f"| 公司 | 核心产品 |\n|---|---|\n{rows}\n\n风险提示：请自行判断。"
+    )
+
+    assert (
+        _strip_unrequested_exact_result_recap(
+            text,
+            "请推荐恰好 10 家公司，并说明每家的核心产品和推荐依据。",
+        )
+        == sections
+    )
+
+
+def test_unrequested_exact_result_comparison_table_is_removed() -> None:
+    sections = "\n\n".join(
+        f"### {index}. 公司 {index}\n\n核心产品 {index}。" for index in range(1, 11)
+    )
+    rows = "\n".join(f"| 公司 {index} | 产品 {index} |" for index in range(1, 11))
+    text = f"{sections}\n\n## 综合对比\n\n| 公司 | 核心产品 |\n|---|---|\n{rows}"
+
+    assert (
+        _strip_unrequested_exact_result_recap(
+            text,
+            "推荐 10 家公司，并说明每家的核心产品和推荐依据。",
+        )
+        == sections
+    )
+
+
+def test_requested_exact_result_recap_table_is_preserved() -> None:
+    sections = "\n\n".join(
+        f"## {index}. 公司 {index}\n\n核心产品 {index}。" for index in range(1, 11)
+    )
+    rows = "\n".join(f"| 公司 {index} | 产品 {index} |" for index in range(1, 11))
+    text = f"{sections}\n\n## 综合一览\n\n| 公司 | 核心产品 |\n|---|---|\n{rows}"
+
+    assert (
+        _strip_unrequested_exact_result_recap(
+            text,
+            "请推荐恰好 10 家公司，详细说明后再用 Markdown 表格汇总。",
         )
         == text
     )
@@ -2086,6 +2174,108 @@ async def test_task_coverage_evaluates_substantive_answer_before_bookkeeping_too
     assert observer.task_coverage["status"] == "complete"
 
 
+async def test_task_coverage_excludes_visible_research_preamble_before_content_tool() -> None:
+    store = _FakeStore()
+    live = _RecordingSink()
+    db = DatabaseEventSink(store, "owner-1", "sess-1", "msg-1")
+    coalesced = DeltaCoalescingSink(PersistThenBroadcastSink(db, live))
+    prompt = (
+        "用 Markdown 表格列出甲公司和乙公司 2025 Q1 的营业收入和经营现金流。"
+        "严格只输出一个 Markdown 表格。"
+    )
+    policy = _task_coverage_policy()
+    contract = parse_task_contract(prompt, policy_snapshot=policy)
+    observer = _MessageObserverSink(
+        coalesced,
+        message_id="msg-1",
+        user_prompt=prompt,
+        citation_quality_policy=policy,
+        citation_enabled=True,
+        task_contract=contract,
+        task_coverage_enabled=True,
+    )
+    table = (
+        "| 公司 | 报告期 | 营业收入 | 经营现金流 |\n"
+        "|---|---|---:|---:|\n"
+        "| 甲公司 | 2025 Q1 | 100 亿元 | 20 亿元 |\n"
+        "| 乙公司 | 2025 Q1 | 90 亿元 | 10 亿元 |"
+    )
+
+    # This model-authored draft stays visible, but the following research tool
+    # proves it was not the selected answer candidate.
+    await observer.emit(Event(type="assistant_message", data={"text": table}))
+    await observer.emit(Event(type="tool_use", data={"id": "search-1", "name": "kb_search"}))
+    await observer.emit(
+        Event(
+            type="tool_result",
+            data={
+                "id": "search-1",
+                "content": (
+                    "甲公司 2025 Q1 营业收入 100 亿元，经营现金流 20 亿元；"
+                    "乙公司 2025 Q1 营业收入 90 亿元，经营现金流 10 亿元。"
+                ),
+            },
+        )
+    )
+    await observer.emit(Event(type="assistant_message", data={"text": table}))
+    await observer.emit(Event(type="session_idle", data={"num_turns": 1}))
+
+    assistants = [event for event in store.appended if event.type == "assistant_message"]
+    assert [event.data["text"] for event in assistants] == [table, table]
+    assert observer.task_coverage is not None
+    assert observer.task_coverage["status"] == "complete"
+
+
+async def test_tool_boundary_resets_a_previously_flushed_answer_candidate() -> None:
+    store = _FakeStore()
+    live = _RecordingSink()
+    db = DatabaseEventSink(store, "owner-1", "sess-1", "msg-1")
+    coalesced = DeltaCoalescingSink(PersistThenBroadcastSink(db, live))
+    prompt = "推荐 10 家国内 A 股 AI 应用公司，并简述各自核心产品。"
+    policy = _task_coverage_policy()
+    contract = parse_task_contract(prompt, policy_snapshot=policy)
+    observer = _MessageObserverSink(
+        coalesced,
+        message_id="msg-1",
+        user_prompt=prompt,
+        citation_quality_policy=policy,
+        citation_enabled=False,
+        task_contract=contract,
+        task_coverage_enabled=True,
+    )
+
+    def answer(label: str) -> str:
+        return "\n\n".join(
+            f"### {index}. {label} {index}\n\n核心产品：AI 应用 {index} "
+            f"[source](citation://cit_{label}_{index})。"
+            for index in range(1, 11)
+        )
+
+    first = answer("初稿公司")
+    final = answer("最终公司")
+    await observer.emit(Event(type="assistant_message", data={"text": first}))
+    # Some runtimes begin the next block's stream before emitting its tool
+    # event. That flushes the first canonical block, but the subsequent search
+    # still proves it is a separate visible candidate rather than part of the
+    # final Answer Manifest.
+    await observer.emit(Event(type="text_delta", data={"text": "继续核对原文。"}))
+    await observer.emit(Event(type="tool_use", data={"id": "search-1", "name": "kb_search"}))
+    await observer.emit(Event(type="tool_result", data={"id": "search-1", "content": "原始内容"}))
+    await observer.emit(Event(type="assistant_message", data={"text": final}))
+    await observer.emit(Event(type="session_idle", data={"num_turns": 1}))
+
+    assistants = [
+        event.data["text"] for event in store.appended if event.type == "assistant_message"
+    ]
+    assert assistants == [first, final]
+    assert observer.task_coverage is not None
+    assert observer.task_coverage["status"] == "complete"
+    output = next(
+        row for row in observer.task_coverage["requirements"] if row["kind"] == "output-shape"
+    )
+    assert output["answerStatus"] == "fulfilled"
+
+
 async def test_internal_compaction_handoff_preserves_runtime_visibility() -> None:
     store, live, observer = _observer()
     handoff = """## SESSION INTENT
@@ -2100,16 +2290,58 @@ None.
 ## NEXT STEPS
 Continue with tools.
 """
+    runtime_note = "Transferring the accumulated context to the next model pass."
 
     await observer.emit(Event(type="assistant_message", data={"text": handoff}))
     await observer.emit(Event(type="tool_use", data={"id": "tool-1", "name": "search"}))
+    await observer.emit(Event(type="assistant_message", data={"text": runtime_note}))
+    await observer.emit(Event(type="tool_use", data={"id": "tool-2", "name": "search"}))
     await observer.emit(Event(type="assistant_message", data={"text": "Visible answer."}))
     await observer.emit(Event(type="session_idle", data={"num_turns": 1}))
 
     assistants = [event for event in store.appended if event.type == "assistant_message"]
-    assert [event.data["text"] for event in assistants] == [handoff, "Visible answer."]
+    assert [event.data["text"] for event in assistants] == [
+        handoff,
+        runtime_note,
+        "Visible answer.",
+    ]
     assert "SESSION INTENT" in (observer.assistant_text or "")
     assert any("SESSION INTENT" in str(event.data.get("text") or "") for event in live.events)
+    assert any(runtime_note in str(event.data.get("text") or "") for event in live.events)
+
+
+async def test_rejected_revision_candidate_remains_visible_without_repeating_baseline() -> None:
+    store, live, observer = _observer()
+    baseline = Event(
+        type="assistant_message",
+        data={
+            "text": "Original visible answer.",
+            "citation_bundle": {"version": 1, "citations": []},
+            "task_coverage": {"status": "partial", "revisionOutcome": "rejected"},
+        },
+    )
+    candidate = Event(
+        type="assistant_message",
+        data={"text": "Model-authored revision candidate."},
+    )
+
+    await observer.emit(baseline)
+    await observer.emit(Event(type="tool_use", data={"id": "tool-1", "name": "search"}))
+    await observer._publish_rejected_revision_candidate(
+        candidate,
+        selected_baseline=baseline,
+    )
+
+    assistants = [event for event in store.appended if event.type == "assistant_message"]
+    assert [event.data["text"] for event in assistants] == [
+        "Original visible answer.",
+        "Model-authored revision candidate.",
+    ]
+    assert [event.data["text"] for event in live.events if event.type == "assistant_message"] == [
+        "Original visible answer.",
+        "Model-authored revision candidate.",
+    ]
+    assert observer.task_coverage == baseline.data["task_coverage"]
 
 
 async def test_tool_call_preamble_is_visible_before_the_final_answer() -> None:
@@ -2600,6 +2832,137 @@ async def test_task_coverage_uses_model_projection_for_lazy_collection_result() 
     assert row["selectorResolution"]["period"] == "2026-q2"
 
 
+async def test_task_coverage_requires_addressable_source_content_in_citation_turn() -> None:
+    store = _FakeStore()
+    live = _RecordingSink()
+    db = DatabaseEventSink(store, "owner-1", "sess-1", "msg-1")
+    coalesced = DeltaCoalescingSink(PersistThenBroadcastSink(db, live))
+    prompt = "针对芯片制造用硅片产业链做深度调研，包括行业发展历史和现状。"
+    policy = _task_coverage_policy()
+    policy["config"]["task_coverage"]["retrieval"]["content_mappings"].append(
+        {
+            "id": "raw-document",
+            "role": "content",
+            "coverage_text": "result",
+            "coverage_scope": "full-document",
+            "tool_patterns": ["*document_raw_content"],
+        }
+    )
+    contract = parse_task_contract(prompt, policy_snapshot=policy)
+    observer = _MessageObserverSink(
+        coalesced,
+        message_id="msg-1",
+        user_prompt=prompt,
+        citation_policy_available=True,
+        citation_quality_policy=policy,
+        task_contract=contract,
+        task_coverage_enabled=True,
+    )
+
+    await observer.emit(
+        Event(
+            type="tool_use",
+            data={
+                "id": "raw-1",
+                "name": "document_raw_content",
+                "input": {"doc_id": "wafer-report"},
+            },
+        )
+    )
+    await observer.emit(
+        Event(
+            type="tool_result",
+            data={
+                "id": "raw-1",
+                "content": "芯片制造用硅片产业经历了长期技术演进，当前市场集中度较高。",
+            },
+        )
+    )
+
+    assert observer._task_coverage_tracker is not None
+    draft = "芯片制造用硅片产业经历了长期技术演进，当前市场集中度较高。"
+    raw_audit = observer._task_coverage_tracker.evaluate(draft)  # noqa: SLF001
+    assert raw_audit["status"] == "partial"
+    assert raw_audit["attempts"][0]["citationReady"] is False
+
+    evidence = {
+        "evidenceHandle": "ev_wafer_chunk_12345678",
+        "source": {
+            "sourceId": "wafer-report",
+            "providerId": "valuz-search",
+            "documentId": "wafer-report",
+            "documentVersion": "sha256:wafer",
+            "sourceType": "document",
+            "title": "芯片制造用硅片产业研究",
+            "retrievedAt": "2026-08-04T10:00:00Z",
+        },
+        "evidence": {
+            "kind": "text",
+            "quote": draft,
+            "snippet": draft,
+            "capturedAt": "2026-08-04T10:00:00Z",
+            "contentHash": "sha256:wafer-chunk",
+        },
+        "locator": {"kind": "chunk", "chunkId": "chunk-history"},
+    }
+    indexed_result = {
+        "chunks": [{"id": "chunk-history", "doc_id": "wafer-report", "content": draft}],
+    }
+    await observer.emit(
+        Event(
+            type="tool_use",
+            data={
+                "id": "search-1",
+                "name": "kb_search",
+                "input": {"doc_ids": ["wafer-report"], "query": "产业历史 现状"},
+            },
+        )
+    )
+    await observer.emit(
+        Event(
+            type="tool_result",
+            data={
+                "id": "search-1",
+                "citation_join_id": "tool-call-search-1",
+                "content": json.dumps(indexed_result, ensure_ascii=False),
+            },
+        )
+    )
+
+    before_bridge = observer._task_coverage_tracker.evaluate(draft)  # noqa: SLF001
+    assert before_bridge["status"] == "partial"
+    assert before_bridge["attempts"][-1]["citationReady"] is False
+    await observer.emit(
+        Event(
+            type="citation_evidence",
+            data={
+                "tool_name": "kb_search",
+                "citation_join_id": "tool-call-search-1",
+                "model_content": json.dumps(
+                    {
+                        "chunks": [
+                            {
+                                "id": "chunk-history",
+                                "doc_id": "wafer-report",
+                                "content": "芯片制造用硅片产业经历了长期技术演进。",
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                "content": json.dumps(
+                    {"_valuz_evidence": [evidence]},
+                    ensure_ascii=False,
+                ),
+            },
+        )
+    )
+
+    indexed_audit = observer._task_coverage_tracker.evaluate(draft)  # noqa: SLF001
+    assert indexed_audit["status"] == "complete"
+    assert indexed_audit["attempts"][-1]["citationReady"] is True
+
+
 async def test_large_private_citation_content_registers_evidence_without_forwarding() -> None:
     store, live, observer = _observer_with_citations()
     evidence = {
@@ -2840,6 +3203,19 @@ async def test_confirmed_entity_conflict_publishes_draft_and_requests_repair() -
         for event in live.events
     )
 
+    await observer.emit(
+        Event(type="assistant_message", data={"text": "Model repair could not form a patch."})
+    )
+    await observer.emit(Event(type="session_idle", data={"num_turns": 1}))
+
+    assistants = [event for event in store.appended if event.type == "assistant_message"]
+    assert [event.data["text"] for event in assistants] == [
+        draft.data["text"],
+        "Model repair could not form a patch.",
+    ]
+    assert observer.citation_bundle is not None
+    assert observer.citation_bundle["integrity"]["repairOutcome"].startswith("rejected-protocol-")
+
 
 async def test_source_free_general_knowledge_does_not_trigger_repair() -> None:
     store, _live, observer = _observer_with_strict_policy()
@@ -3040,6 +3416,56 @@ def test_task_coverage_revision_accepts_lower_mismatch_rate_when_scope_expands()
                         "claimSemanticMismatchCount": 2,
                     },
                     "claims": [passed for _ in range(18)] + [mismatched for _ in range(2)],
+                },
+            }
+        },
+    )
+
+    assert (
+        _MessageObserverSink._task_coverage_candidate_preserves_citation_quality(
+            baseline,
+            candidate,
+        )
+        is True
+    )
+
+
+def test_task_coverage_revision_accepts_known_advisory_citations_over_unsourced_draft() -> None:
+    unsupported = {
+        "citationRequired": True,
+        "status": "unsupported",
+        "issueCodes": ["claim_without_citation"],
+    }
+    advisory = {
+        "citationRequired": True,
+        "status": "unverified",
+        "issueCodes": ["claim_evidence_mismatch"],
+    }
+    baseline = Event(
+        type="assistant_message",
+        data={
+            "citation_bundle": {
+                "integrity": {},
+                "quality": {
+                    "metrics": {"unsourcedClaimCount": 19},
+                    "claims": [unsupported for _ in range(19)],
+                },
+            }
+        },
+    )
+    candidate = Event(
+        type="assistant_message",
+        data={
+            "citation_bundle": {
+                "integrity": {},
+                "citations": [{"citationId": f"cit-{index}"} for index in range(14)],
+                "quality": {
+                    "metrics": {
+                        "unsourcedClaimCount": 9,
+                        "unverifiedClaimCount": 5,
+                        "claimSemanticMismatchCount": 5,
+                    },
+                    "claims": [advisory for _ in range(14)],
                 },
             }
         },

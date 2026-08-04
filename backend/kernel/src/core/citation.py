@@ -92,6 +92,15 @@ _SOURCE_SECTION_HEADING_RE = re.compile(
     r"[ \t]*[:：]?[ \t]*(?:\*\*|__)?[ \t]*$"
 )
 _TRAILING_INLINE_SOURCE_NOTE_RE = re.compile(r"(?im)^[ \t]*(?:数据|资料|信息)?来源\s*[:：][\s\S]*$")
+_LEGACY_REPORTIFY_SOURCE_LINK_RE = re.compile(
+    r"\[(?:source|来源)\]\(\s*:[^)\s]{1,512}:(?:summary|content|chunk)\s*\)",
+    re.IGNORECASE,
+)
+_INVALID_RELATIVE_SOURCE_LINK_RE = re.compile(
+    r"\[(?:source|来源)\]\(\s*(?!(?:https?://|citation://|evidence://))"
+    r"[^)\s]{1,512}\s*\)",
+    re.IGNORECASE,
+)
 _CANONICAL_CITATION_URI_RE = re.compile(r"citation://([A-Za-z0-9_-]{1,160})")
 _MARKDOWN_DESTINATION_RE = re.compile(r"\]\(([^)\n]+)\)")
 _EXPLICIT_CITATION_RE = re.compile(
@@ -130,6 +139,7 @@ _BULK_TEXT_RESULT_KEYS = {
     "markdown",
     "metadatas",
     "raw_content",
+    "summary",
     "text",
 }
 _SECRET_QUERY_KEYS = {
@@ -352,6 +362,55 @@ class EvidenceRegistry:
             tool_name=tool_name,
             trusted_private=trusted_private,
         )
+
+    def projection_is_registered(
+        self,
+        content: Any,
+        *,
+        trusted_private: bool = False,
+    ) -> bool:
+        """Return whether ``content`` names Evidence accepted by this Registry.
+
+        Registration is idempotent, so a repeated valid tool projection can
+        add zero new handles while still being citation-ready.  Task Coverage
+        uses this check after registration instead of treating the insertion
+        count as a validity signal.
+        """
+
+        max_chars = (
+            self._MAX_PRIVATE_TOOL_RESULT_CHARS if trusted_private else self._MAX_TOOL_RESULT_CHARS
+        )
+        payload = _decode_json_payload(content, max_chars=max_chars)
+        if payload is None:
+            return False
+        stack: list[tuple[Any, int]] = [(payload, 0)]
+        visited = 0
+        while stack and visited < self._MAX_VISITED_NODES:
+            node, depth = stack.pop()
+            visited += 1
+            if depth > self._MAX_DEPTH:
+                continue
+            if isinstance(node, dict):
+                for candidate in _as_envelope_items(node.get(EVIDENCE_ENVELOPE_KEY)):
+                    if candidate.get("kind") == "structured-evidence-collection":
+                        handle = candidate.get("collectionHandle")
+                        if isinstance(handle, str) and handle in self._collections:
+                            return True
+                    handle = candidate.get("evidenceHandle")
+                    if isinstance(handle, str) and handle in self._records:
+                        return True
+                stack.extend(
+                    (value, depth + 1)
+                    for key, value in node.items()
+                    if key != EVIDENCE_ENVELOPE_KEY
+                )
+            elif isinstance(node, list):
+                stack.extend((value, depth + 1) for value in node)
+            elif isinstance(node, str):
+                nested = _decode_json_payload(node, max_chars=max_chars)
+                if nested is not None:
+                    stack.append((nested, depth + 1))
+        return False
 
     def _capture_collection_hints(self, content: Any, *, trusted_private: bool) -> None:
         max_chars = (
@@ -1307,8 +1366,17 @@ def _normalize_markdown_table_citation_suffixes(text: str) -> str:
 
 
 def _strip_protocol_source_placeholders(text: str) -> str:
-    """Remove leaked line-ending ``source`` tokens without touching prose."""
+    """Remove leaked source-protocol tokens without touching prose.
 
+    Older Reportify discovery results exposed ``[source](:<id>:summary)`` to
+    the model.  That destination is neither a navigable URL nor a Valuz
+    Evidence handle; rendering it gives users a dead link and falsely looks
+    like a citation.  Keep the surrounding business prose and let Claim Audit
+    report the now-unbound claim normally.
+    """
+
+    text = _LEGACY_REPORTIFY_SOURCE_LINK_RE.sub("", text)
+    text = _INVALID_RELATIVE_SOURCE_LINK_RE.sub("", text)
     output: list[str] = []
     suffix = re.compile(
         r"(?:[ \t]+|(?<=[。！？；;]))source([.!?。！？；;]?)([ \t]*\|)?\s*$",
@@ -1672,7 +1740,7 @@ def _attach_text_evidence_hints(
                     if any(
                         quote in value
                         for key, value in node.items()
-                        if key in {"content", "text", "html", "markdown", "raw_content"}
+                        if key in {"content", "text", "html", "markdown", "raw_content", "summary"}
                         and isinstance(value, str)
                     )
                 ]
@@ -1770,11 +1838,11 @@ def _compact_citation_value(
             original_count = len(direct_items)
             has_local_scalar_content = any(
                 isinstance(output.get(key), str)
-                for key in ("content", "html", "markdown", "raw_content", "text")
+                for key in ("content", "html", "markdown", "raw_content", "summary", "text")
             )
             local_text = "\n".join(
                 str(output.get(key) or "")
-                for key in ("content", "html", "markdown", "raw_content", "text")
+                for key in ("content", "html", "markdown", "raw_content", "summary", "text")
                 if isinstance(output.get(key), str)
             )
             compact_excerpt = (

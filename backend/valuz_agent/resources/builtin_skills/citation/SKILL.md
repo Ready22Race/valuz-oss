@@ -103,8 +103,21 @@ trusted citation bundle, so a model-authored bibliography would be duplicated.
 - Do not copy `_valuz_evidence` metadata into prose. Bind only its opaque
   handle, or use the lightweight `_valuz_evidence_hint` template for a field
   actually present in the returned structured data.
+- Evidence handles and Collection Addresses are opaque protocol values. Use
+  them only inside an `evidence://` link target or an evidence-aware tool
+  argument. Never name, quote, list, explain, or otherwise expose them in
+  user-visible prose, progress updates, handoffs, status messages, headings,
+  tables, or error descriptions.
 - A source marker is not a citation unless it links to a registered
   `evidence://` handle.
+- A browser view, screenshot, shell/CLI output, or ordinary tool result without
+  a direct handle or Collection Address is navigation context, not citable
+  Evidence. Retrieve the same fact through a metadata-bearing source tool
+  before using it in the answer.
+- Bind every independently verifiable sentence or table/list item immediately.
+  A link at the end of a paragraph does not automatically support earlier
+  claims in that paragraph; repeat the same handle when one excerpt supports
+  more than one claim.
 - If evidence is missing or contradictory, say so plainly. Do not make the
   answer look verified.
 

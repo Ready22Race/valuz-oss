@@ -197,6 +197,16 @@ _TABLE_SCOPE_HEADER_RE = re.compile(
     r"unit|currency|period|reporting period|fiscal year|scope|as of)$",
     re.IGNORECASE,
 )
+_TABLE_RANK_HEADER_RE = re.compile(
+    r"^(?:#|序号|序位|排名|名次|rank|ranking|no\.?|number)$",
+    re.IGNORECASE,
+)
+_TABLE_IDENTITY_HEADER_RE = re.compile(
+    r"^(?:公司|企业|标的|名称|模型|产品|项目|主体|证券|股票|"
+    r"company|entity|name|model|product|item|security|ticker)$",
+    re.IGNORECASE,
+)
+_TABLE_ORDINAL_VALUE_RE = re.compile(r"^(?:#\s*)?\d{1,4}(?:[.)、])?$")
 _TABLE_EMPTY_PLACEHOLDER_RE = re.compile(
     r"^(?:[-—–]+|N\s*/?\s*A|NOT\s+AVAILABLE)$",
     re.IGNORECASE,
@@ -1209,7 +1219,7 @@ def match_composite_text_evidence(
 ) -> tuple[str, ...]:
     """Return a bounded set of excerpts that jointly covers every claim amount."""
 
-    claim_amounts = _claim_amounts(claim.exact, semantics)
+    claim_amounts = _claim_amounts(_claim_assertion_text(claim), semantics)
     if len(claim_amounts) < 2:
         return ()
     candidates: list[tuple[str, Mapping[str, Any], Mapping[str, Any], set[int], int]] = []
@@ -1337,6 +1347,13 @@ def bind_claims_to_evidence(
         for handle, source, evidence in [_evidence_parts(record)]
         if handle and isinstance(evidence, Mapping)
     }
+    raw_records_by_handle = {
+        handle: record
+        for record in available
+        for handle, _source, evidence in [_evidence_parts(record)]
+        if handle and isinstance(evidence, Mapping)
+    }
+    local_indexes: dict[tuple[str, ...], Any] = {}
     edits: list[tuple[int, int, str]] = []
     auto_bound: dict[str, tuple[str, ...]] = {}
     rebound: dict[str, str] = {}
@@ -1394,16 +1411,39 @@ def bind_claims_to_evidence(
 
         attributed = bool(_EXPLICIT_ATTRIBUTION_RE.search(claim.exact))
         disclosure_handle = _unique_negative_disclosure_handle(claim, available)
-        match = (
-            EvidenceMatch("exact", (disclosure_handle,))
-            if disclosure_handle is not None
-            else match_available_evidence(
-                claim,
-                candidate_index,
-                semantics=semantics,
-                entity_aliases=entity_aliases,
+        if disclosure_handle is not None:
+            match = EvidenceMatch("exact", (disclosure_handle,))
+        else:
+            local_handles = tuple(
+                handle
+                for handle in _local_evidence_handles(answer, claim)
+                if handle in raw_records_by_handle
             )
-        )
+            local_match = EvidenceMatch("none")
+            if local_handles:
+                local_index = local_indexes.get(local_handles)
+                if local_index is None:
+                    local_index = ensure_evidence_candidate_index(
+                        (raw_records_by_handle[handle] for handle in local_handles),
+                        semantics=semantics,
+                    )
+                    local_indexes[local_handles] = local_index
+                local_match = match_available_evidence(
+                    claim,
+                    local_index,
+                    semantics=semantics,
+                    entity_aliases=entity_aliases,
+                )
+            match = (
+                local_match
+                if local_match.status in {"exact", "ambiguous"}
+                else match_available_evidence(
+                    claim,
+                    candidate_index,
+                    semantics=semantics,
+                    entity_aliases=entity_aliases,
+                )
+            )
         handles: tuple[str, ...] = ()
         if match.status == "exact" and len(match.handles) == 1:
             handle = match.handles[0]
@@ -1596,7 +1636,7 @@ def verify_evidence_support(
             return EvidenceSupport("contradicted", 2)
         if entity_status == "partial" or dimension_status == "partial":
             return EvidenceSupport("partially-supported", 2)
-        if len(_claim_amounts(claim.exact, semantics)) > 1:
+        if len(_claim_amounts(_claim_assertion_text(claim), semantics)) > 1:
             return EvidenceSupport("partially-supported", 2)
         return EvidenceSupport("supported", 4)
     if kind == "text":
@@ -1807,7 +1847,7 @@ def structured_components_cover_claim(
 ) -> bool:
     """Return true when structured component evidence covers every claim value."""
 
-    amounts = _claim_amounts(claim.exact, semantics)
+    amounts = _claim_amounts(_claim_assertion_text(claim), semantics)
     if len(amounts) < 2:
         return False
     covered = [False] * len(amounts)
@@ -2243,6 +2283,31 @@ def _append_table_claims(
     row_label = _plain_text(cells[0].content)
     if not row_label:
         return
+    identity_column_index: int | None = None
+    identity_row_label = ""
+    first_header = headers[0].strip() if headers else ""
+    if _TABLE_RANK_HEADER_RE.fullmatch(first_header) and _TABLE_ORDINAL_VALUE_RE.fullmatch(
+        row_label.strip()
+    ):
+        # Ranked result tables use the first cell only as an ordinal.  Claims
+        # in later value columns need the row's actual entity (company, model,
+        # product, etc.) as their subject; ``1 — WoW: +12%`` cannot be matched
+        # safely to a document that says ``MiMo-V2.5 ... +12.2%``.  Select only
+        # an explicitly labelled identity column so arbitrary neighboring
+        # values never become an inferred entity.
+        for candidate_index, candidate_cell in enumerate(cells[1:], start=1):
+            candidate_header = (
+                headers[candidate_index].strip() if candidate_index < len(headers) else ""
+            )
+            candidate_label = _plain_text(candidate_cell.content).strip()
+            if (
+                candidate_label
+                and _TABLE_IDENTITY_HEADER_RE.fullmatch(candidate_header)
+                and not _TABLE_EMPTY_PLACEHOLDER_RE.fullmatch(candidate_label)
+            ):
+                identity_column_index = candidate_index
+                identity_row_label = candidate_label
+                break
     row_scope_parts: list[str] = []
     for column_index, cell in enumerate(cells[1:], start=1):
         value = _plain_text(cell.content)
@@ -2296,7 +2361,12 @@ def _append_table_claims(
             _NUMBER_RE.search(value) or _DECLARATIVE_RE.search(value)
         ):
             continue
-        exact = f"{row_label} — {header}: {value}"
+        claim_row_label = (
+            identity_row_label
+            if identity_row_label and column_index != identity_column_index
+            else row_label
+        )
+        exact = f"{claim_row_label} — {header}: {value}"
         citation_ids, handles = _binding_refs(cell.content)
         location = {
             "kind": "table-cell",
@@ -2706,6 +2776,67 @@ def _binding_refs(text: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
     return tuple(citations), tuple(handles)
 
 
+def _local_evidence_handles(answer: str, claim: ClaimCandidate) -> tuple[str, ...]:
+    """Return explicit handles from the claim's own prose/list scope.
+
+    A model commonly writes several factual sentences and places their source
+    links at the paragraph end.  Those links are useful candidate constraints,
+    but they are not proof by themselves.  ``bind_claims_to_evidence`` still
+    runs the normal deterministic verifier against this bounded set before it
+    inserts any binding.  List/table items stay line-local so a citation from
+    one sibling can never spill into another.
+    """
+
+    start = claim.location.get("sourceStart")
+    end = claim.location.get("sourceEnd")
+    if not isinstance(start, int) or not isinstance(end, int):
+        return ()
+    start = min(max(start, 0), len(answer))
+    end = min(max(end, start), len(answer))
+    kind = str(claim.location.get("kind") or "")
+    if kind in {"list-item", "table-cell"}:
+        scope_start = answer.rfind("\n", 0, start) + 1
+        scope_end = answer.find("\n", end)
+    else:
+        scope_start = answer.rfind("\n\n", 0, start) + 2
+        scope_end = answer.find("\n\n", end)
+    if scope_end < 0:
+        scope_end = len(answer)
+    local = _binding_refs(answer[scope_start:scope_end])[1]
+    if local or kind in {"list-item", "table-cell"}:
+        return local
+
+    # Exact-N research answers commonly use one numbered heading per result,
+    # with source links in the recommendation paragraph and a separately
+    # rendered "why it is relevant" paragraph below it.  Treat citations from
+    # the same numbered section as a bounded candidate set, never as proof:
+    # the normal deterministic verifier still checks the claim against each
+    # Evidence item.  Ending at the next heading of the same or higher level
+    # prevents a source from one company/result spilling into a sibling.
+    section = _numbered_heading_section(answer, start)
+    return _binding_refs(section)[1] if section else ()
+
+
+def _numbered_heading_section(answer: str, source_start: int) -> str:
+    headings = list(
+        re.finditer(
+            r"(?m)^[ \t]{0,3}(?P<marks>#{1,6})\s+"
+            r"(?:\d+[.)、]|[一二三四五六七八九十]+[、.)])\s*.+$",
+            answer[:source_start],
+        )
+    )
+    if not headings:
+        return ""
+    heading = headings[-1]
+    level = len(heading.group("marks"))
+    boundary = re.search(
+        rf"(?m)^\s{{0,3}}#{{1,{level}}}\s+.+$",
+        answer[heading.end() :],
+    )
+    section_end = heading.end() + boundary.start() if boundary is not None else len(answer)
+    return answer[heading.start() : section_end]
+
+
 def _plain_text(value: str) -> str:
     value = _CITATION_LINK_RE.sub(
         lambda match: _visible_citation_label(match.group(1)),
@@ -2925,7 +3056,7 @@ def _evidence_match_specificity(
     token_overlap = (
         int(1_000 * len(claim_tokens & quote_tokens) / len(claim_tokens)) if claim_tokens else 0
     )
-    claim_amount_count = len(_claim_amounts(claim.exact, semantics))
+    claim_amount_count = len(_claim_amounts(_claim_assertion_text(claim), semantics))
     quote_amount_count = len(_claim_amounts(str(evidence.get("quote") or ""), semantics))
     extra_amounts = max(0, quote_amount_count - claim_amount_count)
     compact_claim = re.sub(r"\s+", "", claim_text)
@@ -3707,7 +3838,7 @@ def _text_numeric_supports_claim(
     metric_context: str | None = None,
     allow_distinctive_unit_match: bool = False,
 ) -> bool:
-    claim_amounts = _claim_amounts(claim.exact, semantics)
+    claim_amounts = _claim_amounts(_claim_assertion_text(claim), semantics)
     if not claim_amounts:
         return False
     claim_contextual_unit = _contextual_table_unit(claim.exact, semantics)
@@ -3866,7 +3997,7 @@ def _text_numeric_conflicts_claim(
     if not quote_amounts:
         return False
 
-    claim_amounts = _claim_amounts(claim.exact, semantics)
+    claim_amounts = _claim_amounts(_claim_assertion_text(claim), semantics)
     claim_unit = _contextual_table_unit(claim.exact, semantics)
     if claim_unit is not None:
         claim_label, claim_canonical, claim_scale = claim_unit
@@ -4538,6 +4669,27 @@ def _claim_label_body(value: str) -> str:
     """
 
     return re.sub(r"^\s*(?:[*_#`]+\s*)?[^\n:：]{1,32}[:：]\s*", "", value, count=1)
+
+
+def _claim_assertion_text(claim: ClaimCandidate) -> str:
+    """Return the value asserted by one structural claim.
+
+    A table claim's ``exact`` text intentionally includes its row identity and
+    column header so lexical retrieval can find the right entity and metric.
+    Numbers inside those labels are coordinates, not asserted values: model
+    versions such as ``MiMo-V2.5`` and comparison windows such as
+    ``7.13—7.19`` must not be required to reappear in the supporting quote for
+    the cell's ``+12%`` value.  Keep the complete claim for subject/metric
+    matching, but restrict numeric verification to the rendered cell value.
+    """
+
+    if claim.location.get("kind") != "table-cell":
+        return claim.exact
+    _separator, marker, descriptor = claim.exact.partition(" — ")
+    if not marker:
+        return claim.exact
+    match = re.match(r"^[^\n:：]{1,240}[:：]\s*(.+)$", descriptor, re.DOTALL)
+    return match.group(1).strip() if match is not None else claim.exact
 
 
 def _prose_contains(left: str, right: str) -> bool:

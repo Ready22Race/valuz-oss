@@ -69,6 +69,18 @@ def test_generated_ui_requires_explicit_visual_request() -> None:
     assert chart.generated_ui_allowed is True
 
 
+def test_side_effects_require_explicit_user_action_not_future_reusability() -> None:
+    descriptive = parse_output_contract("生成 AI 领域周度新闻汇总，并可用于定时任务。")
+    file_request = parse_output_contract("生成 AI 新闻汇总并保存为 PDF 文件。")
+    automation_request = parse_output_contract("创建一个每周一发送 AI 新闻的定时任务。")
+
+    assert descriptive.artifact_mutation_allowed is False
+    assert descriptive.automation_mutation_allowed is False
+    assert file_request.artifact_mutation_allowed is True
+    assert file_request.automation_mutation_allowed is False
+    assert automation_request.automation_mutation_allowed is True
+
+
 def test_parses_direct_recommendation_count_but_not_approximate_bound() -> None:
     exact = parse_output_contract("推荐 10 家国内 A 股 AI 应用公司。")
     english = parse_output_contract("Recommend exactly 10 listed companies.")
@@ -79,10 +91,20 @@ def test_parses_direct_recommendation_count_but_not_approximate_bound() -> None:
     assert lower_bound.requested_item_count is None
 
 
-def test_parses_explicit_two_line_contract() -> None:
-    contract = parse_output_contract(
-        "请根据年度报告，只用两行列出直销渠道和批发代理渠道的收入。"
+def test_parses_ranked_top_n_as_an_exact_result_count() -> None:
+    zh = parse_output_contract(
+        "统计 OpenRouter 最近一周模型 Token 用量 Top10，并计算周环比和月环比。"
     )
+    english = parse_output_contract("Rank the top 25 models by weekly token usage.")
+
+    assert zh.requested_result_count == 10
+    assert zh.requested_item_count == 10
+    assert english.requested_result_count == 25
+    assert english.requested_item_count == 25
+
+
+def test_parses_explicit_two_line_contract() -> None:
+    contract = parse_output_contract("请根据年度报告，只用两行列出直销渠道和批发代理渠道的收入。")
 
     assert contract.strict is True
     assert contract.requested_line_count == 2

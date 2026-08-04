@@ -55,6 +55,22 @@ task_coverage:
     output_constraints: [prose, list, table, exact-count, required-columns, preserve-order]
     ontology_refs: []
   retrieval:
+    # Runtime control, planning and artifact-delivery calls are observable
+    # agent work, but they are not source retrieval.  The shared resolver
+    # excludes them from Task Coverage without changing their UI visibility.
+    ignored_tool_patterns:
+      - "*list_skills*"
+      - "*read_skill*"
+      - "*write_todos*"
+      - "*todo_update*"
+      - "*automation*"
+      - "*write_file*"
+      - "*deliver_artifacts*"
+      - "glob"
+    ignored_input_patterns:
+      - "*/.agents/skills/*"
+      - "*/resources/skills/*"
+      - "*/skills/*/SKILL.md*"
     identity_mappings:
       - id: oss-entity-identity
         tool_patterns: ["*entity*search*", "*identity*lookup*"]

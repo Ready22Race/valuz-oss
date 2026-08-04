@@ -22,7 +22,13 @@ import valuz_agent.boot.kernel  # noqa: F401 — sets sys.path for ``src`` / ``a
 from src.core.agent_config import AgentConfig
 from src.core.events import Event
 from src.core.orchestrator import SessionOrchestrator
-from src.core.types import BARE_COMPLETION_METADATA_KEY, EndTurn, Session, UserMessage
+from src.core.types import (
+    BARE_COMPLETION_METADATA_KEY,
+    EndTurn,
+    McpHttpServerConfig,
+    Session,
+    UserMessage,
+)
 
 
 class _FakeStore:
@@ -193,6 +199,52 @@ class _CitationRepairRuntime:
 
     async def close(self) -> None:
         self.closed = True
+
+
+async def test_continuation_uses_refreshed_mcp_snapshot_and_keeps_it_in_memory(
+    tmp_path,
+) -> None:
+    agent = AgentConfig(id="agent-1", name="tester")
+    stale = McpHttpServerConfig(
+        name="reportify",
+        url="https://mcp.example.test",
+        headers={"Authorization": "Bearer stale"},
+    )
+    fresh = McpHttpServerConfig(
+        name="reportify",
+        url="https://mcp.example.test",
+        headers={"Authorization": "Bearer fresh"},
+    )
+    session = Session(
+        id="sess-refresh-continuation",
+        agent_config=agent,
+        cwd=str(tmp_path),
+        user_id="owner-1",
+        status="running",
+        mcp_servers=(stale,),
+    )
+    store = _FakeStore(session)
+    orch = SessionOrchestrator(store)  # type: ignore[arg-type]
+
+    async def refresh(user_id: str, session_id: str) -> bool:
+        assert (user_id, session_id) == ("owner-1", session.id)
+        durable = copy.deepcopy(session)
+        durable.mcp_servers = (fresh,)
+        store._session = durable
+        return True
+
+    orch.set_citation_repair_refresh_hook(refresh)
+
+    await orch._refresh_continuation_credentials(  # noqa: SLF001
+        "owner-1",
+        session.id,
+        session,
+        continuation="task coverage",
+    )
+
+    assert session.mcp_servers == (fresh,)
+    await store.save_session(session)
+    assert store._session.mcp_servers == (fresh,)
 
 
 async def test_run_turn_does_not_repair_an_unresolved_claim(tmp_path, monkeypatch) -> None:

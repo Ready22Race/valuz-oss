@@ -963,6 +963,20 @@ def test_registry_rejects_oversized_snapshots_and_locator_geometry() -> None:
     assert len(registry) == 0
 
 
+def test_projection_registration_readiness_is_idempotent() -> None:
+    registry = EvidenceRegistry()
+    projection = {
+        "_valuz_evidence": [
+            _item("ev_ready_12345678", locator={"kind": "chunk", "chunkId": "chunk-1"})
+        ]
+    }
+
+    assert registry.register_tool_projection(projection, projection, trusted_private=True) == 1
+    assert registry.projection_is_registered(projection, trusted_private=True) is True
+    assert registry.register_tool_projection(projection, projection, trusted_private=True) == 0
+    assert registry.projection_is_registered(projection, trusted_private=True) is True
+
+
 def test_registry_never_persists_signed_urls_paths_or_unknown_locator_fields() -> None:
     item = _item(
         locator={
@@ -1395,6 +1409,36 @@ def test_guard_removes_protocol_source_placeholders_without_rewriting_prose() ->
     assert "12%。[1](citation://" in result.text
     assert ") source" not in result.text
     assert "The primary source is the annual report." in result.text
+
+
+def test_guard_removes_legacy_reportify_summary_source_link() -> None:
+    guard = CitationGuard(
+        EvidenceRegistry(),
+        message_id="msg-1",
+        user_prompt="请列出十家公司并引用来源",
+        policy_available=True,
+    )
+
+    result = guard.finalize("泛微网络利润同比增长42%。[source](:1239333165953323008:summary)")
+
+    assert result.text == "泛微网络利润同比增长42%。"
+    assert "source" not in result.text
+    assert ":summary" not in result.text
+
+
+def test_guard_removes_non_navigable_relative_source_link() -> None:
+    guard = CitationGuard(
+        EvidenceRegistry(),
+        message_id="msg-1",
+        user_prompt="请列出十家公司并引用来源",
+        policy_available=True,
+    )
+
+    result = guard.finalize(
+        "万兴科技 AI 原生收入同比增长90%。[source](.cn/reports/1239333165953323008)"
+    )
+
+    assert result.text == "万兴科技 AI 原生收入同比增长90%。"
 
 
 def test_guard_moves_citation_out_of_a_split_grouped_number() -> None:

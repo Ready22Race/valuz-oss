@@ -292,14 +292,8 @@ def _evaluate_topic_ontology_families(
             continue
         task = policy_deltas[index].get("task_coverage")
         contract = task.get("contract") if isinstance(task, Mapping) else None
-        topic_ontology = (
-            contract.get("topic_ontology") if isinstance(contract, Mapping) else None
-        )
-        topics = (
-            topic_ontology.get("topics")
-            if isinstance(topic_ontology, Mapping)
-            else None
-        )
+        topic_ontology = contract.get("topic_ontology") if isinstance(contract, Mapping) else None
+        topics = topic_ontology.get("topics") if isinstance(topic_ontology, Mapping) else None
         for topic_id, definition in topics.items() if isinstance(topics, Mapping) else []:
             aliases = definition.get("aliases") if isinstance(definition, Mapping) else None
             expected_aliases = [str(alias) for alias in aliases or [] if str(alias).strip()]
@@ -346,14 +340,8 @@ def _probe_metric(effective_policy: Mapping[str, Any]) -> tuple[str, str]:
     """
 
     semantics = effective_policy.get("semantics")
-    metric_ontology = (
-        semantics.get("metric_ontology") if isinstance(semantics, Mapping) else None
-    )
-    metrics = (
-        metric_ontology.get("metrics")
-        if isinstance(metric_ontology, Mapping)
-        else None
-    )
+    metric_ontology = semantics.get("metric_ontology") if isinstance(semantics, Mapping) else None
+    metrics = metric_ontology.get("metrics") if isinstance(metric_ontology, Mapping) else None
     if not isinstance(metrics, Mapping):
         return "", ""
     ordered_ids = ["operating_revenue", *metrics]
@@ -380,9 +368,7 @@ def _evaluate_dimension_ontology_families(
             continue
         task = policy_deltas[index].get("task_coverage")
         contract = task.get("contract") if isinstance(task, Mapping) else None
-        ontology = (
-            contract.get("dimension_ontology") if isinstance(contract, Mapping) else None
-        )
+        ontology = contract.get("dimension_ontology") if isinstance(contract, Mapping) else None
         dimensions = ontology.get("dimensions") if isinstance(ontology, Mapping) else None
         for dimension_id, definition in (
             dimensions.items() if isinstance(dimensions, Mapping) else []
@@ -402,9 +388,7 @@ def _evaluate_dimension_ontology_families(
                     if isinstance(member_definition, Mapping)
                     else member_definition
                 )
-                member_values = [
-                    str(alias) for alias in member_aliases or [] if str(alias).strip()
-                ]
+                member_values = [str(alias) for alias in member_aliases or [] if str(alias).strip()]
                 expected = {str(member_id), *member_values}
                 policy_ref = (
                     "task_coverage.contract.dimension_ontology.dimensions."
@@ -442,8 +426,7 @@ def _evaluate_dimension_ontology_families(
                     for item in task_contract.requirements
                     if item.kind == "structured-slot"
                     and item.slots.get("metric") == metric_id
-                    and item.slots.get("dimensions", {}).get(str(dimension_id))
-                    == str(member_id)
+                    and item.slots.get("dimensions", {}).get(str(dimension_id)) == str(member_id)
                 ]
                 actual_aliases = (
                     set(requirements[0].aliases.get(f"dimension:{dimension_id}", ()))
@@ -486,6 +469,10 @@ def evaluate_case(case: Mapping[str, Any], policy: Mapping[str, Any]) -> dict[st
             tool.get("name"),
             tool.get("input"),
             tool.get("result"),
+            citation_ready=(bool(tool.get("citation_ready")) if "citation_ready" in tool else None),
+            citation_join_id=(
+                str(tool.get("citation_join_id")) if tool.get("citation_join_id") else None
+            ),
         )
     audit = tracker.evaluate(str(case.get("answer") or ""))
     failures: list[str] = []
@@ -504,13 +491,33 @@ def evaluate_case(case: Mapping[str, Any], policy: Mapping[str, Any]) -> dict[st
     _compare_expected("contract", expected_contract, actual_contract, failures)
     metrics = audit["metrics"]
     expected_coverage = case.get("expected_coverage") or {}
+    missing_result_items = [
+        str(item)
+        for row in audit["requirements"]
+        if isinstance(row, Mapping)
+        for item in (
+            row.get("missingResultItems") if isinstance(row.get("missingResultItems"), list) else []
+        )
+    ]
+    revision_requested = tracker.should_request_revision(audit)
+    result_item_retrieval_count = 0
+    if revision_requested and missing_result_items:
+        revision_prompt = tracker.revision_prompt(audit, str(case.get("answer") or ""), prompt)
+        marker = "Restricted task-coverage context (JSON):\n"
+        if marker in revision_prompt:
+            revision_context = json.loads(revision_prompt.split(marker, 1)[1])
+            retrieval_rows = revision_context.get("resultItemRetrieval")
+            if isinstance(retrieval_rows, list):
+                result_item_retrieval_count = len(retrieval_rows)
     actual_coverage = {
         "status": audit["status"],
         "answer_missing_count": metrics["answerRequirementMissingCount"],
         "answer_fulfilled_count": metrics["answerRequirementFulfilledCount"],
         "retrieval_available_count": metrics["retrievalRequirementAvailableCount"],
         "model_input_visible_count": metrics["modelInputRequirementVisibleCount"],
-        "revision_requested": tracker.should_request_revision(audit),
+        "revision_requested": revision_requested,
+        "missing_result_items": missing_result_items,
+        "result_item_retrieval_count": result_item_retrieval_count,
     }
     _compare_expected("coverage", expected_coverage, actual_coverage, failures)
     expected_plan = case.get("expected_retrieval_plan") or {}

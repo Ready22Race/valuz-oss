@@ -47,6 +47,8 @@ _TASK_COVERAGE_SECTIONS = {
     "retrieval": {
         "content_mappings",
         "identity_mappings",
+        "ignored_tool_patterns",
+        "ignored_input_patterns",
         "candidate_selection",
         "source_constraints",
     },
@@ -477,16 +479,13 @@ def _validate_task_coverage_topic_ontology(value: Any) -> None:
             or not aliases
             or not all(isinstance(alias, str) and alias for alias in aliases)
         ):
-            raise RuntimeError(
-                "citation policy task_coverage topic ontology aliases are invalid"
-            )
+            raise RuntimeError("citation policy task_coverage topic ontology aliases are invalid")
 
 
 def _validate_task_coverage_dimension_ontology(value: Any) -> None:
     if not isinstance(value, dict) or set(value) != {"revision", "dimensions"}:
         raise RuntimeError(
-            "citation policy task_coverage dimension ontology requires "
-            "revision and dimensions"
+            "citation policy task_coverage dimension ontology requires revision and dimensions"
         )
     revision = value.get("revision")
     dimensions = value.get("dimensions")
@@ -497,8 +496,7 @@ def _validate_task_coverage_dimension_ontology(value: Any) -> None:
         or not dimensions
     ):
         raise RuntimeError(
-            "citation policy task_coverage dimension ontology revision or dimensions "
-            "is invalid"
+            "citation policy task_coverage dimension ontology revision or dimensions is invalid"
         )
     for dimension_id, definition in dimensions.items():
         if (
@@ -520,8 +518,7 @@ def _validate_task_coverage_dimension_ontology(value: Any) -> None:
             or not members
         ):
             raise RuntimeError(
-                "citation policy task_coverage dimension ontology aliases or members "
-                "are invalid"
+                "citation policy task_coverage dimension ontology aliases or members are invalid"
             )
         for member_id, member_definition in members.items():
             if (
@@ -538,13 +535,10 @@ def _validate_task_coverage_dimension_ontology(value: Any) -> None:
             if (
                 not isinstance(member_aliases, list)
                 or not member_aliases
-                or not all(
-                    isinstance(alias, str) and alias for alias in member_aliases
-                )
+                or not all(isinstance(alias, str) and alias for alias in member_aliases)
             ):
                 raise RuntimeError(
-                    "citation policy task_coverage dimension ontology member aliases "
-                    "are invalid"
+                    "citation policy task_coverage dimension ontology member aliases are invalid"
                 )
 
 
@@ -592,9 +586,7 @@ def _validate_task_coverage_content_mappings(entries: list[Any]) -> None:
 def _validate_task_coverage_identity_mappings(entries: list[Any]) -> None:
     for entry in entries:
         if not isinstance(entry, dict):
-            raise RuntimeError(
-                "citation policy task_coverage identity mappings must be mappings"
-            )
+            raise RuntimeError("citation policy task_coverage identity mappings must be mappings")
         required = {"id", "tool_patterns"}
         allowed = {*required, "query_fields", "result_fields"}
         if not required.issubset(entry) or set(entry) - allowed:
@@ -603,9 +595,7 @@ def _validate_task_coverage_identity_mappings(entries: list[Any]) -> None:
                 "tool_patterns, with optional query_fields and result_fields"
             )
         if not isinstance(entry.get("id"), str) or not entry["id"]:
-            raise RuntimeError(
-                "citation policy task_coverage identity mapping id is invalid"
-            )
+            raise RuntimeError("citation policy task_coverage identity mapping id is invalid")
         for key in ("tool_patterns", "query_fields", "result_fields"):
             values = entry.get(key)
             if values is None and key != "tool_patterns":

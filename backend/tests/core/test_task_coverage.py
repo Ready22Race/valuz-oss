@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
+
 from src.core.task_coverage import (
     TaskCoverageTracker,
+    build_answer_manifest,
     build_task_retrieval_plan,
     parse_task_contract,
     task_contract_prompt,
@@ -139,6 +142,16 @@ def _finance_like_policy() -> dict:
                     },
                 },
                 "retrieval": {
+                    "ignored_tool_patterns": [
+                        "*list_skills*",
+                        "*automation*",
+                        "*write_file*",
+                        "glob",
+                    ],
+                    "ignored_input_patterns": [
+                        "*/.agents/skills/*",
+                        "*/skills/*/SKILL.md*",
+                    ],
                     "content_mappings": [
                         {
                             "id": "discovery",
@@ -274,6 +287,26 @@ def test_explicit_table_columns_override_inferred_period_column_and_enforce_shap
     assert invalid_output["reasonCodes"] == ["exact-table-column-count-mismatch"]
 
 
+def test_requested_markdown_table_rejects_truncated_data_row() -> None:
+    prompt = (
+        "请比较贵州茅台和五粮液 2024 年营业收入与归母净利润。严格只输出一个 "
+        "Markdown 表格，恰好 2 行公司数据和 3 列：公司、营业收入、归母净利润。"
+    )
+    contract = parse_task_contract(prompt, policy_snapshot=_finance_like_policy())
+    tracker = TaskCoverageTracker(contract, policy_snapshot=_finance_like_policy())
+    truncated = """| 公司 | 营业收入 | 归母净利润 |
+|---|---:|---:|
+| 贵州茅台 | 1,708.99亿元 | 862.28亿元 |
+| 五粮液 | 891.75亿元"""
+
+    output = next(
+        row for row in tracker.evaluate(truncated)["requirements"] if row["kind"] == "output-shape"
+    )
+
+    assert output["answerStatus"] == "missing"
+    assert output["reasonCodes"] == ["malformed-table-row"]
+
+
 def test_unscoped_metric_explanation_does_not_create_retrieval_or_repair_contract() -> None:
     contract = parse_task_contract(
         "ROE 是什么意思？请用通俗语言解释它反映什么、常见计算方式，"
@@ -403,7 +436,12 @@ def test_direct_recommendation_count_is_enforceable_and_requires_visible_items()
 
     output = next(item for item in contract.requirements if item.kind == "output-shape")
     assert output.slots["exactItemCount"] == 10
+    assert output.slots["requireCitationPerItem"] is True
     assert contract.enforceable is True
+    coverage_prompt = task_contract_prompt(contract)
+    assert "Every result item must contain at least one citation" in coverage_prompt
+    assert "return the answer in chat" in coverage_prompt
+    assert "reusability only" in coverage_prompt
 
     short_result = TaskCoverageTracker(contract, policy_snapshot=policy).evaluate(
         "数据已充分。现在整合所有来源，撰写综合报告。"
@@ -417,11 +455,223 @@ def test_direct_recommendation_count_is_enforceable_and_requires_visible_items()
     complete = "\n\n".join(
         f"### {index}. 公司 {index}\n\n核心产品：AI 应用 {index}。" for index in range(1, 11)
     )
-    complete_result = TaskCoverageTracker(contract, policy_snapshot=policy).evaluate(complete)
+    uncited_result = TaskCoverageTracker(contract, policy_snapshot=policy).evaluate(complete)
+    uncited_output = next(
+        item for item in uncited_result["requirements"] if item["kind"] == "output-shape"
+    )
+    assert uncited_output["answerStatus"] == "missing"
+    assert uncited_output["reasonCodes"] == ["result-item-citation-missing"]
+    assert uncited_output["missingResultItems"] == [f"公司 {index}" for index in range(1, 11)]
+
+    cited = "\n\n".join(
+        f"### {index}. 公司 {index}\n\n核心产品：AI 应用 {index} [source](citation://cit_{index})。"
+        for index in range(1, 11)
+    )
+    complete_result = TaskCoverageTracker(contract, policy_snapshot=policy).evaluate(cited)
     complete_output = next(
         item for item in complete_result["requirements"] if item["kind"] == "output-shape"
     )
     assert complete_output["answerStatus"] == "fulfilled"
+
+
+def test_exact_result_headings_extend_turn_local_entity_aliases() -> None:
+    policy = _finance_like_policy()
+    contract = parse_task_contract(
+        "推荐 3 家国内 A 股 AI 应用公司，并简述各自核心产品。",
+        policy_snapshot=policy,
+    )
+    tracker = TaskCoverageTracker(contract, policy_snapshot=policy)
+    answer = """### 1. 金山办公（688111）— AI 办公
+
+核心产品：WPS AI。
+
+### 2. 汉朔科技（AI+零售，电子价签）
+
+核心产品：电子价签。
+
+### 3. 科大讯飞（002230）— 大模型
+
+核心产品：星火大模型。"""
+
+    aliases = tracker.entity_aliases_snapshot(answer)
+
+    assert aliases["金山办公"] == ("688111", "金山办公")
+    assert aliases["汉朔科技"] == ("汉朔科技",)
+    assert aliases["科大讯飞"] == ("002230", "科大讯飞")
+
+
+def test_exact_result_requires_one_locally_supported_citation_per_item() -> None:
+    policy = _finance_like_policy()
+    contract = parse_task_contract(
+        "推荐 3 家国内 A 股 AI 应用公司，并简述各自核心产品。",
+        policy_snapshot=policy,
+    )
+    tracker = TaskCoverageTracker(contract, policy_snapshot=policy)
+    answer = "\n\n".join(
+        f"### {index}. 公司 {index}\n\n核心产品：AI 应用 {index} [source](citation://cit_{index})。"
+        for index in range(1, 4)
+    )
+    claims = build_answer_manifest(answer).claims
+    bundle = {
+        "quality": {
+            "claims": [
+                {
+                    "claimId": claim.claim_id,
+                    "status": "unverified" if "AI 应用 2" in claim.exact else "passed",
+                    "citationIds": list(claim.attached_citation_ids),
+                }
+                for claim in claims
+            ]
+        }
+    }
+
+    audit = tracker.evaluate(answer, citation_bundle=bundle)
+    output = next(row for row in audit["requirements"] if row["kind"] == "output-shape")
+
+    assert output["answerStatus"] == "missing"
+    assert output["reasonCodes"] == ["result-item-citation-missing"]
+    assert output["missingResultItems"] == ["公司 2"]
+
+
+def test_exact_result_revision_retrieves_only_uncited_items_in_one_scoped_batch() -> None:
+    policy = _finance_like_policy()
+    prompt = "推荐 10 家国内 A 股 AI 应用公司，并简述各自核心产品。"
+    contract = parse_task_contract(prompt, policy_snapshot=policy)
+    tracker = TaskCoverageTracker(contract, policy_snapshot=policy)
+    answer = "\n\n".join(
+        f"### {index}. 公司 {index}\n\n核心产品：AI 应用 {index}"
+        + (f" [source](citation://cit_{index})。" if index in {1, 2, 3, 8, 9, 10} else "。")
+        for index in range(1, 11)
+    )
+
+    audit = tracker.evaluate(answer)
+    output = next(row for row in audit["requirements"] if row["kind"] == "output-shape")
+
+    assert output["missingResultItems"] == [
+        "公司 4",
+        "公司 5",
+        "公司 6",
+        "公司 7",
+    ]
+    revision = tracker.revision_prompt(audit, answer, prompt)
+    context = json.loads(revision.split("Restricted task-coverage context (JSON):\n", 1)[1])
+    requirement_id = output["requirementId"]
+    assert requirement_id in context["retrievalNeeded"]
+    assert requirement_id not in context["answerPatchOnly"]
+    assert context["resultItemRetrieval"] == [
+        {
+            "requirementId": requirement_id,
+            "items": ["公司 4", "公司 5", "公司 6", "公司 7"],
+            "strategy": "batch-document-scoped-search",
+            "sourceBoundary": "original-addressable-content",
+        }
+    ]
+    assert "Prefer one batch document-scoped search" in revision
+
+
+def test_exact_item_count_uses_one_numbered_heading_level() -> None:
+    policy = _finance_like_policy()
+    contract = parse_task_contract(
+        "推荐 10 家国内 A 股 AI 应用公司，并简述各自核心产品。",
+        policy_snapshot=policy,
+    )
+    grouped = "\n\n".join(
+        [
+            "## 一、AI 办公",
+            *(
+                f"### {index}. 公司 {index}\n\n核心产品：AI 应用 {index} "
+                f"[source](citation://cit_{index})。"
+                for index in range(1, 6)
+            ),
+            "## 二、AI 金融",
+            *(
+                f"### {index}. 公司 {index}\n\n核心产品：AI 应用 {index} "
+                f"[source](citation://cit_{index})。"
+                for index in range(6, 11)
+            ),
+        ]
+    )
+
+    result = TaskCoverageTracker(contract, policy_snapshot=policy).evaluate(grouped)
+    output = next(item for item in result["requirements"] if item["kind"] == "output-shape")
+
+    assert output["answerStatus"] == "fulfilled"
+
+
+def test_ranked_calculation_requires_exact_count_and_addressable_source_content() -> None:
+    policy = _finance_like_policy()
+    contract = parse_task_contract(
+        "统计 OpenRouter 最近一周模型 Token 用量 Top10，并计算周环比和月环比。",
+        policy_snapshot=policy,
+    )
+
+    assert contract.declared_scope.get("entities") is None
+    assert [requirement.kind for requirement in contract.requirements] == [
+        "topic",
+        "calculation",
+        "output-shape",
+    ]
+    output = next(item for item in contract.requirements if item.kind == "output-shape")
+    assert output.slots["exactItemCount"] == 10
+    assert output.slots["requireCitationPerItem"] is True
+    tracker = TaskCoverageTracker(contract, policy_snapshot=policy)
+    tracker.record_tool_result(
+        "browser_execute",
+        {"script": "collect weekly usage"},
+        "1. Model A 100 tokens\n2. Model B 90 tokens",
+        citation_ready=False,
+    )
+    answer = "\n".join(
+        f"{index}. Model {index}: {101 - index} tokens，周环比 1%，月环比 2%。"
+        for index in range(1, 11)
+    )
+
+    audit = tracker.evaluate(answer)
+
+    assert audit["status"] == "partial"
+    topic = next(item for item in audit["requirements"] if item["kind"] == "topic")
+    output_row = next(item for item in audit["requirements"] if item["kind"] == "output-shape")
+    assert topic["modelInputStatus"] == "not-visible"
+    assert output_row["answerStatus"] == "missing"
+    assert output_row["reasonCodes"] == ["result-item-citation-missing"]
+    assert tracker.should_request_revision(audit) is True
+
+
+def test_exact_ranked_result_prefers_matching_table_over_explanatory_bullets() -> None:
+    policy = _finance_like_policy()
+    contract = parse_task_contract(
+        "统计 OpenRouter 最近一周模型 Token 用量 Top10，并计算周环比和月环比。",
+        policy_snapshot=policy,
+    )
+    rows = "\n".join(
+        f"| {index} | Model {index} | {index}T [source](citation://cit_{index}) | 1% | 2% |"
+        for index in range(1, 11)
+    )
+    answer = f"""本轮已取得两组数据：
+
+- 本周视图已读取
+- 本月视图已读取
+
+| 排名 | 模型 | 用量 | 周环比 | 月环比 |
+|---:|---|---:|---:|---:|
+{rows}
+
+数据说明：
+
+- 周环比来自本周视图
+- 月环比来自本月视图
+- 未入榜项目标记为未披露
+"""
+
+    output = next(
+        row
+        for row in TaskCoverageTracker(contract, policy_snapshot=policy).evaluate(answer)[
+            "requirements"
+        ]
+        if row["kind"] == "output-shape"
+    )
+
+    assert output["answerStatus"] == "fulfilled"
 
 
 def test_scoped_metric_calculation_still_creates_a_strict_contract() -> None:
@@ -1098,6 +1348,112 @@ def test_topic_plan_progress_requires_original_content_after_discovery() -> None
     assert with_content["retrievalPlanProgress"]["pendingStepCount"] == 0
 
 
+def test_open_research_requires_original_content_beyond_discovery() -> None:
+    policy = _finance_like_policy()
+    contract = parse_task_contract(
+        "推荐 10 家国内 A 股 AI 应用公司，并说明依据。",
+        policy_snapshot=policy,
+    )
+    topics = [item for item in contract.requirements if item.kind == "topic"]
+    assert [item.slots["topic"] for item in topics] == ["requested-summary"]
+    assert contract.enforceable is True
+    assert [step.strategy for step in build_task_retrieval_plan(contract).steps] == [
+        "document-discovery",
+        "document-scoped-search",
+    ]
+
+    tracker = TaskCoverageTracker(contract, policy_snapshot=policy)
+    tracker.record_tool_result(
+        "earnings_search",
+        {"query": "A 股 AI 应用公司"},
+        {"documents": [{"id": "report-1", "title": "AI 应用行业报告"}]},
+    )
+    answer = "\n".join(
+        f"{index}. 公司{index}：AI 应用收入和客户数量增长。" for index in range(1, 11)
+    )
+    discovery_only = tracker.evaluate(answer)
+    assert discovery_only["status"] == "partial"
+    assert tracker.should_request_revision(discovery_only) is True
+
+    tracker.record_tool_result(
+        "kb_search",
+        {"doc_ids": ["report-1"], "query": "AI 应用收入 客户"},
+        {"chunks": [{"id": "chunk-1", "content": "AI 应用收入和客户数量增长。"}]},
+    )
+    cited_answer = "\n".join(
+        f"{index}. 公司{index}：AI 应用收入和客户数量增长 [source](citation://cit_{index})。"
+        for index in range(1, 11)
+    )
+    with_content = tracker.evaluate(cited_answer)
+    assert with_content["status"] == "complete"
+
+
+def test_open_research_recognizes_object_before_research_verb() -> None:
+    policy = _finance_like_policy()
+    contract = parse_task_contract(
+        "针对芯片制造用硅片产业链做深度调研，包括行业发展历史和现状。",
+        policy_snapshot=policy,
+    )
+
+    topics = [item for item in contract.requirements if item.kind == "topic"]
+    assert [item.slots["topic"] for item in topics] == ["requested-summary"]
+    assert contract.enforceable is True
+    assert [step.strategy for step in build_task_retrieval_plan(contract).steps] == [
+        "document-discovery",
+        "document-scoped-search",
+    ]
+
+
+def test_runtime_operations_do_not_satisfy_open_research_source_coverage() -> None:
+    policy = _finance_like_policy()
+    contract = parse_task_contract(
+        "生成 AI 领域周度新闻汇总，并可用于定时任务。",
+        policy_snapshot=policy,
+    )
+    tracker = TaskCoverageTracker(contract, policy_snapshot=policy)
+    answer = "过去一周 AI 领域出现多项重要产品发布和投资事件。"
+
+    tracker.record_tool_result("list_skills", {}, {"skills": ["financial-news"]})
+    tracker.record_tool_result(
+        "read_file",
+        {"file_path": "/workspace/.agents/skills/financial-news/SKILL.md"},
+        "Search news, group events, and produce a weekly report.",
+    )
+    tracker.record_tool_result("automation", {"action": "list"}, {"items": []})
+    tracker.record_tool_result("write_file", {"path": "weekly.md"}, "saved")
+    tracker.record_tool_result("glob", {"pattern": "*.md"}, ["weekly.md"])
+
+    operations_only = tracker.evaluate(answer)
+    assert operations_only["status"] == "partial"
+    assert operations_only["attempts"] == []
+    assert tracker.should_request_revision(operations_only) is True
+
+    tracker.record_tool_result(
+        "news_search",
+        {"query": "AI weekly news"},
+        {"documents": [{"id": "news-1", "title": "AI weekly"}]},
+    )
+    discovery_only = tracker.evaluate(answer)
+    assert discovery_only["status"] == "partial"
+
+    tracker.record_tool_result(
+        "kb_search",
+        {"doc_ids": ["news-1"], "query": "AI weekly news"},
+        {"chunks": [{"id": "chunk-1", "content": "AI 产品发布和投资事件。"}]},
+    )
+    assert tracker.evaluate(answer)["status"] == "complete"
+
+
+def test_explanatory_knowledge_answer_does_not_require_research_content() -> None:
+    contract = parse_task_contract(
+        "ROE 是什么意思？请通俗解释。",
+        policy_snapshot=_finance_like_policy(),
+    )
+
+    assert contract.requirements == ()
+    assert contract.enforceable is False
+
+
 def test_task_contract_prompt_includes_bounded_retrieval_plan() -> None:
     policy = _finance_like_policy()
     contract = parse_task_contract(
@@ -1137,6 +1493,36 @@ def test_single_markdown_table_contract_rejects_duplicate_tables() -> None:
 
     assert output["answerStatus"] == "missing"
     assert output["reasonCodes"] == ["exact-table-count-mismatch"]
+
+
+def test_exact_item_count_uses_bold_numbered_results_not_nested_details() -> None:
+    policy = _finance_like_policy()
+    contract = parse_task_contract(
+        "推荐 3 家国内 A 股在 AI 应用方向较靠谱的公司，并说明依据。",
+        policy_snapshot=policy,
+    )
+    tracker = TaskCoverageTracker(contract, policy_snapshot=policy)
+    answer = """**1. 金山办公（688111.SH）**
+- 核心业务：AI 办公 [source](citation://cit_1)
+- 确定性依据：订阅收入
+
+**2. 用友网络（600588.SH）**
+- 核心业务：企业软件 [source](citation://cit_2)
+- 确定性依据：政企客户
+
+**3. 科大讯飞（002230.SZ）**
+- 核心业务：大模型应用 [source](citation://cit_3)
+- 确定性依据：教育与医疗场景
+
+## 综合说明
+- 以上公司均需持续跟踪。
+"""
+
+    audit = tracker.evaluate(answer)
+    output = next(row for row in audit["requirements"] if row["kind"] == "output-shape")
+
+    assert output["answerStatus"] == "fulfilled"
+    assert output["reasonCodes"] == ["requested-output-shape-present"]
 
 
 def test_retrieval_plan_progress_is_auditable_per_scope() -> None:
@@ -1243,6 +1629,164 @@ def test_tracker_separates_discovery_content_and_answer_coverage() -> None:
     assert "ev_company_a_cash_flow" in revision_prompt
 
 
+def test_raw_document_without_addressable_evidence_does_not_complete_research() -> None:
+    policy = _finance_like_policy()
+    policy["config"]["task_coverage"]["retrieval"]["content_mappings"].append(
+        {
+            "id": "full-document",
+            "role": "content",
+            "coverage_text": "result",
+            "coverage_scope": "full-document",
+            "tool_patterns": ["*document_raw_content*"],
+        }
+    )
+    contract = parse_task_contract(
+        "针对芯片制造用硅片产业链做深度调研，包括行业发展历史和现状。",
+        policy_snapshot=policy,
+    )
+    tracker = TaskCoverageTracker(contract, policy_snapshot=policy)
+    tracker.record_tool_result(
+        "document_raw_content",
+        {"doc_id": "wafer-report"},
+        "芯片制造用硅片产业经历了长期技术演进，当前市场集中度较高。",
+        citation_ready=False,
+    )
+
+    audit = tracker.evaluate("芯片制造用硅片产业经历了长期技术演进，当前市场集中度较高。")
+
+    assert audit["status"] == "partial"
+    assert audit["requirements"][0]["modelInputStatus"] == "not-visible"
+    assert audit["attempts"][0]["citationReady"] is False
+    assert tracker.should_request_revision(audit) is True
+
+
+def test_addressable_document_chunk_completes_open_research_source_coverage() -> None:
+    policy = _finance_like_policy()
+    contract = parse_task_contract(
+        "针对芯片制造用硅片产业链做深度调研，包括行业发展历史和现状。",
+        policy_snapshot=policy,
+    )
+    tracker = TaskCoverageTracker(contract, policy_snapshot=policy)
+    tracker.record_tool_result(
+        "kb_search",
+        {"doc_id": "wafer-report", "query": "产业历史 现状"},
+        "芯片制造用硅片产业经历了长期技术演进，当前市场集中度较高。",
+        citation_ready=True,
+    )
+
+    audit = tracker.evaluate("芯片制造用硅片产业经历了长期技术演进，当前市场集中度较高。")
+
+    assert audit["status"] == "complete"
+    assert audit["requirements"][0]["modelInputStatus"] == "visible"
+    assert audit["attempts"][0]["citationReady"] is True
+    assert tracker.should_request_revision(audit) is False
+
+
+def test_late_citation_artifact_reconciles_existing_retrieval_attempt() -> None:
+    policy = _finance_like_policy()
+    contract = parse_task_contract(
+        "针对芯片制造用硅片产业链做深度调研，包括行业发展历史和现状。",
+        policy_snapshot=policy,
+    )
+    tracker = TaskCoverageTracker(contract, policy_snapshot=policy)
+    content = {
+        "chunks": [
+            {
+                "id": "chunk-history",
+                "doc_id": "wafer-report",
+                "content": "芯片制造用硅片产业经历了长期技术演进。",
+            }
+        ]
+    }
+    tracker.record_tool_result(
+        "kb_search",
+        {"doc_ids": ["wafer-report"], "query": "产业历史"},
+        content,
+        citation_ready=False,
+    )
+    draft = "芯片制造用硅片产业经历了长期技术演进。"
+    assert tracker.evaluate(draft)["status"] == "partial"
+
+    assert tracker.mark_citation_ready("kb_search", content) == 1
+    audit = tracker.evaluate(draft)
+
+    assert audit["status"] == "complete"
+    assert audit["attempts"][0]["citationReady"] is True
+    assert tracker.mark_citation_ready("kb_search", content) == 0
+
+
+def test_late_compacted_citation_artifact_joins_by_stable_tool_call_id() -> None:
+    policy = _finance_like_policy()
+    contract = parse_task_contract(
+        "针对芯片制造用硅片产业链做深度调研，包括行业发展历史和现状。",
+        policy_snapshot=policy,
+    )
+    tracker = TaskCoverageTracker(contract, policy_snapshot=policy)
+    raw_content = {
+        "result": {
+            "documents": [
+                {
+                    "document_id": "wafer-report",
+                    "content": "芯片制造用硅片产业经历了长期技术演进。",
+                }
+            ]
+        }
+    }
+    compacted_content = {
+        "chunks": [
+            {
+                "id": "chunk-history",
+                "doc_id": "wafer-report",
+                "content": "芯片制造用硅片产业经历了长期技术演进。",
+            }
+        ]
+    }
+    tracker.record_tool_result(
+        "kb_search",
+        {"doc_ids": ["wafer-report"], "query": "产业历史"},
+        raw_content,
+        citation_ready=False,
+        citation_join_id="tool-call-history",
+    )
+
+    assert (
+        tracker.mark_citation_ready(
+            "kb_search",
+            compacted_content,
+            citation_join_id="tool-call-history",
+        )
+        == 1
+    )
+    assert tracker._attempts[-1].citation_ready is True  # noqa: SLF001
+
+
+def test_stable_tool_call_id_never_marks_a_different_attempt_ready() -> None:
+    policy = _finance_like_policy()
+    contract = parse_task_contract(
+        "针对芯片制造用硅片产业链做深度调研，包括行业发展历史和现状。",
+        policy_snapshot=policy,
+    )
+    tracker = TaskCoverageTracker(contract, policy_snapshot=policy)
+    content = {"chunks": [{"content": "产业历史"}]}
+    tracker.record_tool_result(
+        "kb_search",
+        {"query": "产业历史"},
+        content,
+        citation_ready=False,
+        citation_join_id="tool-call-original",
+    )
+
+    assert (
+        tracker.mark_citation_ready(
+            "kb_search",
+            content,
+            citation_join_id="tool-call-other",
+        )
+        == 0
+    )
+    assert tracker._attempts[-1].citation_ready is False  # noqa: SLF001
+
+
 def test_visible_structured_gap_uses_bounded_local_cell_patch() -> None:
     policy = _finance_like_policy()
     prompt = "只用 Markdown 表格列出甲公司2025年营业收入。"
@@ -1298,6 +1842,43 @@ def test_visible_structured_gap_uses_bounded_local_cell_patch() -> None:
     assert "| 甲公司 | 2025年 | 100亿元 [source](evidence://ev_company_a_revenue) |" in (
         result.text
     )
+
+
+def test_local_cell_patch_replaces_contradictory_limitation_in_existing_cell() -> None:
+    policy = _finance_like_policy()
+    prompt = "只用 Markdown 表格列出甲公司2025年营业收入。"
+    contract = parse_task_contract(prompt, policy_snapshot=policy)
+    tracker = TaskCoverageTracker(contract, policy_snapshot=policy)
+    tracker.record_tool_result(
+        "kb_search",
+        {"doc": "甲公司2025年报", "query": "营业收入"},
+        "甲公司2025年营业收入为100亿元。",
+    )
+    draft = """| 公司 | 报告期 | 营业收入 |
+|---|---|---:|
+| 甲公司 | 2025年 | 100亿元，但原文未披露具体数字 |
+"""
+    audit = tracker.evaluate(draft)
+    requirement_id = next(
+        row["requirementId"] for row in audit["requirements"] if row["kind"] == "structured-slot"
+    )
+
+    assert tracker.uses_local_patch_protocol(audit) is True
+    result = tracker.apply_local_revision_patch(
+        baseline_text=draft,
+        response_text=(
+            '{"version":"task-coverage-patch-v1","patches":['
+            f'{{"requirementId":"{requirement_id}","replacementText":"100亿元",'
+            '"evidenceHandles":["ev_company_a_revenue"]}]}'
+        ),
+        audit=audit,
+        allowed_evidence_handles=("ev_company_a_revenue",),
+    )
+
+    assert result.accepted is True
+    assert result.text is not None
+    assert "原文未披露" not in result.text
+    assert "| 甲公司 | 2025年 | 100亿元 [source](evidence://ev_company_a_revenue) |" in result.text
 
 
 def test_local_cell_patch_rejects_incomplete_requirement_set() -> None:
