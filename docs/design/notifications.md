@@ -109,8 +109,13 @@ resolved(和今天 aggregator 的 hydrate 同精神)。
   关键**:进程内订阅表只能覆盖同一 pod 的 SSE 客户端,pod A 写入的通知到不了连在 pod B
   的流;持久账本共享(本地一份 SQLite、SaaS 一份 Postgres),DB 轮询流对每个 pod 都正确,
   无需共享总线(Redis pub/sub 是未来的 overlay 优化路径)。
+- `GET /v1/notifications/history?limit=&before=` — 已消解（清除/已处理）的历史页，
+  最新在前；`before` 为 `created_at` 毫秒游标，响应携带 `has_more`。抽屉"历史"tab 的
+  只读数据源。
 - `POST /v1/notifications/{id}:read` / `:read-all`
-- `POST /v1/notifications/{id}:dismiss`
+- `POST /v1/notifications/{id}:dismiss` / `:dismiss-all`（抽屉"全部清除"——所有开放项
+  移入历史；question 项仅清除通知本身，问题在会话里仍可作答）。前端两者都做乐观移除
+  （store 立即删行，失败由下一帧 snapshot 自愈），不等 2.5s 轮询帧。
 - 动作本身走各自领域端点（答复 → `/sessions/{id}/actions`，恢复 →
   `/tasks/{id}:intervene action=resume`）；这些成功后经来源 `resolve` 消解通知。
 

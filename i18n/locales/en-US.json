@@ -2818,10 +2818,17 @@
     "kindQuestion": "Needs answer",
     "kindFailure": "Task blocked",
     "resume": "Resume task",
-    "dismiss": "Dismiss",
+    "dismiss": "Clear",
     "openTask": "Open task",
     "notifBackupFailedTitle": "Local backup failed",
     "kindBackupFailed": "Backup failed",
-    "openBackupSettings": "Open backup settings"
+    "openBackupSettings": "Open backup settings",
+    "tabOpen": "Open",
+    "tabHistory": "History",
+    "clearAll": "Clear all",
+    "historyEmpty": "No history yet",
+    "historyLoadFailed": "Failed to load history",
+    "loadMore": "Load more",
+    "kindCompleted": "Completed"
   }
 }
