@@ -66,7 +66,6 @@ const OPENUI_COMPONENT_NAMES = [
   "ListItem",
   "MarkDownRenderer",
   "Markdown",
-  "Metric",
   "Modal",
   "Paragraph",
   "PieChart",
@@ -353,14 +352,6 @@ function OpenUIComponent({
           variant={readTextCalloutVariant(props.variant)}
           title={readText(props.title)}
           description={readText(props.description ?? props.text)}
-        />
-      );
-    case "Metric":
-    case "KPI":
-      return (
-        <MetricBox
-          label={readText(props.label ?? props.title)}
-          value={readText(props.value ?? props.text)}
         />
       );
     case "CodeBlock":
@@ -724,48 +715,6 @@ function TextBlock({
         {children}
       </span>
     </OpenUI.TextContent>
-  );
-}
-
-function MetricBox({ label, value }: { label: string; value: string }) {
-  return (
-    <div
-      data-a2ui-component="metric"
-      style={{
-        display: "flex",
-        minWidth: 0,
-        flexDirection: "column",
-        gap: "var(--openui-space-2xs)",
-      }}
-    >
-      {label ? (
-        <span
-          data-a2ui-metric-label
-          style={{
-            color: "var(--openui-text-neutral-secondary)",
-            font: "var(--openui-text-label-sm)",
-            letterSpacing: 0,
-            overflowWrap: "anywhere",
-          }}
-        >
-          {label}
-        </span>
-      ) : null}
-      {value ? (
-        <span
-          data-a2ui-metric-value
-          style={{
-            color: "var(--openui-text-neutral-primary)",
-            font: "var(--openui-text-numbers-heading-md)",
-            fontVariantNumeric: "tabular-nums",
-            letterSpacing: 0,
-            overflowWrap: "anywhere",
-          }}
-        >
-          {value}
-        </span>
-      ) : null}
-    </div>
   );
 }
 

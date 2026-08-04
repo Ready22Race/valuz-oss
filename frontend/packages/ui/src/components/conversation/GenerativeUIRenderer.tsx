@@ -181,6 +181,21 @@ const VALUZ_OPENUUI_THEME: OpenUiTheme = {
   letterSpacingTight: "0",
   letterSpacingTighter: "0",
 
+  // OpenUI also ships composite `font` shorthands, and they are not derived
+  // from the primitives above — left unmapped they keep OpenUI's own defaults
+  // (`400 14px/1.25 "Inter"`), so any component using one renders in Inter at
+  // OpenUI's sizes while everything beside it uses the Valuz stack and scale.
+  // Composing them from the mapped primitives is what puts them back under
+  // this theme instead of restating the font stack a fifth time.
+  textLabelSm:
+    "var(--openui-font-weight-regular) var(--openui-font-size-sm)/1.25 var(--openui-font-label)",
+  textLabelDefaultHeavy:
+    "var(--openui-font-weight-medium) var(--openui-font-size-lg)/1.25 var(--openui-font-label)",
+  textBodyDefaultHeavy:
+    "var(--openui-font-weight-medium) var(--openui-font-size-lg)/1.5 var(--openui-font-body)",
+  textNumbersHeadingMd:
+    "var(--openui-font-weight-bold) var(--openui-font-size-3xl)/1.1 var(--openui-font-numbers)",
+
   shadow0: "none",
   shadowS: "var(--shadow-outline)",
   // OpenUI's card/popover primitives already draw a border. Valuz requires

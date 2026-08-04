@@ -9,6 +9,7 @@ import { DataTileCard } from "./DataTileCard";
 import { MarketBreadth } from "./MarketBreadth";
 import { MarketIndexCard, MarketIndexGrid } from "./MarketIndexGrid";
 import { Mermaid, MermaidBadge } from "./Mermaid";
+import { Metric } from "./Metric";
 import { MiniCard, MiniCardBlock } from "./MiniCard";
 import { OptionCard, OptionCards } from "./OptionCard";
 import { OverviewCard } from "./OverviewCard";
@@ -54,6 +55,7 @@ export const blockComponents: BlockComponent[] = [
   // Metric tiles
   MiniCard,
   MiniCardBlock,
+  Metric,
   // Cards & tiles
   SmallCardBlock,
   MediumCardBlock,
@@ -98,9 +100,9 @@ export const blockComponents: BlockComponent[] = [
 export const blockComponentGroups: ComponentGroup[] = [
   {
     name: "Metric Tiles",
-    components: ["MiniCardBlock", "MiniCard"],
+    components: ["MiniCardBlock", "MiniCard", "Metric"],
     notes: [
-      "Prefer MiniCardBlock over a row of Cards whenever every entry is a single label + figure.",
+      "Prefer MiniCardBlock over a row of Cards whenever every entry is a single label + figure; Metric is the unframed version, for use inside a surface that already has a frame.",
     ],
   },
   {

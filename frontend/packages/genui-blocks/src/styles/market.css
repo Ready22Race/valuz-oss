@@ -214,7 +214,11 @@
   min-height: 8px;
   overflow: hidden;
   border-radius: var(--openui-radius-full);
-  background: var(--openui-background-neutral-muted);
+  /* The unfilled remainder of the breadth bar. `--openui-background-neutral-muted`
+     was used here originally but is not a token this OpenUI version defines, so
+     the track rendered with no background at all — the segments floated on the
+     card. */
+  background: var(--openui-highlight-subtle);
 }
 
 /*

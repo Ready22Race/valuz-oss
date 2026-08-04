@@ -97,6 +97,35 @@ describe("A2UI ↔ genui-blocks bridge", () => {
     expect(screen.getByText("+2.1%")).toBeTruthy();
   });
 
+  it("renders Metric bare, and KPI as its alias", () => {
+    // Metric's defining property is the absence of a frame — it is meant to sit
+    // inside a surface that already has one. A border or background here means
+    // it has been aliased onto a carded block by mistake.
+    const { container } = render(
+      <A2UIRenderer
+        body={a2ui([
+          { id: "root", component: "Metric", label: "Revenue", value: "$4.2M" },
+        ])}
+      />,
+    );
+    const metric = container.querySelector('[data-a2ui-component="metric"]');
+    expect(metric).not.toBeNull();
+    expect(container.querySelector("[data-a2ui-metric-label]")?.textContent).toBe("Revenue");
+    expect(container.querySelector("[data-a2ui-metric-value]")?.textContent).toBe("$4.2M");
+    expect((metric as HTMLElement).style.border).toBe("");
+    expect((metric as HTMLElement).style.backgroundColor).toBe("");
+  });
+
+  it("resolves the KPI alias onto Metric", () => {
+    const { container } = render(
+      <A2UIRenderer
+        body={a2ui([{ id: "root", component: "KPI", title: "Users", text: "184" }])}
+      />,
+    );
+    expect(container.querySelector("[data-a2ui-metric-label]")?.textContent).toBe("Users");
+    expect(container.querySelector("[data-a2ui-metric-value]")?.textContent).toBe("184");
+  });
+
   it("registers every block name with the runtime", () => {
     expect(blockNames).toContain("MiniCard");
     expect(blockNames).toContain("ReportPage");
