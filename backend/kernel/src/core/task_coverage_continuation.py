@@ -6,20 +6,29 @@ from typing import Any
 
 from src.core.tools import ExecContext, ToolDef, ToolResult
 
-
 TASK_COVERAGE_NOOP_TOOL_NAME = "valuz_task_coverage_noop"
 
 
-TASK_COVERAGE_CONTINUATION_PROMPT = f"""This is an append-only completion pass, not a request for a review report.
-Review the original user request and every visible assistant and tool message from this turn.
-Decide whether the user still needs an important omission filled, an unfinished requirement completed, or a material correction.
-
-If important user-facing content is missing, use the same available tools and context when needed, then append only that missing information or correction. Do not repeat or replace the completed answer. Do not summarize or evaluate it.
-
-If no important user-facing content is missing, call `{TASK_COVERAGE_NOOP_TOOL_NAME}` exactly once and then end. Do not generate any assistant text before or after that private completion call. Do not say "nothing was omitted", "the response is complete", "no correction is needed", or any equivalent review conclusion.
-Do not print the word "empty", an "(empty)" placeholder, or a description of an empty response.
-
-Never output analysis about whether the prior response is complete. Do not mention Task Coverage, internal auditing, Host contracts, plans, manifests, candidate selection, or protocol fields."""
+TASK_COVERAGE_CONTINUATION_PROMPT = (
+    "This is an append-only completion pass, not a request for a review report.\n"
+    "Review the original user request and every visible assistant and tool message "
+    "from this turn.\n"
+    "Decide whether the user still needs an important omission filled, an unfinished "
+    "requirement completed, or a material correction.\n\n"
+    "If important user-facing content is missing, use the same available tools and "
+    "context when needed, then append only that missing information or correction. "
+    "Do not repeat or replace the completed answer. Do not summarize or evaluate it.\n\n"
+    f"If no important user-facing content is missing, call "
+    f"`{TASK_COVERAGE_NOOP_TOOL_NAME}` exactly once and then end. Do not generate any "
+    "assistant text before or after that private completion call. Do not say "
+    '"nothing was omitted", "the response is complete", "no correction is needed", '
+    "or any equivalent review conclusion.\n"
+    'Do not print the word "empty", an "(empty)" placeholder, or a description of '
+    "an empty response.\n\n"
+    "Never output analysis about whether the prior response is complete. Do not mention "
+    "Task Coverage, internal auditing, Host contracts, plans, manifests, candidate "
+    "selection, or protocol fields."
+)
 
 
 async def _task_coverage_noop_handler(
@@ -72,7 +81,11 @@ def build_task_coverage_continuation_prompt(
     ):
         values = guidance.get(key)
         if isinstance(values, list):
-            cleaned = [value.strip() for value in values if isinstance(value, str) and value.strip()]
+            cleaned = [
+                value.strip()
+                for value in values
+                if isinstance(value, str) and value.strip()
+            ]
             if cleaned:
                 sections.append(f"- {label}: " + "; ".join(cleaned))
     if not sections:
