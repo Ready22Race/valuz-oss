@@ -37,6 +37,13 @@ ASKS = [
     "data viz please",
     "make it visual",
     "render a UI",
+    # Phrased without naming a chart type at all.
+    "用图展示涨跌",
+    "加个图",
+    "出个图",
+    "来张图",
+    "做个界面看看",
+    "生成一个页面",
 ]
 
 # Every one of these contains something chart-adjacent or was a near-miss while
@@ -48,6 +55,11 @@ DOES_NOT_ASK = [
     "这个地图怎么用",
     "我试图理解这段代码",
     "上传一张图片",
+    "发一张图片",
+    # 图标 is an icon and 界面 on its own is a question about the app, not a
+    # request to draw one — both sit one lookahead away from the 图/界面 rules.
+    "做个图标",
+    "这个界面怎么用",
     "把表格导出成csv",
     "graphql 怎么配",
 ]

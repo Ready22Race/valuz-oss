@@ -14,9 +14,9 @@ from importlib import resources
 TOOL_DESCRIPTION = (
     "Generate a rich, interactive UI — charts, forms, KPI cards, or a dashboard — "
     "only when the user has asked for a chart, dashboard, visualization, or "
-    "interactive UI — either in this message or in the last turn or two, so a "
-    "follow-up refining a chart already on screen still counts. Never infer this "
-    "intent from data, and do "
+    "interactive UI — in this message or recently in this conversation, so a "
+    "follow-up refining a chart already on screen still counts even when it "
+    "does not name one. Never infer this intent from data, and do "
     "not call it merely because the user asks to list items or show a table. Pass "
     "a natural-language `request` describing what to show, and optional `data`. "
     "The client renders the returned GenUI protocol payload inline; do not repeat "

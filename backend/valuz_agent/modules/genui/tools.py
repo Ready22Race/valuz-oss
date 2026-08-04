@@ -44,17 +44,26 @@ GENERATIVE_UI_TOOL_NAME = "generate_ui"
 _GENERATION_MAX_ATTEMPTS = 2
 _GENERATION_RETRY_DELAY_SECONDS = 0.5
 # How many recent turns may carry the visual intent forward. A refinement
-# ("换成柱状图", "把刚才的图加上成交额") rarely restates the request, and making
-# the user re-say the magic word every turn is what made this gate feel
-# arbitrary. The window is deliberately short: intent from an hour ago is not
-# intent now, and a wide window would hand back exactly the scope-expansion
-# this gate exists to prevent.
-_INTENT_LOOKBACK_TURNS = 3
+# ("换成柱状图", "把刚才的图加上成交额") rarely restates the request, so a
+# conversation that is plainly about a chart has to keep working without the
+# user re-saying the magic word.
+#
+# Five turns is chosen against the cost of being wrong in each direction. A
+# false negative breaks a feature in front of the user; a false positive costs
+# one unnecessary generation, and the model still has the tool description
+# telling it not to. It is bounded rather than session-wide because intent from
+# far earlier in a long conversation is not intent now.
+_INTENT_LOOKBACK_TURNS = 5
 
 _EXPLICIT_VISUAL_REQUEST_RE = re.compile(
-    r"(?:可视化|图形化|图表|仪表盘|看板|数据面板|行情面板"
+    # Chart-ish nouns, then "<verb> 图/界面/页面" for the many ways a request is
+    # phrased without naming a chart type. The negative lookaheads are the
+    # load-bearing part: 图 alone lives inside 图片, 图标, 地图 and 试图, and
+    # matching those is what would let an ordinary request become a dashboard.
+    r"(?:可视化|图形化|图表|仪表盘|看板|数据面板|行情面板|图形"
     r"|(?:柱状|条形|折线|曲线|饼|饼状|散点|热力|雷达|走势|甘特|漏斗|气泡|K\s*线)图"
-    r"|[画绘](?:制)?[一二三]?[张个幅]?图"
+    r"|(?:画|绘|绘制|做|出|加|换|来|给|要|用|生成)(?:一)?[个张幅]?图(?!片|标)"
+    r"|(?:做|画|生成|来|给)(?:一)?[个张]?(?:界面|页面)"
     r"|交互(?:式)?(?:界面|图)|生成式\s*UI"
     r"|\b(?:dashboard|chart|plot|graph|visuali[sz](?:e|ation)|visual|viz"
     r"|interactive\s+ui|render\s+(?:a\s+)?ui)\b)",
