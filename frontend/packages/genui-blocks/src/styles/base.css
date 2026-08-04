@@ -1,0 +1,144 @@
+/*
+ * Styles for @valuz/genui-blocks.
+ *
+ * Rules for anything added here:
+ *  1. Every class is prefixed `.vgb-`. Blocks render inside the same subtree as
+ *     `.openui-*` components, so an unprefixed class would collide.
+ *  2. Colour, spacing, radius and type come from `--openui-*` custom properties
+ *     only. No literal colours — the host theme owns them.
+ *  3. Responsive behaviour uses container queries, never viewport media
+ *     queries: blocks render inside a chat column whose width is unrelated to
+ *     the viewport's. `.vgb-root` establishes the container.
+ */
+
+.vgb-root {
+  container-type: inline-size;
+  container-name: vgb;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.vgb-root *,
+.vgb-root *::before,
+.vgb-root *::after {
+  box-sizing: border-box;
+  min-width: 0;
+}
+
+/* ── Shared surfaces ─────────────────────────────────────────────── */
+
+.vgb-surface {
+  background-color: var(--openui-highlight-subtle);
+  border: 1px solid var(--openui-border-default);
+  border-radius: var(--openui-radius-2xl);
+}
+
+.vgb-surface-flat {
+  background-color: var(--openui-highlight-subtle);
+  border-radius: var(--openui-radius-2xl);
+}
+
+/* ── Wrapping block: the layout every *Block container shares ────── */
+
+.vgb-block {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: var(--openui-space-m);
+  width: 100%;
+}
+
+/* ── Tiles ───────────────────────────────────────────────────────── */
+
+/*
+ * The tile grid. `flex-basis` is the knob that decides how many tiles share a
+ * row: peers wrap once they can no longer hold their basis. The container
+ * queries below step it down so a tile strip degrades to two-up and then
+ * one-up as the chat column narrows, instead of overflowing.
+ */
+.vgb-tile {
+  display: flex;
+  flex: 1 1 15rem;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--openui-space-xs);
+  padding: var(--openui-space-l);
+  background-color: var(--openui-highlight-subtle);
+  border-radius: var(--openui-radius-2xl);
+}
+
+.vgb-tile-row {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--openui-space-s);
+}
+
+.vgb-tile-label {
+  color: var(--openui-text-neutral-secondary);
+  font-size: var(--openui-font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.vgb-tile-value {
+  color: var(--openui-text-neutral-primary);
+  font-size: var(--openui-font-size-2xl);
+  font-weight: var(--openui-font-weight-bold);
+  font-family: var(--openui-font-numbers);
+  overflow-wrap: anywhere;
+}
+
+.vgb-tile-delta {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--openui-font-size-sm);
+  white-space: nowrap;
+}
+
+@container vgb (max-width: 48rem) {
+  .vgb-tile {
+    flex-basis: 11rem;
+  }
+}
+
+@container vgb (max-width: 30rem) {
+  .vgb-tile {
+    flex-basis: 100%;
+  }
+}
+
+/* ── Text ────────────────────────────────────────────────────────── */
+
+.vgb-title {
+  color: var(--openui-text-neutral-primary);
+  font-family: var(--openui-font-heading);
+  font-weight: var(--openui-font-weight-bold);
+  overflow-wrap: anywhere;
+}
+
+.vgb-body {
+  color: var(--openui-text-neutral-secondary);
+  font-family: var(--openui-font-body);
+  font-size: var(--openui-font-size-md);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.vgb-eyebrow {
+  color: var(--openui-text-neutral-tertiary);
+  font-size: var(--openui-font-size-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* ── Scroll containment ──────────────────────────────────────────── */
+
+/*
+ * Wide content (tables, charts) scrolls inside its own box. Without this the
+ * whole chat column scrolls sideways, which moves the composer off-screen.
+ */
+.vgb-scroll-x {
+  width: 100%;
+  overflow-x: auto;
+}

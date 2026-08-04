@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ComponentProps } from "react";
 import { Renderer } from "@openuidev/react-lang";
 import { ThemeProvider } from "@openuidev/react-ui";
-import { openuiLibrary } from "@openuidev/react-ui/genui-lib";
+import { createValuzLibrary } from "@valuz/genui-blocks";
 import { Maximize2 } from "lucide-react";
 
 import { useI18n } from "../../hooks/use-i18n";
@@ -256,6 +256,17 @@ export interface GenerativeUICardProps {
    * from the DOM once the tool completes (it never persists to history). */
   thinking?: string;
 }
+
+/**
+ * OpenUI's own components plus the Valuz blocks, as one library.
+ *
+ * Built once at module scope: `createValuzLibrary()` walks and re-registers
+ * every component, and the result is immutable, so rebuilding it per render
+ * would be pure waste. The merge is additive — no block shadows an OpenUI
+ * component (a test in `@valuz/genui-blocks` enforces that), so anything the
+ * model could emit before it still emits now.
+ */
+const GENERATIVE_UI_LIBRARY = createValuzLibrary();
 
 const OPENUI_SCOPE_SELECTOR = '[data-openui-scope="generative-ui"]';
 
@@ -531,7 +542,7 @@ function OpenUiBody({
       cssSelector={OPENUI_SCOPE_SELECTOR}
     >
       <Renderer
-        library={openuiLibrary}
+        library={GENERATIVE_UI_LIBRARY}
         response={body}
         isStreaming={status === "running"}
       />

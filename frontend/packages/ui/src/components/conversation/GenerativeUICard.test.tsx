@@ -14,8 +14,12 @@ vi.mock("@openuidev/react-ui", () => ({
   // real style-injection/context machinery here.
   ThemeProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
 }));
-vi.mock("@openuidev/react-ui/genui-lib", () => ({
-  openuiLibrary: {},
+// The component no longer builds its library from OpenUI's alone — it merges
+// in @valuz/genui-blocks. Stubbing the factory keeps this file about the card's
+// own behaviour; the merge itself is covered by that package's tests, which
+// exercise the real parser rather than a stub Renderer.
+vi.mock("@valuz/genui-blocks", () => ({
+  createValuzLibrary: () => ({}),
 }));
 vi.mock("../../hooks/use-i18n", () => ({
   useI18n: () => ({ t: (k: string) => k }),
