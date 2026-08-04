@@ -21,7 +21,8 @@ vi.mock("../../hooks/use-i18n", () => ({
   useI18n: () => ({ t: (k: string) => k }),
 }));
 
-import { GenerativeUICard, extractContentText } from "./GenerativeUICard";
+import { GenerativeUICard } from "./GenerativeUICard";
+import { extractContentText } from "./generative-ui-payload";
 
 describe("GenerativeUICard", () => {
   it("renders the OpenUI Renderer with the openui payload", () => {
