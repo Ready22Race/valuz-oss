@@ -1298,7 +1298,10 @@ function buildChartData(
   const rowsFromSeriesData = buildRowsFromSeriesData(declared);
   if (rowsFromSeriesData.length) return rowsFromSeriesData;
 
-  const labels = toArray(props.labels).map(readText);
+  // The axis arrives as `labels` or `categories` depending on how the model
+  // phrased it; reading only one leaves the chart with no axis, which the guard
+  // below then turns into no chart at all — and an orphaned heading above it.
+  const labels = toArray(props.labels ?? props.categories).map(readText);
   const series = readSeries(declared);
   // Labels alone are not data. Returning a row per label would clear the
   // caller's `!data.length` guard while carrying no numeric key at all, and the

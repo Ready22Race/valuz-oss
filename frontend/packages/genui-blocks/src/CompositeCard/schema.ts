@@ -6,4 +6,5 @@ export const CompositeCardSchema = z.object({
   value: z.string().optional(),
   clickable: z.boolean().optional(),
   children: z.array(z.unknown()).optional(),
+  icon: z.string().optional(),
 });

@@ -79,11 +79,7 @@
   gap: var(--openui-space-s);
 }
 
-/*
- * The value side of a label/value row. Capping it at 35% keeps a long figure
- * from starving the label, and the 100px floor keeps a short one from being
- * squeezed to a single character; `overflow: hidden` makes both bite.
- */
+/* The two halves of a label/value row. */
 .vgb-tile-slot-start,
 .vgb-tile-slot-end {
   display: flex;
@@ -92,9 +88,23 @@
   overflow: hidden;
 }
 
+/*
+ * The figure side never shrinks. A 35% cap looks tidy until the value and its
+ * change together need more than that, at which point the number breaks
+ * mid-digit — and "26,58 / 4" does not read as a squeezed 26,584, it reads as a
+ * different number. So the label is what gives way, and the value keeps the
+ * width it needs.
+ */
 .vgb-tile-slot-end {
-  max-width: 35%;
-  min-width: 100px;
+  flex: 0 0 auto;
+  max-width: 70%;
+  min-width: 0;
+  gap: var(--openui-space-s);
+}
+
+.vgb-tile-slot-start {
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .vgb-tile-label {
@@ -108,7 +118,12 @@
   font-size: var(--openui-font-size-2xl);
   font-weight: var(--openui-font-weight-bold);
   font-family: var(--openui-font-numbers);
-  overflow-wrap: anywhere;
+  /* Figures are read as one token. The host stylesheet sets
+     `overflow-wrap: anywhere` on every span in scope, which is right for prose
+     and wrong for a number, so this has to say so explicitly. */
+  white-space: nowrap;
+  overflow-wrap: normal;
+  font-variant-numeric: tabular-nums;
 }
 
 .vgb-tile-delta {
@@ -116,6 +131,8 @@
   align-items: center;
   gap: 4px;
   font-size: var(--openui-font-size-sm);
+  overflow-wrap: normal;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 

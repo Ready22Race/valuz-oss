@@ -48,6 +48,7 @@ export const blockAdditionalRules: string[] = [
   "Report pages are filled with the ordinary shared blocks (MiniCardBlock, TextContent, charts) — there is no report-specific twin of any content block.",
   "Mermaid displays diagram source as text, not a drawn picture. Only use it when the source itself is worth showing.",
   "OptionCard, TileOption and the selected flag are presentational: nothing rendered here is clickable, so never present them as a choice the user can make.",
+  "Never paste an emoji into a label, title or heading to stand in for an icon. Blocks that can carry one take an `icon` prop naming any lucide-react icon; a block without that prop is a block meant to have no icon.",
 ];
 
 /**

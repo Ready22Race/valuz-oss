@@ -116,3 +116,24 @@
   font: var(--openui-text-label-sm);
   overflow-wrap: anywhere;
 }
+
+/* ── Icons inside a card heading ──────────────────────────────────── */
+
+/*
+ * A bare mark beside the heading, not a tinted tag: the card already draws a
+ * surface, and a second filled square inside it competes with the figure the
+ * card exists to show.
+ */
+.vgb-card-heading-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--openui-space-xs);
+}
+
+.vgb-card-icon {
+  flex-shrink: 0;
+  width: 1em;
+  height: 1em;
+  color: var(--openui-text-neutral-tertiary);
+}

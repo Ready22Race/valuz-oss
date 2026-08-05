@@ -87,6 +87,37 @@ describe("A2UI charts whose series arrives by reference", () => {
     ]);
   });
 
+  it("accepts categories as the axis, not just labels", () => {
+    // Taken from a dashboard where both charts came back as a bare heading:
+    // the model named the axis `categories` and put the series in `children`,
+    // and the renderer read only `labels`. An empty axis then met the
+    // no-data guard, so the chart removed itself and left the heading orphaned.
+    render(
+      <A2UIRenderer
+        body={a2ui([
+          {
+            id: "root",
+            component: "HorizontalBarChart",
+            categories: ["ARM", "AMAT", "INTC"],
+            children: ["semi-series"],
+          },
+          {
+            id: "semi-series",
+            component: "Series",
+            name: "涨幅 %",
+            data: [17.36, 14.97, 10.84],
+          },
+        ])}
+      />,
+    );
+    const data = JSON.parse(screen.getByTestId("horizontal-chart").textContent ?? "[]");
+    expect(data).toEqual([
+      { category: "ARM", "涨幅 %": 17.36 },
+      { category: "AMAT", "涨幅 %": 14.97 },
+      { category: "INTC", "涨幅 %": 10.84 },
+    ]);
+  });
+
   it("renders no chart when the series is genuinely absent", () => {
     render(
       <A2UIRenderer

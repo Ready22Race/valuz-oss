@@ -8,5 +8,6 @@ export const StatsCardSchema = z.object({
   description: z.string().optional(),
   delta: z.string().optional(),
   trend: TrendSchema.optional(),
+  icon: z.string().optional(),
   tone: ToneSchema.optional(),
 });
