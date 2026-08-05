@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 
 from valuz_agent.infra.db import async_unit_of_work
+from valuz_agent.ports.message_context import HostRef
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ async def _build_additional_context(
     attachment_rows=None,  # type: ignore[no-untyped-def]
     user_id: str | None = None,
     worktree: str = "",
+    host_ref: HostRef | None = None,
 ) -> str:
     if user_id is None:
         raise ValueError("user_id is required")
@@ -167,6 +169,27 @@ async def _build_additional_context(
             artifacts_section = ""
         if artifacts_section:
             sections.append(artifacts_section)
+
+    # 4) Edition-registered per-turn context providers (ports/message_context).
+    #    Each turns the client-declared ``host_ref`` (validated server-side by
+    #    the provider itself) into one extra section. Outside the shared db
+    #    scope on purpose — providers open their own if they need one. A
+    #    failing provider is skipped: never block a turn on overlay context.
+    from valuz_agent.ports.extensions import ext
+
+    for provider in list(ext.message_context_providers):
+        try:
+            section = await provider.build(
+                user_id=user_id,
+                session_id=session_id,
+                project_id=project_id,
+                host_ref=host_ref,
+            )
+        except Exception:  # noqa: BLE001 — never block a turn on overlay context
+            logger.debug("message context provider skipped", exc_info=True)
+            continue
+        if section:
+            sections.append(section)
 
     return "\n\n".join(sections)
 

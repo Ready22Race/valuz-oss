@@ -44,6 +44,12 @@ ASKS = [
     "来张图",
     "做个界面看看",
     "生成一个页面",
+    # 工作台 is the same word class as 仪表盘/看板 — a workbench IS the visual
+    # deliverable. The two real-world phrasings that surfaced the gap: the
+    # finance desk starter instruction and a user's free-form variant.
+    "读取我现有的关注、Thesis、持续任务和研究结果，生成一个总工作台，先让我查看具体内容再应用。",
+    "帮我把研究池做成一个以 Thesis 变化、研究产物和覆盖状态为核心的总工作台。",
+    "build me a research workbench",
 ]
 
 # Every one of these contains something chart-adjacent or was a near-miss while

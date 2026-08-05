@@ -26,6 +26,7 @@ from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.infra.lifecycle import is_draining
 from valuz_agent.modules.sessions.pre_turn import PreTurnHook, always_on_mcp_hook
+from valuz_agent.ports.message_context import HostRef
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +109,7 @@ async def run_session_to_idle(
     queued_attachments: list[dict[str, Any]] | None = None,
     pre_turn: PreTurnHook | None = None,
     user_id: str,
+    host_ref: HostRef | None = None,
 ) -> str:
     """Drive one agent turn to completion and return the final session status.
 
@@ -213,6 +215,7 @@ async def run_session_to_idle(
                 pending_attachments,
                 user_id=user_id,
                 worktree=worktree_name_of(loaded_session),
+                host_ref=host_ref,
             )
         except Exception:  # noqa: BLE001
             additional_context = ""

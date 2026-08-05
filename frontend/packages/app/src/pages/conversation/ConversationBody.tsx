@@ -52,6 +52,14 @@ type ConversationBodyProps = {
   setDraft: Dispatch<SetStateAction<string>>;
   hasPendingProjectSend: boolean;
   startingRuntime: ComposerConfig["startingRuntime"];
+  /** Embedding-host override for the new-chat welcome: custom title,
+   *  custom suggestion list (replaces the three generic new-chat
+   *  suggestions), and mascot suppression. Absent → system defaults. */
+  emptyStateOverride?: {
+    title?: string;
+    suggestions?: string[];
+    hideMascot?: boolean;
+  };
 };
 
 /**
@@ -93,6 +101,7 @@ export function ConversationBody({
   setDraft,
   hasPendingProjectSend,
   startingRuntime,
+  emptyStateOverride,
 }: ConversationBodyProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -194,12 +203,28 @@ export function ConversationBody({
                   citationId,
                 });
               }}
-              emptySuggestions={[
-                t("conversation.newChatSuggestion1" as Parameters<typeof t>[0]),
-                t("conversation.newChatSuggestion2" as Parameters<typeof t>[0]),
-                t("conversation.newChatSuggestion3" as Parameters<typeof t>[0]),
-              ]}
+              emptyTitle={emptyStateOverride?.title}
+              emptySuggestions={
+                emptyStateOverride?.suggestions ?? [
+                  t(
+                    "conversation.newChatSuggestion1" as Parameters<
+                      typeof t
+                    >[0],
+                  ),
+                  t(
+                    "conversation.newChatSuggestion2" as Parameters<
+                      typeof t
+                    >[0],
+                  ),
+                  t(
+                    "conversation.newChatSuggestion3" as Parameters<
+                      typeof t
+                    >[0],
+                  ),
+                ]
+              }
               onEmptySuggestionClick={(text) => setDraft(text)}
+              hideEmptyMascot={emptyStateOverride?.hideMascot}
               // Only a genuinely new chat (URL is /conversation/new) shows the
               // welcome. An existing conversation keyed by id has no turns yet
               // while its transcript loads — gate on the URL, not the transient

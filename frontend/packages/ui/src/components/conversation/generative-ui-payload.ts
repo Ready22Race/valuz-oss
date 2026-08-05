@@ -33,12 +33,59 @@ export function extractContentText(raw: string | undefined | null): string {
   return s;
 }
 
+/** Receipt appended by the backend's UI-artifact sink (see the
+ *  ``[[ui-artifact-receipt]]`` trailer in ``modules/genui/tools.py``). */
+export interface GeneratedUiArtifactReceipt {
+  artifact_id: string;
+  revision_id: string;
+  revision: number;
+  host_type: string | null;
+  host_id: string | null;
+  slot: string;
+  expected_revision_id: string | null;
+}
+
+const RECEIPT_RE =
+  /\n?\[\[ui-artifact-receipt\]\](\{[\s\S]*?\})\[\[\/ui-artifact-receipt\]\]\s*$/;
+
+/**
+ * Split a raw generate_ui tool output into the renderable body and the
+ * (optional) artifact receipt trailer. The trailer rides in the persisted
+ * tool result so the adopt affordance survives history replay; renderers
+ * must never see it.
+ */
+export function extractUiArtifactReceipt(raw: string | undefined | null): {
+  receipt: GeneratedUiArtifactReceipt | null;
+  body: string;
+} {
+  const text = extractContentText(raw);
+  const match = text.match(RECEIPT_RE);
+  if (!match || match.index === undefined) return { receipt: null, body: text };
+  let receipt: GeneratedUiArtifactReceipt | null = null;
+  try {
+    const parsed: unknown = JSON.parse(match[1]);
+    if (
+      isRecord(parsed) &&
+      typeof parsed.artifact_id === "string" &&
+      typeof parsed.revision_id === "string" &&
+      typeof parsed.revision === "number"
+    ) {
+      receipt = parsed as unknown as GeneratedUiArtifactReceipt;
+    }
+  } catch {
+    /* malformed trailer — treat as absent, keep it stripped from the body */
+  }
+  return { receipt, body: text.slice(0, match.index).trimEnd() };
+}
+
 export function parseGenerativeUIPayload(
   raw: string | GenerativeUIPayload | undefined | null,
 ): GenerativeUIPayload {
   if (raw && typeof raw === "object") return raw;
 
-  const body = extractContentText(raw);
+  // Defensive strip: callers normally pass the pre-stripped body, but the
+  // fullscreen/export paths may hand the raw tool output straight through.
+  const body = extractUiArtifactReceipt(raw).body;
   const envelope = parseProtocolEnvelope(body);
   if (envelope) return envelope;
 
@@ -76,7 +123,9 @@ function readPayloadBody(payload: Record<string, unknown>): string {
   if (typeof payload.content === "string") return payload.content;
   if (typeof payload.body === "string") return payload.body;
   if (Array.isArray(payload.messages)) {
-    return payload.messages.map((message) => JSON.stringify(message)).join("\n");
+    return payload.messages
+      .map((message) => JSON.stringify(message))
+      .join("\n");
   }
   if (payload.content !== undefined) return JSON.stringify(payload.content);
   return "";

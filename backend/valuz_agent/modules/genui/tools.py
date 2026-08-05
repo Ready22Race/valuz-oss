@@ -37,6 +37,7 @@ from valuz_agent.modules.genui.runner import _make_completer, _resolve_provider_
 from valuz_agent.modules.providers.service import (
     resolve_model_provider_for_user as resolve_model_provider,
 )
+from valuz_agent.ports.ui_artifact import UiArtifactTargetHost
 
 logger = logging.getLogger(__name__)
 
@@ -60,12 +61,12 @@ _EXPLICIT_VISUAL_REQUEST_RE = re.compile(
     # phrased without naming a chart type. The negative lookaheads are the
     # load-bearing part: 图 alone lives inside 图片, 图标, 地图 and 试图, and
     # matching those is what would let an ordinary request become a dashboard.
-    r"(?:可视化|图形化|图表|仪表盘|看板|数据面板|行情面板|图形"
+    r"(?:可视化|图形化|图表|仪表盘|看板|数据面板|行情面板|工作台|图形"
     r"|(?:柱状|条形|折线|曲线|饼|饼状|散点|热力|雷达|走势|甘特|漏斗|气泡|K\s*线)图"
     r"|(?:画|绘|绘制|做|出|加|换|来|给|要|用|生成)(?:一)?[个张幅]?图(?!片|标)"
     r"|(?:做|画|生成|来|给)(?:一)?[个张]?(?:界面|页面)"
     r"|交互(?:式)?(?:界面|图)|生成式\s*UI"
-    r"|\b(?:dashboard|chart|plot|graph|visuali[sz](?:e|ation)|visual|viz"
+    r"|\b(?:dashboard|workbench|chart|plot|graph|visuali[sz](?:e|ation)|visual|viz"
     r"|interactive\s+ui|render\s+(?:a\s+)?ui)\b)",
     re.IGNORECASE,
 )
@@ -102,9 +103,88 @@ _PARAMS = {
             "description": "Optional structured values to render directly into the components.",
             "additionalProperties": True,
         },
+        "target_host": {
+            "type": "object",
+            "description": (
+                "Where the generated UI should live, when the conversation is "
+                "anchored to a product host (e.g. a workbench page). Copy "
+                "host_type/host_id verbatim from the host context provided to "
+                "you; omit for a one-off in-conversation visual."
+            ),
+            "properties": {
+                "host_type": {"type": "string"},
+                "host_id": {"type": "string"},
+                "slot": {"type": "string"},
+            },
+            "required": ["host_type", "host_id"],
+            "additionalProperties": False,
+        },
     },
     "required": ["request"],
 }
+
+
+def _parse_target_host(args: dict[str, Any]) -> "UiArtifactTargetHost | None":
+    raw = args.get("target_host")
+    if not isinstance(raw, dict):
+        return None
+    host_type = str(raw.get("host_type") or "").strip()
+    host_id = str(raw.get("host_id") or "").strip()
+    if not host_type or not host_id:
+        return None
+    return UiArtifactTargetHost(
+        host_type=host_type,
+        host_id=host_id,
+        slot=str(raw.get("slot") or "main").strip() or "main",
+    )
+
+
+# Marker wrapping the sink receipt appended to a successful tool result. The
+# frontend extracts + strips it before handing the payload to the renderer;
+# it rides IN the persisted tool result so the adopt affordance survives
+# history replay (per the conversation-to-ui-artifact contract §7).
+UI_ARTIFACT_RECEIPT_OPEN = "[[ui-artifact-receipt]]"
+UI_ARTIFACT_RECEIPT_CLOSE = "[[/ui-artifact-receipt]]"
+
+
+async def _offer_to_artifact_sinks(
+    *,
+    user_id: str,
+    session_id: str | None,
+    tool_use_id: str | None,
+    target_host: "UiArtifactTargetHost | None",
+    request: str,
+    protocol: str,
+    content: str,
+) -> str:
+    """Offer the generated document to registered sinks; return a receipt
+    trailer ("" when no sink persisted anything). Best-effort by contract."""
+    import json as _json
+
+    from valuz_agent.ports.extensions import ext
+    from valuz_agent.ports.ui_artifact import receipt_to_payload
+
+    for sink in list(ext.ui_artifact_sinks):
+        try:
+            receipt = await sink.store_generated_ui(
+                user_id=user_id,
+                session_id=session_id,
+                tool_use_id=tool_use_id,
+                target_host=target_host,
+                request=request,
+                protocol=protocol,
+                content=content,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("generate_ui: ui-artifact sink failed; skipping")
+            continue
+        if receipt is None:
+            continue
+        payload = _json.dumps(
+            receipt_to_payload(receipt), ensure_ascii=False, separators=(",", ":")
+        )
+        return f"\n{UI_ARTIFACT_RECEIPT_OPEN}{payload}{UI_ARTIFACT_RECEIPT_CLOSE}"
+    return ""
 
 
 async def _complete_with_retries(
@@ -235,7 +315,19 @@ async def _generate_ui_handler(args: dict[str, Any], ctx: ExecContext) -> ToolRe
             content=f"generate_ui: model returned no {output_format_for_protocol(protocol)}",
             is_error=True,
         )
-    return ToolResult(content=wrap_generated_ui(protocol, generated), is_error=False)
+    receipt_trailer = await _offer_to_artifact_sinks(
+        user_id=user_id,
+        session_id=ctx.session_id,
+        tool_use_id=tool_use_id,
+        target_host=_parse_target_host(args),
+        request=str(request),
+        protocol=protocol,
+        content=generated,
+    )
+    return ToolResult(
+        content=wrap_generated_ui(protocol, generated) + receipt_trailer,
+        is_error=False,
+    )
 
 
 def build_generative_ui_tool_defs() -> tuple[ToolDef, ...]:

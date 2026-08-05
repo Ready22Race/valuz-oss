@@ -1,6 +1,5 @@
 import { useCallback } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import {
   ApiError,
@@ -18,6 +17,7 @@ import {
   type RuntimeId,
   type SessionEventDTO,
   type SessionListItem,
+  type SessionMessageHostRef,
   type SkillView,
   type UseSessionAttachmentsResult,
 } from "@valuz/core";
@@ -53,6 +53,11 @@ type ConversationSendParams = {
   selectedPermissionMode: "default" | "auto_review" | "full_access";
   selectedMcpSlugs: string[];
   selectedComposerSkill: SkillView | null;
+  /** ADR — client-declared host location of this conversation panel (e.g.
+   *  a finance edition workbench surface). Threaded onto ``sendMessage``'s
+   *  ``host_ref`` for the DIRECT send path only; the queue-drain path
+   *  (``useInputQueue``) does not carry it yet — TODO(host-ref-queue). */
+  hostRef?: SessionMessageHostRef | null;
   draft: string;
   /** Derived turn-activity flag (``deriveTurnActive``), computed in the page. */
   isBusy: boolean;
@@ -120,6 +125,11 @@ type ConversationSendParams = {
   /** The send entry point (owned by useProjectHandoff). Only invoked from
    *  ``handleRetry``'s ``setTimeout``. */
   handleSend: () => void;
+  /** Promote ``/conversation/new`` → the real session id. ``page`` variant
+   *  navigates the route (verbatim original behavior); ``panel`` variant
+   *  updates the embedding host's own id state instead — see
+   *  ``useConversationRouting``. */
+  onSessionPromoted: (newId: string, opts?: { skillCreator?: boolean }) => void;
 };
 
 /**
@@ -150,6 +160,7 @@ export function useConversationSend({
   selectedPermissionMode,
   selectedMcpSlugs,
   selectedComposerSkill,
+  hostRef,
   draft,
   isBusy,
   turns,
@@ -193,9 +204,9 @@ export function useConversationSend({
   setRetryCounts,
   setKbPickerOpen,
   handleSend,
+  onSessionPromoted,
 }: ConversationSendParams) {
   const { t } = useTranslation();
-  const navigate = useNavigate();
 
   const ensureSession = useCallback(
     async (navigateOnCreate = false) => {
@@ -377,10 +388,7 @@ export function useConversationSend({
       // churn that was dropping the freshly-attached file from the panel. The
       // send path navigates explicitly (see ``performSend``).
       if (id === NEW_SESSION_ID && navigateOnCreate) {
-        navigate(
-          `/conversation/${created.id}${isSkillCreatorMode ? "?mode=skill-creator" : ""}`,
-          { replace: true },
-        );
+        onSessionPromoted(created.id, { skillCreator: isSkillCreatorMode });
       }
       return created;
     },
@@ -416,7 +424,7 @@ export function useConversationSend({
       skillKindParam,
       skillProjectParam,
       id,
-      navigate,
+      onSessionPromoted,
       // Multi-target routing: the chosen execution target is read at
       // creation time — same closure-staleness trap as permission mode.
       resolveExecTarget,
@@ -588,16 +596,7 @@ export function useConversationSend({
       // the swap here. ``replace:true`` keeps Back from returning to the draft.
       if (id === NEW_SESSION_ID && session.id !== NEW_SESSION_ID) {
         promotingSessionIdRef.current = session.id;
-        navigate(
-          `/conversation/${session.id}${isSkillCreatorMode ? "?mode=skill-creator" : ""}`,
-          {
-            replace: true,
-            state: {
-              promotedFromNew: true,
-              promotedSessionId: session.id,
-            },
-          },
-        );
+        onSessionPromoted(session.id, { skillCreator: isSkillCreatorMode });
       }
 
       // Attachments were already uploaded (on attach) and the backend's
@@ -621,6 +620,7 @@ export function useConversationSend({
         outboundText,
         selectedProviderId,
         selectedModelId,
+        hostRef,
       );
       if (!detail?.id) throw new Error("Failed to send message.");
       // The desktop sidebar's per-project session lists are derived from

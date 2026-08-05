@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { Sparkles } from "lucide-react";
 import {
   SESSION_ACTION_RESOLVED_EVENT,
+  SlotRenderer,
   parseActionResolved,
   useTranslation,
   type SessionEventDTO,
@@ -18,6 +19,7 @@ import {
   SkillSubmissionCard,
   UserAnswerSummaryCard,
   WorkflowProgressCard,
+  extractUiArtifactReceipt,
   parseAskUserQuestionInput,
   parseAutomationToolOutput,
 } from "@valuz/ui";
@@ -188,12 +190,52 @@ export function useToolCallCards({
       // generic ToolCallCard so the failure text stays visible.
       if (isToolNamed(name, "generate_ui")) {
         if (tool.status === "error") return null;
+        // The sink receipt trailer (persisted inside the tool result) must
+        // never reach the renderer. The slot below is the edition seam for
+        // host-targeted generation UX (live progress mirrored into a product
+        // host, adopt/bind proposal on completion) — it renders during the
+        // run too, with the streaming body; OSS registers nothing there, so
+        // the card is unchanged for OSS.
+        const { receipt, body } = extractUiArtifactReceipt(tool.output);
+        // A generation DECLARED for a product host renders in that host (the
+        // edition slot mirrors it there); the conversation keeps only the
+        // slot's compact status/adopt card — the full inline card would
+        // duplicate the same painting at panel width. Plain in-conversation
+        // visuals (no target_host) keep the inline card. OSS never sets
+        // target_host, so OSS behavior is unchanged.
+        const hostTargeted = (() => {
+          if (!tool.input) return false;
+          try {
+            const parsed: unknown = JSON.parse(tool.input);
+            return Boolean(
+              parsed &&
+              typeof parsed === "object" &&
+              (parsed as Record<string, unknown>).target_host,
+            );
+          } catch {
+            return false;
+          }
+        })();
         return (
-          <GenerativeUICard
-            openui={tool.output}
-            status={tool.status === "running" ? "running" : "success"}
-            thinking={tool.thinking}
-          />
+          <>
+            {hostTargeted ? null : (
+              <GenerativeUICard
+                openui={tool.output === undefined ? undefined : body}
+                status={tool.status === "running" ? "running" : "success"}
+                thinking={tool.thinking}
+              />
+            )}
+            <SlotRenderer
+              name="genui.artifact-binding"
+              context={{
+                receipt,
+                toolUseId: tool.id,
+                status: tool.status === "running" ? "running" : "success",
+                output: body,
+                input: tool.input,
+              }}
+            />
+          </>
         );
       }
 
