@@ -16,6 +16,8 @@ import { ChevronLeft, ChevronRight } from "lucide-react";
 import { createContext, useContext, useMemo, type CSSProperties, type ReactNode } from "react";
 import { z } from "zod/v3";
 
+import { completeJsonFragment } from "./partial-json";
+
 export interface A2UIRendererProps {
   body: string;
 }
@@ -1018,56 +1020,22 @@ function parseA2UIMessages(body: string): A2UIMessage[] {
 }
 
 /**
- * Recover the complete component objects from a half-written
- * `updateComponents` line.
+ * Recover what has arrived of a half-written `updateComponents` line.
  *
- * Scans for balanced braces rather than parsing, because the line is by
- * definition not valid JSON yet. String and escape state are tracked so a brace
- * inside a label — `{"text":"a { b"}` — does not end an object early.
+ * `completeJsonFragment` closes the fragment rather than waiting for the
+ * model to close it, so a component still being typed renders with the fields
+ * it has — text grows as it streams instead of appearing whole. It never
+ * fabricates: an unfinished key or number is dropped, only an unfinished
+ * string value is kept and closed.
  */
 function salvagePartialComponents(line: string): A2UIMessage | null {
-  const arrayStart = line.indexOf("[", line.indexOf('"components"'));
-  if (arrayStart < 0) return null;
-
-  const components: A2UIComponent[] = [];
-  let depth = 0;
-  let start = -1;
-  let inString = false;
-  let escaped = false;
-  for (let i = arrayStart + 1; i < line.length; i += 1) {
-    const ch = line[i];
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (ch === "\\") {
-      escaped = true;
-      continue;
-    }
-    if (ch === '"') {
-      inString = !inString;
-      continue;
-    }
-    if (inString) continue;
-    if (ch === "{") {
-      if (depth === 0) start = i;
-      depth += 1;
-    } else if (ch === "}") {
-      depth -= 1;
-      if (depth === 0 && start >= 0) {
-        const parsed = safeJsonParse(line.slice(start, i + 1));
-        if (isRecord(parsed)) components.push(parsed);
-        start = -1;
-      }
-    }
-  }
-  if (!components.length) return null;
-
-  const surfaceId = /"surfaceId"\s*:\s*"([^"]+)"/.exec(line)?.[1];
-  return {
-    version: "v0.9",
-    updateComponents: surfaceId ? { surfaceId, components } : { components },
-  };
+  const completed = completeJsonFragment(line);
+  if (!completed) return null;
+  const parsed = safeJsonParse(completed);
+  if (!isRecord(parsed)) return null;
+  const update = parsed.updateComponents;
+  if (!isRecord(update) || !Array.isArray(update.components)) return null;
+  return update.components.some(isRecord) ? (parsed as A2UIMessage) : null;
 }
 
 function normalizeMessages(messages: A2UIMessage[]): A2UIMessage[] {

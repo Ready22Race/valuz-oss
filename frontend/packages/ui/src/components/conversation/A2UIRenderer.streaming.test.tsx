@@ -67,6 +67,28 @@ describe("A2UI streaming", () => {
     expect(complete).toContain("第三段");
   });
 
+  it("grows a paragraph character by character", () => {
+    // The point of completing the fragment rather than waiting for its closing
+    // brace: a component still being typed renders with what it has, so text
+    // appears as it streams instead of arriving whole.
+    const start = BODY.indexOf("第一段");
+    const oneChar = textAt(start + 1);
+    const twoChars = textAt(start + 2);
+    expect(oneChar).toContain("第");
+    expect(oneChar).not.toContain("第一");
+    expect(twoChars).toContain("第一");
+  });
+
+  it("never shows text the stream had not reached", () => {
+    // The guarantee that makes showing a partial component safe.
+    for (let i = 1; i <= BODY.length; i += 4) {
+      const shown = textAt(i);
+      if (shown.includes("第三段")) {
+        expect(BODY.slice(0, i)).toContain("第三段");
+      }
+    }
+  });
+
   it("is not confused by a brace inside a string", () => {
     // Scanning braces without tracking string state would end an object early
     // and salvage a broken component.
