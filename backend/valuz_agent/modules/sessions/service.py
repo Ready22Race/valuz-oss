@@ -67,7 +67,10 @@ from valuz_agent.modules.sessions.attachments import (
     _load_pending_attachments,
     _mark_attachments_consumed,
 )
-from valuz_agent.modules.sessions.context_builder import _build_additional_context
+from valuz_agent.modules.sessions.context_builder import (
+    _build_additional_context,
+    worktree_name_of,
+)
 from valuz_agent.modules.sessions.datastore import SessionDatastore
 from valuz_agent.modules.sessions.dto import (
     QueuedInput,
@@ -1521,6 +1524,7 @@ class SessionService:
                 project_id,
                 pending_attachments,
                 user_id=user_id,
+                worktree=worktree_name_of(session),
             )
 
             try:
@@ -1994,7 +1998,9 @@ class SessionService:
                     return  # still in use by a live session
             from valuz_agent.modules.worktrees.service import worktree_service
 
-            removed = await worktree_service.cleanup_if_clean(snapshot)
+            removed = await worktree_service.cleanup_if_clean(
+                snapshot, user_id=user_id, project_id=project_id or ""
+            )
             if removed:
                 logger.info(
                     "delete_session: removed clean worktree '%s' (%s)",
