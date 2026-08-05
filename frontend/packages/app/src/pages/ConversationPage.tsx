@@ -33,6 +33,7 @@ import {
   type QueuedInput,
   type QueuedInputList,
   agentsApi,
+  artifactsApi,
   automationsApi,
   connectorsApi,
   getDefaultExecutionTarget,
@@ -5781,7 +5782,31 @@ export const ConversationPage = () => {
       path: a.file_path,
       versionNo: a.version_no,
       isCurrent: a.is_current,
+      artifactId: a.artifact_id,
     }));
+
+    // Fetched only when a version badge is expanded — most deliverables' history
+    // is never opened, so loading every one alongside the list would be traffic
+    // spent on nothing. The panel caches what this returns.
+    const handleLoadArtifactVersions = async (artifactId: string) => {
+      const res = await artifactsApi.listRevisions(artifactId, {
+        // Same routing the rest of this page uses: a project session's reads go
+        // to that project's backend, a quick chat to the default one.
+        baseUrl: selectedProjectId
+          ? { projectId: selectedProjectId }
+          : undefined,
+      });
+      return res.items.map((r) => ({
+        id: r.id,
+        versionNo: r.version_no,
+        path: r.file_path,
+        size: formatFileSize(r.file_size),
+        when: new Date(r.created_at).toLocaleString(),
+        // A version whose bytes are gone still belongs in the history; the
+        // backend says so by withholding the ref.
+        openable: Boolean(r.ref),
+      }));
+    };
     // Always render the panel — even when it has nothing in it — so the
     // right-side toggle button stays visible on every conversation page.
     // The layout hides the panel column when the user collapses it; the
@@ -5826,6 +5851,7 @@ export const ConversationPage = () => {
         // project sessions; rows open in the in-app artifact viewer.
         generatedFiles={generatedFiles}
         onOpenGeneratedFile={(path) => void openArtifactFile(path)}
+        onLoadArtifactVersions={handleLoadArtifactVersions}
         // KB binding tree — project sessions only, **read-only**: we
         // pass ``kbTree`` + ``bindings`` (so the checkbox state shows
         // which folders/files are bound) and ``onExpandKbFolder`` (so
