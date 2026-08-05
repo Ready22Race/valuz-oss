@@ -67,7 +67,10 @@ from valuz_agent.modules.sessions.attachments import (
     _load_pending_attachments,
     _mark_attachments_consumed,
 )
-from valuz_agent.modules.sessions.context_builder import _build_additional_context
+from valuz_agent.modules.sessions.context_builder import (
+    _build_additional_context,
+    worktree_name_of,
+)
 from valuz_agent.modules.sessions.datastore import SessionDatastore
 from valuz_agent.modules.sessions.dto import (
     QueuedInput,
@@ -675,6 +678,7 @@ class SessionService:
         """
         from valuz_agent.adapters.provider_resolver import (
             ProviderNotResolvable,
+            resolve_model_max_input_tokens,
             resolve_model_provider,
             resolve_runtime_provider,
         )
@@ -859,10 +863,17 @@ class SessionService:
         # set"). That's a per-model constraint — clear effort on those specific
         # agents — not a reason to drop it runtime-wide.
         effective_effort = override_effort or getattr(agent, "effort", None)
-        model_settings = (
-            ModelSettingsSchema(effort=_coerce_session_effort(effective_effort))
-            if effective_effort
-            else ModelSettingsSchema()
+        model_settings = ModelSettingsSchema(
+            effort=_coerce_session_effort(effective_effort) if effective_effort else None,
+            # Channel-declared input window (gateway aliases only; None for
+            # models the runtimes' own defaults already know) — the runtimes
+            # derive their auto-compaction triggers from it.
+            max_input_tokens=await resolve_model_max_input_tokens(
+                provider_id=provider_id,
+                model_id=effective_model,
+                providers=self._providers,
+                user_id=user_id,
+            ),
         )
 
         session_id = uuid4().hex
@@ -1103,6 +1114,7 @@ class SessionService:
         # without a provider.
         from valuz_agent.adapters.provider_resolver import (
             ProviderNotResolvable,
+            resolve_model_max_input_tokens,
             resolve_model_provider,
             resolve_runtime_provider,
         )
@@ -1305,7 +1317,17 @@ class SessionService:
         # accepts reasoning_effort; deepseek-v4-flash 400s on it), not a
         # runtime-wide one. Don't strip it for deepagents wholesale.
         effective_effort = _coerce_session_effort(effort)
-        model_settings = ModelSettingsSchema(effort=effective_effort)
+        model_settings = ModelSettingsSchema(
+            effort=effective_effort,
+            # Channel-declared input window (gateway aliases only) — see the
+            # agent-conversation path above.
+            max_input_tokens=await resolve_model_max_input_tokens(
+                provider_id=resolved_provider_id,
+                model_id=resolution.model,
+                providers=self._providers,
+                user_id=user_id,
+            ),
+        )
 
         if project_row is None:
             raise SessionNotRunnable(f"project '{project_id}' not found")
@@ -1521,6 +1543,7 @@ class SessionService:
                 project_id,
                 pending_attachments,
                 user_id=user_id,
+                worktree=worktree_name_of(session),
             )
 
             try:
@@ -1994,7 +2017,9 @@ class SessionService:
                     return  # still in use by a live session
             from valuz_agent.modules.worktrees.service import worktree_service
 
-            removed = await worktree_service.cleanup_if_clean(snapshot)
+            removed = await worktree_service.cleanup_if_clean(
+                snapshot, user_id=user_id, project_id=project_id or ""
+            )
             if removed:
                 logger.info(
                     "delete_session: removed clean worktree '%s' (%s)",
@@ -2105,6 +2130,7 @@ class SessionService:
                     temperature=previous.temperature,
                     max_tokens=previous.max_tokens,
                     effort=target_effort,
+                    max_input_tokens=previous.max_input_tokens,
                 )
             ),
         )

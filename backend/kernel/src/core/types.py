@@ -110,11 +110,39 @@ class ModelSettings:
     * ``CodexRuntime`` -> ``model_reasoning_effort`` config override
     * ``DeepAgentsRuntime`` -> langchain backend kwarg
       (``reasoning_effort`` / ``effort`` / ``thinking_level``)
+
+    ``max_input_tokens`` is the model's maximum INPUT context size —
+    langchain model-profile semantics, NOT the vendor "context window"
+    (for split-budget models like GPT-5 the input cap 272k differs from
+    the 400k total; for Anthropic models the two coincide). Set only
+    when the host resolved a channel-declared value for a model the
+    SDKs can't know (gateway aliases like ``valuz-pro-anthropic``);
+    ``None`` means "not declared" and every runtime keeps its SDK /
+    CLI tuned default. Each runtime derives its auto-compaction
+    trigger from it:
+
+    * ``ClaudeAgentRuntime`` -> ``autoCompactWindow`` settings key
+    * ``CodexRuntime`` -> ``model_context_window`` +
+      ``model_auto_compact_token_limit`` config overrides
+    * ``DeepAgentsRuntime`` -> langchain ``profile`` (deepagents'
+      SummarizationMiddleware reads ``profile["max_input_tokens"]``)
+
+    Unlike ``effort`` it is not live-reconcilable: the model is locked
+    at session creation, so the snapshot never drifts.
     """
 
     temperature: float | None = None
     max_tokens: int | None = None
     effort: EffortLevel | None = None
+    max_input_tokens: int | None = None
+
+
+# Fraction of ``max_input_tokens`` at which claude_agent / codex trigger
+# automatic history compaction. Aligned with deepagents' own
+# SummarizationMiddleware fraction default (0.85) so all three runtimes
+# compact at the same relative fill; deepagents applies the fraction
+# itself, so only the CLI runtimes consume this constant.
+AUTO_COMPACT_WINDOW_FRACTION = 0.85
 
 
 # -- MCP server config (tagged union) --

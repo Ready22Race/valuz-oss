@@ -359,10 +359,7 @@ def _session_evidence_binding_enabled(session: Session) -> bool:
     valuz = metadata.get("valuz")
     return bool(
         isinstance(valuz, dict)
-        and (
-            valuz.get("citation_enabled")
-            or valuz.get("citation_verification_enabled")
-        )
+        and (valuz.get("citation_enabled") or valuz.get("citation_verification_enabled"))
     )
 
 
@@ -1418,6 +1415,17 @@ class DeepAgentsRuntime:
         # graph is rebuilt on PATCH via ``_reconcile_session_levers``,
         # so this method re-runs with the fresh value on the next turn.
         effort = session.model_settings.effort if session.model_settings is not None else None
+        # Channel-declared input window for models the langchain profile
+        # registry can't know (gateway aliases like ``valuz-pro-anthropic``).
+        # Without a profile, deepagents' SummarizationMiddleware falls back
+        # to a fixed 170k trigger instead of 0.85 x the real window; the
+        # explicit ``profile`` kwarg restores fraction-based compaction.
+        # Known model names already get a registry profile — the host only
+        # sets ``max_input_tokens`` for declared aliases, never guesses.
+        max_input_tokens = (
+            session.model_settings.max_input_tokens if session.model_settings is not None else None
+        )
+        profile = {"max_input_tokens": max_input_tokens} if max_input_tokens else None
         from pydantic import SecretStr
 
         if protocol == "anthropic":
@@ -1456,6 +1464,10 @@ class DeepAgentsRuntime:
                 kwargs["base_url"] = self.model_provider.base_url
             if effort is not None:
                 kwargs["effort"] = effort
+            if profile is not None:
+                # Does not disturb the max_tokens default fill below — that
+                # reads the bundled registry directly, not ``self.profile``.
+                kwargs["profile"] = profile
             # Unset max_tokens lets ChatAnthropic default from its profile
             # registry, which bottoms out at 4096 for model names it doesn't
             # know (gateway aliases, compatible third-party models) — pass an
@@ -1483,6 +1495,8 @@ class DeepAgentsRuntime:
                 }
             if effort is not None:
                 gemini_kwargs["thinking_level"] = _map_effort_for_gemini(effort)
+            if profile is not None:
+                gemini_kwargs["profile"] = profile
             return ChatGoogleGenerativeAI(**gemini_kwargs)
 
         # openai_completion path (default for any non-anthropic /
@@ -1520,6 +1534,8 @@ class DeepAgentsRuntime:
             openai_kwargs["base_url"] = self.model_provider.base_url
         if effort is not None:
             openai_kwargs["reasoning_effort"] = _map_effort_for_openai(effort)
+        if profile is not None:
+            openai_kwargs["profile"] = profile
         return ChatOpenAI(**openai_kwargs)
 
     async def _open_checkpointer(self) -> Any:
@@ -1729,8 +1745,7 @@ class DeepAgentsRuntime:
                 )
             )
         if citation_protocol and not any(
-            subagent["name"] == GENERAL_PURPOSE_SUBAGENT["name"]
-            for subagent in subagents
+            subagent["name"] == GENERAL_PURPOSE_SUBAGENT["name"] for subagent in subagents
         ):
             # DeepAgents auto-creates ``general-purpose`` with a private
             # system prompt and middleware stack. Explicitly mirror that
@@ -1742,8 +1757,7 @@ class DeepAgentsRuntime:
                 "name": GENERAL_PURPOSE_SUBAGENT["name"],
                 "description": GENERAL_PURPOSE_SUBAGENT["description"],
                 "system_prompt": (
-                    f"{GENERAL_PURPOSE_SUBAGENT['system_prompt']}\n\n"
-                    f"{citation_protocol}"
+                    f"{GENERAL_PURPOSE_SUBAGENT['system_prompt']}\n\n{citation_protocol}"
                 ),
                 "middleware": [
                     InvalidToolCallPairMiddleware(),

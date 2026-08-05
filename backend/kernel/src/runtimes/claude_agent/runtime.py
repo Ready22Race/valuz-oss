@@ -95,6 +95,7 @@ from src.core.rule_canonicalize import reduce_args_for_subject
 from src.core.session_approval_cache import SessionRule
 from src.core.tools import ExecContext, ToolDef, ToolKit, ToolResult
 from src.core.types import (
+    AUTO_COMPACT_WINDOW_FRACTION,
     BudgetExhausted,
     EndTurn,
     Error,
@@ -1787,14 +1788,20 @@ class ClaudeAgentRuntime:
         omitted.
 
         The workspace's own settings are read once up front so each harness
-        default can defer to an explicit project value. Two defaults today:
+        default can defer to an explicit project value. Three defaults today:
 
         - dynamic workflows / ``/deep-research`` (``enableWorkflows``), which
           the ``setting_sources=["project"]`` scoping otherwise drops (it
           lives in the user surface; see ``_WORKFLOW_SETTINGS``);
         - ``skipWebFetchPreflight`` when the deployment opts in via
           ``VALUZ_SKIP_WEBFETCH_PREFLIGHT`` (see
-          ``SKIP_WEBFETCH_PREFLIGHT_ENV``).
+          ``SKIP_WEBFETCH_PREFLIGHT_ENV``);
+        - ``autoCompactWindow`` when the session carries a channel-declared
+          ``max_input_tokens`` (gateway aliases the CLI's per-model tuning
+          can't know). The trigger is ``AUTO_COMPACT_WINDOW_FRACTION`` of
+          the input window, clamped to the CLI's documented 100k–1M range —
+          a sub-100k trigger is skipped entirely (emitting the 100k floor
+          would place the trigger past the real window).
 
         Keep each a true *default*: inject it only when the project hasn't
         set the key, so a project's explicit value (loaded via
@@ -1818,6 +1825,11 @@ class ClaudeAgentRuntime:
             settings.update(_WORKFLOW_SETTINGS)
         if _skip_webfetch_preflight_enabled() and "skipWebFetchPreflight" not in project:
             settings["skipWebFetchPreflight"] = True
+        max_input_tokens = self.model_settings.max_input_tokens if self.model_settings else None
+        if max_input_tokens and "autoCompactWindow" not in project:
+            window = int(max_input_tokens * AUTO_COMPACT_WINDOW_FRACTION)
+            if window >= 100_000:
+                settings["autoCompactWindow"] = min(window, 1_000_000)
         return json.dumps(settings) if settings else None
 
     def _build_model_provider_env(self) -> dict[str, str] | None:

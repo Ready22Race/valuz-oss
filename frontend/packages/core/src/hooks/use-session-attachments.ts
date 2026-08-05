@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   sessionsApi,
@@ -33,9 +33,16 @@ export interface UseSessionAttachmentsResult {
   /**
    * Optimistically stamp every pending row consumed — call right after a send
    * so the staging chips clear immediately (the turn marks them consumed
-   * server-side only after it runs).
+   * server-side only after it runs). Also records a consume watermark so rows
+   * the server returns as still-pending AFTER this call land consumed too.
+   *
+   * ``sessionId``/``consumedAt`` override the watermark's session and moment
+   * for callers consuming a send performed ELSEWHERE (the project-detail
+   * handoff: that page POSTs the message itself and navigates; the landing
+   * page's own ``sessionId`` may not have settled yet when it consumes the
+   * handoff).
    */
-  markPendingConsumed: () => void;
+  markPendingConsumed: (sessionId?: string, consumedAt?: number) => void;
   /** Escape hatch for callers that need to splice optimistic state directly. */
   setAttachments: React.Dispatch<React.SetStateAction<SessionAttachmentItem[]>>;
 }
@@ -61,23 +68,63 @@ export function useSessionAttachments(
 ): UseSessionAttachmentsResult {
   const [attachments, setAttachments] = useState<SessionAttachmentItem[]>([]);
 
+  // Mirror of ``sessionId`` for callbacks that must read it at CALL time.
+  // ``markPendingConsumed`` fires from a closure captured before the
+  // project-send handoff promoted ``sessionId`` (null → real id), so reading
+  // the prop directly would miss the session the send just consumed. (Synced
+  // in an effect — the promote commits long before the send's POST resolves.)
+  const sessionIdRef = useRef(sessionId);
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
+
+  // Last optimistic-consume moment, per session. ``markPendingConsumed`` can
+  // only stamp rows that are ALREADY in local state — but on the project-send
+  // handoff the send races the very first attachments load: the GET was
+  // issued before the server stamped ``consumed_at`` (that happens once the
+  // turn runs), so its still-pending rows land AFTER the local stamp — either
+  // replacing stamped rows or arriving into a state the stamp never saw — and
+  // the composer chips resurrect with nothing left to clear them. Recording
+  // the consume moment lets every server-row application re-assert it.
+  const consumeWatermarkRef = useRef<{ sessionId: string; ts: number } | null>(
+    null,
+  );
+
+  // Re-assert the optimistic consume on a server row the server hasn't caught
+  // up with yet: a still-pending row of the watermarked session uploaded
+  // BEFORE the consume moment belongs to the already-sent turn (uploads
+  // happen on attach, before send). A row attached after the send stays
+  // pending — it ships with the next turn.
+  const applyConsumeWatermark = useCallback(
+    (row: SessionAttachmentItem): SessionAttachmentItem => {
+      const wm = consumeWatermarkRef.current;
+      if (!wm || row.consumed_at || row.session_id !== wm.sessionId) return row;
+      if (row.created_at > wm.ts) return row;
+      return { ...row, consumed_at: wm.ts };
+    },
+    [],
+  );
+
   // Merge fresh server rows into local state WITHOUT clobbering an optimistic
   // ``consumed_at`` we stamped on send. The turn marks rows consumed
   // server-side only after it finishes running, so a poll fired between send
   // and turn-completion would otherwise un-consume the just-sent chips and
   // flash them back into the composer's staging row.
-  const mergeServer = useCallback((serverRows: SessionAttachmentItem[]) => {
-    setAttachments((prev) => {
-      const localById = new Map(prev.map((a) => [a.id, a]));
-      return serverRows.map((s) => {
-        const local = localById.get(s.id);
-        if (local?.consumed_at && !s.consumed_at) {
-          return { ...s, consumed_at: local.consumed_at };
-        }
-        return s;
+  const mergeServer = useCallback(
+    (serverRows: SessionAttachmentItem[]) => {
+      setAttachments((prev) => {
+        const localById = new Map(prev.map((a) => [a.id, a]));
+        return serverRows.map((s) => {
+          const local = localById.get(s.id);
+          if (local?.consumed_at && !s.consumed_at) {
+            return { ...s, consumed_at: local.consumed_at };
+          }
+          return applyConsumeWatermark(s);
+        });
       });
-    });
-  }, []);
+    },
+    [applyConsumeWatermark],
+  );
 
   // Load on session change. CRITICAL: this races with ``attachLocalFiles`` in
   // the eager-create flow (the new-conversation composer sets ``sessionId`` to
@@ -104,17 +151,29 @@ export function useSessionAttachments(
       if (cancelled) return;
       setAttachments((prev) => {
         if (!sessionId) return [];
+        const localById = new Map(prev.map((a) => [a.id, a]));
         const serverIds = new Set(items.map((r) => r.id));
+        // Server rows win, but never backwards on ``consumed_at``: a send
+        // that already stamped a row optimistically must survive a load that
+        // was issued before the server caught up (project-send handoff), and
+        // the consume watermark covers rows the stamp never saw.
+        const merged = items.map((s) => {
+          const local = localById.get(s.id);
+          if (local?.consumed_at && !s.consumed_at) {
+            return { ...s, consumed_at: local.consumed_at };
+          }
+          return applyConsumeWatermark(s);
+        });
         const optimistic = prev.filter(
           (a) => a.session_id === sessionId && !serverIds.has(a.id),
         );
-        return [...items, ...optimistic];
+        return [...merged, ...optimistic];
       });
     });
     return () => {
       cancelled = true;
     };
-  }, [sessionId]);
+  }, [sessionId, applyConsumeWatermark]);
 
   const hasParsing = attachments.some(
     (a) => !a.consumed_at && a.parse_status === "parsing",
@@ -190,12 +249,17 @@ export function useSessionAttachments(
     [sessionId],
   );
 
-  const markPendingConsumed = useCallback(() => {
-    const ts = Date.now();
-    setAttachments((prev) =>
-      prev.map((a) => (a.consumed_at ? a : { ...a, consumed_at: ts })),
-    );
-  }, []);
+  const markPendingConsumed = useCallback(
+    (sessionIdOverride?: string, consumedAt?: number) => {
+      const ts = consumedAt ?? Date.now();
+      const sid = sessionIdOverride ?? sessionIdRef.current;
+      if (sid) consumeWatermarkRef.current = { sessionId: sid, ts };
+      setAttachments((prev) =>
+        prev.map((a) => (a.consumed_at ? a : { ...a, consumed_at: ts })),
+      );
+    },
+    [],
+  );
 
   return {
     attachments,

@@ -121,6 +121,7 @@ def session_to_data(session: Session) -> SessionData:
                 temperature=session.model_settings.temperature,
                 max_tokens=session.model_settings.max_tokens,
                 effort=session.model_settings.effort,
+                max_input_tokens=session.model_settings.max_input_tokens,
             )
             if session.model_settings is not None
             else None

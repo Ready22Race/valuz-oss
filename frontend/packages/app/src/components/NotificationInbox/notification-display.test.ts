@@ -79,3 +79,21 @@ describe("notificationDisplay", () => {
     expect(d.tag).toBe("backup_failed");
   });
 });
+
+describe("notificationDisplay body clamp", () => {
+  it("caps a multi-KB provider error dump at 300 chars for alert surfaces", () => {
+    const d = notificationDisplay({
+      ...base,
+      kind: "run_failed",
+      title: "analyst",
+      body: "x".repeat(5000),
+    });
+    expect(d.body.length).toBe(300);
+    expect(d.body.endsWith("…")).toBe(true);
+  });
+
+  it("leaves short bodies untouched", () => {
+    const d = notificationDisplay({ ...base, kind: "run_failed", body: "rate limited" });
+    expect(d.body).toBe("rate limited");
+  });
+});

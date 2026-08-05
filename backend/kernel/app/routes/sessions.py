@@ -208,7 +208,12 @@ def _apply_model_provider_update(
 def _model_settings_from_schema(s: ModelSettingsSchema | None) -> ModelSettings | None:
     if s is None:
         return None
-    return ModelSettings(temperature=s.temperature, max_tokens=s.max_tokens, effort=s.effort)
+    return ModelSettings(
+        temperature=s.temperature,
+        max_tokens=s.max_tokens,
+        effort=s.effort,
+        max_input_tokens=s.max_input_tokens,
+    )
 
 
 @router.get("", response_model=SessionListResponse)

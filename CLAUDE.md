@@ -178,6 +178,9 @@ Stop and ask the human when:
 - Never skip tests or use `--no-verify`
 - Database migrations must be reversible
 - Secrets go in `.env`, never in code
+- Frontend: keep a single source file under ~1000 lines — when a page/component
+  grows past that, split it (extract hooks, subcomponents, and pure helpers into
+  sibling modules)
 
 ## Compact Instructions
 

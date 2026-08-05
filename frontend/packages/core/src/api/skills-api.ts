@@ -464,7 +464,10 @@ export const skillsApi = {
   projectCatalog(projectId: string): Promise<SkillsCatalog> {
     return fetchJson(
       `/v1/projects/${encodeURIComponent(projectId)}/skills`,
-      { cache: skillsCatalogCache(projectId) },
+      {
+        cache: skillsCatalogCache(projectId),
+        baseUrl: resolveApiBase({ projectId }, "") || undefined,
+      },
     );
   },
 
