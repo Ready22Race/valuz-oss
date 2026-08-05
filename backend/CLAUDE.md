@@ -327,6 +327,15 @@ logs land under `.ai/dev/{backend,frontend}.log`.
   backend otherwise only sees launchd's minimal PATH and can't resolve
   user-installed tools (nvm `npx`, `uv`, homebrew) needed by stdio MCP
   connectors, the CLI login probe, and the browser dev fallback.
+- **`max_input_tokens` is the model's INPUT cap, not the vendor "context
+  window"** (GPT-5 class: 272k input ≠ 400k total; Anthropic: the two
+  coincide). Channel model entries declare it (`LLMModel.max_input_tokens`,
+  producer-declared per ADR-011) ONLY for gateway aliases the SDK/CLI
+  per-model defaults can't know; the host snapshots it into kernel
+  `ModelSettings.max_input_tokens` at session create and each runtime derives
+  its auto-compaction trigger (deepagents langchain `profile`, claude
+  `autoCompactWindow`, codex `model_context_window` +
+  `model_auto_compact_token_limit`). Never guess it from a model name.
 - **`rg`** (ripgrep) is a runtime helper for `integrations/docs_embedded`,
   located via the `VALUZ_RG_PATH` env the Electron sidecar sets to the packaged
   `libexec/rg`. The binary is vendored per platform at

@@ -21,15 +21,17 @@ import kernel  # noqa: F401
 
 import pytest
 
+from src.core.types import ModelSettings
 from src.runtimes.claude_agent.runtime import (
     SKIP_WEBFETCH_PREFLIGHT_ENV,
     ClaudeAgentRuntime,
 )
 
 
-def _build(workspace_root: str | None) -> dict:
+def _build(workspace_root: str | None, model_settings: ModelSettings | None = None) -> dict:
     rt = object.__new__(ClaudeAgentRuntime)
     rt.workspace_root = workspace_root
+    rt.model_settings = model_settings
     raw = rt._build_settings()
     return json.loads(raw) if raw is not None else {}
 
@@ -89,3 +91,42 @@ def test_project_explicit_preflight_value_wins(
     monkeypatch.setenv(SKIP_WEBFETCH_PREFLIGHT_ENV, "1")
     root = _write_project_settings(tmp_path, {"skipWebFetchPreflight": False})
     assert "skipWebFetchPreflight" not in _build(root)
+
+
+# -- autoCompactWindow: from channel-declared max_input_tokens ---------------
+
+
+def test_auto_compact_window_injected_at_fraction(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(SKIP_WEBFETCH_PREFLIGHT_ENV, raising=False)
+    settings = _build(None, ModelSettings(max_input_tokens=200_000))
+    assert settings["autoCompactWindow"] == 170_000  # 0.85 x 200k
+
+
+def test_auto_compact_window_absent_without_declaration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(SKIP_WEBFETCH_PREFLIGHT_ENV, raising=False)
+    assert "autoCompactWindow" not in _build(None)
+    assert "autoCompactWindow" not in _build(None, ModelSettings(effort="high"))
+
+
+def test_auto_compact_window_clamped_to_cli_max(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 0.85 x 2M = 1.7M exceeds the CLI's documented 1M ceiling.
+    monkeypatch.delenv(SKIP_WEBFETCH_PREFLIGHT_ENV, raising=False)
+    settings = _build(None, ModelSettings(max_input_tokens=2_000_000))
+    assert settings["autoCompactWindow"] == 1_000_000
+
+
+def test_auto_compact_window_skipped_below_cli_floor(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 0.85 x 100k = 85k is below the CLI's 100k floor; emitting the floor
+    # would place the trigger PAST the real window, so skip entirely.
+    monkeypatch.delenv(SKIP_WEBFETCH_PREFLIGHT_ENV, raising=False)
+    assert "autoCompactWindow" not in _build(None, ModelSettings(max_input_tokens=100_000))
+
+
+def test_project_explicit_auto_compact_window_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(SKIP_WEBFETCH_PREFLIGHT_ENV, raising=False)
+    root = _write_project_settings(tmp_path, {"autoCompactWindow": 120_000})
+    assert "autoCompactWindow" not in _build(root, ModelSettings(max_input_tokens=200_000))

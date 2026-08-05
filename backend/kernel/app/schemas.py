@@ -159,11 +159,18 @@ class ModelSettingsSchema(BaseModel):
     ``ModelSettings`` in ``backend/src/core/types.py`` for the per-
     runtime mapping. The harness accepts the full union; runtimes that
     don't support a level map it down.
+
+    ``max_input_tokens`` is the model's maximum INPUT context size
+    (langchain model-profile semantics, not the vendor total "context
+    window") — set by the host only for channel-declared models the
+    SDKs can't know; runtimes derive their auto-compaction triggers
+    from it. See ``ModelSettings`` for the per-runtime mapping.
     """
 
     temperature: float | None = None
     max_tokens: int | None = None
     effort: EffortLiteral | None = None
+    max_input_tokens: int | None = None
 
 
 RuntimeProvider = Literal["claude_agent", "codex", "deepagents"]
