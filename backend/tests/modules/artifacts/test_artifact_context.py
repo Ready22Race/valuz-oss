@@ -128,6 +128,25 @@ async def test_lists_current_version_with_an_absolute_path(session_factory):  # 
     assert "1 total" in section
 
 
+async def test_carries_the_artifact_id(session_factory):  # type: ignore[no-untyped-def]
+    """Renaming a deliverable requires naming it, and this is the only place a
+    session that did not itself deliver it can learn the id.
+
+    Without it, a rename could only be expressed in the same conversation that
+    made the thing — every later session would fork it instead.
+    """
+    await _record(session_factory, MAIN, name="report.md", digest="h1")
+
+    async with session_factory() as db:
+        artifact = await ArtifactDatastore(db).find_by_keys(
+            MAIN, rel_path="report.md", display_name="report.md"
+        )
+    assert artifact is not None
+
+    section = await _section(session_factory, MAIN)
+    assert f"id {artifact.id}" in section
+
+
 async def test_only_the_head_is_listed(session_factory):  # type: ignore[no-untyped-def]
     """Whole histories would grow the block by every revision ever made."""
     for digest in ("h1", "h2", "h3"):
@@ -212,7 +231,7 @@ async def test_carries_the_revise_instructions(session_factory):  # type: ignore
     section = await _section(session_factory, MAIN)
 
     assert "SAME file name" in section
-    assert "NEW deliverable" in section
+    assert "artifactId" in section  # the rename case, which keys cannot infer
     assert "Never write into .artifact/" in section
     assert "valuz-file://" in section
 

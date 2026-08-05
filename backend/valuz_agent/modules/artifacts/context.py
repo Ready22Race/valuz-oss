@@ -74,9 +74,14 @@ async def build_artifacts_section(
 
     lines = [f"Delivered artifacts in this workspace ({total} total, most recently updated first):"]
     for artifact, head, revision in rows:
+        # The id is here because ``deliver_artifacts`` takes it: renaming or
+        # moving a deliverable is the one case key matching cannot recognise,
+        # and the caller has to name what it is continuing. Without this line
+        # that is only possible in a conversation that already delivered the
+        # thing once — a rename in a later session could not be expressed at all.
         lines.append(
             f"- {artifact.display_name} — {artifact.kind}, v{head.version_no}, "
-            f"updated {_stamp(head.updated_at, tz_name)}"
+            f"id {artifact.id}, updated {_stamp(head.updated_at, tz_name)}"
         )
         if revision.status == REVISION_STATUS_READY and revision.abs_path:
             # Absolute, because that is the file's identity everywhere else: what
@@ -98,9 +103,11 @@ async def build_artifacts_section(
     lines.append(
         'To revise one: read its "current" file, write the updated version in your '
         "working directory under the SAME file name, then call deliver_artifacts — "
-        "it records the next version automatically. Use a different file name only "
-        "when the user asked for a NEW deliverable rather than a revision. Never "
-        "write into .artifact/ yourself. When you mention a deliverable in your "
-        "reply, link it as [name](valuz-file://<its absolute path>)."
+        "it records the next version automatically. If you rename or move one, pass "
+        "its id as 'artifactId' in the same call, or it will be recorded as a second "
+        "deliverable instead of the next version of this one. Start a new deliverable "
+        "only when the user asked for one. Never write into .artifact/ yourself. When "
+        "you mention a deliverable in your reply, link it as "
+        "[name](valuz-file://<its absolute path>)."
     )
     return "\n".join(lines)

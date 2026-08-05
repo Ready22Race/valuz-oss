@@ -118,12 +118,15 @@ TOOL_DESCRIPTION = (
     "from the file itself — do not supply them. "
     "Delivering a file you have delivered before records a NEW VERSION of the "
     "same deliverable rather than replacing it — earlier versions stay readable "
-    "at the 'absPath' each delivery returns. Keep the same file name when you "
-    "revise something, so it is recognised as the same deliverable; use a "
-    "different name only when the user asked for a genuinely new deliverable, "
-    "and set 'asNewArtifact' to say so. If you RENAME or MOVE a deliverable, "
-    "pass its 'artifactId' so it stays one deliverable rather than becoming "
-    "two. Delivering unchanged content is a no-op. When "
+    "at the 'absPath' each delivery returns. Revising a deliverable therefore "
+    "needs nothing special: deliver the updated file at the same path. "
+    "IF YOU CHANGED THE FILE NAME OR MOVED IT, pass the deliverable's "
+    "'artifactId' (it is listed with each deliverable in your context, and "
+    "returned by every delivery) — a new name is not a new deliverable, and "
+    "without the id this call silently creates a second one. Reserve "
+    "'asNewArtifact' for when the user actually asked for a separate deliverable "
+    "that happens to share a name; it is rarely right. Delivering unchanged "
+    "content is a no-op. When "
     "you mention a delivered file in your reply text, link it by joining "
     "`valuz-file://` with the returned absolute 'absPath' (which starts with "
     "`/`), giving three slashes — e.g. "
@@ -174,19 +177,21 @@ _PARAMS = {
                     "artifactId": {
                         "type": "string",
                         "description": (
-                            "Continue this existing deliverable, from an "
-                            "earlier delivery's result or the workspace list. "
-                            "Needed when you RENAMED or MOVED the file — "
-                            "otherwise it reads as a different deliverable."
+                            "Continue this existing deliverable. Required "
+                            "whenever you renamed or moved its file, since "
+                            "neither the path nor the name will match any more. "
+                            "The id is listed beside each deliverable in your "
+                            "context and returned by every delivery."
                         ),
                     },
                     "asNewArtifact": {
                         "type": "boolean",
                         "description": (
-                            "The opposite: start a separate deliverable even "
-                            "though the name matches one you delivered before. "
-                            "Only when the user asked for a NEW deliverable "
-                            "rather than a revision of the old one."
+                            "Start a SEPARATE deliverable even though the name "
+                            "matches one already recorded. Rarely right — a "
+                            "renamed or moved file is NOT this case, use "
+                            "'artifactId' for that. Only when the user asked "
+                            "for a new deliverable alongside the old one."
                         ),
                     },
                 },
