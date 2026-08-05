@@ -493,27 +493,6 @@ class ArtifactDatastore:
             )
         ).scalar_one_or_none()
 
-    async def find_revision_by_legacy_id(
-        self, user_id: str, legacy_row_id: str
-    ) -> ArtifactRevisionRow | None:
-        """The revision built from a given legacy row, if the backfill got to it.
-
-        This is what makes the backfill re-runnable: it can be interrupted at
-        any point and resumed without re-migrating what it already did.
-        """
-        return (
-            (
-                await self._db.execute(
-                    select(ArtifactRevisionRow).where(
-                        ArtifactRevisionRow.user_id == user_id,
-                        ArtifactRevisionRow.legacy_row_id == legacy_row_id,
-                    )
-                )
-            )
-            .scalars()
-            .first()
-        )
-
     async def get_content(self, user_id: str, content_id: str) -> ArtifactContentRow | None:
         return (
             await self._db.execute(

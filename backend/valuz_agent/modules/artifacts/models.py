@@ -254,8 +254,15 @@ class ArtifactRevisionRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     # below can exist without a join.
     content_hash: Mapped[str] = mapped_column(String(80), index=True)
     status: Mapped[str] = mapped_column(String(16), default=REVISION_STATUS_READY)
-    # Set by the backfill only: the ``valuz_session_artifact.id`` this revision
-    # was built from, so the migration job is idempotent and re-runnable.
+    # Reserved for a backfill from ``valuz_session_artifact``: the legacy row a
+    # revision was built from, which is what would make such a job re-runnable.
+    #
+    # Nothing writes it today — the backfill was written, measured against real
+    # data (one row in production), and removed as not worth its weight. The
+    # column stays because it is the ONLY part of that job that costs a
+    # migration; keeping it means a later backfill is code alone, on a schedule
+    # of its own choosing. The old table is not dropped either, so the data is
+    # still there to migrate whenever it becomes worth doing.
     legacy_row_id: Mapped[str | None] = mapped_column(String(36), index=True)
     created_by: Mapped[str | None] = mapped_column(String(64))
 

@@ -4,11 +4,13 @@ Creates the five tables only. Nothing reads or writes them yet, and the existing
 ``valuz_session_artifact`` is left completely untouched — no new column, no drop
 — so this revision is safe to ship ahead of both the backfill and the cutover.
 
-Deliberately NOT doing the data move here: the backfill has to read every
-delivered file end to end to hash it, which on the cloud deployment is a
-bucket-wide read. Alembic runs at process start, on every replica; one large
-project would hold up the release. That work belongs to a separate, resumable
-job (``scripts/migrate_artifacts.py``).
+Deliberately NOT doing the data move here, and in fact not doing it at all yet:
+a backfill has to read every delivered file end to end to hash it, which on the
+cloud deployment is a bucket-wide read, and alembic runs at process start on
+every replica. It would belong to a separate resumable job — one that was
+written, measured against real data (a single row in production) and dropped as
+not worth its weight. ``valuz_session_artifact`` is left in place, so that data
+is still there to migrate if it ever becomes worth doing.
 
 Revision ID: 0030
 Revises: 0029
@@ -134,7 +136,8 @@ def upgrade() -> None:
     op.create_index(
         "ix_valuz_artifact_revision_content_hash", "valuz_artifact_revision", ["content_hash"]
     )
-    # Lets the backfill skip rows it already moved, so the job is re-runnable.
+    # Reserved for a future backfill, so it could skip rows it already moved.
+    # Indexed here because the index is the part that costs a migration.
     op.create_index(
         "ix_valuz_artifact_revision_legacy_row_id", "valuz_artifact_revision", ["legacy_row_id"]
     )
