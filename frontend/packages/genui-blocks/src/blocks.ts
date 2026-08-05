@@ -2,7 +2,9 @@ import type { ComponentGroup, DefinedComponent } from "@openuidev/react-lang";
 
 import { Avatar } from "./Avatar";
 import { BoxPlot } from "./BoxPlot";
+import { BubbleChart } from "./BubbleChart";
 import { GroupedBar, StackedBar } from "./CategoryBars";
+import { ComboChart } from "./ComboChart";
 import { ComparisonTable, DiffView } from "./ComparisonTable";
 import { EmptyState } from "./EmptyState";
 import { ErrorState } from "./ErrorState";
@@ -20,18 +22,23 @@ import {
   DashboardGrid,
   Divider,
   Inline,
+  Inset,
   Page,
   PageFooter,
   PageHeader,
   ScrollArea,
   Spacer,
+  Split,
+  Well,
 } from "./Layout";
 import { MetricGroup } from "./MetricGroup";
 import { Breadcrumb, DescriptionList, Tree } from "./Outline";
 import { Progress } from "./Progress";
 import { Result } from "./Result";
 import { RichText } from "./RichText";
+import { Sankey } from "./Sankey";
 import { Skeleton } from "./Skeleton";
+import { SmallMultiples } from "./SmallMultiples";
 import { Sparkline } from "./Sparkline";
 import { StatDelta } from "./StatDelta";
 import { ProgressList, StatusItem, StatusList } from "./StatusList";
@@ -140,6 +147,9 @@ export const blockComponents: BlockComponent[] = [
   DashboardGrid,
   Inline,
   Cluster,
+  Split,
+  Inset,
+  Well,
   Divider,
   Spacer,
   AspectRatio,
@@ -186,6 +196,10 @@ export const blockComponents: BlockComponent[] = [
   Treemap,
   GroupedBar,
   StackedBar,
+  BubbleChart,
+  SmallMultiples,
+  ComboChart,
+  Sankey,
   // Diagrams
   Mermaid,
   MermaidBadge,
@@ -261,7 +275,7 @@ export const blockComponentGroups: ComponentGroup[] = [
   {
     name: "Layout & Structure",
     components: [
-      "Page", "PageHeader", "PageFooter", "DashboardGrid", "Inline", "Cluster",
+      "Page", "PageHeader", "PageFooter", "DashboardGrid", "Inline", "Cluster", "Split", "Inset", "Well",
       "Divider", "Spacer", "AspectRatio", "ScrollArea", "Collapsible",
     ],
     notes: [
@@ -301,9 +315,10 @@ export const blockComponentGroups: ComponentGroup[] = [
     components: [
       "Sparkline", "Waterfall", "BridgeChart", "Funnel", "Heatmap",
       "Histogram", "BoxPlot", "Treemap", "GroupedBar", "StackedBar",
+      "BubbleChart", "SmallMultiples", "ComboChart", "Sankey",
     ],
     notes: [
-      "Hand-drawn shapes OpenUI's own charts lack — reach for BarChart / LineChart / AreaChart / PieChart / ScatterChart / RadarChart first and come here only for these. Every one needs its values in a single unit, named by `unit`; Waterfall computes its own closing total and flags a reported figure that disagrees; a chart with no data renders nothing rather than an empty frame.",
+      "Hand-drawn shapes OpenUI's own charts lack — reach for BarChart / LineChart / AreaChart / PieChart / ScatterChart / RadarChart first and come here only for these. Every one needs its values in a single unit, named by `unit`; Waterfall computes its own closing total and flags a reported figure that disagrees; a chart with no data renders nothing rather than an empty frame. BubbleChart encodes its third value as area rather than radius; SmallMultiples puts every panel on one shared domain and states it; ComboChart keeps one scale unless two different units are both given; Sankey checks each node's inflow against its outflow and flags a discrepancy rather than balancing it.",
     ],
   },
   {

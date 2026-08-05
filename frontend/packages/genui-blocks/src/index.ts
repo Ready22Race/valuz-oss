@@ -73,6 +73,10 @@ export * from "./Skeleton";
 
 // Charts
 export * from "./BoxPlot";
+export * from "./BubbleChart";
+export * from "./ComboChart";
+export * from "./Sankey";
+export * from "./SmallMultiples";
 export * from "./CategoryBars";
 export * from "./Funnel";
 export * from "./Heatmap";

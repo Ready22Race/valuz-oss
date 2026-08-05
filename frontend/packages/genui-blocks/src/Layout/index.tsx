@@ -3,8 +3,10 @@
 import { defineComponent } from "@openuidev/react-lang";
 import type { ReactNode } from "react";
 
+import { readTone } from "../lib/collections";
 import { readText, toArray } from "../lib/props";
-import { cssLength, cssRatio, gapSpace, justifyContent, spacerSpace } from "./css";
+import { toneBorder, toneSurface } from "../lib/tone";
+import { cssLength, cssRatio, gapSpace, justifyContent, spacerSpace, splitRatio } from "./css";
 import {
   AspectRatioSchema,
   ClusterSchema,
@@ -12,11 +14,14 @@ import {
   DashboardGridSchema,
   DividerSchema,
   InlineSchema,
+  InsetSchema,
   PageFooterSchema,
   PageHeaderSchema,
   PageSchema,
   ScrollAreaSchema,
   SpacerSchema,
+  SplitSchema,
+  WellSchema,
 } from "./schema";
 
 export {
@@ -26,14 +31,18 @@ export {
   DashboardGridSchema,
   DividerSchema,
   InlineSchema,
+  InsetSchema,
   PageFooterSchema,
   PageHeaderSchema,
   PageSchema,
   ScrollAreaSchema,
   ScrollAxisSchema,
   SpacerSchema,
+  SplitRatioSchema,
+  SplitSchema,
+  WellSchema,
 } from "./schema";
-export type { ScrollAxis } from "./schema";
+export type { ScrollAxis, SplitRatio } from "./schema";
 
 /*
  * The layout family. No block here is called `Layout`, `Col`, `Content`,
@@ -238,6 +247,111 @@ export const DashboardGrid = defineComponent({
           // sideways. Nothing errors; the layout is just wrong.
           gridTemplateColumns: `repeat(auto-fit, minmax(min(100%, ${min}), 1fr))`,
         }}
+      >
+        {renderNode(children)}
+      </div>
+    );
+  },
+});
+
+export const Split = defineComponent({
+  name: "Split",
+  props: SplitSchema,
+  description:
+    "Two blocks side by side at a proportion you choose: a chart beside the paragraph that reads it, a figure beside the caveat that qualifies it, a table beside its legend. Pass exactly two children. " +
+    "ratio is half (the default — equal columns), wide-narrow (the first slot takes roughly two thirds) or narrow-wide (the second does); gap is small | medium | large. A third child and any after it render below the pair at full width rather than being dropped. " +
+    "In a narrow column it becomes one column in child order, so put the block that must be read first in the first slot. Use DashboardGrid instead when the children are peers, their count is open-ended, and the number of columns should follow the width — Split is for exactly two slots whose proportion carries meaning.",
+  component: ({ props, renderNode }) => {
+    const children = toArray(props.children);
+    if (children.length === 0) return null;
+    // Exactly two slots, and a third child is a mistake worth rendering rather
+    // than a mistake worth hiding: the model reaches for a third often enough
+    // that dropping it would lose content silently, so the overflow lands in a
+    // full-width row under the pair where it is visibly not part of the split.
+    const pair = children.slice(0, 2);
+    const rest = children.slice(2);
+    return (
+      <div
+        className="vgb-split"
+        data-slot="vgb-split"
+        data-ratio={splitRatio(props.ratio)}
+        // One child is not a split. Without this the lone child would be held
+        // at half width with dead space beside it, which reads as a block that
+        // failed to load rather than as a block with one thing in it.
+        data-slots={pair.length}
+        style={{ gap: gapSpace(props.gap, "medium") }}
+      >
+        {renderNode(pair)}
+        {rest.length > 0 ? (
+          <div className="vgb-split-rest">{renderNode(rest)}</div>
+        ) : null}
+      </div>
+    );
+  },
+});
+
+/* ── Surfaces ─────────────────────────────────────────────────────── */
+
+/*
+ * Inset and Well are the two ways to put a boundary around a group of blocks,
+ * and they are opposite emphases rather than variants of one thing: Inset
+ * recedes (darker fill, no border — it reads as carved into the surface around
+ * it), Well encloses (border, the page's own background — it reads as a box
+ * drawn beside its neighbours, not inside them). Their descriptions each name
+ * the other, because the failure mode is not a wrong render: it is the model
+ * treating them as synonyms and picking at random, which produces answers whose
+ * nesting means nothing.
+ *
+ * They take identical props and therefore take separate schema objects — see
+ * `surfaceProps()` in schema.ts for what sharing one would silently do.
+ */
+
+export const Inset = defineComponent({
+  name: "Inset",
+  props: InsetSchema,
+  description:
+    "A recessed panel *inside* a block that already has a surface: a slightly darker fill with padding and a radius and no border at all, so it reads as carved into the card around it rather than placed beside it. Reach for it for an aside, a quoted result, a worked example, a nested summary — content that belongs to its container. " +
+    "children is the content; tone tints the fill and defaults to neutral, so set success / warning / danger only when the aside itself carries that meaning. " +
+    "Well is the opposite emphasis and the one to use at the top level of a Page: a bordered box on the plain background, for grouping blocks that are peers. An Inset needs a surface to be inset from — inside a card, a Collapsible or another Inset, never directly in a Page body.",
+  component: ({ props, renderNode }) => {
+    const children = toArray(props.children);
+    if (children.length === 0) return null;
+    const tone = readTone(props.tone);
+    return (
+      <div
+        className="vgb-inset"
+        data-slot="vgb-inset"
+        data-tone={tone ?? "neutral"}
+        // The stylesheet owns the neutral fill; an inline style appears only for
+        // a tone that was actually asked for. `readTone` is what keeps a
+        // misspelt tone from writing `background-color: undefined` here.
+        style={tone ? { backgroundColor: toneSurface(tone) } : undefined}
+      >
+        {renderNode(children)}
+      </div>
+    );
+  },
+});
+
+export const Well = defineComponent({
+  name: "Well",
+  props: WellSchema,
+  description:
+    "A bordered box on the page's own background that groups blocks belonging together *without* implying they sit inside anything: a set of assumptions, a pair of charts read as one, the figures behind a conclusion. It encloses at the same level as its neighbours. " +
+    "children is the group; tone colours the border only and defaults to neutral — the background stays the page's, and that is exactly what makes it read as an enclosure rather than a recess. " +
+    "Inset is the opposite emphasis: darker fill, no border, and it reads as nested inside the card containing it. Use a Well at the top level of a Page and an Inset inside a card. When the group is long or the reader may skip it, a Collapsible is better than either.",
+  component: ({ props, renderNode }) => {
+    const children = toArray(props.children);
+    if (children.length === 0) return null;
+    const tone = readTone(props.tone);
+    return (
+      <div
+        className="vgb-well"
+        data-slot="vgb-well"
+        data-tone={tone ?? "neutral"}
+        // Border only. Tinting the fill here would make a toned Well
+        // indistinguishable from an Inset, which is the whole distinction.
+        style={tone ? { borderColor: toneBorder(tone) } : undefined}
       >
         {renderNode(children)}
       </div>

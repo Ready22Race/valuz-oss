@@ -16,11 +16,14 @@ import {
   DashboardGrid,
   Divider,
   Inline,
+  Inset,
   Page,
   PageFooter,
   PageHeader,
   ScrollArea,
   Spacer,
+  Split,
+  Well,
 } from "./Layout";
 
 /**
@@ -40,6 +43,9 @@ const layoutBlocks: BlockComponent[] = [
   Inline,
   Cluster,
   DashboardGrid,
+  Split,
+  Inset,
+  Well,
   Divider,
   Spacer,
   AspectRatio,
@@ -58,7 +64,7 @@ const ONE_CHAR = "无";
 
 describe("layout family renders through the OpenUI Lang parser", () => {
   it("binds every block's shortest positional call to the props it reads", () => {
-    renderLang(`root = Page([header, grid, inline, cluster, rule, gap, ratio, scroll, fold, footer], "Q3 Review", "Group revenue and margin", "As of 30 Jun 2026")
+    renderLang(`root = Page([header, grid, inline, cluster, pair, aside, group, rule, gap, ratio, scroll, fold, footer], "Q3 Review", "Group revenue and margin", "As of 30 Jun 2026")
 header = PageHeader("Segment detail", "Four reporting units", "Unaudited")
 grid = DashboardGrid([g1, g2], "18rem")
 g1 = TextContent("EMEA")
@@ -69,6 +75,13 @@ i2 = TextContent("$4.2M")
 cluster = Cluster([c1, c2], "small")
 c1 = Tag("infrastructure")
 c2 = Tag("renewals")
+pair = Split([s1, s2], "wide-narrow", "large")
+s1 = TextContent("Margin bridge")
+s2 = TextContent("Reads left to right")
+aside = Inset([a1], "info")
+a1 = TextContent("Restated for the disposal")
+group = Well([w1], "neutral")
+w1 = TextContent("Assumptions used throughout")
 rule = Divider("Assumptions")
 gap = Spacer("large")
 ratio = AspectRatio([media], "16/9")
@@ -92,6 +105,10 @@ footer = PageFooter([], "Source: exchange filings")`);
       "$4.2M",
       "infrastructure",
       "renewals",
+      "Margin bridge",
+      "Reads left to right",
+      "Restated for the disposal",
+      "Assumptions used throughout",
       "Assumptions",
       "Adoption chart",
       "A very wide table would go here",
@@ -104,7 +121,7 @@ footer = PageFooter([], "Source: exchange filings")`);
   });
 
   it("emits every block's stable slot hook", () => {
-    const { container } = renderLang(`root = Page([header, grid, inline, cluster, rule, gap, ratio, scroll, fold, footer], "Title")
+    const { container } = renderLang(`root = Page([header, grid, inline, cluster, pair, aside, group, rule, gap, ratio, scroll, fold, footer], "Title")
 header = PageHeader("Section")
 grid = DashboardGrid([g1])
 g1 = TextContent("cell")
@@ -112,6 +129,13 @@ inline = Inline([i1])
 i1 = TextContent("one")
 cluster = Cluster([c1])
 c1 = Tag("tag")
+pair = Split([p1, p2])
+p1 = TextContent("left")
+p2 = TextContent("right")
+aside = Inset([a1])
+a1 = TextContent("aside")
+group = Well([w1])
+w1 = TextContent("group")
 rule = Divider()
 gap = Spacer()
 ratio = AspectRatio([m])
@@ -129,6 +153,9 @@ footer = PageFooter([], "note")`);
       "vgb-inline",
       "vgb-cluster",
       "vgb-dashboard-grid",
+      "vgb-split",
+      "vgb-inset",
+      "vgb-well",
       "vgb-divider",
       "vgb-spacer",
       "vgb-aspect-ratio",
@@ -225,6 +252,112 @@ describe("DashboardGrid concedes to a narrow container", () => {
     const grid = container.querySelector('[data-slot="vgb-dashboard-grid"]');
     expect(grid?.children.length).toBe(50);
     expect(screen.getByText("行 49")).toBeTruthy();
+  });
+});
+
+describe("Split holds two slots at a stated proportion", () => {
+  it("records the ratio as an attribute rather than an inline track list", () => {
+    // An inline `grid-template-columns` outranks every stylesheet rule,
+    // including the container query that collapses the split below 30rem — the
+    // block would keep two squeezed columns in a narrow chat column forever and
+    // nothing would report it. The attribute lets the stylesheet own both
+    // states, so the assertion is that no inline track list exists at all.
+    const { container } = renderLang(
+      `root = Split([a, b], "wide-narrow")\na = TextContent("a")\nb = TextContent("b")`,
+    );
+    const split = container.querySelector<HTMLElement>('[data-slot="vgb-split"]');
+    expect(split?.getAttribute("data-ratio")).toBe("wide-narrow");
+    expect(split?.style.gridTemplateColumns).toBe("");
+  });
+
+  it("falls back to half when the ratio is not one of the three", () => {
+    const { container } = renderLang(
+      `root = Split([a, b], "60/40")\na = TextContent("a")\nb = TextContent("b")`,
+    );
+    expect(
+      container
+        .querySelector<HTMLElement>('[data-slot="vgb-split"]')
+        ?.getAttribute("data-ratio"),
+    ).toBe("half");
+  });
+
+  it("renders a third child below the pair instead of dropping it", () => {
+    // The model reaches for a third child often enough that dropping it would
+    // lose content silently. It lands in a full-width row under the pair, where
+    // it is visibly not part of the split.
+    const { container } = renderLang(
+      `root = Split([a, b, c, d])\na = TextContent("first")\nb = TextContent("second")\nc = TextContent("third")\nd = TextContent("fourth")`,
+    );
+    const split = container.querySelector('[data-slot="vgb-split"]');
+    const rest = container.querySelector(".vgb-split-rest");
+    expect(rest).not.toBeNull();
+    expect(rest?.textContent).toContain("third");
+    expect(rest?.textContent).toContain("fourth");
+    expect(rest?.textContent).not.toContain("first");
+    // Two slots plus the overflow row — never a third column.
+    expect(split?.children.length).toBe(3);
+  });
+
+  it("gives a lone child the whole width rather than half of one", () => {
+    const solo = renderLang(`root = Split([a])\na = TextContent("only")`);
+    const split = solo.container.querySelector('[data-slot="vgb-split"]');
+    expect(split?.getAttribute("data-slots")).toBe("1");
+    expect(solo.container.querySelector(".vgb-split-rest")).toBeNull();
+    solo.unmount();
+
+    const pair = renderLang(`root = Split([a, b])\na = TextContent("l")\nb = TextContent("r")`);
+    expect(
+      pair.container.querySelector('[data-slot="vgb-split"]')?.getAttribute("data-slots"),
+    ).toBe("2");
+  });
+
+  it("keeps all fifty children when handed fifty", () => {
+    const ids = Array.from({ length: 50 }, (_, i) => `c${i}`);
+    const rows = ids.map((id, i) => `${id} = TextContent("行 ${i}")`).join("\n");
+    const { container } = renderLang(`root = Split([${ids.join(", ")}])\n${rows}`);
+    expect(container.querySelector(".vgb-split-rest")?.children.length).toBe(48);
+    expect(screen.getByText("行 0")).toBeTruthy();
+    expect(screen.getByText("行 49")).toBeTruthy();
+  });
+});
+
+describe("Inset and Well are opposite emphases, not synonyms", () => {
+  it("tints an Inset's fill and a Well's border, never the other way round", () => {
+    // This is the whole distinction: a filled Well would be an Inset with an
+    // outline, and the model would have no reason to prefer either. The neutral
+    // case is left to the stylesheet, so only a stated tone appears inline.
+    const inset = renderLang(`root = Inset([a], "warning")\na = TextContent("a")`);
+    const insetBox = inset.container.querySelector<HTMLElement>('[data-slot="vgb-inset"]');
+    expect(insetBox?.style.backgroundColor).toBe("var(--openui-alert-background)");
+    expect(insetBox?.style.borderColor).toBe("");
+    inset.unmount();
+
+    const well = renderLang(`root = Well([a], "warning")\na = TextContent("a")`);
+    const wellBox = well.container.querySelector<HTMLElement>('[data-slot="vgb-well"]');
+    expect(wellBox?.style.borderColor).toBe("var(--openui-border-alert)");
+    expect(wellBox?.style.backgroundColor).toBe("");
+  });
+
+  it("leaves the neutral case entirely to the stylesheet", () => {
+    const { container } = renderLang(`root = Inset([a])\na = TextContent("a")`);
+    const box = container.querySelector<HTMLElement>('[data-slot="vgb-inset"]');
+    expect(box?.getAttribute("style")).toBeNull();
+    expect(box?.getAttribute("data-tone")).toBe("neutral");
+  });
+
+  it("reads a tone it does not recognise as no tone at all", () => {
+    // Props arrive unvalidated, so `tone` may be any string. Writing it through
+    // would emit `background-color: undefined` and void the declaration.
+    const Component = Inset.component;
+    const { container } = render(
+      <Component
+        props={{ children: ["x"], tone: "purple" as never }}
+        renderNode={(value) => <span>{String(value)}</span>}
+      />,
+    );
+    const box = container.querySelector<HTMLElement>('[data-slot="vgb-inset"]');
+    expect(box?.getAttribute("style")).toBeNull();
+    expect(box?.getAttribute("data-tone")).toBe("neutral");
   });
 });
 
@@ -338,6 +471,31 @@ const FIT_CASES: FitCase[] = [
     long: `root = DashboardGrid([t])\nt = TextContent("${LONG_CJK}")`,
     bare: `root = DashboardGrid([t])\nt = TextContent("${ONE_CHAR}")`,
     empty: `root = DashboardGrid([])`,
+  },
+  {
+    name: "Split",
+    slot: "vgb-split",
+    // CJK on one side, Latin on the other: the pair that catches a column with
+    // no `min-width: 0`, because the unbroken CJK run blows its track out past
+    // the container and paints across the slot beside it.
+    long: `root = Split([a, b])\na = TextContent("${LONG_CJK}")\nb = TextContent("Restated for the disposal, unaudited")`,
+    bare: `root = Split([a, b])\na = TextContent("${ONE_CHAR}")\nb = TextContent("${ONE_CHAR}")`,
+    empty: `root = Split([])`,
+    absentWhenBare: [".vgb-split-rest"],
+  },
+  {
+    name: "Inset",
+    slot: "vgb-inset",
+    long: `root = Inset([a])\na = TextContent("${LONG_CJK}")`,
+    bare: `root = Inset([a])\na = TextContent("${ONE_CHAR}")`,
+    empty: `root = Inset([])`,
+  },
+  {
+    name: "Well",
+    slot: "vgb-well",
+    long: `root = Well([a])\na = TextContent("${LONG_CJK}")`,
+    bare: `root = Well([a])\na = TextContent("${ONE_CHAR}")`,
+    empty: `root = Well([])`,
   },
   {
     name: "Divider",
@@ -470,6 +628,22 @@ describe("layout schemas bind positionally in the order a human would write", ()
     expect(offenders).toEqual([]);
   });
 
+  it("gives every block its own schema object", () => {
+    // The library keys registration off the schema, so two defineComponent
+    // calls handed the same object make the second silently replace the first:
+    // one name renders the other's component, both names stay in the library,
+    // and nothing is reported anywhere. Inset and Well take identical props and
+    // are the pair this exists for — they come from a factory, not a const.
+    const owner = new Map<unknown, string>();
+    const shared: string[] = [];
+    for (const block of layoutBlocks) {
+      const first = owner.get(block.props);
+      if (first) shared.push(`${block.name} shares ${first}'s schema object`);
+      else owner.set(block.props, block.name);
+    }
+    expect(shared).toEqual([]);
+  });
+
   it("never shadows an OpenUI component", () => {
     // Blocks merge after OpenUI's own components, so a shared name silently
     // replaces theirs for every document — `Layout`, `Col`, `Content` and
@@ -506,6 +680,9 @@ describe("layout.css", () => {
       ".vgb-inline",
       ".vgb-cluster",
       ".vgb-grid",
+      ".vgb-split",
+      ".vgb-inset",
+      ".vgb-well",
       ".vgb-aspect",
       ".vgb-scroll",
       ".vgb-collapsible",
@@ -524,5 +701,27 @@ describe("layout.css", () => {
       .map((m) => (m[1] ?? "").trim())
       .filter((value) => /\b\d+(?:\.\d+)?(?:px|rem|em)\b/.test(value) && !value.includes("min("));
     expect(offenders).toEqual([]);
+  });
+
+  it("floors Split's own tracks the same way", () => {
+    // `minmax(12rem, 1fr)` is a floor the track cannot go below: in a 10rem
+    // column the track is still 12rem, so the split overflows and paints over
+    // whatever sits beside it. The floor exists because a third of a chat
+    // column is not a readable width — but it has to concede to the container.
+    const bare = [...css.matchAll(/minmax\(([^,]+),/g)]
+      .map((m) => (m[1] ?? "").trim())
+      .filter((floor) => floor !== "0" && !floor.startsWith("min("));
+    expect(bare).toEqual([]);
+  });
+
+  it("collapses Split at 30rem with the specificity to beat its own ratio rules", () => {
+    // A container query adds no specificity of its own, so a bare `.vgb-split`
+    // at (0,1,0) loses to `.vgb-split[data-ratio="wide-narrow"]` at (0,2,0) and
+    // the two columns survive into a 20rem column. The narrow rule has to carry
+    // an attribute selector too. Nothing errors — the layout is just wrong.
+    const narrow = /@container vgb \(max-width: 30rem\)\s*\{([\s\S]*?)\n\}/.exec(css)?.[1] ?? "";
+    expect(narrow).toMatch(
+      /\.vgb-split\[data-ratio\][^{}]*\{[^{}]*grid-template-columns:\s*minmax\(0, 1fr\)/,
+    );
   });
 });

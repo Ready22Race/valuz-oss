@@ -1,4 +1,6 @@
+import { readText } from "../lib/props";
 import type { Align, Size } from "../lib/schema";
+import type { SplitRatio } from "./schema";
 
 /**
  * The values this family lets model output reach CSS with.
@@ -73,6 +75,23 @@ const SPACER: Record<Size, string> = {
 
 export function spacerSpace(size: Size | undefined): string {
   return SPACER[size ?? "medium"] ?? SPACER.medium;
+}
+
+/**
+ * A Split's proportion, as a `data-ratio` attribute rather than a track list.
+ *
+ * The column formula deliberately does *not* come through here into an inline
+ * style, which is the one thing that would look tidier and be wrong: an inline
+ * `grid-template-columns` beats every stylesheet rule, including the container
+ * query that collapses the split to one column below 30rem. The block would
+ * then hold two 8rem columns in a narrow chat column and nothing would report
+ * it. The attribute lets the stylesheet own both states.
+ */
+const SPLIT_RATIOS = new Set<string>(["half", "wide-narrow", "narrow-wide"]);
+
+export function splitRatio(value: unknown): SplitRatio {
+  const raw = readText(value).trim().toLowerCase();
+  return SPLIT_RATIOS.has(raw) ? (raw as SplitRatio) : "half";
 }
 
 /** Where a run of children sits on its line. */

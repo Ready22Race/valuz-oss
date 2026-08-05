@@ -1,6 +1,7 @@
 /*
  * Hand-drawn charts — Sparkline, Waterfall/BridgeChart, Funnel, Heatmap,
- * Histogram, BoxPlot, Treemap, GroupedBar, StackedBar.
+ * Histogram, BoxPlot, Treemap, GroupedBar, StackedBar, BubbleChart,
+ * SmallMultiples, ComboChart, Sankey.
  *
  * These are CSS boxes and one inline SVG, not a charting library: OpenUI
  * already ships recharts-backed BarChart/LineChart/AreaChart/PieChart/
@@ -515,6 +516,334 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* ── BubbleChart ──────────────────────────────────────────────────── */
+
+/*
+ * Axis names beside the plot, never rotated onto it. The y axis is a column of
+ * three lines read top to bottom — high value, what is being measured, low
+ * value — which is the same information a rotated caption carries and is
+ * legible at this size, in Latin and in CJK alike.
+ */
+.vgb-bubble {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--openui-space-2xs) var(--openui-space-xs);
+}
+
+.vgb-bubble-axis {
+  display: flex;
+  color: var(--openui-text-neutral-secondary);
+  font: var(--openui-text-label-sm);
+}
+
+.vgb-bubble-axis-y {
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: space-between;
+  text-align: right;
+}
+
+.vgb-bubble-axis-x {
+  grid-column: 2;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--openui-space-xs);
+}
+
+.vgb-bubble-axis-name {
+  max-width: 6rem;
+  overflow-wrap: anywhere;
+}
+
+/*
+ * The one plot in this package that must NOT stretch.
+ *
+ * `aspect-ratio` pins the box to the viewBox's own proportions so the default
+ * `preserveAspectRatio` scales x and y by the same factor. Let it stretch and
+ * every circle becomes an ellipse whose area — the encoded quantity — depends
+ * on how wide the column happened to be.
+ */
+.vgb-bubble-plot {
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  overflow: visible;
+}
+
+/*
+ * The size key: the two ends of the area scale, drawn at the size they are
+ * drawn at. An area encoding cannot be decoded without one — a reader can see
+ * that one bubble is larger, but not by how much.
+ */
+.vgb-bubble-size-key {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--openui-space-2xs) var(--openui-space-xs);
+  color: var(--openui-text-neutral-secondary);
+  font: var(--openui-text-label-sm);
+}
+
+.vgb-bubble-size-svg {
+  width: 3.9rem;
+  height: 1.9rem;
+  flex: none;
+  overflow: visible;
+}
+
+.vgb-bubble-key {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--openui-space-2xs) var(--openui-space-m);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.vgb-bubble-key-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--openui-space-2xs);
+  color: var(--openui-text-neutral-secondary);
+  font: var(--openui-text-label-sm);
+}
+
+.vgb-bubble-key-name {
+  color: var(--openui-text-neutral-primary);
+  overflow-wrap: anywhere;
+}
+
+/* ── SmallMultiples ───────────────────────────────────────────────── */
+
+/*
+ * `auto-fill` rather than a stated column count: the grid re-fits itself to the
+ * column it lands in, which is the only thing that works when the same block is
+ * dropped into a chat column, a report page and a dashboard cell. The floor is
+ * `min(…, 100%)` so a column narrower than one panel gets one panel, not an
+ * overflow.
+ */
+.vgb-multiples {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(auto-fill, minmax(min(9rem, 100%), 1fr));
+  gap: var(--openui-space-s) var(--openui-space-m);
+}
+
+.vgb-multiple {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--openui-space-3xs);
+}
+
+.vgb-multiple-label {
+  color: var(--openui-text-neutral-secondary);
+  font: var(--openui-text-label-sm);
+  /* Wraps rather than truncating — `anywhere` because CJK labels carry no
+     spaces to break at. */
+  overflow-wrap: anywhere;
+}
+
+.vgb-multiple-svg {
+  width: 100%;
+  height: 2.25rem;
+  border-radius: var(--openui-radius-xs);
+  background: var(--openui-highlight-subtle);
+  overflow: visible;
+}
+
+.vgb-multiple-zero {
+  stroke: var(--openui-border-default);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.vgb-multiple-figure {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--openui-space-2xs);
+}
+
+/* ── ComboChart ───────────────────────────────────────────────────── */
+
+/*
+ * Three grid columns — left axis, plot, optional right axis — with the labels
+ * on a second row under the plot only. The plot and the foot row are separate
+ * flex rows whose cells share `flex: 1 1 0` and no gap, so cell *n* sits at the
+ * same x in both; that is what lets the line overlay, which is positioned in
+ * percentages of the plot box, land on the centre of its bar.
+ */
+.vgb-combo {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: max-content minmax(0, 1fr) max-content;
+  column-gap: var(--openui-space-xs);
+}
+
+.vgb-combo-axis {
+  display: flex;
+  grid-row: 1;
+  flex-direction: column;
+  justify-content: space-between;
+  color: var(--openui-text-neutral-secondary);
+  font: var(--openui-text-label-sm);
+  text-align: center;
+}
+
+.vgb-combo-axis-left {
+  grid-column: 1;
+}
+
+.vgb-combo-axis-right {
+  grid-column: 3;
+}
+
+.vgb-combo-axis-name {
+  max-width: 4rem;
+  overflow-wrap: anywhere;
+}
+
+.vgb-combo-plot {
+  position: relative;
+  grid-row: 1;
+  grid-column: 2;
+  min-width: 0;
+  height: 8rem;
+}
+
+.vgb-combo-cells,
+.vgb-combo-foot {
+  display: flex;
+  min-width: 0;
+  /* No gap: the line overlay's x positions are computed as (n + 0.5) / count of
+     the plot's width, which is only the centre of cell n while the cells tile
+     it exactly. */
+  gap: 0;
+}
+
+.vgb-combo-cells {
+  height: 100%;
+}
+
+.vgb-combo-foot {
+  grid-row: 2;
+  grid-column: 2;
+  padding-top: var(--openui-space-2xs);
+}
+
+.vgb-combo-cell,
+.vgb-combo-foot-cell {
+  /* No width floor, and no sideways scroll: a combination chart's claim is how
+     the line moves against the bars, and half of that scrolled out of view is
+     the comparison not being made. The category cap is what keeps the columns
+     wide enough instead. */
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.vgb-combo-cell {
+  position: relative;
+  height: 100%;
+}
+
+.vgb-combo-foot-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--openui-space-3xs);
+  padding: 0 var(--openui-space-3xs);
+}
+
+.vgb-combo-label {
+  color: var(--openui-text-neutral-secondary);
+  font-size: var(--openui-font-size-2xs);
+  text-align: center;
+  /* Wraps inside its own column rather than overlapping the next one. */
+  overflow-wrap: anywhere;
+}
+
+.vgb-combo-foot-cell .vgb-chart-value {
+  font-size: var(--openui-font-size-2xs);
+}
+
+.vgb-combo-bar {
+  position: absolute;
+  left: 18%;
+  right: 18%;
+  /* A value too small to see is still a value. Zero draws no bar at all, so
+     this floor never invents one. */
+  min-height: 2px;
+  border-radius: var(--openui-radius-xs);
+}
+
+.vgb-combo-zero {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--openui-border-default);
+}
+
+.vgb-combo-line {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+/* ── Sankey ───────────────────────────────────────────────────────── */
+
+.vgb-sankey {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  height: 15rem;
+}
+
+.vgb-sankey-svg {
+  width: 100%;
+  height: 100%;
+}
+
+/*
+ * Ribbons are translucent so a crossing reads as two flows rather than one
+ * repainting the other. Set on the element instead of mixing the fill, because
+ * a `<path>` carries no text to fade with it.
+ */
+.vgb-sankey-ribbon {
+  opacity: 0.28;
+}
+
+.vgb-sankey-label {
+  position: absolute;
+  display: flex;
+  max-width: min(9rem, 40%);
+  flex-direction: column;
+  padding: 0 var(--openui-space-2xs);
+  color: var(--openui-text-neutral-primary);
+  font-size: var(--openui-font-size-2xs);
+  /* The label is centred on its bar, which is placed by its top edge. */
+  transform: translateY(-50%);
+}
+
+.vgb-sankey-label[data-sankey-side="end"] {
+  align-items: flex-end;
+  text-align: right;
+}
+
+.vgb-sankey-name {
+  /* Wraps rather than truncating — see the file header. */
+  overflow-wrap: anywhere;
+}
+
+/* A node whose inflow and outflow disagree. Marked, never balanced. */
+.vgb-sankey-label[data-chart-mismatch="true"] {
+  color: var(--openui-text-danger-primary);
+}
+
 /* ── Narrow column ────────────────────────────────────────────────── */
 
 /*
@@ -545,5 +874,27 @@
 
   .vgb-treemap {
     height: 11rem;
+  }
+
+  /* A bubble plot gets taller relative to its width rather than flatter: the
+     encoding is area, and a squat box leaves the big bubbles nowhere to go. */
+  .vgb-bubble-plot {
+    aspect-ratio: 4 / 3;
+  }
+
+  .vgb-bubble-axis-name {
+    max-width: 4rem;
+  }
+
+  .vgb-combo-plot {
+    height: 6.5rem;
+  }
+
+  .vgb-sankey {
+    height: 12rem;
+  }
+
+  .vgb-sankey-label {
+    max-width: min(6rem, 45%);
   }
 }

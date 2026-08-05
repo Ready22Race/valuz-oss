@@ -1,6 +1,6 @@
 import { z } from "zod/v4";
 
-import { AlignSchema, SizeSchema } from "../lib/schema";
+import { AlignSchema, SizeSchema, ToneSchema } from "../lib/schema";
 
 /**
  * Props for the layout family — the frame every other block sits inside.
@@ -22,6 +22,15 @@ import { AlignSchema, SizeSchema } from "../lib/schema";
 /** Which way a ScrollArea scrolls. */
 export const ScrollAxisSchema = z.enum(["vertical", "horizontal", "both"]);
 export type ScrollAxis = z.infer<typeof ScrollAxisSchema>;
+
+/**
+ * How a Split divides its two slots. Local to this family: `Size` would be the
+ * reflex reuse and it is the wrong vocabulary — these name a *proportion between
+ * two slots*, not a magnitude, and "small | medium | large" cannot say which of
+ * the two is the wide one.
+ */
+export const SplitRatioSchema = z.enum(["half", "wide-narrow", "narrow-wide"]);
+export type SplitRatio = z.infer<typeof SplitRatioSchema>;
 
 export const PageSchema = z.object({
   children: z.array(z.unknown()),
@@ -87,4 +96,30 @@ export const CollapsibleSchema = z.object({
   children: z.array(z.unknown()),
   title: z.string(),
   defaultOpen: z.boolean().optional(),
+});
+
+/**
+ * A fresh props schema, per surface block.
+ *
+ * Inset and Well take exactly the same props, and **two `defineComponent` calls
+ * must never share one schema object**: the library keys registration off the
+ * schema, so handing this const to both would make the second silently replace
+ * the first — `Inset(...)` would render a Well, with no parse error, no type
+ * error, and both names still listed in the library. Only the `data-slot` would
+ * give it away. The factory makes an identical-but-distinct object for each.
+ */
+function surfaceProps() {
+  return z.object({
+    children: z.array(z.unknown()),
+    tone: ToneSchema.optional(),
+  });
+}
+
+export const InsetSchema = surfaceProps();
+export const WellSchema = surfaceProps();
+
+export const SplitSchema = z.object({
+  children: z.array(z.unknown()),
+  ratio: SplitRatioSchema.optional(),
+  gap: SizeSchema.optional(),
 });
