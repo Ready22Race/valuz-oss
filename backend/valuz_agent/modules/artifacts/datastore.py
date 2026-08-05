@@ -15,6 +15,7 @@ from __future__ import annotations
 import posixpath
 import re
 import secrets
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from sqlalchemy import func, select, update
@@ -492,6 +493,46 @@ class ArtifactDatastore:
                 )
             )
         ).scalar_one_or_none()
+
+    async def get_contents(
+        self, user_id: str, content_ids: Sequence[str]
+    ) -> dict[str, ArtifactContentRow]:
+        """Load many contents at once, keyed by id.
+
+        Every listing endpoint needs the content row behind each revision it
+        returns. Fetching them one at a time is a round trip per row — cheap on
+        the desktop's local SQLite, a per-item network hop on the cloud's
+        Postgres, and paid on every panel open.
+        """
+        ids = list(dict.fromkeys(content_ids))
+        if not ids:
+            return {}
+        rows = (
+            await self._db.execute(
+                select(ArtifactContentRow).where(
+                    ArtifactContentRow.user_id == user_id,
+                    ArtifactContentRow.id.in_(ids),
+                )
+            )
+        ).scalars()
+        return {row.id: row for row in rows}
+
+    async def get_heads(
+        self, user_id: str, artifact_ids: Sequence[str]
+    ) -> dict[str, ArtifactHeadRow]:
+        """Load many heads at once, keyed by artifact id. See ``get_contents``."""
+        ids = list(dict.fromkeys(artifact_ids))
+        if not ids:
+            return {}
+        rows = (
+            await self._db.execute(
+                select(ArtifactHeadRow).where(
+                    ArtifactHeadRow.user_id == user_id,
+                    ArtifactHeadRow.artifact_id.in_(ids),
+                )
+            )
+        ).scalars()
+        return {row.artifact_id: row for row in rows}
 
     async def get_content(self, user_id: str, content_id: str) -> ArtifactContentRow | None:
         return (

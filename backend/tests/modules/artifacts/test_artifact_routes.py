@@ -287,3 +287,40 @@ async def test_session_listing_flags_superseded_versions(session_factory, monkey
     # Both remain openable at their own snapshot — superseded is not deleted.
     assert v1.file_path != v2.file_path
     assert v1.artifact_id == v2.artifact_id
+
+
+# ── Query shape ───────────────────────────────────────────────────────────────
+
+
+async def test_listing_does_not_query_per_row(session_factory):  # type: ignore[no-untyped-def]
+    """Listing N deliverables must not cost N round trips.
+
+    Every one of these endpoints needs the content row behind each revision it
+    returns, and fetching them one at a time is a per-item network hop on the
+    cloud's Postgres — paid on every panel open. Counting statements is the only
+    way this stays true: the loop reads correctly either way.
+    """
+    for i in range(6):
+        await _record(session_factory, MAIN, name=f"doc{i}.md", digest=f"h{i}")
+
+    async with session_factory() as db:
+        seen: list[str] = []
+        from sqlalchemy import event
+
+        def _count(conn, cursor, statement, *args):  # type: ignore[no-untyped-def]
+            if statement.lstrip().upper().startswith("SELECT"):
+                seen.append(statement)
+
+        engine = db.get_bind()
+        engine = getattr(engine, "sync_engine", engine)
+        event.listen(engine, "before_cursor_execute", _count)
+        try:
+            response = await list_scope_artifacts(
+                project_id="p1", worktree="", limit=200, db=db, user_id="u1"
+            )
+        finally:
+            event.remove(engine, "before_cursor_execute", _count)
+
+    assert len(response.items) == 6
+    # heads+revisions join, count, contents — a small constant, not 6-ish.
+    assert len(seen) <= 4, f"{len(seen)} selects for 6 rows:\n" + "\n".join(seen)

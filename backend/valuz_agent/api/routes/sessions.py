@@ -1205,20 +1205,22 @@ async def list_artifacts(
         raise HTTPException(status_code=404, detail=f"Session {session_id!r} not found")
     ds = ArtifactDatastore(db)
     revisions = await ds.list_session_revisions(user_id, session_id)
+    # Two queries for the whole list rather than two per row — the panel reloads
+    # this on every turn end.
+    heads = await ds.get_heads(user_id, [rev.artifact_id for rev in revisions])
+    contents = await ds.get_contents(user_id, [rev.content_id for rev in revisions])
 
-    items: list[ArtifactItem] = []
-    heads: dict[str, str | None] = {}
-    for revision in revisions:
-        if revision.artifact_id not in heads:
-            head = await ds.get_head(user_id, revision.artifact_id)
-            heads[revision.artifact_id] = head.revision_id if head else None
-        content = await ds.get_content(user_id, revision.content_id)
-        items.append(
+    return ArtifactListResponse(
+        items=[
             _artifact_item(
                 revision,
-                content,
+                contents.get(revision.content_id),
                 session_id=session_id,
-                is_current=heads[revision.artifact_id] == revision.id,
+                is_current=(
+                    (head := heads.get(revision.artifact_id)) is not None
+                    and head.revision_id == revision.id
+                ),
             )
-        )
-    return ArtifactListResponse(items=items)
+            for revision in revisions
+        ]
+    )

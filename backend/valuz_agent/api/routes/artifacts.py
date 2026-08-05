@@ -103,10 +103,13 @@ async def list_scope_artifacts(
     ds = ArtifactDatastore(db)
     rows = await ds.list_scope_heads(scope, limit=limit)
     total = await ds.count_scope_artifacts(scope)
+    # One query for every content, not one per row: this list is up to ``limit``
+    # long and is fetched every time the panel opens.
+    contents = await ds.get_contents(user_id, [rev.content_id for _a, _h, rev in rows])
 
     items: list[ArtifactSummary] = []
     for artifact, head, revision in rows:
-        content = await ds.get_content(user_id, revision.content_id)
+        content = contents.get(revision.content_id)
         items.append(
             ArtifactSummary(
                 id=artifact.id,
@@ -137,10 +140,8 @@ async def list_artifact_revisions(
         raise HTTPException(status_code=404, detail=f"Artifact {artifact_id!r} not found")
 
     revisions = await ds.list_revisions(user_id, artifact_id)
-    items = [
-        _revision_item(revision, await ds.get_content(user_id, revision.content_id))
-        for revision in revisions
-    ]
+    contents = await ds.get_contents(user_id, [rev.content_id for rev in revisions])
+    items = [_revision_item(rev, contents.get(rev.content_id)) for rev in revisions]
     return RevisionListResponse(
         artifact_id=artifact.id, display_name=artifact.display_name, items=items
     )
