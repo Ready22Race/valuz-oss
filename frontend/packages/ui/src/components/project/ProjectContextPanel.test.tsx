@@ -353,6 +353,35 @@ describe("ProjectDetailContextPanel — Artifact version history", () => {
     artifactId: "A1",
   };
 
+  it("should offer history on a superseded row, whose versions it cannot see", async () => {
+    // The session delivered v1; another session then made v2. This row shows v1
+    // and the versions worth reaching are exactly the ones it has no record of.
+    const onLoadArtifactVersions = vi.fn().mockResolvedValue([
+      { id: "rev1", versionNo: 1, path: "/d/v1", when: "旧", openable: true },
+      { id: "rev2", versionNo: 2, path: "/d/v2", when: "新", openable: true },
+    ]);
+    render(
+      <ProjectDetailContextPanel
+        generatedFiles={[
+          {
+            id: "r1",
+            name: "报告.md",
+            path: "/d/.artifact/A1/v1/报告.md",
+            versionNo: 1,
+            isCurrent: false,
+            artifactId: "A1",
+          },
+        ]}
+        onLoadArtifactVersions={onLoadArtifactVersions}
+      />,
+    );
+
+    await userEvent.click(screen.getByTitle("查看历史版本"));
+
+    expect(onLoadArtifactVersions).toHaveBeenCalledWith("A1");
+    expect(await screen.findByText("新")).toBeTruthy();
+  });
+
   it("should not offer history for a deliverable still on its first version", () => {
     // Nothing behind it to show — an expander would open onto one row.
     render(

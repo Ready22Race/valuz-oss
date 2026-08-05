@@ -1407,13 +1407,14 @@ export const ProjectDetailContextPanel = ({
       {visibleGeneratedFiles.length > 0 ? (
         <div className="space-y-1">
           {visibleGeneratedFiles.map((f) => {
-            // Only offer history where there is history to show: a deliverable
-            // still on its first version has nothing behind it.
+            // Offer history wherever there IS history — which is not the same
+            // as "this row is a later version". A session that delivered v1 and
+            // was then superseded by another session shows a v1 row, and the
+            // versions it cannot see are exactly the ones worth reaching.
+            const hasHistory =
+              (f.versionNo != null && f.versionNo > 1) || f.isCurrent === false;
             const canExpand = Boolean(
-              onLoadArtifactVersions &&
-              f.artifactId &&
-              f.versionNo != null &&
-              f.versionNo > 1,
+              onLoadArtifactVersions && f.artifactId && hasHistory,
             );
             // Gated on ``canExpand`` too: the open flag is keyed by artifact, so
             // a row that offers no expander must not sprout one because another
@@ -1460,7 +1461,7 @@ export const ProjectDetailContextPanel = ({
                       {f.name}
                     </span>
                   </button>
-                  {f.versionNo != null && f.versionNo > 1 ? (
+                  {f.versionNo != null && (f.versionNo > 1 || canExpand) ? (
                     canExpand ? (
                       <button
                         type="button"
