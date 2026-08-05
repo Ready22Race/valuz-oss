@@ -224,6 +224,21 @@ async def test_an_unknown_kind_falls_back_rather_than_failing(session_factory, c
     assert artifact is not None and artifact.kind == ArtifactKind.FILE
 
 
+def test_the_schema_asks_only_for_what_the_caller_can_know() -> None:
+    """Nothing derivable from the file itself is a parameter.
+
+    Size, mime and hash are properties of the bytes, which the server is holding;
+    a parameter for them invites a guess that gets thrown away. What the caller
+    knows and the server cannot — where it wrote, what to call it, what it is —
+    stays.
+    """
+    from valuz_agent.modules.sessions.artifacts_tool import _PARAMS
+
+    props = _PARAMS["properties"]["attachments"]["items"]["properties"]
+    assert set(props) == {"filePath", "fileName", "kind", "mimeType", "asNewArtifact"}
+    assert "fileSize" not in props
+
+
 def test_the_tool_schema_offers_every_kind() -> None:
     """The schema is rendered from the enum, so a new family cannot be added
     without the model being told about it."""
@@ -243,11 +258,16 @@ async def test_explicit_file_name_becomes_the_display_name(session_factory, cwd)
     assert Path(payload["results"][0]["absPath"]).name == "Quarterly Report"
 
 
-async def test_size_and_hash_come_from_the_bytes_not_the_model(session_factory, cwd):  # type: ignore[no-untyped-def]
-    """A model-supplied ``fileSize`` is a hint at most — it must not be recorded."""
+async def test_size_and_hash_come_from_the_bytes(session_factory, cwd):  # type: ignore[no-untyped-def]
+    """Measured from the file, and there is no parameter to claim otherwise.
+
+    ``fileSize`` used to be in the schema and read by nothing. The model filled
+    it in anyway — with ``0`` — so it was a field that taught the model to guess
+    a value it cannot know and that would be discarded regardless.
+    """
     src = _write(cwd / "report.md", "exactly eleven")
 
-    _, payload = await _deliver({"filePath": str(src), "fileSize": 999999})
+    _, payload = await _deliver({"filePath": str(src)})
 
     async with session_factory() as db:
         revision = await ArtifactDatastore(db).get_revision(

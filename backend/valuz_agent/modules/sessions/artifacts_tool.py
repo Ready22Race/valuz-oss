@@ -114,8 +114,10 @@ TOOL_DESCRIPTION = (
     "Register finished output files as deliverables — they show up in the "
     "user's '生成文件' (Generated Files) panel, which the user can open. Pass an "
     "'attachments' array; each entry needs a 'filePath' (absolute path to a "
-    "file you already wrote, inside your working directory). 'fileName', "
-    "'fileSize' and 'mimeType' are optional and derived from the file on disk. "
+    "file you already wrote, inside your working directory). Everything else is "
+    "optional: 'fileName' is the display name and defaults to the basename, "
+    "'kind' says what the deliverable is. Size, type and content hash are read "
+    "from the file itself — do not supply them. "
     "Delivering a file you have delivered before records a NEW VERSION of the "
     "same deliverable rather than replacing it — earlier versions stay readable "
     "at the 'absPath' each delivery returns. Keep the same file name when you "
@@ -157,13 +159,12 @@ _PARAMS = {
                         "type": "string",
                         "description": "Display name. Defaults to the file's basename.",
                     },
-                    "fileSize": {
-                        "type": "integer",
-                        "description": "Size in bytes. Derived from disk when omitted.",
-                    },
                     "mimeType": {
                         "type": "string",
-                        "description": "MIME type. Guessed from the extension when omitted.",
+                        "description": (
+                            "Only when the file extension does not say — it is "
+                            "read from the name otherwise."
+                        ),
                     },
                     "kind": {
                         "type": "string",
