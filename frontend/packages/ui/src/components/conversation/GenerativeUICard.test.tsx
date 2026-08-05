@@ -24,6 +24,11 @@ vi.mock("@openuidev/react-ui/Modal", () => ({
 // stub Renderer.
 vi.mock("@valuz/genui-blocks", () => ({
   createValuzLibrary: () => ({}),
+  // The renderer subscribes so an edition registering blocks at startup reaches
+  // a conversation already on screen; a stub that never emits is enough here.
+  subscribeBlocks: () => () => {},
+  getRegistryVersion: () => 0,
+  runtimeBlocks: () => [],
   // A2UIRenderer builds its component registry from these; this file exercises
   // the card's chrome, so an empty registry is the point — no block should be
   // needed to render it.

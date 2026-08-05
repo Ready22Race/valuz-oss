@@ -21,6 +21,11 @@ vi.mock("@openuidev/react-ui", () => ({
 // GenerativeUICard.blocks.test.tsx, which use the real parser.
 vi.mock("@valuz/genui-blocks", () => ({
   createValuzLibrary: () => ({}),
+  // The renderer subscribes so an edition registering blocks at startup reaches
+  // a conversation already on screen; a stub that never emits is enough here.
+  subscribeBlocks: () => () => {},
+  getRegistryVersion: () => 0,
+  runtimeBlocks: () => [],
 }));
 vi.mock("./A2UIRenderer", () => ({
   A2UIRenderer: ({ body }: { body: string }) => (

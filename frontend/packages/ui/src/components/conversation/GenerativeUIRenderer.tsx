@@ -1,7 +1,11 @@
-import { type ComponentProps, type ReactNode } from "react";
+import { useMemo, useSyncExternalStore, type ComponentProps, type ReactNode } from "react";
 import { Renderer } from "@openuidev/react-lang";
 import { ThemeProvider } from "@openuidev/react-ui";
-import { createValuzLibrary } from "@valuz/genui-blocks";
+import {
+  createValuzLibrary,
+  getRegistryVersion,
+  subscribeBlocks,
+} from "@valuz/genui-blocks";
 
 import { A2UIRenderer } from "./A2UIRenderer";
 import {
@@ -21,17 +25,23 @@ export type {
 /**
  * OpenUI's own components plus the Valuz blocks, as one library.
  *
- * Built once at module scope: `createValuzLibrary()` walks and re-registers
- * every component and the result is immutable, so rebuilding it per render
- * would be pure waste. The merge is additive — no block shadows an OpenUI
- * component (a test in `@valuz/genui-blocks` enforces that), so anything the
- * model could emit before it still emits now.
+ * Rebuilt when the block registry changes rather than frozen at module scope:
+ * an edition registers its components at startup, and a conversation already on
+ * screen has to pick them up. The subscription snapshot is a version number,
+ * not the block list — the list is a fresh array each call, so using it would
+ * re-render forever.
+ *
+ * The merge stays additive. A registered block that took the name of an OpenUI
+ * component or a built-in was refused at registration, so nothing here can
+ * shadow anything.
  *
  * This covers the OpenUI Lang protocol only. The A2UI branch below resolves
- * component names through `A2UIRenderer`'s own catalog, which is maintained
- * separately — a block added here is not automatically reachable there.
+ * names through `A2UIRenderer`, which reads the same registry.
  */
-const OPENUI_LANG_LIBRARY = createValuzLibrary();
+function useGenerativeUILibrary() {
+  const version = useSyncExternalStore(subscribeBlocks, getRegistryVersion, getRegistryVersion);
+  return useMemo(() => createValuzLibrary(), [version]);
+}
 
 export type GenerativeUIStatus = "running" | "success" | "error";
 
@@ -303,6 +313,7 @@ function OpenUIBody({
   body: string;
   status?: GenerativeUIStatus;
 }) {
+  const library = useGenerativeUILibrary();
   return (
     <OpenUITheme>
       {/* `vgb-root` is the container the blocks' `@container vgb` queries
@@ -312,7 +323,7 @@ function OpenUIBody({
           over whatever is beside it. */}
       <div className="vgb-root">
         <Renderer
-          library={OPENUI_LANG_LIBRARY}
+          library={library}
           response={body}
           isStreaming={status === "running"}
         />

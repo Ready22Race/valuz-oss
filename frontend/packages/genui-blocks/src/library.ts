@@ -4,6 +4,7 @@ import { openuiLibrary } from "@openuidev/react-ui/genui-lib";
 
 import type { BlockComponent } from "./blocks";
 import { blockComponents, blockComponentGroups } from "./blocks";
+import { runtimeBlockGroups, runtimeBlocks } from "./registry";
 
 export type { BlockComponent };
 export { blockComponents, blockComponentGroups };
@@ -22,13 +23,18 @@ export { blockComponents, blockComponentGroups };
  */
 export function createValuzLibrary(): Library {
   const openuiComponents = Object.values(openuiLibrary.components) as BlockComponent[];
+  // Runtime blocks last: they were refused at registration if they took a name
+  // already in use, so by the time they get here the merge cannot shadow
+  // anything. Order is registration order, which keeps the prompt stable
+  // between boots.
   const groups: ComponentGroup[] = [
     ...(openuiLibrary.componentGroups ?? []),
     ...blockComponentGroups,
+    ...runtimeBlockGroups(),
   ];
   return createLibrary({
     root: openuiLibrary.root ?? "Stack",
-    components: [...openuiComponents, ...blockComponents],
+    components: [...openuiComponents, ...blockComponents, ...runtimeBlocks()],
     componentGroups: groups,
   });
 }

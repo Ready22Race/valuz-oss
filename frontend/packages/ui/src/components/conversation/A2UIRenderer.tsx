@@ -11,9 +11,22 @@ import {
 } from "@a2ui/web_core/v0_9";
 import * as OpenUI from "@openuidev/react-ui";
 import { Modal as OpenUIModal } from "@openuidev/react-ui/Modal";
-import { blockComponents, blockNames } from "@valuz/genui-blocks";
+import {
+  blockComponents,
+  blockNames,
+  getRegistryVersion,
+  runtimeBlocks,
+  subscribeBlocks,
+} from "@valuz/genui-blocks";
 import { ChevronLeft, ChevronRight } from "lucide-react";
-import { createContext, useContext, useMemo, type CSSProperties, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useMemo,
+  useSyncExternalStore,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import { z } from "zod/v3";
 
 import { completeJsonFragment } from "./partial-json";
@@ -104,7 +117,20 @@ const OPENUI_COMPONENT_NAMES = [
   "Title",
 ];
 
-const BLOCK_BY_NAME = new Map(blockComponents.map((block) => [block.name, block]));
+/**
+ * Name → block, including anything registered at runtime.
+ *
+ * Read through a function rather than captured in a module constant: an edition
+ * registers its components at startup, which is after this module is imported.
+ * A frozen map would accept the built-ins and silently ignore everything an
+ * edition added — the block would render nowhere while still being described
+ * in the prompt, which is the worst of the two failure directions.
+ */
+function blockByName(name: string) {
+  const runtime = runtimeBlocks().find((block) => block.name === name);
+  if (runtime) return runtime;
+  return blockComponents.find((block) => block.name === name);
+}
 
 /**
  * Names retired in favour of a block, kept resolvable so payloads generated
@@ -139,11 +165,14 @@ const RETIRED_TO_BLOCK: Record<
  * to reach this protocol. Retired names stay registered so the runtime still
  * accepts them; the adapter maps them onto their replacement.
  */
-const A2UI_COMPONENT_NAMES = [
-  ...OPENUI_COMPONENT_NAMES,
-  ...blockNames,
-  ...Object.keys(RETIRED_TO_BLOCK),
-];
+function a2uiComponentNames(): string[] {
+  return [
+    ...OPENUI_COMPONENT_NAMES,
+    ...blockNames,
+    ...runtimeBlocks().map((block) => block.name),
+    ...Object.keys(RETIRED_TO_BLOCK),
+  ];
+}
 
 /**
  * Render a block from an A2UI component model.
@@ -162,7 +191,7 @@ function renderBlockComponent(
 ): ReactNode | null {
   const retired = RETIRED_TO_BLOCK[name];
   const blockName = retired ? retired.block : name;
-  const block = BLOCK_BY_NAME.get(blockName);
+  const block = blockByName(blockName);
   if (!block) return null;
 
   const props = retired ? retired.map(rawProps) : rawProps;
@@ -198,11 +227,30 @@ const createA2UIComponent = createBinderlessComponentImplementation as unknown a
     buildChild: BuildChild;
   }) => ReactNode,
 ) => ReactComponentImplementation;
-const openuiA2UICatalog = new Catalog(CATALOG_ID, createOpenUIComponents());
-const legacyOpenuiA2UICatalog = new Catalog(
-  LEGACY_CATALOG_ID,
-  createOpenUIComponents(),
-);
+/**
+ * The catalogs, rebuilt when the block registry changes.
+ *
+ * They were module constants, which meant they were built at import — before
+ * an edition has registered anything. Cached on the registry version so the
+ * common case still builds them once, and a registration invalidates them.
+ */
+type A2UICatalogPair = [
+  Catalog<ReactComponentImplementation>,
+  Catalog<ReactComponentImplementation>,
+];
+
+let catalogCache: { version: number; catalogs: A2UICatalogPair } | null = null;
+
+function a2uiCatalogs(): A2UICatalogPair {
+  const version = getRegistryVersion();
+  if (catalogCache?.version === version) return catalogCache.catalogs;
+  const catalogs: A2UICatalogPair = [
+    new Catalog(CATALOG_ID, createOpenUIComponents()),
+    new Catalog(LEGACY_CATALOG_ID, createOpenUIComponents()),
+  ];
+  catalogCache = { version, catalogs };
+  return catalogs;
+}
 
 /**
  * id → component, for resolving references that A2UI expresses as ids.
@@ -217,7 +265,10 @@ const legacyOpenuiA2UICatalog = new Catalog(
 const A2UIComponentIndex = createContext<Map<string, Record<string, unknown>>>(new Map());
 
 export function A2UIRenderer({ body }: A2UIRendererProps) {
-  const surfaces = useMemo(() => buildSurfaces(body), [body]);
+  // Surfaces are rebuilt when a registration lands, not only when the payload
+  // changes: a conversation already on screen must pick up an edition's blocks.
+  const version = useSyncExternalStore(subscribeBlocks, getRegistryVersion, getRegistryVersion);
+  const surfaces = useMemo(() => buildSurfaces(body), [body, version]);
   const index = useMemo(() => buildComponentIndex(body), [body]);
   if (!surfaces.length) return null;
 
@@ -250,10 +301,9 @@ function buildSurfaces(body: string): SurfaceModel<ReactComponentImplementation>
   const messages = normalizeMessages(parseA2UIMessages(body));
   if (!messages.length) return [];
 
-  const processor = new MessageProcessor<ReactComponentImplementation>([
-    openuiA2UICatalog,
-    legacyOpenuiA2UICatalog,
-  ]);
+  const processor = new MessageProcessor<ReactComponentImplementation>(
+    a2uiCatalogs(),
+  );
 
   try {
     processor.processMessages(messages as never);
@@ -268,7 +318,7 @@ function buildSurfaces(body: string): SurfaceModel<ReactComponentImplementation>
 }
 
 function createOpenUIComponents(): ReactComponentImplementation[] {
-  return A2UI_COMPONENT_NAMES.map((name) => {
+  return a2uiComponentNames().map((name) => {
     const api = { name, schema: looseComponentSchema } as unknown as ComponentApi;
     return createA2UIComponent(
       api,
