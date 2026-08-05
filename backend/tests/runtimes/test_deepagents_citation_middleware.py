@@ -7,12 +7,16 @@ import json
 import time
 from typing import Any, cast
 
-from langchain.agents.middleware.types import ToolCallRequest
-from langchain_core.messages import ToolMessage
+from deepagents.backends import FilesystemBackend
+from deepagents.middleware.summarization import SummarizationMiddleware
+from langchain.agents.middleware.types import ModelRequest, ModelResponse, ToolCallRequest
+from langchain_core.language_models.fake_chat_models import FakeListChatModel
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from src.core.citation import EvidenceRegistry
 from src.core.mcp_source_metadata import MCP_SOURCE_TRANSPORT_KEY
 from src.runtimes.deepagents.middleware import (
     CitationEvidenceCompactionMiddleware,
+    InvalidToolCallPairMiddleware,
     ToolErrorTolerantMiddleware,
     _canonical_metric_for_factor_formula,
     citation_artifact_content,
@@ -73,9 +77,20 @@ async def test_citation_evidence_is_compacted_for_model_and_preserved_privately(
     assert "capturedAt" not in compact_text
     private_content = citation_artifact_content(result)
     assert private_content is not None
-    private_items = json.loads(private_content)["_valuz_evidence"]
+    private_payload = json.loads(private_content)
+    private_items = private_payload["_valuz_evidence"]
     assert len(private_items) == 1
+    assert private_payload["_valuz_evidence_format"] == 1
     assert private_items[0]["kind"] == "structured-evidence-collection"
+    registry = EvidenceRegistry()
+    assert (
+        registry.register_tool_projection(
+            result.content,
+            private_content,
+            trusted_private=True,
+        )
+        == 1
+    )
     assert private_items[0]["collectionHandle"] == hint["collectionHandle"]
     assert "data" not in json.loads(private_content)
 
@@ -147,9 +162,20 @@ async def test_large_nested_legacy_result_compacts_before_filesystem_eviction() 
     assert len(str(result.content)) < len(original_content) / 4
     private_content = citation_artifact_content(result)
     assert private_content is not None
-    private_items = json.loads(private_content)["_valuz_evidence"]
+    private_payload = json.loads(private_content)
+    private_items = private_payload["_valuz_evidence"]
     assert len(private_items) == 1
-    assert private_items[0]["kind"] == "structured-evidence-collection"
+    assert private_payload["_valuz_evidence_format"] == 1
+    assert private_items[0]["projectionRef"]
+    registry = EvidenceRegistry()
+    assert (
+        registry.register_tool_projection(
+            result.content,
+            private_content,
+            trusted_private=True,
+        )
+        == 1
+    )
 
 
 async def test_calculation_rejects_value_that_does_not_match_collection_address() -> None:
@@ -258,6 +284,99 @@ async def test_calculation_rejects_value_that_does_not_match_collection_address(
     assert calculation_called is False
 
 
+async def test_calculation_validates_evidence_uri_collection_address() -> None:
+    middleware = CitationEvidenceCompactionMiddleware()
+    payload = {
+        "data": [{"revenue": 170_899_152_276}],
+        "_valuz_evidence": [
+            {
+                "evidenceHandle": "ev_revenue_2024_12345678",
+                "source": {
+                    "sourceId": "financials:600519",
+                    "providerId": "valuz-stock",
+                    "sourceType": "dataset",
+                    "title": "Company income statement · 600519",
+                    "retrievedAt": "2026-08-02T08:00:00Z",
+                },
+                "evidence": {
+                    "kind": "structured-data",
+                    "datasetId": "financials",
+                    "toolName": "income_statement",
+                    "recordKey": "600519|2024 FY",
+                    "field": "revenue",
+                    "metric": "operating_revenue",
+                    "value": 170_899_152_276,
+                    "unit": "CNY",
+                    "period": "2024 FY",
+                    "capturedAt": "2026-08-02T08:00:00Z",
+                },
+            }
+        ],
+    }
+    statement_request = cast(
+        Any,
+        type(
+            "Request",
+            (),
+            {
+                "tool_call": {
+                    "id": "statement-uri",
+                    "name": "income_statement",
+                    "args": {"symbol": "600519"},
+                }
+            },
+        )(),
+    )
+
+    async def statement_handler(_request: ToolCallRequest) -> ToolMessage:
+        return ToolMessage(
+            content=[{"type": "text", "text": json.dumps(payload)}],
+            tool_call_id="statement-uri",
+            name="income_statement",
+        )
+
+    statement = await middleware.awrap_tool_call(statement_request, statement_handler)
+    assert isinstance(statement, ToolMessage)
+    hint = json.loads(statement.content[0]["text"])["_valuz_evidence_hint"]
+    address = f"evidence://{hint['collectionHandle']}#/data/0/revenue"
+    calculation_request = cast(
+        Any,
+        type(
+            "Request",
+            (),
+            {
+                "tool_call": {
+                    "id": "calculation-uri",
+                    "name": "citation_calculate",
+                    "args": {
+                        "expression": "revenue / 100000000",
+                        "inputs": [
+                            {
+                                "name": "revenue",
+                                "value": 170_899_152_276,
+                                "evidenceHandle": address,
+                            }
+                        ],
+                        "unit": "CNY 100m",
+                    },
+                }
+            },
+        )(),
+    )
+    calculation_called = False
+
+    async def calculation_handler(_request: ToolCallRequest) -> ToolMessage:
+        nonlocal calculation_called
+        calculation_called = True
+        return ToolMessage(content="ok", tool_call_id="calculation-uri")
+
+    accepted = await middleware.awrap_tool_call(calculation_request, calculation_handler)
+
+    assert isinstance(accepted, ToolMessage)
+    assert accepted.status != "error"
+    assert calculation_called is True
+
+
 async def test_indexed_chunks_gain_evidence_before_deepagents_compaction() -> None:
     original = ToolMessage(
         content=json.dumps(
@@ -310,7 +429,14 @@ async def test_indexed_chunks_gain_evidence_before_deepagents_compaction() -> No
     private = citation_artifact_content(result)
     assert private is not None
     registry = EvidenceRegistry()
-    assert registry.register_tool_result(private, trusted_private=True) == 1
+    assert (
+        registry.register_tool_projection(
+            compacted,
+            private,
+            trusted_private=True,
+        )
+        == 1
+    )
 
 
 async def test_compaction_does_not_register_out_of_scope_indexed_chunks() -> None:
@@ -633,7 +759,10 @@ async def test_reportify_mcp_metadata_builds_lazy_collection_without_per_field_e
     assert private is not None
     private_payload = json.loads(private)
     assert len(private_payload["_valuz_evidence"]) == 1
-    assert private_payload["_valuz_evidence"][0]["kind"] == "structured-evidence-collection"
+    assert private_payload["_valuz_evidence_format"] == 1
+    assert private_payload["_valuz_evidence"][0]["projectionRef"] == "/_valuz_evidence_hint"
+    registry = EvidenceRegistry()
+    assert registry.register_tool_projection(result.content, private, trusted_private=True) == 1
 
 
 async def test_reportify_discovery_metadata_stays_non_citable() -> None:
@@ -823,12 +952,19 @@ async def test_reportify_document_summary_metadata_survives_transport_as_one_evi
     private_payload = json.loads(private)
     evidence = private_payload["_valuz_evidence"]
     assert len(evidence) == 2
-    summary_evidence = next(item for item in evidence if item["evidence"]["quote"] == summary)
-    assert summary_evidence["evidenceHandle"] == visible["evidenceHandle"]
+    summary_evidence = next(
+        item for item in evidence if item["evidence"].get("quoteRef") == "/summary"
+    )
+    assert "evidenceHandle" not in summary_evidence
     assert summary_evidence["locator"] == {
         "kind": "external",
         "fragment": "provider-summary",
     }
+    registry = EvidenceRegistry()
+    assert registry.register_tool_projection(visible, private, trusted_private=True) == 2
+    record = registry.resolve(visible["evidenceHandle"])
+    assert record is not None
+    assert record.evidence["quote"] == summary
 
 
 async def test_kb_search_exact_chunks_survive_stale_non_citable_metadata() -> None:
@@ -1879,3 +2015,415 @@ async def test_repeated_document_not_found_is_returned_without_host_short_circui
     assert isinstance(third, ToolMessage) and third.status == "error"
     assert calls == 3
     assert "HTTP error 404" in str(third.content)
+
+
+async def test_invalid_provider_visible_tool_call_gets_transient_error_result() -> None:
+    malformed_id = "call_00_malformed_todos"
+    valid_id = "call_01_search"
+    assistant = AIMessage(
+        content=[
+            {"type": "thinking", "thinking": "I will update the plan and search."},
+            {
+                "type": "tool_use",
+                "id": malformed_id,
+                "name": "write_todos",
+                "input": {},
+                "partial_json": '{"todos":[{""content":"search"}]}',
+            },
+            {
+                "type": "tool_use",
+                "id": valid_id,
+                "name": "conferences_search",
+                "input": {"query": "AI capacity"},
+            },
+        ],
+        tool_calls=[
+            {
+                "id": valid_id,
+                "name": "conferences_search",
+                "args": {"query": "AI capacity"},
+                "type": "tool_call",
+            }
+        ],
+        invalid_tool_calls=[
+            {
+                "id": malformed_id,
+                "name": "write_todos",
+                "args": '{"todos":[{""content":"search"}]}',
+                "error": None,
+                "type": "invalid_tool_call",
+            }
+        ],
+    )
+    valid_result = ToolMessage(
+        content="search result",
+        tool_call_id=valid_id,
+        name="conferences_search",
+    )
+    captured: list[ModelRequest] = []
+
+    async def handler(request: ModelRequest) -> ModelResponse:
+        captured.append(request)
+        return ModelResponse(result=[AIMessage(content="continue")])
+
+    response = await InvalidToolCallPairMiddleware().awrap_model_call(
+        ModelRequest(
+            model=cast(Any, object()),
+            messages=[HumanMessage(content="research"), assistant, valid_result],
+        ),
+        handler,
+    )
+
+    assert isinstance(response, ModelResponse)
+    assert captured[0].messages[1] is assistant
+    assert [
+        message.tool_call_id
+        for message in captured[0].messages
+        if isinstance(message, ToolMessage)
+    ] == [malformed_id, valid_id]
+    malformed_result = cast(ToolMessage, captured[0].messages[2])
+    assert malformed_result.status == "error"
+    assert "not executed" in str(malformed_result.content)
+
+
+async def test_invalid_tool_call_pair_is_not_duplicated_when_already_answered() -> None:
+    malformed_id = "call_00_already_answered"
+    assistant = AIMessage(
+        content=[
+            {
+                "type": "tool_use",
+                "id": malformed_id,
+                "name": "write_todos",
+                "input": {},
+            }
+        ],
+        invalid_tool_calls=[
+            {
+                "id": malformed_id,
+                "name": "write_todos",
+                "args": "{bad json",
+                "error": None,
+                "type": "invalid_tool_call",
+            }
+        ],
+    )
+    existing = ToolMessage(
+        content="malformed arguments",
+        tool_call_id=malformed_id,
+        name="write_todos",
+        status="error",
+    )
+    captured: list[ModelRequest] = []
+
+    async def handler(request: ModelRequest) -> object:
+        captured.append(request)
+        return object()
+
+    await InvalidToolCallPairMiddleware().awrap_model_call(
+        ModelRequest(
+            model=cast(Any, object()),
+            messages=[HumanMessage(content="research"), assistant, existing],
+        ),
+        handler,
+    )
+
+    assert captured[0].messages == [HumanMessage(content="research"), assistant, existing]
+
+
+def _register_continuity_value(
+    registry: EvidenceRegistry,
+    handle: str,
+    value: int | float,
+    *,
+    metric: str = "value",
+    unit: str = "count",
+) -> None:
+    assert (
+        registry.register_tool_result(
+            {
+                "_valuz_evidence": [
+                    {
+                        "evidenceHandle": handle,
+                        "source": {
+                            "sourceId": f"continuity:{handle}",
+                            "providerId": "test",
+                            "sourceType": "dataset",
+                            "title": f"Continuity source · {handle}",
+                            "retrievedAt": "2026-08-05T00:00:00Z",
+                        },
+                        "evidence": {
+                            "kind": "structured-data",
+                            "datasetId": "continuity",
+                            "toolName": "continuity_lookup",
+                            "recordKey": handle,
+                            "field": metric,
+                            "metric": metric,
+                            "value": value,
+                            "unit": unit,
+                            "period": "2024 FY",
+                            "capturedAt": "2026-08-05T00:00:00Z",
+                        },
+                    }
+                ]
+            }
+        )
+        == 1
+    )
+
+
+def _continuity_collection_payload(handle: str) -> dict[str, Any]:
+    return {
+        "data": [{"symbol": "600519", "revenue": 170_899_152_276}],
+        "_valuz_evidence": [
+            {
+                "evidenceHandle": handle,
+                "source": {
+                    "sourceId": "financials:600519",
+                    "providerId": "valuz-stock",
+                    "sourceType": "dataset",
+                    "title": "Company income statement · 600519",
+                    "retrievedAt": "2026-08-05T00:00:00Z",
+                },
+                "evidence": {
+                    "kind": "structured-data",
+                    "datasetId": "financials",
+                    "toolName": "income_statement",
+                    "recordKey": "600519|2024 FY",
+                    "entityId": "600519",
+                    "field": "revenue",
+                    "metric": "operating_revenue",
+                    "value": 170_899_152_276,
+                    "unit": "CNY",
+                    "period": "2024 FY",
+                    "capturedAt": "2026-08-05T00:00:00Z",
+                },
+            }
+        ],
+    }
+
+
+async def _remember_model_reference(
+    middleware: CitationEvidenceCompactionMiddleware,
+    reference: str,
+) -> None:
+    async def handler(_request: ModelRequest) -> object:
+        return object()
+
+    await middleware.awrap_model_call(
+        ModelRequest(
+            model=cast(Any, object()),
+            messages=[AIMessage(content=f"[1](evidence://{reference})")],
+        ),
+        handler,
+    )
+
+
+async def _summarized_model_request(
+    middleware: CitationEvidenceCompactionMiddleware,
+    *,
+    system_message: SystemMessage | None = None,
+    summary: str = "summarized",
+) -> ModelRequest:
+    captured: list[ModelRequest] = []
+
+    async def handler(request: ModelRequest) -> object:
+        captured.append(request)
+        return object()
+
+    await middleware.awrap_model_call(
+        ModelRequest(
+            model=cast(Any, object()),
+            messages=[
+                HumanMessage(
+                    content=summary,
+                    additional_kwargs={"lc_source": "summarization"},
+                )
+            ],
+            system_message=system_message,
+        ),
+        handler,
+    )
+    return captured[0]
+
+
+async def test_evidence_continuity_restores_only_active_handles_after_summarization() -> None:
+    registry = EvidenceRegistry()
+    _register_continuity_value(registry, "ev_active_12345678", 170_899_152_276)
+    _register_continuity_value(registry, "ev_inactive_12345678", 89_100_000_000)
+    middleware = CitationEvidenceCompactionMiddleware(evidence_registry=registry)
+    await _remember_model_reference(middleware, "ev_active_12345678")
+
+    request = await _summarized_model_request(
+        middleware,
+        system_message=SystemMessage(content="original system prompt"),
+    )
+    resumed = str(request.system_message.content)
+    assert "original system prompt" in resumed
+    assert "<valuz_evidence_resume>" in resumed
+    assert "evidence://ev_active_12345678" in resumed
+    assert "170899152276" in resumed
+    assert "ev_inactive_12345678" not in resumed
+
+
+async def test_evidence_continuity_runs_after_real_deepagents_summarizer(tmp_path) -> None:
+    registry = EvidenceRegistry()
+    _register_continuity_value(
+        registry,
+        "ev_summary_12345678",
+        15.7,
+        metric="revenue_growth",
+        unit="percent",
+    )
+    continuity = CitationEvidenceCompactionMiddleware(evidence_registry=registry)
+    await _remember_model_reference(continuity, "ev_summary_12345678")
+    summarizer = SummarizationMiddleware(
+        FakeListChatModel(responses=["Revenue evidence was collected."]),
+        backend=FilesystemBackend(root_dir=tmp_path, virtual_mode=True),
+        trigger=("messages", 3),
+        keep=("messages", 1),
+        truncate_args_settings=None,
+    )
+    captured: list[ModelRequest] = []
+
+    async def terminal_handler(request: ModelRequest) -> ModelResponse:
+        captured.append(request)
+        return ModelResponse(result=[AIMessage(content="done")])
+
+    async def continuity_handler(request: ModelRequest) -> ModelResponse:
+        return await continuity.awrap_model_call(request, terminal_handler)
+
+    await summarizer.awrap_model_call(
+        ModelRequest(
+            model=FakeListChatModel(responses=["unused"]),
+            messages=[
+                HumanMessage(content="first"),
+                AIMessage(content="[1](evidence://ev_summary_12345678)"),
+                HumanMessage(content="second"),
+                AIMessage(content="working"),
+                HumanMessage(content="continue"),
+            ],
+            system_message=SystemMessage(content="original system prompt"),
+            state=cast(Any, {}),
+        ),
+        continuity_handler,
+    )
+
+    assert captured[0].messages[0].additional_kwargs["lc_source"] == "summarization"
+    resumed = str(captured[0].system_message.content)
+    assert "original system prompt" in resumed
+    assert "evidence://ev_summary_12345678" in resumed
+    assert '"metric":"revenue_growth"' in resumed
+    assert '"value":15.7' in resumed
+
+
+async def test_evidence_continuity_does_not_modify_normal_model_requests() -> None:
+    middleware = CitationEvidenceCompactionMiddleware()
+    original_system = SystemMessage(content="original system prompt")
+    captured: list[ModelRequest] = []
+
+    async def handler(request: ModelRequest) -> object:
+        captured.append(request)
+        return object()
+
+    await middleware.awrap_model_call(
+        ModelRequest(
+            model=cast(Any, object()),
+            messages=[HumanMessage(content="normal turn")],
+            system_message=original_system,
+        ),
+        handler,
+    )
+    assert captured[0].system_message is original_system
+
+
+async def test_evidence_continuity_restores_collection_addresses() -> None:
+    middleware = CitationEvidenceCompactionMiddleware()
+    payload = _continuity_collection_payload("ev_revenue_87654321")
+
+    async def tool_handler(_request: ToolCallRequest) -> ToolMessage:
+        return ToolMessage(
+            content=[{"type": "text", "text": json.dumps(payload)}],
+            tool_call_id="toolu-continuity",
+            name="income_statement",
+        )
+
+    compacted = await middleware.awrap_tool_call(cast(Any, object()), tool_handler)
+    assert isinstance(compacted, ToolMessage)
+    hint = json.loads(compacted.content[0]["text"])["_valuz_evidence_hint"]
+    address = f"{hint['collectionHandle']}#/data/0/revenue"
+    await _remember_model_reference(middleware, address)
+
+    request = await _summarized_model_request(middleware)
+    resumed = str(request.system_message.content)
+    assert f"evidence://{address}" in resumed
+    assert "170899152276" in resumed
+
+
+async def test_evidence_continuity_retains_collection_before_first_model_use() -> None:
+    middleware = CitationEvidenceCompactionMiddleware()
+    payload = _continuity_collection_payload("ev_revenue_11223344")
+
+    async def tool_handler(_request: ToolCallRequest) -> ToolMessage:
+        return ToolMessage(
+            content=[{"type": "text", "text": json.dumps(payload)}],
+            tool_call_id="toolu-before-summary",
+            name="income_statement",
+        )
+
+    compacted = await middleware.awrap_tool_call(cast(Any, object()), tool_handler)
+    assert isinstance(compacted, ToolMessage)
+    hint = json.loads(compacted.content[0]["text"])["_valuz_evidence_hint"]
+
+    # Compression may happen before the assistant authors its first Address.
+    request = await _summarized_model_request(
+        middleware,
+        summary="贵州茅台 600519 的 2024 FY 营业收入为 170899152276 CNY。",
+    )
+    resumed = str(request.system_message.content)
+    assert f"evidence://{hint['collectionHandle']}" in resumed
+    assert '"contentRoot":"/data"' in resumed
+    assert '"value":170899152276' in resumed
+    assert "ev_revenue_11223344" not in resumed
+
+
+async def test_evidence_continuity_preserves_nested_handoff_references() -> None:
+    registry = EvidenceRegistry()
+    _register_continuity_value(registry, "ev_nested_12345678", 42)
+    parent = CitationEvidenceCompactionMiddleware(evidence_registry=registry)
+
+    async def handoff_handler(_request: ToolCallRequest) -> ToolMessage:
+        return ToolMessage(
+            content="Nested result [1](evidence://ev_nested_12345678)",
+            tool_call_id="toolu-task",
+            name="task",
+        )
+
+    await parent.awrap_tool_call(cast(Any, object()), handoff_handler)
+    request = await _summarized_model_request(parent)
+    resumed = str(request.system_message.content)
+    assert "evidence://ev_nested_12345678" in resumed
+    assert '"value":42' in resumed
+
+
+async def test_evidence_continuity_working_set_survives_middleware_rebuild() -> None:
+    registry = EvidenceRegistry()
+    _register_continuity_value(registry, "ev_rebuild_12345678", 7)
+    first_graph = CitationEvidenceCompactionMiddleware(evidence_registry=registry)
+    await _remember_model_reference(first_graph, "ev_rebuild_12345678")
+
+    rebuilt_graph = CitationEvidenceCompactionMiddleware(evidence_registry=registry)
+    request = await _summarized_model_request(rebuilt_graph)
+    resumed = str(request.system_message.content)
+    assert "evidence://ev_rebuild_12345678" in resumed
+    assert '"value":7' in resumed
+
+
+async def test_evidence_continuity_drops_prior_turn_state_after_registry_reset() -> None:
+    registry = EvidenceRegistry()
+    _register_continuity_value(registry, "ev_previous_12345678", 1)
+    middleware = CitationEvidenceCompactionMiddleware(evidence_registry=registry)
+    await _remember_model_reference(middleware, "ev_previous_12345678")
+
+    registry.reset()
+    request = await _summarized_model_request(middleware)
+    assert request.system_message is None

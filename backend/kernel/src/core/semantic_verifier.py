@@ -15,6 +15,7 @@ import json
 import logging
 import re
 import threading
+import time
 from collections import Counter, OrderedDict
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -28,14 +29,15 @@ from src.core.claim_evidence_resolution import (
 )
 from src.core.types import Session
 
-SEMANTIC_VERIFIER_REVISION = "claim-evidence-semantic-v2"
+SEMANTIC_VERIFIER_REVISION = "claim-evidence-semantic-v5"
 DEFAULT_MAX_CALLS_PER_TURN = 12
 DEFAULT_MAX_CANDIDATES = 8
-DEFAULT_MAX_EXCERPT_CHARS = 4_000
-DEFAULT_MAX_CLAIMS_PER_BATCH = 6
-DEFAULT_MAX_EVIDENCE_PER_BATCH = 24
-DEFAULT_MAX_BATCH_CHARS = 48_000
+DEFAULT_MAX_EXCERPT_CHARS = 2_800
+DEFAULT_MAX_CLAIMS_PER_BATCH = 4
+DEFAULT_MAX_EVIDENCE_PER_BATCH = 16
+DEFAULT_MAX_BATCH_CHARS = 28_000
 DEFAULT_CACHE_ENTRIES = 512
+DEFAULT_MODEL_TIMEOUT_SECONDS = 25.0
 
 logger = logging.getLogger(__name__)
 
@@ -45,19 +47,27 @@ You have no tools and must not search, infer a new source, create a citation, or
 rewrite the Claim. Decide only whether the supplied Evidence supports the Claim.
 
 The input contains a requests array. Evaluate every request independently. Never
-use one request's Evidence to support another request. Return exactly one JSON
-object with a results array. Each result must contain:
+use one request's Evidence to support another request. Return compact JSON only:
+{"results":[{"claimId":"...","verdict":"entailed","evidenceIds":["..."],"confidence":0.99}]}
+
+Each result must contain only:
 claimId: the unchanged id from that request
 verdict: entailed | partially-entailed | unresolved | contradicted | unrelated
-evidenceIds: ids from that request's candidates only
-supportSpans: array of {evidenceId, start, end} offsets inside that candidate quote
-coveredParts: array of short Claim fragments supported by those candidates
-missingParts: array of short Claim fragments not supported
-conflicts: array of concrete conflicts visible in that request
+evidenceIds: supporting ids from that request's candidates only
 confidence: number from 0 to 1
 
+Use entailed when the candidates jointly support every material factual part,
+including faithful translation, paraphrase, and equivalent unit presentation.
+Use partially-entailed only when at least one material part is supported and at
+least one material part is not; then add missingParts with only the unsupported
+short fragments. Evidence may be split across several candidates in the same
+request. A candidate's documentContext contains safe title/period/date metadata
+and may support only those scope attributes; it is not a substitute for quote
+support of the candidate's substantive facts.
+
 Use unresolved when context is insufficient. Do not treat missing text as a
-contradiction. Do not include Markdown or any text outside the JSON object."""
+contradiction. Do not explain the answer, copy Claim text, calculate character
+offsets, or include Markdown outside the JSON object."""
 
 _VERDICTS = {
     "entailed",
@@ -192,15 +202,36 @@ class SessionModelSemanticVerifier:
                 sort_keys=True,
                 separators=(",", ":"),
             )
+            started = time.perf_counter()
             try:
                 raw = self._invoke(_SYSTEM_PROMPT, encoded)
                 parsed = _parse_batch_result(
                     raw,
                     [request for request, _cache_key_value in batch],
                 )
-            except Exception:  # noqa: BLE001 — optional sidecar always fails open
-                logger.debug("semantic verifier batch call failed", exc_info=True)
+            except Exception as exc:  # noqa: BLE001 — optional sidecar always fails open
+                logger.warning(
+                    "semantic verifier batch failed: model=%s claims=%d evidence=%d "
+                    "chars=%d elapsed_ms=%.1f error=%s",
+                    self._model_id,
+                    len(batch),
+                    sum(len(request["candidates"]) for request, _cache_key in batch),
+                    len(encoded),
+                    (time.perf_counter() - started) * 1_000,
+                    type(exc).__name__,
+                )
                 parsed = {}
+            else:
+                logger.info(
+                    "semantic verifier batch complete: model=%s claims=%d evidence=%d "
+                    "chars=%d parsed=%d elapsed_ms=%.1f",
+                    self._model_id,
+                    len(batch),
+                    sum(len(request["candidates"]) for request, _cache_key in batch),
+                    len(encoded),
+                    len(parsed),
+                    (time.perf_counter() - started) * 1_000,
+                )
             for request, cache_key in batch:
                 claim_id = request["claim"]["claimId"]
                 result = parsed.get(claim_id, _unresolved())
@@ -284,9 +315,14 @@ def _build_model_invoke(
         kwargs: dict[str, Any] = {
             "api_key": SecretStr(api_key),
             "model_name": model_id,
-            "max_tokens": 4_000,
-            "timeout": 15.0,
+            "max_tokens": 1_800,
+            "timeout": DEFAULT_MODEL_TIMEOUT_SECONDS,
             "max_retries": 0,
+            # Claim-to-Evidence verification is a bounded classification
+            # sidecar, not an agent reasoning turn. Gateway model aliases may
+            # otherwise inherit extended thinking and spend the entire output
+            # budget on a private ``thinking`` block, leaving no JSON result.
+            "thinking": {"type": "disabled"},
         }
         if base_url:
             kwargs["base_url"] = base_url
@@ -297,7 +333,7 @@ def _build_model_invoke(
         kwargs = {
             "api_key": SecretStr(api_key),
             "model": model_id,
-            "timeout": 15.0,
+            "timeout": DEFAULT_MODEL_TIMEOUT_SECONDS,
             "max_retries": 0,
         }
         if base_url:
@@ -309,7 +345,7 @@ def _build_model_invoke(
         kwargs = {
             "model": model_id,
             "google_api_key": SecretStr(api_key),
-            "timeout": 15.0,
+            "timeout": DEFAULT_MODEL_TIMEOUT_SECONDS,
             "max_retries": 0,
         }
         if base_url:
@@ -346,8 +382,11 @@ def _request_payload(
             "evidenceId": candidate.handle,
             "quote": quote,
         }
+        document_context = _safe_document_context(candidate.source, evidence)
+        if document_context:
+            row["documentContext"] = document_context
         for key in ("prefix", "suffix"):
-            value = _bounded_text(evidence.get(key), limit=1_200)
+            value = _bounded_text(evidence.get(key), limit=400)
             if value:
                 row[key] = value
         table_context = evidence.get("tableContext")
@@ -530,6 +569,34 @@ def _json_safe_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
     except (TypeError, ValueError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _safe_document_context(
+    source: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> dict[str, str]:
+    """Project only non-secret document scope into semantic verification."""
+
+    output: dict[str, str] = {}
+    allowed = {
+        "title": 400,
+        "publishedAt": 80,
+        "period": 120,
+        "fiscalPeriod": 120,
+        "fiscalYear": 40,
+        "fiscalQuarter": 40,
+        "asOf": 80,
+        "date": 80,
+    }
+    for key, limit in allowed.items():
+        value = source.get(key)
+        if value in (None, ""):
+            value = evidence.get(key)
+        if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+            text = str(value).strip()[:limit]
+            if text:
+                output[key] = text
+    return output
 
 
 def _message_text(content: Any) -> str:

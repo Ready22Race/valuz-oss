@@ -37,6 +37,11 @@ export default defineConfig({
   ],
   resolve: {
     alias: {
+      // This repo is often consumed from a parent commercial workspace. Pin
+      // React resolution to this workspace's lockfile so Vitest cannot mix a
+      // parent React dispatcher with the local ReactDOM renderer.
+      react: resolvePath("./packages/ui/node_modules/react"),
+      "react-dom": resolvePath("./packages/ui/node_modules/react-dom"),
       "@valuz/shared": resolvePath("./packages/shared/src"),
       "@valuz/core": resolvePath("./packages/core/src"),
       "@valuz/ui": resolvePath("./packages/ui/src"),

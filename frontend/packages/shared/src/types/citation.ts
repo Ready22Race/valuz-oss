@@ -11,9 +11,37 @@ export interface CitationBundleV1 {
   /** Post-publish projection from Runtime evidence links to trusted ids. */
   projection?: {
     evidenceHandleToCitationId: Record<string, string>;
+    /** Render-only anchors for deterministic post-publish bindings. */
+    anchors?: CitationAnchorV1[];
+    /** Rectangular table scopes derived from cell lineage. */
+    provenanceRegions?: ProvenanceRegionV1[];
   };
   integrity?: CitationIntegrityV1;
   quality?: CitationQualityResultV1;
+}
+
+export interface CitationAnchorV1 {
+  citationId: string;
+  claimId: string;
+  location: ClaimLocationV1;
+  /** Raw Markdown insertion offset; the stored assistant text stays immutable. */
+  sourceOffset: number;
+  origin: "explicit" | "auto-bound" | "equivalent-claim";
+}
+
+export interface ProvenanceRegionV1 {
+  regionId: string;
+  /** Evidence-lineage group; several disconnected regions may share it. */
+  claimGroupId?: string;
+  blockIndex: number;
+  rowStart: number;
+  rowEnd: number;
+  columnStart: number;
+  columnEnd: number;
+  citationIds: string[];
+  anchor: ClaimLocationV1;
+  /** Raw Markdown insertion offset of the terminal table cell. */
+  sourceOffset: number;
 }
 
 export interface CitationRefV1 {
@@ -248,6 +276,10 @@ export interface CitationClaimAuditV1 {
   exact: string;
   segmentIndex: number;
   citationRequired: boolean;
+  auditPriority?: "critical" | "supporting" | "optional";
+  auditSelected?: boolean;
+  selectionReasons?: string[];
+  claimGroupId?: string;
   citationIds: string[];
   bindings?: ClaimEvidenceBindingV1[];
   status:
@@ -256,7 +288,8 @@ export interface CitationClaimAuditV1 {
     | "repaired"
     | "degraded"
     | "unverified"
-    | "unsupported";
+    | "unsupported"
+    | "not-selected";
   issueCodes: string[];
   location?: ClaimLocationV1;
 }
@@ -267,11 +300,14 @@ export interface CitationQualityResultV1 {
   policyLayers?: CitationPolicyLayerV1[];
   mode: "required-on-evidence" | "strict-domain" | string;
   status: "passed" | "unverified" | "degraded";
+  /** Bounded critical-Claim outcome; does not describe whole-answer truth. */
+  auditOutcome?: "passed" | "partial" | "needs-review";
   publishStatus: "ready" | "draft-only" | "blocked" | string;
   layers: Record<string, "passed" | "degraded" | string>;
   issues: CitationQualityIssueV1[];
   claims?: CitationClaimAuditV1[];
   extractorRevision?: string;
+  selectorRevision?: string;
   verifierRevision?: string;
   metrics: {
     citationCount: number;
@@ -283,6 +319,11 @@ export interface CitationQualityResultV1 {
     claimSemanticMismatchCount?: number;
     claimAmbiguousCount?: number;
     claimAuditTruncated?: boolean;
+    criticalClaimSelectedCount?: number;
+    criticalClaimSupportedCount?: number;
+    criticalClaimUnresolvedCount?: number;
+    criticalConfirmedConflictCount?: number;
+    optionalClaimObservedCount?: number;
     unsourcedClaimCount: number;
     unverifiedClaimCount: number;
     tierCounts: Record<string, number>;

@@ -29,6 +29,7 @@ from urllib.parse import parse_qsl, unquote, urlsplit
 
 from src.core.citation_quality import evaluate_citation_quality
 from src.core.claim_audit import (
+    ClaimCandidate,
     bind_claims_to_evidence,
     canonical_evidence_metric,
     extract_claims,
@@ -42,6 +43,9 @@ from src.core.claim_evidence_resolution import EvidenceCandidateIndex, SemanticV
 POLICY_REVISION = "citation-v1"
 EVIDENCE_ENVELOPE_KEY = "_valuz_evidence"
 EVIDENCE_HINT_KEY = "_valuz_evidence_hint"
+_PRIVATE_EVIDENCE_SOURCES_KEY = "_valuz_evidence_sources"
+_PRIVATE_EVIDENCE_FORMAT_KEY = "_valuz_evidence_format"
+_PRIVATE_EVIDENCE_FORMAT_VERSION = 1
 
 _HANDLE_RE = re.compile(r"^ev_[A-Za-z0-9_-]{8,128}$")
 _COLLECTION_HANDLE_RE = re.compile(r"^evc_[A-Za-z0-9_-]{8,128}$")
@@ -223,11 +227,33 @@ class EvidenceRegistry:
         self._materialized_count = 0
         self._materialization_rejected_count = 0
         self._overflow_reasons: set[str] = set()
+        self._continuity_references: dict[str, None] = {}
+        self._continuity_collections: dict[str, None] = {}
+        # Middleware instances are compiled into long-lived Runtime graphs,
+        # while Evidence itself is scoped to one user turn.  Incrementing a
+        # generation lets those middleware instances discard their own
+        # derived continuity state whenever the shared Registry is reset.
+        self._generation = 0
         self._allowed_document_ids = (
             {str(item) for item in allowed_document_ids if str(item)}
             if allowed_document_ids is not None
             else None
         )
+
+    def reset(self) -> None:
+        """Start a new turn without replacing the shared Registry object."""
+
+        self._records.clear()
+        self._collections.clear()
+        self._pending_collection_snapshots.clear()
+        self._rejected_count = 0
+        self._address_requested_count = 0
+        self._materialized_count = 0
+        self._materialization_rejected_count = 0
+        self._overflow_reasons.clear()
+        self._continuity_references.clear()
+        self._continuity_collections.clear()
+        self._generation += 1
 
     def register_tool_result(
         self,
@@ -358,8 +384,14 @@ class EvidenceRegistry:
         """
 
         self._capture_collection_hints(model_content, trusted_private=trusted_private)
+        registration_content = private_content if private_content is not None else model_content
+        if trusted_private and private_content is not None:
+            registration_content = _inflate_private_citation_content(
+                private_content,
+                model_content=model_content,
+            )
         return self.register_tool_result(
-            private_content if private_content is not None else model_content,
+            registration_content,
             tool_name=tool_name,
             trusted_private=trusted_private,
         )
@@ -460,6 +492,23 @@ class EvidenceRegistry:
     def get(self, handle: str) -> EvidenceRecord | None:
         return self._records.get(handle)
 
+    def get_collection(self, handle: str) -> EvidenceCollectionRecord | None:
+        """Return one exact immutable Collection for runtime continuity."""
+
+        return self._collections.get(handle)
+
+    def remember_continuity_reference(self, reference: str) -> None:
+        """Mark one validated direct handle/Address as recently model-visible."""
+
+        self._continuity_references.pop(reference, None)
+        self._continuity_references[reference] = None
+
+    def remember_continuity_collection(self, handle: str) -> None:
+        """Mark one validated Collection handle as recently model-visible."""
+
+        self._continuity_collections.pop(handle, None)
+        self._continuity_collections[handle] = None
+
     def resolve(self, handle: str) -> EvidenceRecord | None:
         """Resolve an exact handle or a uniquely matching digest alias.
 
@@ -476,9 +525,7 @@ class EvidenceRegistry:
         match = re.fullmatch(r"ev_[A-Za-z0-9_]+_([0-9a-f]{24})", handle)
         if match is not None:
             suffix = f"_{match.group(1)}"
-            candidates = [
-                record for key, record in self._records.items() if key.endswith(suffix)
-            ]
+            candidates = [record for key, record in self._records.items() if key.endswith(suffix)]
             if len(candidates) == 1:
                 return candidates[0]
 
@@ -518,10 +565,11 @@ class EvidenceRegistry:
         """
 
         locator_kind = str((record.locator or {}).get("kind") or "")
-        if (
-            record.source.get("sourceType") != "document"
-            or locator_kind in {"pdf", "chunk", "html"}
-        ):
+        if record.source.get("sourceType") != "document" or locator_kind in {
+            "pdf",
+            "chunk",
+            "html",
+        }:
             return record
         document_identity = _document_source_identity(record.source)
         broad_quote = _document_match_text(record.evidence)
@@ -607,6 +655,22 @@ class EvidenceRegistry:
             self._materialized_count += 1
         return existing
 
+    def preview_reference(self, handle: str, fragment: str | None) -> EvidenceRecord | None:
+        """Resolve an exact reference without mutating materialization stats.
+
+        Evidence Continuity uses this read-only path while rebuilding model
+        context after DeepAgents summarizes history.  A Collection Address is
+        resolved against the immutable snapshot, but it is not promoted into
+        ``_records`` until normal Citation processing actually consumes it.
+        """
+
+        if fragment is None:
+            return self.resolve(handle)
+        collection = self._collections.get(handle)
+        if collection is None or not fragment.startswith("#/"):
+            return None
+        return _materialize_collection_address(collection, unquote(fragment[1:]))
+
     def materialize_claim_candidates(
         self,
         text: str,
@@ -647,6 +711,31 @@ class EvidenceRegistry:
         for handle, pointer in sorted(requested):
             self.materialize_reference(handle, f"#{pointer}")
         return len(self._records) - before
+
+    def remember_continuity_claim_candidates(self, text: str) -> int:
+        """Restore exact Collection fields mentioned by a runtime summary.
+
+        A summarizer can compact the first model call after a large structured
+        result, before the assistant has authored a Collection Address.  Use
+        the existing bounded scalar candidate materializer on the summary and
+        retain only the canonical Evidence records it proves.  This is not a
+        semantic audit or repair and never searches for new data.
+        """
+
+        if not self._continuity_collections or not text.strip():
+            return 0
+        previous_handles = set(self._records)
+        added = self.materialize_claim_candidates(
+            text,
+            mode="required-on-evidence",
+            semantics=None,
+        )
+        if not added:
+            return 0
+        for handle in self._records:
+            if handle not in previous_handles:
+                self.remember_continuity_reference(handle)
+        return added
 
     def materialize_calculation_inputs(self) -> int:
         """Resolve Collection Addresses carried by calculation Evidence.
@@ -690,16 +779,13 @@ class EvidenceRegistry:
         snapshot = EvidenceRegistry(allowed_document_ids=self._allowed_document_ids)
         snapshot._records = dict(self._records)
         snapshot._collections = dict(self._collections)
-        snapshot._pending_collection_snapshots = dict(
-            self._pending_collection_snapshots
-        )
+        snapshot._pending_collection_snapshots = dict(self._pending_collection_snapshots)
         snapshot._rejected_count = self._rejected_count
         snapshot._address_requested_count = self._address_requested_count
         snapshot._materialized_count = self._materialized_count
-        snapshot._materialization_rejected_count = (
-            self._materialization_rejected_count
-        )
+        snapshot._materialization_rejected_count = self._materialization_rejected_count
         snapshot._overflow_reasons = set(self._overflow_reasons)
+        snapshot._generation = self._generation
         return snapshot
 
     def values(self) -> Iterable[EvidenceRecord]:
@@ -711,6 +797,18 @@ class EvidenceRegistry:
     @property
     def collection_count(self) -> int:
         return len(self._collections)
+
+    @property
+    def generation(self) -> int:
+        return self._generation
+
+    @property
+    def continuity_references(self) -> tuple[str, ...]:
+        return tuple(self._continuity_references)
+
+    @property
+    def continuity_collections(self) -> tuple[str, ...]:
+        return tuple(self._continuity_collections)
 
     @property
     def address_requested_count(self) -> int:
@@ -762,6 +860,178 @@ def _document_match_text(evidence: Mapping[str, Any]) -> str:
     if not isinstance(value, str):
         return ""
     return re.sub(r"\s+", "", value).casefold()
+
+
+def _build_projection_anchors_and_regions(
+    claims: Iterable[ClaimCandidate],
+    *,
+    auto_bound_claim_handles: Mapping[str, tuple[str, ...]],
+    equivalent_claim_handles: Mapping[str, tuple[str, ...]],
+    handle_to_citation_id: Mapping[str, str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Project post-publish bindings without rewriting assistant Markdown.
+
+    Narrative/list claims become direct anchors. Table cells are compressed
+    into rectangular provenance regions according to their actual Citation
+    lineage, so the implementation does not assume that a source belongs to a
+    row (or a column). The terminal cell owns the single visible marker.
+    """
+
+    anchors: list[dict[str, Any]] = []
+    table_cells: list[tuple[int, int, int, tuple[str, ...], ClaimCandidate]] = []
+    seen_anchors: set[tuple[str, str]] = set()
+
+    for claim in claims:
+        handles = auto_bound_claim_handles.get(claim.claim_id)
+        origin = "auto-bound"
+        if not handles:
+            handles = equivalent_claim_handles.get(claim.claim_id)
+            origin = "equivalent-claim"
+        if not handles:
+            continue
+        citation_ids = tuple(
+            dict.fromkeys(
+                citation_id
+                for handle in handles
+                for citation_id in [handle_to_citation_id.get(handle)]
+                if citation_id
+            )
+        )
+        if not citation_ids:
+            continue
+
+        location = claim.location
+        if location.get("kind") == "table-cell" and all(
+            isinstance(location.get(key), int) for key in ("blockIndex", "rowIndex", "columnIndex")
+        ):
+            table_cells.append(
+                (
+                    int(location["blockIndex"]),
+                    int(location["rowIndex"]),
+                    int(location["columnIndex"]),
+                    citation_ids,
+                    claim,
+                )
+            )
+            continue
+
+        for citation_id in citation_ids:
+            key = (claim.claim_id, citation_id)
+            if key in seen_anchors:
+                continue
+            seen_anchors.add(key)
+            anchors.append(
+                {
+                    "citationId": citation_id,
+                    "claimId": claim.claim_id,
+                    "location": copy.deepcopy(location),
+                    "sourceOffset": claim.insertion_offset,
+                    "origin": origin,
+                }
+            )
+
+    # Turn every table row into contiguous runs with identical lineage, then
+    # merge vertically adjacent runs only when their column bounds also match.
+    runs: list[dict[str, Any]] = []
+    grouped_rows: dict[tuple[int, tuple[str, ...], int], list[tuple[int, ClaimCandidate]]] = {}
+    for block, row, column, citation_ids, claim in table_cells:
+        grouped_rows.setdefault((block, citation_ids, row), []).append((column, claim))
+    for (block, citation_ids, row), cells in sorted(grouped_rows.items()):
+        ordered = sorted(cells, key=lambda item: item[0])
+        current: list[tuple[int, ClaimCandidate]] = []
+        for cell in ordered:
+            if current and cell[0] != current[-1][0] + 1:
+                runs.append(
+                    {
+                        "blockIndex": block,
+                        "rowStart": row,
+                        "rowEnd": row,
+                        "columnStart": current[0][0],
+                        "columnEnd": current[-1][0],
+                        "citationIds": citation_ids,
+                        "terminal": current[-1][1],
+                    }
+                )
+                current = []
+            current.append(cell)
+        if current:
+            runs.append(
+                {
+                    "blockIndex": block,
+                    "rowStart": row,
+                    "rowEnd": row,
+                    "columnStart": current[0][0],
+                    "columnEnd": current[-1][0],
+                    "citationIds": citation_ids,
+                    "terminal": current[-1][1],
+                }
+            )
+
+    rectangles: list[dict[str, Any]] = []
+    latest_by_shape: dict[tuple[int, tuple[str, ...], int, int], dict[str, Any]] = {}
+    for run in sorted(
+        runs,
+        key=lambda item: (
+            item["blockIndex"],
+            item["rowStart"],
+            item["columnStart"],
+            item["columnEnd"],
+            item["citationIds"],
+        ),
+    ):
+        shape = (
+            run["blockIndex"],
+            run["citationIds"],
+            run["columnStart"],
+            run["columnEnd"],
+        )
+        previous = latest_by_shape.get(shape)
+        if previous is not None and previous["rowEnd"] + 1 == run["rowStart"]:
+            previous["rowEnd"] = run["rowEnd"]
+            previous["terminal"] = run["terminal"]
+            continue
+        rectangle = dict(run)
+        rectangles.append(rectangle)
+        latest_by_shape[shape] = rectangle
+
+    regions: list[dict[str, Any]] = []
+    for rectangle in sorted(
+        rectangles,
+        key=lambda item: (
+            item["blockIndex"],
+            item["columnStart"],
+            item["rowStart"],
+            item["columnEnd"],
+        ),
+    ):
+        terminal = rectangle.pop("terminal")
+        citation_ids = list(rectangle["citationIds"])
+        rectangle["citationIds"] = citation_ids
+        # Claim Group identity follows Evidence lineage, not the rectangle's
+        # row/column geometry.  One source can therefore own several
+        # disconnected render regions while remaining one provenance group.
+        group_fingerprint = json.dumps(
+            {
+                "blockIndex": rectangle["blockIndex"],
+                "citationIds": citation_ids,
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        rectangle["claimGroupId"] = (
+            f"clg_{hashlib.sha256(group_fingerprint.encode()).hexdigest()[:20]}"
+        )
+        fingerprint = json.dumps(rectangle, sort_keys=True, ensure_ascii=False)
+        regions.append(
+            {
+                "regionId": f"prv_{hashlib.sha256(fingerprint.encode()).hexdigest()[:20]}",
+                **rectangle,
+                "anchor": copy.deepcopy(terminal.location),
+                "sourceOffset": terminal.insertion_offset,
+            }
+        )
+
+    return anchors, regions
 
 
 class CitationGuard:
@@ -853,9 +1123,7 @@ class CitationGuard:
             if canonical_handle in cited_handles:
                 return
             cited_handles.append(canonical_handle)
-            annotations: dict[str, Any] = {
-                "binding": {"evidenceHandle": canonical_handle}
-            }
+            annotations: dict[str, Any] = {"binding": {"evidenceHandle": canonical_handle}}
             if record.tool_name:
                 annotations["provenance"] = {"toolName": record.tool_name}
             citation: dict[str, Any] = {
@@ -985,6 +1253,15 @@ class CitationGuard:
             self._registry,
             semantics=semantics,
         )
+        # Keep the Runtime-authored coordinates before any deterministic
+        # binding links are inserted. Claim ids intentionally ignore source
+        # offsets, so later binding passes can still refer back to these
+        # immutable locations for the render-only sidecar projection.
+        projection_claims = extract_claims(
+            normalized_text,
+            mode=str(policy_mode or "required-on-evidence"),
+            semantics=semantics,
+        )
         self._registry.materialize_calculation_inputs()
         self._registry.materialize_claim_candidates(
             normalized_text,
@@ -1033,6 +1310,7 @@ class CitationGuard:
         unknown_ids: list[str] = []
         missing_locator_ids: list[str] = []
         handle_to_citation_id: dict[str, str] = {}
+
         def append_handle(identifier: str) -> str | None:
             requested_identifier = identifier
             record = self._registry.resolve(identifier)
@@ -1095,9 +1373,7 @@ class CitationGuard:
                 "evidence": evidence,
                 "resolutionStatus": "ready",
             }
-            annotations: dict[str, Any] = {
-                "binding": {"evidenceHandle": identifier}
-            }
+            annotations: dict[str, Any] = {"binding": {"evidenceHandle": identifier}}
             if record.tool_name:
                 annotations["provenance"] = {"toolName": record.tool_name}
             auto_bound_claim_ids = auto_bound_claims_by_handle.get(identifier)
@@ -1203,6 +1479,13 @@ class CitationGuard:
         canonical_text = _strip_redundant_source_section(canonical_text)
         canonical_text = _strip_protocol_source_placeholders(canonical_text)
 
+        projection_anchors, provenance_regions = _build_projection_anchors_and_regions(
+            projection_claims,
+            auto_bound_claim_handles=binding_result.auto_bound_claim_handles,
+            equivalent_claim_handles=propagated_bind_result.claim_handles,
+            handle_to_citation_id=handle_to_citation_id,
+        )
+
         all_citation_ids = [self._citation_id(record.handle) for record in self._registry.values()]
         used_citation_ids = {self._citation_id(handle) for handle in cited_handles}
         unused_ids = [item for item in all_citation_ids if item not in used_citation_ids]
@@ -1226,6 +1509,8 @@ class CitationGuard:
             "citations": citations,
             "projection": {
                 "evidenceHandleToCitationId": handle_to_citation_id,
+                "anchors": projection_anchors,
+                "provenanceRegions": provenance_regions,
             },
             "integrity": {
                 "status": status,
@@ -1869,7 +2154,11 @@ def rebase_collection_projections(content: Any) -> Any:
     return output
 
 
-def private_citation_tool_content(content: Any) -> str | None:
+def private_citation_tool_content(
+    content: Any,
+    *,
+    model_content: Any | None = None,
+) -> str | None:
     """Return only trusted direct Evidence and Collection descriptors.
 
     Structured ``data`` remains in the model projection and is captured through
@@ -1935,11 +2224,466 @@ def private_citation_tool_content(content: Any) -> str | None:
                 stack.append((nested, depth + 1))
     if not private_items:
         return None
+    private_payload: dict[str, Any] = {EVIDENCE_ENVELOPE_KEY: private_items}
+    if model_content is not None:
+        model_payload = _decode_json_payload(
+            model_content,
+            max_chars=EvidenceRegistry._MAX_PRIVATE_TOOL_RESULT_CHARS,
+        )
+        if model_payload is not None:
+            compacted_items = [
+                _compact_private_collection(
+                    _compact_private_text_evidence(item, model_payload=model_payload),
+                    model_payload=model_payload,
+                )
+                for item in private_items
+            ]
+            source_table = _deduplicate_private_evidence_sources(compacted_items)
+            candidate_payload: dict[str, Any] = {
+                EVIDENCE_ENVELOPE_KEY: compacted_items,
+                _PRIVATE_EVIDENCE_FORMAT_KEY: _PRIVATE_EVIDENCE_FORMAT_VERSION,
+            }
+            if source_table:
+                candidate_payload[_PRIVATE_EVIDENCE_SOURCES_KEY] = source_table
+            if _compact_json_size(candidate_payload) < _compact_json_size(private_payload):
+                private_payload = candidate_payload
     return json.dumps(
-        {EVIDENCE_ENVELOPE_KEY: private_items},
+        private_payload,
         ensure_ascii=False,
         separators=(",", ":"),
     )
+
+
+def _compact_json_size(value: Any) -> int:
+    return len(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+    )
+
+
+def _compact_private_text_evidence(
+    item: dict[str, Any],
+    *,
+    model_payload: Any,
+) -> dict[str, Any]:
+    """Replace a repeated text quote with a hash-verified model-content pointer.
+
+    The model projection already owns the immutable chunk text.  The private
+    sidecar only needs its address and content hash; registration materializes
+    the canonical Evidence record before any Citation/Audit consumer sees it.
+    If the exact text cannot be addressed unambiguously, preserve the legacy
+    self-contained envelope unchanged.
+    """
+
+    evidence = item.get("evidence")
+    handle = item.get("evidenceHandle")
+    if (
+        not isinstance(evidence, dict)
+        or evidence.get("kind") != "text"
+        or not isinstance(handle, str)
+    ):
+        return copy.deepcopy(item)
+    quote = evidence.get("quote")
+    content_hash = evidence.get("contentHash")
+    if not isinstance(quote, str) or not quote or content_hash != _text_content_hash(quote):
+        return copy.deepcopy(item)
+    pointer = _model_text_pointer_for_evidence(
+        model_payload,
+        evidence_handle=handle,
+        quote=quote,
+    )
+    if pointer is None:
+        return copy.deepcopy(item)
+
+    compacted = copy.deepcopy(item)
+    compacted_evidence = dict(compacted["evidence"])
+    compacted_evidence.pop("quote", None)
+    if compacted_evidence.get("kind") == "text":
+        compacted_evidence.pop("kind", None)
+    source = compacted.get("source")
+    if isinstance(source, dict) and compacted_evidence.get("capturedAt") == source.get(
+        "retrievedAt"
+    ):
+        compacted_evidence.pop("capturedAt", None)
+    if compacted_evidence.get("snippet") == quote[:_MAX_SNIPPET_CHARS]:
+        compacted_evidence.pop("snippet", None)
+    compacted_evidence["quoteRef"] = pointer
+    compacted["evidence"] = compacted_evidence
+    compacted.pop("evidenceHandle", None)
+    locator = compacted.get("locator")
+    if isinstance(locator, dict):
+        locator_quote = locator.get("quote")
+        compacted_locator = dict(locator)
+        if isinstance(locator_quote, dict) and locator_quote.get("exact") == quote:
+            compacted_locator.pop("quote", None)
+        if (
+            (
+                compacted_locator.get("kind") == "pdf"
+                and isinstance(compacted_locator.get("page"), int)
+            )
+            or (
+                compacted_locator.get("kind") == "html"
+                and isinstance(compacted_locator.get("cssSelector"), str)
+            )
+            or (
+                compacted_locator.get("kind") == "chunk"
+                and isinstance(compacted_locator.get("chunkId"), str)
+            )
+        ):
+            compacted_locator.pop("kind", None)
+        compacted["locator"] = compacted_locator
+    return compacted
+
+
+def _compact_private_collection(
+    item: dict[str, Any],
+    *,
+    model_payload: Any,
+) -> dict[str, Any]:
+    """Omit Collection fields that are deterministic private-wire defaults."""
+
+    if item.get("kind") != "structured-evidence-collection":
+        return item
+    compacted = copy.deepcopy(item)
+    if compacted.get("version") == 1:
+        compacted.pop("version", None)
+    source = compacted.get("source")
+    common = compacted.get("common")
+    addressing = compacted.get("addressing")
+    semantics = compacted.get("semantics")
+    if isinstance(source, dict) and source.get("sourceType") == "dataset":
+        source.pop("sourceType", None)
+    if isinstance(source, dict) and isinstance(common, dict):
+        if common.get("capturedAt") == source.get("retrievedAt"):
+            common.pop("capturedAt", None)
+    if isinstance(addressing, dict):
+        content_root = addressing.get("contentRoot")
+        if addressing.get("mode") == "json-pointer":
+            addressing.pop("mode", None)
+        if addressing.get("itemsPointer") == content_root:
+            addressing.pop("itemsPointer", None)
+        if addressing.get("identityFields") == []:
+            addressing.pop("identityFields", None)
+        if addressing.get("allowedPathRoots") == [content_root] and not addressing.get(
+            "allowedItemPaths"
+        ):
+            addressing.pop("allowedPathRoots", None)
+        schema_ref = addressing.get("fieldSchemaRef")
+        if (
+            isinstance(schema_ref, dict)
+            and isinstance(common, dict)
+            and common.get("datasetId") == schema_ref.get("schemaId")
+        ):
+            common.pop("datasetId", None)
+    if semantics == {}:
+        compacted.pop("semantics", None)
+    hint_pointer = _model_collection_hint_pointer(
+        model_payload,
+        collection_handle=str(item.get("collectionHandle") or ""),
+    )
+    if hint_pointer is not None:
+        found, hint = _resolve_json_pointer(model_payload, hint_pointer)
+        if found and isinstance(hint, dict) and _collection_hint_matches_descriptor(hint, item):
+            compacted["projectionRef"] = hint_pointer
+            compacted["projectionHash"] = _content_hash(hint)
+            compacted.pop("kind", None)
+            compacted.pop("collectionHandle", None)
+            compacted_addressing = compacted.get("addressing")
+            if isinstance(compacted_addressing, dict):
+                for key in (
+                    "contentRoot",
+                    "identityFields",
+                    "fieldSchemaRef",
+                    "allowedItemPaths",
+                ):
+                    compacted_addressing.pop(key, None)
+                if not compacted_addressing:
+                    compacted.pop("addressing", None)
+            compacted_semantics = compacted.get("semantics")
+            if isinstance(compacted_semantics, dict):
+                metric = compacted_semantics.get("metric")
+                if isinstance(metric, dict) and metric.get("mode") == hint.get("metricMode"):
+                    metric.pop("mode", None)
+                    if metric.get("valueRoots") == [""]:
+                        metric.pop("valueRoots", None)
+                    mapped_pointers = _mapped_semantic_pointers(compacted_semantics)
+                    if mapped_pointers and metric.get("excludedFields") == mapped_pointers:
+                        metric.pop("excludedFields", None)
+                        metric["mappedExclusions"] = 1
+    return compacted
+
+
+def _model_collection_hint_pointer(
+    model_payload: Any,
+    *,
+    collection_handle: str,
+) -> str | None:
+    if not _COLLECTION_HANDLE_RE.fullmatch(collection_handle):
+        return None
+    matches: list[str] = []
+    stack: list[tuple[Any, str]] = [(model_payload, "")]
+    while stack:
+        node, pointer = stack.pop()
+        if isinstance(node, dict):
+            if (
+                node.get("collectionHandle") == collection_handle
+                and isinstance(node.get("contentRoot"), str)
+                and node.get("addressing") == "json-pointer"
+            ):
+                matches.append(pointer)
+            for key, value in reversed(tuple(node.items())):
+                stack.append((value, f"{pointer}/{_escape_json_pointer_token(str(key))}"))
+        elif isinstance(node, list):
+            for index in range(len(node) - 1, -1, -1):
+                stack.append((node[index], f"{pointer}/{index}"))
+    unique = list(dict.fromkeys(matches))
+    return unique[0] if len(unique) == 1 else None
+
+
+def _collection_hint_matches_descriptor(
+    hint: Mapping[str, Any],
+    item: Mapping[str, Any],
+) -> bool:
+    addressing = item.get("addressing")
+    semantics = item.get("semantics")
+    if not isinstance(addressing, Mapping) or hint.get("addressing") != addressing.get("mode"):
+        return False
+    for hint_key, addressing_key in (
+        ("contentRoot", "contentRoot"),
+        ("identityFields", "identityFields"),
+        ("fieldSchemaRef", "fieldSchemaRef"),
+        ("allowedItemPaths", "allowedItemPaths"),
+    ):
+        if hint.get(hint_key) != addressing.get(addressing_key):
+            return False
+    metric = semantics.get("metric") if isinstance(semantics, Mapping) else None
+    if isinstance(metric, Mapping):
+        if hint.get("metricMode") != metric.get("mode"):
+            return False
+        if metric.get("mode") == "field-map" and hint.get("metricFields") != metric.get(
+            "fields", {}
+        ):
+            return False
+    return True
+
+
+def _mapped_semantic_pointers(semantics: Mapping[str, Any]) -> list[str]:
+    pointers = {
+        pointer
+        for group, mapping in semantics.items()
+        if group != "metric" and isinstance(mapping, Mapping)
+        for pointer in mapping.values()
+        if isinstance(pointer, str) and _json_pointer_tokens(pointer) is not None
+    }
+    return sorted(pointers)
+
+
+def _model_text_pointer_for_evidence(
+    model_payload: Any,
+    *,
+    evidence_handle: str,
+    quote: str,
+) -> str | None:
+    preferred_fields = ("content", "text", "html", "markdown", "raw_content", "summary")
+    matches: list[str] = []
+    stack: list[tuple[Any, str]] = [(model_payload, "")]
+    while stack:
+        node, pointer = stack.pop()
+        if isinstance(node, dict):
+            if node.get("evidenceHandle") == evidence_handle:
+                for key in preferred_fields:
+                    value = node.get(key)
+                    if isinstance(value, str) and value.strip() == quote:
+                        matches.append(f"{pointer}/{_escape_json_pointer_token(key)}")
+            for key, value in reversed(tuple(node.items())):
+                stack.append((value, f"{pointer}/{_escape_json_pointer_token(str(key))}"))
+        elif isinstance(node, list):
+            for index in range(len(node) - 1, -1, -1):
+                stack.append((node[index], f"{pointer}/{index}"))
+    unique = list(dict.fromkeys(matches))
+    return unique[0] if len(unique) == 1 else None
+
+
+def _deduplicate_private_evidence_sources(
+    items: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    buckets: dict[str, list[int]] = {}
+    sources: dict[str, dict[str, Any]] = {}
+    for index, item in enumerate(items):
+        source = item.get("source")
+        if not isinstance(source, dict):
+            continue
+        canonical = json.dumps(
+            source,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        source_ref = f"src_{hashlib.sha256(canonical.encode()).hexdigest()[:16]}"
+        buckets.setdefault(source_ref, []).append(index)
+        sources[source_ref] = source
+    shared = {source_ref for source_ref, indexes in buckets.items() if len(indexes) > 1}
+    if not shared:
+        return {}
+    for source_ref in shared:
+        for index in buckets[source_ref]:
+            items[index].pop("source", None)
+            items[index]["sourceRef"] = source_ref
+    return {source_ref: copy.deepcopy(sources[source_ref]) for source_ref in sorted(shared)}
+
+
+def _inflate_private_citation_content(
+    private_content: Any,
+    *,
+    model_content: Any,
+) -> Any:
+    private_payload = _decode_json_payload(
+        private_content,
+        max_chars=EvidenceRegistry._MAX_PRIVATE_TOOL_RESULT_CHARS,
+    )
+    model_payload = _decode_json_payload(
+        model_content,
+        max_chars=EvidenceRegistry._MAX_PRIVATE_TOOL_RESULT_CHARS,
+    )
+    if not isinstance(private_payload, (dict, list)) or model_payload is None:
+        return private_content
+    output = copy.deepcopy(private_payload)
+    if (
+        not isinstance(output, dict)
+        or output.get(_PRIVATE_EVIDENCE_FORMAT_KEY) != _PRIVATE_EVIDENCE_FORMAT_VERSION
+    ):
+        return private_content
+    source_table = output.get(_PRIVATE_EVIDENCE_SOURCES_KEY) if isinstance(output, dict) else None
+    source_table = source_table if isinstance(source_table, dict) else {}
+    stack: list[Any] = [output]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            candidates = _as_envelope_items(node.get(EVIDENCE_ENVELOPE_KEY))
+            for candidate in candidates:
+                if candidate.get("kind") == "structured-evidence-collection":
+                    _inflate_private_collection(candidate, model_payload=model_payload)
+                elif "projectionRef" in candidate:
+                    _inflate_private_collection(candidate, model_payload=model_payload)
+                source_ref = candidate.pop("sourceRef", None)
+                if isinstance(source_ref, str) and isinstance(source_table.get(source_ref), dict):
+                    candidate["source"] = copy.deepcopy(source_table[source_ref])
+                evidence = candidate.get("evidence")
+                if not isinstance(evidence, dict):
+                    continue
+                quote_ref = evidence.get("quoteRef")
+                if not isinstance(quote_ref, str):
+                    continue
+                candidate.setdefault(
+                    "evidenceHandle",
+                    _model_evidence_handle_for_quote_ref(model_payload, quote_ref),
+                )
+                evidence.setdefault("kind", "text")
+                source = candidate.get("source")
+                if isinstance(source, dict) and isinstance(source.get("retrievedAt"), str):
+                    evidence.setdefault("capturedAt", source["retrievedAt"])
+                evidence.pop("quoteRef", None)
+                found, raw_quote = _resolve_json_pointer(model_payload, quote_ref)
+                quote = raw_quote.strip() if isinstance(raw_quote, str) else None
+                if not quote or evidence.get("contentHash") != _text_content_hash(quote):
+                    continue
+                evidence["quote"] = quote
+                evidence.setdefault("snippet", quote[:_MAX_SNIPPET_CHARS])
+                locator = candidate.get("locator")
+                if isinstance(locator, dict):
+                    if "kind" not in locator:
+                        if isinstance(locator.get("page"), int):
+                            locator["kind"] = "pdf"
+                        elif isinstance(locator.get("cssSelector"), str):
+                            locator["kind"] = "html"
+                        elif isinstance(locator.get("chunkId"), str):
+                            locator["kind"] = "chunk"
+                    if locator.get("kind") in {"chunk", "html", "pdf"}:
+                        locator.setdefault("quote", {"exact": quote})
+            stack.extend(
+                value
+                for key, value in node.items()
+                if key not in {EVIDENCE_ENVELOPE_KEY, _PRIVATE_EVIDENCE_SOURCES_KEY}
+            )
+        elif isinstance(node, list):
+            stack.extend(node)
+    if isinstance(output, dict):
+        output.pop(_PRIVATE_EVIDENCE_SOURCES_KEY, None)
+        output.pop(_PRIVATE_EVIDENCE_FORMAT_KEY, None)
+    return output
+
+
+def _text_content_hash(value: str) -> str:
+    return f"sha256:{hashlib.sha256(value.encode()).hexdigest()}"
+
+
+def _model_evidence_handle_for_quote_ref(model_payload: Any, quote_ref: str) -> str | None:
+    parent_pointer = quote_ref.rsplit("/", 1)[0]
+    found, parent = _resolve_json_pointer(model_payload, parent_pointer)
+    handle = parent.get("evidenceHandle") if found and isinstance(parent, dict) else None
+    return handle if isinstance(handle, str) and _HANDLE_RE.fullmatch(handle) else None
+
+
+def _inflate_private_collection(item: dict[str, Any], *, model_payload: Any) -> None:
+    """Restore deterministic Collection defaults before canonical validation."""
+
+    projection_ref = item.pop("projectionRef", None)
+    projection_hash = item.pop("projectionHash", None)
+    if isinstance(projection_ref, str) and isinstance(projection_hash, str):
+        found, raw_hint = _resolve_json_pointer(model_payload, projection_ref)
+        hint = raw_hint if found and isinstance(raw_hint, dict) else None
+        if hint is not None and _content_hash(hint) == projection_hash:
+            item.setdefault("kind", "structured-evidence-collection")
+            item.setdefault("collectionHandle", hint.get("collectionHandle"))
+            addressing = item.setdefault("addressing", {})
+            if isinstance(addressing, dict):
+                addressing.setdefault("mode", hint.get("addressing"))
+                for hint_key, addressing_key in (
+                    ("contentRoot", "contentRoot"),
+                    ("identityFields", "identityFields"),
+                    ("fieldSchemaRef", "fieldSchemaRef"),
+                    ("allowedItemPaths", "allowedItemPaths"),
+                ):
+                    if hint_key in hint:
+                        addressing.setdefault(addressing_key, copy.deepcopy(hint[hint_key]))
+            semantics = item.setdefault("semantics", {})
+            if isinstance(semantics, dict) and isinstance(hint.get("metricMode"), str):
+                metric = semantics.setdefault("metric", {})
+                if isinstance(metric, dict):
+                    metric.setdefault("mode", hint["metricMode"])
+                    if metric.pop("mappedExclusions", None) == 1:
+                        metric.setdefault(
+                            "excludedFields",
+                            _mapped_semantic_pointers(semantics),
+                        )
+    item.setdefault("version", 1)
+    source = item.get("source")
+    common = item.get("common")
+    addressing = item.get("addressing")
+    if isinstance(source, dict):
+        source.setdefault("sourceType", "dataset")
+    if isinstance(source, dict) and isinstance(common, dict):
+        retrieved_at = source.get("retrievedAt")
+        if isinstance(retrieved_at, str):
+            common.setdefault("capturedAt", retrieved_at)
+    if isinstance(addressing, dict):
+        addressing.setdefault("mode", "json-pointer")
+        content_root = addressing.get("contentRoot")
+        if isinstance(content_root, str):
+            addressing.setdefault("itemsPointer", content_root)
+            if not addressing.get("allowedItemPaths"):
+                addressing.setdefault("allowedPathRoots", [content_root])
+        addressing.setdefault("identityFields", [])
+        schema_ref = addressing.get("fieldSchemaRef")
+        if isinstance(schema_ref, dict) and isinstance(common, dict):
+            schema_id = schema_ref.get("schemaId")
+            if isinstance(schema_id, str):
+                common.setdefault("datasetId", schema_id)
+    item.setdefault("semantics", {})
 
 
 def _collection_descriptor(collection: EvidenceCollectionRecord) -> dict[str, Any]:

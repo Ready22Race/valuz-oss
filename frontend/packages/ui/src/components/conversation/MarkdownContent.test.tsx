@@ -66,6 +66,86 @@ it("projects a post-publish evidence link from sidecar metadata", () => {
   expect(container.textContent).not.toContain("evidence://");
 });
 
+it("renders an auto-bound citation from a sidecar anchor without changing stored text", () => {
+  const content = "Revenue increased 18%.";
+  const bundle: CitationBundleV1 = {
+    ...CITATIONS,
+    citations: [CITATIONS.citations[0]!],
+    projection: {
+      evidenceHandleToCitationId: {},
+      anchors: [
+        {
+          citationId: "cit_first",
+          claimId: "clm_revenue",
+          origin: "auto-bound",
+          sourceOffset: content.indexOf("."),
+          location: {
+            kind: "text",
+            blockIndex: 0,
+            start: 0,
+            end: content.indexOf("."),
+            sourceStart: 0,
+            sourceEnd: content.indexOf("."),
+          },
+        },
+      ],
+      provenanceRegions: [],
+    },
+  };
+
+  const { container } = render(
+    <MarkdownContent content={content} citationBundle={bundle} />,
+  );
+
+  expect(container.textContent).toContain("Revenue increased 18%");
+  expect(container.querySelectorAll('[data-citation-id="cit_first"]')).toHaveLength(1);
+  expect(content).toBe("Revenue increased 18%.");
+});
+
+it("renders one terminal citation for a table provenance region", () => {
+  const content =
+    "| Company | 2024 | 2025 |\n" +
+    "| --- | ---: | ---: |\n" +
+    "| A | 10 | 11 |\n" +
+    "| B | 20 | 21 |";
+  const terminalOffset = content.lastIndexOf("20") + "20".length;
+  const bundle: CitationBundleV1 = {
+    ...CITATIONS,
+    citations: [CITATIONS.citations[0]!],
+    projection: {
+      evidenceHandleToCitationId: {},
+      anchors: [],
+      provenanceRegions: [
+        {
+          regionId: "region_2024",
+          blockIndex: 0,
+          rowStart: 0,
+          rowEnd: 1,
+          columnStart: 1,
+          columnEnd: 1,
+          citationIds: ["cit_first"],
+          sourceOffset: terminalOffset,
+          anchor: {
+            kind: "table-cell",
+            blockIndex: 0,
+            rowIndex: 1,
+            columnIndex: 1,
+            sourceStart: content.lastIndexOf("20"),
+            sourceEnd: terminalOffset,
+          },
+        },
+      ],
+    },
+  };
+
+  const { container } = render(
+    <MarkdownContent content={content} citationBundle={bundle} />,
+  );
+
+  expect(container.querySelectorAll('[data-citation-id="cit_first"]')).toHaveLength(1);
+  expect(screen.getByText("20")).not.toBeNull();
+});
+
 describe("MarkdownContent local file links", () => {
   it("routes local file hrefs through the provided handler", () => {
     const onLocalFileLinkClick = vi.fn();
@@ -1011,7 +1091,7 @@ describe("MarkdownContent citations", () => {
     ).toBe(true);
   });
 
-  it("opens the authoritative inputs from a calculation citation card", () => {
+  it("renders calculation as a hoverable derivation instead of a numbered source", () => {
     const onCitationClick = vi.fn();
     const input = CITATIONS.citations[0];
     const bundle: CitationBundleV1 = {
@@ -1054,13 +1134,15 @@ describe("MarkdownContent citations", () => {
       />,
     );
 
-    const calculationPill = screen.getByRole("button", {
-      name: /(?:citation|引用) 1/i,
-    });
-    fireEvent.click(calculationPill);
+    const calculationPill = document.querySelector<HTMLElement>(
+      "[data-citation-derivation]",
+    );
+    expect(calculationPill).not.toBeNull();
+    expect(calculationPill?.textContent).toBe("");
+    fireEvent.click(calculationPill!);
     expect(onCitationClick).not.toHaveBeenCalled();
 
-    fireEvent.focus(calculationPill);
+    fireEvent.focus(calculationPill!);
     fireEvent.click(screen.getByRole("button", { name: /revenue.*annual report/i }));
 
     expect(onCitationClick).toHaveBeenCalledWith({
@@ -1068,12 +1150,9 @@ describe("MarkdownContent citations", () => {
       citationId: "cit_first",
     });
 
-    const calculationSource = document.querySelector(
-      "[data-citation-calculation-source]",
-    );
-    expect(calculationSource).not.toBeNull();
-    expect(calculationSource?.closest("button")).toBeNull();
-    fireEvent.mouseEnter(calculationSource!);
+    expect(document.querySelector("[data-citation-calculation-source]")).toBeNull();
+    expect(document.querySelector("[data-citation-source-list]")).toBeNull();
+    fireEvent.mouseEnter(calculationPill!);
     expect(screen.getAllByText(/revenue \/ 100 = 1\.18 x/i).length).toBeGreaterThan(0);
   });
 

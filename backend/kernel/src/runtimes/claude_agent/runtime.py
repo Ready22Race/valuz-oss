@@ -2188,7 +2188,14 @@ class ClaudeAgentRuntime:
                 # summaries, and result cardinality exactly as returned.
                 model_projection = effective_tool_response
                 model_projection = rebase_collection_projections(model_projection)
-                private_citation_content = private_citation_tool_content(model_projection)
+                compacted = compact_citation_tool_content(
+                    model_projection,
+                    max_text_evidence_items=evidence_limit,
+                )
+                private_citation_content = private_citation_tool_content(
+                    model_projection,
+                    model_content=compacted if compacted is not None else model_projection,
+                )
                 if (
                     tool_use_id
                     and private_citation_content is not None
@@ -2196,10 +2203,6 @@ class ClaudeAgentRuntime:
                     <= _MAX_PERSISTED_CITATION_CONTENT_BYTES
                 ):
                     self._citation_tool_result_sidecars[tool_use_id] = private_citation_content
-                compacted = compact_citation_tool_content(
-                    model_projection,
-                    max_text_evidence_items=evidence_limit,
-                )
                 if compacted is None:
                     return SyncHookJSONOutput()
                 output_key = (

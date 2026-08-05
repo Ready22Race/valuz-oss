@@ -194,13 +194,109 @@ def test_document_chunks_create_direct_evidence_with_pdf_locator() -> None:
     }
 
     compacted = compact_citation_tool_content(adapted.model_content)
-    private = private_citation_tool_content(adapted.model_content)
+    private = private_citation_tool_content(
+        adapted.model_content,
+        model_content=compacted,
+    )
     assert compacted is not None and private is not None
     assert compacted["chunks"][0]["evidenceHandle"] == envelope["evidenceHandle"]
     assert payload["chunks"][0]["content"] in json.dumps(compacted, ensure_ascii=False)
+    private_payload = json.loads(private)
+    private_evidence = private_payload["_valuz_evidence"][0]["evidence"]
+    assert private_evidence["quoteRef"] == "/chunks/0/content"
+    assert "quote" not in private_evidence
+    assert "snippet" not in private_evidence
+    assert "quote" not in private_payload["_valuz_evidence"][0]["locator"]
+
     registry = EvidenceRegistry()
     assert registry.register_tool_projection(compacted, private, trusted_private=True) == 1
-    assert registry.resolve(envelope["evidenceHandle"]) is not None
+    record = registry.resolve(envelope["evidenceHandle"])
+    assert record is not None
+    assert record.evidence["quote"] == payload["chunks"][0]["content"]
+    assert record.evidence["snippet"] == payload["chunks"][0]["content"]
+    assert record.locator is not None
+    assert record.locator["quote"] == {"exact": payload["chunks"][0]["content"]}
+
+    tampered = json.loads(json.dumps(compacted))
+    tampered["chunks"][0]["content"] = "Tampered after metadata validation."
+    rejected = EvidenceRegistry()
+    assert rejected.register_tool_projection(tampered, private, trusted_private=True) == 0
+    assert rejected.rejected_count == 1
+    assert EvidenceRegistry().register_tool_result(private, trusted_private=True) == 0
+
+
+def test_private_document_evidence_deduplicates_quote_and_shared_source() -> None:
+    quote_a = "First chunk " + ("financial detail " * 200)
+    quote_b = "Second chunk " + ("operating detail " * 200)
+    payload = {
+        "doc_id": "doc-large",
+        "title": "Large filing",
+        "url": "https://example.com/large.pdf",
+        "chunks": [
+            {"id": "chunk-a", "content": quote_a, "metadata": {"document_page": 1}},
+            {"id": "chunk-b", "content": quote_b, "metadata": {"document_page": 2}},
+        ],
+    }
+    descriptor = _descriptor(
+        payload,
+        tool_name="document_fetch",
+        resources=[
+            {
+                "resourceId": "document-fetch-chunks",
+                "kind": "document-chunks",
+                "authority": "authoritative",
+                "rootPointer": "",
+                "document": {
+                    "scope": "resource",
+                    "sourceId": "/doc_id",
+                    "documentId": "/doc_id",
+                    "title": "/title",
+                    "url": "/url",
+                },
+                "itemsPointer": "/chunks",
+                "mapping": {
+                    "chunkId": "/id",
+                    "text": "/content",
+                    "page": "/metadata/document_page",
+                },
+            }
+        ],
+    )
+    adapted = adapt_mcp_source_result(
+        [],
+        tool_name="document_fetch",
+        descriptor=descriptor,
+        structured_content=payload,
+    )
+    assert adapted is not None
+    compacted = compact_citation_tool_content(adapted.model_content)
+    legacy_private = private_citation_tool_content(adapted.model_content)
+    private = private_citation_tool_content(
+        adapted.model_content,
+        model_content=compacted,
+    )
+    assert compacted is not None and legacy_private is not None and private is not None
+
+    private_payload = json.loads(private)
+    assert len(private_payload["_valuz_evidence_sources"]) == 1
+    assert all(
+        "sourceRef" in item and "source" not in item
+        for item in private_payload["_valuz_evidence"]
+    )
+    assert quote_a not in private
+    assert quote_b not in private
+    assert len(private.encode()) < len(legacy_private.encode()) * 0.35
+
+    legacy_payload = json.loads(legacy_private)
+    assert "_valuz_evidence_sources" not in legacy_payload
+    legacy_registry = EvidenceRegistry()
+    assert legacy_registry.register_tool_result(legacy_private, trusted_private=True) == 2
+
+    registry = EvidenceRegistry()
+    assert registry.register_tool_projection(compacted, private, trusted_private=True) == 2
+    records = list(registry.values())
+    assert [record.evidence["quote"] for record in records] == [quote_a.strip(), quote_b.strip()]
+    assert records[0].source == records[1].source
 
 
 def test_document_published_at_is_not_substituted_for_document_version() -> None:
@@ -325,7 +421,10 @@ def test_document_summary_creates_direct_evidence_without_copying_model_content(
     }
 
     compacted = compact_citation_tool_content(adapted.model_content)
-    private = private_citation_tool_content(adapted.model_content)
+    private = private_citation_tool_content(
+        adapted.model_content,
+        model_content=compacted,
+    )
     assert compacted is not None and private is not None
     assert compacted["summary"] == summary
     assert compacted["evidenceHandle"] == envelope["evidenceHandle"]
@@ -530,11 +629,17 @@ def test_large_structured_result_registers_one_collection_and_materializes_one_a
     assert "T0999" not in json.dumps(collection, ensure_ascii=False)
 
     compacted = compact_citation_tool_content(adapted.model_content)
-    private = private_citation_tool_content(adapted.model_content)
+    legacy_private = private_citation_tool_content(adapted.model_content)
+    private = private_citation_tool_content(
+        adapted.model_content,
+        model_content=compacted,
+    )
     assert compacted is not None and private is not None
     assert len(compacted["data"]) == 1_000
     assert "_valuz_evidence" not in compacted
     assert compacted["_valuz_evidence_hint"]["collectionHandle"] == collection["collectionHandle"]
+    assert legacy_private is not None
+    assert len(private.encode()) < len(legacy_private.encode()) * 0.85
 
     registry = EvidenceRegistry()
     assert registry.register_tool_projection(compacted, private, trusted_private=True) == 1
@@ -548,6 +653,19 @@ def test_large_structured_result_registers_one_collection_and_materializes_one_a
     assert record.evidence["period"] == "2024 FY"
     assert record.evidence["currency"] == "CNY"
     assert record.evidence["recordKey"] == "T0037|2024|FY"
+
+    tampered_projection = json.loads(json.dumps(compacted))
+    tampered_projection["_valuz_evidence_hint"]["identityFields"].append("/tampered")
+    rejected = EvidenceRegistry()
+    assert (
+        rejected.register_tool_projection(
+            tampered_projection,
+            private,
+            trusted_private=True,
+        )
+        == 0
+    )
+    assert rejected.rejected_count == 1
 
 
 def test_tampered_business_result_rejects_metadata() -> None:
