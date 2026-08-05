@@ -292,12 +292,8 @@ function OpenUIComponent({
 }) {
   const children = readChildren(props, buildChild);
   const componentIndex = useContext(A2UIComponentIndex);
-  // Expand id references into the components they name, so a chart whose
-  // series arrives as `children: ["sector-series"]` can read it.
   const resolveRefs = (value: unknown): unknown[] =>
-    toArray(value).map((item) =>
-      typeof item === "string" ? (componentIndex.get(item) ?? item) : item,
-    );
+    materializeRefs(value, componentIndex);
 
   switch (name) {
     case "Stack":
@@ -1289,13 +1285,56 @@ function renderCell(value: unknown, buildChild: BuildChild): ReactNode {
   return JSON.stringify(value);
 }
 
+/** Array props that can hold nested components, inline or by id. */
+const NESTED_PROPS = ["children", "data", "points", "series", "slices", "columns", "items"];
+
+/**
+ * Expand id references into the components they name — all the way down.
+ *
+ * A2UI nests by id, and how deeply is the model's choice: one payload put a
+ * chart's series in `children`, the next put the series' points one level below
+ * that, with no axis on the chart at all. Resolving a fixed number of levels
+ * means every new depth is a fresh bug that presents identically — a chart that
+ * silently renders nothing. Resolving to the bottom removes the whole class.
+ *
+ * Bounded on both axes that could hang it: `seen` breaks reference cycles on
+ * the current path, and `depth` stops a pathological payload from walking
+ * forever. Both limits are far above any real document.
+ */
+function materializeRefs(
+  value: unknown,
+  index: Map<string, Record<string, unknown>>,
+  depth = 0,
+  seen: ReadonlySet<string> = new Set(),
+): unknown[] {
+  if (depth > 8) return toArray(value);
+  return toArray(value).map((item) => {
+    let record: unknown = item;
+    if (typeof item === "string") {
+      if (seen.has(item)) return item;
+      const resolved = index.get(item);
+      if (!resolved) return item;
+      record = resolved;
+      seen = new Set([...seen, item]);
+    }
+    if (!isRecord(record)) return record;
+    const expanded: Record<string, unknown> = { ...record };
+    for (const key of NESTED_PROPS) {
+      if (key in expanded) {
+        expanded[key] = materializeRefs(expanded[key], index, depth + 1, seen);
+      }
+    }
+    return expanded;
+  });
+}
+
 function buildChartData(
   props: Record<string, unknown>,
   resolve: (value: unknown) => unknown[] = toArray,
 ) {
   // `series` may be inline, or `children` may name sibling components by id.
   const declared = resolve(props.series ?? props.children);
-  const rowsFromSeriesData = buildRowsFromSeriesData(declared, resolve);
+  const rowsFromSeriesData = buildRowsFromSeriesData(declared);
   if (rowsFromSeriesData.length) return rowsFromSeriesData;
 
   // The axis arrives as `labels` or `categories` depending on how the model
@@ -1307,30 +1346,119 @@ function buildChartData(
   // caller's `!data.length` guard while carrying no numeric key at all, and the
   // chart would reserve a full-height plot to draw nothing in — which is how
   // this surfaced: a category axis of sixteen sectors above an empty box.
-  if (!series.length) return [];
-  return labels.map((label, index) => {
-    const row: Record<string, string | number> = { category: label };
-    for (const item of series) {
-      row[item.category] = Number(item.values[index] ?? 0);
-    }
-    return row;
-  });
+  if (series.length) {
+    return labels.map((label, index) => {
+      const row: Record<string, string | number> = { category: label };
+      for (const item of series) {
+        row[item.category] = Number(item.values[index] ?? 0);
+      }
+      return row;
+    });
+  }
+
+  // Last resort: the shapes above key on prop names the model has used so far,
+  // and it keeps inventing new ones. Rather than render nothing, scan the
+  // materialised subtree for records that pair a label with a number — which is
+  // what a data point is, whatever it happens to be called.
+  const scanned = scanForPoints([props]);
+  if (scanned.length) return scanned;
+
+  warnUnreadableChart(props);
+  return [];
 }
 
-function buildRowsFromSeriesData(
+/**
+ * Pull (label, value) pairs out of an arbitrary materialised subtree.
+ *
+ * Deliberately last: it cannot tell which series a point belongs to, so a
+ * multi-series chart flattens into one. That is a worse chart than the readers
+ * above produce, and a much better outcome than no chart at all.
+ */
+function scanForPoints(value: unknown): Record<string, string | number>[] {
+  const rows: Record<string, string | number>[] = [];
+  const walk = (node: unknown, depth: number) => {
+    if (depth > 6 || rows.length > 200) return;
+    for (const item of toArray(node)) {
+      if (!isRecord(item)) continue;
+      const label = readText(item.label ?? item.category ?? item.name ?? item.x);
+      const numeric = readNumber(item.value ?? item.y ?? item.amount ?? item.count);
+      if (label && numeric !== undefined) rows.push({ category: label, value: numeric });
+      // Any array, not just the known nesting props: this path exists precisely
+      // for the case where the key is one nobody has seen before.
+      for (const nested of Object.values(item)) {
+        if (Array.isArray(nested)) walk(nested, depth + 1);
+      }
+    }
+  };
+  walk(value, 0);
+  return rows;
+}
+
+/**
+ * A chart that resolves to no data removes itself, leaving whatever heading sat
+ * above it stranded. That is a silent failure, and every instance so far cost a
+ * screenshot and a trip through the session database to identify. Naming the
+ * keys the payload actually carried turns the next unknown shape into a console
+ * line instead.
+ */
+function warnUnreadableChart(props: Record<string, unknown>): void {
+  if (!import.meta.env.DEV) return;
+  console.warn(
+    "[genui] chart had no readable data — keys:",
+    Object.keys(props).join(", "),
+  );
+}
+
+/** A record's nested arrays, in the order data is likeliest to live. */
+function nestedOf(record: Record<string, unknown>): unknown {
+  return record.data ?? record.points ?? record.children ?? record.series;
+}
+
+/** True when `record` directly holds things that look like plotted points. */
+function holdsPoints(record: Record<string, unknown>): boolean {
+  return toArray(nestedOf(record))
+    .filter(isRecord)
+    .some(
+      (point) =>
+        readText(point.category ?? point.name ?? point.label) !== "" &&
+        readNumber(point.value ?? point.y ?? point.data) !== undefined,
+    );
+}
+
+/**
+ * Find the nodes that actually carry points, however they are wrapped.
+ *
+ * The model puts a series directly under the chart, or under one or more
+ * grouping components first. Reading only the top level makes a wrapper look
+ * like an empty series, so this descends until it finds nodes holding points.
+ */
+function collectSeriesNodes(
   value: unknown,
-  resolve: (value: unknown) => unknown[] = toArray,
-): Record<string, string | number>[] {
+  depth = 0,
+  out: Record<string, unknown>[] = [],
+): Record<string, unknown>[] {
+  if (depth > 8) return out;
+  for (const item of toArray(value).filter(isRecord)) {
+    const record = isA2UIComponent(item) ? mergeProps(item) : item;
+    if (holdsPoints(record)) out.push(record);
+    else collectSeriesNodes(nestedOf(record), depth + 1, out);
+  }
+  return out;
+}
+
+function buildRowsFromSeriesData(value: unknown): Record<string, string | number>[] {
   const rows = new Map<string, Record<string, string | number>>();
-  for (const item of resolve(value).filter(isRecord)) {
+  // `value` arrives materialised; resolving again would restart the cycle
+  // guard from empty and re-enter any self-reference.
+  for (const item of collectSeriesNodes(toArray(value))) {
     const record = isA2UIComponent(item) ? mergeProps(item) : item;
     const seriesKey = readText(
       record.category ?? record.name ?? record.label ?? "value",
     );
-    // Points arrive inline, or — since A2UI nests by id — as `children` naming
-    // sibling Point components. Reading only `data`/`points` leaves a chart
-    // whose data is one level deeper with nothing to plot.
-    const points = resolve(record.data ?? record.points ?? record.children);
+    // Already materialised at the entry point — resolving again here would
+    // restart the cycle guard from empty and re-enter a self-reference, turning
+    // a series that points at itself into a bogus zero-valued category.
+    const points = toArray(nestedOf(record));
     let consumedNamedPoint = false;
     for (const point of points) {
       if (!isRecord(point)) continue;

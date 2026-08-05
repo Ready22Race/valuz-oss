@@ -140,6 +140,66 @@ describe("A2UI charts whose series arrives by reference", () => {
     ]);
   });
 
+  it("follows references to any depth, not a fixed number of levels", () => {
+    // Each payload so far nested one level deeper than the last, and each
+    // presented identically: a chart that silently rendered nothing. Depth is
+    // the model's choice, so resolution has to be recursive rather than
+    // counted — this wraps the series in two extra layers it has never used.
+    render(
+      <A2UIRenderer
+        body={a2ui([
+          { id: "root", component: "HorizontalBarChart", children: ["g1"] },
+          { id: "g1", component: "Group", children: ["g2"] },
+          { id: "g2", component: "Group", children: ["s"] },
+          { id: "s", component: "Series", name: "涨幅", children: ["p1"] },
+          { id: "p1", component: "Point", label: "ARM", value: 17.36 },
+        ])}
+      />,
+    );
+    const data = JSON.parse(screen.getByTestId("horizontal-chart").textContent ?? "[]");
+    expect(data).toEqual([{ category: "ARM", 涨幅: 17.36 }]);
+  });
+
+  it("survives a reference cycle instead of hanging", () => {
+    // Model output is untrusted; a self-referencing id must not spin forever.
+    render(
+      <A2UIRenderer
+        body={a2ui([
+          { id: "root", component: "HorizontalBarChart", children: ["loop"] },
+          { id: "loop", component: "Series", name: "s", children: ["loop", "p"] },
+          { id: "p", component: "Point", label: "A", value: 1 },
+        ])}
+      />,
+    );
+    const data = JSON.parse(screen.getByTestId("horizontal-chart").textContent ?? "[]");
+    expect(data).toEqual([{ category: "A", s: 1 }]);
+  });
+
+  it("still finds points when the props are named something new", () => {
+    // The one class that cannot be solved by resolution: an unrecognised key.
+    // The fallback reads any record pairing a label with a number, so a novel
+    // spelling degrades to a flattened chart rather than to nothing.
+    render(
+      <A2UIRenderer
+        body={a2ui([
+          {
+            id: "root",
+            component: "BarChart",
+            dataPoints: [
+              { label: "ARM", value: 17.36 },
+              { label: "AMAT", value: 14.97 },
+            ],
+          },
+        ])}
+      />,
+    );
+    const data = JSON.parse(screen.getByTestId("bar-chart").textContent ?? "[]");
+    expect(data).toEqual([
+      { category: "ARM", value: 17.36 },
+      { category: "AMAT", value: 14.97 },
+    ]);
+  });
+
   it("renders no chart when the series is genuinely absent", () => {
     render(
       <A2UIRenderer
