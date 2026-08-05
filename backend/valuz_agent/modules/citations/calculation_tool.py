@@ -20,6 +20,12 @@ CITATION_CALCULATE_TOOL_NAME = "citation_calculate"
 _HANDLE_RE = re.compile(r"^ev_[A-Za-z0-9_-]{8,128}$")
 _COLLECTION_ADDRESS_RE = re.compile(r"^evc_[A-Za-z0-9_-]{8,128}#/[^\s#?]{1,1024}$")
 
+
+def _canonical_evidence_reference(value: str) -> str:
+    """Accept the protocol URI form while storing the canonical opaque reference."""
+
+    return value.removeprefix("evidence://")
+
 _PARAMS = {
     "type": "object",
     "properties": {
@@ -177,6 +183,8 @@ async def _citation_calculate_handler(
             has_user_origin = origin == "user-input"
             if has_handle == has_user_origin:
                 raise ValueError("invalid_input_origin")
+            if has_handle:
+                handle = _canonical_evidence_reference(handle)
             if has_handle and not (
                 _HANDLE_RE.fullmatch(handle) or _COLLECTION_ADDRESS_RE.fullmatch(handle)
             ):

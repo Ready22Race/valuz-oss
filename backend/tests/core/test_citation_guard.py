@@ -9,6 +9,7 @@ import time
 from src.core.citation import (
     CitationGuard,
     EvidenceRegistry,
+    _build_projection_anchors_and_regions,
     compact_citation_tool_content,
     private_citation_tool_content,
 )
@@ -59,6 +60,38 @@ def _registry(*items: dict) -> EvidenceRegistry:
     return registry
 
 
+def _structured_item(
+    handle: str,
+    *,
+    entity_id: str,
+    field: str,
+    value: int | float,
+    unit: str = "",
+) -> dict:
+    return {
+        "evidenceHandle": handle,
+        "source": {
+            "sourceId": f"dataset:{entity_id}",
+            "providerId": "valuz-stock",
+            "sourceType": "dataset",
+            "title": f"Structured data · {entity_id}",
+            "retrievedAt": "2026-08-05T00:00:00Z",
+        },
+        "evidence": {
+            "kind": "structured-data",
+            "datasetId": "test.financials",
+            "toolName": "company_financials",
+            "recordKey": entity_id,
+            "entityId": entity_id,
+            "field": field,
+            "metric": field,
+            "value": value,
+            "unit": unit,
+            "capturedAt": "2026-08-05T00:00:00Z",
+        },
+    }
+
+
 def test_registry_accepts_nested_valid_envelope_and_first_writer_wins() -> None:
     registry = _registry(_item(locator={"kind": "pdf", "page": 12}))
     replacement = _item(locator={"kind": "pdf", "page": 99})
@@ -74,6 +107,139 @@ def test_registry_accepts_nested_valid_envelope_and_first_writer_wins() -> None:
     assert record is not None
     assert record.locator == {"kind": "pdf", "page": 12}
     assert record.tool_name == "valuz_docs/doc_search"
+
+
+def test_verified_structured_table_cell_is_projection_not_claim() -> None:
+    handle = "ev_table_revenue_12345678"
+    registry = _registry(
+        _structured_item(
+            handle,
+            entity_id="600519",
+            field="revenue",
+            value=120,
+            unit="CNY",
+        )
+    )
+    answer = (
+        "| Code | Revenue | Source |\n"
+        "|---|---:|---|\n"
+        f"| 600519 | CNY 120 | [source](evidence://{handle}) |"
+    )
+
+    result = CitationGuard(
+        registry,
+        message_id="message-table-projection",
+        user_prompt="Show revenue in a table",
+        policy_available=True,
+        verification_enabled=True,
+    ).finalize(answer)
+
+    assert result.bundle is not None
+    metrics = result.bundle["quality"]["metrics"]
+    assert metrics["claimProjectionCellCount"] == 1
+    assert metrics["claimDetectedCount"] == 0
+    assert result.bundle["quality"]["claims"] == []
+
+
+def test_structured_projection_accepts_dimension_implied_by_canonical_metric() -> None:
+    handle = "ev_table_parent_profit_12345678"
+    registry = _registry(
+        _structured_item(
+            handle,
+            entity_id="600519",
+            field="net_profit_attributable_to_owners_of_the_parent",
+            value=86_228_146_422,
+            unit="CNY",
+        )
+    )
+    policy = {
+        "mode": "strict-domain",
+        "config": {
+            "semantics": {
+                "metric_ontology": {
+                    "metrics": {
+                        "parent_net_profit": {
+                            "aliases": ["归母净利润"],
+                            "fields": [
+                                "net_profit_attributable_to_owners_of_the_parent"
+                            ],
+                            "dimensions": {"basis": "attributable"},
+                        }
+                    }
+                },
+                "unit_ontology": {
+                    "units": {
+                        "cny": {
+                            "canonical": "CNY",
+                            "aliases": ["CNY"],
+                            "scale": 1,
+                        },
+                        "cny_100m": {
+                            "canonical": "CNY",
+                            "aliases": ["亿元"],
+                            "scale": 100_000_000,
+                        },
+                    }
+                },
+                "dimensions": {
+                    "basis": {"attributable": ["归母", "attributable to parent"]}
+                },
+            },
+            "rules": {"factual_claim": {"citation_required": True}},
+        },
+    }
+    answer = (
+        "| 公司 | 归母净利润（亿元） |\n"
+        "|---|---:|\n"
+        f"| 贵州茅台 | 862.28 [source](evidence://{handle}) |"
+    )
+
+    result = CitationGuard(
+        registry,
+        message_id="message-table-parent-profit-projection",
+        user_prompt="请列出贵州茅台的归母净利润",
+        policy_available=True,
+        verification_enabled=True,
+        quality_policy=policy,
+    ).finalize(answer)
+
+    assert result.bundle is not None
+    metrics = result.bundle["quality"]["metrics"]
+    assert metrics["claimProjectionCellCount"] == 1
+    assert metrics["claimDetectedCount"] == 0
+    assert result.bundle["quality"]["claims"] == []
+
+
+def test_structured_table_cell_with_wrong_value_remains_a_claim() -> None:
+    handle = "ev_table_revenue_wrong_12345678"
+    registry = _registry(
+        _structured_item(
+            handle,
+            entity_id="600519",
+            field="revenue",
+            value=120,
+            unit="CNY",
+        )
+    )
+    answer = (
+        "| Code | Revenue | Source |\n"
+        "|---|---:|---|\n"
+        f"| 600519 | CNY 121 | [source](evidence://{handle}) |"
+    )
+
+    result = CitationGuard(
+        registry,
+        message_id="message-table-not-projection",
+        user_prompt="Show revenue in a table",
+        policy_available=True,
+        verification_enabled=True,
+    ).finalize(answer)
+
+    assert result.bundle is not None
+    metrics = result.bundle["quality"]["metrics"]
+    assert metrics["claimProjectionCellCount"] == 0
+    assert metrics["claimDetectedCount"] == 1
+    assert result.bundle["quality"]["claims"][0]["status"] == "unverified"
 
 
 def test_guard_accepts_unique_evidence_digest_when_model_rewrites_prefix() -> None:
@@ -110,10 +276,7 @@ def test_guard_accepts_unique_mcp_chunk_id_alias() -> None:
         message_id="message-mcp-chunk-alias",
         user_prompt="cite the source",
         policy_available=True,
-    ).finalize(
-        "Revenue increased by 12% "
-        "[source](evidence://ev_mcp_829938771212395)."
-    )
+    ).finalize("Revenue increased by 12% [source](evidence://ev_mcp_829938771212395).")
 
     assert result.bundle is not None
     assert len(result.bundle["citations"]) == 1
@@ -145,9 +308,7 @@ def test_guard_rebases_external_excerpt_to_unique_later_located_chunk() -> None:
         "ev_grep_external_12345678",
         locator={"kind": "external", "fragment": "Revenue"},
     )
-    external["evidence"]["quote"] = (
-        "Earlier context.\nRevenue increased by 12%.\nLater context."
-    )
+    external["evidence"]["quote"] = "Earlier context.\nRevenue increased by 12%.\nLater context."
     external["evidence"]["snippet"] = external["evidence"]["quote"]
     located = _item(
         "ev_chunk_located_12345678",
@@ -161,17 +322,12 @@ def test_guard_rebases_external_excerpt_to_unique_later_located_chunk() -> None:
         user_prompt="cite the source",
         policy_available=True,
         verification_enabled=False,
-    ).finalize(
-        "Revenue increased by 12% "
-        "[source](evidence://ev_grep_external_12345678)."
-    )
+    ).finalize("Revenue increased by 12% [source](evidence://ev_grep_external_12345678).")
 
     assert result.bundle is not None
     assert len(result.bundle["citations"]) == 1
     citation = result.bundle["citations"][0]
-    assert citation["annotations"]["binding"]["evidenceHandle"] == (
-        "ev_chunk_located_12345678"
-    )
+    assert citation["annotations"]["binding"]["evidenceHandle"] == ("ev_chunk_located_12345678")
     assert citation["locator"] == {
         "kind": "pdf",
         "page": 12,
@@ -208,16 +364,11 @@ def test_guard_keeps_external_excerpt_when_multiple_located_chunks_match() -> No
         user_prompt="cite the source",
         policy_available=True,
         verification_enabled=False,
-    ).finalize(
-        "Revenue increased by 12% "
-        "[source](evidence://ev_grep_ambiguous_12345678)."
-    )
+    ).finalize("Revenue increased by 12% [source](evidence://ev_grep_ambiguous_12345678).")
 
     assert result.bundle is not None
     citation = result.bundle["citations"][0]
-    assert citation["annotations"]["binding"]["evidenceHandle"] == (
-        "ev_grep_ambiguous_12345678"
-    )
+    assert citation["annotations"]["binding"]["evidenceHandle"] == ("ev_grep_ambiguous_12345678")
     assert citation["locator"]["kind"] == "external"
 
 
@@ -228,10 +379,7 @@ def test_projection_guard_keeps_runtime_body_and_does_not_extract_claims(monkeyp
             locator={"kind": "pdf", "page": 12},
         )
     )
-    original = (
-        "Revenue increased by 12% "
-        "[source](evidence://ev_projection_12345678)."
-    )
+    original = "Revenue increased by 12% [source](evidence://ev_projection_12345678)."
 
     def fail_if_called(*_args, **_kwargs):  # noqa: ANN002, ANN003
         raise AssertionError("Citation-only projection must not split claims")
@@ -249,9 +397,7 @@ def test_projection_guard_keeps_runtime_body_and_does_not_extract_claims(monkeyp
     assert result.bundle is not None
     assert "quality" not in result.bundle
     citation = result.bundle["citations"][0]
-    assert citation["annotations"]["binding"]["evidenceHandle"] == (
-        "ev_projection_12345678"
-    )
+    assert citation["annotations"]["binding"]["evidenceHandle"] == ("ev_projection_12345678")
     assert result.bundle["integrity"]["unknownCitationIds"] == []
 
 
@@ -2052,6 +2198,139 @@ def test_guard_auto_binds_one_unique_structured_candidate_without_model_repair()
     assert result.bundle["integrity"]["repairAttempts"] == 0
     assert result.bundle["quality"]["claims"][0]["status"] == "auto-bound"
     assert result.bundle["quality"]["metrics"]["claimAutoBoundCount"] == 1
+    projection = result.bundle["projection"]
+    assert projection["anchors"] == [
+        {
+            "citationId": result.bundle["citations"][0]["citationId"],
+            "claimId": result.bundle["quality"]["claims"][0]["claimId"],
+            "location": {
+                "kind": "text",
+                "blockIndex": 0,
+                "start": 0,
+                "end": len("Gross margin was 23.5% in 2024."),
+                "sourceStart": 0,
+                "sourceEnd": len("Gross margin was 23.5% in 2024."),
+            },
+            "sourceOffset": len("Gross margin was 23.5% in 2024"),
+            "origin": "auto-bound",
+        }
+    ]
+    assert projection["provenanceRegions"] == []
+
+
+def test_projection_groups_table_lineage_by_actual_column_regions() -> None:
+    def table_claim(claim_id: str, row: int, column: int, offset: int) -> ClaimCandidate:
+        return ClaimCandidate(
+            claim_id=claim_id,
+            exact=f"Company {row} — Quarter {column}: value",
+            segment_index=row * 2 + column,
+            kind="numeric",
+            citation_required=True,
+            attached_citation_ids=(),
+            normalized={},
+            location={
+                "kind": "table-cell",
+                "blockIndex": 3,
+                "rowIndex": row,
+                "columnIndex": column,
+                "sourceStart": offset - 5,
+                "sourceEnd": offset + 1,
+            },
+            semantic_text="value",
+            insertion_offset=offset,
+        )
+
+    claims = [
+        table_claim("clm_r0_c1", 0, 1, 20),
+        table_claim("clm_r0_c2", 0, 2, 30),
+        table_claim("clm_r1_c1", 1, 1, 50),
+        table_claim("clm_r1_c2", 1, 2, 60),
+    ]
+
+    anchors, regions = _build_projection_anchors_and_regions(
+        claims,
+        auto_bound_claim_handles={
+            "clm_r0_c1": ("ev_2024",),
+            "clm_r0_c2": ("ev_2025",),
+            "clm_r1_c1": ("ev_2024",),
+            "clm_r1_c2": ("ev_2025",),
+        },
+        equivalent_claim_handles={},
+        handle_to_citation_id={
+            "ev_2024": "cit_2024",
+            "ev_2025": "cit_2025",
+        },
+    )
+
+    assert anchors == []
+    assert [
+        (
+            region["rowStart"],
+            region["rowEnd"],
+            region["columnStart"],
+            region["columnEnd"],
+            region["citationIds"],
+            region["sourceOffset"],
+        )
+        for region in regions
+    ] == [
+        (0, 1, 1, 1, ["cit_2024"], 50),
+        (0, 1, 2, 2, ["cit_2025"], 60),
+    ]
+
+
+def test_projection_keeps_one_evidence_group_across_disconnected_regions() -> None:
+    def table_claim(claim_id: str, row: int, column: int, offset: int) -> ClaimCandidate:
+        return ClaimCandidate(
+            claim_id=claim_id,
+            exact=f"Cell {row}:{column}",
+            segment_index=row * 3 + column,
+            kind="numeric-fact",
+            citation_required=True,
+            attached_citation_ids=(),
+            normalized={},
+            location={
+                "kind": "table-cell",
+                "blockIndex": 7,
+                "rowIndex": row,
+                "columnIndex": column,
+            },
+            semantic_text="value",
+            insertion_offset=offset,
+        )
+
+    claims = [
+        table_claim("clm_a", 0, 1, 10),
+        table_claim("clm_b", 0, 2, 20),
+        table_claim("clm_c", 2, 1, 40),
+        table_claim("clm_d", 1, 2, 30),
+    ]
+
+    _anchors, regions = _build_projection_anchors_and_regions(
+        claims,
+        auto_bound_claim_handles={
+            "clm_a": ("ev_document_a",),
+            "clm_b": ("ev_document_b",),
+            "clm_c": ("ev_document_a",),
+            "clm_d": ("ev_document_b",),
+        },
+        equivalent_claim_handles={},
+        handle_to_citation_id={
+            "ev_document_a": "cit_document_a",
+            "ev_document_b": "cit_document_b",
+        },
+    )
+
+    group_ids_by_citation: dict[str, set[str]] = {}
+    for region in regions:
+        citation_id = region["citationIds"][0]
+        group_ids_by_citation.setdefault(citation_id, set()).add(region["claimGroupId"])
+
+    assert group_ids_by_citation == {
+        "cit_document_a": {next(iter(group_ids_by_citation["cit_document_a"]))},
+        "cit_document_b": {next(iter(group_ids_by_citation["cit_document_b"]))},
+    }
+    assert group_ids_by_citation["cit_document_a"] != group_ids_by_citation["cit_document_b"]
 
 
 def test_guard_combines_user_thresholds_with_unique_structured_values() -> None:
@@ -2729,8 +3008,7 @@ def test_guard_uses_bounded_semantic_verifier_for_bound_paraphrase() -> None:
     )
 
     result = guard.finalize(
-        "Premium products improved profitability "
-        "[source](evidence://ev_product_mix_paraphrase)."
+        "Premium products improved profitability [source](evidence://ev_product_mix_paraphrase)."
     )
 
     assert len(verifier.calls) >= 1

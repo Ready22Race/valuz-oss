@@ -323,8 +323,18 @@ async def test_post_tool_hook_builds_uncovered_provider_summary_evidence() -> No
     sidecar = json.loads(runtime._citation_tool_result_sidecars["mcp-meta-document-summary"])
     assert len(sidecar["_valuz_evidence"]) == 1
     evidence = sidecar["_valuz_evidence"][0]
-    assert evidence["evidence"]["quote"] == summary
+    assert evidence["evidence"]["quoteRef"] == "/summary"
+    assert "quote" not in evidence["evidence"]
     assert evidence["locator"] == {
+        "kind": "external",
+        "fragment": "provider-summary",
+    }
+    registry = EvidenceRegistry()
+    assert registry.register_tool_projection(compacted, sidecar, trusted_private=True) == 1
+    restored = registry.resolve(compacted["evidenceHandle"])
+    assert restored is not None
+    assert restored.evidence["quote"] == summary
+    assert restored.locator == {
         "kind": "external",
         "fragment": "provider-summary",
     }

@@ -85,6 +85,78 @@ def test_merge_rejects_out_of_order_or_duplicate_layers() -> None:
         merge_citation_quality_policy_snapshots([_snapshot("oss"), _snapshot("oss")])
 
 
+def test_claim_audit_policy_merges_layer_budgets_and_materiality_terms() -> None:
+    merged = merge_citation_quality_policy_snapshots(
+        [
+            _snapshot(
+                "oss",
+                config={
+                    "rules": {
+                        "claim_audit": {
+                            "selection_enabled": True,
+                            "max_selected_claims": 12,
+                            "critical_kinds": ["numeric-fact"],
+                        }
+                    }
+                },
+            ),
+            _snapshot(
+                "commercial",
+                config={
+                    "rules": {
+                        "claim_audit": {
+                            "max_selected_claims": 16,
+                            "materiality_terms": ["risk"],
+                        }
+                    }
+                },
+            ),
+            _snapshot(
+                "distribution",
+                config={
+                    "rules": {
+                        "claim_audit": {
+                            "max_selected_claims": 24,
+                            "materiality_terms": ["revenue"],
+                        }
+                    }
+                },
+            ),
+        ]
+    )
+
+    selector = merged.config["rules"]["claim_audit"]
+    assert selector["selection_enabled"] is True
+    assert selector["max_selected_claims"] == 24
+    assert selector["critical_kinds"] == ["numeric-fact"]
+    assert selector["materiality_terms"] == ["risk", "revenue"]
+
+
+def test_policy_loader_rejects_unbounded_claim_audit_budget(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policy.yaml"
+    policy_path.write_text(
+        """policy_id: test-policy
+layer: distribution
+version: test-policy-v1
+activation:
+  default_mode: required-on-evidence
+rules:
+  claim_audit:
+    selection_enabled: true
+    max_selected_claims: 10000
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="max_selected_claims"):
+        load_citation_policy_document(
+            policy_path,
+            expected_policy_id="test-policy",
+            expected_layer="distribution",
+            revision_prefix="test-policy-v",
+        )
+
+
 def test_task_coverage_review_guidance_merges_all_layers_additively() -> None:
     merged = merge_citation_quality_policy_snapshots(
         [

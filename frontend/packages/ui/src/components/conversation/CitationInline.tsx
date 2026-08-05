@@ -13,7 +13,7 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
-import { AlertTriangle, ExternalLink, Info } from "lucide-react";
+import { AlertTriangle, Calculator, ExternalLink, Info } from "lucide-react";
 import { Streamdown, type Components } from "streamdown";
 import type {
   CitationBundleV1,
@@ -115,6 +115,69 @@ export function projectEvidenceMarkdownLinks(
   );
 }
 
+function codePointOffsetToCodeUnit(content: string, sourceOffset: number): number {
+  if (!Number.isInteger(sourceOffset) || sourceOffset < 0) return -1;
+  const points = Array.from(content);
+  if (sourceOffset > points.length) return -1;
+  return points.slice(0, sourceOffset).join("").length;
+}
+
+export function projectCitationSidecarAnchors(
+  content: string,
+  bundle?: CitationBundleV1,
+): string {
+  const knownCitationIds = new Set(
+    bundle?.citations.map((citation) => citation.citationId) ?? [],
+  );
+  const insertions = new Map<number, string[]>();
+  const seen = new Set<string>();
+  const append = (sourceOffset: number, citationId: string) => {
+    if (!knownCitationIds.has(citationId)) return;
+    const offset = codePointOffsetToCodeUnit(content, sourceOffset);
+    if (offset < 0) return;
+    const key = `${offset}\0${citationId}`;
+    if (seen.has(key)) return;
+    // A producer may replay a bundle against text that has already been
+    // projected. Only de-duplicate a link already present at this exact raw
+    // claim boundary. The same source can legitimately support two adjacent
+    // claims, so a broad nearby-text check would silently drop the latter.
+    const escapedCitationId = citationId.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+    const atBoundary = content.slice(offset, offset + 280);
+    if (
+      new RegExp(
+        `^\\s*\\[[^\\]]+\\]\\(citation:\\/\\/${escapedCitationId}\\)`,
+        "u",
+      ).test(atBoundary)
+    ) {
+      return;
+    }
+    seen.add(key);
+    const ids = insertions.get(offset) ?? [];
+    ids.push(citationId);
+    insertions.set(offset, ids);
+  };
+
+  for (const region of bundle?.projection?.provenanceRegions ?? []) {
+    for (const citationId of region.citationIds) {
+      append(region.sourceOffset, citationId);
+    }
+  }
+  for (const anchor of bundle?.projection?.anchors ?? []) {
+    append(anchor.sourceOffset, anchor.citationId);
+  }
+
+  let projected = content;
+  for (const [offset, citationIds] of Array.from(insertions.entries()).sort(
+    ([left], [right]) => right - left,
+  )) {
+    const markdown = citationIds
+      .map((citationId) => `[source](citation://${citationId})`)
+      .join(" ");
+    projected = `${projected.slice(0, offset)} ${markdown}${projected.slice(offset)}`;
+  }
+  return projected;
+}
+
 export function citationIdFromHref(href?: string): string | null {
   if (!href?.startsWith(CITATION_HREF_PREFIX)) return null;
   try {
@@ -152,11 +215,19 @@ export function citationOccurrences(
   return occurrences;
 }
 
-export function citationDisplayOrder(content: string): Map<string, number> {
+export function citationDisplayOrder(
+  content: string,
+  bundle?: CitationBundleV1,
+): Map<string, number> {
+  const derivationIds = new Set(
+    bundle?.citations
+      .filter((citation) => citation.evidence.kind === "calculation")
+      .map((citation) => citation.citationId) ?? [],
+  );
   const order = new Map<string, number>();
   for (const match of content.matchAll(CITATION_URI_PATTERN)) {
     const citationId = match[1];
-    if (citationId && !order.has(citationId)) {
+    if (citationId && !derivationIds.has(citationId) && !order.has(citationId)) {
       order.set(citationId, order.size + 1);
     }
   }
@@ -170,7 +241,7 @@ export function usedCitations(
 ): Array<{ displayIndex: number; citation: CitationRefV1 }> {
   if (!bundle) return [];
   const byId = new Map(bundle.citations.map((citation) => [citation.citationId, citation]));
-  const localOrder = citationDisplayOrder(content);
+  const localOrder = citationDisplayOrder(content, bundle);
   return Array.from(localOrder, ([citationId, localDisplayIndex]) => {
     const citation = byId.get(citationId);
     const displayIndex = displayOrder?.get(citationId) ?? localDisplayIndex;
@@ -459,7 +530,7 @@ function CitationHoverCard({
   onMouseEnter,
   onMouseLeave,
 }: {
-  displayIndex: number;
+  displayIndex?: number;
   citation: CitationRefV1;
   side: CitationCardSide;
   position: CitationCardPosition;
@@ -513,7 +584,7 @@ function CitationHoverCard({
       <span className="flex items-start gap-2">
         <span className="min-w-0 flex-1">
           <span className="block font-medium text-ink-heading">
-            {displayIndex} {citation.source.title}
+            {displayIndex ? `${displayIndex} ` : ""}{citation.source.title}
           </span>
           <span className="mt-0.5 block text-ink-meta">
             {[attribution, detail.time].filter(Boolean).join(" · ")}
@@ -685,6 +756,7 @@ export function CitationPill({
     citation?.resolutionStatus !== "forbidden" &&
     citation?.resolutionStatus !== "missing" &&
     Boolean(onCitationClick);
+  const isCalculation = citation?.evidence.kind === "calculation";
   const qualityStatus = qualityIssues?.some(
     (issue) => issue.tone === "critical",
   )
@@ -827,7 +899,9 @@ export function CitationPill({
           }}
           type="button"
           aria-label={
-            citation && displayIndex
+            isCalculation
+              ? t("ui.citation.calculationDetails", "Calculation details")
+              : citation && displayIndex
               ? [
                   t("ui.citation.ariaLabel", "Citation {index}", {
                     index: displayIndex,
@@ -840,6 +914,7 @@ export function CitationPill({
           }
           aria-disabled={!canOpen}
           data-citation-id={citationId}
+          data-citation-derivation={isCalculation || undefined}
           data-citation-quality={qualityStatus}
           className={cn(
             "inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border p-0 font-medium leading-none tabular-nums no-underline transition-colors",
@@ -851,25 +926,29 @@ export function CitationPill({
           )}
           onClick={open}
         >
-          <span
-            className={cn(
-              "inline-flex h-full w-full items-center justify-center leading-none",
-              indexLabel.length > 1 ? "text-micro" : "text-2xs",
-            )}
-            // At this 16px control size, a whole CSS pixel crosses the optical
-            // centre on Retina displays. Half a pixel centres two tabular
-            // digits without moving the circle or single-digit labels.
-            style={
-              indexLabel.length > 1
-                ? { transform: "translateX(-0.5px) scale(0.9)" }
-                : undefined
-            }
-          >
-            {indexLabel}
-          </span>
+          {isCalculation ? (
+            <Calculator className="h-2.5 w-2.5" aria-hidden="true" />
+          ) : (
+            <span
+              className={cn(
+                "inline-flex h-full w-full items-center justify-center leading-none",
+                indexLabel.length > 1 ? "text-micro" : "text-2xs",
+              )}
+              // At this 16px control size, a whole CSS pixel crosses the optical
+              // centre on Retina displays. Half a pixel centres two tabular
+              // digits without moving the circle or single-digit labels.
+              style={
+                indexLabel.length > 1
+                  ? { transform: "translateX(-0.5px) scale(0.9)" }
+                  : undefined
+              }
+            >
+              {indexLabel}
+            </span>
+          )}
         </button>
       )}
-      {hovered && citation && displayIndex && typeof document !== "undefined"
+      {hovered && citation && (displayIndex || isCalculation) && typeof document !== "undefined"
         ? createPortal(
             <CitationHoverCard
               displayIndex={displayIndex}
@@ -916,16 +995,6 @@ export function CitationSourceCards({
     [content, citationBundle, displayOrder],
   );
   const sourceGroups = useMemo(() => groupedCitationSources(used), [used]);
-  const citationById = useMemo(
-    () =>
-      new Map(
-        citationBundle?.citations.map((citation) => [
-          citation.citationId,
-          citation,
-        ]) ?? [],
-      ),
-    [citationBundle],
-  );
   if (!used.length) return null;
 
   return (
@@ -941,21 +1010,6 @@ export function CitationSourceCards({
           const displayIndex = citationIndexLabel(displayIndexes);
           const citationMessageId =
             messageIdByCitationId?.get(citation.citationId) ?? messageId;
-          if (citation.evidence.kind === "calculation") {
-            return (
-              <CitationPill
-                key={key}
-                citationId={citation.citationId}
-                displayIndex={displayIndexes[0]}
-                citation={citation}
-                citationById={citationById}
-                messageId={citationMessageId}
-                onCitationClick={onCitationClick}
-                variant="source-row"
-                sourceLabel={citation.source.title}
-              />
-            );
-          }
           const disabled =
             !onCitationClick ||
             citation.resolutionStatus === "forbidden" ||

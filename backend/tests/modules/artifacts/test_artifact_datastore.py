@@ -57,7 +57,6 @@ async def _content(ds: ArtifactDatastore, digest: str, size: int = 10) -> Artifa
         "u1",
         content_hash=digest,
         byte_size=size,
-        mime_type="text/markdown",
         storage_key=f"/ws/p1/.artifact/x/{digest}",
     )
 
@@ -77,10 +76,10 @@ async def _deliver(
         artifact = await ds.create_artifact(
             scope, kind="document", display_name=display_name, rel_path=rel_path
         )
-    existing = await ds.find_revision_by_content(scope.user_id, artifact.id, digest)
-    if existing is not None:
-        return existing
-    head = await ds.get_head(scope.user_id, artifact.id)
+    current = await ds.get_head_with_revision(scope.user_id, artifact.id)
+    head, head_revision = current if current is not None else (None, None)
+    if head_revision is not None and head_revision.content_hash == digest:
+        return head_revision  # a replay of the current version
     content = await _content(ds, digest)
     return await ds.append_revision(
         scope.user_id,
@@ -467,7 +466,7 @@ async def test_lost_race_leaves_nothing_behind_for_the_retry(session_factory, sc
             is None
         )
         # Nothing recorded for the refused attempt.
-        assert await ds.find_revision_by_content("u1", artifact.id, "h3") is None
+        assert [r.content_hash for r in await ds.list_revisions("u1", artifact.id)] == ["h1", "h2"]
 
         retried = await ds.append_revision(
             "u1",

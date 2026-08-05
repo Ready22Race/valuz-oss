@@ -2024,6 +2024,7 @@
   "ui": {
     "citation": {
       "ariaLabel": "引用 {index}",
+      "calculationDetails": "查看计算过程",
       "calculationInputs": "计算依据",
       "documentAddressUnavailable": "文档地址暂不可用，请稍后重试。",
       "documentDialog": "引用文档",

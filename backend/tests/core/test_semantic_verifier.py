@@ -5,7 +5,7 @@ from dataclasses import replace
 
 from src.core.claim_audit import ClaimCandidate
 from src.core.claim_evidence_resolution import EvidenceCandidate, SemanticVerificationRequest
-from src.core.semantic_verifier import SessionModelSemanticVerifier
+from src.core.semantic_verifier import SessionModelSemanticVerifier, _build_model_invoke
 
 
 def _claim() -> ClaimCandidate:
@@ -45,6 +45,25 @@ def _candidate(index: int, *, kind: str = "text") -> EvidenceCandidate:
             "value": index,
         },
     )
+
+
+def test_anthropic_verifier_disables_extended_thinking(monkeypatch) -> None:
+    captured: dict = {}
+
+    class _FakeChatAnthropic:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr("langchain_anthropic.ChatAnthropic", _FakeChatAnthropic)
+
+    _build_model_invoke(
+        model_id="gateway-model-alias",
+        api_protocol="anthropic",
+        api_key="test-key",
+        base_url="https://gateway.example",
+    )
+
+    assert captured["thinking"] == {"type": "disabled"}
 
 
 def test_verifier_projects_only_one_claim_and_bounded_text_candidates() -> None:
@@ -96,9 +115,61 @@ def test_verifier_projects_only_one_claim_and_bounded_text_candidates() -> None:
         "ev_text_1",
         "ev_text_2",
     ]
-    assert "source" not in request_json.lower()
+    assert request["candidates"][0]["documentContext"] == {
+        "title": "Private report"
+    }
+    assert "canonicalUrl" not in request_json
     assert "accessToken" not in request_json
     assert "https://secret.example" not in request_json
+
+
+def test_verifier_projects_safe_document_period_context_only() -> None:
+    captured: list[dict] = []
+
+    def invoke(_system_prompt: str, request_json: str) -> str:
+        payload = json.loads(request_json)
+        captured.append(payload)
+        request = payload["requests"][0]
+        return json.dumps(
+            {
+                "results": [
+                    {
+                        "claimId": request["claim"]["claimId"],
+                        "verdict": "entailed",
+                        "evidenceIds": [request["candidates"][0]["evidenceId"]],
+                        "confidence": 0.99,
+                    }
+                ]
+            }
+        )
+
+    candidate = replace(
+        _candidate(1),
+        source={
+            "title": "Microsoft - 2026 Q2 - Earnings Call Transcript",
+            "publishedAt": "2026-01-28T23:32:00Z",
+            "canonicalUrl": "https://secret.example/transcript",
+            "documentId": "private-document-id",
+            "accessToken": "must-not-leak",
+        },
+    )
+    verifier = SessionModelSemanticVerifier(
+        owner_id="owner-safe-document-context",
+        model_id="test-model",
+        invoke=invoke,
+    )
+
+    verifier.verify(_claim(), (candidate,))
+
+    context = captured[0]["requests"][0]["candidates"][0]["documentContext"]
+    assert context == {
+        "title": "Microsoft - 2026 Q2 - Earnings Call Transcript",
+        "publishedAt": "2026-01-28T23:32:00Z",
+    }
+    encoded = json.dumps(captured[0])
+    assert "private-document-id" not in encoded
+    assert "must-not-leak" not in encoded
+    assert "https://secret.example" not in encoded
 
 
 def test_verifier_caches_identical_owner_model_claim_and_evidence() -> None:

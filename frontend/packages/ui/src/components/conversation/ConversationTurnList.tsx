@@ -27,6 +27,7 @@ import { MarkdownContent } from "./MarkdownContent";
 import {
   CitationSourceCards,
   citationDisplayOrder,
+  projectCitationSidecarAnchors,
   projectEvidenceMarkdownLinks,
 } from "./CitationInline";
 import { ToolCallCard } from "../ToolCallCard";
@@ -587,7 +588,7 @@ function buildTrailingCitationContext(
     const block = blocks[index];
     if (block?.kind !== "segment" || block.header === null) continue;
     const projectedHeader = projectEvidenceMarkdownLinks(
-      block.header,
+      projectCitationSidecarAnchors(block.header, block.citationBundle),
       block.citationBundle,
     );
     content.push(projectedHeader);
@@ -604,7 +605,10 @@ function buildTrailingCitationContext(
         messageIdByCitationId.set(citation.citationId, block.messageId);
       }
     }
-    for (const citationId of citationDisplayOrder(projectedHeader).keys()) {
+    for (const citationId of citationDisplayOrder(
+      projectedHeader,
+      block.citationBundle,
+    ).keys()) {
       if (!displayOrder.has(citationId)) {
         displayOrder.set(citationId, displayOrder.size + 1);
       }

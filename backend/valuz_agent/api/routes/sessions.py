@@ -1211,7 +1211,7 @@ def _artifact_item(
         ref=build_valuz_file_uri(path) if path else "",
         file_name=revision.file_name,
         file_size=content.byte_size if content else 0,
-        mime_type=content.mime_type if content else None,
+        mime_type=revision.mime_type,
         created_at=revision.created_at,
         artifact_id=revision.artifact_id,
         version_no=revision.version_no,

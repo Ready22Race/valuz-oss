@@ -218,9 +218,17 @@ class ArtifactRevisionRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     ``modules/genui/ids.py``, which reconstructs it heuristically for streaming
     and could not do so reliably here — a replay and a genuine second delivery
     of the same path carry identical arguments). Idempotency therefore keys on
-    the content: ``ux_artifact_revision_content``. That also absorbs a transport
-    retry, which would otherwise mint a phantom version every time a response
-    was lost after the handler committed.
+    the content, which also absorbs a transport retry that would otherwise mint
+    a phantom version every time a response was lost after the handler
+    committed.
+
+    That check compares against the CURRENT head, and there is deliberately no
+    uniqueness rule over the whole history. A retry's bytes are the head's, so
+    the head is all a replay check needs — while "these bytes appear at most
+    once in this deliverable" would additionally forbid the one case where
+    repeating content is meaningful: returning to an earlier version, whose
+    bytes are by definition already in the history. Nothing issues a revert
+    today; the table simply does not stand in the way of one.
     """
 
     __tablename__ = "valuz_artifact_revision"
@@ -238,6 +246,12 @@ class ArtifactRevisionRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     source_tool_call_id: Mapped[str | None] = mapped_column(String(64))
     file_name: Mapped[str] = mapped_column(String(512))
     file_format: Mapped[str | None] = mapped_column(String(32))
+    # Read from ``file_name``, and therefore a property of THIS generation
+    # rather than of its bytes. It cannot live on the content row: that row is
+    # shared between deliverables holding identical bytes, so the same content
+    # delivered as ``page.html`` and as ``notes.txt`` would report one type for
+    # both — whichever name got there first.
+    mime_type: Mapped[str | None] = mapped_column(String(128))
     schema_version: Mapped[str | None] = mapped_column(String(32))
     renderer_version: Mapped[str | None] = mapped_column(String(32))
     content_id: Mapped[str] = mapped_column(String(36), index=True)
@@ -266,13 +280,7 @@ class ArtifactRevisionRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     legacy_row_id: Mapped[str | None] = mapped_column(String(36), index=True)
     created_by: Mapped[str | None] = mapped_column(String(64))
 
-    __table_args__ = (
-        Index("ix_artifact_revision_chain", "artifact_id", "version_no"),
-        # Idempotency, per the class docstring.
-        UniqueConstraint(
-            "user_id", "artifact_id", "content_hash", name="ux_artifact_revision_content"
-        ),
-    )
+    __table_args__ = (Index("ix_artifact_revision_chain", "artifact_id", "version_no"),)
 
 
 class ArtifactContentRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
@@ -295,6 +303,12 @@ class ArtifactContentRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
        short markdown) somewhere to live that is not a pile of mostly-NULL
        columns on every revision;
     3. it answers "are these two versions the same bytes" without reading files.
+
+    Everything here is a property of the BYTES. Anything that depends on the
+    name a delivery gave them belongs on the revision — a row here is shared by
+    every deliverable holding this content, so a name-derived value stored here
+    would be read back by deliverables that never had that name. ``mime_type``
+    was such a value and now lives on the revision.
     """
 
     __tablename__ = "valuz_artifact_content"
@@ -306,6 +320,5 @@ class ArtifactContentRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     content_inline: Mapped[str | None] = mapped_column(Text)
     content_hash: Mapped[str] = mapped_column(String(80))
     byte_size: Mapped[int] = mapped_column(BigInteger, default=0)
-    mime_type: Mapped[str | None] = mapped_column(String(128))
 
     __table_args__ = (Index("ix_artifact_content_hash", "user_id", "content_hash"),)

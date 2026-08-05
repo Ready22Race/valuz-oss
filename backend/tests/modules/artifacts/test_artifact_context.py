@@ -69,9 +69,7 @@ async def _record(  # type: ignore[no-untyped-def]
                 scope, kind="document", display_name=name, rel_path=name
             )
         head = await ds.get_head(scope.user_id, artifact.id)
-        content = await ds.create_content(
-            scope.user_id, content_hash=digest, byte_size=1, mime_type="text/markdown"
-        )
+        content = await ds.create_content(scope.user_id, content_hash=digest, byte_size=1)
         await ds.append_revision(
             scope.user_id,
             artifact.id,

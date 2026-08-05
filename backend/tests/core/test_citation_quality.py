@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from src.core.citation_quality import evaluate_citation_quality
 from src.core.claim_audit import MAX_CLAIMS_PER_ANSWER
+from src.core.claim_evidence_resolution import (
+    SemanticVerificationRequest,
+    SemanticVerificationResult,
+)
 
 
 def _policy() -> dict:
@@ -580,6 +584,192 @@ def test_policy_audits_non_numeric_external_facts_and_dates() -> None:
     assert result["quality"]["metrics"]["unsourcedClaimCount"] == 2
 
 
+def test_risk_bounded_audit_only_gates_selected_critical_claims() -> None:
+    policy = _policy()
+    policy["config"]["rules"]["claim_audit"] = {
+        "selection_enabled": True,
+        "max_selected_claims": 1,
+        "max_selected_claims_per_group": 1,
+        "minimum_supported_ratio": 0.6,
+        "critical_kinds": ["financial-fact", "numeric-fact", "date-fact"],
+        "prioritize_explicit_user_request": True,
+        "prioritize_existing_bindings": True,
+    }
+
+    result = evaluate_citation_quality(
+        (
+            "Revenue was 120 USDm [source](citation://cit_revenue). "
+            "The company was founded in 1999. Alice is the CEO."
+        ),
+        {
+            "version": 1,
+            "citations": [_structured()],
+            "integrity": _integrity(),
+        },
+        policy,
+        user_prompt="What was revenue?",
+    )
+
+    claims = result["quality"]["claims"]
+    selected = [claim for claim in claims if claim["auditSelected"]]
+    not_selected = [claim for claim in claims if not claim["auditSelected"]]
+    assert len(selected) == 1
+    assert selected[0]["exact"].startswith("Revenue was 120 USDm")
+    assert selected[0]["auditPriority"] == "critical"
+    assert selected[0]["status"] == "passed"
+    assert all(claim["status"] == "not-selected" for claim in not_selected)
+    assert result["quality"]["auditOutcome"] == "passed"
+    assert result["quality"]["metrics"]["criticalClaimSelectedCount"] == 1
+    assert result["quality"]["metrics"]["optionalClaimObservedCount"] == len(not_selected)
+    assert not {
+        "claim_without_citation",
+        "date_claim_without_citation",
+        "numeric_claim_without_citation",
+    }.intersection(issue["code"] for issue in result["quality"]["issues"])
+
+
+def test_unresolved_critical_claim_is_partial_without_gating_optional_claims() -> None:
+    policy = _policy()
+    policy["config"]["rules"]["claim_audit"] = {
+        "selection_enabled": True,
+        "max_selected_claims": 1,
+        "max_selected_claims_per_group": 1,
+        "minimum_supported_ratio": 0.6,
+        "critical_kinds": ["financial-fact", "numeric-fact", "date-fact"],
+        "prioritize_explicit_user_request": True,
+    }
+
+    result = evaluate_citation_quality(
+        "Revenue was 120 USDm. The company was founded in 1999.",
+        {
+            "version": 1,
+            "citations": [],
+            "integrity": _integrity(),
+        },
+        policy,
+        user_prompt="What was revenue?",
+    )
+
+    assert result["quality"]["auditOutcome"] == "partial"
+    assert result["quality"]["metrics"]["criticalClaimSelectedCount"] == 1
+    assert result["quality"]["metrics"]["criticalClaimUnresolvedCount"] == 1
+    assert result["quality"]["metrics"]["optionalClaimObservedCount"] == 1
+    assert (
+        len(
+            [
+                issue
+                for issue in result["quality"]["issues"]
+                if issue["code"]
+                in {"numeric_claim_without_citation", "date_claim_without_citation"}
+            ]
+        )
+        == 1
+    )
+
+
+def test_confirmed_conflict_only_escalates_when_claim_is_selected() -> None:
+    policy = _policy()
+    policy["config"]["rules"]["claim_audit"] = {
+        "selection_enabled": True,
+        "max_selected_claims": 1,
+        "max_selected_claims_per_group": 1,
+        "minimum_supported_ratio": 0.6,
+        "critical_kinds": ["financial-fact"],
+        "prioritize_explicit_user_request": True,
+        "prioritize_existing_bindings": True,
+    }
+
+    result = evaluate_citation_quality(
+        "Revenue was 999 USDm [source](citation://cit_revenue).",
+        {
+            "version": 1,
+            "citations": [_structured()],
+            "integrity": _integrity(),
+        },
+        policy,
+        user_prompt="What was revenue?",
+    )
+
+    assert result["quality"]["auditOutcome"] == "needs-review"
+    assert result["quality"]["metrics"]["criticalConfirmedConflictCount"] == 1
+    conflict = next(
+        issue for issue in result["quality"]["issues"] if issue["code"] == "claim_evidence_conflict"
+    )
+    assert conflict["severity"] == "degraded"
+
+
+def test_semantic_verifier_receives_only_selected_critical_claims() -> None:
+    class RecordingVerifier:
+        def __init__(self) -> None:
+            self.requests: tuple[SemanticVerificationRequest, ...] = ()
+
+        def verify_batch(
+            self,
+            requests: tuple[SemanticVerificationRequest, ...],
+        ) -> dict[str, SemanticVerificationResult]:
+            self.requests = requests
+            return {
+                request.claim.claim_id: SemanticVerificationResult(
+                    verdict="entailed",
+                    evidence_handles=tuple(candidate.handle for candidate in request.candidates),
+                    confidence=0.99,
+                    verifier_revision="test-selected-only",
+                )
+                for request in requests
+            }
+
+    def citation(citation_id: str, quote: str) -> dict:
+        return {
+            "citationId": citation_id,
+            "source": {
+                "sourceId": citation_id,
+                "providerId": "documents",
+                "sourceType": "document",
+                "title": "Document",
+                "retrievedAt": "2026-08-05T00:00:00Z",
+            },
+            "evidence": {
+                "kind": "text",
+                "quote": quote,
+                "snippet": quote,
+                "capturedAt": "2026-08-05T00:00:00Z",
+            },
+        }
+
+    policy = _policy()
+    policy["config"]["rules"]["claim_audit"] = {
+        "selection_enabled": True,
+        "max_selected_claims": 1,
+        "max_selected_claims_per_group": 1,
+        "minimum_supported_ratio": 0.6,
+        "critical_kinds": ["document-claim"],
+        "prioritize_explicit_user_request": True,
+        "prioritize_existing_bindings": True,
+    }
+    verifier = RecordingVerifier()
+
+    evaluate_citation_quality(
+        (
+            "Customer demand exceeds supply [1](citation://cit_demand). "
+            "The office opened in Paris [2](citation://cit_office)."
+        ),
+        {
+            "version": 1,
+            "citations": [
+                citation("cit_demand", "Orders remain above available capacity."),
+                citation("cit_office", "A Paris workplace began operations."),
+            ],
+            "integrity": _integrity(),
+        },
+        policy,
+        user_prompt="What is the demand situation?",
+        semantic_verifier=verifier,
+    )
+
+    assert len(verifier.requests) == 1
+    assert "Customer demand" in verifier.requests[0].claim.exact
+
+
 def test_extra_non_supporting_citation_does_not_degrade_supported_claim() -> None:
     def text_citation(citation_id: str, quote: str) -> dict:
         return {
@@ -738,6 +928,37 @@ def test_explicit_text_source_period_mismatch_is_a_concrete_conflict() -> None:
         if item["code"] == "claim_source_period_conflict"
     )
     assert issue["severity"] == "degraded"
+
+
+def test_fiscal_period_and_call_date_do_not_create_false_period_conflict() -> None:
+    citation = {
+        "citationId": "cit_msft_q1",
+        "source": {
+            "sourceId": "msft-q1",
+            "providerId": "reportify",
+            "sourceType": "document",
+            "title": "Microsoft (MSFT) - FY2026 Q1 - Earnings Call Transcript",
+            "retrievedAt": "2026-08-05T08:00:00Z",
+        },
+        "evidence": {
+            "kind": "text",
+            "quote": "FY2026 Q1 当季资本开支为 349 亿美元。",
+            "capturedAt": "2026-08-05T08:00:00Z",
+        },
+    }
+
+    result = evaluate_citation_quality(
+        "FY26 Q1（2025-10-29）— 当季资本开支为 349 亿美元 [source](citation://cit_msft_q1)。",
+        {
+            "version": 1,
+            "citations": [citation],
+            "integrity": _integrity(),
+        },
+        _policy(),
+    )
+
+    claim = result["quality"]["claims"][0]
+    assert "claim_source_period_conflict" not in claim["issueCodes"]
 
 
 def test_cross_language_paraphrase_is_not_reported_as_evidence_mismatch() -> None:
@@ -1634,6 +1855,45 @@ def test_metric_acronym_in_parentheses_is_not_a_company_identifier() -> None:
     }
     result = evaluate_citation_quality(
         "Microsoft AI 业务年化收入（ARR）突破 370 亿美元，同比增长 123% [1](citation://cit_msft)。",
+        {
+            "version": 1,
+            "citations": [microsoft],
+            "integrity": _integrity(),
+        },
+        _policy(),
+    )
+
+    assert "claim_source_entity_conflict" not in {
+        issue["code"] for issue in result["quality"]["issues"]
+    }
+
+
+def test_speaker_role_in_parentheses_is_not_a_company_identifier() -> None:
+    microsoft = {
+        "citationId": "cit_msft",
+        "source": {
+            "sourceId": "msft-q1",
+            "providerId": "reportify",
+            "sourceType": "document",
+            "title": "Microsoft (MSFT) FY2026 Q1 earnings call transcript",
+            "retrievedAt": "2026-08-03T08:00:00Z",
+        },
+        "evidence": {
+            "kind": "text",
+            "quote": (
+                "Satya Nadella said we will increase our total AI capacity by over 80% this year."
+            ),
+            "capturedAt": "2026-08-03T08:00:00Z",
+        },
+    }
+    answer = (
+        "微软（MSFT）FY2026 Q1 电话会：Satya Nadella（CEO）表示，"
+        "本年 AI 总容量将增加超过 80% "
+        "[1](citation://cit_msft)。随后 Amy Hood（CFO）补充了资本开支安排。"
+    )
+
+    result = evaluate_citation_quality(
+        answer,
         {
             "version": 1,
             "citations": [microsoft],

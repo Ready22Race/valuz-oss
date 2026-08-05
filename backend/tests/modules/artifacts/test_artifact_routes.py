@@ -68,9 +68,7 @@ async def _record(  # type: ignore[no-untyped-def]
                 scope, kind="document", display_name=name, rel_path=name
             )
         head = await ds.get_head(scope.user_id, artifact.id)
-        content = await ds.create_content(
-            scope.user_id, content_hash=digest, byte_size=42, mime_type="text/markdown"
-        )
+        content = await ds.create_content(scope.user_id, content_hash=digest, byte_size=42)
         # Mirrors the real layout: every version gets its OWN directory, which
         # is what keeps a superseded version openable.
         version_no = (head.version_no + 1) if head else 1

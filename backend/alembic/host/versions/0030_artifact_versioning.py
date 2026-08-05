@@ -103,6 +103,10 @@ def upgrade() -> None:
         sa.Column("source_tool_call_id", sa.String(length=64), nullable=True),
         sa.Column("file_name", sa.String(length=512), nullable=False),
         sa.Column("file_format", sa.String(length=32), nullable=True),
+        # Read from ``file_name``, so a property of this generation and not of
+        # its bytes — a content row is shared by every deliverable holding the
+        # same content, and would report one type for all of them.
+        sa.Column("mime_type", sa.String(length=128), nullable=True),
         sa.Column("schema_version", sa.String(length=32), nullable=True),
         sa.Column("renderer_version", sa.String(length=32), nullable=True),
         sa.Column("content_id", sa.String(length=36), nullable=False),
@@ -115,11 +119,12 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.BigInteger(), nullable=False),
         sa.Column("user_id", sa.String(length=64), nullable=False),
         sa.PrimaryKeyConstraint("id"),
-        # Idempotency: same bytes on the same artifact is the same generation,
-        # however many times the tool call is replayed or retried.
-        sa.UniqueConstraint(
-            "user_id", "artifact_id", "content_hash", name="ux_artifact_revision_content"
-        ),
+        # Deliberately NO uniqueness over ``(user_id, artifact_id,
+        # content_hash)``. Recognising a replay is a comparison against the
+        # current head, which absorbs a retry just as well (a retry's bytes ARE
+        # the head's) — while a rule over the whole history would additionally
+        # forbid the one case where repeating content is meaningful: returning
+        # to an earlier version, whose bytes are by definition already in there.
     )
     op.create_index("ix_valuz_artifact_revision_user_id", "valuz_artifact_revision", ["user_id"])
     op.create_index(
@@ -145,6 +150,9 @@ def upgrade() -> None:
         "ix_artifact_revision_chain", "valuz_artifact_revision", ["artifact_id", "version_no"]
     )
 
+    # Everything here is a property of the BYTES. Anything derived from the name
+    # a delivery gave them (``mime_type``) lives on the revision instead — this
+    # row is shared by every deliverable holding this content.
     op.create_table(
         "valuz_artifact_content",
         sa.Column("storage_kind", sa.String(length=16), nullable=False),
@@ -152,7 +160,6 @@ def upgrade() -> None:
         sa.Column("content_inline", sa.Text(), nullable=True),
         sa.Column("content_hash", sa.String(length=80), nullable=False),
         sa.Column("byte_size", sa.BigInteger(), nullable=False),
-        sa.Column("mime_type", sa.String(length=128), nullable=True),
         sa.Column("id", sa.String(length=36), nullable=False),
         sa.Column("created_at", sa.BigInteger(), nullable=False),
         sa.Column("updated_at", sa.BigInteger(), nullable=False),

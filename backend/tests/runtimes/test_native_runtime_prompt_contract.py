@@ -9,10 +9,11 @@ from typing import Any
 import valuz_agent.boot.kernel  # noqa: F401
 
 from src.core.agent_config import AgentConfig
+from src.core.task_coverage_continuation import build_task_coverage_noop_tool
 from src.core.types import Session, UserMessage
 from src.runtimes.claude_agent.runtime import ClaudeAgentRuntime
 from src.runtimes.codex.runtime import CodexRuntime
-from src.runtimes.deepagents.runtime import DeepAgentsRuntime
+from src.runtimes.deepagents.runtime import DeepAgentsRuntime, _build_local_shell_backend
 
 
 class _RecordingSink:
@@ -21,6 +22,32 @@ class _RecordingSink:
 
     async def emit(self, event: Any) -> None:
         self.events.append(event)
+
+
+def test_deepagents_large_result_backend_supports_virtual_paths_and_line_paging(
+    tmp_path,
+) -> None:
+    backend = _build_local_shell_backend(str(tmp_path))
+    virtual_path = "/large_tool_results/tool-call-1"
+    payload = '{"rows":[' + ",".join(
+        f'{{"index":{index},"value":"row-{index}"}}' for index in range(400)
+    ) + "]}"
+
+    write_result = backend.write(virtual_path, payload)
+    assert write_result.error is None
+
+    # One-line MCP JSON must expose stable logical lines to read_file instead
+    # of rejecting every non-zero line offset.
+    page = backend.read(virtual_path, offset=150, limit=5)
+    assert page.error is None
+    assert page.file_data is not None
+    assert page.file_data["content"]
+
+    # Shell execution runs at the workspace root. Virtual absolute artifact
+    # paths must resolve to the same file that read_file sees.
+    result = backend.execute(f"jq -r '.rows[0].value' {virtual_path}")
+    assert result.exit_code == 0
+    assert "row-0" in result.output
 
 
 def _session(
@@ -118,6 +145,80 @@ async def test_deepagents_primary_uses_only_the_shared_user_prompt(tmp_path, mon
     assert captured == [{"messages": [{"role": "user", "content": sentinel_prompt}]}]
 
 
+async def test_deepagents_preserves_evidence_continuity_for_same_turn_coverage_only(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    settled_state = SimpleNamespace(values={"messages": []}, interrupts=(), next=())
+
+    class _Graph:
+        async def aget_state(self, _config: Any) -> Any:
+            return settled_state
+
+        async def astream_events(self, *_args: Any, **_kwargs: Any):
+            if False:
+                yield None
+
+    async def _graph(*_args: Any, **_kwargs: Any) -> _Graph:
+        return _Graph()
+
+    runtime = DeepAgentsRuntime(
+        AgentConfig(id="agent-1", name="tester"),
+        "model",
+        _RecordingSink(),
+        workspace_root=str(tmp_path),
+    )
+    monkeypatch.setattr(runtime, "_ensure_graph", _graph)
+    session = _session(tmp_path, runtime="deepagents")
+
+    await runtime.run(session, UserMessage(text="primary"))
+    registry = runtime._turn_evidence_registry
+    generation = registry.generation
+    registry.register_tool_result(
+        {
+            "_valuz_evidence": [
+                {
+                    "evidenceHandle": "ev_coverage_12345678",
+                    "source": {
+                        "sourceId": "coverage:source",
+                        "providerId": "test",
+                        "sourceType": "dataset",
+                        "title": "Coverage source",
+                        "retrievedAt": "2026-08-05T00:00:00Z",
+                    },
+                    "evidence": {
+                        "kind": "structured-data",
+                        "datasetId": "coverage",
+                        "toolName": "coverage_lookup",
+                        "recordKey": "coverage|1",
+                        "field": "value",
+                        "metric": "value",
+                        "value": 9,
+                        "unit": "count",
+                        "capturedAt": "2026-08-05T00:00:00Z",
+                    },
+                }
+            ]
+        }
+    )
+    registry.remember_continuity_reference("ev_coverage_12345678")
+
+    await runtime.run_task_coverage(
+        session,
+        UserMessage(text="coverage"),
+        no_op_tool=build_task_coverage_noop_tool(),
+    )
+
+    assert registry.generation == generation
+    assert registry.resolve("ev_coverage_12345678") is not None
+    assert registry.continuity_references == ("ev_coverage_12345678",)
+
+    await runtime.run(session, UserMessage(text="next primary turn"))
+    assert registry.generation == generation + 1
+    assert registry.resolve("ev_coverage_12345678") is None
+    assert registry.continuity_references == ()
+
+
 async def test_deepagents_preserves_assistant_messages_between_tool_calls(
     tmp_path,
     monkeypatch,
@@ -145,9 +246,7 @@ async def test_deepagents_preserves_assistant_messages_between_tool_calls(
             yield {
                 "event": "on_tool_end",
                 "run_id": "tool-1",
-                "data": {
-                    "output": SimpleNamespace(content="document content", status="success")
-                },
+                "data": {"output": SimpleNamespace(content="document content", status="success")},
             }
             yield {
                 "event": "on_chat_model_end",
@@ -181,9 +280,72 @@ async def test_deepagents_preserves_assistant_messages_between_tool_calls(
         "tool_result",
         "assistant_message",
     ]
-    assert [
-        event.data["text"] for event in visible if event.type == "assistant_message"
-    ] == ["先说明已找到一份材料。", "再给出最终结论。"]
+    assert [event.data["text"] for event in visible if event.type == "assistant_message"] == [
+        "先说明已找到一份材料。",
+        "再给出最终结论。",
+    ]
+
+
+async def test_deepagents_hides_only_internal_summarizer_model_events(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from langchain_core.messages import AIMessage, AIMessageChunk
+
+    sink = _RecordingSink()
+    settled_state = SimpleNamespace(values={"messages": []}, interrupts=(), next=())
+
+    class _Graph:
+        async def aget_state(self, _config: Any) -> Any:
+            return settled_state
+
+        async def astream_events(self, *_args: Any, **_kwargs: Any):
+            yield {
+                "event": "on_chat_model_stream",
+                "metadata": {"lc_source": "summarization"},
+                "data": {"chunk": AIMessageChunk(content="## SESSION INTENT\ninternal")},
+            }
+            yield {
+                "event": "on_chat_model_end",
+                "metadata": {"lc_source": "summarization"},
+                "data": {"output": AIMessage(content="## SESSION INTENT\ninternal")},
+            }
+            yield {
+                "event": "on_chat_model_stream",
+                "metadata": {},
+                "data": {"chunk": AIMessageChunk(content="正常最终回答")},
+            }
+            yield {
+                "event": "on_chat_model_end",
+                "metadata": {},
+                "data": {"output": AIMessage(content="正常最终回答")},
+            }
+
+    async def _graph(*_args: Any, **_kwargs: Any) -> _Graph:
+        return _Graph()
+
+    runtime = DeepAgentsRuntime(
+        AgentConfig(id="agent-1", name="tester"),
+        "model",
+        sink,
+        workspace_root=str(tmp_path),
+    )
+    monkeypatch.setattr(runtime, "_ensure_graph", _graph)
+
+    await runtime.run(
+        _session(tmp_path, runtime="deepagents"),
+        UserMessage(text="长任务完成后回答。"),
+    )
+
+    visible = [
+        event
+        for event in sink.events
+        if event.type in {"text_delta", "assistant_message"}
+    ]
+    assert [(event.type, event.data["text"]) for event in visible] == [
+        ("text_delta", "正常最终回答"),
+        ("assistant_message", "正常最终回答"),
+    ]
 
 
 async def test_codex_primary_uses_only_the_shared_user_prompt(tmp_path, monkeypatch) -> None:
@@ -276,6 +438,7 @@ async def test_deepagents_production_graph_has_no_host_research_controller(
     assert built is graph
     middleware_names = [type(item).__name__ for item in captured["middleware"]]
     assert middleware_names == [
+        "InvalidToolCallPairMiddleware",
         "ToolErrorTolerantMiddleware",
         "CitationEvidenceCompactionMiddleware",
     ]
@@ -332,6 +495,7 @@ async def test_deepagents_always_registers_source_metadata_when_citation_is_off(
         if type(item).__name__ == "CitationEvidenceCompactionMiddleware"
     )
     assert compaction._citation_artifact_emitter is not None
+    assert compaction._evidence_registry is runtime._turn_evidence_registry
 
 
 async def test_deepagents_subagents_receive_only_the_minimal_citation_protocol(
@@ -378,13 +542,24 @@ async def test_deepagents_subagents_receive_only_the_minimal_citation_protocol(
     await runtime._ensure_graph(session)
 
     general_purpose = next(
-        subagent
-        for subagent in captured["subagents"]
-        if subagent["name"] == "general-purpose"
+        subagent for subagent in captured["subagents"] if subagent["name"] == "general-purpose"
     )
     assert "Use registered Evidence handles only." in general_purpose["system_prompt"]
     assert "Normal agent instructions." not in general_purpose["system_prompt"]
     assert general_purpose["skills"] == ["/tmp/skills"]
     assert [type(item).__name__ for item in general_purpose["middleware"]] == [
-        "CitationEvidenceCompactionMiddleware"
+        "InvalidToolCallPairMiddleware",
+        "CitationEvidenceCompactionMiddleware",
     ]
+    main_compaction = next(
+        item
+        for item in captured["middleware"]
+        if type(item).__name__ == "CitationEvidenceCompactionMiddleware"
+    )
+    nested_compaction = next(
+        item
+        for item in general_purpose["middleware"]
+        if type(item).__name__ == "CitationEvidenceCompactionMiddleware"
+    )
+    assert main_compaction._evidence_registry is runtime._turn_evidence_registry
+    assert nested_compaction._evidence_registry is runtime._turn_evidence_registry

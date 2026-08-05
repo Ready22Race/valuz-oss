@@ -2024,6 +2024,7 @@
   "ui": {
     "citation": {
       "ariaLabel": "Citation {index}",
+      "calculationDetails": "View calculation",
       "calculationInputs": "Calculation inputs",
       "documentAddressUnavailable": "The document address is temporarily unavailable. Please try again.",
       "documentDialog": "Citation document",

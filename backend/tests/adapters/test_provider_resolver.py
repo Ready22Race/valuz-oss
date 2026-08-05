@@ -20,6 +20,7 @@ import pytest
 import valuz_agent.boot.kernel  # noqa: F401
 from valuz_agent.adapters.provider_resolver import (
     ProviderNotResolvable,
+    resolve_model_max_input_tokens,
     resolve_model_provider,
     resolve_runtime_provider,
 )
@@ -39,6 +40,8 @@ class _FakeProvider:
     protocol: str | None = None
     provider_kind: str = "compatible"
     user_id: str = "local-test-owner"
+    model_ids: str | None = None
+    default_model: str | None = None
 
 
 class _FakeProviderDatastore:
@@ -48,6 +51,8 @@ class _FakeProviderDatastore:
     async def get_by_id(self, user_id: str, provider_id: str) -> _FakeProvider | None:
         return self._by_id.get(provider_id)
 
+    async def list_providers(self, user_id: str) -> list[_FakeProvider]:
+        return list(self._by_id.values())
 
 
 @pytest.fixture(autouse=True)
@@ -247,6 +252,7 @@ async def test_dual_protocol_builtin_follows_runtime_to_openai_endpoint() -> Non
     assert result.api_protocol == "openai_completion"
     assert result.base_url == "https://open.bigmodel.cn/api/paas/v4"
 
+
 async def test_zhipu_provider_preserves_saved_coding_endpoint_for_openai_runtime() -> None:
     """One Zhipu card can persist the Coding Plan endpoint after discovery fallback."""
 
@@ -342,7 +348,6 @@ async def test_legacy_call_signature_without_runtime_kwarg_still_works() -> None
 # ---------------------------------------------------------------------------
 # bba3014: 4-value ``api_protocol`` + Optional ``base_url``
 # ---------------------------------------------------------------------------
-
 
 
 async def test_row_protocol_openai_completion_maps_to_kernel_underscore_form() -> None:
@@ -462,3 +467,75 @@ async def test_empty_base_url_normalizes_to_none() -> None:
     )
     assert result is not None
     assert result.base_url is None
+
+
+# ---------------------------------------------------------------------------
+# resolve_model_max_input_tokens — user-row declarations
+# (extension-channel declarations are covered in
+#  test_provider_resolver_system.py next to the other ``ext.llm_provider``
+#  fakes)
+# ---------------------------------------------------------------------------
+
+
+async def test_max_input_tokens_from_pinned_row_dict_entry() -> None:
+    provider = _FakeProvider(
+        id="ch-x",
+        model_ids='[{"id": "valuz-pro-anthropic", "max_input_tokens": 200000}, "other-model"]',
+    )
+    declared = await resolve_model_max_input_tokens(
+        provider_id="ch-x",
+        model_id="valuz-pro-anthropic",
+        providers=_FakeProviderDatastore([provider]),
+        user_id="local-test-owner",
+    )
+    assert declared == 200_000
+
+
+async def test_max_input_tokens_none_without_declaration() -> None:
+    provider = _FakeProvider(id="ch-x", model_ids='["valuz-pro-anthropic"]')
+    declared = await resolve_model_max_input_tokens(
+        provider_id="ch-x",
+        model_id="valuz-pro-anthropic",
+        providers=_FakeProviderDatastore([provider]),
+        user_id="local-test-owner",
+    )
+    assert declared is None
+
+
+async def test_max_input_tokens_unknown_channel_returns_none_without_raising() -> None:
+    declared = await resolve_model_max_input_tokens(
+        provider_id="ch-missing",
+        model_id="m",
+        providers=_FakeProviderDatastore([]),
+        user_id="local-test-owner",
+    )
+    assert declared is None
+
+
+async def test_max_input_tokens_no_pin_scans_enabled_rows_only() -> None:
+    disabled = _FakeProvider(
+        id="ch-off",
+        enabled=False,
+        model_ids='[{"id": "alias-m", "max_input_tokens": 111}]',
+    )
+    enabled = _FakeProvider(
+        id="ch-on",
+        model_ids='[{"id": "alias-m", "max_input_tokens": 200000}]',
+    )
+    declared = await resolve_model_max_input_tokens(
+        provider_id=None,
+        model_id="alias-m",
+        providers=_FakeProviderDatastore([disabled, enabled]),
+        user_id="local-test-owner",
+    )
+    assert declared == 200_000
+
+
+async def test_max_input_tokens_empty_model_id_returns_none() -> None:
+    declared = await resolve_model_max_input_tokens(
+        provider_id="ch-x",
+        model_id="",
+        providers=_FakeProviderDatastore([_FakeProvider(id="ch-x")]),
+        user_id="local-test-owner",
+    )
+    assert declared is None
