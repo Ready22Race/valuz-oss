@@ -325,13 +325,22 @@ function OpenUITheme({ children }: { children: ReactNode }) {
   );
 }
 
-function A2UIBody({ body }: {
+function A2UIBody({
+  body,
+  status,
+}: {
   body: string;
   status?: GenerativeUIStatus;
 }) {
   return (
     <OpenUITheme>
-      <A2UIRenderer body={body} />
+      {/* `data-a2ui-streaming` marks the subtree as still filling in. A partly
+          written payload renders the components that have arrived, so without
+          the marker a half-built document is indistinguishable from a finished
+          one that came out short. */}
+      <div data-a2ui-streaming={status === "running" ? "true" : undefined}>
+        <A2UIRenderer body={body} />
+      </div>
     </OpenUITheme>
   );
 }

@@ -998,12 +998,76 @@ function parseA2UIMessages(body: string): A2UIMessage[] {
   }
   if (isRecord(parsed) && looksLikeA2UIMessage(parsed)) return [parsed];
 
-  return trimmed
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.startsWith("{") && line.endsWith("}"))
-    .map((line) => safeJsonParse(line))
-    .filter((message): message is A2UIMessage => isRecord(message));
+  const lines = trimmed.split(/\r?\n/).map((line) => line.trim());
+  const messages: A2UIMessage[] = [];
+  for (const line of lines) {
+    if (!line.startsWith("{")) continue;
+    if (line.endsWith("}")) {
+      const message = safeJsonParse(line);
+      if (isRecord(message)) messages.push(message);
+      continue;
+    }
+    // A line still arriving. One `updateComponents` message usually carries the
+    // entire tree, so waiting for its closing brace means the document appears
+    // in one jump at the end — no streaming at all. Salvaging the components
+    // that are already complete is what makes it build up instead.
+    const salvaged = salvagePartialComponents(line);
+    if (salvaged) messages.push(salvaged);
+  }
+  return messages;
+}
+
+/**
+ * Recover the complete component objects from a half-written
+ * `updateComponents` line.
+ *
+ * Scans for balanced braces rather than parsing, because the line is by
+ * definition not valid JSON yet. String and escape state are tracked so a brace
+ * inside a label — `{"text":"a { b"}` — does not end an object early.
+ */
+function salvagePartialComponents(line: string): A2UIMessage | null {
+  const arrayStart = line.indexOf("[", line.indexOf('"components"'));
+  if (arrayStart < 0) return null;
+
+  const components: A2UIComponent[] = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+  for (let i = arrayStart + 1; i < line.length; i += 1) {
+    const ch = line[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === "{") {
+      if (depth === 0) start = i;
+      depth += 1;
+    } else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        const parsed = safeJsonParse(line.slice(start, i + 1));
+        if (isRecord(parsed)) components.push(parsed);
+        start = -1;
+      }
+    }
+  }
+  if (!components.length) return null;
+
+  const surfaceId = /"surfaceId"\s*:\s*"([^"]+)"/.exec(line)?.[1];
+  return {
+    version: "v0.9",
+    updateComponents: surfaceId ? { surfaceId, components } : { components },
+  };
 }
 
 function normalizeMessages(messages: A2UIMessage[]): A2UIMessage[] {
