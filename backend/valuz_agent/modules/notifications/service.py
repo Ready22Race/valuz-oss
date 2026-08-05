@@ -25,9 +25,25 @@ logger = logging.getLogger(__name__)
 
 NOTIFICATION_CREATED = "notification.created"
 
+# Schema limits (models.py String lengths). SQLite does NOT enforce VARCHAR
+# lengths, so a raw provider error dump (several KB) would land in full and
+# blow up every delivery surface — clamp on write, and on read for legacy rows.
+_TITLE_MAX = 256
+_BODY_MAX = 2048
+
+
+def _clamp(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
 
 def _entry(row: NotificationRow) -> NotificationEntry:
-    return NotificationEntry.model_validate(row)
+    entry = NotificationEntry.model_validate(row)
+    # Rows written before the ingest clamp may exceed the schema limits.
+    entry.title = _clamp(entry.title, _TITLE_MAX)
+    entry.body = _clamp(entry.body, _BODY_MAX)
+    return entry
 
 
 class NotificationService:
@@ -65,8 +81,8 @@ class NotificationService:
                     user_id,
                     dedup_key=dedup_key,
                     kind=kind,
-                    title=title,
-                    body=body,
+                    title=_clamp(title, _TITLE_MAX),
+                    body=_clamp(body, _BODY_MAX),
                     route=route,
                     action=action,
                     urgency=urgency,

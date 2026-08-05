@@ -63,7 +63,7 @@ function BackupFailedCard({
     >
       <div className="flex flex-col gap-3 px-4 py-3">
         {entry.body && (
-          <p className="whitespace-pre-wrap text-xs leading-5 text-ink-body">
+          <p className="line-clamp-6 whitespace-pre-wrap break-words text-xs leading-5 text-ink-body">
             {entry.body}
           </p>
         )}
@@ -169,7 +169,9 @@ function QuestionCard({ entry, onNavigateAway }: NotificationCardProps): ReactEl
           />
         ) : (
           <div className="flex items-center justify-between px-3 py-3">
-            <span className="text-sm text-ink-muted">{entry.body}</span>
+            <span className="line-clamp-3 break-words text-sm text-ink-muted">
+              {entry.body}
+            </span>
             {entry.session_id && (
               <button
                 type="button"
@@ -236,7 +238,7 @@ function FailureCard({ entry, onNavigateAway }: NotificationCardProps): ReactEle
     >
       <div className="flex flex-col gap-3 px-4 py-3">
         {entry.body && (
-          <p className="whitespace-pre-wrap text-xs leading-5 text-ink-body">
+          <p className="line-clamp-6 whitespace-pre-wrap break-words text-xs leading-5 text-ink-body">
             {entry.body}
           </p>
         )}

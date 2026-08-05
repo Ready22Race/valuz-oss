@@ -306,3 +306,40 @@ def test_history_pages_by_created_at_cursor(db_factory) -> None:
     first, more1, second, more2 = asyncio.run(page())
     assert [e.created_at for e in first] == [1002, 1001] and more1
     assert [e.created_at for e in second] == [1000] and not more2
+
+
+def test_ingest_clamps_oversized_title_and_body(db_factory) -> None:
+    """SQLite doesn't enforce VARCHAR lengths — a raw provider error dump
+    (several KB) must be clamped at ingest so it can't blow up every delivery
+    surface downstream."""
+    svc = NotificationService()
+
+    async def run():
+        return await svc.ingest(
+            OWNER,
+            **_q(title="t" * 5000, body="e" * 10000),
+        )
+
+    entry = asyncio.run(run())
+    assert entry is not None
+    assert len(entry.title) == 256 and entry.title.endswith("…")
+    assert len(entry.body) == 2048 and entry.body.endswith("…")
+
+
+def test_snapshot_clamps_legacy_oversized_rows(db_factory) -> None:
+    """Rows written before the ingest clamp are clamped on the way out."""
+    svc = NotificationService()
+
+    async def seed():
+        return await svc.ingest(OWNER, **_q())
+
+    asyncio.run(seed())
+
+    # Simulate a pre-clamp row: oversize the stored columns directly.
+    with db_factory() as db:
+        row = db.query(NotificationRow).one()
+        row.body = "x" * 9000
+        db.commit()
+
+    entries, _ = asyncio.run(svc.snapshot(OWNER))
+    assert len(entries[0].body) == 2048 and entries[0].body.endswith("…")

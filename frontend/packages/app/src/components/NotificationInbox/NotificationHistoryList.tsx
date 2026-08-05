@@ -83,7 +83,7 @@ function HistoryRow({
         {display.title}
       </p>
       {display.body && (
-        <p className="mt-0.5 line-clamp-2 text-xs leading-5 text-ink-muted">
+        <p className="mt-0.5 line-clamp-2 break-words text-xs leading-5 text-ink-muted">
           {display.body}
         </p>
       )}
