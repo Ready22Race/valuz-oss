@@ -223,7 +223,12 @@ const GENERATIVE_UI_LAYOUT_CSS = `
     gap: var(--openui-space-m-l) !important;
   }
 
-  ${OPENUI_SCOPE_SELECTOR} [data-a2ui-component="row"] > * {
+  /* A row's children share the width — except a fixed-size mark, which is
+     sized in px precisely so it stays that size. Without the exclusion an
+     IconTag stretches to 16rem and renders as a wide tinted bar with a small
+     glyph adrift in the middle of it. */
+  ${OPENUI_SCOPE_SELECTOR}
+    [data-a2ui-component="row"] > *:not([data-a2ui-component="icon-tag"]) {
     flex: 1 1 16rem;
   }
 

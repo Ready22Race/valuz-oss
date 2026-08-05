@@ -1295,7 +1295,7 @@ function buildChartData(
 ) {
   // `series` may be inline, or `children` may name sibling components by id.
   const declared = resolve(props.series ?? props.children);
-  const rowsFromSeriesData = buildRowsFromSeriesData(declared);
+  const rowsFromSeriesData = buildRowsFromSeriesData(declared, resolve);
   if (rowsFromSeriesData.length) return rowsFromSeriesData;
 
   // The axis arrives as `labels` or `categories` depending on how the model
@@ -1317,14 +1317,20 @@ function buildChartData(
   });
 }
 
-function buildRowsFromSeriesData(value: unknown): Record<string, string | number>[] {
+function buildRowsFromSeriesData(
+  value: unknown,
+  resolve: (value: unknown) => unknown[] = toArray,
+): Record<string, string | number>[] {
   const rows = new Map<string, Record<string, string | number>>();
-  for (const item of toArray(value).filter(isRecord)) {
+  for (const item of resolve(value).filter(isRecord)) {
     const record = isA2UIComponent(item) ? mergeProps(item) : item;
     const seriesKey = readText(
       record.category ?? record.name ?? record.label ?? "value",
     );
-    const points = toArray(record.data ?? record.points);
+    // Points arrive inline, or — since A2UI nests by id — as `children` naming
+    // sibling Point components. Reading only `data`/`points` leaves a chart
+    // whose data is one level deeper with nothing to plot.
+    const points = resolve(record.data ?? record.points ?? record.children);
     let consumedNamedPoint = false;
     for (const point of points) {
       if (!isRecord(point)) continue;

@@ -118,6 +118,28 @@ describe("A2UI charts whose series arrives by reference", () => {
     ]);
   });
 
+  it("follows references two levels down, to the points", () => {
+    // The next payload from the same conversation nested one level further:
+    // chart → children:[Series] → children:[Point{label,value}], with no axis
+    // on the chart at all. Resolving only the first level left the series with
+    // no points, so the chart vanished again — the axis lives on the points.
+    render(
+      <A2UIRenderer
+        body={a2ui([
+          { id: "root", component: "HorizontalBarChart", children: ["s"] },
+          { id: "s", component: "Series", name: "涨幅 %", children: ["p1", "p2"] },
+          { id: "p1", component: "Point", label: "ARM", value: 17.36 },
+          { id: "p2", component: "Point", label: "AMAT", value: 14.97 },
+        ])}
+      />,
+    );
+    const data = JSON.parse(screen.getByTestId("horizontal-chart").textContent ?? "[]");
+    expect(data).toEqual([
+      { category: "ARM", "涨幅 %": 17.36 },
+      { category: "AMAT", "涨幅 %": 14.97 },
+    ]);
+  });
+
   it("renders no chart when the series is genuinely absent", () => {
     render(
       <A2UIRenderer
