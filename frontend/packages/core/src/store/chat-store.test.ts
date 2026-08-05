@@ -8,7 +8,7 @@ const makeState = (overrides: Partial<ChatStoreState> = {}): ChatStoreState => {
     sessionStatus: "running",
     messages: [],
     todos: null,
-    streaming: { messageId: null, text: "", thinking: "" },
+    streaming: { messageId: null, assistantId: null, text: "", thinking: "" },
     isStreaming: false,
     isInterrupting: false,
     queue: [],
@@ -79,7 +79,12 @@ describe("chat-store reducer", () => {
 
     it("should commit assistant message and clear streaming on canonical delta", () => {
       const start = makeState({
-        streaming: { messageId: "m1", text: "partial", thinking: "" },
+        streaming: {
+          messageId: "m1",
+          assistantId: null,
+          text: "partial",
+          thinking: "",
+        },
         isStreaming: true,
       });
       const next = {
@@ -130,7 +135,12 @@ describe("chat-store reducer", () => {
 
     it("should flush thinking buffer into committed message on full thinking event", () => {
       const start = makeState({
-        streaming: { messageId: "m1", text: "", thinking: "Let me think" },
+        streaming: {
+          messageId: "m1",
+          assistantId: null,
+          text: "",
+          thinking: "Let me think",
+        },
       });
       const next = {
         ...start,
@@ -437,6 +447,142 @@ describe("chat-store reducer", () => {
         ),
       };
       expect(afterComplete.messages[0]!.tools[0]!.output).toBe("final");
+    });
+  });
+
+  describe("kernel turn-id reuse (assistant events carry the user echo's message_id)", () => {
+    // Real kernel streams scope ``message_id`` to the TURN: the user echo
+    // and every assistant event of the turn share one id (repro:
+    // kernel.db events 8–24 — user_message, thinking, tool_use,
+    // assistant_message ×2, session_idle, all on the same message_id).
+    const mid = "turn-1";
+    const apply = (
+      state: ChatStoreState,
+      ...frames: SessionEventDTO[]
+    ): ChatStoreState =>
+      frames.reduce<ChatStoreState>(
+        (s, f) => ({ ...s, ...reduce(s, f) }),
+        state,
+      );
+
+    it("should keep assistant output out of the user bubble when message_id is reused", () => {
+      const s = apply(
+        makeState(),
+        frame(1, "message.user", { text: "check NVDA", message_id: mid }),
+        frame(2, "message.assistant.thinking", {
+          text: "let me look",
+          message_id: mid,
+        }),
+        frame(3, "tool.call.started", {
+          tool_use_id: "t1",
+          name: "stock_quote",
+          input: "{}",
+          message_id: mid,
+        }),
+        frame(4, "tool.call.completed", {
+          tool_use_id: "t1",
+          content: "211.94",
+          is_error: "false",
+        }),
+        frame(5, "message.assistant.delta", {
+          text: "NVDA closed at $211.94",
+          message_id: mid,
+        }),
+      );
+
+      expect(s.messages).toHaveLength(2);
+      const [user, assistant] = s.messages;
+      expect(user!.role).toBe("user");
+      expect(user!.text).toBe("check NVDA");
+      expect(user!.thinking).toEqual([]);
+      expect(user!.tools).toEqual([]);
+      expect(assistant!.role).toBe("assistant");
+      expect(assistant!.id).not.toBe(user!.id);
+      expect(assistant!.thinking).toEqual(["let me look"]);
+      expect(assistant!.tools).toHaveLength(1);
+      expect(assistant!.tools[0]!.output).toBe("211.94");
+      expect(assistant!.text).toBe("NVDA closed at $211.94");
+    });
+
+    it("should route streamed tool input to the assistant entry, not the user echo", () => {
+      const s = apply(
+        makeState(),
+        frame(1, "message.user", { text: "write it", message_id: mid }),
+        frame(2, "tool.call.input_delta", {
+          tool_use_id: "t1",
+          name: "Write",
+          text: '{"content":',
+          message_id: mid,
+        }),
+        frame(3, "tool.call.input_delta", {
+          tool_use_id: "t1",
+          text: '"hi"}',
+          message_id: mid,
+        }),
+      );
+
+      expect(s.messages).toHaveLength(2);
+      expect(s.messages[0]!.role).toBe("user");
+      expect(s.messages[0]!.tools).toEqual([]);
+      expect(s.messages[1]!.role).toBe("assistant");
+      expect(s.messages[1]!.tools[0]!.input).toBe('{"content":"hi"}');
+    });
+
+    it("should open a fresh entry after a canonical delta instead of overwriting the committed text", () => {
+      // One turn, two assistant messages separated by a tool block —
+      // the second commit must not clobber the first answer.
+      const s = apply(
+        makeState(),
+        frame(1, "message.user", { text: "check NVDA", message_id: mid }),
+        frame(2, "message.assistant.delta", {
+          text: "first answer",
+          message_id: mid,
+        }),
+        frame(3, "message.assistant.thinking", {
+          text: "double-checking",
+          message_id: mid,
+        }),
+        frame(4, "tool.call.started", {
+          tool_use_id: "t2",
+          name: "stock_quote",
+          input: "{}",
+          message_id: mid,
+        }),
+        frame(5, "tool.call.completed", {
+          tool_use_id: "t2",
+          content: "ok",
+          is_error: "false",
+        }),
+        frame(6, "message.assistant.delta", {
+          text: "nothing to add",
+          message_id: mid,
+        }),
+      );
+
+      expect(s.messages).toHaveLength(3);
+      expect(s.messages[1]!.role).toBe("assistant");
+      expect(s.messages[1]!.text).toBe("first answer");
+      expect(s.messages[2]!.role).toBe("assistant");
+      expect(s.messages[2]!.thinking).toEqual(["double-checking"]);
+      expect(s.messages[2]!.tools).toHaveLength(1);
+      expect(s.messages[2]!.text).toBe("nothing to add");
+      // Ids stay unique — they key React rendering.
+      expect(new Set(s.messages.map((m) => m.id)).size).toBe(3);
+    });
+
+    it("should not reuse the user echo's id for the run.failed placeholder", () => {
+      const s = apply(
+        makeState(),
+        frame(1, "message.user", { text: "boom pls", message_id: mid }),
+        frame(2, "run.failed", { message: "boom", message_id: mid }),
+      );
+
+      expect(s.messages).toHaveLength(2);
+      expect(s.messages[0]!.role).toBe("user");
+      expect(s.messages[0]!.text).toBe("boom pls");
+      expect(s.messages[1]!.role).toBe("assistant");
+      expect(s.messages[1]!.id).not.toBe(s.messages[0]!.id);
+      expect(s.messages[1]!.text).toBe("[boom]");
     });
   });
 
