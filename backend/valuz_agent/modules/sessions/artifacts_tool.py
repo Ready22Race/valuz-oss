@@ -46,20 +46,17 @@ references them).
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy.ext.asyncio import AsyncSession
 from src.core import ToolDef, ToolResult
 from src.core.tools import ExecContext
 
 import valuz_agent.boot.kernel  # noqa: F401  (sets kernel import path)
 from valuz_agent.infra.db import async_unit_of_work
-from valuz_agent.modules.artifacts import snapshot as snap
-from valuz_agent.modules.artifacts.datastore import ArtifactDatastore
 from valuz_agent.modules.artifacts.models import (
     ARTIFACT_KIND_HINTS,
     ArtifactKind,
@@ -70,46 +67,42 @@ from valuz_agent.modules.artifacts.scope import (
     ScopeUnavailableError,
     resolve_delivery_scope,
 )
-from valuz_agent.modules.files.service import assert_owned, owner_allowed_roots
+from valuz_agent.modules.artifacts.service import (
+    DeliveryRequest,
+    DeliveryResult,
+    DeliveryStatus,
+    deliver_file,
+)
+from valuz_agent.modules.files.service import owner_allowed_roots
 
 logger = logging.getLogger(__name__)
 
 DELIVER_ARTIFACTS_TOOL_NAME = "deliver_artifacts"
 
-# Per-entry outcomes. The toolkit MCP renders a failed tool result as a text
-# prefix rather than a wire error, so the model reads these as prose — each one
-# has to say what to do next, not merely that something was refused.
-STATUS_RECORDED = "recorded"
-STATUS_UNCHANGED = "unchanged"
-STATUS_NOT_OWNED = "not_owned"
-STATUS_NOT_IN_SCOPE = "not_in_scope"
-STATUS_NOT_FOUND = "not_found"
-STATUS_IN_ARTIFACT_STORE = "in_artifact_store"
-STATUS_STALE_HEAD = "stale_head"
-STATUS_SNAPSHOT_FAILED = "snapshot_failed"
-STATUS_INVALID = "invalid"
-STATUS_UNKNOWN_ARTIFACT = "unknown_artifact"
-
+# Model-facing wording for each ``DeliveryStatus``. The service decides what
+# happened; this decides how to say it to a model — which reads these as prose,
+# because the toolkit MCP renders a failed tool result as a text prefix rather
+# than a wire error. Each one therefore says what to do next.
 _ERRORS = {
-    STATUS_NOT_OWNED: (
+    DeliveryStatus.NOT_OWNED: (
         "path is outside your workspace — write the file into your working "
         "directory and deliver it from there"
     ),
-    STATUS_NOT_IN_SCOPE: (
+    DeliveryStatus.NOT_IN_SCOPE: (
         "path is outside this session's working directory — write the file "
         "there and deliver it from there"
     ),
-    STATUS_NOT_FOUND: "file not found — check the path you wrote",
-    STATUS_IN_ARTIFACT_STORE: (
+    DeliveryStatus.NOT_FOUND: "file not found — check the path you wrote",
+    DeliveryStatus.IN_ARTIFACT_STORE: (
         "that path is inside the artifact store, which holds already-delivered "
         "versions — deliver the file from your working directory instead"
     ),
-    STATUS_STALE_HEAD: (
+    DeliveryStatus.STALE_HEAD: (
         "someone recorded a newer version of this deliverable while you were "
         "working — read the current version and apply your change to it"
     ),
-    STATUS_SNAPSHOT_FAILED: "could not copy the file — you can retry this delivery",
-    STATUS_UNKNOWN_ARTIFACT: (
+    DeliveryStatus.SNAPSHOT_FAILED: "could not copy the file — you can retry this delivery",
+    DeliveryStatus.UNKNOWN_ARTIFACT: (
         "no such deliverable in this workspace — check the artifactId, or omit "
         "it and it will be matched by file name"
     ),
@@ -206,155 +199,67 @@ _PARAMS = {
 }
 
 
-def _fail(file_path: Any, status: str, detail: str | None = None) -> dict[str, Any]:
-    return {
-        "filePath": str(file_path),
-        "status": status,
-        "error": detail or _ERRORS.get(status, status),
-    }
+def _entry(file_path: Any, result: DeliveryResult) -> dict[str, Any]:
+    """Render one service outcome as the tool's per-item result."""
+    entry: dict[str, Any] = {"filePath": str(file_path), "status": result.status.value}
+    if result.ok:
+        entry.update(
+            artifactId=result.artifact_id,
+            revisionId=result.revision_id,
+            versionNo=result.version_no,
+            isNewVersion=result.is_new_version,
+            absPath=result.abs_path,
+        )
+    else:
+        entry["error"] = result.detail or _ERRORS.get(result.status, result.status.value)
+    return entry
 
 
 async def _deliver_one(
-    ds: ArtifactDatastore,
+    db: AsyncSession,
     delivery: DeliveryScope,
     raw: dict[str, Any],
     *,
     roots: list[Path],
     session_id: str,
-    user_id: str,
 ) -> dict[str, Any]:
-    """Record one entry. Returns the per-item result — never raises for input."""
+    """Translate one attachment into a delivery, and its outcome back into JSON.
+
+    Everything this does is translation. What a delivery MEANS — the boundary,
+    the identity matching, the idempotency, the head CAS — is
+    ``artifacts.service``, so that a module delivering something without an
+    agent in the loop gets exactly the same rules.
+    """
     file_path = raw.get("filePath")
     if not file_path or not isinstance(file_path, str):
-        return _fail(file_path, STATUS_INVALID, "missing 'filePath'")
-
-    abs_path = Path(os.path.abspath(os.path.expanduser(file_path)))
-
-    # Owner boundary first — see the module docstring.
-    try:
-        assert_owned(abs_path, roots)
-    except PermissionError:
-        logger.warning("deliver_artifacts: refused out-of-bounds path for owner %s", user_id)
-        return _fail(file_path, STATUS_NOT_OWNED)
-
-    if snap.is_inside_artifact_root(abs_path, delivery.cwd):
-        return _fail(file_path, STATUS_IN_ARTIFACT_STORE)
-
-    try:
-        rel_path = str(abs_path.relative_to(delivery.cwd))
-    except ValueError:
-        # Owned, but belonging to a different project or worktree. Identity is
-        # scope-relative, so there is no key to file this under.
-        return _fail(file_path, STATUS_NOT_IN_SCOPE)
-
-    if not abs_path.is_file():
-        return _fail(file_path, STATUS_NOT_FOUND)
-
-    file_name = str(raw.get("fileName") or abs_path.name)
-    mime_type = raw.get("mimeType") or snap.guess_mime(file_name)
-
-    # Server-side and authoritative: hash and size come from the bytes, not from
-    # what the model claimed about them.
-    try:
-        content_hash, byte_size = await asyncio.to_thread(snap.hash_and_size, abs_path)
-    except OSError:
-        logger.warning("deliver_artifacts: could not read %s", abs_path, exc_info=True)
-        return _fail(file_path, STATUS_SNAPSHOT_FAILED)
-
-    scope = delivery.scope
-    requested_id = raw.get("artifactId")
-    as_new = bool(raw.get("asNewArtifact"))
-    if requested_id and as_new:
-        return _fail(
-            file_path,
-            STATUS_INVALID,
-            "'artifactId' and 'asNewArtifact' say opposite things — pass one",
-        )
-
-    artifact = None
-    if requested_id:
-        # Named outright: the caller knows this is the same deliverable even
-        # though the file no longer looks like it — a rename or a move, which no
-        # amount of key matching can recognise.
-        artifact = await ds.get_artifact_in_scope(scope, str(requested_id))
-        if artifact is None:
-            return _fail(file_path, STATUS_UNKNOWN_ARTIFACT)
-    elif not as_new:
-        artifact = await ds.find_by_keys(scope, rel_path=rel_path, display_name=file_name)
-
-    if artifact is None:
-        artifact = await ds.create_artifact(
-            scope,
-            # The caller's word, or ``file``. An extension says what a file is
-            # encoded as, not what it is for, and guessing would put a
-            # confident-looking wrong label on things the agent could simply
-            # have named.
-            kind=coerce_kind(raw.get("kind")).value,
-            display_name=file_name,
-            rel_path=rel_path,
-        )
-    else:
-        # Follow the file: a deliverable that moved or was renamed has to be
-        # findable at its new path next time, not only at the one it left.
-        await ds.adopt_delivery(scope, artifact, rel_path=rel_path, display_name=file_name)
-
-    existing = await ds.find_revision_by_content(scope.user_id, artifact.id, content_hash)
-    if existing is not None:
-        # Same bytes, same deliverable: a replay, a retry, or the agent
-        # delivering something it never changed.
         return {
-            "filePath": file_path,
-            "status": STATUS_UNCHANGED,
-            "artifactId": artifact.id,
-            "revisionId": existing.id,
-            "versionNo": existing.version_no,
-            "isNewVersion": False,
-            "absPath": existing.abs_path,
+            "filePath": str(file_path),
+            "status": DeliveryStatus.INVALID.value,
+            "error": "missing 'filePath'",
         }
 
-    head = await ds.get_head(scope.user_id, artifact.id)
-    version_no = (head.version_no + 1) if head is not None else 1
-
-    try:
-        stored = await asyncio.to_thread(
-            snap.write_snapshot, abs_path, delivery.cwd, artifact.id, version_no, file_name
-        )
-    except OSError:
-        logger.warning("deliver_artifacts: snapshot failed for %s", abs_path, exc_info=True)
-        return _fail(file_path, STATUS_SNAPSHOT_FAILED)
-
-    content = await ds.find_content_by_hash(scope.user_id, content_hash)
-    if content is None:
-        content = await ds.create_content(
-            scope.user_id,
-            content_hash=content_hash,
-            byte_size=byte_size,
-            mime_type=mime_type,
-            storage_key=str(stored),
-        )
-
-    revision = await ds.append_revision(
-        scope.user_id,
-        artifact.id,
-        expected_head_revision_id=head.revision_id if head is not None else None,
-        content=content,
-        file_name=file_name,
-        abs_path=str(stored),
-        file_format=snap.format_for(file_name),
+    result = await deliver_file(
+        db,
+        scope=delivery.scope,
+        scope_cwd=delivery.cwd,
+        owner_roots=roots,
         source_session_id=session_id,
+        request=DeliveryRequest(
+            abs_path=Path(file_path),
+            display_name=str(raw["fileName"]) if raw.get("fileName") else None,
+            kind=coerce_kind(raw.get("kind")),
+            mime_type=str(raw["mimeType"]) if raw.get("mimeType") else None,
+            artifact_id=str(raw["artifactId"]) if raw.get("artifactId") else None,
+            as_new_artifact=bool(raw.get("asNewArtifact")),
+        ),
     )
-    if revision is None:
-        return _fail(file_path, STATUS_STALE_HEAD)
-
-    return {
-        "filePath": file_path,
-        "status": STATUS_RECORDED,
-        "artifactId": artifact.id,
-        "revisionId": revision.id,
-        "versionNo": revision.version_no,
-        "isNewVersion": revision.version_no > 1,
-        "absPath": str(stored),
-    }
+    if result.status is DeliveryStatus.INVALID and result.detail:
+        # The service speaks in field names; the model knows them as parameters.
+        result = DeliveryResult(
+            status=DeliveryStatus.INVALID,
+            detail="'artifactId' and 'asNewArtifact' say opposite things — pass one",
+        )
+    return _entry(file_path, result)
 
 
 async def _deliver_artifacts_handler(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
@@ -394,23 +299,22 @@ async def _deliver_artifacts_handler(args: dict[str, Any], ctx: ExecContext) -> 
     results: list[dict[str, Any]] = []
     # One transaction for the batch — see the module docstring.
     async with async_unit_of_work() as db:
-        ds = ArtifactDatastore(db)
         for raw in items:
             if not isinstance(raw, dict):
-                results.append(_fail(raw, STATUS_INVALID, "entry is not an object"))
+                results.append(
+                    {
+                        "filePath": str(raw),
+                        "status": DeliveryStatus.INVALID.value,
+                        "error": "entry is not an object",
+                    }
+                )
                 continue
             results.append(
-                await _deliver_one(
-                    ds,
-                    delivery,
-                    raw,
-                    roots=roots,
-                    session_id=ctx.session_id,
-                    user_id=user_id,
-                )
+                await _deliver_one(db, delivery, raw, roots=roots, session_id=ctx.session_id)
             )
 
-    recorded = [r for r in results if r["status"] in (STATUS_RECORDED, STATUS_UNCHANGED)]
+    ok = {DeliveryStatus.RECORDED.value, DeliveryStatus.UNCHANGED.value}
+    recorded = [r for r in results if r["status"] in ok]
     payload: dict[str, Any] = {"results": results, "delivered_count": len(recorded)}
     # A call that delivered nothing is surfaced as an error so the model notices
     # rather than assuming success.
