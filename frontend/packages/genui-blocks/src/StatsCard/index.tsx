@@ -16,7 +16,7 @@ export const StatsCard = defineComponent({
     "One headline figure with room to breathe: the metric label, the figure set large, and an optional sentence explaining it. " +
     "Reach for this when a single number *is* the point of the section — use MiniCard inside a MiniCardBlock instead once three or more figures sit side by side. " +
     "value is already formatted with its unit (\"$4.2M\", \"12.4%\"), delta is the change figure, trend (up|down|flat) colours it, and description is one short supporting sentence. " +
-    "Put several in a MediumCardBlock to lay them out as a row." +
+    "Put several in a MediumCardBlock to lay them out as a row. " +
     "icon is any lucide-react icon name, shown as a small mark beside the heading — put it there rather than pasting an emoji into the text.",
   component: ({ props }) => {
     const deltaTone = props.tone ?? trendTone(props.trend);
