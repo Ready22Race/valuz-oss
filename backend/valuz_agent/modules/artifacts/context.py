@@ -70,7 +70,11 @@ async def build_artifacts_section(
     rows = await ds.list_scope_heads(scope, limit=MAX_LISTED)
     if not rows:
         return ""
-    total = await ds.count_scope_artifacts(scope)
+    # A short list is its own count. Only a full page can have more behind it,
+    # and this runs on every turn of every session — the common project has
+    # fewer deliverables than the cap, so asking would be a query whose answer
+    # is already in hand.
+    total = len(rows) if len(rows) < MAX_LISTED else await ds.count_scope_artifacts(scope)
 
     lines = [f"Delivered artifacts in this workspace ({total} total, most recently updated first):"]
     for artifact, head, revision in rows:
