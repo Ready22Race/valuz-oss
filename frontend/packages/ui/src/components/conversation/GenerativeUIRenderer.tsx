@@ -305,11 +305,18 @@ function OpenUIBody({
 }) {
   return (
     <OpenUITheme>
-      <Renderer
-        library={OPENUI_LANG_LIBRARY}
-        response={body}
-        isStreaming={status === "running"}
-      />
+      {/* `vgb-root` is the container the blocks' `@container vgb` queries
+          resolve against, and the scope of their `min-width: 0` reset. Without
+          it every breakpoint silently never matches: a tile keeps its widest
+          floor at every width and overflows the column it sits in, painting
+          over whatever is beside it. */}
+      <div className="vgb-root">
+        <Renderer
+          library={OPENUI_LANG_LIBRARY}
+          response={body}
+          isStreaming={status === "running"}
+        />
+      </div>
     </OpenUITheme>
   );
 }
@@ -338,7 +345,10 @@ function A2UIBody({
           written payload renders the components that have arrived, so without
           the marker a half-built document is indistinguishable from a finished
           one that came out short. */}
-      <div data-a2ui-streaming={status === "running" ? "true" : undefined}>
+      <div
+        className="vgb-root"
+        data-a2ui-streaming={status === "running" ? "true" : undefined}
+      >
         <A2UIRenderer body={body} />
       </div>
     </OpenUITheme>

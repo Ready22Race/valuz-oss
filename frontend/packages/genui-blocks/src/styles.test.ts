@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
@@ -65,6 +65,26 @@ describe("block stylesheets", () => {
       }
     }
     expect(offenders).toEqual([]);
+  });
+
+  it("has a container to resolve its container queries against", () => {
+    // `@container vgb (...)` only matches inside an element carrying
+    // `.vgb-root`. Miss that and every breakpoint silently never fires — a tile
+    // keeps its widest floor at every width and overflows its column, painting
+    // over whatever sits beside it. Nothing errors; the layout is just wrong.
+    const hosts = resolve(stylesDir, "../../../ui/src/components/conversation");
+    const wired = readdirSync(hosts)
+      .filter((f) => f.endsWith(".tsx") && !f.includes(".test."))
+      .some((f) => readFileSync(join(hosts, f), "utf8").includes('className="vgb-root"'));
+    expect(wired, "no component establishes the vgb-root container").toBe(true);
+
+    // And the rules that depend on it must actually exist, or the check above
+    // would pass on a package that had quietly stopped using container queries.
+    const queries = readAll().reduce(
+      (n, { css }) => n + (css.match(/@container vgb /g) ?? []).length,
+      0,
+    );
+    expect(queries).toBeGreaterThan(3);
   });
 
   it("uses container queries rather than viewport media queries for layout", () => {
