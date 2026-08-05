@@ -34,11 +34,23 @@ class LLMModel:
             A producer declares them only when derivation can't know — e.g. the
             Valuz codex gateway card declares ``("codex",)`` because a Responses
             wire alone wouldn't otherwise imply codex.
+        max_input_tokens: The model's maximum INPUT context size in tokens,
+            declared by the producing side. This is langchain model-profile
+            semantics, NOT the vendor total "context window": for split-budget
+            models enter the input cap (e.g. 272000 for a 400k-window GPT-5
+            class model); for Anthropic models the two numbers coincide.
+            ``None`` → "not declared": runtimes keep their SDK / CLI tuned
+            per-model defaults. Declare it only for models those defaults
+            can't know — gateway aliases like ``valuz-pro-anthropic`` — so
+            auto-compaction triggers at the real window instead of a fixed
+            fallback. At session creation the host snapshots it into kernel
+            ``ModelSettings.max_input_tokens``.
     """
 
     id: str
     label: str | None = None
     runtimes: tuple[str, ...] | None = None
+    max_input_tokens: int | None = None
 
 
 @dataclass

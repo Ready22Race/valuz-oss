@@ -317,6 +317,8 @@ def model_settings_to_dict(s: ModelSettings | None) -> dict[str, Any] | None:
     out: dict[str, Any] = {"temperature": s.temperature, "max_tokens": s.max_tokens}
     if s.effort is not None:
         out["effort"] = s.effort
+    if s.max_input_tokens is not None:
+        out["max_input_tokens"] = s.max_input_tokens
     return out
 
 
@@ -329,10 +331,16 @@ def dict_to_model_settings(data: dict[str, Any] | None) -> ModelSettings | None:
     # to its SDK default when ``effort`` is None.
     if effort is not None and effort not in _VALID_EFFORT_LEVELS:
         effort = None
+    # Same tolerance for a malformed window: a non-positive / non-int
+    # value degrades to "not declared" instead of poisoning the session.
+    max_input_tokens = data.get("max_input_tokens")
+    if not isinstance(max_input_tokens, int) or max_input_tokens <= 0:
+        max_input_tokens = None
     return ModelSettings(
         temperature=data.get("temperature"),
         max_tokens=data.get("max_tokens"),
         effort=effort,
+        max_input_tokens=max_input_tokens,
     )
 
 
