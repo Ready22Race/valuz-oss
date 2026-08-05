@@ -3,17 +3,20 @@ import type { ComponentGroup, DefinedComponent } from "@openuidev/react-lang";
 import { Avatar } from "./Avatar";
 import { BoxPlot } from "./BoxPlot";
 import { BubbleChart } from "./BubbleChart";
+import { Calendar } from "./Calendar";
 import { GroupedBar, StackedBar } from "./CategoryBars";
 import { ComboChart } from "./ComboChart";
 import { ComparisonTable, DiffView } from "./ComparisonTable";
 import { EmptyState } from "./EmptyState";
 import { ErrorState } from "./ErrorState";
+import { EventStrip } from "./EventStrip";
 import { Feed } from "./Feed";
 import { Footnote, FootnoteList } from "./Footnote";
 import { Funnel } from "./Funnel";
 import { Heatmap } from "./Heatmap";
 import { Histogram } from "./Histogram";
 import { JsonView } from "./JsonView";
+import { Kanban } from "./Kanban";
 import { KeyValue, KeyValueGroup } from "./KeyValue";
 import {
   AspectRatio,
@@ -33,6 +36,7 @@ import {
 } from "./Layout";
 import { MetricGroup } from "./MetricGroup";
 import { Breadcrumb, DescriptionList, Tree } from "./Outline";
+import { PivotTable } from "./PivotTable";
 import { Progress } from "./Progress";
 import { Result } from "./Result";
 import { RichText } from "./RichText";
@@ -49,6 +53,7 @@ import { MediumCardBlock, SmallCardBlock } from "./CardBlock";
 import { Citation, CondensedSources, SourceItem, SourceList } from "./Citation";
 import { CompositeCard } from "./CompositeCard";
 import { ContextCard } from "./ContextCard";
+import { DataGrid } from "./DataGrid";
 import { DataList, DataListItem } from "./DataList";
 import { DataTileCard } from "./DataTileCard";
 import { IconTag, IconText } from "./IconTag";
@@ -179,6 +184,12 @@ export const blockComponents: BlockComponent[] = [
   DiffView,
   Tree,
   Breadcrumb,
+  // Data views
+  DataGrid,
+  PivotTable,
+  Calendar,
+  EventStrip,
+  Kanban,
   // Feedback states
   EmptyState,
   ErrorState,
@@ -301,6 +312,13 @@ export const blockComponentGroups: ComponentGroup[] = [
     ],
     notes: [
       "Repeating entries that share a shape: Timeline for dated milestones and ActivityFeed for who-did-what (TimelineItem / ActivityItem / StatusItem only ever sit inside their parent); StatusList and ProgressList for state and completion; ComparisonTable for the same measures across two to four subjects and DiffView for before/after of one; Tree and Breadcrumb for structure without time. Every one renders a finished answer — nothing is clickable or live.",
+    ],
+  },
+  {
+    name: "Data Views",
+    components: ["DataGrid", "PivotTable", "Calendar", "EventStrip", "Kanban"],
+    notes: [
+      "Views of a result set that would normally be operable, rendered static: they show what was already computed and can never be sorted, filtered, paged, expanded or dragged, so never describe an action the reader could take on one. DataGrid is a wide result set denser than Table, and its sortedBy / filteredBy state how the answer was produced rather than offering a control. PivotTable checks any totals you supply against its cells and prints a disagreement instead of correcting it. Calendar shows one named month with no way to reach another. EventStrip draws events across a range you state, clamping and counting any that fall outside. Kanban is a board as a picture — limit is reported, never enforced.",
     ],
   },
   {

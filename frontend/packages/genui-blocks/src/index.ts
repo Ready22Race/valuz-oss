@@ -58,7 +58,12 @@ export * from "./RichText";
 export * from "./StatDelta";
 
 // Collections
+export * from "./Calendar";
 export * from "./ComparisonTable";
+export * from "./DataGrid";
+export * from "./EventStrip";
+export * from "./Kanban";
+export * from "./PivotTable";
 export * from "./Feed";
 export * from "./Outline";
 export * from "./StatusList";
