@@ -352,3 +352,61 @@ async def test_session_listing_shows_one_row_per_deliverable(session_factory, mo
     report = response.items[0]
     assert report.version_no == 2
     assert report.is_current is True
+
+
+# ── Across sessions ───────────────────────────────────────────────────────────
+
+
+async def test_a_later_session_can_open_versions_it_did_not_make(session_factory, monkeypatch):  # type: ignore[no-untyped-def]
+    """History is the deliverable's, not the conversation's.
+
+    A hand-off is only real if the session that inherits a deliverable can see
+    where it came from — otherwise "one artifact continued across sessions" is
+    true in the database and invisible everywhere else.
+    """
+    from valuz_agent.api.routes import sessions as sessions_routes
+
+    artifact_id = await _record(
+        session_factory, MAIN, name="report.md", digest="h1", session_id="sessA"
+    )
+    await _record(session_factory, MAIN, name="report.md", digest="h2", session_id="sessB")
+
+    class _Reader:
+        async def get_session(self, user_id: str, session_id: str) -> object:
+            return object()
+
+    monkeypatch.setattr(sessions_routes, "data_reader", lambda: _Reader())
+
+    async with session_factory() as db:
+        history = await list_artifact_revisions(artifact_id, db=db, user_id="u1")
+        panel_a = await sessions_routes.list_artifacts("sessA", db=db, user_id="u1")
+        panel_b = await sessions_routes.list_artifacts("sessB", db=db, user_id="u1")
+
+    # Both generations, each attributable and each still openable.
+    assert [(r.version_no, r.source_session_id, bool(r.ref)) for r in history.items] == [
+        (1, "sessA", True),
+        (2, "sessB", True),
+    ]
+    # The session that made v1 still lists it — flagged as no longer current, so
+    # the panel does not present a superseded version as the deliverable.
+    assert [(i.version_no, i.is_current) for i in panel_a.items] == [(1, False)]
+    assert [(i.version_no, i.is_current) for i in panel_b.items] == [(2, True)]
+
+
+async def test_the_workspace_view_shows_one_current_deliverable(session_factory):  # type: ignore[no-untyped-def]
+    """However many sessions it took, the workspace holds one thing at v2.
+
+    This is the view a session that delivered nothing has to read from — its own
+    per-session list is empty by definition.
+    """
+    await _record(session_factory, MAIN, name="report.md", digest="h1", session_id="sessA")
+    await _record(session_factory, MAIN, name="report.md", digest="h2", session_id="sessB")
+
+    async with session_factory() as db:
+        response = await list_scope_artifacts(
+            project_id="p1", worktree="", limit=200, db=db, user_id="u1"
+        )
+
+    assert response.total == 1
+    (item,) = response.items
+    assert (item.display_name, item.version_no) == ("report.md", 2)
