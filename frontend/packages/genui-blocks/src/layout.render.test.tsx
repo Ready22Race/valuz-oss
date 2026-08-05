@@ -2,12 +2,13 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { Renderer, createLibrary } from "@openuidev/react-lang";
+import { Renderer } from "@openuidev/react-lang";
 import { openuiLibrary } from "@openuidev/react-ui/genui-lib";
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import type { BlockComponent } from "./blocks";
+import { createValuzLibrary } from "./library";
 import {
   AspectRatio,
   Cluster,
@@ -23,15 +24,14 @@ import {
 } from "./Layout";
 
 /**
- * The layout family through the real parser.
+ * The layout family through the real parser, on the real library.
  *
- * The library is composed here rather than through `createValuzLibrary()`
- * because registration in `blocks.ts` is assembled centrally; swap this for
- * `createValuzLibrary()` once these eleven names are listed there. What the
- * detour cannot skip is the point of the file: every call below is positional,
- * which is the only way to catch a schema whose key order does not match the
- * order the model would write the arguments in — a mismatch that produces an
- * empty block and no error anywhere.
+ * `createValuzLibrary()` is what the product renders with, so using it here
+ * means a block that stops being registered fails this file rather than only
+ * the registry test. Every call below is positional, which is the only way to
+ * catch a schema whose key order does not match the order the model would write
+ * the arguments in — a mismatch that produces an empty block and no error
+ * anywhere.
  */
 const layoutBlocks: BlockComponent[] = [
   Page,
@@ -48,14 +48,7 @@ const layoutBlocks: BlockComponent[] = [
 ];
 
 function renderLang(source: string) {
-  const library = createLibrary({
-    root: openuiLibrary.root ?? "Stack",
-    components: [
-      ...(Object.values(openuiLibrary.components) as BlockComponent[]),
-      ...layoutBlocks,
-    ],
-  });
-  return render(<Renderer library={library} response={source} />);
+  return render(<Renderer library={createValuzLibrary()} response={source} />);
 }
 
 /** A heading several times longer than any design assumed, in a script that has no spaces. */
