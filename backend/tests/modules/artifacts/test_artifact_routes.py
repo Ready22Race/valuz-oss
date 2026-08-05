@@ -324,3 +324,31 @@ async def test_listing_does_not_query_per_row(session_factory):  # type: ignore[
     assert len(response.items) == 6
     # heads+revisions join, count, contents — a small constant, not 6-ish.
     assert len(seen) <= 4, f"{len(seen)} selects for 6 rows:\n" + "\n".join(seen)
+
+
+async def test_session_listing_shows_one_row_per_deliverable(session_factory, monkeypatch):  # type: ignore[no-untyped-def]
+    """Delivering the same file twice produced one thing, twice — not two things.
+
+    A row per revision reads as a duplicate file in the panel, and once the row
+    can expand a version history it would show that history once per row.
+    """
+    from valuz_agent.api.routes import sessions as sessions_routes
+
+    await _record(session_factory, MAIN, name="report.md", digest="h1", session_id="s1")
+    await _record(session_factory, MAIN, name="report.md", digest="h2", session_id="s1")
+    await _record(session_factory, MAIN, name="other.md", digest="h3", session_id="s1")
+
+    class _Reader:
+        async def get_session(self, user_id: str, session_id: str) -> object:
+            return object()
+
+    monkeypatch.setattr(sessions_routes, "data_reader", lambda: _Reader())
+
+    async with session_factory() as db:
+        response = await sessions_routes.list_artifacts("s1", db=db, user_id="u1")
+
+    assert [i.file_name for i in response.items] == ["report.md", "other.md"]
+    # And it is the LATEST version this session produced, not the first.
+    report = response.items[0]
+    assert report.version_no == 2
+    assert report.is_current is True

@@ -5801,7 +5801,14 @@ export const ConversationPage = () => {
         versionNo: r.version_no,
         path: r.file_path,
         size: formatFileSize(r.file_size),
-        when: new Date(r.created_at).toLocaleString(),
+        // Compact on purpose: this sits in a narrow rail beside a size, and a
+        // full locale string ("8/4/2026, 7:29:13 PM") crowds both out.
+        when: new Date(r.created_at).toLocaleString(undefined, {
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
         // A version whose bytes are gone still belongs in the history; the
         // backend says so by withholding the ref.
         openable: Boolean(r.ref),

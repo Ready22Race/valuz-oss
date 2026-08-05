@@ -1415,8 +1415,11 @@ export const ProjectDetailContextPanel = ({
               f.versionNo != null &&
               f.versionNo > 1,
             );
+            // Gated on ``canExpand`` too: the open flag is keyed by artifact, so
+            // a row that offers no expander must not sprout one because another
+            // row of the same deliverable was opened.
             const expanded = Boolean(
-              f.artifactId && openVersions[f.artifactId],
+              canExpand && f.artifactId && openVersions[f.artifactId],
             );
             const versions = f.artifactId
               ? versionsById[f.artifactId]
