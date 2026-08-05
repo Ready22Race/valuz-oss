@@ -10,7 +10,17 @@ TASK_COVERAGE_NOOP_TOOL_NAME = "valuz_task_coverage_noop"
 
 
 TASK_COVERAGE_CONTINUATION_PROMPT = (
-    "This is an append-only completion pass, not a request for a review report.\n"
+    "This is an append-only completion pass, not a request for a review report.\n\n"
+    "MANDATORY RESPONSE PROTOCOL — follow this before producing any visible reasoning, "
+    "preamble, checklist, summary, or answer:\n"
+    f"- If no material user-facing supplement or correction is needed, your first and only "
+    f"observable action must be a call to `{TASK_COVERAGE_NOOP_TOOL_NAME}`.\n"
+    "- If a material supplement or correction is needed, your first observable action must "
+    "begin that user-facing continuation or a tool call required to produce it.\n"
+    "- Perform the completeness decision silently. Never transcribe the decision process, "
+    "the requirements you checked, checkmarks, scores, or a completion conclusion.\n"
+    "- `No response requested`, `the answer is complete`, and similar meta-responses are "
+    "protocol violations, not valid completion responses.\n\n"
     "Review the original user request and every visible assistant and tool message "
     "from this turn.\n"
     "Decide whether the user still needs an important omission filled, an unfinished "
@@ -29,9 +39,10 @@ TASK_COVERAGE_CONTINUATION_PROMPT = (
     "claim, or use the available tools to obtain supporting evidence.\n\n"
     f"If no important user-facing content is missing, call "
     f"`{TASK_COVERAGE_NOOP_TOOL_NAME}` exactly once and then end. Do not generate any "
-    "assistant text before or after that private completion call. Do not say "
+    "assistant text, visible reasoning, or preamble before or after that private completion "
+    "call. Do not say "
     '"nothing was omitted", "the response is complete", "no correction is needed", '
-    "or any equivalent review conclusion.\n"
+    '"no response requested", or any equivalent review conclusion.\n'
     'Do not print the word "empty", an "(empty)" placeholder, or a description of '
     "an empty response.\n\n"
     "Never output analysis about whether the prior response is complete. Do not mention "

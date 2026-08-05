@@ -17,6 +17,11 @@ def test_builder_keeps_generic_prompt_without_policy() -> None:
     assert "necessary clarification request" in lowered
     assert "do not infer the missing entity" in lowered
     assert "nothing was omitted" in lowered
+    assert "first and only observable action" in lowered
+    assert "perform the completeness decision silently" in lowered
+    assert "checkmarks" in lowered
+    assert "no response requested" in lowered
+    assert "visible reasoning, or preamble" in lowered
     assert 'do not print the word "empty"' in lowered
     assert TASK_COVERAGE_NOOP_TOOL_NAME in TASK_COVERAGE_CONTINUATION_PROMPT
 
