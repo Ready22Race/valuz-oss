@@ -31,14 +31,11 @@ import {
   recordEntityOrigin,
   resolveApiBase,
   sessionsApi,
-  providersApi,
   automationsApi,
   connectorsApi,
   tasksApi,
   agentsApi,
   worktreesApi,
-  useComposerProviders,
-  useModelDefaults,
   usePanelStore,
   useProjectLastUsed,
   useRuntimes,
@@ -48,11 +45,9 @@ import {
   type ActivityTab,
   type ActionKind,
   type AutomationItem,
-  type RuntimeId,
   type Trigger,
   type ProjectDetail,
   type ProjectFileNode,
-  type LLMChannel,
   type ConnectorItem,
   type Agent,
   type MemberWithAgent,
@@ -429,22 +424,14 @@ export const ProjectDetailPage = () => {
   const [sending, setSending] = useState(false);
   const [connectors, setConnectors] = useState<ConnectorItem[]>([]);
   const [selectedMcpSlugs, setSelectedMcpSlugs] = useState<string[]>([]);
-  const [providers, setProviders] = useState<LLMChannel[]>([]);
-  const [selectedProviderId, setSelectedProviderId] = useState<string | null>(
-    null,
-  );
-  const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
-  // Runtime / provider / model start as ``null`` and are seeded by the
-  // Settings → Default tuple via ``useModelDefaults`` (effect below).
-  // Falling back to the first available runtime is handled by the
-  // existing repair effect when the user's default isn't available.
-  const [selectedRuntimeId, setSelectedRuntimeId] = useState<RuntimeId | null>(
-    null,
-  );
-  // ``true`` once the user touches any composer picker (runtime / model
-  // / provider). Locks out reseeds so explicit choices survive
-  // re-renders.
-  const [composerTouched, setComposerTouched] = useState(false);
+  // NB: no runtime / provider / model state here. This composer picks an
+  // AGENT, and the agent owns the brain — the session inherits
+  // runtime/model/provider/effort from it at creation time. A page-local
+  // (provider, model) pair used to be seeded here from the project's
+  // last-used session and handed to ``/conversation/new``, where it became an
+  // ADR-006 override and beat the agent's own brain. Nothing reads such a pair
+  // now; do not reintroduce one without a picker in this composer to justify
+  // it.
   // Worktree isolation for the new chat session created from this page.
   // The toggle only shows when the project cwd is a usable git repo
   // (``worktreeAvailable`` — computed by the backend, fetched once per
@@ -525,49 +512,10 @@ export const ProjectDetailPage = () => {
   const [selectedPermissionMode, setSelectedPermissionMode] = useState<
     "default" | "auto_review" | "full_access"
   >("full_access");
-  // Reasoning-effort budget for the new session created from this page
-  // (kernel V5+bba3014 ``ModelSettings.effort``). ``null`` lets the
-  // runtime fall through to its SDK default. Seeded from
-  // ``modelDefaults.default_effort`` alongside the model picker below.
-  const { defaults: modelDefaults, loading: defaultsLoading } =
-    useModelDefaults();
-  // Per-project memory: the picker seeds from the project's most
-  // recent session before falling back to Settings → Default. So if
-  // the user mostly drives this project with Deep Agents but their
-  // global default is Claude Code, the project still opens in Deep
-  // Agents next time.
+  // Per-project memory. Only the AGENT half is consumed here (the seed effect
+  // below): this page has no model picker, so the pick's runtime / provider /
+  // model are none of its business.
   const { pick: lastPick, loading: lastPickLoading } = useProjectLastUsed(id);
-  // Seed sequence (highest wins on first pass; once any source lands
-  // we don't override until the user manually picks something else):
-  //   1. Project last-used (per-project memory)
-  //   2. Global Settings → Default
-  // Either source is enough — we wait until both fetches are done
-  // before deciding so we don't briefly flash the global default and
-  // then snap to the per-project value.
-  useEffect(() => {
-    if (composerTouched) return;
-    if (lastPickLoading || defaultsLoading) return;
-    const runtime =
-      lastPick?.runtime_provider ?? modelDefaults?.default_runtime ?? null;
-    const providerId =
-      lastPick?.provider_id ?? modelDefaults?.default_provider_id ?? null;
-    const modelId = lastPick?.model_id ?? modelDefaults?.default_model ?? null;
-    if (runtime) {
-      setSelectedRuntimeId(runtime as RuntimeId);
-    }
-    if (providerId) {
-      setSelectedProviderId(providerId);
-    }
-    if (modelId) {
-      setSelectedModelId(modelId);
-    }
-  }, [
-    lastPick,
-    lastPickLoading,
-    modelDefaults,
-    defaultsLoading,
-    composerTouched,
-  ]);
   // Seed each mode's agent ONCE from the project's last-used picks: Chat from
   // the last conversation's agent, Task from the last Lead. Ref-gated so it
   // never clobbers a pick the user made afterwards or a later member reload.
@@ -596,21 +544,9 @@ export const ProjectDetailPage = () => {
       task: taskSeed ?? prev.task,
     }));
   }, [members, lastPick, lastPickLoading]);
+  // Runtime list is read for display only — the Agent selector labels each
+  // member with its runtime's display name (``composerAgents`` below).
   const { runtimes: runtimeList } = useRuntimes();
-  useEffect(() => {
-    // Wait for both the Settings-default fetch and the project last-pick
-    // fetch — otherwise this effect races in first (runtimes are
-    // module-cached) and locks the picker to ``firstAvailable`` before
-    // the user's configured defaults land.
-    if (defaultsLoading || lastPickLoading) return;
-    if (runtimeList.length === 0) return;
-    const current = runtimeList.find((rt) => rt.id === selectedRuntimeId);
-    if (current && current.available) return;
-    const firstAvailable = runtimeList.find((rt) => rt.available);
-    if (firstAvailable) {
-      setSelectedRuntimeId(firstAvailable.id as RuntimeId);
-    }
-  }, [runtimeList, selectedRuntimeId, defaultsLoading, lastPickLoading]);
   const [kbPickerOpen, setKbPickerOpen] = useState(false);
   // Global KB document tree for the attachment picker — loads lazily
   // when the picker opens. Distinct from ``useProjectKbBindings``:
@@ -631,11 +567,6 @@ export const ProjectDetailPage = () => {
   const [editTask, setEditTask] = useState<Awaited<
     ReturnType<typeof automationsApi.get>
   > | null>(null);
-  const composerProviders = useComposerProviders(
-    providers,
-    selectedRuntimeId ?? undefined,
-  );
-
   // Project-agent options for the composer's Agent selector. The session
   // inherits runtime/model/provider/effort/skills/connectors from the
   // chosen agent, so this page no longer exposes a raw model picker.
@@ -653,31 +584,10 @@ export const ProjectDetailPage = () => {
     [members, runtimeList],
   );
 
-  // Auto-pick first usable (provider, model) so Send never falls
-  // through to backend default and 422s. Waits for the Settings-default
-  // fetch so the picker doesn't briefly flash to ``isDefault`` provider
-  // before the configured global default lands.
-  useEffect(() => {
-    if (defaultsLoading) return;
-    if (composerProviders.length === 0) return;
-    const stillValid =
-      selectedProviderId &&
-      selectedModelId &&
-      composerProviders.some(
-        (m) =>
-          m.providerId === selectedProviderId && m.modelId === selectedModelId,
-      );
-    if (stillValid) return;
-    const preferred =
-      composerProviders.find((m) => m.isDefault) ?? composerProviders[0];
-    setSelectedProviderId(preferred.providerId);
-    setSelectedModelId(preferred.modelId);
-  }, [composerProviders, selectedProviderId, selectedModelId, defaultsLoading]);
-
   // Standalone file tree refresh — mirrors the conversation page's
   // ``refreshFileTree`` so the panel's manual ``FileRefreshButton``
-  // can re-list files without re-fetching skills / KB / providers
-  // (which ``fetchData`` does). Same depth-3 listing as initial load.
+  // can re-list files without re-running everything else ``fetchData``
+  // pulls. Same depth-3 listing as initial load.
   const refreshFileTree = useCallback(() => {
     if (!id) return;
     projectsApi
@@ -752,36 +662,14 @@ export const ProjectDetailPage = () => {
         setConnectors(connRes.connectors.filter((c) => c.enabled));
       }
       setSelectedMcpSlugs(mcpRes.slugs);
-      // NB: provider model details (``/v1/providers`` + one ``/v1/providers/{id}``
-      // per channel) are NOT fetched here. This page selects by AGENT (no raw
-      // model picker) and the default (provider, model) comes from
-      // last-session-pick / model-defaults, so Send works without them. They only
-      // validate the composer's model against the live channel list, so we defer
-      // them to ``ensureProviderDetails`` (first compose) instead of firing 5
-      // requests on every project-home load.
+      // NB: the channel list (``/v1/providers``) is not fetched here, or
+      // anywhere else on this page. It only ever fed a model picker this
+      // composer does not have — the session's channel comes from the chosen
+      // agent, resolved backend-side at creation.
     } catch {
       /* secondary data is non-fatal — the shell already rendered */
     }
   }, [id]);
-
-  // Lazy provider load (see ``fetchData``): one-shot, triggered the first
-  // time the user actually composes. ``autoFocus`` rules out an onFocus
-  // trigger (it would fire on mount), so we hang it off the first keystroke.
-  // One gated list request (server-side subscription-login gate) — replaces
-  // the old per-channel detail fan-out.
-  const providersLoadedRef = useRef(false);
-  const ensureProviderDetails = useCallback(() => {
-    if (providersLoadedRef.current) return;
-    providersLoadedRef.current = true;
-    void (async () => {
-      try {
-        const list = await providersApi.list({ gated: true });
-        setProviders(list.providers.filter((c) => c.enabled));
-      } catch {
-        providersLoadedRef.current = false; // let the next keystroke retry
-      }
-    })();
-  }, []);
 
   useEffect(() => {
     void fetchData();
@@ -1656,10 +1544,7 @@ export const ProjectDetailPage = () => {
                     />
                   }
                   value={composerValue}
-                  onChange={(v) => {
-                    setComposerValue(v);
-                    ensureProviderDetails(); // lazy-load provider details on first compose
-                  }}
+                  onChange={setComposerValue}
                   mode={composerMode}
                   onModeChange={setComposerMode}
                   onSend={() => {
@@ -1701,19 +1586,15 @@ export const ProjectDetailPage = () => {
                   // mode is frozen by a minted chat session; Task mode keeps its
                   // own pick (kickoff navigates away, so it never mints one here).
                   agentLocked={composerMode === "chat" && chatSessionId != null}
-                  onAgentChange={(slug) => {
-                    setAgentByMode((m) => ({ ...m, [composerMode]: slug }));
-                    setComposerTouched(true);
-                  }}
+                  onAgentChange={(slug) =>
+                    setAgentByMode((m) => ({ ...m, [composerMode]: slug }))
+                  }
                   onAddAgent={() => setAddAgentOpen(true)}
                   sendDisabled={
                     composerAgents.length === 0 || !selectedAgentSlug
                   }
                   permissionMode={selectedPermissionMode}
-                  onPermissionModeChange={(mode) => {
-                    setSelectedPermissionMode(mode);
-                    setComposerTouched(true);
-                  }}
+                  onPermissionModeChange={setSelectedPermissionMode}
                   worktree={
                     // Chat mode: hidden once a chat session exists (frozen at
                     // creation). Task mode: every kickoff is fresh, so the
