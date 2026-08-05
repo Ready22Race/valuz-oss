@@ -72,7 +72,7 @@ def _revision_item(revision, content) -> RevisionItem:  # type: ignore[no-untype
         file_path=path,
         ref=build_valuz_file_uri(path) if openable else "",
         file_size=content.byte_size if content else 0,
-        mime_type=content.mime_type if content else None,
+        mime_type=revision.mime_type,
         status=revision.status,
         source_session_id=revision.source_session_id,
         created_at=revision.created_at,

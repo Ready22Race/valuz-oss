@@ -33,7 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from valuz_agent.modules.artifacts import snapshot as snap
 from valuz_agent.modules.artifacts.datastore import ArtifactDatastore, Scope
-from valuz_agent.modules.artifacts.models import ArtifactKind
+from valuz_agent.modules.artifacts.models import REVISION_STATUS_READY, ArtifactKind
 
 logger = logging.getLogger(__name__)
 
@@ -162,13 +162,6 @@ async def deliver_artifact(
     display_name = request.display_name or abs_path.name
     mime_type = request.mime_type or snap.guess_mime(display_name)
 
-    # Authoritative, and read from the bytes this is about to copy.
-    try:
-        content_hash, byte_size = await asyncio.to_thread(snap.hash_and_size, abs_path)
-    except OSError:
-        logger.warning("deliver: could not read %s", abs_path, exc_info=True)
-        return DeliveryResult(status=DeliveryStatus.SNAPSHOT_FAILED)
-
     artifact = None
     if request.artifact_id:
         # Scoped lookup: an id is a bare string a caller could have carried over
@@ -195,28 +188,21 @@ async def deliver_artifact(
     # re-read and try again once before reporting it. Only a second loss, which
     # means sustained contention, becomes STALE_HEAD.
     for attempt in range(2):
-        # Re-checked each round, not just the first: the delivery that beat us
-        # may have recorded these very bytes, and then there is nothing to add.
-        existing = await ds.find_revision_by_content(scope.user_id, artifact.id, content_hash)
-        if existing is not None:
-            return DeliveryResult(
-                status=DeliveryStatus.UNCHANGED,
-                artifact_id=artifact.id,
-                revision_id=existing.id,
-                version_no=existing.version_no,
-                abs_path=existing.abs_path,
-            )
-
-        head = await ds.get_head(scope.user_id, artifact.id)
+        # Both, together: the head gives the version to build on and the value
+        # the compare-and-set expects, its revision carries the hash that says
+        # whether this delivery changed anything. Re-read each round — the
+        # delivery that beat us may have recorded these very bytes.
+        current = await ds.get_head_with_revision(scope.user_id, artifact.id)
+        head, head_revision = current if current is not None else (None, None)
         version_no = (head.version_no + 1) if head is not None else 1
 
         try:
-            # Written inside the loop because the destination carries the
-            # version number, so a retry needs its own path. The copy from the
-            # lost attempt is left behind: no row references it, and deleting it
-            # would race with whatever is reading the directory.
-            stored = await asyncio.to_thread(
-                snap.write_snapshot,
+            # Copied inside the loop because the destination carries the version
+            # number, so a retry needs its own. The bytes are hashed on the way
+            # through rather than in a separate pass: both need to read the whole
+            # file, and on the cloud deployment that read crosses an object mount.
+            staged = await asyncio.to_thread(
+                snap.stage_snapshot,
                 abs_path,
                 scope_cwd,
                 artifact.id,
@@ -227,14 +213,32 @@ async def deliver_artifact(
             logger.warning("deliver: snapshot failed for %s", abs_path, exc_info=True)
             return DeliveryResult(status=DeliveryStatus.SNAPSHOT_FAILED)
 
-        content = await ds.find_content_by_hash(scope.user_id, content_hash)
+        # A replay, a transport retry, or a caller re-delivering something it
+        # never changed. Compared against the head alone: a revision further
+        # back holding these bytes means the caller is RETURNING to it, which is
+        # a new generation and not a no-op. ``ready`` as well, because a head
+        # whose file is gone must not absorb the delivery that would restore it.
+        if (
+            head_revision is not None
+            and head_revision.content_hash == staged.content_hash
+            and head_revision.status == REVISION_STATUS_READY
+        ):
+            await asyncio.to_thread(snap.discard_snapshot, staged)
+            return DeliveryResult(
+                status=DeliveryStatus.UNCHANGED,
+                artifact_id=artifact.id,
+                revision_id=head_revision.id,
+                version_no=head_revision.version_no,
+                abs_path=head_revision.abs_path,
+            )
+
+        content = await ds.find_content_by_hash(scope.user_id, staged.content_hash)
         if content is None:
             content = await ds.create_content(
                 scope.user_id,
-                content_hash=content_hash,
-                byte_size=byte_size,
-                mime_type=mime_type,
-                storage_key=str(stored),
+                content_hash=staged.content_hash,
+                byte_size=staged.byte_size,
+                storage_key=str(staged.final),
             )
 
         revision = await ds.append_revision(
@@ -243,15 +247,39 @@ async def deliver_artifact(
             expected_head_revision_id=head.revision_id if head is not None else None,
             content=content,
             file_name=display_name,
-            abs_path=str(stored),
+            abs_path=str(staged.final),
             file_format=snap.format_for(display_name),
+            mime_type=mime_type,
             source_session_id=source_session_id,
         )
         if revision is not None:
             break
+        # The winner's snapshot is at the path this attempt staged for, so the
+        # staged copy is dropped rather than promoted — publishing it would put
+        # these bytes under the row that recorded the winner's.
+        await asyncio.to_thread(snap.discard_snapshot, staged)
         logger.info("deliver: head moved under %s, retrying (attempt %d)", artifact.id, attempt + 1)
     else:
         return DeliveryResult(status=DeliveryStatus.STALE_HEAD)
+
+    try:
+        # Last, and only for the delivery that won the head — see
+        # ``stage_snapshot``.
+        stored = await asyncio.to_thread(snap.promote_snapshot, staged)
+    except OSError:
+        logger.warning("deliver: could not publish snapshot for %s", abs_path, exc_info=True)
+        await asyncio.to_thread(snap.discard_snapshot, staged)
+        # The generation is on record but its bytes never landed. Marking it
+        # keeps the history honest — the read paths already gate on status — and
+        # it is also what lets a retry through: the replay check above requires
+        # a head whose bytes are actually there, so the next attempt sees a
+        # change rather than a no-op.
+        await ds.mark_revision_missing(scope.user_id, revision.id)
+        return DeliveryResult(
+            status=DeliveryStatus.SNAPSHOT_FAILED,
+            artifact_id=artifact.id,
+            revision_id=revision.id,
+        )
 
     return DeliveryResult(
         status=DeliveryStatus.RECORDED,

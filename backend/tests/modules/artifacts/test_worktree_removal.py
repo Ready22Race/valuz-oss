@@ -60,9 +60,7 @@ async def _record(session_factory, scope: Scope, *, name: str, digest: str) -> s
                 scope, kind="document", display_name=name, rel_path=name
             )
         head = await ds.get_head(scope.user_id, artifact.id)
-        content = await ds.create_content(
-            scope.user_id, content_hash=digest, byte_size=1, mime_type="text/markdown"
-        )
+        content = await ds.create_content(scope.user_id, content_hash=digest, byte_size=1)
         version_no = (head.version_no + 1) if head else 1
         await ds.append_revision(
             scope.user_id,

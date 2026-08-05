@@ -58,23 +58,40 @@ def test_migration_columns_match_orm(migrated_db, model) -> None:  # type: ignor
     assert live == declared
 
 
-def test_identity_and_idempotency_constraints_exist(migrated_db) -> None:  # type: ignore[no-untyped-def]
-    """The two constraints the design leans on, present in the actual DDL.
+def _unique_names(inspector, table: str) -> set[str]:  # type: ignore[no-untyped-def]
+    return {u["name"] for u in inspector.get_unique_constraints(table)} | {
+        i["name"] for i in inspector.get_indexes(table) if i.get("unique")
+    }
 
-    ``ux_artifact_key`` is what makes identity lookup a lookup; without it two
-    deliveries could register the same key against different artifacts.
-    ``ux_artifact_revision_content`` is the idempotency line that replaces the
-    unavailable tool_call_id — a replayed delivery must not mint a version.
+
+def test_the_identity_constraint_exists(migrated_db) -> None:  # type: ignore[no-untyped-def]
+    """``ux_artifact_key`` is what makes identity lookup a lookup; without it
+    two deliveries could register the same key against different artifacts."""
+    assert "ux_artifact_key" in _unique_names(inspect(migrated_db), "valuz_artifact_key")
+
+
+def test_content_may_repeat_within_a_deliverable(migrated_db) -> None:  # type: ignore[no-untyped-def]
+    """No uniqueness over ``(user_id, artifact_id, content_hash)``.
+
+    Recognising a replay is a comparison against the current head, which
+    absorbs a retry just as well — a retry's bytes ARE the head's. A rule over
+    the whole history would additionally forbid the one case where repeating
+    content is meaningful: returning to an earlier version, whose bytes are by
+    definition already in there. Nothing issues a revert yet; this asserts the
+    schema does not stand in the way of one.
     """
     inspector = inspect(migrated_db)
-    for table, want in (
-        ("valuz_artifact_key", "ux_artifact_key"),
-        ("valuz_artifact_revision", "ux_artifact_revision_content"),
-    ):
-        names = {u["name"] for u in inspector.get_unique_constraints(table)} | {
-            i["name"] for i in inspector.get_indexes(table) if i.get("unique")
-        }
-        assert want in names
+    revision_uniques = _unique_names(inspector, "valuz_artifact_revision")
+    for name in revision_uniques:
+        columns = next(
+            (
+                u["column_names"]
+                for u in inspector.get_unique_constraints("valuz_artifact_revision")
+                if u["name"] == name
+            ),
+            [],
+        )
+        assert "content_hash" not in columns, f"{name} would make a revert unrecordable"
 
 
 def test_legacy_artifact_table_is_untouched(migrated_db) -> None:  # type: ignore[no-untyped-def]

@@ -251,24 +251,124 @@ async def test_a_racing_duplicate_becomes_unchanged_not_a_new_version(
     from valuz_agent.modules.artifacts import datastore as ds_mod
 
     src = _write(cwd / "chart.html", "v1")
-    first = await _deliver(session_factory, cwd, src)
+    await _deliver(session_factory, cwd, src)
 
-    real = ds_mod.ArtifactDatastore.find_revision_by_content
+    real = ds_mod.ArtifactDatastore.append_revision
+    winner: dict[str, str] = {}
     calls = {"n": 0}
 
-    async def _appears_on_retry(self, user_id, artifact_id, content_hash):  # type: ignore[no-untyped-def]
+    async def _somebody_else_gets_there_first(self, *args, **kwargs):  # type: ignore[no-untyped-def]
         calls["n"] += 1
         if calls["n"] == 1:
-            return None  # not there when we looked
-        return await real(self, user_id, artifact_id, content_hash)
+            # Another delivery of the SAME new bytes lands, and then ours is
+            # refused — exactly what two tool_use blocks in one turn produce.
+            other = await real(self, *args, **kwargs)
+            winner["id"] = other.id
+            return None
+        return await real(self, *args, **kwargs)
 
-    monkeypatch.setattr(ds_mod.ArtifactDatastore, "find_revision_by_content", _appears_on_retry)
-    monkeypatch.setattr(ds_mod.ArtifactDatastore, "append_revision", lambda *a, **k: _none())
+    monkeypatch.setattr(
+        ds_mod.ArtifactDatastore, "append_revision", _somebody_else_gets_there_first
+    )
 
-    async def _none():  # type: ignore[no-untyped-def]
-        return None
-
+    src.write_text("v2", encoding="utf-8")
     result = await _deliver(session_factory, cwd, src)
 
+    assert calls["n"] == 1  # the retry never reached the append
     assert result.status is DeliveryStatus.UNCHANGED
-    assert result.revision_id == first.revision_id
+    assert result.version_no == 2
+    assert result.revision_id == winner["id"]
+
+
+async def test_returning_to_earlier_bytes_is_a_new_version(session_factory, cwd):  # type: ignore[no-untyped-def]
+    """Only the head decides what a replay is.
+
+    Delivering content that appears further back in the history means the
+    caller is RETURNING to it, which is the next generation and not a no-op. A
+    uniqueness rule over the whole history would make that unrecordable —
+    nothing issues a revert yet, and this is what keeps one possible.
+    """
+    src = _write(cwd / "report.md", "A")
+    await _deliver(session_factory, cwd, src)
+    src.write_text("B", encoding="utf-8")
+    await _deliver(session_factory, cwd, src)
+
+    src.write_text("A", encoding="utf-8")  # back to what v1 held
+    back = await _deliver(session_factory, cwd, src)
+
+    assert back.status is DeliveryStatus.RECORDED
+    assert back.version_no == 3
+    assert Path(back.abs_path or "").read_text(encoding="utf-8") == "A"
+
+
+async def test_the_type_follows_the_name_not_the_bytes(session_factory, cwd):  # type: ignore[no-untyped-def]
+    """Two deliverables holding identical content share a content row, so a
+    type stored there would be read back by a deliverable that never had that
+    name."""
+    page = _write(cwd / "page.html", "same")
+    notes = _write(cwd / "notes.txt", "same")
+
+    first = await _deliver(session_factory, cwd, page)
+    second = await _deliver(session_factory, cwd, notes)
+
+    async with session_factory() as db:
+        ds = ArtifactDatastore(db)
+        a = await ds.get_revision("u1", first.revision_id or "")
+        b = await ds.get_revision("u1", second.revision_id or "")
+
+    assert a is not None and b is not None
+    assert a.content_id == b.content_id  # the sharing this guards against
+    assert a.mime_type == "text/html"
+    assert b.mime_type == "text/plain"
+
+
+async def test_a_lost_race_publishes_nothing(session_factory, cwd, monkeypatch):  # type: ignore[no-untyped-def]
+    """Two deliveries racing compute the SAME version number, so both target
+    one path. Only the one that wins the head may publish — otherwise the
+    loser's bytes end up under the winner's row."""
+    from valuz_agent.modules.artifacts import datastore as ds_mod
+
+    src = _write(cwd / "chart.html", "v1")
+    first = await _deliver(session_factory, cwd, src)
+    version_dir = Path(first.abs_path or "").parent.parent / "v2"
+
+    async def _always_lose(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        return None
+
+    monkeypatch.setattr(ds_mod.ArtifactDatastore, "append_revision", _always_lose)
+
+    src.write_text("v2", encoding="utf-8")
+    result = await _deliver(session_factory, cwd, src)
+
+    assert result.status is DeliveryStatus.STALE_HEAD
+    # Neither the snapshot nor the staging copy it was built in.
+    assert not (version_dir / "chart.html").exists()
+    assert list(version_dir.glob("*")) == []
+
+
+async def test_an_unrecordable_snapshot_does_not_pass_as_delivered(  # type: ignore[no-untyped-def]
+    session_factory, cwd, monkeypatch
+):
+    """If publishing fails after the head moved, the generation stays on record
+    but is marked missing — so the panel does not offer a broken link, and a
+    retry is not mistaken for a replay of it."""
+    from valuz_agent.modules.artifacts import snapshot as snap_mod
+
+    src = _write(cwd / "chart.html", "v1")
+    await _deliver(session_factory, cwd, src)
+
+    def _boom(staged):  # type: ignore[no-untyped-def]
+        raise OSError("mount went away")
+
+    monkeypatch.setattr(snap_mod, "promote_snapshot", _boom)
+
+    src.write_text("v2", encoding="utf-8")
+    failed = await _deliver(session_factory, cwd, src)
+    assert failed.status is DeliveryStatus.SNAPSHOT_FAILED
+    assert not failed.ok
+
+    monkeypatch.undo()
+    retried = await _deliver(session_factory, cwd, src)
+
+    assert retried.status is DeliveryStatus.RECORDED  # not "unchanged"
+    assert Path(retried.abs_path or "").read_text(encoding="utf-8") == "v2"
