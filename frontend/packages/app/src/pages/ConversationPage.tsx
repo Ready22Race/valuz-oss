@@ -152,6 +152,7 @@ import {
   shouldShowNoModelEmptyState,
 } from "./conversation-loading";
 import { createConversationBootstrapGuard } from "./conversation-bootstrap";
+import { resolveBrainOverride } from "./conversation-brain-override";
 import { canSendProjectHandoff } from "./conversation-project-handoff";
 import { dropHandoffFromHistory } from "./conversation-handoff-history";
 import { LiveTaskCard } from "../components/LiveTaskCard";
@@ -1396,8 +1397,6 @@ export const ConversationPage = () => {
   const projectSendHandoffRef = useRef<{
     worktree?: { name?: string };
     permissionMode?: typeof selectedPermissionMode;
-    providerId?: string | null;
-    modelId?: string | null;
   } | null>(null);
   // Set while a handed-over pending is live, and read by ``refreshEventsInner``
   // so its unconditional "switching sessions invalidates the pending" clear
@@ -3609,14 +3608,24 @@ export const ConversationPage = () => {
         sessionProjectId === "chat-default" || activeProject?.kind === "chat";
       // 09-assistant §2.1/§2.2: every session binds to an agent — project
       // conversations to the chosen 派驻 member, 临时对话 to the picked "我的"
-      // agent. There is no agentless path; the backend derives
-      // runtime/model/provider/effort/skills/connectors from the agent, so the
-      // model-picker fields below are ignored when it resolves the brain.
-      // Skill-creator must bind an agent; a normal conversation may be agentless
-      // (the create below sends ``agent_slug: undefined`` → backend chat path).
+      // agent. Skill-creator must bind an agent; a normal conversation may be
+      // agentless (the create below sends ``agent_slug: undefined`` → backend
+      // chat path).
       if (isSkillCreatorMode && !selectedAgentSlug) {
         throw new Error("No agent selected.");
       }
+      // The bound agent OWNS the brain — provider/model/runtime/effort in this
+      // create are ADR-006 overrides that beat it, so they travel only when the
+      // user actually picked one here. See ``conversation-brain-override.ts``
+      // for the two ways sending them unconditionally went wrong.
+      const brainOverride = resolveBrainOverride({
+        agentSlug: selectedAgentSlug,
+        composerTouched,
+        providerId: selectedProviderId,
+        modelId: selectedModelId,
+        runtimeId: selectedRuntimeId,
+        effort: selectedEffort,
+      });
       let created: Awaited<ReturnType<typeof sessionsApi.create>>;
       if (isSkillCreatorMode) {
         // Skill-creator draft: mint through the skills launcher so the
@@ -3629,8 +3638,8 @@ export const ConversationPage = () => {
               ? { kind: "project", project_id: skillProjectParam }
               : { kind: skillKindParam === "chat" ? "chat" : "skills_library" },
           agent_slug: selectedAgentSlug,
-          provider_id: selectedProviderId ?? undefined,
-          model_id: selectedModelId ?? undefined,
+          provider_id: brainOverride.provider_id,
+          model_id: brainOverride.model_id,
         });
         created = await sessionsApi.get(start.session_id);
       } else {
@@ -3653,12 +3662,7 @@ export const ConversationPage = () => {
           {
             project_id: isChat ? "chat-default" : sessionProjectId,
             agent_slug: selectedAgentSlug ?? undefined,
-            provider_id: selectedProviderId ?? undefined,
-            model_id: selectedModelId ?? undefined,
-            runtime_id:
-              selectedProviderId && selectedModelId
-                ? (selectedRuntimeId ?? undefined)
-                : undefined,
+            ...brainOverride,
             mcp_provider_slugs:
               !remoteCreate && selectedMcpSlugs.length > 0
                 ? selectedMcpSlugs
@@ -3666,24 +3670,23 @@ export const ConversationPage = () => {
             permission_mode:
               projectSendHandoffRef.current?.permissionMode ??
               selectedPermissionMode,
-            effort: selectedEffort,
-            // Everything the project-detail composer had picked and this page
-            // would otherwise answer with its OWN defaults. Worktree is the
-            // obvious one — this page has no such field at all — but the
-            // dangerous ones are the rest: they exist on both pages under the
-            // same names, so dropping them raises no error, it just silently
-            // mints the session with the wrong provider / model / permission.
+            // What the project-detail composer had picked and this page would
+            // otherwise answer with its OWN defaults: worktree (this page has
+            // no such field at all) and permission mode (same name on both
+            // pages, so dropping it raises no error — it just silently mints
+            // the session with the wrong permission). Provider / model are
+            // deliberately NOT carried: the project composer picks an AGENT,
+            // not a model, so its ``selectedProviderId`` / ``selectedModelId``
+            // are seeded from the project's last-used session, not from the
+            // chosen agent. Forwarding them made the create override the
+            // agent's own brain (backend ADR-006), so a project whose last
+            // chat ran on another channel silently dragged every agent onto
+            // it. The brain comes from ``agent_slug`` alone.
             // (Execution location is carried too, but through
             // ``recordEntityOrigin`` where the handoff is consumed, because
             // that is what ``getEntityOrigin`` / ``resolveApiBase`` read.)
             ...(projectSendHandoffRef.current?.worktree
               ? { worktree: projectSendHandoffRef.current.worktree }
-              : {}),
-            ...(projectSendHandoffRef.current?.providerId
-              ? { provider_id: projectSendHandoffRef.current.providerId }
-              : {}),
-            ...(projectSendHandoffRef.current?.modelId
-              ? { model_id: projectSendHandoffRef.current.modelId }
               : {}),
           },
           createBaseUrl ? { baseUrl: createBaseUrl } : undefined,
@@ -3805,6 +3808,10 @@ export const ConversationPage = () => {
       selectedPermissionMode,
       selectedEffort,
       selectedAgentSlug,
+      // Gates ``brainOverride``: a bound agent owns the brain until the user
+      // picks a model for this conversation. Stale here = a user override
+      // silently dropped (or an agent silently overridden).
+      composerTouched,
       isSkillCreatorMode,
       skillKindParam,
       skillProjectParam,
@@ -4876,8 +4883,6 @@ export const ConversationPage = () => {
           sentAt?: number;
           worktree?: { name?: string };
           permissionMode?: typeof selectedPermissionMode;
-          providerId?: string | null;
-          modelId?: string | null;
           projectId?: string;
           execOrigin?: string;
         };
@@ -4917,8 +4922,6 @@ export const ConversationPage = () => {
     projectSendHandoffRef.current = {
       ...(send?.worktree ? { worktree: send.worktree } : {}),
       ...(send?.permissionMode ? { permissionMode: send.permissionMode } : {}),
-      ...(send?.providerId ? { providerId: send.providerId } : {}),
-      ...(send?.modelId ? { modelId: send.modelId } : {}),
     };
     // Execution location does not travel as a create field: ``ensureSession``
     // resolves a project conversation's target through ``getEntityOrigin`` /

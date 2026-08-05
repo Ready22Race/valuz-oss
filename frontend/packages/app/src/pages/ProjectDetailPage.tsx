@@ -1260,9 +1260,16 @@ export const ProjectDetailPage = () => {
             // own state under most of these names, so anything omitted here is
             // not an error — it silently mints the session with that page's
             // defaults instead of what the user picked.
+            //
+            // provider/model are deliberately NOT among them: this composer
+            // picks an AGENT, not a model (there is no model picker here), so
+            // ``selectedProviderId`` / ``selectedModelId`` only ever hold the
+            // project's last-used channel or the global default. Handing them
+            // over made the create override the agent's own brain, which
+            // dragged every agent in the project onto whatever channel its
+            // last chat happened to use. The conversation page derives the
+            // brain from ``agent`` in the URL instead.
             permissionMode: selectedPermissionMode,
-            providerId: selectedProviderId,
-            modelId: selectedModelId,
             // Execution location (本地 / 云端服务): carried as an origin
             // observation because that is what routes the create.
             projectId: id,
