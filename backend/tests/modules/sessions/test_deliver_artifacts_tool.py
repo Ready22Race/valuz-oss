@@ -235,7 +235,14 @@ def test_the_schema_asks_only_for_what_the_caller_can_know() -> None:
     from valuz_agent.modules.sessions.artifacts_tool import _PARAMS
 
     props = _PARAMS["properties"]["attachments"]["items"]["properties"]
-    assert set(props) == {"filePath", "fileName", "kind", "mimeType", "asNewArtifact"}
+    assert set(props) == {
+        "filePath",
+        "fileName",
+        "kind",
+        "mimeType",
+        "artifactId",
+        "asNewArtifact",
+    }
     assert "fileSize" not in props
 
 
@@ -436,3 +443,99 @@ async def test_no_session_id_errors(cwd) -> None:  # type: ignore[no-untyped-def
     )
     assert result.is_error
     assert "session" in result.content.lower()
+
+
+# ── Renaming a deliverable ────────────────────────────────────────────────────
+
+
+async def test_a_rename_continues_the_deliverable_when_named(session_factory, cwd):  # type: ignore[no-untyped-def]
+    """Renaming a file must not split its history in two.
+
+    Neither key can recognise this on its own — the path changed and so did the
+    name — so the caller says which deliverable it is. Only it knows.
+    """
+    first = _write(cwd / "brief.md", "v1")
+    _, before = await _deliver({"filePath": str(first)})
+    artifact_id = before["results"][0]["artifactId"]
+
+    # What an agent actually does to rename: write the new name, drop the old.
+    renamed = _write(cwd / "早报.md", "v2")
+    first.unlink()
+    _, after = await _deliver({"filePath": str(renamed), "artifactId": artifact_id})
+
+    entry = after["results"][0]
+    assert entry["artifactId"] == artifact_id
+    assert entry["versionNo"] == 2
+    # Both versions still readable, each at its own snapshot.
+    assert Path(before["results"][0]["absPath"]).read_text(encoding="utf-8") == "v1"
+    assert Path(entry["absPath"]).read_text(encoding="utf-8") == "v2"
+
+
+async def test_after_a_rename_the_new_path_finds_it_without_the_id(session_factory, cwd):  # type: ignore[no-untyped-def]
+    """The deliverable follows the file: the next delivery needs no id."""
+    _, before = await _deliver({"filePath": str(_write(cwd / "brief.md", "v1"))})
+    artifact_id = before["results"][0]["artifactId"]
+
+    renamed = _write(cwd / "早报.md", "v2")
+    await _deliver({"filePath": str(renamed), "artifactId": artifact_id})
+    renamed.write_text("v3", encoding="utf-8")
+    _, third = await _deliver({"filePath": str(renamed)})
+
+    assert third["results"][0]["artifactId"] == artifact_id
+    assert third["results"][0]["versionNo"] == 3
+
+
+async def test_a_rename_updates_the_display_name(session_factory, cwd):  # type: ignore[no-untyped-def]
+    _, before = await _deliver({"filePath": str(_write(cwd / "brief.md", "v1"))})
+    artifact_id = before["results"][0]["artifactId"]
+
+    await _deliver({"filePath": str(_write(cwd / "早报.md", "v2")), "artifactId": artifact_id})
+
+    async with session_factory() as db:
+        artifact = await ArtifactDatastore(db).get_artifact("u1", artifact_id)
+    assert artifact is not None and artifact.display_name == "早报.md"
+
+
+async def test_an_artifact_id_from_another_scope_is_refused(session_factory, cwd):  # type: ignore[no-untyped-def]
+    """An id is a bare string; resolving it unscoped would let a delivery append
+    a version to somebody else's deliverable."""
+    async with session_factory() as db:
+        ds = ArtifactDatastore(db)
+        theirs = await ds.create_artifact(
+            Scope(user_id="u2", project_id="p1"),
+            kind="document",
+            display_name="theirs.md",
+            rel_path="theirs.md",
+        )
+        await db.commit()
+
+    result, payload = await _deliver(
+        {"filePath": str(_write(cwd / "mine.md", "x")), "artifactId": theirs.id}
+    )
+
+    assert result.is_error
+    assert payload["results"][0]["status"] == "unknown_artifact"
+
+
+async def test_an_unknown_artifact_id_is_refused_rather_than_guessed(session_factory, cwd):  # type: ignore[no-untyped-def]
+    """The caller asked for something specific; quietly doing something else
+    would hide the mistake and fork anyway."""
+    result, payload = await _deliver(
+        {"filePath": str(_write(cwd / "a.md", "x")), "artifactId": "NOSUCH00"}
+    )
+
+    assert result.is_error
+    assert payload["results"][0]["status"] == "unknown_artifact"
+
+
+async def test_the_two_escape_hatches_cannot_both_be_set(session_factory, cwd):  # type: ignore[no-untyped-def]
+    """They say opposite things — continue this one, versus start a new one."""
+    _, payload = await _deliver(
+        {
+            "filePath": str(_write(cwd / "a.md", "x")),
+            "artifactId": "SOMETHING",
+            "asNewArtifact": True,
+        }
+    )
+
+    assert payload["results"][0]["status"] == "invalid"

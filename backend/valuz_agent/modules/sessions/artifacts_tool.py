@@ -88,6 +88,7 @@ STATUS_IN_ARTIFACT_STORE = "in_artifact_store"
 STATUS_STALE_HEAD = "stale_head"
 STATUS_SNAPSHOT_FAILED = "snapshot_failed"
 STATUS_INVALID = "invalid"
+STATUS_UNKNOWN_ARTIFACT = "unknown_artifact"
 
 _ERRORS = {
     STATUS_NOT_OWNED: (
@@ -108,6 +109,10 @@ _ERRORS = {
         "working — read the current version and apply your change to it"
     ),
     STATUS_SNAPSHOT_FAILED: "could not copy the file — you can retry this delivery",
+    STATUS_UNKNOWN_ARTIFACT: (
+        "no such deliverable in this workspace — check the artifactId, or omit "
+        "it and it will be matched by file name"
+    ),
 }
 
 TOOL_DESCRIPTION = (
@@ -122,8 +127,10 @@ TOOL_DESCRIPTION = (
     "same deliverable rather than replacing it — earlier versions stay readable "
     "at the 'absPath' each delivery returns. Keep the same file name when you "
     "revise something, so it is recognised as the same deliverable; use a "
-    "different name (or set 'asNewArtifact': true) only when the user asked for "
-    "a genuinely new deliverable. Delivering unchanged content is a no-op. When "
+    "different name only when the user asked for a genuinely new deliverable, "
+    "and set 'asNewArtifact' to say so. If you RENAME or MOVE a deliverable, "
+    "pass its 'artifactId' so it stays one deliverable rather than becoming "
+    "two. Delivering unchanged content is a no-op. When "
     "you mention a delivered file in your reply text, link it by joining "
     "`valuz-file://` with the returned absolute 'absPath' (which starts with "
     "`/`), giving three slashes — e.g. "
@@ -171,13 +178,22 @@ _PARAMS = {
                         "enum": [k.value for k in ArtifactKind],
                         "description": _KIND_DESCRIPTION,
                     },
+                    "artifactId": {
+                        "type": "string",
+                        "description": (
+                            "Continue this existing deliverable, from an "
+                            "earlier delivery's result or the workspace list. "
+                            "Needed when you RENAMED or MOVED the file — "
+                            "otherwise it reads as a different deliverable."
+                        ),
+                    },
                     "asNewArtifact": {
                         "type": "boolean",
                         "description": (
-                            "Force a separate deliverable even if the name "
-                            "matches one you delivered before. Use only when "
-                            "the user asked for a new deliverable rather than "
-                            "a revision."
+                            "The opposite: start a separate deliverable even "
+                            "though the name matches one you delivered before. "
+                            "Only when the user asked for a NEW deliverable "
+                            "rather than a revision of the old one."
                         ),
                     },
                 },
@@ -246,9 +262,26 @@ async def _deliver_one(
         return _fail(file_path, STATUS_SNAPSHOT_FAILED)
 
     scope = delivery.scope
+    requested_id = raw.get("artifactId")
+    as_new = bool(raw.get("asNewArtifact"))
+    if requested_id and as_new:
+        return _fail(
+            file_path,
+            STATUS_INVALID,
+            "'artifactId' and 'asNewArtifact' say opposite things — pass one",
+        )
+
     artifact = None
-    if not raw.get("asNewArtifact"):
+    if requested_id:
+        # Named outright: the caller knows this is the same deliverable even
+        # though the file no longer looks like it — a rename or a move, which no
+        # amount of key matching can recognise.
+        artifact = await ds.get_artifact_in_scope(scope, str(requested_id))
+        if artifact is None:
+            return _fail(file_path, STATUS_UNKNOWN_ARTIFACT)
+    elif not as_new:
         artifact = await ds.find_by_keys(scope, rel_path=rel_path, display_name=file_name)
+
     if artifact is None:
         artifact = await ds.create_artifact(
             scope,
@@ -260,6 +293,10 @@ async def _deliver_one(
             display_name=file_name,
             rel_path=rel_path,
         )
+    else:
+        # Follow the file: a deliverable that moved or was renamed has to be
+        # findable at its new path next time, not only at the one it left.
+        await ds.adopt_delivery(scope, artifact, rel_path=rel_path, display_name=file_name)
 
     existing = await ds.find_revision_by_content(scope.user_id, artifact.id, content_hash)
     if existing is not None:

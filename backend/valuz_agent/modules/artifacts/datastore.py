@@ -193,6 +193,79 @@ class ArtifactDatastore:
         )
         return row
 
+    async def get_artifact_in_scope(self, scope: Scope, artifact_id: str) -> ArtifactRow | None:
+        """An artifact by id, but only if it belongs to this exact scope.
+
+        Guards the caller-supplied ``artifactId``: an id is a bare string the
+        agent could have carried over from another project, another worktree, or
+        an artifact it was shown but does not own. Resolving it without the
+        scope check would let a delivery append a version to somebody else's
+        deliverable.
+        """
+        return (
+            await self._db.execute(
+                select(ArtifactRow).where(
+                    ArtifactRow.id == artifact_id,
+                    ArtifactRow.user_id == scope.user_id,
+                    ArtifactRow.project_id == scope.project_id,
+                    ArtifactRow.worktree == scope.worktree,
+                    ArtifactRow.archived_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+
+    async def adopt_delivery(
+        self, scope: Scope, artifact: ArtifactRow, *, rel_path: str, display_name: str
+    ) -> None:
+        """Point an existing artifact at where this delivery actually landed.
+
+        A deliverable that gets renamed or moved is still that deliverable, and
+        the next delivery has to find it at its NEW path — so the path key
+        follows, the label follows, and the directory follows (name keys are
+        directory-qualified, so a move without it would register the next name
+        against a directory the file has left).
+
+        Only writes what changed. The common case is a re-delivery to the same
+        path under the same name, where this does nothing at all.
+        """
+        rel_dir = rel_dir_of(rel_path)
+        if artifact.display_name != display_name:
+            artifact.display_name = display_name
+            artifact.updated_at = now_ms()
+        if artifact.rel_dir != rel_dir:
+            artifact.rel_dir = rel_dir
+            artifact.updated_at = now_ms()
+
+        existing = (
+            await self._db.execute(
+                select(ArtifactKeyRow).where(
+                    ArtifactKeyRow.user_id == scope.user_id,
+                    ArtifactKeyRow.project_id == scope.project_id,
+                    ArtifactKeyRow.worktree == scope.worktree,
+                    ArtifactKeyRow.key_kind == KEY_KIND_PATH,
+                    ArtifactKeyRow.key_value == rel_path,
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is None:
+            self._db.add(
+                ArtifactKeyRow(
+                    user_id=scope.user_id,
+                    project_id=scope.project_id,
+                    worktree=scope.worktree,
+                    key_kind=KEY_KIND_PATH,
+                    key_value=rel_path,
+                    artifact_id=artifact.id,
+                )
+            )
+        elif existing.artifact_id != artifact.id:
+            existing.artifact_id = artifact.id
+            existing.updated_at = now_ms()
+        await self._db.flush()
+        await self.try_add_name_key(
+            scope, artifact_id=artifact.id, display_name=display_name, rel_dir=rel_dir
+        )
+
     async def try_add_name_key(
         self, scope: Scope, *, artifact_id: str, display_name: str, rel_dir: str
     ) -> bool:
