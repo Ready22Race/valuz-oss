@@ -334,6 +334,16 @@ export interface ProjectContextPanelProps {
   ) => void;
   onExpandKbFolder?: (kbId: string, folderId: string) => Promise<void>;
   /**
+   * Every deliverable the project holds, at its current version — regardless of
+   * which conversation produced it. Distinct from ``generatedFiles``, which is
+   * one session's output: a project view has no session to scope to, and a
+   * session that delivered nothing would otherwise show nothing at all while
+   * the workspace is full of deliverables.
+   *
+   * Pass ``undefined`` to hide the section.
+   */
+  projectArtifacts?: GeneratedArtifactItem[];
+  /**
    * Fetch a deliverable's version history. Provide it to make the version badge
    * expandable; omit it and rows stay plain files. Called at most once per
    * artifact — the panel caches what it gets back.
@@ -1048,6 +1058,7 @@ export const ProjectDetailContextPanel = ({
   bindings = [],
   onToggleBinding,
   onExpandKbFolder,
+  projectArtifacts,
   onLoadArtifactVersions,
   onRemoveKb,
   onSelectAllInKb,
@@ -1395,6 +1406,138 @@ export const ProjectDetailContextPanel = ({
     </AccordionSection>
   ) : null;
 
+  // Shared by the session list and the project list: a row is a deliverable
+  // with its version badge, and the badge expands into the deliverable's whole
+  // history. Which set of deliverables is on screen is the caller's question;
+  // how one is drawn is not.
+  const renderArtifactRow = (f: GeneratedArtifactItem) => {
+    // Offer history wherever there IS history — which is not the same
+    // as "this row is a later version". A session that delivered v1 and
+    // was then superseded by another session shows a v1 row, and the
+    // versions it cannot see are exactly the ones worth reaching.
+    const hasHistory =
+      (f.versionNo != null && f.versionNo > 1) || f.isCurrent === false;
+    const canExpand = Boolean(
+      onLoadArtifactVersions && f.artifactId && hasHistory,
+    );
+    // Gated on ``canExpand`` too: the open flag is keyed by artifact, so
+    // a row that offers no expander must not sprout one because another
+    // row of the same deliverable was opened.
+    const expanded = Boolean(
+      canExpand && f.artifactId && openVersions[f.artifactId],
+    );
+    const versions = f.artifactId ? versionsById[f.artifactId] : undefined;
+
+    const toggle = () => {
+      const id = f.artifactId;
+      if (!id || !onLoadArtifactVersions) return;
+      setOpenVersions((prev) => ({ ...prev, [id]: !prev[id] }));
+      if (versionsById[id] !== undefined) return; // already fetched
+      void onLoadArtifactVersions(id)
+        .then((items) => setVersionsById((prev) => ({ ...prev, [id]: items })))
+        .catch(() => setVersionsById((prev) => ({ ...prev, [id]: null })));
+    };
+
+    return (
+      <div key={f.id}>
+        <div className="group -mx-2 flex w-[calc(100%+1rem)] items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-surface-muted/60">
+          <button
+            type="button"
+            onClick={() => onOpenGeneratedFile?.(f.path)}
+            disabled={!onOpenGeneratedFile}
+            className="flex min-w-0 flex-1 items-center gap-2.5 text-left disabled:cursor-default"
+            title={f.path}
+          >
+            <FileTypeIcon filename={f.name} />
+            <span
+              className={`flex-1 truncate ${
+                f.isCurrent === false ? "text-ink-meta" : "text-ink-heading"
+              }`}
+            >
+              {f.name}
+            </span>
+          </button>
+          {f.versionNo != null && (f.versionNo > 1 || canExpand) ? (
+            canExpand ? (
+              <button
+                type="button"
+                onClick={toggle}
+                aria-expanded={expanded}
+                className="flex shrink-0 items-center gap-0.5 rounded bg-surface-muted px-1 text-2xs text-ink-meta transition-colors hover:bg-surface-muted/80"
+                title={t("conversation.artifactShowVersions")}
+              >
+                <ChevronRight
+                  className={`h-2.5 w-2.5 transition-transform ${
+                    expanded ? "rotate-90" : ""
+                  }`}
+                />
+                v{f.versionNo}
+              </button>
+            ) : (
+              <span
+                className="shrink-0 rounded bg-surface-muted px-1 text-2xs text-ink-meta"
+                title={
+                  f.isCurrent === false
+                    ? t("conversation.artifactSupersededHint")
+                    : undefined
+                }
+              >
+                v{f.versionNo}
+              </span>
+            )
+          ) : null}
+          {f.size ? (
+            <span className="shrink-0 text-2xs text-ink-meta">{f.size}</span>
+          ) : null}
+        </div>
+
+        {expanded ? (
+          <div className="ml-5 border-l border-[#f3f4f6] pl-2">
+            {versions === undefined ? (
+              <p className="py-1 text-2xs text-ink-meta">
+                {t("conversation.artifactVersionsLoading")}
+              </p>
+            ) : versions === null ? (
+              <p className="py-1 text-2xs text-ink-meta">
+                {t("conversation.artifactVersionsFailed")}
+              </p>
+            ) : (
+              versions
+                .slice()
+                .reverse()
+                .map((v) => (
+                  <button
+                    key={v.id}
+                    type="button"
+                    onClick={() =>
+                      v.openable ? onOpenGeneratedFile?.(v.path) : undefined
+                    }
+                    disabled={!v.openable || !onOpenGeneratedFile}
+                    className="flex w-full items-center gap-2 rounded px-1 py-1 text-left text-2xs text-ink-meta transition-colors hover:bg-surface-muted/60 disabled:cursor-default disabled:hover:bg-transparent"
+                    title={
+                      v.openable
+                        ? v.path
+                        : t("conversation.artifactVersionUnavailable")
+                    }
+                  >
+                    <span className="w-6 shrink-0 tabular-nums">
+                      v{v.versionNo}
+                    </span>
+                    <span className="flex-1 truncate">
+                      {v.openable
+                        ? (v.when ?? "")
+                        : t("conversation.artifactVersionUnavailable")}
+                    </span>
+                    {v.size ? <span className="shrink-0">{v.size}</span> : null}
+                  </button>
+                ))
+            )}
+          </div>
+        ) : null}
+      </div>
+    );
+  };
+
   const generatedFilesSection = showGeneratedFiles ? (
     <AccordionSection
       {...sectionState("generated", visibleGeneratedFiles.length > 0)}
@@ -1406,147 +1549,7 @@ export const ProjectDetailContextPanel = ({
     >
       {visibleGeneratedFiles.length > 0 ? (
         <div className="space-y-1">
-          {visibleGeneratedFiles.map((f) => {
-            // Offer history wherever there IS history — which is not the same
-            // as "this row is a later version". A session that delivered v1 and
-            // was then superseded by another session shows a v1 row, and the
-            // versions it cannot see are exactly the ones worth reaching.
-            const hasHistory =
-              (f.versionNo != null && f.versionNo > 1) || f.isCurrent === false;
-            const canExpand = Boolean(
-              onLoadArtifactVersions && f.artifactId && hasHistory,
-            );
-            // Gated on ``canExpand`` too: the open flag is keyed by artifact, so
-            // a row that offers no expander must not sprout one because another
-            // row of the same deliverable was opened.
-            const expanded = Boolean(
-              canExpand && f.artifactId && openVersions[f.artifactId],
-            );
-            const versions = f.artifactId
-              ? versionsById[f.artifactId]
-              : undefined;
-
-            const toggle = () => {
-              const id = f.artifactId;
-              if (!id || !onLoadArtifactVersions) return;
-              setOpenVersions((prev) => ({ ...prev, [id]: !prev[id] }));
-              if (versionsById[id] !== undefined) return; // already fetched
-              void onLoadArtifactVersions(id)
-                .then((items) =>
-                  setVersionsById((prev) => ({ ...prev, [id]: items })),
-                )
-                .catch(() =>
-                  setVersionsById((prev) => ({ ...prev, [id]: null })),
-                );
-            };
-
-            return (
-              <div key={f.id}>
-                <div className="group -mx-2 flex w-[calc(100%+1rem)] items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-surface-muted/60">
-                  <button
-                    type="button"
-                    onClick={() => onOpenGeneratedFile?.(f.path)}
-                    disabled={!onOpenGeneratedFile}
-                    className="flex min-w-0 flex-1 items-center gap-2.5 text-left disabled:cursor-default"
-                    title={f.path}
-                  >
-                    <FileTypeIcon filename={f.name} />
-                    <span
-                      className={`flex-1 truncate ${
-                        f.isCurrent === false
-                          ? "text-ink-meta"
-                          : "text-ink-heading"
-                      }`}
-                    >
-                      {f.name}
-                    </span>
-                  </button>
-                  {f.versionNo != null && (f.versionNo > 1 || canExpand) ? (
-                    canExpand ? (
-                      <button
-                        type="button"
-                        onClick={toggle}
-                        aria-expanded={expanded}
-                        className="flex shrink-0 items-center gap-0.5 rounded bg-surface-muted px-1 text-2xs text-ink-meta transition-colors hover:bg-surface-muted/80"
-                        title={t("conversation.artifactShowVersions")}
-                      >
-                        <ChevronRight
-                          className={`h-2.5 w-2.5 transition-transform ${
-                            expanded ? "rotate-90" : ""
-                          }`}
-                        />
-                        v{f.versionNo}
-                      </button>
-                    ) : (
-                      <span
-                        className="shrink-0 rounded bg-surface-muted px-1 text-2xs text-ink-meta"
-                        title={
-                          f.isCurrent === false
-                            ? t("conversation.artifactSupersededHint")
-                            : undefined
-                        }
-                      >
-                        v{f.versionNo}
-                      </span>
-                    )
-                  ) : null}
-                  {f.size ? (
-                    <span className="shrink-0 text-2xs text-ink-meta">
-                      {f.size}
-                    </span>
-                  ) : null}
-                </div>
-
-                {expanded ? (
-                  <div className="ml-5 border-l border-[#f3f4f6] pl-2">
-                    {versions === undefined ? (
-                      <p className="py-1 text-2xs text-ink-meta">
-                        {t("conversation.artifactVersionsLoading")}
-                      </p>
-                    ) : versions === null ? (
-                      <p className="py-1 text-2xs text-ink-meta">
-                        {t("conversation.artifactVersionsFailed")}
-                      </p>
-                    ) : (
-                      versions
-                        .slice()
-                        .reverse()
-                        .map((v) => (
-                          <button
-                            key={v.id}
-                            type="button"
-                            onClick={() =>
-                              v.openable
-                                ? onOpenGeneratedFile?.(v.path)
-                                : undefined
-                            }
-                            disabled={!v.openable || !onOpenGeneratedFile}
-                            className="flex w-full items-center gap-2 rounded px-1 py-1 text-left text-2xs text-ink-meta transition-colors hover:bg-surface-muted/60 disabled:cursor-default disabled:hover:bg-transparent"
-                            title={
-                              v.openable
-                                ? v.path
-                                : t("conversation.artifactVersionUnavailable")
-                            }
-                          >
-                            <span className="w-6 shrink-0 tabular-nums">
-                              v{v.versionNo}
-                            </span>
-                            <span className="flex-1 truncate">
-                              {v.openable
-                                ? (v.when ?? "")
-                                : t("conversation.artifactVersionUnavailable")}
-                            </span>
-                            {v.size ? (
-                              <span className="shrink-0">{v.size}</span>
-                            ) : null}
-                          </button>
-                        ))
-                    )}
-                  </div>
-                ) : null}
-              </div>
-            );
-          })}
+          {visibleGeneratedFiles.map(renderArtifactRow)}
         </div>
       ) : (
         <p className="text-2xs text-ink-meta">
@@ -2479,6 +2482,29 @@ export const ProjectDetailContextPanel = ({
                 </p>
               )}
             </>
+          )}
+        </AccordionSection>
+      )}
+      {/* Everything the project holds, whoever produced it. The 生成文件 section
+          above is one conversation's output; this is the workspace, which is
+          what a session that has delivered nothing has to read from. */}
+      {projectArtifacts !== undefined && (
+        <AccordionSection
+          {...sectionState("projectArtifacts", projectArtifacts.length > 0)}
+          title={t("project.deliverables" as Parameters<typeof t>[0])}
+          icon={Sparkles}
+          iconClassName="text-brand"
+          contentClassName="px-5 py-2"
+          count={projectArtifacts.length || undefined}
+        >
+          {projectArtifacts.length > 0 ? (
+            <div className="space-y-1">
+              {projectArtifacts.map(renderArtifactRow)}
+            </div>
+          ) : (
+            <p className="text-2xs text-ink-meta">
+              {t("project.noDeliverables" as Parameters<typeof t>[0])}
+            </p>
           )}
         </AccordionSection>
       )}

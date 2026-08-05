@@ -540,3 +540,67 @@ describe("ProjectDetailContextPanel — Artifact version history", () => {
     expect(await screen.findByText("历史版本加载失败")).toBeTruthy();
   });
 });
+
+describe("ProjectDetailContextPanel — Project deliverables section", () => {
+  it("should list what the project holds, separately from one session's output", () => {
+    // A conversation that delivered nothing shows an empty 生成文件 list; the
+    // workspace section is the only place those deliverables appear.
+    render(
+      <ProjectDetailContextPanel
+        generatedFiles={[]}
+        projectArtifacts={[
+          {
+            id: "A1",
+            name: "季度报告.pdf",
+            path: "/d/.artifact/A1/v3/季度报告.pdf",
+            versionNo: 3,
+            isCurrent: true,
+            artifactId: "A1",
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("交付物")).toBeTruthy();
+    expect(screen.getByText("季度报告.pdf")).toBeTruthy();
+    expect(screen.getByText("暂无生成文件")).toBeTruthy();
+  });
+
+  it("should expand a project deliverable's history the same way a session row does", async () => {
+    const onLoadArtifactVersions = vi.fn().mockResolvedValue([
+      { id: "r1", versionNo: 1, path: "/d/v1", when: "旧", openable: true },
+      { id: "r2", versionNo: 2, path: "/d/v2", when: "新", openable: true },
+    ]);
+    render(
+      <ProjectDetailContextPanel
+        projectArtifacts={[
+          {
+            id: "A1",
+            name: "报告.md",
+            path: "/d/.artifact/A1/v2/报告.md",
+            versionNo: 2,
+            isCurrent: true,
+            artifactId: "A1",
+          },
+        ]}
+        onLoadArtifactVersions={onLoadArtifactVersions}
+      />,
+    );
+
+    await userEvent.click(screen.getByTitle("查看历史版本"));
+
+    expect(onLoadArtifactVersions).toHaveBeenCalledWith("A1");
+    expect(await screen.findByText("旧")).toBeTruthy();
+  });
+
+  it("should show an empty state rather than vanishing when the project has none", () => {
+    render(<ProjectDetailContextPanel projectArtifacts={[]} />);
+    expect(screen.getByText("交付物")).toBeTruthy();
+    expect(screen.getByText("暂无交付物")).toBeTruthy();
+  });
+
+  it("should hide the section entirely when projectArtifacts is undefined", () => {
+    render(<ProjectDetailContextPanel todos={[]} />);
+    expect(screen.queryByText("交付物")).toBeNull();
+  });
+});

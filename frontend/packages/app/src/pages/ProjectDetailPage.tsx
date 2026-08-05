@@ -23,7 +23,9 @@ import {
   type ActivityFeedListProps,
 } from "@valuz/app/components";
 import { toast } from "sonner";
+
 import {
+  artifactsApi,
   channelsApi,
   projectsApi,
   ApiError,
@@ -75,6 +77,20 @@ import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
 import { ArtifactSplitPane } from "../components/ArtifactSplitPane";
 import { useArtifactFile } from "../hooks/use-artifact-file";
 import { toAbsoluteProjectPath } from "../lib/project-paths";
+
+/** Bytes as the rail shows them. Local because the two other copies of this in
+ *  the app are equally local; unifying them is not this change's business. */
+function formatArtifactSize(bytes: number): string {
+  if (!bytes) return "";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value < 10 && unit > 0 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+}
 
 /** One tab body: owns its own cursor-paginated feed. Radix unmounts inactive
  *  ``TabsContent``, so only the active tab's feed polls / paginates. */
@@ -358,6 +374,68 @@ export const ProjectDetailPage = () => {
   useEffect(() => {
     void loadMembers();
   }, [loadMembers]);
+
+  // Deliverables the project holds, at their current version — the workspace
+  // view, as opposed to the per-session list a conversation shows. Reloaded
+  // when the project changes; a delivery lands during a conversation, not here.
+  const [projectArtifacts, setProjectArtifacts] = useState<
+    { id: string; name: string; size: string; path: string; versionNo: number;
+      isCurrent: boolean; artifactId: string }[]
+  >([]);
+
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+    artifactsApi
+      .list(id, { baseUrl: { projectId: id } })
+      .then((res) => {
+        if (cancelled) return;
+        setProjectArtifacts(
+          res.items.map((a) => ({
+            id: a.id,
+            name: a.display_name,
+            size: formatArtifactSize(a.current.file_size),
+            path: a.current.file_path,
+            versionNo: a.version_no,
+            // The workspace view lists each deliverable at its head, so every
+            // row here is current by construction — the flag exists for the
+            // per-session list, where a row can have been superseded.
+            isCurrent: true,
+            artifactId: a.id,
+          })),
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setProjectArtifacts([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+
+  const loadArtifactVersions = useCallback(
+    async (artifactId: string) => {
+      const res = await artifactsApi.listRevisions(artifactId, {
+        baseUrl: id ? { projectId: id } : undefined,
+      });
+      return res.items.map((r) => ({
+        id: r.id,
+        versionNo: r.version_no,
+        path: r.file_path,
+        size: formatArtifactSize(r.file_size),
+        when: new Date(r.created_at).toLocaleString(undefined, {
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+        // A version whose bytes are gone still belongs in the history; the
+        // backend says so by withholding the ref.
+        openable: Boolean(r.ref),
+      }));
+    },
+    [id],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -1422,6 +1500,8 @@ export const ProjectDetailPage = () => {
         onInstructionsChange={handleInstructionsChange}
         members={members}
         defaultLeadSlug={project?.default_lead_agent_slug ?? null}
+        projectArtifacts={projectArtifacts}
+        onLoadArtifactVersions={loadArtifactVersions}
         chatBindings={chatBindings}
         onBindChat={() => setBindChatOpen(true)}
         onUnbindChat={(chatId) => void handleUnbindChat(chatId)}

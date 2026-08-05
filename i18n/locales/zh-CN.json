@@ -1017,6 +1017,8 @@
     "instructionsTitle": "提示词",
     "keyFindings": "关键发现",
     "knowledgeBase": "知识库",
+    "deliverables": "交付物",
+    "noDeliverables": "暂无交付物",
     "loadFailed": "加载项目详情失败",
     "manageKb": "管理知识库",
     "nextRun": "下次 {time}",

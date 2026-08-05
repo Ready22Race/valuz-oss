@@ -1017,6 +1017,8 @@
     "instructionsTitle": "Instructions",
     "keyFindings": "Key findings",
     "knowledgeBase": "Knowledge base",
+    "deliverables": "Deliverables",
+    "noDeliverables": "No deliverables yet",
     "loadFailed": "Failed to load project details",
     "manageKb": "Manage knowledge base",
     "nextRun": "Next {time}",
