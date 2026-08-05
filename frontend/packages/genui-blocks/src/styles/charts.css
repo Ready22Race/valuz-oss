@@ -1,0 +1,549 @@
+/*
+ * Hand-drawn charts — Sparkline, Waterfall/BridgeChart, Funnel, Heatmap,
+ * Histogram, BoxPlot, Treemap, GroupedBar, StackedBar.
+ *
+ * These are CSS boxes and one inline SVG, not a charting library: OpenUI
+ * already ships recharts-backed BarChart/LineChart/AreaChart/PieChart/
+ * ScatterChart/RadarChart, and these are the shapes it lacks. A second renderer
+ * in a package whose contract is "@openuidev/* + react + zod" would be a
+ * dependency nobody asked for.
+ *
+ * Family rules, same as every file under styles/: `.vgb-` prefix, `--openui-*`
+ * custom properties only, container queries rather than media queries.
+ *
+ * Two rules specific to this family:
+ *
+ *  1. **Anything that depends on the data stays inline in the component.** A
+ *     stylesheet cannot express a bar whose width comes from a value. Only the
+ *     data-driven declarations are inline; everything else is here.
+ *  2. **Labels wrap, they never truncate and never rotate.** These blocks render
+ *     model output into a chat column, so a category name is routinely longer
+ *     than the bar beside it. Rotated labels are unreadable at this size and a
+ *     truncated one needs a hover to recover — and this first version is static
+ *     by design, so there is no hover to recover it with. A wrapped label costs
+ *     row height, which is the budget a vertically scrolling column has. Where
+ *     wrapping is not enough (a 50-bin histogram, a 20-column heatmap) the plot
+ *     scrolls sideways inside `.vgb-scroll-x` instead of squeezing its labels.
+ */
+
+/* ── Frame ────────────────────────────────────────────────────────── */
+
+.vgb-chart {
+  /* Its own query container. Naming only an outer `.vgb-root` measures the
+     whole document, so a chart in a half-width column would be told it has the
+     full width and would keep a layout that does not fit. */
+  container-type: inline-size;
+  container-name: vgb;
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--openui-space-s);
+  margin: 0;
+}
+
+.vgb-chart-caption {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--openui-space-xs);
+}
+
+.vgb-chart-title {
+  color: var(--openui-text-neutral-primary);
+  font: var(--openui-text-label-default-heavy);
+  overflow-wrap: anywhere;
+}
+
+.vgb-chart-unit,
+.vgb-chart-sub,
+.vgb-chart-note {
+  color: var(--openui-text-neutral-secondary);
+  font: var(--openui-text-label-sm);
+  overflow-wrap: anywhere;
+}
+
+.vgb-chart-note {
+  margin: 0;
+}
+
+/*
+ * The accessible summary.
+ *
+ * An SVG polyline and a row of `<span>`s announce nothing at all — not the
+ * values, not that a chart is there — so every block states in one sentence
+ * what the picture shows. Scoped to this family on purpose: a generic
+ * `.vgb-sr-only` would be a package-wide utility and belongs in base.css, which
+ * families do not own. (`.vgb-cite-sr` in sources.css is the same rule for the
+ * same reason.)
+ */
+.vgb-chart-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* A figure that disagrees with what the chart computed. Marked, never hidden. */
+.vgb-chart-row[data-chart-mismatch="true"] .vgb-chart-value,
+.vgb-chart-note [data-chart-mismatch="true"] {
+  color: var(--openui-text-danger-primary);
+}
+
+/* ── Legend ───────────────────────────────────────────────────────── */
+
+/*
+ * Present for two or more series, absent for one — a legend with a single
+ * swatch only restates the title. Identity is the swatch beside the name; the
+ * name itself never wears the series colour, because a light categorical hue is
+ * illegible as text.
+ */
+.vgb-chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--openui-space-xs) var(--openui-space-m);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.vgb-chart-legend-item,
+.vgb-stack-part {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--openui-space-2xs);
+  color: var(--openui-text-neutral-secondary);
+  font: var(--openui-text-label-sm);
+}
+
+.vgb-chart-legend-name {
+  overflow-wrap: anywhere;
+}
+
+.vgb-chart-swatch {
+  display: inline-block;
+  flex: none;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: var(--openui-radius-full);
+}
+
+/* ── Rows: label · track · figure ─────────────────────────────────── */
+
+.vgb-chart-rows {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--openui-space-s);
+}
+
+.vgb-chart-row {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 9rem) minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: var(--openui-space-2xs) var(--openui-space-s);
+}
+
+/* A grouped row has no single figure — each series carries its own. */
+.vgb-chart-row-group {
+  grid-template-columns: minmax(0, 9rem) minmax(0, 1fr);
+}
+
+.vgb-chart-label {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--openui-space-2xs);
+  color: var(--openui-text-neutral-secondary);
+  font: var(--openui-text-label-sm);
+}
+
+.vgb-chart-label-text {
+  /* Wraps rather than truncating — see the file header. `anywhere` because CJK
+     labels carry no spaces to break at. */
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.vgb-chart-figure {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--openui-space-3xs);
+  text-align: right;
+}
+
+.vgb-chart-value {
+  color: var(--openui-text-neutral-primary);
+  font: var(--openui-text-label-sm);
+  font-variant-numeric: tabular-nums;
+  /* Figures are one token. The host stylesheet sets `overflow-wrap: anywhere`
+     on every span in scope, which is right for prose and wrong for a number —
+     "26,58 / 4" reads as a different number, not a squeezed one. */
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+
+.vgb-chart-sub {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.vgb-chart-detail {
+  display: flex;
+  flex-wrap: wrap;
+  grid-column: 1 / -1;
+  gap: var(--openui-space-2xs) var(--openui-space-m);
+}
+
+/* ── Tracks and bars ──────────────────────────────────────────────── */
+
+.vgb-chart-track {
+  position: relative;
+  min-width: 0;
+  height: 0.7rem;
+  border-radius: var(--openui-radius-full);
+  background: var(--openui-highlight-subtle);
+}
+
+.vgb-chart-bar {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: var(--openui-radius-full);
+  /* A contribution too small to see is still a contribution. Zero draws no bar
+     at all, so this floor never invents one. */
+  min-width: 2px;
+}
+
+/* Funnel bars are centred on the track, so the narrowing is the shape. */
+.vgb-chart-bar-centred {
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.vgb-chart-zero {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 1px;
+  transform: translateX(-0.5px);
+  background: var(--openui-border-default);
+}
+
+/* ── GroupedBar ───────────────────────────────────────────────────── */
+
+/*
+ * One thin track per series, stacked inside the category's cell with its value
+ * in an aligned column. Horizontal rather than vertical columns: a chat column
+ * is narrow, and vertical columns put the category names on an axis that has
+ * nowhere to put a long or CJK label.
+ */
+.vgb-group {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: 2px var(--openui-space-s);
+}
+
+.vgb-group .vgb-chart-track {
+  height: 0.45rem;
+}
+
+/* ── StackedBar ───────────────────────────────────────────────────── */
+
+.vgb-stack {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  /* 2px of the surface between segments. A border drawn round each one would
+     add ink that is not data; the gap does the separating. */
+  gap: 2px;
+}
+
+.vgb-stack-segment {
+  min-width: 2px;
+}
+
+.vgb-stack-segment:first-child {
+  border-start-start-radius: var(--openui-radius-full);
+  border-end-start-radius: var(--openui-radius-full);
+}
+
+.vgb-stack-segment:last-child {
+  border-start-end-radius: var(--openui-radius-full);
+  border-end-end-radius: var(--openui-radius-full);
+}
+
+.vgb-stack-part {
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+/* ── Sparkline ────────────────────────────────────────────────────── */
+
+/*
+ * Sized to sit in a table cell or beside a metric, so it is inline and takes
+ * the width it is given. The cap keeps it from stretching across a full-width
+ * row, where a line with no axes stops meaning anything.
+ */
+.vgb-sparkline {
+  display: inline-flex;
+  width: 100%;
+  max-width: min(9rem, 100%);
+  min-width: min(3rem, 100%);
+  height: 1.25rem;
+  vertical-align: middle;
+}
+
+.vgb-sparkline-svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+/* ── Histogram ────────────────────────────────────────────────────── */
+
+.vgb-histogram {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  min-width: 100%;
+}
+
+.vgb-histogram-bin {
+  display: flex;
+  flex: 1 1 auto;
+  /* `min(…, 100%)` rather than a bare floor: a floor wider than the container
+     does not shrink the container, it overflows it. Here the overflow is the
+     point — `.vgb-scroll-x` catches it — but the container still has to win
+     when there is only one bin. */
+  min-width: min(2.75rem, 100%);
+  flex-direction: column;
+  align-items: center;
+  gap: var(--openui-space-3xs);
+}
+
+.vgb-histogram-count,
+.vgb-histogram-label {
+  color: var(--openui-text-neutral-secondary);
+  font-size: var(--openui-font-size-2xs);
+  text-align: center;
+  /* Wraps inside its own bin rather than overlapping the next one. */
+  overflow-wrap: anywhere;
+}
+
+.vgb-histogram-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.vgb-histogram-column {
+  display: flex;
+  width: 100%;
+  height: 7rem;
+  align-items: flex-end;
+}
+
+.vgb-histogram-fill {
+  width: 100%;
+  /* A bin one-thousandth the height of its neighbour still happened. Zero draws
+     no fill at all, so this floor never invents one. */
+  min-height: 2px;
+  /* Rounded at the data end, square at the baseline: the cap is the value, the
+     foot is the axis. */
+  border-start-start-radius: var(--openui-radius-xs);
+  border-start-end-radius: var(--openui-radius-xs);
+}
+
+/* ── Heatmap ──────────────────────────────────────────────────────── */
+
+/*
+ * A real table: the cells are tabular data, the headers carry the row/column
+ * association for free, and it is the table view the chart would otherwise need
+ * a second time.
+ */
+.vgb-heatmap {
+  min-width: 100%;
+  border-collapse: separate;
+  border-spacing: 2px;
+}
+
+.vgb-heatmap-head,
+.vgb-heatmap-row-head,
+.vgb-heatmap-corner {
+  color: var(--openui-text-neutral-secondary);
+  font: var(--openui-text-label-sm);
+  font-weight: var(--openui-font-weight-regular);
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+/* `min(…, 100%)` rather than a bare floor everywhere a width has a floor: one
+   wider than its container does not shrink the container, it overflows it. Here
+   the overflow is caught by `.vgb-scroll-x`, which is the point — a 20-column
+   grid scrolls rather than squeezing its headers into unreadable slivers. */
+.vgb-heatmap-head {
+  min-width: min(3rem, 100%);
+  text-align: center;
+}
+
+.vgb-heatmap-row-head {
+  max-width: 9rem;
+}
+
+.vgb-heatmap-cell {
+  min-width: min(3rem, 100%);
+  padding: var(--openui-space-2xs) var(--openui-space-xs);
+  border-radius: var(--openui-radius-xs);
+  color: var(--openui-text-neutral-primary);
+  font: var(--openui-text-label-sm);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+
+.vgb-heatmap-scale {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--openui-space-2xs);
+}
+
+.vgb-heatmap-swatch {
+  display: inline-block;
+  flex: none;
+  width: 1.25rem;
+  height: 0.5rem;
+  border-radius: var(--openui-radius-xs);
+}
+
+/* ── BoxPlot ──────────────────────────────────────────────────────── */
+
+.vgb-box-whisker {
+  position: absolute;
+  top: 50%;
+  height: 1px;
+  transform: translateY(-50%);
+  opacity: 0.55;
+}
+
+.vgb-box {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  min-width: 2px;
+  border: 1px solid;
+  border-radius: var(--openui-radius-xs);
+}
+
+.vgb-box-median {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  transform: translateX(-1px);
+  border-radius: var(--openui-radius-full);
+}
+
+.vgb-box-outlier {
+  position: absolute;
+  top: 50%;
+  width: 5px;
+  height: 5px;
+  transform: translate(-50%, -50%);
+  border-radius: var(--openui-radius-full);
+  opacity: 0.7;
+}
+
+/* ── Treemap ──────────────────────────────────────────────────────── */
+
+/*
+ * Bands whose heights are their share of the total, each holding tiles that
+ * grow in proportion to their value. Every area is exactly right; only the
+ * aspect ratios are less even than a squarified layout would make them, which
+ * is a fair trade for a picture this small.
+ */
+.vgb-treemap {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  height: 14rem;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.vgb-treemap-row {
+  display: flex;
+  min-height: 0;
+  flex-basis: 0;
+  gap: 2px;
+}
+
+.vgb-treemap-tile {
+  display: flex;
+  min-width: 0;
+  flex-basis: 0;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: var(--openui-space-3xs);
+  padding: var(--openui-space-2xs);
+  border-radius: var(--openui-radius-xs);
+}
+
+.vgb-treemap-label,
+.vgb-treemap-value {
+  color: var(--openui-text-neutral-primary);
+  font-size: var(--openui-font-size-2xs);
+  /* Ellipsis, never a mid-character crop. Nothing is lost: the accessible
+     summary names every slice with its share. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vgb-treemap-value {
+  color: var(--openui-text-neutral-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Narrow column ────────────────────────────────────────────────── */
+
+/*
+ * Below 30rem a label and its track cannot share a line. The label and its
+ * figure take the first line and the track takes the second, placed explicitly
+ * — auto-placement would push the figure onto a third row.
+ */
+@container vgb (max-width: 30rem) {
+  .vgb-chart-row:not(.vgb-chart-row-group) {
+    grid-template-columns: minmax(0, 1fr) max-content;
+  }
+
+  .vgb-chart-row:not(.vgb-chart-row-group) > .vgb-chart-label {
+    grid-area: 1 / 1 / 2 / 2;
+  }
+
+  .vgb-chart-row:not(.vgb-chart-row-group) > .vgb-chart-figure {
+    grid-area: 1 / 2 / 2 / 3;
+  }
+
+  .vgb-chart-row:not(.vgb-chart-row-group) > .vgb-chart-track {
+    grid-area: 2 / 1 / 3 / 3;
+  }
+
+  .vgb-chart-row-group {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .vgb-treemap {
+    height: 11rem;
+  }
+}

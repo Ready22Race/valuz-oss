@@ -108,6 +108,42 @@ Write rules in `src/styles/<family>.css` and add one `@import` line to
 - Wide content (tables, charts) scrolls inside its own box — reuse
   `.vgb-scroll-x`. The page body must never scroll sideways.
 
+- **Two components must never share one schema object.** The library keys
+  registration off the schema, so a second `defineComponent` given the same
+  object silently replaces the first: one name renders the other's component,
+  with both names still present in the library and nothing reported anywhere.
+  If two blocks want the same props, give each its own schema from a factory
+  (`waterfallProps()`, `categoryBarProps()`) rather than sharing a const.
+
+## Layout rules learned the hard way
+
+Each of these cost a screenshot and a debugging session. They fail silently —
+nothing errors, the page is just wrong.
+
+- **A width floor must concede to its container.** Write
+  `min-width: min(320px, 100%)`, never `min-width: 320px`. A floor wider than
+  the container does not shrink the container, it overflows and paints over
+  whatever is beside it.
+- **A wrapping block is its own query container.** Put
+  `container-type: inline-size; container-name: vgb;` on the block that wraps
+  children, not only on an outer root. A query resolved against the whole
+  document tells a tile in a half-width column that it has the full width.
+- **Numbers never break.** `white-space: nowrap` on any figure. The host
+  stylesheet sets `overflow-wrap: anywhere` on every span in scope, which is
+  right for prose and wrong for a value — "26,58 / 4" reads as a different
+  number, not a squeezed one.
+- **Composite typography tokens must be mapped.** `--openui-text-heading-lg`
+  and friends are not derived from the primitives; unmapped they keep OpenUI's
+  Inter defaults. A test asserts every one is mapped.
+
+## Icons
+
+`icon` props take a lucide-react icon name and render through
+`BlockIcon` from `../lib/icon`. Both the component spelling (`TrendingUp`) and
+the id (`trending-up`) resolve; an unknown name renders nothing. Never accept
+an emoji as an icon, and say so in the description — a block without an `icon`
+prop is a block meant to have no icon.
+
 ## Constraints
 
 - **No `@valuz/*` imports.** This package sits below `@valuz/ui`; importing
