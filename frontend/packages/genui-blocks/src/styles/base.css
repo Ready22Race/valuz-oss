@@ -41,6 +41,13 @@
 /* ── Wrapping block: the layout every *Block container shares ────── */
 
 .vgb-block {
+  /* Each wrapping block is its own query container. Naming only an outer
+     `.vgb-root` measures the whole generated document, so a tile inside a
+     half-width column still sees the full width, never reaches a breakpoint,
+     and keeps a floor wider than the column it sits in — it then overflows and
+     paints over its neighbour. A block asks about *its own* row instead. */
+  container-type: inline-size;
+  container-name: vgb;
   display: flex;
   flex-direction: row;
   flex-wrap: wrap;
@@ -64,7 +71,12 @@
 .vgb-tile {
   display: flex;
   flex: 1 1 320px;
-  min-width: 320px;
+  /* `min(320px, 100%)` rather than a bare floor: a floor wider than the
+     container does not shrink the container, it overflows it — which is how a
+     tile ended up painted across the column beside it. This keeps the intent
+     (do not go narrower than 320px) while conceding to a container that simply
+     has less room than that. */
+  min-width: min(320px, 100%);
   flex-direction: column;
   gap: var(--openui-space-s);
   padding: var(--openui-space-m);
@@ -146,7 +158,7 @@
 @container vgb (max-width: 48rem) {
   .vgb-tile {
     flex-basis: 15rem;
-    min-width: 15rem;
+    min-width: min(15rem, 100%);
   }
 }
 

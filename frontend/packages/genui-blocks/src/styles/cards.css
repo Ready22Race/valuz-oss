@@ -289,6 +289,13 @@
  */
 
 .vgb-card-block {
+  /* Each wrapping block is its own query container. Naming only an outer
+     `.vgb-root` measures the whole generated document, so a tile inside a
+     half-width column still sees the full width, never reaches a breakpoint,
+     and keeps a floor wider than the column it sits in — it then overflows and
+     paints over its neighbour. A block asks about *its own* row instead. */
+  container-type: inline-size;
+  container-name: vgb;
   display: flex;
   flex-direction: row;
   flex-wrap: wrap;
@@ -304,12 +311,12 @@
  */
 .vgb-card-block.vgb-card-block-small > * {
   flex: 1 1 158px;
-  min-width: 158px;
+  min-width: min(158px, 100%);
 }
 
 .vgb-card-block.vgb-card-block-medium > * {
   flex: 1 1 15rem;
-  min-width: 15rem;
+  min-width: min(15rem, 100%);
 }
 
 /* ── Container breakpoints ───────────────────────────────────────── */
@@ -325,7 +332,7 @@
      scrolls sideways. */
   .vgb-card-block.vgb-card-block-medium > * {
     flex-basis: 13rem;
-    min-width: 13rem;
+    min-width: min(13rem, 100%);
   }
 
   .vgb-card.vgb-option-card {

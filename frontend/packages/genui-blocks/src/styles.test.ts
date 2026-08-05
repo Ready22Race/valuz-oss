@@ -38,7 +38,9 @@ function splitRules(css: string) {
   return { base, narrow };
 }
 
-const NON_ZERO_MIN_WIDTH = /min-width:\s*(?!0\b)([0-9.]+)(px|rem|em)/;
+// A floor written as `min(320px, 100%)` already concedes to a narrower
+// container, so it is not the hazard this guards. A bare floor is.
+const NON_ZERO_MIN_WIDTH = /min-width:\s*(?!0\b|min\()([0-9.]+)(px|rem|em)/;
 const SETS_BASIS = /flex(-basis)?:\s*[^;]*\b([0-9.]+(px|rem|em)|100%)/;
 
 describe("block stylesheets", () => {
@@ -47,8 +49,10 @@ describe("block stylesheets", () => {
     // a card hold its shape, but a floor left in place when the column gets
     // narrower than the floor makes the card overflow its own container
     // instead of shrinking — so the whole chat column scrolls sideways. Any
-    // selector that both claims a width (flex-basis) and sets a floor has to
-    // give the floor up at 30rem.
+    // selector that both claims a width (flex-basis) and sets a bare floor has
+    // to give it up at 30rem. Writing the floor as `min(…, 100%)` is the better
+    // answer and is accepted instead: a floor that exceeds its container does
+    // not shrink the container, it overflows it and paints over the neighbour.
     const offenders: string[] = [];
     for (const { file, css } of readAll()) {
       const { base, narrow } = splitRules(css);
