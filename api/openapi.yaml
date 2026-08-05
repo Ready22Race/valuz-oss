@@ -6847,10 +6847,70 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/CitationRefV1"
+        projection:
+          $ref: "#/components/schemas/CitationProjectionV1"
         integrity:
           $ref: "#/components/schemas/CitationIntegrityV1"
         quality:
           $ref: "#/components/schemas/CitationQualityResultV1"
+
+    CitationProjectionV1:
+      type: object
+      required: [evidenceHandleToCitationId]
+      properties:
+        evidenceHandleToCitationId:
+          type: object
+          additionalProperties: {type: string}
+        anchors:
+          type: array
+          items:
+            $ref: "#/components/schemas/CitationAnchorV1"
+        provenanceRegions:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProvenanceRegionV1"
+
+    CitationAnchorV1:
+      type: object
+      required: [citationId, claimId, location, sourceOffset, origin]
+      properties:
+        citationId: {type: string}
+        claimId: {type: string}
+        location:
+          $ref: "#/components/schemas/ClaimLocationV1"
+        sourceOffset:
+          type: integer
+          minimum: 0
+          description: Unicode code-point offset in raw Markdown, used only by the renderer.
+        origin:
+          type: string
+          enum: [explicit, auto-bound, equivalent-claim]
+
+    ProvenanceRegionV1:
+      type: object
+      required:
+        [regionId, blockIndex, rowStart, rowEnd, columnStart, columnEnd,
+         citationIds, anchor, sourceOffset]
+      properties:
+        regionId: {type: string}
+        claimGroupId:
+          type: string
+          description: Stable Evidence-lineage group shared by disconnected render regions.
+        blockIndex: {type: integer, minimum: 0}
+        rowStart: {type: integer, minimum: 0}
+        rowEnd: {type: integer, minimum: 0}
+        columnStart: {type: integer, minimum: 0}
+        columnEnd: {type: integer, minimum: 0}
+        citationIds:
+          type: array
+          minItems: 1
+          items: {type: string}
+        anchor:
+          $ref: "#/components/schemas/ClaimLocationV1"
+        sourceOffset:
+          type: integer
+          minimum: 0
+          description: Unicode code-point offset of the terminal table cell in raw Markdown.
 
     DocumentResearchSessionRequest:
       type: object
@@ -7337,6 +7397,14 @@ components:
         exact: {type: string}
         segmentIndex: {type: integer, minimum: 0}
         citationRequired: {type: boolean}
+        auditPriority:
+          type: string
+          enum: [critical, supporting, optional]
+        auditSelected: {type: boolean}
+        selectionReasons:
+          type: array
+          items: {type: string}
+        claimGroupId: {type: string}
         citationIds:
           type: array
           items: {type: string}
@@ -7346,7 +7414,7 @@ components:
             $ref: "#/components/schemas/ClaimEvidenceBindingV1"
         status:
           type: string
-          enum: [passed, auto-bound, repaired, degraded, unverified, unsupported]
+          enum: [passed, auto-bound, repaired, degraded, unverified, unsupported, not-selected]
         issueCodes:
           type: array
           items: {type: string}
@@ -7367,6 +7435,9 @@ components:
         status:
           type: string
           enum: [passed, unverified, degraded]
+        auditOutcome:
+          type: string
+          enum: [passed, partial, needs-review]
         publishStatus:
           type: string
           enum: [ready, draft-only, blocked]
@@ -7384,6 +7455,7 @@ components:
           items:
             $ref: "#/components/schemas/CitationClaimAuditV1"
         extractorRevision: {type: string}
+        selectorRevision: {type: string}
         verifierRevision: {type: string}
         metrics:
           type: object
@@ -7400,6 +7472,11 @@ components:
             claimSemanticMismatchCount: {type: integer, minimum: 0}
             claimAmbiguousCount: {type: integer, minimum: 0}
             claimAuditTruncated: {type: boolean}
+            criticalClaimSelectedCount: {type: integer, minimum: 0}
+            criticalClaimSupportedCount: {type: integer, minimum: 0}
+            criticalClaimUnresolvedCount: {type: integer, minimum: 0}
+            criticalConfirmedConflictCount: {type: integer, minimum: 0}
+            optionalClaimObservedCount: {type: integer, minimum: 0}
             unsourcedClaimCount: {type: integer, minimum: 0}
             unverifiedClaimCount: {type: integer, minimum: 0}
             tierCounts:

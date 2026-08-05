@@ -15,7 +15,7 @@ import json
 import re
 import unicodedata
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from typing import Any, Literal
@@ -25,7 +25,14 @@ from src.core.calculation import evaluate_decimal_expression
 
 CLAIM_EXTRACTOR_REVISION = "claim-extractor-v2"
 CLAIM_VERIFIER_REVISION = "claim-verifier-local-v2"
+CLAIM_SELECTOR_REVISION = "claim-audit-selector-v1"
 MAX_CLAIMS_PER_ANSWER = 1_000
+# Large structured result tables are presentation artifacts, not a useful
+# source of hundreds or thousands of independent natural-language Claims.
+# Their provenance is carried by Evidence/Collection bindings; derived values
+# and narrative conclusions remain independently auditable outside this gate.
+LARGE_TABLE_MIN_DATA_ROWS = 50
+LARGE_TABLE_MIN_DATA_CELLS = 200
 
 # Policy snapshots are immutable for the lifetime of one turn. Keep a small
 # identity cache for their normalized unit ontology so hot verification paths
@@ -167,6 +174,47 @@ _PRESENTATION_RE = re.compile(
 )
 _ASSISTANT_PROCESS_RE = re.compile(
     r"^(?:"
+    r"(?:已|已经)(?:确认|核实|定位|选定|取得|获取|收集|提取).{0,120}"
+    r"(?:文档|文件|纪要|报告|来源|原文|证据|记录)|"
+    r"(?:第[一二三四五六七八九十\d]+|首|上一|下一)?(?:批|轮|次)?"
+    r".{0,16}(?:搜索|检索|查询)(?:结果)?.{0,120}(?:返回|覆盖|命中).{0,160}|"
+    r"(?:继续|随后|接下来|现在|进行|开始|准备)(?:按.{0,24})?.{0,24}"
+    r"(?:检查|查找|搜索|检索|查询|读取|解析|获取|提取|定位|整理|汇总|生成)|"
+    r"(?:现在)?(?:让我|我(?:还|仍|已经|现在)?(?:需要|将|会|要|可以)).{0,160}"
+    r"(?:检查|查找|搜索|检索|查询|读取|解析|获取|提取|定位|整理|汇总|生成|"
+    r"原文|文档|文件|纪要|段落|问答环节|部分)|"
+    r"(?:现在)?可以.{0,64}(?:整理|汇总|生成|构建|输出).{0,80}"
+    r"(?:表格|对比表|结果|报告|回答)|"
+    r"(?:索引|搜索|检索)(?:结果)?.{0,80}(?:返回|命中).{0,100}"
+    r"(?:文档|文件|纪要|报告|段落|章节)|"
+    r"(?:我)?(?:已|已经)(?:取得|获取|收集|提取).{0,120}"
+    r"(?:数据|片段|原文|证据|文档|文件|纪要|报告).{0,120}"
+    r"(?:现在|接下来|随后|继续).{0,80}|"
+    r"[^。！？!?]{0,160}(?:完整|最终)(?:的)?.{0,24}(?:对比表|表格|汇总|结果)|"
+    r"[^。！？!?]{0,180}[，,；;](?:继续|随后|接下来|进行|开始)(?:按.{0,24})?.{0,24}"
+    r"(?:检查|查找|搜索|检索|查询|读取|解析|获取|提取|定位|整理|汇总|生成)|"
+    r"(?:使用|用|通过).{0,64}(?:脚本|工具|接口|命令|文件).{0,120}"
+    r"(?:检查|查找|搜索|检索|查询|读取|解析|获取|提取|定位|整理|汇总|生成)|"
+    r"[^。！？!?]{0,160}(?:位于|处于).{0,80}"
+    r"(?:文档|文件|纪要|报告|章节|段落|问答环节|后段|前段)|"
+    r"(?:审计|核查|核对)(?:结果)?(?:已)?确认.{0,200}|"
+    r"[^。！？!?]{0,180}(?:与|和)(?:原文|来源|证据)(?:一致|吻合|对应).{0,40}|"
+    r"(?:discovery|[A-Za-z][A-Za-z0-9.-]*_(?:search|fetch))\s*"
+    r"(?:对.{0,80})?(?:返回|发现|列出|包含|只返回|仅返回).{0,180}|"
+    r"(?:还|仍|尚)?需要(?:继续)?(?:确认|定位|查找|搜索|检索|查询|读取|获取|提取)"
+    r".{0,120}(?:文档|文件|纪要|报告|来源|原文|证据|记录)|"
+    r"(?:第[一二三四五六七八九十\d]+|首|上一|下一)?(?:批|轮|次)?"
+    r"(?:搜索|检索|查询)(?:结果)?.{0,120}(?:返回|覆盖|命中).{0,160}|"
+    r"(?:改用|转用|切换到)\s*[A-Za-z][A-Za-z0-9_.-]{1,80}"
+    r".{0,160}(?:定位|查找|搜索|检索|查询|读取|获取|提取).{0,120}|"
+    r"(?:搜索|检索)(?:结果)?.{0,80}(?:较大|过大|已存盘|需要?分段).{0,80}|"
+    r"(?:发现|可见)(?:搜索|检索)?(?:结果|列表).{0,160}|"
+    r"(?:沙箱|路径|文件路径).{0,80}(?:无法访问|不可访问|不存在).{0,120}|"
+    r"(?:日期|时间|季度|财年|参数|条件|筛选|过滤).{0,80}"
+    r"(?:未生效|无效|失效|不支持).{0,120}|"
+    r"(?:文档|文件|纪要|报告|来源|原文|证据|标识|代码|结果|列表)"
+    r".{0,160}(?:均|全部|分别)?(?:已|已经)(?:定位|核实|取得|获取|收集|提取)"
+    r"(?:到|为|完毕|齐全)?.{0,120}|"
     r"(?:搜索|检索|查询)(?:结果)?(?:只|仅)?.{0,120}(?:覆盖|返回|命中).{0,120}|"
     r"(?:已|已经)(?:获得|取得|获取|收集)(?:到)?(?:全部)?.{0,40}"
     r"(?:摘要|文档|文件|报告|记录|资料|来源|证据)(?:。|！|!|$)|"
@@ -178,9 +226,12 @@ _ASSISTANT_PROCESS_RE = re.compile(
     r"(?:查找|搜索|检索|查询|获取|读取|提取|定位|整理|汇总|撰写|生成|构建|标记)|"
     r"(?:我|我们)(?:现在|接下来|随后|将|会|需要|正在|可以).{0,100}"
     r"(?:查找|搜索|检索|查询|获取|读取|提取|定位|整理|汇总|撰写|生成|构建|标记)|"
-    r"[^。！？!?]{0,80}(?:已取到|已获取到|已检索到|已找到)|"
+    r"[^。！？!?]{0,160}(?:已取到|已取得|已获取到|已检索到|已找到|已定位|已核实|"
+    r"已提取(?:完毕)?)|"
     r"(?:已|已经)(?:找到|检索到|获取到|收集到).{0,100}"
     r"(?:资料|来源|数据|信息|证据|原文|文档|报告|年报|财报|结果)|"
+    r"(?:我|我们)?(?:已|已经)(?:取得|获取|收集|提取)(?:了|到)?.{0,120}"
+    r"(?:数据|资料|信息)(?:。|！|!|$)|"
     r"(?:(?:now|next|then)\s+)?(?:let me|i(?:'ll| will| need to| can now)?).{0,120}\b"
     r"(?:search(?:es|ing)?|fetch(?:es|ing)?|query|read|retrieve|extract|locate|compile|"
     r"assemble|build|write|mark)\b|"
@@ -251,8 +302,8 @@ _TABLE_RANK_HEADER_RE = re.compile(
     re.IGNORECASE,
 )
 _TABLE_IDENTITY_HEADER_RE = re.compile(
-    r"^(?:公司|企业|标的|名称|模型|产品|项目|主体|证券|股票|"
-    r"company|entity|name|model|product|item|security|ticker)$",
+    r"^(?:公司|企业|标的|名称|代码|证券代码|股票代码|模型|产品|项目|主体|证券|股票|"
+    r"company|entity|name|code|symbol|model|product|item|security|ticker)$",
     re.IGNORECASE,
 )
 _TABLE_ORDINAL_VALUE_RE = re.compile(r"^(?:#\s*)?\d{1,4}(?:[.)、])?$")
@@ -344,6 +395,10 @@ class ClaimCandidate:
         repr=False,
         compare=False,
     )
+    audit_priority: Literal["critical", "supporting", "optional"] = "optional"
+    audit_selected: bool = False
+    selection_reasons: tuple[str, ...] = ()
+    claim_group_id: str = ""
 
     def to_bundle_dict(
         self,
@@ -362,13 +417,281 @@ class ClaimCandidate:
                 self.citation_required if citation_required is None else citation_required
             ),
             "citationIds": list(citation_ids or self.attached_citation_ids),
+            "auditPriority": self.audit_priority,
+            "auditSelected": self.audit_selected,
+            "selectionReasons": list(self.selection_reasons),
             "status": status,
             "issueCodes": list(dict.fromkeys(issue_codes)),
             "location": dict(self.location),
         }
         if bindings:
             result["bindings"] = bindings
+        if self.claim_group_id:
+            result["claimGroupId"] = self.claim_group_id
         return result
+
+
+_AUDIT_CORE_CONCLUSION_RE = re.compile(
+    r"(?:结论|总结|核心|关键|风险|建议|因此|所以|总体|意味着|"
+    r"\b(?:conclusion|summary|key|critical|risk|recommend|therefore|overall|implies?)\b)",
+    re.IGNORECASE,
+)
+_AUDIT_COMPARISON_RE = re.compile(
+    r"(?:比.{0,48}(?:高|低|多|少)|高于|低于|超过|少于|领先|落后|"
+    r"\b(?:higher|lower|more|less|above|below|exceed(?:s|ed)?|compare[ds]?)\b)"
+    r"[^。！？!?;；\n]{0,48}\d",
+    re.IGNORECASE,
+)
+_AUDIT_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{1,}|\d+(?:\.\d+)?")
+_AUDIT_STOPWORDS = {
+    "about",
+    "and",
+    "are",
+    "for",
+    "from",
+    "how",
+    "the",
+    "this",
+    "was",
+    "what",
+    "when",
+    "which",
+    "with",
+}
+_AUDIT_CJK_STOP_TOKENS = {
+    "公司",
+    "情况",
+    "数据",
+    "信息",
+    "报告",
+    "文档",
+    "结果",
+    "分析",
+    "概括",
+    "总结",
+    "比较",
+    "多少",
+    "哪些",
+    "年末",
+    "年度",
+}
+
+
+def select_claims_for_audit(
+    claims: Iterable[ClaimCandidate],
+    *,
+    user_prompt: str,
+    policy: Mapping[str, Any] | None,
+    required_claim_ids: set[str] | None = None,
+) -> list[ClaimCandidate]:
+    """Select a bounded, risk-ranked subset without changing assistant text.
+
+    Claim extraction deliberately remains high recall.  This selector is the
+    separate quality gate: only selected critical Claims enter deep support
+    verification, while the rest remain observable candidates.  The selector
+    is deterministic and policy-driven; a later bounded model classifier may
+    add ranking signals, but cannot bypass the same budgets.
+    """
+
+    candidates = list(claims)
+    config = policy if isinstance(policy, Mapping) else {}
+    selection_enabled = config.get("selection_enabled") is True
+    grouped = [replace(claim, claim_group_id=_audit_claim_group_id(claim)) for claim in candidates]
+    if not selection_enabled:
+        return [
+            replace(
+                claim,
+                audit_priority=(
+                    "critical"
+                    if claim.citation_required or claim.attached_citation_ids
+                    else "optional"
+                ),
+                audit_selected=bool(claim.citation_required or claim.attached_citation_ids),
+                selection_reasons=("legacy-required",)
+                if claim.citation_required or claim.attached_citation_ids
+                else (),
+            )
+            for claim in grouped
+        ]
+
+    max_selected = _bounded_policy_int(config.get("max_selected_claims"), 12, 1, 128)
+    max_per_group = _bounded_policy_int(
+        config.get("max_selected_claims_per_group"),
+        4,
+        1,
+        32,
+    )
+    critical_kinds = {
+        str(value) for value in config.get("critical_kinds", []) if isinstance(value, str) and value
+    }
+    materiality_terms = tuple(
+        str(value).casefold()
+        for value in config.get("materiality_terms", [])
+        if isinstance(value, str) and value.strip()
+    )
+    prompt_tokens = _audit_selection_tokens(user_prompt)
+    prompt_folded = user_prompt.casefold()
+    ranked: list[tuple[int, int, ClaimCandidate, tuple[str, ...]]] = []
+
+    for claim in grouped:
+        core_conclusion = _AUDIT_CORE_CONCLUSION_RE.search(claim.exact) is not None
+        comparison = _AUDIT_COMPARISON_RE.search(claim.exact) is not None
+        policy_material = bool(
+            materiality_terms
+            and any(term in claim.semantic_text.casefold() for term in materiality_terms)
+            and claim.kind not in {"definition", "presentation", "limitation", "user-provided"}
+        )
+        eligible = bool(
+            (
+                claim.claim_id in required_claim_ids
+                if required_claim_ids is not None
+                else claim.citation_required
+            )
+            or claim.attached_citation_ids
+            or claim.kind == "calculation"
+            or comparison
+            or core_conclusion
+            or policy_material
+        )
+        if not eligible:
+            continue
+        score = 0
+        reasons: list[str] = []
+        if config.get("prioritize_explicit_user_request") is True and _claim_matches_request(
+            claim,
+            prompt_folded=prompt_folded,
+            prompt_tokens=prompt_tokens,
+        ):
+            score += 100
+            reasons.append("explicit-user-request")
+        if claim.kind == "calculation":
+            score += 85
+            reasons.append("calculation")
+        elif comparison:
+            score += 85
+            reasons.append("numeric-comparison")
+        if core_conclusion:
+            score += 75
+            reasons.append("core-conclusion")
+        if policy_material:
+            score += 65
+            reasons.append("policy-materiality")
+        if claim.kind in critical_kinds:
+            score += 50
+            reasons.append("high-risk-kind")
+        if config.get("prioritize_existing_bindings") is True and claim.attached_citation_ids:
+            score += 35
+            reasons.append("existing-binding")
+        # Earlier claims are a stable tie-break only.  They do not become
+        # critical merely because of their position.
+        ranked.append((score, -claim.segment_index, claim, tuple(dict.fromkeys(reasons))))
+
+    selected_ids: set[str] = set()
+    selected_reasons: dict[str, tuple[str, ...]] = {}
+    selected_per_group: dict[str, int] = {}
+    for _score, _position, claim, reasons in sorted(
+        ranked,
+        key=lambda row: (-row[0], -row[1], row[2].claim_id),
+    ):
+        if len(selected_ids) >= max_selected:
+            break
+        group_count = selected_per_group.get(claim.claim_group_id, 0)
+        if group_count >= max_per_group:
+            continue
+        selected_ids.add(claim.claim_id)
+        selected_reasons[claim.claim_id] = reasons or ("bounded-risk-sample",)
+        selected_per_group[claim.claim_group_id] = group_count + 1
+
+    return [
+        replace(
+            claim,
+            audit_priority=(
+                "critical"
+                if claim.claim_id in selected_ids
+                else "supporting"
+                if (
+                    (
+                        claim.claim_id in required_claim_ids
+                        if required_claim_ids is not None
+                        else claim.citation_required
+                    )
+                    or claim.attached_citation_ids
+                )
+                else "optional"
+            ),
+            audit_selected=claim.claim_id in selected_ids,
+            selection_reasons=selected_reasons.get(claim.claim_id, ()),
+        )
+        for claim in grouped
+    ]
+
+
+def _audit_claim_group_id(claim: ClaimCandidate) -> str:
+    location = claim.location
+    kind = str(location.get("kind") or "legacy")
+    block = location.get("blockIndex")
+    lineage = tuple(
+        sorted(set(claim.attached_evidence_handles) or set(claim.attached_citation_ids))
+    )
+    if kind == "table-cell" and lineage:
+        identity: Any = ("table-lineage", block, lineage)
+    elif kind == "table-cell":
+        identity = (
+            "table-cell",
+            block,
+            location.get("rowIndex"),
+            location.get("columnIndex"),
+        )
+    else:
+        identity = (kind, block)
+    digest = hashlib.sha256(
+        json.dumps(identity, ensure_ascii=False, sort_keys=True).encode()
+    ).hexdigest()[:20]
+    return f"clg_{digest}"
+
+
+def _audit_selection_tokens(value: str) -> set[str]:
+    folded = value.casefold()
+    tokens = {
+        match.group(0)
+        for match in _AUDIT_TOKEN_RE.finditer(folded)
+        if match.group(0) not in _AUDIT_STOPWORDS
+    }
+    for sequence in re.findall(r"[\u3400-\u9fff]{2,}", folded):
+        for width in (2, 3, 4):
+            tokens.update(
+                sequence[index : index + width]
+                for index in range(max(0, len(sequence) - width + 1))
+                if sequence[index : index + width] not in _AUDIT_CJK_STOP_TOKENS
+            )
+    return tokens
+
+
+def _claim_matches_request(
+    claim: ClaimCandidate,
+    *,
+    prompt_folded: str,
+    prompt_tokens: set[str],
+) -> bool:
+    if not prompt_tokens or not prompt_folded:
+        return False
+    normalized_values = {
+        str(value).casefold()
+        for key, value in claim.normalized.items()
+        if key in {"entityId", "entityName", "metric", "period", "asOf"}
+        and isinstance(value, str)
+        and len(value.strip()) >= 2
+    }
+    if any(value in prompt_folded for value in normalized_values):
+        return True
+    overlap = _audit_selection_tokens(claim.semantic_text).intersection(prompt_tokens)
+    return any(not token.replace(".", "", 1).isdigit() for token in overlap)
+
+
+def _bounded_policy_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return default
+    return max(minimum, min(maximum, value))
 
 
 @dataclass(frozen=True)
@@ -461,6 +784,7 @@ def extract_claims_with_status(
         return [], False
     parser = MarkdownIt("commonmark").enable("table")
     tokens = parser.parse(answer)
+    large_table_ordinals = _large_table_ordinals(tokens)
     line_offsets = _line_offsets(answer)
     global_fiscal_year_context = _unique_fiscal_year_context(answer)
     claims = _ClaimAccumulator()
@@ -472,6 +796,8 @@ def extract_claims_with_status(
     table_row_cells: list[_TableCell] = []
     table_in_header = False
     table_data_row = -1
+    table_ordinal = -1
+    table_claims_disabled = False
     inline_search_cursor: dict[tuple[int, int], int] = {}
     heading_context: dict[int, str] = {}
     narrative_context = ""
@@ -509,6 +835,8 @@ def extract_claims_with_status(
             current_list_item = None
             continue
         if token.type == "table_open":
+            table_ordinal += 1
+            table_claims_disabled = table_ordinal in large_table_ordinals
             table_block_index = next_block()
             table_headers = []
             table_data_row = -1
@@ -516,6 +844,7 @@ def extract_claims_with_status(
         if token.type == "table_close":
             table_block_index = None
             table_row_cells = []
+            table_claims_disabled = False
             continue
         if token.type == "thead_open":
             table_in_header = True
@@ -531,7 +860,7 @@ def extract_claims_with_status(
         if token.type == "tr_close" and table_block_index is not None:
             if table_in_header:
                 table_headers = [_plain_text(cell.content) for cell in table_row_cells]
-            else:
+            elif not table_claims_disabled:
                 _append_table_claims(
                     claims,
                     table_row_cells,
@@ -640,6 +969,62 @@ def extract_claims_with_status(
         ):
             narrative_context = plain_block.strip()
     return list(claims), claims.truncated
+
+
+def _large_table_ordinals(tokens: Iterable[Any]) -> set[int]:
+    """Return Markdown table ordinals whose data cells bypass Claim extraction.
+
+    This is deliberately a structural and deterministic gate.  It does not
+    attempt to infer whether the table is a stock screen, comparison matrix,
+    or another business-specific shape.  Large tables keep their explicit
+    Evidence links for Citation projection while avoiding per-cell Claim and
+    semantic-verifier expansion.
+    """
+
+    large: set[int] = set()
+    table_ordinal = -1
+    in_table = False
+    in_header = False
+    data_rows = 0
+    data_cells = 0
+    row_has_data = False
+
+    for token in tokens:
+        token_type = str(getattr(token, "type", ""))
+        if token_type == "table_open":
+            table_ordinal += 1
+            in_table = True
+            in_header = False
+            data_rows = 0
+            data_cells = 0
+            row_has_data = False
+            continue
+        if not in_table:
+            continue
+        if token_type == "thead_open":
+            in_header = True
+            continue
+        if token_type == "thead_close":
+            in_header = False
+            continue
+        if token_type == "tr_open":
+            row_has_data = not in_header
+            continue
+        if token_type == "td_open" and not in_header:
+            data_cells += 1
+            continue
+        if token_type == "tr_close" and row_has_data:
+            data_rows += 1
+            row_has_data = False
+            continue
+        if token_type != "table_close":
+            continue
+        if data_rows >= LARGE_TABLE_MIN_DATA_ROWS or data_cells >= LARGE_TABLE_MIN_DATA_CELLS:
+            large.add(table_ordinal)
+        in_table = False
+        in_header = False
+
+    return large
 
 
 def match_available_evidence(
@@ -2632,7 +3017,7 @@ def _append_table_claims(
     row_label = _plain_text(cells[0].content)
     if not row_label:
         return
-    identity_column_index: int | None = None
+    identity_column_indices: set[int] = set()
     identity_row_label = ""
     first_header = headers[0].strip() if headers else ""
     if _TABLE_RANK_HEADER_RE.fullmatch(first_header) and _TABLE_ORDINAL_VALUE_RE.fullmatch(
@@ -2644,6 +3029,7 @@ def _append_table_claims(
         # safely to a document that says ``MiMo-V2.5 ... +12.2%``.  Select only
         # an explicitly labelled identity column so arbitrary neighboring
         # values never become an inferred entity.
+        identity_candidates: list[tuple[int, str, str]] = []
         for candidate_index, candidate_cell in enumerate(cells[1:], start=1):
             candidate_header = (
                 headers[candidate_index].strip() if candidate_index < len(headers) else ""
@@ -2654,9 +3040,28 @@ def _append_table_claims(
                 and _TABLE_IDENTITY_HEADER_RE.fullmatch(candidate_header)
                 and not _TABLE_EMPTY_PLACEHOLDER_RE.fullmatch(candidate_label)
             ):
-                identity_column_index = candidate_index
-                identity_row_label = candidate_label
-                break
+                identity_column_indices.add(candidate_index)
+                identity_candidates.append((candidate_index, candidate_header, candidate_label))
+        if identity_candidates:
+            # Prefer a human-readable entity label over a ticker/code when a
+            # ranked result exposes both.  All identity columns remain row
+            # context: auditing ``序号``/``代码``/``名称`` as three independent
+            # facts inflates a 100-row result by hundreds of fake Claims.
+            _index, _header, identity_row_label = max(
+                identity_candidates,
+                key=lambda item: (
+                    int(
+                        re.fullmatch(
+                            r"(?:公司|企业|标的|名称|模型|产品|项目|主体|"
+                            r"company|entity|name|model|product|item)",
+                            item[1],
+                            re.IGNORECASE,
+                        )
+                        is not None
+                    ),
+                    -item[0],
+                ),
+            )
     row_scope_parts: list[str] = []
     for column_index, cell in enumerate(cells[1:], start=1):
         value = _plain_text(cell.content)
@@ -2700,6 +3105,7 @@ def _append_table_claims(
             not value
             or _TABLE_EMPTY_PLACEHOLDER_RE.fullmatch(value.strip())
             or _TABLE_SOURCE_HEADER_RE.fullmatch(header.strip())
+            or column_index in identity_column_indices
         ):
             continue
         # Strict-domain audit covers ordinary factual table cells too.  Product
@@ -2710,11 +3116,7 @@ def _append_table_claims(
             _NUMBER_RE.search(value) or _DECLARATIVE_RE.search(value)
         ):
             continue
-        claim_row_label = (
-            identity_row_label
-            if identity_row_label and column_index != identity_column_index
-            else row_label
-        )
+        claim_row_label = identity_row_label or row_label
         exact = f"{claim_row_label} — {header}: {value}"
         citation_ids, handles = _binding_refs(cell.content)
         location = {
@@ -2736,6 +3138,7 @@ def _append_table_claims(
             mode=mode,
             semantics=semantics,
             normalization_context=row_normalization_context,
+            assertion_text=value,
         )
 
 
@@ -2750,8 +3153,13 @@ def _append_claim(
     mode: str,
     semantics: Mapping[str, Any] | None,
     normalization_context: str = "",
+    assertion_text: str | None = None,
 ) -> None:
     semantic_text = f"{normalization_context} {exact}".strip()
+    asserted_text = assertion_text if assertion_text is not None else exact
+    # The row label and column header still determine whether a table cell is
+    # a factual value, a user-supplied rule, or a presentation field.  Only
+    # numeric value extraction is restricted to the cell body below.
     kind = _classify_claim(exact)
     if _HYPOTHETICAL_RE.search(normalization_context):
         kind = "reasoning"
@@ -2780,14 +3188,15 @@ def _append_claim(
     # context when the displayed value intentionally omits a repeated unit.
     normalized = _normalize_claim(semantic_text, semantics, kind=kind)
     exact_normalized = _normalize_claim(exact, semantics, kind=kind)
+    asserted_normalized = _normalize_claim(asserted_text, semantics, kind=kind)
     for key in ("value", "valueBase"):
         normalized.pop(key, None)
-        if key in exact_normalized:
-            normalized[key] = exact_normalized[key]
-    if "unit" in exact_normalized:
-        normalized["unit"] = exact_normalized["unit"]
-    if "unitBase" in exact_normalized:
-        normalized["unitBase"] = exact_normalized["unitBase"]
+        if key in asserted_normalized:
+            normalized[key] = asserted_normalized[key]
+    if "unit" in asserted_normalized:
+        normalized["unit"] = asserted_normalized["unit"]
+    if "unitBase" in asserted_normalized:
+        normalized["unitBase"] = asserted_normalized["unitBase"]
     if "period" in exact_normalized and (
         kind != "date-fact"
         or re.search(
@@ -2825,7 +3234,6 @@ def _append_claim(
                 normalized[key] = exact_normalized[key]
             if candidates_key in exact_normalized:
                 normalized[candidates_key] = exact_normalized[candidates_key]
-
     output.append(
         ClaimCandidate(
             claim_id=f"clm_{digest}",
@@ -2852,9 +3260,7 @@ def _classify_claim(text: str) -> str:
         return "reasoning"
     if _SOURCE_ATTRIBUTION_SUMMARY_RE.match(text.strip()):
         return "presentation"
-    if _ASSISTANT_PROCESS_RE.search(text.strip()) or _COMPLETION_REVIEW_RE.search(
-        text.strip()
-    ):
+    if _ASSISTANT_PROCESS_RE.search(text.strip()) or _COMPLETION_REVIEW_RE.search(text.strip()):
         return "presentation"
     # A unit/currency/period table cell qualifies another value in the same
     # row.  Classify it before the derived-value heuristic: labels such as
@@ -3825,6 +4231,8 @@ def _explicit_period_keys(value: str) -> set[str]:
         r"((?:19|20)\d{2})(?:年度|年报|年度报告|ANNUALREPORT|FULLYEAR|FY)",
         compact,
     ):
+        periods.add(f"{match.group(1)} FY")
+    for match in re.finditer(r"FY((?:19|20)\d{2})", compact):
         periods.add(f"{match.group(1)} FY")
     for match in re.finditer(
         r"((?:19|20)\d{2})年(?:1|01)月(?:1|01)日?[—~至到-]+"
@@ -5060,11 +5468,15 @@ def _dimension_support_status(
     evidence: Mapping[str, Any],
     semantics: Mapping[str, Any] | None,
 ) -> Literal["supported", "partial", "contradicted"]:
+    metric_dimensions = evidence_semantic_options(evidence, semantics).get("dimensions")
+    metric_dimensions = metric_dimensions if isinstance(metric_dimensions, Mapping) else {}
     for dimension in ("scope", "basis"):
         claim_value = claim.normalized.get(dimension)
         if not claim_value:
             continue
-        evidence_raw = str(evidence.get(dimension) or "")
+        evidence_raw = str(
+            evidence.get(dimension) or metric_dimensions.get(dimension) or ""
+        )
         if not evidence_raw:
             return "partial"
         claim_canonical = _canonical_dimension(str(claim_value), semantics, dimension)
@@ -5101,6 +5513,30 @@ def _period_key(
 ) -> str:
     del semantics  # Reserved for edition-specific aliases carried in snapshots.
     compact = re.sub(r"\s+", "", value).upper()
+    # An explicit fiscal shorthand scopes the reported facts even when the
+    # same label also carries a call/publication date. For example
+    # ``FY26 Q1 (2025-10-29)`` is fiscal 2026 Q1, not calendar 2025 Q1.
+    # Parse these unambiguous two-digit fiscal shapes before the first generic
+    # four-digit year in the text.
+    fiscal_prefix = re.search(r"FY(\d{2})Q([1-4])", compact)
+    if fiscal_prefix:
+        year_suffix, quarter_number = fiscal_prefix.groups()
+        return f"20{year_suffix} Q{quarter_number}"
+    quarter_fiscal = re.search(r"Q([1-4])FY(\d{2})(?!\d)", compact)
+    if quarter_fiscal:
+        quarter_number, year_suffix = quarter_fiscal.groups()
+        return f"20{year_suffix} Q{quarter_number}"
+    compact_quarter = re.search(r"([1-4])Q(\d{2})(?!\d)", compact)
+    if compact_quarter:
+        quarter_number, year_suffix = compact_quarter.groups()
+        return f"20{year_suffix} Q{quarter_number}"
+    suffix_quarter = re.search(r"Q([1-4])(\d{2})(?!\d)", compact)
+    if suffix_quarter:
+        quarter_number, year_suffix = suffix_quarter.groups()
+        return f"20{year_suffix} Q{quarter_number}"
+    short_fiscal_year = re.search(r"FY(\d{2})(?!\d)", compact)
+    if short_fiscal_year:
+        return f"20{short_fiscal_year.group(1)} FY"
     year_match = re.search(r"(?:19|20)\d{2}", compact)
     if not year_match:
         # Parse each shorthand shape explicitly. The previous combined branch
@@ -5111,7 +5547,7 @@ def _period_key(
         if fiscal_prefix:
             year_suffix, quarter_number = fiscal_prefix.groups()
             return f"20{year_suffix} Q{quarter_number}"
-        quarter_fiscal = re.search(r"Q([1-4])FY(\d{2})", compact)
+        quarter_fiscal = re.search(r"Q([1-4])FY(\d{2})(?!\d)", compact)
         if quarter_fiscal:
             quarter_number, year_suffix = quarter_fiscal.groups()
             return f"20{year_suffix} Q{quarter_number}"

@@ -57,6 +57,7 @@ import {
   citationOffsetFromHref,
   CitationPill,
   CitationSourceCards,
+  projectCitationSidecarAnchors,
   projectEvidenceMarkdownLinks,
   rewriteCitationMarkdownLinks,
   type CitationQualityDisplayIssue,
@@ -924,13 +925,16 @@ export const MarkdownContent = memo(function MarkdownContent({
   const displayContent = stripStandaloneCitationLines(
     stripDecorativeHeadingCitations(
       stripProtocolSourcePlaceholders(
-        projectEvidenceMarkdownLinks(content, citationBundle),
+        projectEvidenceMarkdownLinks(
+          projectCitationSidecarAnchors(content, citationBundle),
+          citationBundle,
+        ),
       ),
     ),
   );
   const localCitationOrder = useMemo(
-    () => citationDisplayOrder(displayContent),
-    [displayContent],
+    () => citationDisplayOrder(displayContent, citationBundle),
+    [citationBundle, displayContent],
   );
   const citationOrder = citationDisplayOrderOverride ?? localCitationOrder;
   const citationOccurrenceOffsets = useMemo(

@@ -172,6 +172,30 @@ async def test_calculation_tool_preserves_structured_collection_addresses() -> N
     assert registry.register_tool_result(result.content, tool_name="citation_calculate") == 1
 
 
+async def test_calculation_tool_accepts_and_canonicalizes_evidence_uri_addresses() -> None:
+    address = "evc_income_current_12345678#/data/0/revenue"
+    result = await _citation_calculate_handler(
+        {
+            "expression": "revenue / 100000000",
+            "inputs": [
+                {
+                    "name": "revenue",
+                    "value": "170899152276",
+                    "unit": "CNY",
+                    "evidenceHandle": f"evidence://{address}",
+                }
+            ],
+            "unit": "CNY 100m",
+            "decimalPlaces": 2,
+        },
+        ExecContext(session_id="s1"),
+    )
+
+    assert result.is_error is False
+    payload = json.loads(result.content)
+    assert payload["_valuz_evidence"]["evidence"]["inputs"][0]["citationId"] == address
+
+
 async def test_calculation_tool_accepts_explicit_user_input_provenance() -> None:
     result = await _citation_calculate_handler(
         {

@@ -12,6 +12,10 @@ def test_builder_keeps_generic_prompt_without_policy() -> None:
     lowered = TASK_COVERAGE_CONTINUATION_PROMPT.lower()
     assert "do not generate any assistant text" in lowered
     assert "do not summarize or evaluate" in lowered
+    assert "uncited restatement or reformatting" in lowered
+    assert "reuse the matching evidence links" in lowered
+    assert "necessary clarification request" in lowered
+    assert "do not infer the missing entity" in lowered
     assert "nothing was omitted" in lowered
     assert 'do not print the word "empty"' in lowered
     assert TASK_COVERAGE_NOOP_TOOL_NAME in TASK_COVERAGE_CONTINUATION_PROMPT

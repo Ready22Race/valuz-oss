@@ -19,6 +19,12 @@ def test_public_openapi_contains_complete_citation_and_research_contract() -> No
     assert schemas["CitationBundleV1"]["properties"]["quality"]["$ref"].endswith(
         "CitationQualityResultV1"
     )
+    assert schemas["CitationBundleV1"]["properties"]["projection"]["$ref"].endswith(
+        "CitationProjectionV1"
+    )
+    assert {"anchors", "provenanceRegions"} <= set(schemas["CitationProjectionV1"]["properties"])
+    assert "sourceOffset" in schemas["CitationAnchorV1"]["required"]
+    assert "sourceOffset" in schemas["ProvenanceRegionV1"]["required"]
     assert schemas["CitationQualityResultV1"]["properties"]["claims"]["items"]["$ref"].endswith(
         "CitationClaimAuditV1"
     )
@@ -54,8 +60,9 @@ def test_public_openapi_contains_complete_citation_and_research_contract() -> No
         "evidenceRejectedCount",
         "evidenceOverflowReasons",
     } <= set(schemas["CitationIntegrityV1"]["properties"])
-    assert "claimAuditTruncated" in (
-        schemas["CitationQualityResultV1"]["properties"]["metrics"]["properties"]
+    assert (
+        "claimAuditTruncated"
+        in (schemas["CitationQualityResultV1"]["properties"]["metrics"]["properties"])
     )
     assert "chunkId" in schemas["PdfLocatorV1"]["properties"]
     render_variants = schemas["ResolvedCitationDocumentSource"]["properties"]["render"]["oneOf"]

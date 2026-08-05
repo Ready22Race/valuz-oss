@@ -543,7 +543,10 @@ class _MessageObserverSink:
         private_projection = (
             citation_content
             if isinstance(citation_content, str)
-            else private_citation_tool_content(visible_content)
+            else private_citation_tool_content(
+                visible_content,
+                model_content=compacted_content,
+            )
             if compacted_content is not None
             else None
         )
@@ -808,8 +811,13 @@ class _MessageObserverSink:
                 audit = copy.deepcopy(quality)
                 audit["assistantSegmentIndex"] = segment_index
                 self.claim_audits.append(audit)
-                sidecar_data["claim_audit"] = audit
-                has_payload = True
+                # When citations are enabled the same audit already lives in
+                # ``citation_bundle.quality``.  Persist the canonical audit for
+                # history, but do not send a second byte-for-byte copy on the
+                # live sidecar.  Audit-only mode still exposes ``claim_audit``.
+                if not self._citation_enabled:
+                    sidecar_data["claim_audit"] = audit
+                    has_payload = True
 
             if has_payload:
                 await self._inner.emit(

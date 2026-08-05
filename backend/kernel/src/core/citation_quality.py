@@ -22,6 +22,7 @@ from typing import Any
 from src.core.calculation import evaluate_decimal_expression
 from src.core.claim_audit import (
     CLAIM_EXTRACTOR_REVISION,
+    CLAIM_SELECTOR_REVISION,
     CLAIM_VERIFIER_REVISION,
     ClaimCandidate,
     calculation_formula_matches_evidence,
@@ -33,6 +34,7 @@ from src.core.claim_audit import (
     extract_claims_with_status,
     match_available_evidence,
     numeric_comparison_truth,
+    select_claims_for_audit,
     structured_components_cover_claim,
     structured_units_compatible,
     structured_value_present,
@@ -217,6 +219,8 @@ def evaluate_citation_quality(
     time_rule = time_rule if isinstance(time_rule, dict) else {}
     semantics = config.get("semantics")
     semantics = semantics if isinstance(semantics, dict) else None
+    claim_audit_rule = rules.get("claim_audit")
+    claim_audit_rule = claim_audit_rule if isinstance(claim_audit_rule, dict) else {}
 
     structured_groups: dict[
         tuple[str, str, str, str, str, str],
@@ -430,6 +434,13 @@ def evaluate_citation_quality(
         semantics=semantics,
         entity_aliases=entity_aliases,
         semantic_verifier=semantic_verifier,
+        claim_audit_rule=claim_audit_rule,
+        projection_claim_ids=_verified_projection_cell_claim_ids(
+            answer,
+            citation_by_id,
+            mode=mode,
+            semantics=semantics,
+        ),
     )
     unsourced_marker_count = len(_UNSOURCED_RE.findall(answer))
     unsourced_count = unsourced_marker_count + claim_metrics["unsupported"]
@@ -486,6 +497,10 @@ def evaluate_citation_quality(
         "policyLayers": policy_layers,
         "mode": mode,
         "status": status,
+        "auditOutcome": _critical_audit_outcome(
+            claim_metrics,
+            minimum_supported_ratio=claim_audit_rule.get("minimum_supported_ratio"),
+        ),
         "publishStatus": publish_status,
         "layers": {
             layer: "degraded" if layer_issues.get(layer) else "passed"
@@ -494,10 +509,12 @@ def evaluate_citation_quality(
         "issues": issues,
         "claims": claim_audits,
         "extractorRevision": CLAIM_EXTRACTOR_REVISION,
+        "selectorRevision": CLAIM_SELECTOR_REVISION,
         "verifierRevision": CLAIM_VERIFIER_REVISION,
         "metrics": {
             "citationCount": len(citation_by_id),
             "claimDetectedCount": claim_metrics["detected"],
+            "claimProjectionCellCount": claim_metrics["projected"],
             "claimCitationRequiredCount": claim_metrics["required"],
             "claimBoundCount": claim_metrics["bound"],
             "claimAutoBoundCount": claim_metrics["auto_bound"],
@@ -505,6 +522,11 @@ def evaluate_citation_quality(
             "claimSemanticMismatchCount": claim_metrics["mismatch"],
             "claimAmbiguousCount": claim_metrics["ambiguous"],
             "claimAuditTruncated": bool(claim_metrics["truncated"]),
+            "criticalClaimSelectedCount": claim_metrics["critical_selected"],
+            "criticalClaimSupportedCount": claim_metrics["critical_supported"],
+            "criticalClaimUnresolvedCount": claim_metrics["critical_unresolved"],
+            "criticalConfirmedConflictCount": claim_metrics["critical_conflicts"],
+            "optionalClaimObservedCount": claim_metrics["optional_observed"],
             "unsourcedClaimCount": unsourced_count,
             "unverifiedClaimCount": unverified_count,
             "tierCounts": dict(sorted(tier_counts.items())),
@@ -526,15 +548,19 @@ def _audit_claims(
     semantics: dict[str, Any] | None,
     entity_aliases: Mapping[str, Iterable[str]] | None,
     semantic_verifier: SemanticVerifierPort | None,
+    claim_audit_rule: Mapping[str, Any],
+    projection_claim_ids: set[str],
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    claims, extraction_truncated = extract_claims_with_status(
+    extracted_claims, extraction_truncated = extract_claims_with_status(
         answer,
         mode=mode,
         semantics=semantics,
     )
+    claims = [claim for claim in extracted_claims if claim.claim_id not in projection_claim_ids]
     audits: list[dict[str, Any]] = []
     metrics = {
         "detected": len(claims),
+        "projected": len(extracted_claims) - len(claims),
         "required": 0,
         "bound": 0,
         "auto_bound": 0,
@@ -543,6 +569,11 @@ def _audit_claims(
         "mismatch": 0,
         "ambiguous": 0,
         "truncated": int(extraction_truncated),
+        "critical_selected": 0,
+        "critical_supported": 0,
+        "critical_unresolved": 0,
+        "critical_conflicts": 0,
+        "optional_observed": 0,
     }
     if extraction_truncated:
         issue("claim_audit_truncated", "L0")
@@ -551,7 +582,7 @@ def _audit_claims(
         citation_by_id,
         provided=entity_aliases,
     )
-    claim_rows: list[tuple[ClaimCandidate, bool, list[str], bool]] = []
+    preliminary_rows: list[tuple[ClaimCandidate, bool, list[str], bool]] = []
     for claim_index, claim in enumerate(claims):
         required = (
             claim.citation_required
@@ -578,7 +609,7 @@ def _audit_claims(
         )
         if not citation_ids and adjacent_calculation_ids:
             citation_ids = adjacent_calculation_ids
-        claim_rows.append(
+        preliminary_rows.append(
             (
                 claim,
                 required,
@@ -586,6 +617,26 @@ def _audit_claims(
                 bool(adjacent_calculation_ids),
             )
         )
+
+    selected_claims = select_claims_for_audit(
+        (row[0] for row in preliminary_rows),
+        user_prompt=user_prompt,
+        policy=claim_audit_rule,
+        required_claim_ids={
+            claim.claim_id
+            for claim, required, _citation_ids, _adjacent in preliminary_rows
+            if required
+        },
+    )
+    selected_by_id = {claim.claim_id: claim for claim in selected_claims}
+    claim_rows = [
+        (selected_by_id[claim.claim_id], required, citation_ids, adjacent)
+        for claim, required, citation_ids, adjacent in preliminary_rows
+    ]
+    metrics["critical_selected"] = sum(
+        1 for claim, _required, _citation_ids, _adjacent in claim_rows if claim.audit_selected
+    )
+    metrics["optional_observed"] = len(claim_rows) - metrics["critical_selected"]
 
     semantic_results = _batch_semantic_results_for_bound_claims(
         claim_rows,
@@ -611,6 +662,15 @@ def _audit_claims(
         )
         comparison_false = numeric_comparison_truth(claim, semantics=semantics) is False
         audit_explicit_binding = bool(citation_ids) and _bound_claim_is_auditable(claim)
+        if not claim.audit_selected:
+            audits.append(
+                claim.to_bundle_dict(
+                    citation_ids=citation_ids,
+                    citation_required=required,
+                    status="not-selected",
+                )
+            )
+            continue
         if not required and not audit_explicit_binding:
             audits.append(
                 claim.to_bundle_dict(
@@ -709,9 +769,7 @@ def _audit_claims(
                         citation_id,
                         semantic_support.get(citation_id, support_status),
                         4 if citation_id in semantic_support else directness,
-                        "bounded-semantic-verifier"
-                        if citation_id in semantic_support
-                        else reason,
+                        "bounded-semantic-verifier" if citation_id in semantic_support else reason,
                     )
                     for citation_id, support_status, directness, reason in support_rows
                 ]
@@ -843,7 +901,11 @@ def _audit_claims(
                     claim=claim.exact,
                     claim_id=claim.claim_id,
                     location=claim.location,
-                    severity="unverified",
+                    severity=(
+                        "degraded"
+                        if claim_audit_rule.get("selection_enabled") is True
+                        else "unverified"
+                    ),
                 )
             elif equivalent_bound:
                 # A deterministic pre-audit pass proved this shorter recap is
@@ -929,7 +991,101 @@ def _audit_claims(
                 issue_codes=issue_codes,
             )
         )
+    confirmed_conflict_codes = {
+        "numeric_comparison_false",
+        "claim_source_entity_conflict",
+        "claim_source_period_conflict",
+        "claim_evidence_conflict",
+    }
+    for audit in audits:
+        if audit.get("auditSelected") is not True:
+            continue
+        issue_codes = {value for value in audit.get("issueCodes", []) if isinstance(value, str)}
+        if issue_codes.intersection(confirmed_conflict_codes):
+            metrics["critical_conflicts"] += 1
+        if audit.get("status") in {"passed", "auto-bound", "repaired"}:
+            metrics["critical_supported"] += 1
+        else:
+            metrics["critical_unresolved"] += 1
     return audits, metrics
+
+
+def _critical_audit_outcome(
+    metrics: Mapping[str, int],
+    *,
+    minimum_supported_ratio: Any,
+) -> str:
+    if metrics.get("critical_conflicts", 0) > 0:
+        return "needs-review"
+    selected = metrics.get("critical_selected", 0)
+    if selected <= 0:
+        return "passed"
+    supported = metrics.get("critical_supported", 0)
+    ratio = supported / selected
+    threshold = 0.6
+    if isinstance(minimum_supported_ratio, (int, float)) and not isinstance(
+        minimum_supported_ratio,
+        bool,
+    ):
+        threshold = max(0.0, min(1.0, float(minimum_supported_ratio)))
+    if metrics.get("critical_unresolved", 0) > 0 or ratio < threshold:
+        return "partial"
+    return "passed"
+
+
+def _verified_projection_cell_claim_ids(
+    answer: str,
+    citation_by_id: Mapping[str, Mapping[str, Any]],
+    *,
+    mode: str,
+    semantics: Mapping[str, Any] | None,
+) -> set[str]:
+    """Identify table cells already proven by their structured lineage.
+
+    Projection cells do not need a second Claim-to-Evidence resolution pass.
+    The exemption is intentionally narrow: the cell must already carry one or
+    more canonical Citation bindings, every binding must resolve to structured
+    data, and every bound Evidence item must deterministically support the
+    displayed cell.  Calculations, text evidence, contradictions, partial
+    support and unbound cells continue through the normal Claim Audit.
+    """
+
+    projected: set[str] = set()
+    claims, _truncated = extract_claims_with_status(
+        answer,
+        mode=mode,
+        semantics=semantics,
+    )
+    for claim in claims:
+        if claim.location.get("kind") != "table-cell":
+            continue
+        citation_ids = tuple(dict.fromkeys(claim.attached_citation_ids))
+        if not citation_ids:
+            continue
+        citations = [citation_by_id.get(citation_id) for citation_id in citation_ids]
+        if any(not isinstance(citation, Mapping) for citation in citations):
+            continue
+        if any(
+            not isinstance(citation.get("evidence"), Mapping)
+            or citation["evidence"].get("kind") != "structured-data"
+            for citation in citations
+            if isinstance(citation, Mapping)
+        ):
+            continue
+        if numeric_comparison_truth(claim, semantics=semantics) is False:
+            continue
+        if all(
+            verify_evidence_support(
+                claim,
+                citation,
+                semantics=semantics,
+            ).status
+            == "supported"
+            for citation in citations
+            if isinstance(citation, Mapping)
+        ):
+            projected.add(claim.claim_id)
+    return projected
 
 
 def _semantic_support_for_bound_claim(
@@ -989,6 +1145,8 @@ def _batch_semantic_results_for_bound_claims(
         return {}
     requests: list[SemanticVerificationRequest] = []
     for claim, _required, citation_ids, _adjacent in claim_rows:
+        if not claim.audit_selected:
+            continue
         if not citation_ids or not _bound_claim_is_auditable(claim):
             continue
         records, bound_ids = _bound_citation_records(citation_ids, citation_by_id)
@@ -1087,15 +1245,26 @@ _NON_ENTITY_PAREN_IDENTIFIERS = {
     "ARR",
     "CAGR",
     "CAPEX",
+    "CEO",
+    "CFO",
+    "CIO",
+    "CMO",
+    "COO",
+    "CPO",
     "CPU",
+    "CSO",
+    "CTO",
     "EBIT",
     "EBITDA",
     "EPS",
+    "EVP",
     "GPU",
     "IP",
     "ROA",
     "ROE",
+    "SVP",
     "TAM",
+    "VP",
 }
 
 
@@ -1507,6 +1676,7 @@ def _merge_issues_into_claim_audits(
             targets = [
                 audit
                 for audit in audits
+                if audit.get("auditSelected") is True
                 if citation_ids.intersection(audit.get("citationIds") or [])
             ]
         for audit in targets:

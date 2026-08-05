@@ -45,6 +45,16 @@ _TASK_COVERAGE_SUPPLEMENT_RULES = {
     "do_not_repeat_completed_content",
     "preserve_visible_history",
 }
+_CLAIM_AUDIT_KEYS = {
+    "selection_enabled",
+    "max_selected_claims",
+    "max_selected_claims_per_group",
+    "minimum_supported_ratio",
+    "prioritize_explicit_user_request",
+    "prioritize_existing_bindings",
+    "critical_kinds",
+    "materiality_terms",
+}
 _OSS_POLICY_PATH = (
     Path(__file__).resolve().parents[1] / "resources" / "citation-policies" / "oss" / "policy.yaml"
 )
@@ -379,12 +389,68 @@ def _load_citation_policy_document_cached(
     for key in ("rules", "failure"):
         if key in payload and not isinstance(payload[key], dict):
             raise RuntimeError(f"citation policy {key} must be a mapping")
+    rules = payload.get("rules")
+    if isinstance(rules, dict):
+        _validate_claim_audit_policy(rules.get("claim_audit"))
     _validate_task_coverage_policy(payload.get("task_coverage"))
     # Validate JSON safety and the host/kernel metadata budget up front.
     encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     if len(encoded.encode("utf-8")) > _MAX_POLICY_BYTES:
         raise RuntimeError("citation policy payload exceeds 128 KiB")
     return payload
+
+
+def _validate_claim_audit_policy(value: Any) -> None:
+    """Validate the passive, bounded Claim Audit selector configuration."""
+
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        raise RuntimeError("citation policy rules.claim_audit must be a mapping")
+    unknown = set(value) - _CLAIM_AUDIT_KEYS
+    if unknown:
+        raise RuntimeError(
+            "citation policy rules.claim_audit has unknown keys: " + ", ".join(sorted(unknown))
+        )
+    for key in (
+        "selection_enabled",
+        "prioritize_explicit_user_request",
+        "prioritize_existing_bindings",
+    ):
+        if key in value and not isinstance(value[key], bool):
+            raise RuntimeError(f"citation policy rules.claim_audit.{key} must be boolean")
+    for key, maximum in (
+        ("max_selected_claims", 128),
+        ("max_selected_claims_per_group", 32),
+    ):
+        configured = value.get(key)
+        if configured is not None and (
+            isinstance(configured, bool)
+            or not isinstance(configured, int)
+            or not 1 <= configured <= maximum
+        ):
+            raise RuntimeError(
+                f"citation policy rules.claim_audit.{key} must be between 1 and {maximum}"
+            )
+    ratio = value.get("minimum_supported_ratio")
+    if ratio is not None and (
+        isinstance(ratio, bool) or not isinstance(ratio, (int, float)) or not 0 <= float(ratio) <= 1
+    ):
+        raise RuntimeError(
+            "citation policy rules.claim_audit.minimum_supported_ratio must be between 0 and 1"
+        )
+    for key in ("critical_kinds", "materiality_terms"):
+        configured = value.get(key)
+        if configured is None:
+            continue
+        if not isinstance(configured, list) or not all(
+            isinstance(entry, str) and entry.strip() for entry in configured
+        ):
+            raise RuntimeError(
+                f"citation policy rules.claim_audit.{key} must contain non-empty strings"
+            )
+        if len(configured) != len(set(configured)):
+            raise RuntimeError(f"citation policy rules.claim_audit.{key} has duplicate entries")
 
 
 def _validate_task_coverage_policy(value: Any) -> None:
@@ -430,15 +496,11 @@ def _validate_task_coverage_policy(value: Any) -> None:
         )
     for key in sorted(_TASK_COVERAGE_SUPPLEMENT_RULES):
         if supplement_rules.get(key) is not True:
-            raise RuntimeError(
-                f"citation policy task_coverage supplement_rules.{key} must be true"
-            )
+            raise RuntimeError(f"citation policy task_coverage supplement_rules.{key} must be true")
 
     evaluation = value.get("evaluation")
     if not isinstance(evaluation, dict) or set(evaluation) != {"scenario_families"}:
-        raise RuntimeError(
-            "citation policy task_coverage evaluation requires scenario_families"
-        )
+        raise RuntimeError("citation policy task_coverage evaluation requires scenario_families")
     _validate_unique_nonempty_strings(
         evaluation.get("scenario_families"),
         "evaluation.scenario_families",
@@ -446,12 +508,8 @@ def _validate_task_coverage_policy(value: Any) -> None:
 
 
 def _validate_unique_nonempty_strings(value: Any, path: str) -> None:
-    if not isinstance(value, list) or not all(
-        isinstance(entry, str) and entry for entry in value
-    ):
-        raise RuntimeError(
-            f"citation policy task_coverage {path} must contain non-empty strings"
-        )
+    if not isinstance(value, list) or not all(isinstance(entry, str) and entry for entry in value):
+        raise RuntimeError(f"citation policy task_coverage {path} must contain non-empty strings")
     if len(value) != len(set(value)):
         raise RuntimeError(f"citation policy task_coverage {path} has duplicate entries")
 

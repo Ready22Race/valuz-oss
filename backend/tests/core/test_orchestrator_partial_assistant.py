@@ -111,14 +111,8 @@ async def test_each_runtime_assistant_is_published_before_its_sidecar() -> None:
             data={"content": _evidence_payload(), "tool_name": "document_search"},
         )
     )
-    first = (
-        "Revenue was 100 USD in 2026 Q2 "
-        "[source](evidence://ev_revenue_2026_q2)."
-    )
-    second = (
-        "The same source reports the quarter "
-        "[source](evidence://ev_revenue_2026_q2)."
-    )
+    first = "Revenue was 100 USD in 2026 Q2 [source](evidence://ev_revenue_2026_q2)."
+    second = "The same source reports the quarter [source](evidence://ev_revenue_2026_q2)."
 
     await observer.emit(Event(type="assistant_message", data={"text": first}))
     await observer.emit(Event(type="assistant_message", data={"text": second}))
@@ -146,6 +140,31 @@ async def test_each_runtime_assistant_is_published_before_its_sidecar() -> None:
     assert projected_ids[0] == projected_ids[1]
     assert observer.citation_bundle is not None
     assert len(observer.citation_bundle["citations"]) == 1
+
+
+async def test_auto_binding_stays_in_sidecar_and_never_rewrites_runtime_message() -> None:
+    sink, observer = _observer(citation_enabled=True, verification_enabled=True)
+    await observer.emit(
+        Event(
+            type="citation_evidence",
+            data={"content": _evidence_payload(), "tool_name": "document_search"},
+        )
+    )
+    original = "Revenue was 100 USD in 2026 Q2."
+
+    await observer.emit(Event(type="assistant_message", data={"text": original}))
+    await observer.emit(Event(type="session_idle", data={"num_turns": 1}))
+
+    assistant = next(event for event in sink.events if event.type == "assistant_message")
+    sidecar = next(event for event in sink.events if event.type == "assistant_message_sidecar")
+    assert assistant.data["text"] == original
+    assert observer.assistant_text == original
+    projection = sidecar.data["citation_bundle"]["projection"]
+    assert projection["anchors"][0]["sourceOffset"] == len(original) - 1
+    assert projection["anchors"][0]["origin"] == "auto-bound"
+    assert sidecar.data["citation_bundle"]["quality"]["claims"]
+    assert "claim_audit" not in sidecar.data
+    assert observer.claim_audits[0]["claims"]
 
 
 async def test_sidecar_failure_never_removes_or_replaces_runtime_message(

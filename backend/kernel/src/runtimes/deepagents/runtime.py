@@ -39,11 +39,13 @@ from typing import Any, Literal
 
 from deepagents import SubAgent, create_deep_agent
 from deepagents.backends import LocalShellBackend
+from deepagents.backends.protocol import FileData, ReadResult
 from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
 from langchain_core.tools import StructuredTool
 from langgraph.types import Command
 from src.core.agent_config import AgentConfig, SubAgentDef
 from src.core.approval_rule_matcher import ExactArgsRuleMatcher, RuntimeApprovalRuleMatcher
+from src.core.citation import EvidenceRegistry
 from src.core.events import AVAILABLE_DECISIONS_EDITABLE_WITH_SESSION, Event, EventSink
 from src.core.mcp_source_metadata import wrap_mcp_result_metadata_for_transport
 from src.core.rule_canonicalize import reduce_args_for_subject
@@ -71,6 +73,7 @@ from src.runtimes.deepagents.approval_bridge import (
 )
 from src.runtimes.deepagents.middleware import (
     CitationEvidenceCompactionMiddleware,
+    InvalidToolCallPairMiddleware,
     ToolErrorTolerantMiddleware,
     citation_artifact_content,
 )
@@ -78,6 +81,20 @@ from src.runtimes.interruption import describe_exception, is_runtime_interruptio
 from src.runtimes.mcp_env import resolve_stdio_env
 
 logger = logging.getLogger(__name__)
+
+
+def _is_internal_summarization_event(chunk: dict[str, Any]) -> bool:
+    """Return whether a LangChain model event belongs to history compaction.
+
+    LangChain tags the nested summarizer invocation with this metadata.  Its
+    response is runtime state, not an Agent message: publishing it exposes the
+    private handoff prompt and makes Citation Audit treat the summary as a
+    second user-facing answer.  Normal primary, tool-adjacent, repair, and
+    continuation model events do not carry this marker and remain visible.
+    """
+
+    metadata = chunk.get("metadata")
+    return isinstance(metadata, dict) and metadata.get("lc_source") == "summarization"
 
 
 async def _preserve_mcp_source_metadata(request: Any, handler: Any) -> Any:
@@ -117,6 +134,47 @@ def _citation_system_policy_block(instructions: str) -> str:
     matches = list(_CITATION_SYSTEM_POLICY_BLOCK_RE.finditer(instructions or ""))
     return matches[-1].group(0).strip() if matches else ""
 
+
+def _sanitize_anthropic_request_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Drop malformed signature-only thinking blocks from model history.
+
+    Some Anthropic-compatible streaming gateways emit the terminal signature
+    delta as a separate ``thinking`` content block. LangChain preserves that
+    block in the checkpoint, but Anthropic rejects it on the next round because
+    the required ``thinking`` field is absent. The signature-only block carries
+    no user-visible reasoning and is not the tool call, so remove only that
+    invalid transport fragment while preserving every complete thinking, text,
+    and tool-use block.
+    """
+
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return payload
+    dropped = 0
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        filtered: list[Any] = []
+        for block in content:
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "thinking"
+                and not isinstance(block.get("thinking"), str)
+            ):
+                dropped += 1
+                continue
+            filtered.append(block)
+        if len(filtered) != len(content):
+            message["content"] = filtered
+    if dropped:
+        logger.warning(
+            "deepagents: removed %s malformed signature-only thinking history block(s)",
+            dropped,
+        )
+    return payload
 
 # In an ephemeral cloud sandbox the checkpoint must be EXTERNALIZED (per-owner
 # COS mount) so it survives sandbox recreation ("resume in a fresh sandbox").
@@ -159,6 +217,117 @@ def _checkpoint_backend() -> str:
     return "file" if _in_sandbox() else "sqlite"
 
 
+def _expand_embedded_json(value: Any, *, depth: int = 0) -> Any:
+    """Decode JSON strings embedded inside an offloaded MCP envelope.
+
+    MCP adapters commonly return a JSON content-block array whose ``text``
+    field is itself serialized JSON.  Pretty-printing only the outer array
+    leaves the useful dataset on one enormous line, so line-based pagination
+    still cannot advance.  Decode only strings that visibly contain JSON and
+    cap recursion to keep hostile or accidental nesting bounded.
+    """
+
+    if depth >= 6:
+        return value
+    if isinstance(value, dict):
+        return {
+            key: _expand_embedded_json(item, depth=depth + 1)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_expand_embedded_json(item, depth=depth + 1) for item in value]
+    if not isinstance(value, str):
+        return value
+    candidate = value.strip()
+    if len(candidate) < 2 or candidate[0] not in "[{" or candidate[-1] not in "]}":
+        return value
+    try:
+        decoded = json.loads(candidate)
+    except (TypeError, ValueError):
+        return value
+    return _expand_embedded_json(decoded, depth=depth + 1)
+
+
+def _logical_large_result_content(content: str) -> str:
+    """Expose one-line structured tool results as stable logical lines."""
+
+    if len(content.splitlines()) > 1:
+        return content
+    try:
+        decoded = json.loads(content)
+    except (TypeError, ValueError):
+        decoded = None
+    if decoded is not None:
+        rendered = json.dumps(
+            _expand_embedded_json(decoded),
+            ensure_ascii=False,
+            indent=2,
+        )
+        if len(rendered.splitlines()) > 1:
+            return rendered
+    # Non-JSON output can still be a single minified/log line.  Fixed-width
+    # logical lines make read_file pagination usable without mutating the
+    # immutable artifact consumed by Citation extraction.
+    width = 1_000
+    if len(content) > width:
+        return "\n".join(
+            content[index : index + width]
+            for index in range(0, len(content), width)
+        )
+    return content
+
+
+class _WorkspaceLocalShellBackend(LocalShellBackend):
+    """Keep DeepAgents virtual artifacts readable by both file and shell tools."""
+
+    _VIRTUAL_ARTIFACT_PREFIXES = (
+        "/large_tool_results/",
+        "/conversation_history/",
+    )
+
+    def read(
+        self,
+        file_path: str,
+        offset: int = 0,
+        limit: int = 2_000,
+    ) -> ReadResult:
+        if not file_path.startswith("/large_tool_results/"):
+            return super().read(file_path, offset=offset, limit=limit)
+
+        raw = super().read(file_path, offset=0, limit=1)
+        if (
+            raw.error
+            or raw.file_data is None
+            or raw.file_data.get("encoding") != "utf-8"
+        ):
+            return raw
+        content = str(raw.file_data.get("content") or "")
+        logical = _logical_large_result_content(content)
+        if logical == content:
+            return super().read(file_path, offset=offset, limit=limit)
+        lines = logical.splitlines(keepends=True)
+        if offset >= len(lines):
+            return ReadResult(
+                error=f"Line offset {offset} exceeds file length ({len(lines)} lines)"
+            )
+        return ReadResult(
+            file_data=FileData(
+                content="".join(lines[offset : offset + limit]),
+                encoding="utf-8",
+            )
+        )
+
+    def execute(self, command: str, *, timeout: int | None = None) -> Any:
+        # Filesystem tools use a virtual root, while LocalShellBackend executes
+        # with the workspace as cwd and does not translate virtual paths.
+        # Convert only the two DeepAgents-owned artifact namespaces to relative
+        # paths; ordinary absolute user paths retain their existing semantics.
+        translated = command
+        for prefix in self._VIRTUAL_ARTIFACT_PREFIXES:
+            translated = translated.replace(prefix, prefix.removeprefix("/"))
+        return super().execute(translated, timeout=timeout)
+
+
 def _build_local_shell_backend(workspace_root: str | None) -> LocalShellBackend:
     """Create a backend that maps DeepAgents virtual paths into the workspace.
 
@@ -169,12 +338,12 @@ def _build_local_shell_backend(workspace_root: str | None) -> LocalShellBackend:
     """
 
     if workspace_root:
-        return LocalShellBackend(
+        return _WorkspaceLocalShellBackend(
             root_dir=workspace_root,
             inherit_env=True,
             virtual_mode=True,
         )
-    return LocalShellBackend(inherit_env=True, virtual_mode=True)
+    return _WorkspaceLocalShellBackend(inherit_env=True, virtual_mode=True)
 
 
 # langchain TodoListMiddleware tool name (auto-included by deepagents). Treated
@@ -227,6 +396,11 @@ class DeepAgentsRuntime:
         self._checkpointer_cm: Any | None = None
         self._active_task: asyncio.Task[Any] | None = None
         self._cancelled: bool = False
+        # One immutable Evidence namespace per user turn, shared by the main
+        # agent and every nested subagent.  The graph and its middleware live
+        # across turns, so ``run`` resets this object instead of replacing it.
+        self._turn_evidence_registry = EvidenceRegistry()
+        self._continuing_same_user_turn = False
         # Identity of the session currently being run — exposed to
         # custom-tool handlers through ExecContext.
         self._cur_session_id: str = ""
@@ -352,6 +526,8 @@ class DeepAgentsRuntime:
         session.status = "running"
         self._cancelled = False
         self._cur_session_id = session.id
+        if not self._continuing_same_user_turn:
+            self._turn_evidence_registry.reset()
 
         try:
             # Reconcile live session-driven levers BEFORE ``_ensure_graph``
@@ -448,26 +624,28 @@ class DeepAgentsRuntime:
 
                     if event_name == "on_chat_model_stream":
                         chunk_obj = data.get("chunk")
+                        internal_summarization = _is_internal_summarization_event(chunk)
                         text = _extract_chunk_text(chunk_obj)
-                        if text:
+                        if text and not internal_summarization:
                             await self.event_sink.emit(
                                 Event(type="text_delta", data={"text": text})
                             )
                         thinking_text = _extract_chunk_thinking(chunk_obj)
-                        if thinking_text:
+                        if thinking_text and not internal_summarization:
                             await self.event_sink.emit(
                                 Event(type="thinking_delta", data={"text": thinking_text})
                             )
 
                     elif event_name == "on_chat_model_end":
                         output = data.get("output")
+                        internal_summarization = _is_internal_summarization_event(chunk)
                         full_text = _extract_full_text(output)
-                        if full_text:
+                        if full_text and not internal_summarization:
                             await self.event_sink.emit(
                                 Event(type="assistant_message", data={"text": full_text})
                             )
                         full_thinking = _extract_full_thinking(output)
-                        if full_thinking:
+                        if full_thinking and not internal_summarization:
                             await self.event_sink.emit(
                                 Event(type="thinking", data={"text": full_thinking})
                             )
@@ -688,9 +866,11 @@ class DeepAgentsRuntime:
         # runtime and checkpointer; ``session.runtime_session_id`` remains the
         # LangGraph thread id, so history and native continuity are preserved.
         self._graph = None
+        self._continuing_same_user_turn = True
         try:
             await self.run(session, user_message)
         finally:
+            self._continuing_same_user_turn = False
             if previous is None:
                 self.toolkit.unregister(no_op_tool.name)
             else:
@@ -1150,13 +1330,15 @@ class DeepAgentsRuntime:
             "backend": backend,
             "checkpointer": self._checkpointer,
             "middleware": [
+                InvalidToolCallPairMiddleware(),
                 ToolErrorTolerantMiddleware(),
                 CitationEvidenceCompactionMiddleware(
                     # Evidence Registry is shared infrastructure.  Always
                     # publish trusted source metadata to the Host; Citation
                     # and Audit switches decide only which post-run sidecars
                     # consume it.
-                    citation_artifact_emitter=self._emit_citation_evidence
+                    evidence_registry=self._turn_evidence_registry,
+                    citation_artifact_emitter=self._emit_citation_evidence,
                 ),
             ],
         }
@@ -1249,6 +1431,23 @@ class DeepAgentsRuntime:
         if protocol == "anthropic":
             from langchain_anthropic import ChatAnthropic
 
+            class _ValuzChatAnthropic(ChatAnthropic):
+                """ChatAnthropic with gateway-history compatibility cleanup."""
+
+                def _get_request_payload(
+                    self,
+                    input_: Any,
+                    *,
+                    stop: list[str] | None = None,
+                    **kwargs: Any,
+                ) -> dict[str, Any]:
+                    payload = super()._get_request_payload(
+                        input_,
+                        stop=stop,
+                        **kwargs,
+                    )
+                    return _sanitize_anthropic_request_payload(payload)
+
             # ChatAnthropic streams already include usage on the final
             # AIMessageChunk — no opt-in flag needed. ``effort`` is
             # natively supported across the full union ``low|medium|
@@ -1276,7 +1475,7 @@ class DeepAgentsRuntime:
             max_tokens = _resolve_anthropic_max_tokens(self.model)
             if max_tokens is not None:
                 kwargs["max_tokens"] = max_tokens
-            return ChatAnthropic(**kwargs)
+            return _ValuzChatAnthropic(**kwargs)
 
         if protocol == "gemini":
             from langchain_google_genai import ChatGoogleGenerativeAI
@@ -1561,8 +1760,10 @@ class DeepAgentsRuntime:
                     f"{GENERAL_PURPOSE_SUBAGENT['system_prompt']}\n\n{citation_protocol}"
                 ),
                 "middleware": [
+                    InvalidToolCallPairMiddleware(),
                     CitationEvidenceCompactionMiddleware(
-                        citation_artifact_emitter=self._emit_citation_evidence
+                        evidence_registry=self._turn_evidence_registry,
+                        citation_artifact_emitter=self._emit_citation_evidence,
                     )
                 ],
             }
@@ -1595,8 +1796,10 @@ class DeepAgentsRuntime:
         }
         if citation_protocol:
             entry["middleware"] = [
+                InvalidToolCallPairMiddleware(),
                 CitationEvidenceCompactionMiddleware(
-                    citation_artifact_emitter=self._emit_citation_evidence
+                    evidence_registry=self._turn_evidence_registry,
+                    citation_artifact_emitter=self._emit_citation_evidence,
                 )
             ]
         if sub_tools:

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from src.core.claim_audit import (
+    LARGE_TABLE_MIN_DATA_CELLS,
+    LARGE_TABLE_MIN_DATA_ROWS,
     MAX_CLAIMS_PER_ANSWER,
     ClaimCandidate,
     _claim_amounts,
@@ -648,6 +650,83 @@ def test_strict_domain_does_not_flag_runtime_retrieval_progress_messages() -> No
     assert all(claim.citation_required is False for claim in claims)
 
 
+def test_strict_domain_does_not_flag_retrieval_status_with_embedded_facts() -> None:
+    """Audit every visible message without treating tool narration as an answer.
+
+    Long research turns often mention identifiers, periods, and values while
+    describing what was just located.  Those values still belong to the final
+    cited answer; the progress sentence itself is operational presentation.
+    """
+
+    messages = (
+        "微软代码已核实为 US:MSFT。\n\n"
+        "检索结果较大，先定位 Q1 电话会纪要（FY2026 Q1，2025年10月底发布）。\n\n"
+        "发现列表已包含 Q4/Q3/Q2 纪要。\n\n"
+        "沙箱无法访问该路径，改用按时间段定向检索 FY2026 Q1 电话会纪要。\n\n"
+        "日期过滤未生效，改用 fiscal_year / fiscal_quarter 参数精确检索。\n\n"
+        "四个季度纪要已定位（FY26 Q1、Q2、Q3、Q4）。\n\n"
+        "Q2 的资本开支（$375亿）与需求持续超过供应的原文已取得。\n\n"
+        "四个补充检索结果较大，已存盘。\n\n"
+        "四个季度电话会纪要的原文均已提取完毕，所有引用均为对应季度原文。"
+    )
+
+    claims = extract_claims(messages, mode="strict-domain")
+
+    assert claims
+    assert all(claim.kind == "presentation" for claim in claims)
+    assert all(claim.citation_required is False for claim in claims)
+
+
+def test_strict_domain_does_not_flag_batched_or_named_tool_retrieval_status() -> None:
+    """Batch labels and tool names do not turn progress into business facts."""
+
+    messages = (
+        "Discovery 返回了 FY26 Q4/Q3/Q2 的纪要候选。\n\n"
+        "还需要确认最近四个已完成季度中的 FY26 Q1 纪要。\n\n"
+        "第一批检索返回的是各纪要开头的陈述部分（按文档顺序返回，相关性评分均为 0）。\n\n"
+        "kb_search 对这几份纪要只返回文档开头的分块（无相关性排序），"
+        "无法覆盖 CFO 资本开支表述和问答环节的供需约束段落。\n\n"
+        "改用 document_fetch 按区块窗口定位各纪要后半部分原文。"
+    )
+
+    claims = extract_claims(messages, mode="strict-domain")
+
+    assert claims
+    assert all(claim.kind == "presentation" for claim in claims)
+    assert all(claim.citation_required is False for claim in claims)
+
+
+def test_strict_domain_does_not_flag_retrieval_location_and_audit_progress() -> None:
+    """Long research progress stays presentation across generic phrasings."""
+
+    messages = (
+        "已确认四个季度纪要（微软 FY2026 Q1–Q4，即 2025-10 至 2026-07 的财报电话会）。\n\n"
+        "首轮定向检索命中的多为开场陈述部分，资本开支与供需约束的表述"
+        "（多在 CFO 陈述与问答环节）尚未覆盖到，进行补充定向检索。\n\n"
+        "供需约束的明确表述与 FY27 指引在问答环节，继续按季度深入检索。\n\n"
+        "继续检查 Q2 文件中的问答环节内容。\n\n"
+        "Q3/Q4 的供需约束与 FY27 指引表述位于纪要问答环节（后段）。\n\n"
+        "用脚本解析并精确提取 Q3/Q4 问答环节中供需约束与资本开支指引的原文片段。\n\n"
+        "审计确认：四季度 × 三主题引用全部为该季度专有、无跨季度复用。\n\n"
+        "Q4 资本开支口径、租赁重分类与折旧年限均与原文一致。\n\n"
+        "现在我已获取了每个季度电话会的原文关键证据片段，让我再针对性地读取"
+        "各季度电话会中资本开支和供需约束的具体财务讨论部分。\n\n"
+        "索引返回的都是文档开头段落。\n\n"
+        "我已经获取了 FY2026 Q4 和 Q3 的核心供需约束和资本开支数据，"
+        "现在读取 Q2 和 Q1 的关键段落。\n\n"
+        "我已经获取了 FY2026 Q4 和 Q3 的核心供需约束和资本开支数据。\n\n"
+        "现在我需要 Q1 的供需约束原文和 Q4 的供需约束问答部分。\n\n"
+        "现在已经获取所有四个季度的完整原文证据，可以整理成最终的 Markdown 表格。\n\n"
+        "管理层关于 AI 算力需求、资本开支和供需约束三大主题表述的完整对比表。"
+    )
+
+    claims = extract_claims(messages, mode="strict-domain")
+
+    assert claims
+    assert all(claim.kind == "presentation" for claim in claims)
+    assert all(claim.citation_required is False for claim in claims)
+
+
 def test_strict_domain_does_not_flag_chinese_search_progress_with_future_action() -> None:
     claims = extract_claims(
         "搜索到了两份报告，现在继续读取下一份。",
@@ -1153,6 +1232,7 @@ def test_ranked_table_uses_named_entity_column_for_value_claims() -> None:
         semantics=_FINANCE_SEMANTICS,
     )
 
+    assert len(claims) == 2
     usage_claim = next(claim for claim in claims if claim.location.get("columnIndex") == 2)
     growth_claim = next(claim for claim in claims if claim.location.get("columnIndex") == 3)
     assert usage_claim.exact == "MiMo-V2.5 — 本周用量: 10.5T"
@@ -1186,6 +1266,32 @@ def test_ranked_table_uses_named_entity_column_for_value_claims() -> None:
     )
     assert bound.auto_bound_claim_handles[growth_claim.claim_id] == ("ev_openrouter_mimo",)
     assert "+12% [source](evidence://ev_openrouter_mimo)" in bound.text
+
+
+def test_ranked_table_treats_code_and_name_as_row_identity_not_claims() -> None:
+    claims = extract_claims(
+        "| 序号 | 代码 | 名称 | C1 总市值(亿元) | C2 近15日最大涨幅 |\n"
+        "|---:|:---:|:---|---:|---:|\n"
+        "| 1 | 000155 | 川能动力 | 225.2 | 10.03% |",
+        mode="strict-domain",
+    )
+
+    assert [claim.exact for claim in claims] == [
+        "川能动力 — C1 总市值(亿元): 225.2",
+        "川能动力 — C2 近15日最大涨幅: 10.03%",
+    ]
+    assert [claim.normalized.get("value") for claim in claims] == ["225.2", "10.03"]
+
+
+def test_table_header_numbers_do_not_replace_the_cell_asserted_value() -> None:
+    claims = extract_claims(
+        "| 股票 | C2 近15日最大涨幅 | C3 近60日最低价 → 涨幅 |\n"
+        "|---|---:|---:|\n"
+        "| 川能动力 | 10.03% | 10.46 → 16.63% |",
+        mode="strict-domain",
+    )
+
+    assert [claim.normalized.get("value") for claim in claims] == ["10.03", "10.46"]
 
 
 def test_table_visual_placeholders_are_not_factual_claims() -> None:
@@ -2373,6 +2479,36 @@ def test_chunk_period_overrides_broader_document_title_period() -> None:
     )
 
 
+def test_fiscal_year_in_chunk_overrides_quarterly_call_title_period() -> None:
+    claim = extract_claims(
+        "自 FY2027 起调整折旧年限，2026 日历年 CapEx 预期约为 1750 亿美元。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    evidence = {
+        "source": {
+            "title": "Microsoft (MSFT) - 2026 Q4 - Earnings Call Transcript",
+        },
+        "evidence": {
+            "kind": "text",
+            "quote": (
+                "This change is expected to have a minimal benefit to FY 2027 "
+                "operating income. Calendar year 2026 CapEx expectations adjust "
+                "to approximately $175 billion."
+            ),
+        },
+    }
+
+    support = verify_evidence_support(
+        claim,
+        evidence,
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert claim.normalized["period"] == "2027 FY"
+    assert support.reason != "period-conflict"
+
+
 def test_chunk_without_claim_period_still_rejects_title_period_conflict() -> None:
     claim = extract_claims(
         "2026 Q1 PC DRAM 合约价环比上涨 110%～115%。",
@@ -2849,6 +2985,41 @@ def test_table_claims_inherit_a_dedicated_source_column_binding() -> None:
     assert claims[0].attached_evidence_handles == ("ev_revenue_table_12345678",)
 
 
+def test_large_table_cells_bypass_claim_extraction_but_narrative_remains_auditable() -> None:
+    rows = "\n".join(
+        f"| {index:06d} | Company {index} | {100 + index} | {index / 10:.1f}% |"
+        for index in range(LARGE_TABLE_MIN_DATA_ROWS)
+    )
+    answer = (
+        "| Code | Name | Revenue | Growth |\n"
+        "|---|---|---:|---:|\n"
+        f"{rows}\n\n"
+        "The selected universe contains 50 companies."
+    )
+
+    claims, truncated = extract_claims_with_status(answer, mode="strict-domain")
+
+    assert truncated is False
+    assert not any(claim.location.get("kind") == "table-cell" for claim in claims)
+    assert any("50 companies" in claim.exact for claim in claims)
+
+
+def test_wide_table_uses_cell_threshold_for_claim_bypass() -> None:
+    column_count = 10
+    row_count = LARGE_TABLE_MIN_DATA_CELLS // column_count
+    headers = "|".join(f" Metric {index} " for index in range(column_count))
+    separator = "|".join("---:" for _ in range(column_count))
+    rows = "\n".join(
+        "| " + " | ".join(str(row * column_count + column) for column in range(column_count)) + " |"
+        for row in range(row_count)
+    )
+    answer = f"|{headers}|\n|{separator}|\n{rows}"
+
+    claims = extract_claims(answer, mode="strict-domain")
+
+    assert not any(claim.location.get("kind") == "table-cell" for claim in claims)
+
+
 def test_generic_market_quote_with_all_numbers_is_supported_without_metric_ontology() -> None:
     claim = extract_claims(
         (
@@ -3060,6 +3231,17 @@ def test_finance_clause_split_ignores_numeric_thousands_separator() -> None:
         "operating_revenue",
         "net_profit",
     ]
+
+
+def test_explicit_fiscal_period_precedes_call_date_in_claim_scope() -> None:
+    claims = extract_claims(
+        "FY26 Q1（2025-10-29）— 当季资本开支为 349 亿美元。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert len(claims) == 1
+    assert claims[0].normalized["period"] == "2026 Q1"
 
 
 def test_auto_bind_keeps_each_citation_before_its_clause_punctuation() -> None:
