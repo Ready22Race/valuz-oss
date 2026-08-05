@@ -15,6 +15,11 @@ type ProjectHandoffParams = {
   draft: string;
   /** True while any session attachment is still parsing. */
   attachmentsParsing: boolean;
+  /** ``useSessionAttachments.markPendingConsumed`` — the handoff-consume
+   *  effect stamps the already-sent turn's pending rows (explicit id +
+   *  sentAt because the page's own ``selectedSessionId`` may not have
+   *  settled when the handoff is consumed). */
+  markPendingConsumed: (sessionId?: string, consumedAt?: number) => void;
   historyCursorRef: { current: number };
   /** Narrower than the raw ``useState`` setters on purpose — the moved
    *  bodies only ever pass a full value (or ``null``), never an updater. */
@@ -69,6 +74,7 @@ export function useProjectHandoff({
   selectedProjectId,
   draft,
   attachmentsParsing,
+  markPendingConsumed,
   historyCursorRef,
   setPendingUserMessage,
   setTurnStartAnchor,
@@ -130,6 +136,14 @@ export function useProjectHandoff({
     if (Date.now() - sentAt > HANDOFF_MAX_AGE_MS) return;
     consumedHandoffSessionIdsRef.current.add(id);
     handoffSessionIdRef.current = id;
+    // The handing-over page already POSTed this turn (see ``performChatSend``
+    // in ProjectDetailPage) — every pending attachment of this session that
+    // existed at ``sentAt`` shipped with it. This page's own send path never
+    // runs for a handoff, so consume them here: the first attachments load
+    // was issued before the server stamped the rows, and without the
+    // watermark its still-pending result would pin the already-sent files
+    // back onto the composer.
+    markPendingConsumed(id, sentAt);
     setPendingUserMessage({
       text,
       attachments: [],
@@ -144,7 +158,14 @@ export function useProjectHandoff({
     // handing-over navigation sets ``handoff`` and it carries nothing else, so
     // clearing the whole entry is safe here.
     dropHandoffFromHistory();
-  }, [id, location.state, location.pathname, location.search, navigate]);
+  }, [
+    id,
+    location.state,
+    location.pathname,
+    location.search,
+    navigate,
+    markPendingConsumed,
+  ]);
 
   // Send entry point. While a turn is running, a follow-up is queued (drains
   // after the active turn). Otherwise it blocks on attachments still parsing —

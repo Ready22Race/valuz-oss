@@ -566,6 +566,7 @@ export const ConversationPage = () => {
     selectedProjectId,
     draft,
     attachmentsParsing,
+    markPendingConsumed,
     historyCursorRef,
     setPendingUserMessage,
     setTurnStartAnchor,

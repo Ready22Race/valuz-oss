@@ -33,9 +33,16 @@ export interface UseSessionAttachmentsResult {
   /**
    * Optimistically stamp every pending row consumed — call right after a send
    * so the staging chips clear immediately (the turn marks them consumed
-   * server-side only after it runs).
+   * server-side only after it runs). Also records a consume watermark so rows
+   * the server returns as still-pending AFTER this call land consumed too.
+   *
+   * ``sessionId``/``consumedAt`` override the watermark's session and moment
+   * for callers consuming a send performed ELSEWHERE (the project-detail
+   * handoff: that page POSTs the message itself and navigates; the landing
+   * page's own ``sessionId`` may not have settled yet when it consumes the
+   * handoff).
    */
-  markPendingConsumed: () => void;
+  markPendingConsumed: (sessionId?: string, consumedAt?: number) => void;
   /** Escape hatch for callers that need to splice optimistic state directly. */
   setAttachments: React.Dispatch<React.SetStateAction<SessionAttachmentItem[]>>;
 }
@@ -242,14 +249,17 @@ export function useSessionAttachments(
     [sessionId],
   );
 
-  const markPendingConsumed = useCallback(() => {
-    const ts = Date.now();
-    const sid = sessionIdRef.current;
-    if (sid) consumeWatermarkRef.current = { sessionId: sid, ts };
-    setAttachments((prev) =>
-      prev.map((a) => (a.consumed_at ? a : { ...a, consumed_at: ts })),
-    );
-  }, []);
+  const markPendingConsumed = useCallback(
+    (sessionIdOverride?: string, consumedAt?: number) => {
+      const ts = consumedAt ?? Date.now();
+      const sid = sessionIdOverride ?? sessionIdRef.current;
+      if (sid) consumeWatermarkRef.current = { sessionId: sid, ts };
+      setAttachments((prev) =>
+        prev.map((a) => (a.consumed_at ? a : { ...a, consumed_at: ts })),
+      );
+    },
+    [],
+  );
 
   return {
     attachments,

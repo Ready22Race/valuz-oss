@@ -225,6 +225,32 @@ describe("useSessionAttachments", () => {
     expect(result.current.attachments[0].consumed_at).toBeTruthy();
   });
 
+  it("explicit session/ts override records the watermark before the hook's sessionId settles (handoff)", async () => {
+    // ProjectDetailPage POSTs the message itself and navigates; the landing
+    // page consumes the handoff (calling markPendingConsumed with the route's
+    // session id + sentAt) while its own selectedSessionId may still be null.
+    let resolveLoad: (v: { items: SessionAttachmentItem[] }) => void = () => {};
+    const loadPromise = new Promise<{ items: SessionAttachmentItem[] }>((r) => {
+      resolveLoad = r;
+    });
+    listAttachments.mockReturnValueOnce(loadPromise);
+    const { result, rerender } = renderHook(
+      ({ sid }: { sid: string | null }) => useSessionAttachments(sid),
+      { initialProps: { sid: null as string | null } },
+    );
+    act(() => {
+      result.current.markPendingConsumed("s1", Date.now()); // hook sessionId still null
+    });
+    rerender({ sid: "s1" }); // settles later → load fires
+    await act(async () => {
+      resolveLoad({
+        items: [row({ id: "p1", parse_status: "ready", consumed_at: null })],
+      });
+      await loadPromise;
+    });
+    expect(result.current.attachments[0].consumed_at).toBeTruthy();
+  });
+
   it("a row attached AFTER the send stays pending (watermark is not a blanket consume)", async () => {
     let resolveLoad: (v: { items: SessionAttachmentItem[] }) => void = () => {};
     const loadPromise = new Promise<{ items: SessionAttachmentItem[] }>((r) => {
