@@ -19,6 +19,8 @@ go if the linear-history policy is ever relaxed — the DAG shape is already in
 
 from __future__ import annotations
 
+from enum import StrEnum
+
 from sqlalchemy import BigInteger, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -32,6 +34,52 @@ SHARED_CWD = ""
 # Delivery scope: the cwd a session actually runs in. Callers pass these three
 # together everywhere, so the column set is spelled once here.
 _SCOPE_COLUMNS = ("user_id", "project_id", "worktree")
+
+
+class ArtifactKind(StrEnum):
+    """What family of thing a deliverable is.
+
+    Supplied by the agent, not inferred. An extension says what a file is
+    encoded as, not what it is *for* — the same ``.html`` is a one-page report,
+    an interactive tool, or a chart depending on intent, and a md -> pdf export
+    would flip a derived value on a product whose kind never changed. The caller
+    is the only party that knows; when it says nothing, ``FILE`` is the honest
+    answer rather than a guess dressed up as one.
+
+    Purely a label: it groups and captions, and is deliberately excluded from
+    identity matching (see the key table). Nothing branches on it, so a wrong
+    value costs a misfiled icon, not a split history.
+    """
+
+    FILE = "file"
+    DOCUMENT = "document"
+    PRESENTATION = "presentation"
+    SPREADSHEET = "spreadsheet"
+    UI = "ui"
+    MEDIA = "media"
+
+
+#: Model-facing descriptions, kept beside the enum so the tool schema and the
+#: type cannot drift apart.
+ARTIFACT_KIND_HINTS: dict[ArtifactKind, str] = {
+    ArtifactKind.DOCUMENT: "prose to read — a report, memo, analysis, notes",
+    ArtifactKind.PRESENTATION: "slides",
+    ArtifactKind.SPREADSHEET: "tabular data — a model, dataset, comparison table",
+    ArtifactKind.UI: "something to interact with or view — a page, dashboard, chart",
+    ArtifactKind.MEDIA: "an image, video, or audio file",
+    ArtifactKind.FILE: "anything else, or when unsure",
+}
+
+
+def coerce_kind(raw: object) -> ArtifactKind:
+    """A caller-supplied kind, or ``FILE``. Never raises, never guesses."""
+    if isinstance(raw, str):
+        try:
+            return ArtifactKind(raw.strip().lower())
+        except ValueError:
+            pass
+    return ArtifactKind.FILE
+
 
 KEY_KIND_PATH = "path"
 KEY_KIND_NAME = "name"
@@ -69,10 +117,11 @@ class ArtifactRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     # ``report.md`` and the main line's ``report.md`` are two artifacts, not two
     # versions of one — a worktree is an independent line of work.
     worktree: Mapped[str] = mapped_column(String(128), default=SHARED_CWD)
-    # Stable content family (document | presentation | spreadsheet | ui | …).
-    # Fixed at creation: it is derived from mime/extension, and a md -> pdf
-    # conversion would otherwise drift the identity of an existing artifact.
-    kind: Mapped[str] = mapped_column(String(32), default="file")
+    # ``ArtifactKind``, supplied by the agent at creation and fixed thereafter.
+    # Fixed because it labels the product, not the file: a deliverable exported
+    # to a second format is the same product, and re-reading the kind from each
+    # delivery would let it flap.
+    kind: Mapped[str] = mapped_column(String(32), default=ArtifactKind.FILE.value)
     # Required at creation (the tool defaults it to the file's basename) because
     # the first delivery derives the identity from it. Freely editable after —
     # renaming adds a ``name`` key, it does not create a revision.

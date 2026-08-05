@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from valuz_agent.modules.artifacts import snapshot as snap
 from valuz_agent.modules.artifacts.datastore import ArtifactDatastore, Scope
-from valuz_agent.modules.artifacts.models import REVISION_STATUS_MISSING
+from valuz_agent.modules.artifacts.models import REVISION_STATUS_MISSING, ArtifactKind
 from valuz_agent.modules.sessions.models import SessionArtifactRow
 
 logger = logging.getLogger(__name__)
@@ -250,7 +250,12 @@ async def apply_plan(db: AsyncSession, plan: RowPlan) -> bool:
     if artifact is None:
         artifact = await ds.create_artifact(
             scope,
-            kind=snap.kind_for(plan.file_name, snap.guess_mime(plan.file_name)),
+            # ``file`` for everything. Kind is the caller's statement of what a
+            # deliverable IS, and a legacy row has no caller left to ask —
+            # inferring one from the extension would put a confident label on a
+            # guess. A user can correct it; a wrong label nobody knows is a
+            # guess cannot be corrected.
+            kind=ArtifactKind.FILE.value,
             display_name=plan.file_name,
             rel_path=plan.rel_path,
         )

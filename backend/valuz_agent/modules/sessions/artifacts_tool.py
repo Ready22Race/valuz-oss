@@ -60,6 +60,11 @@ import valuz_agent.boot.kernel  # noqa: F401  (sets kernel import path)
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.artifacts import snapshot as snap
 from valuz_agent.modules.artifacts.datastore import ArtifactDatastore
+from valuz_agent.modules.artifacts.models import (
+    ARTIFACT_KIND_HINTS,
+    ArtifactKind,
+    coerce_kind,
+)
 from valuz_agent.modules.artifacts.scope import (
     DeliveryScope,
     ScopeUnavailableError,
@@ -126,6 +131,12 @@ TOOL_DESCRIPTION = (
     "directory yourself."
 )
 
+# Rendered from ``ArtifactKind`` rather than written out, so adding a family
+# updates the model-facing schema in the same edit.
+_KIND_DESCRIPTION = "What this deliverable is. " + "; ".join(
+    f"'{kind.value}' — {hint}" for kind, hint in ARTIFACT_KIND_HINTS.items()
+)
+
 _PARAMS = {
     "type": "object",
     "properties": {
@@ -153,6 +164,11 @@ _PARAMS = {
                     "mimeType": {
                         "type": "string",
                         "description": "MIME type. Guessed from the extension when omitted.",
+                    },
+                    "kind": {
+                        "type": "string",
+                        "enum": [k.value for k in ArtifactKind],
+                        "description": _KIND_DESCRIPTION,
                     },
                     "asNewArtifact": {
                         "type": "boolean",
@@ -235,7 +251,11 @@ async def _deliver_one(
     if artifact is None:
         artifact = await ds.create_artifact(
             scope,
-            kind=snap.kind_for(file_name, mime_type),
+            # The caller's word, or ``file``. An extension says what a file is
+            # encoded as, not what it is for, and guessing would put a
+            # confident-looking wrong label on things the agent could simply
+            # have named.
+            kind=coerce_kind(raw.get("kind")).value,
             display_name=file_name,
             rel_path=rel_path,
         )

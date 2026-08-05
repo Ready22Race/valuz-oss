@@ -34,37 +34,6 @@ ARTIFACT_DIR_NAME = ".artifact"
 
 _HASH_CHUNK = 1024 * 1024
 
-# Content families. Deliberately coarse: ``kind`` is fixed at creation and is a
-# label, not a lookup key, so a wrong guess costs a mis-grouped icon rather than
-# a split history.
-_KIND_BY_EXTENSION = {
-    ".md": "document",
-    ".markdown": "document",
-    ".txt": "document",
-    ".pdf": "document",
-    ".doc": "document",
-    ".docx": "document",
-    ".rtf": "document",
-    ".ppt": "presentation",
-    ".pptx": "presentation",
-    ".key": "presentation",
-    ".xls": "spreadsheet",
-    ".xlsx": "spreadsheet",
-    ".csv": "spreadsheet",
-    ".html": "ui",
-    ".htm": "ui",
-    ".png": "media",
-    ".jpg": "media",
-    ".jpeg": "media",
-    ".gif": "media",
-    ".svg": "media",
-    ".webp": "media",
-    ".mp4": "media",
-    ".mov": "media",
-    ".mp3": "media",
-    ".wav": "media",
-}
-
 
 def artifact_root(scope_cwd: Path) -> Path:
     return scope_cwd / ARTIFACT_DIR_NAME
@@ -84,21 +53,9 @@ def is_inside_artifact_root(abs_path: Path, scope_cwd: Path) -> bool:
         return False
 
 
-def kind_for(file_name: str, mime_type: str | None) -> str:
-    """Content family for a delivered file. Falls back to the generic ``file``."""
-    suffix = Path(file_name).suffix.lower()
-    if suffix in _KIND_BY_EXTENSION:
-        return _KIND_BY_EXTENSION[suffix]
-    if mime_type:
-        major = mime_type.split("/", 1)[0]
-        if major in {"image", "video", "audio"}:
-            return "media"
-        if mime_type == "application/json":
-            return "document"
-    return "file"
-
-
 def format_for(file_name: str) -> str | None:
+    """The file's extension. A fact about the name, not a judgement about it —
+    unlike ``ArtifactKind``, which the caller supplies."""
     suffix = Path(file_name).suffix.lower().lstrip(".")
     return suffix or None
 

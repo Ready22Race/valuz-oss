@@ -28,6 +28,7 @@ from valuz_agent.integrations.toolkit_mcp_server import HostExecContext
 from valuz_agent.infra.database import Base
 from valuz_agent.modules.artifacts.datastore import ArtifactDatastore, Scope
 from valuz_agent.modules.artifacts.models import (
+    ArtifactKind,
     ArtifactContentRow,
     ArtifactHeadRow,
     ArtifactKeyRow,
@@ -176,8 +177,11 @@ async def test_as_new_artifact_forces_a_separate_deliverable(session_factory, cw
     assert second["results"][0]["versionNo"] == 1
 
 
-async def test_derives_display_name_and_kind(session_factory, cwd):  # type: ignore[no-untyped-def]
-    _, payload = await _deliver({"filePath": str(_write(cwd / "deck.pptx", "x"))})
+async def test_kind_comes_from_the_caller(session_factory, cwd):  # type: ignore[no-untyped-def]
+    """The agent says what a deliverable is; the server does not guess."""
+    _, payload = await _deliver(
+        {"filePath": str(_write(cwd / "deck.pptx", "x")), "kind": "presentation"}
+    )
 
     async with session_factory() as db:
         artifact = await ArtifactDatastore(db).get_artifact(
@@ -186,7 +190,49 @@ async def test_derives_display_name_and_kind(session_factory, cwd):  # type: ign
 
     assert artifact is not None
     assert artifact.display_name == "deck.pptx"
-    assert artifact.kind == "presentation"
+    assert artifact.kind == ArtifactKind.PRESENTATION
+
+
+async def test_kind_is_never_inferred_from_the_extension(session_factory, cwd):  # type: ignore[no-untyped-def]
+    """A telling extension must NOT produce a kind on its own.
+
+    An extension says how a file is encoded, not what it is for: the same
+    ``.html`` is a report, a tool, or a chart. Guessing puts a confident-looking
+    label on something the agent could simply have named, and it would flip on a
+    md -> pdf export of a product whose kind never changed.
+    """
+    _, payload = await _deliver({"filePath": str(_write(cwd / "deck.pptx", "x"))})
+
+    async with session_factory() as db:
+        artifact = await ArtifactDatastore(db).get_artifact(
+            "u1", payload["results"][0]["artifactId"]
+        )
+
+    assert artifact is not None
+    assert artifact.kind == ArtifactKind.FILE
+
+
+async def test_an_unknown_kind_falls_back_rather_than_failing(session_factory, cwd):  # type: ignore[no-untyped-def]
+    """A bad label is not worth losing a delivery over."""
+    _, payload = await _deliver({"filePath": str(_write(cwd / "a.md", "x")), "kind": "chart"})
+
+    assert payload["results"][0]["status"] == "recorded"
+    async with session_factory() as db:
+        artifact = await ArtifactDatastore(db).get_artifact(
+            "u1", payload["results"][0]["artifactId"]
+        )
+    assert artifact is not None and artifact.kind == ArtifactKind.FILE
+
+
+def test_the_tool_schema_offers_every_kind() -> None:
+    """The schema is rendered from the enum, so a new family cannot be added
+    without the model being told about it."""
+    from valuz_agent.modules.sessions.artifacts_tool import _PARAMS
+
+    schema = _PARAMS["properties"]["attachments"]["items"]["properties"]["kind"]
+    assert schema["enum"] == [k.value for k in ArtifactKind]
+    for kind in ArtifactKind:
+        assert f"'{kind.value}'" in schema["description"]
 
 
 async def test_explicit_file_name_becomes_the_display_name(session_factory, cwd):  # type: ignore[no-untyped-def]
