@@ -29,7 +29,7 @@ from valuz_agent.modules.artifacts.models import (
 from valuz_agent.modules.artifacts.service import (
     DeliveryRequest,
     DeliveryStatus,
-    deliver_file,
+    deliver_artifact,
 )
 
 _TABLES = [
@@ -63,7 +63,7 @@ def cwd(tmp_path):  # type: ignore[no-untyped-def]
 async def _deliver(session_factory, cwd, path: Path, **kwargs):  # type: ignore[no-untyped-def]
     """One delivery, with no ExecContext, no session and no tool anywhere."""
     async with session_factory() as db:
-        result = await deliver_file(
+        result = await deliver_artifact(
             db,
             scope=SCOPE,
             scope_cwd=cwd,
@@ -175,7 +175,7 @@ async def test_the_caller_owns_the_transaction(session_factory, cwd):  # type: i
     """
     src = _write(cwd / "chart.html", "v1")
     async with session_factory() as db:
-        result = await deliver_file(
+        result = await deliver_artifact(
             db,
             scope=SCOPE,
             scope_cwd=cwd,
@@ -187,3 +187,88 @@ async def test_the_caller_owns_the_transaction(session_factory, cwd):  # type: i
 
     async with session_factory() as db:
         assert await ArtifactDatastore(db).count_scope_artifacts(SCOPE) == 0
+
+
+async def test_a_lost_race_is_retried_rather_than_reported(session_factory, cwd, monkeypatch):  # type: ignore[no-untyped-def]
+    """Losing the head is ordinary, not something a caller should handle.
+
+    A runtime can emit several tool_use blocks in one turn, so two deliveries to
+    the same deliverable race routinely. Surfacing that to a model as an error
+    it must diagnose and retry — for contention the server can absorb in one
+    re-read — would be pushing our concurrency control into the prompt.
+    """
+    from valuz_agent.modules.artifacts import datastore as ds_mod
+
+    src = _write(cwd / "chart.html", "v1")
+    await _deliver(session_factory, cwd, src)
+
+    real = ds_mod.ArtifactDatastore.append_revision
+    calls = {"n": 0}
+
+    async def _lose_once(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None  # somebody else moved the head first
+        return await real(self, *args, **kwargs)
+
+    monkeypatch.setattr(ds_mod.ArtifactDatastore, "append_revision", _lose_once)
+
+    src.write_text("v2", encoding="utf-8")
+    result = await _deliver(session_factory, cwd, src)
+
+    assert calls["n"] == 2  # it tried again
+    assert result.status is DeliveryStatus.RECORDED
+    assert result.version_no == 2
+
+
+async def test_sustained_contention_still_reports_stale_head(session_factory, cwd, monkeypatch):  # type: ignore[no-untyped-def]
+    """One retry, not a spin: losing twice means something else is wrong."""
+    from valuz_agent.modules.artifacts import datastore as ds_mod
+
+    src = _write(cwd / "chart.html", "v1")
+    await _deliver(session_factory, cwd, src)
+
+    calls = {"n": 0}
+
+    async def _always_lose(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        return None
+
+    monkeypatch.setattr(ds_mod.ArtifactDatastore, "append_revision", _always_lose)
+
+    src.write_text("v2", encoding="utf-8")
+    result = await _deliver(session_factory, cwd, src)
+
+    assert calls["n"] == 2
+    assert result.status is DeliveryStatus.STALE_HEAD
+
+
+async def test_a_racing_duplicate_becomes_unchanged_not_a_new_version(
+    session_factory, cwd, monkeypatch
+):  # type: ignore[no-untyped-def]
+    """If the delivery that beat us recorded these very bytes, there is nothing
+    to add — the retry must notice that rather than mint a version."""
+    from valuz_agent.modules.artifacts import datastore as ds_mod
+
+    src = _write(cwd / "chart.html", "v1")
+    first = await _deliver(session_factory, cwd, src)
+
+    real = ds_mod.ArtifactDatastore.find_revision_by_content
+    calls = {"n": 0}
+
+    async def _appears_on_retry(self, user_id, artifact_id, content_hash):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None  # not there when we looked
+        return await real(self, user_id, artifact_id, content_hash)
+
+    monkeypatch.setattr(ds_mod.ArtifactDatastore, "find_revision_by_content", _appears_on_retry)
+    monkeypatch.setattr(ds_mod.ArtifactDatastore, "append_revision", lambda *a, **k: _none())
+
+    async def _none():  # type: ignore[no-untyped-def]
+        return None
+
+    result = await _deliver(session_factory, cwd, src)
+
+    assert result.status is DeliveryStatus.UNCHANGED
+    assert result.revision_id == first.revision_id

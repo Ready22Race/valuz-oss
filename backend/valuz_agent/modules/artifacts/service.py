@@ -71,6 +71,8 @@ class DeliveryRequest:
     the bytes, which this layer is about to read.
     """
 
+    #: The file to record. A future request form may carry content instead of a
+    #: path; that is a change to this shape, not a second entry point.
     abs_path: Path
     #: Label for the deliverable. Defaults to the file's basename.
     display_name: str | None = None
@@ -104,7 +106,7 @@ class DeliveryResult:
         return self.status in (DeliveryStatus.RECORDED, DeliveryStatus.UNCHANGED)
 
 
-async def deliver_file(
+async def deliver_artifact(
     db: AsyncSession,
     *,
     scope: Scope,
@@ -113,11 +115,17 @@ async def deliver_file(
     request: DeliveryRequest,
     source_session_id: str | None = None,
 ) -> DeliveryResult:
-    """Record one file as a version of a deliverable.
+    """Record a version of a deliverable, creating the deliverable if it is new.
 
-    Never raises for bad input — every rejection is a ``DeliveryStatus``, so a
-    caller handling several files can report each one without the batch dying on
-    the first bad entry. Commits nothing: the caller's unit of work decides,
+    Named for the act, not for what is handed in. Today a request carries a
+    path, and a second input form (content with no file, which GenUI would need)
+    belongs in ``DeliveryRequest`` rather than in a second function — the
+    outcome is the same either way, and splitting on input shape would make two
+    names for one thing.
+
+    Never raises for bad input: every rejection is a ``DeliveryStatus``, so a
+    caller handling several files reports each one instead of losing the batch
+    to the first bad entry. Commits nothing — the caller's unit of work decides,
     which is what lets a batch be all-or-nothing.
     """
     ds = ArtifactDatastore(db)
@@ -181,48 +189,68 @@ async def deliver_file(
         # findable at its new path next time, not only at the one it left.
         await ds.adopt_delivery(scope, artifact, rel_path=rel_path, display_name=display_name)
 
-    existing = await ds.find_revision_by_content(scope.user_id, artifact.id, content_hash)
-    if existing is not None:
-        return DeliveryResult(
-            status=DeliveryStatus.UNCHANGED,
-            artifact_id=artifact.id,
-            revision_id=existing.id,
-            version_no=existing.version_no,
-            abs_path=existing.abs_path,
-        )
+    # The head can move under us: a runtime may emit several tool_use blocks in
+    # one turn, and two deliveries to the same deliverable then race. Losing
+    # that race is ordinary, not an error the caller should have to handle — so
+    # re-read and try again once before reporting it. Only a second loss, which
+    # means sustained contention, becomes STALE_HEAD.
+    for attempt in range(2):
+        # Re-checked each round, not just the first: the delivery that beat us
+        # may have recorded these very bytes, and then there is nothing to add.
+        existing = await ds.find_revision_by_content(scope.user_id, artifact.id, content_hash)
+        if existing is not None:
+            return DeliveryResult(
+                status=DeliveryStatus.UNCHANGED,
+                artifact_id=artifact.id,
+                revision_id=existing.id,
+                version_no=existing.version_no,
+                abs_path=existing.abs_path,
+            )
 
-    head = await ds.get_head(scope.user_id, artifact.id)
-    version_no = (head.version_no + 1) if head is not None else 1
+        head = await ds.get_head(scope.user_id, artifact.id)
+        version_no = (head.version_no + 1) if head is not None else 1
 
-    try:
-        stored = await asyncio.to_thread(
-            snap.write_snapshot, abs_path, scope_cwd, artifact.id, version_no, display_name
-        )
-    except OSError:
-        logger.warning("deliver: snapshot failed for %s", abs_path, exc_info=True)
-        return DeliveryResult(status=DeliveryStatus.SNAPSHOT_FAILED)
+        try:
+            # Written inside the loop because the destination carries the
+            # version number, so a retry needs its own path. The copy from the
+            # lost attempt is left behind: no row references it, and deleting it
+            # would race with whatever is reading the directory.
+            stored = await asyncio.to_thread(
+                snap.write_snapshot,
+                abs_path,
+                scope_cwd,
+                artifact.id,
+                version_no,
+                display_name,
+            )
+        except OSError:
+            logger.warning("deliver: snapshot failed for %s", abs_path, exc_info=True)
+            return DeliveryResult(status=DeliveryStatus.SNAPSHOT_FAILED)
 
-    content = await ds.find_content_by_hash(scope.user_id, content_hash)
-    if content is None:
-        content = await ds.create_content(
+        content = await ds.find_content_by_hash(scope.user_id, content_hash)
+        if content is None:
+            content = await ds.create_content(
+                scope.user_id,
+                content_hash=content_hash,
+                byte_size=byte_size,
+                mime_type=mime_type,
+                storage_key=str(stored),
+            )
+
+        revision = await ds.append_revision(
             scope.user_id,
-            content_hash=content_hash,
-            byte_size=byte_size,
-            mime_type=mime_type,
-            storage_key=str(stored),
+            artifact.id,
+            expected_head_revision_id=head.revision_id if head is not None else None,
+            content=content,
+            file_name=display_name,
+            abs_path=str(stored),
+            file_format=snap.format_for(display_name),
+            source_session_id=source_session_id,
         )
-
-    revision = await ds.append_revision(
-        scope.user_id,
-        artifact.id,
-        expected_head_revision_id=head.revision_id if head is not None else None,
-        content=content,
-        file_name=display_name,
-        abs_path=str(stored),
-        file_format=snap.format_for(display_name),
-        source_session_id=source_session_id,
-    )
-    if revision is None:
+        if revision is not None:
+            break
+        logger.info("deliver: head moved under %s, retrying (attempt %d)", artifact.id, attempt + 1)
+    else:
         return DeliveryResult(status=DeliveryStatus.STALE_HEAD)
 
     return DeliveryResult(
@@ -239,5 +267,5 @@ __all__ = [
     "DeliveryRequest",
     "DeliveryResult",
     "DeliveryStatus",
-    "deliver_file",
+    "deliver_artifact",
 ]

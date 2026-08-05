@@ -71,7 +71,7 @@ from valuz_agent.modules.artifacts.service import (
     DeliveryRequest,
     DeliveryResult,
     DeliveryStatus,
-    deliver_file,
+    deliver_artifact,
 )
 from valuz_agent.modules.files.service import owner_allowed_roots
 
@@ -243,7 +243,7 @@ async def _deliver_one(
             "error": "missing 'filePath'",
         }
 
-    result = await deliver_file(
+    result = await deliver_artifact(
         db,
         scope=delivery.scope,
         scope_cwd=delivery.cwd,
