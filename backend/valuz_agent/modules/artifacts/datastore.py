@@ -336,11 +336,13 @@ class ArtifactDatastore:
         *,
         content_hash: str,
         byte_size: int,
-        mime_type: str | None,
         storage_key: str | None = None,
         content_inline: str | None = None,
         storage_kind: str = STORAGE_KIND_FILE,
     ) -> ArtifactContentRow:
+        """Record a set of bytes. Takes nothing name-derived — ``mime_type`` is
+        the revision's, since this row is shared by every deliverable holding
+        this content."""
         row = ArtifactContentRow(
             user_id=user_id,
             storage_kind=storage_kind,
@@ -348,7 +350,6 @@ class ArtifactDatastore:
             content_inline=content_inline,
             content_hash=content_hash,
             byte_size=byte_size,
-            mime_type=mime_type,
         )
         self._db.add(row)
         await self._db.flush()
@@ -366,24 +367,30 @@ class ArtifactDatastore:
             )
         ).scalar_one_or_none()
 
-    async def find_revision_by_content(
-        self, user_id: str, artifact_id: str, content_hash: str
-    ) -> ArtifactRevisionRow | None:
-        """The revision already holding these bytes — the idempotency lookup.
+    async def get_head_with_revision(
+        self, user_id: str, artifact_id: str
+    ) -> tuple[ArtifactHeadRow, ArtifactRevisionRow] | None:
+        """The current pointer and the revision it names, in one round trip.
 
-        A hit means this delivery is a replay (or a transport retry), and the
-        caller returns the existing revision instead of minting a version whose
-        only difference is the clock.
+        A delivery needs both and needs them consistent: the head gives the
+        version to build on and the compare-and-set's expected value, while its
+        revision carries the content hash that says whether this delivery is a
+        replay. Two queries could straddle a concurrent delivery and answer
+        about different generations.
+
+        ``None`` for an artifact with no revisions yet.
         """
-        return (
+        row = (
             await self._db.execute(
-                select(ArtifactRevisionRow).where(
-                    ArtifactRevisionRow.user_id == user_id,
-                    ArtifactRevisionRow.artifact_id == artifact_id,
-                    ArtifactRevisionRow.content_hash == content_hash,
+                select(ArtifactHeadRow, ArtifactRevisionRow)
+                .join(ArtifactRevisionRow, ArtifactRevisionRow.id == ArtifactHeadRow.revision_id)
+                .where(
+                    ArtifactHeadRow.user_id == user_id,
+                    ArtifactHeadRow.artifact_id == artifact_id,
                 )
             )
-        ).scalar_one_or_none()
+        ).first()
+        return (row[0], row[1]) if row is not None else None
 
     async def append_revision(
         self,
@@ -395,6 +402,7 @@ class ArtifactDatastore:
         file_name: str,
         abs_path: str | None,
         file_format: str | None = None,
+        mime_type: str | None = None,
         source_session_id: str | None = None,
         source_tool_call_id: str | None = None,
         status: str = REVISION_STATUS_READY,
@@ -470,6 +478,7 @@ class ArtifactDatastore:
             source_tool_call_id=source_tool_call_id,
             file_name=file_name,
             file_format=file_format,
+            mime_type=mime_type,
             content_id=content.id,
             content_hash=content.content_hash,
             abs_path=abs_path,
@@ -566,6 +575,20 @@ class ArtifactDatastore:
                 )
             )
         ).scalar_one_or_none()
+
+    async def mark_revision_missing(self, user_id: str, revision_id: str) -> None:
+        """Record that a generation's bytes are not there.
+
+        Used when publishing the snapshot fails after the head has already
+        moved: the generation happened and stays on record, but every read path
+        gates on ``status`` before offering its path as openable.
+        """
+        revision = await self.get_revision(user_id, revision_id)
+        if revision is None or revision.status == REVISION_STATUS_MISSING:
+            return
+        revision.status = REVISION_STATUS_MISSING
+        revision.updated_at = now_ms()
+        await self._db.flush()
 
     async def get_contents(
         self, user_id: str, content_ids: Sequence[str]

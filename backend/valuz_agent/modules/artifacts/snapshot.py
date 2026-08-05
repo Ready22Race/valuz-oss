@@ -25,7 +25,8 @@ import hashlib
 import logging
 import mimetypes
 import os
-import shutil
+import secrets
+from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -64,44 +65,78 @@ def guess_mime(file_name: str) -> str | None:
     return mimetypes.guess_type(file_name)[0]
 
 
-def hash_and_size(src: Path) -> tuple[str, int]:
-    """Stream ``src`` once for its sha256 and byte count.
-
-    Streamed rather than read whole: deliverables are routinely tens of
-    megabytes, and on the cloud deployment this read crosses an object-storage
-    mount.
-    """
-    digest = hashlib.sha256()
-    size = 0
-    with src.open("rb") as fh:
-        while chunk := fh.read(_HASH_CHUNK):
-            digest.update(chunk)
-            size += len(chunk)
-    return f"sha256:{digest.hexdigest()}", size
-
-
 def snapshot_dir(scope_cwd: Path, artifact_id: str, version_no: int) -> Path:
     return artifact_root(scope_cwd) / artifact_id / f"v{version_no}"
 
 
-def write_snapshot(
-    src: Path, scope_cwd: Path, artifact_id: str, version_no: int, file_name: str
-) -> Path:
-    """Copy ``src`` into its version directory and return the absolute path.
+@dataclass(frozen=True)
+class StagedSnapshot:
+    """A complete copy that is not yet the snapshot.
 
-    Staged beside the destination and renamed into place, so a snapshot is
-    either complete or absent — never a half-written file that a later read
-    would hash as corrupt. On the object mount a rename is a server-side copy,
-    so this costs nothing extra there.
+    Held at ``staging`` until the caller knows the delivery is going to be
+    recorded; ``promote`` puts it at ``final``, ``discard`` removes it.
+    """
+
+    staging: Path
+    final: Path
+    content_hash: str
+    byte_size: int
+
+
+def stage_snapshot(
+    src: Path, scope_cwd: Path, artifact_id: str, version_no: int, file_name: str
+) -> StagedSnapshot:
+    """Copy ``src`` into its version directory, hashing the bytes on the way.
+
+    One pass, not two. The hash and the copy both have to read the whole file,
+    and reading it twice doubles what the cloud deployment pulls across an
+    object-storage mount for every delivery — so the digest is computed from the
+    bytes already in flight.
+
+    Lands on a staging name rather than the snapshot's, for two reasons. A
+    snapshot is then either complete or absent, never a half-written file a
+    later read would hash as corrupt. And the destination is shared: two
+    deliveries racing on one deliverable compute the SAME version number, so
+    both would otherwise write ``v2/report.md`` and the loser's bytes could
+    end up under the winner's row. Only the delivery that wins the head
+    promotes. The staging name carries a token for the same reason — the losing
+    attempt must not be writing over the winner's staging file either.
     """
     dest_dir = snapshot_dir(scope_cwd, artifact_id, version_no)
     dest_dir.mkdir(parents=True, exist_ok=True)
-    final = dest_dir / file_name
-    staging = dest_dir / f".{file_name}.partial"
+    staging = dest_dir / f".{file_name}.{secrets.token_hex(4)}.partial"
+    digest = hashlib.sha256()
+    size = 0
     try:
-        shutil.copyfile(src, staging)
-        os.replace(staging, final)
+        with src.open("rb") as reader, staging.open("wb") as writer:
+            while chunk := reader.read(_HASH_CHUNK):
+                digest.update(chunk)
+                writer.write(chunk)
+                size += len(chunk)
     except OSError:
         staging.unlink(missing_ok=True)
         raise
-    return final
+    return StagedSnapshot(
+        staging=staging,
+        final=dest_dir / file_name,
+        content_hash=f"sha256:{digest.hexdigest()}",
+        byte_size=size,
+    )
+
+
+def promote_snapshot(staged: StagedSnapshot) -> Path:
+    """Make a staged copy the snapshot. On the object mount this is a
+    server-side copy rather than a link swap, which is why it happens once and
+    only for the delivery that is actually being recorded."""
+    os.replace(staged.staging, staged.final)
+    return staged.final
+
+
+def discard_snapshot(staged: StagedSnapshot) -> None:
+    """Drop a staged copy that will not be recorded — a replay, or a delivery
+    that lost the head. Never raises: the delivery's outcome is already decided
+    and leftover staging bytes are not worth failing it for."""
+    try:
+        staged.staging.unlink(missing_ok=True)
+    except OSError:  # pragma: no cover — defensive
+        logger.warning("deliver: could not remove staged snapshot %s", staged.staging)
