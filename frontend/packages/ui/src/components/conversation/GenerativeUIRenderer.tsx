@@ -187,6 +187,72 @@ const VALUZ_OPENUUI_THEME: OpenUiTheme = {
   // OpenUI's sizes while everything beside it uses the Valuz stack and scale.
   // Composing them from the mapped primitives is what puts them back under
   // this theme instead of restating the font stack a fifth time.
+  textBodyDefault:
+    "var(--openui-font-weight-regular) var(--openui-font-size-xl)/1.5 var(--openui-font-body)",
+  textBodyLg:
+    "var(--openui-font-weight-regular) var(--openui-font-size-2xl)/1.5 var(--openui-font-body)",
+  textBodyLgHeavy:
+    "var(--openui-font-weight-medium) var(--openui-font-size-2xl)/1.5 var(--openui-font-body)",
+  textBodySm:
+    "var(--openui-font-weight-regular) var(--openui-font-size-lg)/1.5 var(--openui-font-body)",
+  textBodySmHeavy:
+    "var(--openui-font-weight-medium) var(--openui-font-size-lg)/1.5 var(--openui-font-body)",
+  textBodyXs:
+    "var(--openui-font-weight-regular) var(--openui-font-size-sm)/1.5 var(--openui-font-body)",
+  textBodyXsHeavy:
+    "var(--openui-font-weight-medium) var(--openui-font-size-sm)/1.5 var(--openui-font-body)",
+  textCodeDefault:
+    "var(--openui-font-weight-regular) var(--openui-font-size-lg)/1.5 var(--openui-font-code)",
+  textCodeDefaultHeavy:
+    "var(--openui-font-weight-heavy) var(--openui-font-size-lg)/1.5 var(--openui-font-code)",
+  textCodeSm:
+    "var(--openui-font-weight-regular) var(--openui-font-size-sm)/1.5 var(--openui-font-code)",
+  textCodeSmHeavy:
+    "var(--openui-font-weight-heavy) var(--openui-font-size-sm)/1.5 var(--openui-font-code)",
+  textHeadingLg:
+    "var(--openui-font-weight-bold) var(--openui-font-size-3xl)/1.1 var(--openui-font-heading)",
+  textHeadingMd:
+    "var(--openui-font-weight-bold) var(--openui-font-size-3xl)/1.1 var(--openui-font-heading)",
+  textHeadingSm:
+    "var(--openui-font-weight-bold) var(--openui-font-size-2xl)/1.25 var(--openui-font-heading)",
+  textHeadingXl:
+    "var(--openui-font-weight-heavy) var(--openui-font-size-3xl)/1.1 var(--openui-font-heading)",
+  textHeadingXs:
+    "var(--openui-font-weight-bold) var(--openui-font-size-xl)/1.25 var(--openui-font-heading)",
+  textLabelDefault:
+    "var(--openui-font-weight-regular) var(--openui-font-size-xl)/1.25 var(--openui-font-label)",
+  textLabelLg:
+    "var(--openui-font-weight-regular) var(--openui-font-size-2xl)/1.25 var(--openui-font-label)",
+  textLabelLgHeavy:
+    "var(--openui-font-weight-medium) var(--openui-font-size-2xl)/1.25 var(--openui-font-label)",
+  textLabelSmHeavy:
+    "var(--openui-font-weight-medium) var(--openui-font-size-lg)/1.25 var(--openui-font-label)",
+  textLabelXs:
+    "var(--openui-font-weight-regular) var(--openui-font-size-sm)/1.25 var(--openui-font-label)",
+  textLabelXsHeavy:
+    "var(--openui-font-weight-medium) var(--openui-font-size-sm)/1.25 var(--openui-font-label)",
+  textNumbersDefault:
+    "var(--openui-font-weight-regular) var(--openui-font-size-xl)/1.5 var(--openui-font-numbers)",
+  textNumbersDefaultHeavy:
+    "var(--openui-font-weight-medium) var(--openui-font-size-xl)/1.5 var(--openui-font-numbers)",
+  textNumbersHeadingLg:
+    "var(--openui-font-weight-bold) var(--openui-font-size-3xl)/1.1 var(--openui-font-numbers)",
+  textNumbersHeadingSm:
+    "var(--openui-font-weight-bold) var(--openui-font-size-2xl)/1.25 var(--openui-font-numbers)",
+  textNumbersHeadingXl:
+    "var(--openui-font-weight-bold) var(--openui-font-size-3xl)/1.1 var(--openui-font-numbers)",
+  textNumbersLg:
+    "var(--openui-font-weight-regular) var(--openui-font-size-2xl)/1.5 var(--openui-font-numbers)",
+  textNumbersLgHeavy:
+    "var(--openui-font-weight-medium) var(--openui-font-size-2xl)/1.5 var(--openui-font-numbers)",
+  textNumbersSm:
+    "var(--openui-font-weight-regular) var(--openui-font-size-lg)/1.5 var(--openui-font-numbers)",
+  textNumbersSmHeavy:
+    "var(--openui-font-weight-medium) var(--openui-font-size-lg)/1.5 var(--openui-font-numbers)",
+  textNumbersXs:
+    "var(--openui-font-weight-regular) var(--openui-font-size-sm)/1.5 var(--openui-font-numbers)",
+  textNumbersXsHeavy:
+    "var(--openui-font-weight-medium) var(--openui-font-size-sm)/1.5 var(--openui-font-numbers)",
   textLabelSm:
     "var(--openui-font-weight-regular) var(--openui-font-size-sm)/1.25 var(--openui-font-label)",
   textLabelDefaultHeavy:

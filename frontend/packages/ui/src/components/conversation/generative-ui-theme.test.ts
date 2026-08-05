@@ -33,6 +33,14 @@ function themeKeys(): Set<string> {
   );
 }
 
+/** The installed OpenUI stylesheet, wherever pnpm put it. */
+function openuiStylesheet(): string {
+  const root = resolve(here, "../../../../../node_modules/.pnpm");
+  const dir = readdirSync(root).find((d) => d.startsWith("@openuidev+react-ui@"));
+  if (!dir) throw new Error("@openuidev/react-ui not installed");
+  return join(root, dir, "node_modules/@openuidev/react-ui/dist/styles/index.css");
+}
+
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
     const full = join(dir, entry);
@@ -62,6 +70,23 @@ describe("generative-UI theme coverage", () => {
     expect(
       [...unmapped].map(([token, files]) => `--openui-${token} (${files.join(", ")})`),
     ).toEqual([]);
+  });
+
+  it("maps every composite typography token OpenUI defines", () => {
+    // The earlier check only covered tokens the *blocks* use, which missed the
+    // ones OpenUI's own components reach for — 33 of 37, including every
+    // heading size. Unmapped, they keep OpenUI's defaults, so a generated
+    // dashboard rendered its title in Inter at 28px while the interface around
+    // it used the Valuz stack. Nothing reports that; it just looks foreign.
+    const mapped = themeKeys();
+    const css = readFileSync(openuiStylesheet(), "utf8");
+    const composites = new Set(
+      [...css.matchAll(/--openui-(text-(?:heading|body|label|numbers|code)-[a-z0-9-]+):\s*\d00 /g)]
+        .map((m) => (m[1] ?? "").replace(/-/g, "")),
+    );
+    const unmapped = [...composites].filter((token) => !mapped.has(token));
+    expect(unmapped).toEqual([]);
+    expect(composites.size).toBeGreaterThan(20);
   });
 
   it("checks a meaningful number of tokens", () => {
