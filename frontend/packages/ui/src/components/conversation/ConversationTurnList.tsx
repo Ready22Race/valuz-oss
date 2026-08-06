@@ -14,6 +14,7 @@ import {
   ChevronRight,
   Copy,
   FileText,
+  Gauge,
   Globe,
   Minimize2,
   RotateCw,
@@ -42,6 +43,7 @@ import { SuggestionList } from "../common/SuggestionList";
 import { LogoShimmer } from "../common/PageLoader";
 import type {
   CitationBundleV1,
+  ConversationTokenUsage,
   ConversationTurn,
   OpenCitationInput,
   PrototypeToolCall,
@@ -54,6 +56,11 @@ import {
 } from "@valuz/shared";
 import { useI18n } from "../../hooks/use-i18n";
 import { t as _t } from "@valuz/shared/i18n";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "../ui/popover";
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -64,10 +71,12 @@ function formatFileSize(bytes: number): string {
 const MessageActions = ({
   text,
   onRetry,
+  tokenUsage,
   extraActions,
 }: {
   text: string;
   onRetry?: () => void;
+  tokenUsage?: ConversationTokenUsage;
   /**
    * Host-supplied controls appended to this row (share, export, …).
    *
@@ -92,6 +101,15 @@ const MessageActions = ({
     }
   };
 
+  const formatTokens = (value: number) =>
+    new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(
+      value,
+    );
+  const compactTokens = new Intl.NumberFormat(undefined, {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(tokenUsage?.totalTokens ?? 0);
+
   return (
     <div className="mt-1 flex items-center gap-1">
       <button
@@ -115,6 +133,116 @@ const MessageActions = ({
         >
           <RotateCw className="h-3.5 w-3.5" />
         </button>
+      ) : null}
+      {tokenUsage && tokenUsage.totalTokens > 0 ? (
+        <Popover>
+          <PopoverTrigger asChild>
+            <button
+              type="button"
+              aria-label={t(
+                "conversation.tokenUsage.showDetails" as Parameters<
+                  typeof t
+                >[0],
+                { count: formatTokens(tokenUsage.totalTokens) },
+              )}
+              className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs tabular-nums text-ink-body transition-colors hover:bg-surface-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
+            >
+              <Gauge className="h-3.5 w-3.5" aria-hidden />
+              <span>{compactTokens}</span>
+            </button>
+          </PopoverTrigger>
+          <PopoverContent align="start" side="bottom" className="w-72 p-3">
+            <div className="space-y-2 text-xs">
+              <div className="flex items-center justify-between gap-4 font-medium text-ink-heading">
+                <span>
+                  {t(
+                    "conversation.tokenUsage.turnTotal" as Parameters<
+                      typeof t
+                    >[0],
+                  )}
+                </span>
+                <span className="tabular-nums">
+                  {formatTokens(tokenUsage.totalTokens)}
+                </span>
+              </div>
+              <div className="space-y-1 text-ink-body">
+                {[
+                  [
+                    t(
+                      "conversation.tokenUsage.inputUncached" as Parameters<
+                        typeof t
+                      >[0],
+                    ),
+                    tokenUsage.inputTokens,
+                  ],
+                  [
+                    t(
+                      "conversation.tokenUsage.outputWithReasoning" as Parameters<
+                        typeof t
+                      >[0],
+                    ),
+                    tokenUsage.outputTokens,
+                  ],
+                  [
+                    t(
+                      "conversation.tokenUsage.cacheRead" as Parameters<
+                        typeof t
+                      >[0],
+                    ),
+                    tokenUsage.cacheReadTokens,
+                  ],
+                  [
+                    t(
+                      "conversation.tokenUsage.cacheWrite" as Parameters<
+                        typeof t
+                      >[0],
+                    ),
+                    tokenUsage.cacheWriteTokens,
+                  ],
+                ].map(([label, value]) => (
+                  <div
+                    key={String(label)}
+                    className="flex items-center justify-between gap-4"
+                  >
+                    <span>{label}</span>
+                    <span className="tabular-nums">
+                      {formatTokens(value as number)}
+                    </span>
+                  </div>
+                ))}
+                <div className="flex items-center justify-between gap-4">
+                  <span>
+                    {t(
+                      "conversation.tokenUsage.cacheHitRate" as Parameters<
+                        typeof t
+                      >[0],
+                    )}
+                  </span>
+                  <span className="tabular-nums">
+                    {tokenUsage.cacheHitRate == null
+                      ? "—"
+                      : `${(tokenUsage.cacheHitRate * 100).toFixed(1)}%`}
+                  </span>
+                </div>
+              </div>
+              {tokenUsage.models.length > 0 ? (
+                <div className="border-t border-surface-border pt-2 text-ink-muted">
+                  <span>
+                    {t(
+                      "conversation.tokenUsage.models" as Parameters<
+                        typeof t
+                      >[0],
+                    )}
+                    {": "}
+                  </span>
+                  <span className="break-all">
+                    {tokenUsage.models.join(", ")}
+                  </span>
+                </div>
+              ) : null}
+            </div>
+          </PopoverContent>
+        </Popover>
       ) : null}
       {extraActions}
     </div>
@@ -1218,6 +1346,7 @@ const TurnRow = memo(
               <MessageActions
                 text={actionText}
                 onRetry={onRetry ? () => onRetry(turn.id) : undefined}
+                tokenUsage={turn.tokenUsage}
                 extraActions={renderTurnActions?.(turn)}
               />
             ) : null}

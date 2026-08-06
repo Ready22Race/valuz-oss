@@ -2,6 +2,7 @@ import type { SessionEventDTO } from "../api/sessions-api";
 import type {
   CitationBundleV1,
   ConversationBlock,
+  ConversationTokenUsage,
   ConversationTurn,
   ConversationTurnAttachment,
   PrototypeToolCall,
@@ -207,6 +208,56 @@ const interruptKind = (value: unknown): "user" | "runtime" | null => {
   } catch {
     return null;
   }
+};
+
+const parseUsageToken = (value: string | undefined): number => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
+};
+
+const parseUsageModels = (value: string | undefined): string[] => {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return [];
+    }
+    return Object.keys(parsed).filter((model) => model.trim().length > 0);
+  } catch {
+    return [];
+  }
+};
+
+const accumulateTokenUsage = (
+  previous: ConversationTokenUsage | undefined,
+  payload: Record<string, string>,
+): ConversationTokenUsage => {
+  const inputTokens =
+    (previous?.inputTokens ?? 0) + parseUsageToken(payload.input_tokens);
+  const outputTokens =
+    (previous?.outputTokens ?? 0) + parseUsageToken(payload.output_tokens);
+  const cacheReadTokens =
+    (previous?.cacheReadTokens ?? 0) +
+    parseUsageToken(payload.cache_read_tokens);
+  const cacheWriteTokens =
+    (previous?.cacheWriteTokens ?? 0) +
+    parseUsageToken(payload.cache_write_tokens);
+  const inputSideTokens = inputTokens + cacheReadTokens + cacheWriteTokens;
+  const models = [...(previous?.models ?? [])];
+  for (const model of parseUsageModels(payload.model_usage)) {
+    if (!models.includes(model)) models.push(model);
+  }
+  return {
+    inputTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    totalTokens:
+      inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
+    cacheHitRate:
+      inputSideTokens > 0 ? cacheReadTokens / inputSideTokens : null,
+    models,
+  };
 };
 
 const toMetaToolCall = (
@@ -653,6 +704,11 @@ const createTurnsBuilder = () => {
       }
 
       const turn = ensureTurn();
+
+      if (eventType === "runtime.engine.usage") {
+        turn.tokenUsage = accumulateTokenUsage(turn.tokenUsage, payload);
+        continue;
+      }
 
       if (eventType === "message.assistant.sidecar") {
         const segmentIndex = Number(payload.assistant_segment_index);

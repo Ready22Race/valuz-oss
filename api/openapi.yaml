@@ -6421,6 +6421,7 @@ components:
             total_tokens:
               type: integer
               default: 0
+              description: Sum of normalized input, output, cache-read, and cache-write tokens across all persisted turns in the session.
             total_cost_usd:
               type: number
               default: 0

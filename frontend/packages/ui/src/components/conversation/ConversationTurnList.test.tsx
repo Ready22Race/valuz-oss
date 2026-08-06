@@ -433,6 +433,39 @@ describe("ConversationTurnList virtualization", () => {
   });
 });
 
+describe("ConversationTurnList token usage", () => {
+  it("shows a compact per-turn total and opens the detailed token breakdown", async () => {
+    virtualState.start = 0;
+    const turn: ConversationTurn = {
+      ...buildTurn(1),
+      tokenUsage: {
+        inputTokens: 754,
+        outputTokens: 116,
+        cacheReadTokens: 59_900,
+        cacheWriteTokens: 2,
+        totalTokens: 60_772,
+        cacheHitRate: 59_900 / (754 + 59_900 + 2),
+        models: ["gpt-5.6-codex"],
+      },
+    };
+
+    renderList([turn]);
+
+    const trigger = screen.getByRole("button", {
+      name: /60[,.]?772 Tokens/,
+    });
+    expect(trigger.textContent).toMatch(/60[,.]?8K/i);
+
+    fireEvent.click(trigger);
+
+    expect(await screen.findByText("本轮 Tokens")).not.toBeNull();
+    expect(screen.getByText("输入（命中缓存）")).not.toBeNull();
+    expect(screen.getByText("59,900")).not.toBeNull();
+    expect(screen.getByText("98.8%")).not.toBeNull();
+    expect(screen.getByText("gpt-5.6-codex")).not.toBeNull();
+  });
+});
+
 describe("ConversationTurnList loading placeholder", () => {
   const shimmer = (container: HTMLElement) =>
     container.querySelector('img[src="/logo.png"]');

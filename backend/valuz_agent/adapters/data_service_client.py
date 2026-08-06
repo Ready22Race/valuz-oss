@@ -116,3 +116,28 @@ class DataServiceReadClient:
             items=[self._row_to_event(r) for r in data.get("events", [])],
             has_more=bool(data.get("has_more", False)),
         )
+
+    async def list_messages(
+        self,
+        user_id: str,
+        session_id: str,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[Any]:
+        # Message rows use the DataService's storage projection. Session detail
+        # aggregation only needs the four normalized token buckets, so keep the
+        # remote reader independent of kernel ORM/domain serializers.
+        data = await self._post(
+            "list_messages_for_session",
+            {"session_id": session_id, "limit": limit, "offset": offset},
+        )
+        return [
+            {
+                "input_tokens": row.get("input_tokens"),
+                "output_tokens": row.get("output_tokens"),
+                "cache_read_tokens": row.get("cache_read_tokens"),
+                "cache_write_tokens": row.get("cache_write_tokens"),
+            }
+            for row in (data or [])
+        ]

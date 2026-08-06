@@ -73,6 +73,19 @@ class LocalDataServiceReader:
         # already carry the attributes the frame translator needs.
         return SimpleNamespace(items=items, has_more=has_more)
 
+    async def list_messages(
+        self,
+        user_id: str,
+        session_id: str,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[Any]:
+        messages = await self._store.list_messages_for_session(
+            user_id, session_id, limit=limit, offset=offset
+        )
+        return list(messages)
+
     # -- Session reads (DataService design §5: session fetches go through the
     # DataService, never the execution-local sqlite). Projected to ``SessionData``
     # via the same serializer the kernel route uses, so the host-side session

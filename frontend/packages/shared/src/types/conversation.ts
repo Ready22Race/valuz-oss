@@ -92,6 +92,21 @@ export interface ConversationTurnAttachment {
   size: number;
 }
 
+/** Normalized per-turn token buckets emitted by ``runtime.engine.usage``. */
+export interface ConversationTokenUsage {
+  /** Uncached input tokens. */
+  inputTokens: number;
+  /** Output tokens, including provider-reported reasoning output. */
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  totalTokens: number;
+  /** Cache reads divided by all input-side buckets; null with no input. */
+  cacheHitRate: number | null;
+  /** Models observed in the runtime's per-model usage breakdown. */
+  models: string[];
+}
+
 export interface ConversationTurn {
   id: string;
   /** Seq of the user_message event this turn was built from. ``0`` for
@@ -137,4 +152,6 @@ export interface ConversationTurn {
    * ``已处理 X 秒`` header for turns that have no thinking/tool work to
    * derive elapsedMs from (e.g. a direct one-shot assistant reply). */
   endTimestamp?: number;
+  /** Token consumption accumulated across all runtime segments in this turn. */
+  tokenUsage?: ConversationTokenUsage;
 }
