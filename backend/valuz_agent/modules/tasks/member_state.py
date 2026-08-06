@@ -12,6 +12,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from valuz_agent.modules.tasks.plan import SubtaskStatus
+from valuz_agent.modules.tasks.task_state import RunStatus
+
 # resume     — re-run the member (kernel run_turn on the persisted session);
 #              covers "created but never ran" and "interrupted by host_restart".
 # completed  — member reached a normal terminal turn (end_turn); collect + review.
@@ -76,8 +79,8 @@ class MemberReconcile:
     """
 
     disposition: Disposition
-    run_status: str | None  # new valuz_task_session.status (None = leave as-is)
-    node_status: str | None  # new plan-node status (None = leave as-is)
+    run_status: RunStatus | None  # new valuz_task_session.status (None = leave as-is)
+    node_status: SubtaskStatus | None  # new plan-node status (None = leave as-is)
     resume: bool  # caller should respawn the member actor loop
     deliver_member_done: bool  # caller should notify the lead via mailbox
     reason: str = ""

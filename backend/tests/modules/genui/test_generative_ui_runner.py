@@ -111,7 +111,7 @@ async def test_completer_builds_ephemeral_session_and_returns_text(patched):
     # ``bare_completion`` is the kernel-recognized strip switch: every runtime
     # drops its agentic scaffolding for this one-shot no-tool session.
     assert req.metadata == {"bare_completion": True, "valuz": {"ephemeral_generative_ui": True}}
-    assert "OpenUI Lang" in req.instructions
+    assert "A2UI" in req.instructions
     assert patched["prompt"] == "PROMPT"
     assert patched["deleted"] == [req.id]  # cleanup ran
 
@@ -136,7 +136,7 @@ async def test_generative_ui_sessions_share_one_fixed_cwd(patched):
 async def test_completer_streams_text_and_thinking_deltas_to_calling_session(patched):
     """tool_use_id 非空时,订阅 ephemeral 的 text_delta / thinking_delta,分别转发成
     调用方 session 的 tool_output_delta / tool_thinking_delta(keyed by
-    tool_use_id,后者独立类型 —— output_delta 会被前端无条件拼进 OpenUI 代码流,
+    tool_use_id,后者独立类型 —— output_delta 会被前端无条件拼进生成流,
     推理文本混入会污染渲染);run_turn 全文仍作为返回值。"""
     completer = r._make_completer(
         user_id="u1",
@@ -219,7 +219,7 @@ async def test_completer_sync_when_no_tool_use_id(patched):
 #     assert direct_prompt.startswith("PROMPT")
 #     assert "Direct LLM final-output requirement" in direct_prompt
 #     assert (
-#         "emit the final answer as normal text containing ONLY valid OpenUI Lang"
+#         "emit the final answer as normal text containing ONLY valid A2UI"
 #     ) in direct_prompt
 #     assert "Never stop after thinking" in direct_prompt
 #     assert patched["forwarded"] == [

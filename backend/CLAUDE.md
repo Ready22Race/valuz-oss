@@ -314,8 +314,8 @@ logs land under `.ai/dev/{backend,frontend}.log`.
 ## Gotchas
 
 - **Python 3.12–3.13 only** (`requires-python >=3.12,<3.14`); `uv sync`
-  resolves 3.13. Don't use system Python — parser deps (`markitdown`,
-  `pymupdf4llm`) lack 3.14 wheels.
+  resolves 3.13. Don't use system Python — parser deps (`pymupdf4llm`,
+  `firecrawl-anydoc`) lack 3.14 wheels.
 - **Port 8000 is load-bearing** — it matches the frontend's default
   `VITE_API_BASE_URL`. Change it on both sides or not at all.
 - **ruff**: line-length 100, target `py312`. **mypy**: the kernel is on

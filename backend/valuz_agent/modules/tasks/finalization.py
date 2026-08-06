@@ -456,7 +456,7 @@ class FinalizationService:
                                 p.update_node(_key, status="rework", review_feedback=feedback)
                                 return True
 
-                            await planning.persist_plan(
+                            await planning.persist_plan_best_effort(
                                 task_ds,
                                 event_ds,
                                 task_row,
@@ -464,6 +464,8 @@ class FinalizationService:
                                 actor=agent_slug,
                                 session_id=session_id,
                                 user_id=user_id,
+                                diverges=f"node {key!r} not parked to rework after "
+                                "its member run errored",
                             )
                     agent_name = await resolve_agent_display_name(
                         project_id, agent_slug, user_id
@@ -534,7 +536,7 @@ class FinalizationService:
                         )
                         return True
 
-                    await planning.persist_plan(
+                    await planning.persist_plan_best_effort(
                         task_ds,
                         event_ds,
                         task_row,
@@ -542,6 +544,8 @@ class FinalizationService:
                         actor="user",
                         session_id=session_id,
                         user_id=user_id,
+                        diverges=f"node {key!r} not parked to rework after the user "
+                        "interrupted its member",
                     )
             agent_name = await resolve_agent_display_name(project_id, agent_slug, user_id)
             await record_subtask_stopped(

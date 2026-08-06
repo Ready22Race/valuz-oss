@@ -69,6 +69,7 @@ class NotificationService:
         pending_id: str | None = None,
         source_event_id: str | None = None,
         payload: dict[str, Any] | None = None,
+        resolved: bool = False,
     ) -> NotificationEntry | None:
         """Idempotent create — a re-fire for the same subject upserts the same
         row. Best-effort: a store failure is logged, not raised, so a projector
@@ -92,6 +93,7 @@ class NotificationService:
                     pending_id=pending_id,
                     source_event_id=source_event_id,
                     payload=payload,
+                    resolved=resolved,
                 )
                 entry = _entry(row)
                 unread = await datastore.count_unread(user_id) if created else None

@@ -88,8 +88,32 @@ def _drive_async_parse_sync(
 
 _PDF: Final = frozenset({".pdf"})
 _IMAGE: Final = frozenset({".png", ".jpg", ".jpeg", ".tiff", ".bmp", ".webp", ".gif", ".jp2"})
-_OFFICE: Final = frozenset({".doc", ".docx", ".ppt", ".pptx"})
-_SPREADSHEET: Final = frozenset({".xls", ".xlsx"})
+# Classified by what the format IS, not by who can currently read it. The
+# OpenDocument / RTF / EPUB entries land on a cloud plugin that claims
+# ``office`` but cannot parse them — that costs one failed attempt before
+# ``_runtime_fallback_async`` demotes to LightLocal (which handles all of
+# them via anydoc). Filing them under ``text`` would dodge that round-trip
+# but lock them out of cloud parsing forever and put ``.odt`` next to
+# ``.md`` — a worse lie for the next reader.
+_OFFICE: Final = frozenset(
+    {
+        ".doc",
+        ".docx",
+        ".docm",
+        ".ppt",
+        ".pps",
+        ".pot",
+        ".pptx",
+        ".pptm",
+        ".ppsx",
+        ".ppsm",
+        ".odt",
+        ".odp",
+        ".rtf",
+        ".epub",
+    }
+)
+_SPREADSHEET: Final = frozenset({".xls", ".xlsx", ".xlsm", ".xlsb", ".ods"})
 _WEB: Final = frozenset({".html", ".htm"})
 _TEXT: Final = frozenset({".md", ".txt", ".csv", ".json", ".xml"})
 
@@ -132,7 +156,7 @@ class ParserRouter(ParserBackend):
     2. ``parser.primary_plugin_id`` → use it if the plugin supports
        ``kind`` AND its capability for ``kind`` is ``ready``.
     3. ``light_local`` fallback (always supports every kind via
-       MarkItDown / pymupdf4llm / RapidOCR / markdownify).
+       anydoc / pymupdf4llm / RapidOCR / html-to-markdown).
 
     Plus a setup gate: if the resolved plugin's capability is
     ``needs_setup`` (e.g. RapidOCR model not downloaded yet), raise

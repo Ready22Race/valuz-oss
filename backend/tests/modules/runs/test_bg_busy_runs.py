@@ -33,6 +33,9 @@ class _FakeStore:
     async def list_by_ids(self, *_a, **_k):
         return []
 
+    async def latest_events_by_task(self, *_a, **_k):
+        return {}
+
     async def list_run_session_ids(self, *_a, **_k):
         return set()
 

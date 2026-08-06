@@ -3,6 +3,7 @@ import { Renderer } from "@openuidev/react-lang";
 import { openuiLibrary } from "@openuidev/react-ui/genui-lib";
 import { describe, expect, it } from "vitest";
 
+import { renderBlockCatalogText } from "./catalog";
 import { blockComponentGroups, blockComponents, createValuzLibrary } from "./library";
 
 /** The slice of a zod field this file needs; avoids depending on zod internals. */
@@ -44,9 +45,11 @@ describe("valuz genui blocks", () => {
     expect(dangling).toEqual([]);
   });
 
-  it("contributes every block to the generated prompt", () => {
-    const prompt = createValuzLibrary().prompt();
-    for (const c of blockComponents) expect(prompt).toContain(c.name);
+  it("contributes every block to the generated catalog", () => {
+    // The catalog is what the model reads — a block missing from it renders
+    // fine and is never emitted, which looks like the block not working.
+    const catalog = renderBlockCatalogText();
+    for (const c of blockComponents) expect(catalog).toContain(`${c.name}(`);
   });
 
   it("never shadows an OpenUI component", () => {

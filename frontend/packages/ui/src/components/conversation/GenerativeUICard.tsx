@@ -21,7 +21,7 @@ import { GenerativeUIRenderer } from "./GenerativeUIRenderer";
 import { parseGenerativeUIPayload } from "./generative-ui-payload";
 
 export interface GenerativeUICardProps {
-  /** OpenUI Lang string — the generate_ui tool's output. */
+  /** The generate_ui tool's output — an A2UI v0.9 message stream. */
   openui?: string;
   /** Tool status; "running" while the tool hasn't returned yet. */
   status?: "running" | "success" | "error";
@@ -486,7 +486,7 @@ const GENERATIVE_UI_LAYOUT_CSS = `
 `;
 
 /**
- * Renders the OpenUI Lang produced by the ``generate_ui`` MCP tool as live,
+ * Renders the A2UI stream produced by the ``generate_ui`` MCP tool as live,
  * interactive components. Mounted inline via ``ConversationPage``'s
  * ``renderToolCall`` override (the same lift-out seam AskUserQuestion and
  * submit_skill use).
@@ -499,7 +499,7 @@ export function GenerativeUICard({
   const { t } = useI18n();
   const [fullscreenOpen, setFullscreenOpen] = useState(false);
   const payload = parseGenerativeUIPayload(openui);
-  const body = payload.body;
+  const body = payload?.body ?? "";
   const cardTitle = t("genui.cardTitle" as Parameters<typeof t>[0]);
   const fullscreenLabel = t("genui.fullscreen" as Parameters<typeof t>[0]);
   // Reasoning is transient live progress: visible only while the tool runs

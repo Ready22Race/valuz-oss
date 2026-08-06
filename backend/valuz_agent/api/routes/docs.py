@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from valuz_agent.api.deps import get_current_user_id, get_document_service
 from valuz_agent.modules.docs.errors import KbNotFound
 from valuz_agent.modules.docs.service import (
+    SUPPORTED_EXTS,
     DocSearchHit,
     DocumentDetail,
     DocumentLibraryService,
@@ -13,6 +14,7 @@ from valuz_agent.modules.docs.service import (
     ImportTaskResult,
     KbDetail,
     KbTreeNode,
+    is_ingestible,
 )
 
 router = APIRouter(tags=["docs"])
@@ -145,10 +147,36 @@ async def upload_kb_files(
     """
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
+    # Read the batch and check it BEFORE writing anything, so a rejected file
+    # cannot leave half its siblings on disk. Previously every file was written
+    # and the rescan then skipped anything unrecognised (``_run_rescan`` phase
+    # 3), so the upload returned 201, the file landed in the KB folder, and no
+    # document row ever appeared — with nothing anywhere telling the user.
+    #
+    # ``is_ingestible`` is NOT an extension allow-list: an undeclared extension
+    # that decodes as UTF-8 (source files, config, logs) is accepted and read
+    # as text, exactly as the parser's own fallback would. Only genuinely
+    # binary payloads — .zip, .exe, media — are refused.
+    payloads: list[tuple[str, bytes]] = []
+    rejected: list[str] = []
+    for upload in files:
+        name = upload.filename or ""
+        data = await upload.read()
+        payloads.append((name, data))
+        if not is_ingestible(name, data):
+            rejected.append(name)
+    if rejected:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Cannot read as text or a supported document: {', '.join(rejected)}. "
+                f"Supported document types: {', '.join(sorted(SUPPORTED_EXTS))}; "
+                f"any UTF-8 text file is also accepted."
+            ),
+        )
     try:
-        for upload in files:
-            data = await upload.read()
-            await svc.write_file(user_id, kb_id, upload.filename or "", data)
+        for name, data in payloads:
+            await svc.write_file(user_id, kb_id, name, data)
     except KbNotFound as exc:
         raise HTTPException(status_code=404, detail=f"Unknown KB: {kb_id}") from exc
     except ValueError as exc:

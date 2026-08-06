@@ -14,6 +14,7 @@ import type { useConversationHistory } from "./useConversationHistory";
 import type { useConversationScroll } from "./useConversationScroll";
 import type { useConversationSend } from "./useConversationSend";
 import type { useToolCallCards } from "./useToolCallCards";
+import { SlotRenderer } from "@valuz/core";
 
 type ComposerConfig = ReturnType<typeof useComposerConfig>;
 type ConversationHistory = ReturnType<typeof useConversationHistory>;
@@ -172,6 +173,21 @@ export function ConversationBody({
               </div>
             ) : null}
             <ConversationTurnList
+              // Completes the slot added in #744: the prop existed but nothing
+              // passed it, so the slot was unreachable. Overlays register
+              // under ``conversation.turn.actions``.
+              renderTurnActions={(turn) => (
+                <SlotRenderer
+                  name="conversation.turn.actions"
+                  context={{ turn }}
+                />
+              )}
+              renderTurnLeading={(turn, role) => (
+                <SlotRenderer
+                  name="conversation.turn.leading"
+                  context={{ turn, role }}
+                />
+              )}
               // Remount on true session switches so the virtualizer's
               // internal state starts fresh. The /conversation/new → real-id
               // promotion keeps this key stable so the first sent turn

@@ -11,12 +11,20 @@ import {
 } from "@a2ui/web_core/v0_9";
 import * as OpenUI from "@openuidev/react-ui";
 import { Modal as OpenUIModal } from "@openuidev/react-ui/Modal";
-import { blockComponents, blockNames } from "@valuz/genui-blocks";
+import {
+  ROOT_COMPONENT_NAME,
+  builtInBlocksSuppressed,
+  effectiveBlockNames,
+  effectiveBlocks,
+  getRegistryVersion,
+  subscribeBlocks,
+} from "@valuz/genui-blocks";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import {
   createContext,
   useContext,
   useMemo,
+  useSyncExternalStore,
   type CSSProperties,
   type ReactNode,
 } from "react";
@@ -69,9 +77,6 @@ const OPENUI_COMPONENT_NAMES = [
   "KPI",
   "Label",
   "LineChart",
-  "List",
-  "ListBlock",
-  "ListItem",
   "MarkDownRenderer",
   "Markdown",
   "Modal",
@@ -110,9 +115,21 @@ const OPENUI_COMPONENT_NAMES = [
   "Title",
 ];
 
-const BLOCK_BY_NAME = new Map(
-  blockComponents.map((block) => [block.name, block]),
-);
+/**
+ * Name → block, including anything registered at runtime.
+ *
+ * Read through a function rather than captured in a module constant: an edition
+ * registers its components at startup, which is after this module is imported.
+ * A frozen map would accept the built-ins and silently ignore everything an
+ * edition added — the block would render nowhere while still being described
+ * in the prompt, which is the worst of the two failure directions.
+ */
+function blockByName(name: string) {
+  // `effectiveBlocks()` rather than the built-in list: under an edition that
+  // replaces the set, a built-in must not still resolve here — it would render
+  // from a payload while being absent from the prompt.
+  return effectiveBlocks().find((block) => block.name === name);
+}
 
 /**
  * Names retired in favour of a block, kept resolvable so payloads generated
@@ -155,11 +172,18 @@ const RETIRED_TO_BLOCK: Record<
  * to reach this protocol. Retired names stay registered so the runtime still
  * accepts them; the adapter maps them onto their replacement.
  */
-const A2UI_COMPONENT_NAMES = [
-  ...OPENUI_COMPONENT_NAMES,
-  ...blockNames,
-  ...Object.keys(RETIRED_TO_BLOCK),
-];
+function a2uiComponentNames(): string[] {
+  // Under an edition that replaces the set, the only OpenUI name left is the
+  // root — and the retired aliases go with it, since each maps onto a built-in
+  // block that is no longer there. Accepting a name the prompt no longer offers
+  // would let a stale payload render a component the edition removed.
+  if (builtInBlocksSuppressed()) return [ROOT_COMPONENT_NAME, ...effectiveBlockNames()];
+  return [
+    ...OPENUI_COMPONENT_NAMES,
+    ...effectiveBlockNames(),
+    ...Object.keys(RETIRED_TO_BLOCK),
+  ];
+}
 
 /**
  * Render a block from an A2UI component model.
@@ -178,7 +202,7 @@ function renderBlockComponent(
 ): ReactNode | null {
   const retired = RETIRED_TO_BLOCK[name];
   const blockName = retired ? retired.block : name;
-  const block = BLOCK_BY_NAME.get(blockName);
+  const block = blockByName(blockName);
   if (!block) return null;
 
   const props = retired ? retired.map(rawProps) : rawProps;
@@ -202,24 +226,42 @@ function renderBlockComponent(
   return <Impl props={resolved} renderNode={(value) => value as ReactNode} />;
 }
 
-const createA2UIComponent =
-  createBinderlessComponentImplementation as unknown as (
-    api: ComponentApi,
-    render: (props: {
-      context: {
-        componentModel: {
-          type: string;
-          properties: Record<string, unknown>;
-        };
+const createA2UIComponent = createBinderlessComponentImplementation as unknown as (
+  api: ComponentApi,
+  render: (props: {
+    context: {
+      componentModel: {
+        type: string;
+        properties: Record<string, unknown>;
       };
-      buildChild: BuildChild;
-    }) => ReactNode,
-  ) => ReactComponentImplementation;
-const openuiA2UICatalog = new Catalog(CATALOG_ID, createOpenUIComponents());
-const legacyOpenuiA2UICatalog = new Catalog(
-  LEGACY_CATALOG_ID,
-  createOpenUIComponents(),
-);
+    };
+    buildChild: BuildChild;
+  }) => ReactNode,
+) => ReactComponentImplementation;
+/**
+ * The catalogs, rebuilt when the block registry changes.
+ *
+ * They were module constants, which meant they were built at import — before
+ * an edition has registered anything. Cached on the registry version so the
+ * common case still builds them once, and a registration invalidates them.
+ */
+type A2UICatalogPair = [
+  Catalog<ReactComponentImplementation>,
+  Catalog<ReactComponentImplementation>,
+];
+
+let catalogCache: { version: number; catalogs: A2UICatalogPair } | null = null;
+
+function a2uiCatalogs(): A2UICatalogPair {
+  const version = getRegistryVersion();
+  if (catalogCache?.version === version) return catalogCache.catalogs;
+  const catalogs: A2UICatalogPair = [
+    new Catalog(CATALOG_ID, createOpenUIComponents()),
+    new Catalog(LEGACY_CATALOG_ID, createOpenUIComponents()),
+  ];
+  catalogCache = { version, catalogs };
+  return catalogs;
+}
 
 /**
  * id → component, for resolving references that A2UI expresses as ids.
@@ -236,7 +278,10 @@ const A2UIComponentIndex = createContext<Map<string, Record<string, unknown>>>(
 );
 
 export function A2UIRenderer({ body }: A2UIRendererProps) {
-  const surfaces = useMemo(() => buildSurfaces(body), [body]);
+  // Surfaces are rebuilt when a registration lands, not only when the payload
+  // changes: a conversation already on screen must pick up an edition's blocks.
+  const version = useSyncExternalStore(subscribeBlocks, getRegistryVersion, getRegistryVersion);
+  const surfaces = useMemo(() => buildSurfaces(body), [body, version]);
   const index = useMemo(() => buildComponentIndex(body), [body]);
   if (!surfaces.length) return null;
 
@@ -297,10 +342,9 @@ function buildSurfaces(
   );
   if (!messages.length) return [];
 
-  const processor = new MessageProcessor<ReactComponentImplementation>([
-    openuiA2UICatalog,
-    legacyOpenuiA2UICatalog,
-  ]);
+  const processor = new MessageProcessor<ReactComponentImplementation>(
+    a2uiCatalogs(),
+  );
 
   try {
     processor.processMessages(messages as never);
@@ -315,18 +359,18 @@ function buildSurfaces(
 }
 
 function createOpenUIComponents(): ReactComponentImplementation[] {
-  return A2UI_COMPONENT_NAMES.map((name) => {
-    const api = {
-      name,
-      schema: looseComponentSchema,
-    } as unknown as ComponentApi;
-    return createA2UIComponent(api, ({ context, buildChild }) => (
-      <OpenUIComponent
-        name={normalizeOpenUIComponentName(context.componentModel.type)}
-        props={context.componentModel.properties}
-        buildChild={buildChild}
-      />
-    ));
+  return a2uiComponentNames().map((name) => {
+    const api = { name, schema: looseComponentSchema } as unknown as ComponentApi;
+    return createA2UIComponent(
+      api,
+      ({ context, buildChild }) => (
+        <OpenUIComponent
+          name={normalizeOpenUIComponentName(context.componentModel.type)}
+          props={context.componentModel.properties}
+          buildChild={buildChild}
+        />
+      ),
+    );
   });
 }
 
@@ -575,6 +619,18 @@ function OpenUIComponent({
           placeholder={readString(props.placeholder) ?? ""}
           type={readString(props.type) ?? "text"}
           defaultValue={readString(props.value)}
+        />
+      );
+    case "DatePicker":
+      // Presentational, like the other form controls here: A2UI renders a
+      // result, so the picker shows the date the answer is about rather than
+      // taking one. OpenUI's DatePicker is fully controlled, so an unparseable
+      // or absent value leaves it empty instead of defaulting to today —
+      // showing today's date for a value we do not have would be a fabrication.
+      return (
+        <OpenUI.DatePicker
+          mode={readString(props.mode) === "range" ? "range" : "single"}
+          selectedSingleDate={readDate(props.value ?? props.date)}
         />
       );
     case "TextArea":
@@ -871,6 +927,22 @@ function textStyleForSize(size: string): CSSProperties {
   }
 }
 
+/**
+ * Resolve id references against the surface's components.
+ *
+ * The catalog teaches flat ids — `{"id":"root","component":"Tabs","children":
+ * ["t1"]}` with `t1` declared as its own component — so a container's children
+ * arrive as strings, not records. Every sub-item reader below parses records,
+ * and a string that is not resolved first is either skipped outright or read as
+ * its own label: a Tabs that renders nothing, a column headed "c1". Charts
+ * already resolved theirs; the containers did not, and no test used the flat
+ * form, so the gap held.
+ */
+function useRefResolver(): (value: unknown) => unknown[] {
+  const componentIndex = useContext(A2UIComponentIndex);
+  return (value: unknown) => materializeRefs(value, componentIndex);
+}
+
 function MappedTable({
   props,
   buildChild,
@@ -878,7 +950,7 @@ function MappedTable({
   props: Record<string, unknown>;
   buildChild: BuildChild;
 }) {
-  const columns = readColumns(props, buildChild);
+  const columns = readColumns(props, buildChild, useRefResolver());
   const rowCount = columns.length
     ? Math.max(...columns.map((column) => column.values.length), 0)
     : 0;
@@ -918,7 +990,8 @@ function MappedSelect({
   props: Record<string, unknown>;
   buildChild: BuildChild;
 }) {
-  const items = readOptionItems(props.items ?? props.children, buildChild);
+  const resolve = useRefResolver();
+  const items = readOptionItems(resolve(props.items ?? props.children), buildChild);
   return (
     <OpenUI.Select
       name={readString(props.name)}
@@ -947,7 +1020,8 @@ function MappedTabs({
   props: Record<string, unknown>;
   buildChild: BuildChild;
 }) {
-  const items = readTabItems(props.items ?? props.children);
+  const resolve = useRefResolver();
+  const items = readTabItems(resolve(props.items ?? props.children));
   if (!items.length) return null;
   const firstValue = items[0]?.value ?? "";
   return (
@@ -977,7 +1051,8 @@ function MappedAccordion({
   props: Record<string, unknown>;
   buildChild: BuildChild;
 }) {
-  const items = readTabItems(props.items ?? props.children);
+  const resolve = useRefResolver();
+  const items = readTabItems(resolve(props.items ?? props.children));
   if (!items.length) return null;
   return (
     <OpenUI.Accordion type="single" collapsible defaultValue={items[0]?.value}>
@@ -1000,7 +1075,7 @@ function MappedSteps({
   props: Record<string, unknown>;
   buildChild: BuildChild;
 }) {
-  const items = toArray(props.items ?? props.children);
+  const items = useRefResolver()(props.items ?? props.children);
   return (
     <OpenUI.Steps>
       {items.map((item, index) => {
@@ -1028,7 +1103,7 @@ function MappedCarousel({
   props: Record<string, unknown>;
   buildChild: BuildChild;
 }) {
-  const items = toArray(props.items ?? props.children);
+  const items = useRefResolver()(props.items ?? props.children);
   return (
     <OpenUI.Carousel showButtons variant={readString(props.variant) as never}>
       <OpenUI.CarouselContent>
@@ -1297,8 +1372,12 @@ function readRefs(value: unknown, buildChild: BuildChild): ReactNode {
   });
 }
 
-function readColumns(props: Record<string, unknown>, buildChild: BuildChild) {
-  const explicitColumns = toArray(props.columns ?? props.children);
+function readColumns(
+  props: Record<string, unknown>,
+  buildChild: BuildChild,
+  resolve: (value: unknown) => unknown[] = toArray,
+) {
+  const explicitColumns = resolve(props.columns ?? props.children);
   if (explicitColumns.length) {
     return explicitColumns
       .map((column) => readColumn(column, buildChild))
@@ -1768,6 +1847,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function readString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function readDate(value: unknown): Date | undefined {
+  const text = readString(value);
+  if (!text) return undefined;
+  const date = new Date(text);
+  return Number.isNaN(date.getTime()) ? undefined : date;
 }
 
 function readNumber(value: unknown): number | undefined {

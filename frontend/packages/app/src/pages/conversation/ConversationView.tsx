@@ -1,4 +1,4 @@
-import { type SessionMessageHostRef } from "@valuz/core";
+import { useSurfaceSuppressed, type SessionMessageHostRef } from "@valuz/core";
 import { DeleteConfirmDialog, BackgroundTaskStrip } from "@valuz/ui";
 import { useProjectOutlet } from "@valuz/app/layout";
 import { ArtifactSplitPane } from "../../components/ArtifactSplitPane";
@@ -108,6 +108,7 @@ function useOrchestration(
 function ConversationViewPage(props: ConversationViewProps) {
   const { directoryFieldMode, setRightPanel, setHeader, setHideHeader } =
     useProjectOutlet();
+  const composerSuppressed = useSurfaceSuppressed("conversation.composer");
   const core = useOrchestration(props, "page", directoryFieldMode);
 
   const { handleSend, hasPendingProjectSend } = useProjectHandoff({
@@ -264,6 +265,10 @@ function ConversationViewPage(props: ConversationViewProps) {
             state (finished / stopped-on-runtime-close). */}
           <BackgroundTaskStrip tasks={core.runningBgTasks} />
 
+          {/* An overlay in a take-over mode (share selection) suppresses this:
+              leaving the composer live invites sending a message in a mode
+              where that makes no sense. */}
+          {composerSuppressed ? null : (
           <ComposerPane
             showScrollBottom={core.showScrollBottom}
             handleScrollToBottom={core.handleScrollToBottom}
@@ -341,6 +346,7 @@ function ConversationViewPage(props: ConversationViewProps) {
             setParsingConfirmOpen={core.setParsingConfirmOpen}
             performSend={core.performSend}
           />
+          )}
         </div>
       </ArtifactSplitPane>
 

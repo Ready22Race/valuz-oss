@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -47,7 +48,10 @@ class InboxMsg:
     kind: InboxKind
     text: str = ""
     from_session: str = ""
-    payload: dict[str, Any] = field(default_factory=dict)
+    # ``Mapping`` not ``dict``: ``member_done`` carries a ``MemberManifest``
+    # TypedDict, and dict is invariant — a dict[str, Any] annotation would
+    # force every producer to erase the type it just built.
+    payload: Mapping[str, Any] = field(default_factory=dict)
 
 
 class MailboxRegistry:

@@ -28,6 +28,7 @@ import {
   cn,
 } from "@valuz/ui";
 import { OriginBadge } from "../../components/ExecutionLocationPicker";
+import { SlotRenderer } from "@valuz/core";
 import { SessionStatusPill } from "./SessionStatusPill";
 import type { useComposerConfig } from "./useComposerConfig";
 import type { useConversationHistory } from "./useConversationHistory";
@@ -234,6 +235,16 @@ export function ConversationHeader({
                 </DropdownMenu>
               )
             ) : null}
+            {/* Host actions for THIS session (share, export…), placed next to
+                the title rather than in the app top bar: the top bar is shared
+                by every page, so a session-scoped control there would have to
+                keep proving which session it means. Rendered through the slot
+                registry — this package depends on ``@valuz/core``, unlike
+                ``@valuz/ui`` where the same need is served by a ReactNode prop. */}
+            <SlotRenderer
+              name="conversation.title.actions"
+              context={{ sessionId: selectedSessionId, session: selectedSession }}
+            />
             <SessionStatusPill
               // ``created`` is exactly the state a not-yet-minted session is
               // in: accepted, not running. It is the same pill the promoted

@@ -23,8 +23,10 @@ import logging
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.tasks.datastore import TaskDatastore, TaskEventDatastore
+from valuz_agent.modules.tasks.models import TaskEventRow
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +71,7 @@ async def finalize_task(
     actor: str,
     session_id: str | None = None,
     payload: dict[str, Any] | None = None,
-) -> Any:  # returns the appended TaskEventRow
+) -> TaskEventRow | None:
     """THE terminal write — every site that ends a task goes through here:
     status flip (through the ``task_state`` guard) + ``task.finalized`` bus
     announce + the terminal event row (returned, for notifications).
@@ -129,7 +131,7 @@ async def block_task(
     reason: str,
     session_id: str | None = None,
     payload: dict[str, Any] | None = None,
-) -> Any:  # returns the appended TaskEventRow
+) -> TaskEventRow | None:
     """Put a task into ``blocked`` AND raise the user-facing notification.
 
     ``blocked`` is the single "needs your attention" state, so the

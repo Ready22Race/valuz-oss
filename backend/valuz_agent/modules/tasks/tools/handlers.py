@@ -540,7 +540,7 @@ async def _authorize_task_conversation_caller(
     if task is None:
         return ToolResult(content=f"{tool}: task {task_id!r} not found", is_error=True)
     v: dict[str, Any] = (sess.metadata or {}).get("valuz", {})
-    caller_ws = getattr(sess, "project_id", "") or v.get("project_id", "")
+    caller_ws = v.get("project_id", "")  # SessionData has no project_id field
     origin = (task.metadata_ or {}).get("originating_session_id")
     if not ((origin and sess.id == origin) or (caller_ws and caller_ws == task.project_id)):
         return ToolResult(
@@ -625,7 +625,10 @@ async def _create_task_handler(
     lead_agent = await _resolve_task_lead(
         user_id=ctx.user_id,
         project_id=project_id,
-        explicit_slug=args.get("lead_agent"),
+        # ``lead_agent_slug`` is the declared name (matching draft_task);
+        # ``lead_agent`` was the old spelling — keep reading it so a model
+        # working from a cached tool schema still lands.
+        explicit_slug=args.get("lead_agent_slug") or args.get("lead_agent"),
         conversation_agent_slug=conversation_agent_slug,
     )
     if not lead_agent:
@@ -654,7 +657,7 @@ async def _create_task_handler(
             {
                 "task_id": task_row.id,
                 "title": task_row.title,
-                "lead_agent": lead_agent,
+                "lead_agent_slug": lead_agent,
                 "status": "active",
             },
             ensure_ascii=False,
@@ -709,7 +712,7 @@ async def _list_members_handler(
     if sess is None:
         return ToolResult(content="list_members: caller session not found", is_error=True)
     v: dict[str, Any] = (sess.metadata or {}).get("valuz", {})
-    project_id = v.get("project_id", "") or getattr(sess, "project_id", "")
+    project_id = v.get("project_id", "")  # SessionData has no project_id field
     if not project_id:
         return ToolResult(content="list_members: caller session has no project", is_error=True)
 

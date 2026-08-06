@@ -21,7 +21,7 @@ from uuid import uuid4
 import valuz_agent.boot.kernel  # noqa: F401  (sets kernel import path)
 from valuz_agent.adapters import kernel_client
 from valuz_agent.infra.fs_registry import fs_registry
-from valuz_agent.modules.genui.prompts import GENERATIVE_UI_INSTRUCTIONS
+from valuz_agent.modules.genui.protocol import OUTPUT_FORMAT, a2ui_instructions
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ _LOG_PREVIEW_CHARS = 240
 _DIRECT_GENUI_MAX_TOKENS = 16384
 
 # Ephemeral event type → live event type emitted on the CALLING session.
-# ``text_delta`` is the OpenUI code stream (frontend concatenates it into the
+# ``text_delta`` is the generated A2UI stream (frontend concatenates it into the
 # tool card's output for progressive <Renderer> paint). ``thinking_delta``
 # rides a SEPARATE type — ``tool.call.output_delta`` is concatenated into the
 # code stream unconditionally, so reasoning text through the same channel
@@ -72,7 +72,7 @@ def _is_deepseek_anthropic_channel(*, model: str, mp: Any) -> bool:
 def _with_direct_llm_final_output_requirement(
     prompt: str,
     *,
-    output_format: str = "OpenUI Lang",
+    output_format: str = OUTPUT_FORMAT,
 ) -> str:
     requirement = (
         "Direct LLM final-output requirement: if you perform any thinking or reasoning, "
@@ -91,8 +91,8 @@ def _make_completer(
     mp: Any,
     calling_session_id: str | None = None,
     tool_use_id: str | None = None,
-    session_instructions: str = GENERATIVE_UI_INSTRUCTIONS,
-    output_format: str = "OpenUI Lang",
+    session_instructions: str = a2ui_instructions(),
+    output_format: str = OUTPUT_FORMAT,
 ) -> Completer:
     """Build the ``complete`` seam backed by a throwaway no-tools kernel session
     cloning the source's runtime/provider/model. Each call is a fresh ephemeral
@@ -237,14 +237,14 @@ def _make_direct_llm_completer(
     mp: Any,
     calling_session_id: str | None = None,
     tool_use_id: str | None = None,
-    output_format: str = "OpenUI Lang",
+    output_format: str = OUTPUT_FORMAT,
 ) -> Completer:
     """Build a no-session completer for API-key / non-official model channels.
 
     ``CreateSessionRequest`` is only needed for Claude/Codex official CLI
-    subscription auth. When ``mp`` carries an explicit key, generating OpenUI is
+    subscription auth. When ``mp`` carries an explicit key, generating the UI is
     a one-shot text completion; stream the model chunks directly into the
-    original tool card and return the assembled OpenUI Lang.
+    original tool card and return the assembled message stream.
     """
     if mp is None or not getattr(mp, "api_key", None):
         raise ValueError("generate_ui: direct LLM path requires model credentials")

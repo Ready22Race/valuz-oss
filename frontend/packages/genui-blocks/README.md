@@ -1,7 +1,7 @@
 # @valuz/genui-blocks
 
 Generative-UI blocks that extend the OpenUI component library, written to the
-OpenUI component spec so an LLM can emit them as OpenUI Lang.
+OpenUI component spec so an LLM can emit them in an A2UI v0.9 message stream.
 
 ## Why this package exists
 

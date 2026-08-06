@@ -14,7 +14,7 @@ export const ContextCard = defineComponent({
   description:
     "Explanatory context to set beside a chart or a table: a title, the body text, and an optional source line for attribution (\"Source: Q3 filings, 2026\"). " +
     "Use it for the caveat, the methodology, or the definition a reader needs to trust the figure next to it — not for the finding itself. " +
-    "source renders quietly at the foot of the card; leave it out when the data is the user's own." +
+    "source renders quietly at the foot of the card; leave it out when the data is the user's own. " +
     "icon is any lucide-react icon name, shown as a small mark beside the heading — put it there rather than pasting an emoji into the text.",
   component: ({ props }) => (
     <div className="vgb-card vgb-context-card" data-slot="vgb-context-card">

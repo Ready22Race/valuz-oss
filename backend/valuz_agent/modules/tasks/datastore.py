@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+from collections.abc import Mapping
 from typing import Any, cast
 
 from sqlalchemy import case, func, select, update
@@ -30,6 +31,7 @@ from valuz_agent.infra.db import async_commit_with_retry
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionRow
 from valuz_agent.modules.tasks.task_state import (
+    RunStatus,
     TaskStateError,
     assert_transition,
     is_valid_status,
@@ -179,6 +181,38 @@ class TaskDatastore:
             .scalars()
             .all()
         )
+
+    async def list_active_lead_bindings(self) -> list[tuple[str, str, str, str | None]]:
+        """SYSTEM SWEEP: ``(task_id, user_id, project_id, lead_session_id)`` for
+        every active task, in ONE query.
+
+        The health watchdog runs per minute for the life of the process. It
+        used to call ``list_active`` — full rows, ``plan`` JSON and all — and
+        then one ``list_runs`` per task to find the lead: 1 + N queries a
+        minute, growing with install age, to read four columns. The lead run
+        is joined here instead, and a rejected lead (a commit-race loser, see
+        ``pick_lead_run``) is excluded in SQL so the live one wins the pick.
+        """
+        lead = TaskSessionRow
+        rows = (
+            await self._db.execute(
+                select(TaskRow.id, TaskRow.user_id, TaskRow.project_id, lead.session_id)
+                .select_from(TaskRow)
+                .outerjoin(
+                    lead,
+                    (lead.task_id == TaskRow.id)
+                    & (lead.kind == "lead")
+                    & (lead.status != "rejected"),
+                )
+                .where(TaskRow.status == "active")
+            )
+        ).all()
+        # An active task with two non-rejected lead rows would duplicate; keep
+        # the first binding per task so the sweep still sees each task once.
+        seen: dict[str, tuple[str, str, str, str | None]] = {}
+        for task_id, user_id, project_id, session_id in rows:
+            seen.setdefault(task_id, (task_id, user_id, project_id, session_id))
+        return list(seen.values())
 
     async def list_active(self) -> list[TaskRow]:
         """SYSTEM SWEEP (cross-owner). All ``active`` tasks across every owner —
@@ -384,6 +418,49 @@ class TaskEventDatastore:
             )
         ).scalar_one_or_none()
 
+    async def latest_events_by_task(
+        self, user_id: str, task_ids: list[str]
+    ) -> dict[str, TaskEventRow]:
+        """The most recent event for EACH of several tasks, in one query.
+
+        The activity overview builds its rows concurrently
+        (``asyncio.gather``); calling the single-task read from inside that
+        fan-out issued concurrent statements on ONE ``AsyncSession``, which
+        SQLAlchemy does not support — and the overview's per-row
+        ``except Exception`` swallowed the resulting InvalidRequestError as
+        "failed to build summary", silently dropping runs from the list.
+        Resolve the whole batch up front instead.
+        """
+        if not task_ids:
+            return {}
+        # Window by (task_id, sequence desc) so SQLite returns one row per task.
+        ranked = (
+            select(
+                TaskEventRow,
+                func.row_number()
+                .over(
+                    partition_by=TaskEventRow.task_id,
+                    order_by=TaskEventRow.sequence.desc(),
+                )
+                .label("rn"),
+            )
+            .where(
+                TaskEventRow.task_id.in_(task_ids),
+                TaskEventRow.user_id == user_id,
+            )
+            .subquery()
+        )
+        rows = (
+            await self._db.execute(
+                select(TaskEventRow).from_statement(
+                    select(TaskEventRow).where(
+                        TaskEventRow.id.in_(select(ranked.c.id).where(ranked.c.rn == 1))
+                    )
+                )
+            )
+        ).scalars()
+        return {r.task_id: r for r in rows}
+
     # -- Commands --
 
     async def append_event(
@@ -576,8 +653,8 @@ class TaskSessionDatastore:
     async def update_run_by_session(
         self,
         session_id: str,
-        status: str,
-        result_manifest: dict[str, Any] | None = None,
+        status: RunStatus,
+        result_manifest: Mapping[str, Any] | None = None,
         ended_at: int | None = None,
     ) -> bool:
         """SYSTEM update by the globally-unique kernel ``session_id`` (kernel-
@@ -603,8 +680,8 @@ class TaskSessionDatastore:
         self,
         session_id: str,
         *,
-        status: str,
-        result_manifest: dict[str, Any] | None = None,
+        status: RunStatus,
+        result_manifest: Mapping[str, Any] | None = None,
         ended_at: int | None = None,
     ) -> bool:
         """Loop-exit settlement, gated on the run still being ``active``.

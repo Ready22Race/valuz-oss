@@ -656,6 +656,31 @@ async def recover_active_tasks() -> None:
         logging.getLogger(__name__).exception("recover_active_tasks failed")
 
 
+async def resolve_informational_notification_backlog() -> None:
+    """Close notifications that report a FINISHED thing but were left open.
+
+    Completions are ingested already-resolved, so they toast and land in
+    history without occupying the action inbox. Rows written before that sat
+    in "未处理" wearing a Resume button, and nothing else would ever clear
+    them — a day of successful runs buried the failures that do need
+    attention. One sweep at boot; a no-op once drained.
+    """
+    import logging
+
+    from valuz_agent.infra.db import async_unit_of_work
+    from valuz_agent.modules.notifications.datastore import NotificationDatastore
+
+    try:
+        async with async_unit_of_work() as db:
+            closed = await NotificationDatastore(db).resolve_informational_backlog()
+        if closed:
+            logging.getLogger(__name__).info(
+                "notifications: closed %d informational notification(s) left open", closed
+            )
+    except Exception:  # noqa: BLE001 — startup must not block on bookkeeping
+        logging.getLogger(__name__).exception("informational notification sweep failed")
+
+
 async def start_mcp_session_managers(app: FastAPI) -> None:
     """Bring the in-process docs MCP session manager online.
 
@@ -753,7 +778,7 @@ async def stop_polling_scheduler() -> None:
 
 def warm_parse_pool() -> None:
     """Pre-spawn the document-parser worker processes. Local parses
-    (pymupdf4llm / markitdown) run in a separate process so their GIL-bound
+    (pymupdf4llm) run in a separate process so their GIL-bound
     work can't stall the event loop; warming here pays the spawn + import cost
     at boot instead of on the first upload. Best-effort, never fatal."""
     from valuz_agent.infra import parse_pool

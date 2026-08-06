@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import logging
 import json
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -22,16 +22,6 @@ def _ctx(session_id="s1", user_id="u1"):
 
 @pytest.fixture
 def patched(monkeypatch):
-    if hasattr(t, "settings"):
-        monkeypatch.setattr(t.settings, "genui_protocol", "openui")
-    else:
-        monkeypatch.setattr(
-            t,
-            "settings",
-            SimpleNamespace(genui_protocol="openui"),
-            raising=False,
-        )
-
     async def _get_session(user_id, sid):
         return SimpleNamespace(
             model="claude-sonnet-4-6",
@@ -52,7 +42,7 @@ def patched(monkeypatch):
     monkeypatch.setattr(t, "resolve_model_provider", _resolve)
 
     async def _fake_completer(prompt):
-        return "Chart\n  data: 5,10"
+        return '{"version":"v0.9","createSurface":{"surfaceId":"s"}}'
 
     monkeypatch.setattr(t, "_make_completer", lambda **kw: _fake_completer)
 
@@ -62,16 +52,15 @@ def patched(monkeypatch):
     monkeypatch.setattr(t, "resolve_tool_use_id", _no_tool_use_id)
 
 
-async def test_handler_returns_openui_lang_when_configured(patched):
+async def test_handler_wraps_the_stream_in_the_client_envelope(patched):
     defs = build_generative_ui_tool_defs()
     handler = defs[0].handler
     res = await handler({"request": "sales chart"}, _ctx())
     assert res.is_error is False
-    assert res.content == "Chart\n  data: 5,10"
+    assert json.loads(res.content)["protocol"] == "a2ui-json"
 
 
 async def test_handler_defaults_to_a2ui_payload(monkeypatch, patched):
-    monkeypatch.setattr(t.settings, "genui_protocol", "a2ui")
     seen = {}
 
     async def _comp(prompt):
@@ -184,7 +173,7 @@ async def test_handler_resolves_tool_use_id_and_streams(monkeypatch, patched):
     monkeypatch.setattr(t, "_make_completer", _make)
     handler = build_generative_ui_tool_defs()[0].handler
     res = await handler({"request": "chart"}, _ctx())
-    assert res.content == "Chart" and res.is_error is False
+    assert json.loads(res.content)["content"] == "Chart" and res.is_error is False
     assert completer_calls["kw"]["calling_session_id"] == "s1"
     assert completer_calls["kw"]["tool_use_id"] == "R-FOUND"
     assert captured["resolve_args"]["session_id"] == "s1"
@@ -233,7 +222,7 @@ async def test_handler_retries_when_generation_returns_blank(monkeypatch, patche
         res = await handler({"request": "chart"}, _ctx())
 
     assert res.is_error is False
-    assert res.content == "Chart"
+    assert json.loads(res.content)["content"] == "Chart"
     assert calls == 2
     assert "generate_ui: generation returned blank output on attempt 1/2" in caplog.text
 
@@ -259,6 +248,6 @@ async def test_handler_retries_when_generation_raises(monkeypatch, patched, capl
         res = await handler({"request": "chart"}, _ctx())
 
     assert res.is_error is False
-    assert res.content == "Chart"
+    assert json.loads(res.content)["content"] == "Chart"
     assert calls == 2
     assert "generate_ui: generation attempt 1/2 failed" in caplog.text

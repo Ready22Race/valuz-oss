@@ -394,7 +394,7 @@
     "startHere": "Tell me what you want to do, any task can start here.",
     "stop": "Stop",
     "supplementary": "Supplementary",
-    "supportedFormats": "Supports PDF, Word, Markdown, Excel, CSV",
+    "supportedFormats": "Supports PDF, Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, Markdown, CSV",
     "switchModel": "Switch model",
     "syncSkillFailed": "Sync failed: {error}",
     "syncedSkills": "Synced {count} skills to library",
@@ -676,7 +676,7 @@
     "statusReady": "Ready",
     "statusSourceMissing": "Source file missing",
     "statusWaiting": "Waiting",
-    "supportedFormats": "Supports PDF, DOCX, Markdown, CSV and scanned images, with complex layouts routed to advanced parsing",
+    "supportedFormats": "Supports PDF, Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, Markdown, CSV and scanned images, with complex layouts routed to advanced parsing",
     "uploadFiles": "Upload files",
     "uploaded": "Uploaded",
     "groupPersonal": "Personal"
@@ -1491,9 +1491,9 @@
       "followPrimaryOption": "Follow primary",
       "followPrimaryPlaceholder": "Follow primary ({name})",
       "kindImage": "Images",
-      "kindOffice": "Word / PPT",
+      "kindOffice": "Word / PPT / ODF / RTF / EPUB",
       "kindPdf": "PDF Documents",
-      "kindSpreadsheet": "Excel",
+      "kindSpreadsheet": "Excel / ODS",
       "kindText": "Plain Text / Markdown",
       "kindWeb": "HTML Pages",
       "loadFailed": "Failed to load parsing config: {error}",
@@ -2675,7 +2675,15 @@
     "reworkUserStopped": "The user manually stopped this subtask",
     "summaryUserStopped": "The user stopped this subtask",
     "statusAbandoned": "Abandoned",
-    "subtaskHalted": "Stopped before reporting"
+    "subtaskHalted": "Stopped before reporting",
+    "brief": {
+      "goalSpilledLead": "This task's full goal is too long to pass inline (over the {budget}-token budget) and has been written to a document.\n\nRead the document below IN FULL with a file-read tool first — it holds the task's complete goal, references and acceptance criteria — then work from it until that goal is met:\n\n{path}",
+      "goalSpilledMember": "This subtask's full goal is too long to pass inline (over the {budget}-token budget) and has been written to a document.\n\nRead the document below IN FULL with a file-read tool first — it holds the subtask's complete goal, references and acceptance criteria — then work from it until that goal is met:\n\n{path}",
+      "recoveryLead": "This task has been resumed (app restart or user resume). Subtask reconciliation:\n{summary}\n\nCall get_plan FIRST to align with the current state, then keep orchestrating: dispatch pending subtasks, review the ones in_review, retry the ones in rework. Call finish_task once everything is done.",
+      "recoveryNoMembers": "(no subtasks were in flight)",
+      "recoveryUserInstruction": "The instruction above came with the resume — it is authoritative user intent. Adjust your orchestration accordingly (modify_plan / rework if needed) before continuing.",
+      "memberResumeDefault": "Continue your subtask; report back to the lead when it is done."
+    }
   },
   "marketplace": {
     "title": "Marketplace",
@@ -2840,6 +2848,7 @@
     "historyEmpty": "No history yet",
     "historyLoadFailed": "Failed to load history",
     "loadMore": "Load more",
-    "kindCompleted": "Completed"
+    "kindCompleted": "Completed",
+    "notifCompletedTitle": "Task finished: {task}"
   }
 }

@@ -45,7 +45,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import JSON, BigInteger, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, BigInteger, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from valuz_agent.infra.database import Base, PrimaryKeyMixin, TimestampMixin, UserMixin
@@ -55,6 +55,15 @@ class TaskRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     """Durable task header — one row per task kickoff."""
 
     __tablename__ = "valuz_task"
+
+    __table_args__ = (
+        # ``list_all`` (sidebar) and ``list_tasks_page`` (polled activity feed)
+        # are WHERE user_id ... ORDER BY updated_at DESC LIMIT n — without the
+        # composite they sort every row of the owner, plan JSON included.
+        Index("ix_valuz_task_user_updated", "user_id", "updated_at"),
+        # ``list_active`` runs every 60s from the health watchdog.
+        Index("ix_valuz_task_status", "status"),
+    )
 
     project_id: Mapped[str] = mapped_column(String(36), index=True)
     # Relative path within project.cwd: tasks/<id>-<slug>.md
@@ -127,7 +136,9 @@ class TaskEventRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
         UniqueConstraint("project_id", "task_id", "sequence", name="uq_task_event_ws_task_seq"),
     )
 
-    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    # NOT indexed on its own: every query filters project_id together with
+    # task_id, which the unique constraint above already covers as a prefix.
+    project_id: Mapped[str] = mapped_column(String(36))
     task_id: Mapped[str] = mapped_column(String(36), index=True)
     # Monotonic per (project_id, task_id); host assigns on append
     sequence: Mapped[int] = mapped_column(Integer)
@@ -147,7 +158,9 @@ class TaskSessionRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
 
     __tablename__ = "valuz_task_session"
 
-    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    # NOT indexed: no query filters runs by project_id alone (task_id and
+    # session_id are the access paths).
+    project_id: Mapped[str] = mapped_column(String(36))
     # NULL for independent sessions (not yet used; reserved for §3 isolation)
     task_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     # References kernel sessions.id — business key, NO FK constraint

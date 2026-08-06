@@ -46,6 +46,7 @@ from valuz_agent.ports.connector_oauth_refresh import (
 )
 from valuz_agent.ports.document_research import DocumentResearchProviderPort
 from valuz_agent.ports.file_address import FileAddressResolverPort, LocalFileAddressResolver
+from valuz_agent.ports.genui_blocks import GenUIBlockRegistry
 from valuz_agent.ports.instructions import (
     GlobalInstructionsPort,
     OSSGlobalInstructionsProvider,
@@ -122,6 +123,12 @@ class Extensions:
         # provider. The effective declarative snapshot is re-stamped before
         # every turn so user-authored session metadata cannot weaken the gate.
         self.citation_quality_policies = CitationQualityPolicyRegistry()
+        # GenUI block catalog layers (same fixed commercial → distribution
+        # order). Editions register the catalog text their frontend build
+        # generated; the generate_ui prompt assembles from it per call, so a
+        # registration is live without a process restart. See
+        # docs/design/genui-dynamic-blocks.md.
+        self.genui_blocks = GenUIBlockRegistry()
         # Resolve a file's absolute path into a client-usable access address
         # (see docs/design/file-address-resolution.md). OSS default returns the
         # local absolute path (bundled desktop reads it directly); the commercial

@@ -1,6 +1,12 @@
-import { blockNames } from "@valuz/genui-blocks";
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import {
+  blockNames,
+  registerBlocks,
+  resetRuntimeBlocks,
+} from "@valuz/genui-blocks";
+import { defineComponent } from "@openuidev/react-lang";
+import { cleanup, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it } from "vitest";
+import { z } from "zod/v4";
 
 import { A2UIRenderer } from "./A2UIRenderer";
 
@@ -19,6 +25,20 @@ function a2ui(components: Record<string, unknown>[]): string {
     .map((m) => JSON.stringify(m))
     .join("\n");
 }
+
+const EditionCard = defineComponent({
+  name: "EditionCard",
+  props: z.object({ label: z.string() }),
+  description: "An edition's own block, standing in for a curated vertical set.",
+  component: ({ props }) => <div>{props.label}</div>,
+});
+
+// Unmount before clearing the registry: the renderer subscribes to it, so a
+// reset while it is still mounted is a store update outside act().
+afterEach(() => {
+  cleanup();
+  resetRuntimeBlocks();
+});
 
 describe("A2UI ↔ genui-blocks bridge", () => {
   it("renders a block's scalar props", () => {
@@ -130,5 +150,25 @@ describe("A2UI ↔ genui-blocks bridge", () => {
     expect(blockNames).toContain("MiniCard");
     expect(blockNames).toContain("ReportPage");
     expect(blockNames).toContain("Citation");
+  });
+
+  it("stops resolving the replaced vocabulary under an edition", () => {
+    // A2UI is the second protocol, so it is where suppression is most likely to
+    // be forgotten: a payload naming a built-in block or an OpenUI component
+    // would still render it while the prompt no longer offers it.
+    registerBlocks("finance", [EditionCard], { mode: "replace", groupName: "Finance" });
+    render(
+      <A2UIRenderer
+        body={a2ui([
+          { id: "root", component: "Stack", children: ["own", "gone", "atom"] },
+          { id: "own", component: "EditionCard", label: "自有" },
+          { id: "gone", component: "MiniCard", label: "Revenue", value: "$4.2M" },
+          { id: "atom", component: "Callout", text: "Removed" },
+        ])}
+      />,
+    );
+    expect(screen.getByText("自有")).toBeTruthy();
+    expect(screen.queryByText("Revenue")).toBeNull();
+    expect(screen.queryByText("Removed")).toBeNull();
   });
 });

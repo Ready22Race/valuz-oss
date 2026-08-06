@@ -380,11 +380,13 @@ def test_chat_created_task_is_attributed_to_the_user(monkeypatch):
 
     class _Reader:
         async def get_session(self, _uid, sid):
+            # Shaped like a REAL kernel SessionData: no ``project_id``
+            # attribute (the schema has none) — the project lives in valuz
+            # metadata, which is where both session-creation paths write it.
             return SimpleNamespace(
                 id=sid,
                 user_id=LOCAL_USER_ID,
-                project_id="w1",
-                metadata={"valuz": {"agent_slug": "helper"}},
+                metadata={"valuz": {"agent_slug": "helper", "project_id": "w1"}},
             )
 
     monkeypatch.setattr(dr_mod, "data_reader", lambda: _Reader())

@@ -2,11 +2,12 @@ import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 
-vi.mock("@openuidev/react-lang", () => ({
-  Renderer: (props: { response: string; isStreaming?: boolean }) => (
-    <div data-testid="renderer" data-streaming={props.isStreaming ? "true" : "false"}>
-      {props.response}
-    </div>
+// Stubbing the renderer keeps this file about the card's chrome; what A2UI
+// draws is covered by A2UIRenderer's own tests and by
+// GenerativeUICard.blocks.test.tsx, which mocks nothing.
+vi.mock("./A2UIRenderer", () => ({
+  A2UIRenderer: (props: { body: string }) => (
+    <div data-testid="renderer">{props.body}</div>
   ),
 }));
 vi.mock("@openuidev/react-ui", () => ({
@@ -17,19 +18,6 @@ vi.mock("@openuidev/react-ui", () => ({
 vi.mock("@openuidev/react-ui/Modal", () => ({
   Modal: ({ children }: { children: ReactNode }) => <>{children}</>,
 }));
-// The OpenUI Lang branch no longer builds its library from OpenUI's alone — it
-// merges in @valuz/genui-blocks. Stubbing the factory keeps this file about the
-// card's own behaviour; the merge itself is covered by that package's tests and
-// by GenerativeUICard.blocks.test.tsx, which use the real parser rather than a
-// stub Renderer.
-vi.mock("@valuz/genui-blocks", () => ({
-  createValuzLibrary: () => ({}),
-  // A2UIRenderer builds its component registry from these; this file exercises
-  // the card's chrome, so an empty registry is the point — no block should be
-  // needed to render it.
-  blockComponents: [],
-  blockNames: [],
-}));
 vi.mock("../../hooks/use-i18n", () => ({
   useI18n: () => ({ t: (k: string) => k }),
 }));
@@ -37,14 +25,30 @@ vi.mock("../../hooks/use-i18n", () => ({
 import { GenerativeUICard } from "./GenerativeUICard";
 import { extractContentText } from "./generative-ui-payload";
 
+const a2ui = (text: string) =>
+  [
+    { version: "v0.9", createSurface: { surfaceId: "s", catalogId: "openui" } },
+    {
+      version: "v0.9",
+      updateComponents: {
+        surfaceId: "s",
+        components: [{ id: "root", component: "TextContent", text }],
+      },
+    },
+  ]
+    .map((m) => JSON.stringify(m))
+    .join("\n");
+
+const CHART = a2ui("Chart");
+
 describe("GenerativeUICard", () => {
-  it("renders the OpenUI Renderer with the openui payload", () => {
-    render(<GenerativeUICard openui={"Chart\n  data: 1"} />);
-    expect(screen.getByTestId("renderer").textContent).toBe("Chart\n  data: 1");
+  it("renders the payload through the A2UI renderer", () => {
+    render(<GenerativeUICard openui={CHART} />);
+    expect(screen.getByTestId("renderer").textContent).toBe(CHART);
   });
 
   it("adds a fullscreen action to the title row and opens a fullscreen preview", () => {
-    render(<GenerativeUICard openui={"Chart\n  data: 1"} />);
+    render(<GenerativeUICard openui={CHART} />);
 
     const action = screen.getByRole("button", { name: "genui.fullscreen" });
     expect(action.closest('[data-slot="generative-ui-card"]')).toBeTruthy();
@@ -56,9 +60,7 @@ describe("GenerativeUICard", () => {
     expect(screen.getByRole("dialog").className).toContain("bottom-4");
     expect(screen.getByTestId("genui-fullscreen")).toBeTruthy();
     expect(screen.getAllByTestId("renderer")).toHaveLength(2);
-    expect(screen.getAllByTestId("renderer")[1]?.textContent).toBe(
-      "Chart\n  data: 1",
-    );
+    expect(screen.getAllByTestId("renderer")[1]?.textContent).toBe(CHART);
   });
 
   it("lets horizontal charts expand to show every data row", () => {
@@ -132,11 +134,10 @@ describe("GenerativeUICard", () => {
 
   it("unwraps a JSON content-block envelope before rendering", () => {
     // The kernel JSON-stringifies MCP TextContent at the SSE boundary — the
-    // tool output arrives as [{"type":"text","text":"<OpenUI Lang>"}], not raw.
-    const openuiLang = 'root = Stack([header], "column", "l")';
-    const envelope = JSON.stringify([{ type: "text", text: openuiLang }]);
+    // tool output arrives as [{"type":"text","text":"<stream>"}], not raw.
+    const envelope = JSON.stringify([{ type: "text", text: CHART }]);
     render(<GenerativeUICard openui={envelope} />);
-    expect(screen.getByTestId("renderer").textContent).toBe(openuiLang);
+    expect(screen.getByTestId("renderer").textContent).toBe(CHART);
   });
 
   it("shows an empty state when there is no output yet", () => {
@@ -144,16 +145,17 @@ describe("GenerativeUICard", () => {
     expect(screen.getByTestId("genui-empty")).toBeTruthy();
   });
 
-  it("renders in streaming mode while running", () => {
-    render(<GenerativeUICard openui={"Chart\n  data: 1"} status="running" />);
-    const r = screen.getByTestId("renderer");
-    expect(r.getAttribute("data-streaming")).toBe("true");
-    expect(r.textContent).toBe("Chart\n  data: 1");
+  it("marks the subtree as still filling in while running", () => {
+    // A partly written payload renders what has arrived, so without the marker
+    // a half-built document looks like a finished one that came out short.
+    const { container } = render(<GenerativeUICard openui={CHART} status="running" />);
+    expect(container.querySelector('[data-a2ui-streaming="true"]')).toBeTruthy();
+    expect(screen.getByTestId("renderer").textContent).toBe(CHART);
   });
 
-  it("renders non-streaming on success", () => {
-    render(<GenerativeUICard openui={"Chart"} status="success" />);
-    expect(screen.getByTestId("renderer").getAttribute("data-streaming")).toBe("false");
+  it("drops the marker on success", () => {
+    const { container } = render(<GenerativeUICard openui={CHART} status="success" />);
+    expect(container.querySelector("[data-a2ui-streaming]")).toBeNull();
   });
 
   it("streams the reasoning while running, replacing the bare generating placeholder", () => {
@@ -167,22 +169,22 @@ describe("GenerativeUICard", () => {
   });
 
   it("keeps the reasoning visible alongside the progressive render", () => {
-    render(<GenerativeUICard openui={"Chart"} status="running" thinking={"still going"} />);
+    render(<GenerativeUICard openui={CHART} status="running" thinking={"still going"} />);
     expect(screen.getByTestId("genui-thinking").textContent).toBe("still going");
-    expect(screen.getByTestId("renderer").textContent).toBe("Chart");
+    expect(screen.getByTestId("renderer").textContent).toBe(CHART);
   });
 
   it("drops the reasoning once the tool completes", () => {
-    render(<GenerativeUICard openui={"Chart"} status="success" thinking={"planning"} />);
+    render(<GenerativeUICard openui={CHART} status="success" thinking={"planning"} />);
     expect(screen.queryByTestId("genui-thinking")).toBeNull();
-    expect(screen.getByTestId("renderer").textContent).toBe("Chart");
+    expect(screen.getByTestId("renderer").textContent).toBe(CHART);
   });
 });
 
 describe("extractContentText", () => {
   it("unwraps a JSON content-block envelope (preserving quotes/newlines)", () => {
-    const lang = 'root = Stack([header], "column", "l")\nheader = Card([t], "sunk")';
-    expect(extractContentText(JSON.stringify([{ type: "text", text: lang }]))).toBe(lang);
+    const stream = '{"version":"v0.9","createSurface":{"surfaceId":"s"}}\n{"a":"b"}';
+    expect(extractContentText(JSON.stringify([{ type: "text", text: stream }]))).toBe(stream);
   });
 
   it("concatenates multiple text blocks", () => {
@@ -194,15 +196,13 @@ describe("extractContentText", () => {
     expect(extractContentText(JSON.stringify({ type: "text", text: "hello" }))).toBe("hello");
   });
 
-  it("returns raw OpenUI Lang unchanged when there is no envelope", () => {
-    const lang = 'root = Stack([header], "column", "l")';
-    expect(extractContentText(lang)).toBe(lang);
+  it("returns the raw text unchanged when there is no envelope", () => {
+    const stream = '{"version":"v0.9","createSurface":{"surfaceId":"s"}}';
+    expect(extractContentText(stream)).toBe(stream);
   });
 
   it("unwraps a Python-repr envelope from other runtimes", () => {
-    expect(extractContentText("[{'type': 'text', 'text': 'root = Stack()'}]")).toBe(
-      "root = Stack()",
-    );
+    expect(extractContentText("[{'type': 'text', 'text': '{\"a\": 1}'}]")).toBe('{"a": 1}');
   });
 
   it("returns empty for empty/blank input", () => {

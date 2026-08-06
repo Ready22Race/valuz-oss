@@ -36,7 +36,7 @@ from valuz_agent.modules.tasks.datastore import (
     TaskEventDatastore,
     TaskSessionDatastore,
 )
-from valuz_agent.modules.tasks.models import TaskRow, TaskSessionRow
+from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionRow
 
 logger = logging.getLogger(__name__)
 
@@ -229,7 +229,24 @@ class RunsService:
                 continue
             candidates.append((sess, task_session, effective, background))
 
-        # Per-run enrichment (`_build` fetches the latest message/event) is
+        # Task rows are described by their latest timeline event. Resolve them
+        # for the whole batch HERE, before the fan-out: reading them inside
+        # ``_build_one`` issued concurrent statements on the one request-scoped
+        # AsyncSession (unsupported), and the per-row ``except`` below turned
+        # the resulting InvalidRequestError into "skipping session …" — runs
+        # silently vanishing from the overview.
+        latest_task_events = await self._task_events.latest_events_by_task(
+            user_id,
+            sorted(
+                {
+                    ts.task_id
+                    for _s, ts, _e, _b in candidates
+                    if ts is not None and ts.kind == "lead" and ts.task_id
+                }
+            ),
+        )
+
+        # Per-run enrichment (`_build` fetches the latest message) is
         # independent per session — run it concurrently instead of one awaited
         # round-trip per run (the finished view can carry ~100 runs, which
         # made this loop the dominant cost of the polled overview).
@@ -249,6 +266,7 @@ class RunsService:
                     project_id=proj_by_session.get(sess.id, ""),
                     last_activity=activity_by_session.get(sess.id, sess.created_at),
                     automation_session_ids=automation_session_ids,
+                    latest_task_events=latest_task_events,
                     background=background,
                 )
             except Exception:
@@ -303,6 +321,7 @@ class RunsService:
         project_id: str,
         last_activity: int,
         automation_session_ids: set[str],
+        latest_task_events: dict[str, TaskEventRow],
         background: bool = False,
     ) -> RunSummary:
         meta: dict[str, Any] = (sess.metadata or {}).get("valuz") or {}
@@ -320,7 +339,10 @@ class RunsService:
                 title = task.title
             # Tasks are described by their latest timeline event — the frontend
             # renders it the same way the task-detail timeline does.
-            last_event = await self._latest_task_event(user_id, task_id)
+            row = latest_task_events.get(task_id or "")
+            last_event = (
+                {"type": row.type, "payload": row.payload or {}} if row is not None else None
+            )
         else:
             source = (
                 "project_chat" if project is not None and project.kind == "project" else "assistant"
@@ -374,10 +396,3 @@ class RunsService:
                 return str(message.assistant_message)
         return None
 
-    async def _latest_task_event(self, user_id: str, task_id: str | None) -> dict[str, Any] | None:
-        if not task_id:
-            return None
-        row = await self._task_events.latest_event(user_id, task_id)
-        if row is None:
-            return None
-        return {"type": row.type, "payload": row.payload or {}}

@@ -42,13 +42,14 @@ export const ThingSchema = z.object({
   `z.unknown()` slot accepts both those and other blocks.
 - Keep props flat and few. Every prop is prompt surface: if the model would
   have to guess when to set it, it does not belong.
-- **Key order is load-bearing, and getting it wrong fails silently.** OpenUI
-  Lang calls are positional and bind in zod key order, so declaring
-  `{ label?, children }` makes `Thing([a, b])` assign the array to `label` and
-  leave `children` empty — no parse error, no type error, just an empty block.
-  Put required props first, `children` before optional scalars, and match the
-  order a human would write the call in. OpenUI's own `Card(children, variant?)`
-  is the pattern. Always render one positional call in a test.
+- **Key order is load-bearing in the tests, and getting it wrong fails
+  silently.** A2UI passes props by name, so the wire does not care; the render
+  harness (`createValuzLibrary`, see below) speaks OpenUI Lang, which is
+  positional and binds in zod key order. Declaring `{ label?, children }` makes
+  `Thing([a, b])` assign the array to `label` and leave `children` empty — no
+  parse error, no type error, just an empty block. Put required props first,
+  `children` before optional scalars, and match the order a human would write
+  the call in; OpenUI's own `Card(children, variant?)` is the pattern.
 
 ## index.tsx
 
@@ -108,6 +109,42 @@ Write rules in `src/styles/<family>.css` and add one `@import` line to
 - Wide content (tables, charts) scrolls inside its own box — reuse
   `.vgb-scroll-x`. The page body must never scroll sideways.
 
+- **Two components must never share one schema object.** The library keys
+  registration off the schema, so a second `defineComponent` given the same
+  object silently replaces the first: one name renders the other's component,
+  with both names still present in the library and nothing reported anywhere.
+  If two blocks want the same props, give each its own schema from a factory
+  (`waterfallProps()`, `categoryBarProps()`) rather than sharing a const.
+
+## Layout rules learned the hard way
+
+Each of these cost a screenshot and a debugging session. They fail silently —
+nothing errors, the page is just wrong.
+
+- **A width floor must concede to its container.** Write
+  `min-width: min(320px, 100%)`, never `min-width: 320px`. A floor wider than
+  the container does not shrink the container, it overflows and paints over
+  whatever is beside it.
+- **A wrapping block is its own query container.** Put
+  `container-type: inline-size; container-name: vgb;` on the block that wraps
+  children, not only on an outer root. A query resolved against the whole
+  document tells a tile in a half-width column that it has the full width.
+- **Numbers never break.** `white-space: nowrap` on any figure. The host
+  stylesheet sets `overflow-wrap: anywhere` on every span in scope, which is
+  right for prose and wrong for a value — "26,58 / 4" reads as a different
+  number, not a squeezed one.
+- **Composite typography tokens must be mapped.** `--openui-text-heading-lg`
+  and friends are not derived from the primitives; unmapped they keep OpenUI's
+  Inter defaults. A test asserts every one is mapped.
+
+## Icons
+
+`icon` props take a lucide-react icon name and render through
+`BlockIcon` from `../lib/icon`. Both the component spelling (`TrendingUp`) and
+the id (`trending-up`) resolve; an unknown name renders nothing. Never accept
+an emoji as an icon, and say so in the description — a block without an `icon`
+prop is a block meant to have no icon.
+
 ## Constraints
 
 - **No `@valuz/*` imports.** This package sits below `@valuz/ui`; importing
@@ -120,6 +157,61 @@ Write rules in `src/styles/<family>.css` and add one `@import` line to
 - Prefer one component with a variant prop over near-duplicate components. If
   two layouts differ only in density or alignment, that is a prop.
 
+## Registering blocks from an edition
+
+An edition adds blocks without forking this package by calling `registerBlocks`
+at startup. Two modes, chosen per registration:
+
+```ts
+registerBlocks("finance", financeBlocks, {
+  mode: "append",           // default — sits alongside the built-in blocks
+  groupName: "Finance",     // a block in no group is never described to the model
+  reserved: openuiNames,    // the host's OpenUI component names
+});
+
+registerBlocks("finance", financeBlocks, { mode: "replace" });
+```
+
+- **`append`** — the edition's blocks join the built-in set. A name already
+  taken by a built-in or by another source is refused (returned in
+  `rejected`), never merged, because merge order would decide it silently.
+- **`replace`** — the edition owns the whole vocabulary: the built-in blocks
+  go, and so does every OpenUI component **except the root**. A vertical with a
+  curated set then pays prompt budget for its own components only. Only one
+  source may hold `replace`; a second registration is refused wholesale.
+
+The root is the one name `replace` still refuses. `createLibrary` throws when
+its root is missing from the component list, and a document that cannot resolve
+its root renders nothing at all — so `Stack` survives every mode while
+everything above it is the edition's to define, including names like `Card` or
+`MiniCard` that a built-in used to hold.
+
+The root also keeps its prompt group (narrowed to itself), because grouping is
+what puts a component into the prompt's signature section; its notes are
+filtered to drop any that explain a component `replace` removed.
+
+Both halves move together: `unregisterBlocks(source)` takes the implementation
+and its prompt group away, and the built-ins come back.
+
+## The catalog
+
+A block reaches the model through one generated asset — the A2UI block catalog,
+built from every block's name, zod schema and `description`. Regenerate it after
+adding or changing a block:
+
+```bash
+pnpm --filter @valuz/ui gen:genui-catalog
+```
+
+Forgetting this is the quiet failure: the block renders when named, but nothing
+ever tells the model it exists, so it is never named.
+
+`generate_ui` takes a `components` argument that narrows what a single
+generation is offered — `all` (default), `atoms` (everything this repo ships,
+primitives and blocks alike) or `edition` (only what a vertical edition
+registered from outside). It is assembled backend-side, so nothing here changes:
+a block you add is in the `atoms` set by definition.
+
 ## Verifying
 
 ```bash
@@ -127,3 +219,12 @@ cd frontend
 pnpm exec tsc --noEmit -p packages/genui-blocks/tsconfig.json
 pnpm exec vitest run --config vitest.config.ts packages/genui-blocks
 ```
+
+### The render harness
+
+Tests render through `createValuzLibrary()` and OpenUI's `<Renderer>`, not
+through A2UI. A2UI is the product's only wire protocol, but its renderer lives
+in `@valuz/ui` — above this package, so unreachable from here. The library
+drives the identical component objects and zod schemas the A2UI adapter drives,
+so it is the closest proof available from inside. The one place the two differ
+is argument binding, which is why key order matters above.

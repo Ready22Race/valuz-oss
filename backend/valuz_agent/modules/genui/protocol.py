@@ -1,19 +1,44 @@
-"""GenUI protocol selection and prompt/payload helpers."""
+"""A2UI prompt and payload assembly for the ``generate_ui`` tool.
+
+A2UI v0.9 is the one wire protocol. The tool used to be able to emit OpenUI
+Lang instead, chosen by ``VALUZ_GENUI_PROTOCOL``; carrying two generation
+formats meant two prompt vocabularies, two renderers and two sets of failure
+modes for one feature, so the second was removed rather than maintained.
+"""
 
 from __future__ import annotations
 
 import json
+import re
 from importlib import resources
 from typing import Literal
 
-from valuz_agent.modules.genui.prompts import (
-    GENERATIVE_UI_INSTRUCTIONS,
-    build_openui_prompt,
-)
+from valuz_agent.ports.extensions import ext
+from valuz_agent.ports.genui_blocks import GenUIBlockRegistry
 
-GenUIProtocol = Literal["a2ui", "openui"]
+OUTPUT_FORMAT = "A2UI v0.9 JSON message stream"
 
-A2UI_GENERATIVE_UI_INSTRUCTIONS = (
+#: Which set of components one generation is offered.
+#:
+#: The split follows where a component comes from, not what it is made of:
+#:
+#: - ``atoms`` — everything this repository ships: OpenUI's primitives *and*
+#:   the built-in blocks. The general vocabulary.
+#: - ``edition`` — only what an edition registered from outside this repo.
+#:   A vertical's own set, unmixed with the general one.
+#: - ``all`` — both. The default, and right when the shape of the answer is not
+#:   known up front.
+#:
+#: A shorter menu is an easier menu: the model chooses better from one, and the
+#: catalog is the bulk of every ``generate_ui`` prompt.
+#:
+#: Narrowing is prompt-side only. The renderer keeps accepting every component
+#: it ever accepted, so a narrowed prompt can never produce a payload the client
+#: cannot draw — the failure direction runs the other way, and that one stays
+#: closed.
+GenUIComponentScope = Literal["all", "edition", "atoms"]
+
+_A2UI_INSTRUCTIONS_BASE = (
     "You generate user interfaces as an A2UI v0.9 JSON message stream. Output "
     "ONLY newline-delimited JSON objects, with no markdown fences, prose, or "
     "explanations. The first message must create a surface, and later messages "
@@ -24,14 +49,50 @@ A2UI_GENERATIVE_UI_INSTRUCTIONS = (
     "readable full-width section, and tables may scroll horizontally only when "
     "their columns cannot stay readable. Use OpenUI component names from the "
     "catalog below so the @a2ui/react renderer can map them to OpenUI React "
-    "components one-for-one. For financial market dashboards, prefer the Valuz "
+    "components one-for-one."
+)
+
+_A2UI_PREFER_BLOCKS = (
+    " For financial market dashboards, prefer the Valuz "
     "semantic components in the catalog: they are rendered as OpenUI surfaces "
-    "but avoid fragile Card/TextContent/Chart compositions. Do not create "
+    "but avoid fragile Card/TextContent/Chart compositions."
+)
+
+_A2UI_NO_PLACEHOLDER_CHARTS = (
+    " Do not create "
     "placeholder charts: only render chart components when the request or data "
     "contains real chart series, labels, slices, or points. When the data is a "
-    "current snapshot rather than a time series, use MarketIndexGrid, "
-    "StatsCard, MarketBreadth, DataList, or Table instead of an empty chart."
+    "current snapshot rather than a time series, use {fallbacks} instead of an "
+    "empty chart."
 )
+
+# What to fall back to when the data has no chart-ready series. Named per scope
+# because a fallback the catalog does not offer is worse than no advice at all:
+# the model is being told to reach for something it was never shown.
+#
+# The `edition` entry names nothing, and cannot: this repository does not know
+# what an edition installed. Generic advice is the honest limit — better than
+# naming components from a set that scope just excluded.
+_A2UI_SNAPSHOT_FALLBACKS: dict[str, str] = {
+    "all": "MarketIndexGrid, StatsCard, MarketBreadth, DataList, or Table",
+    "atoms": "MarketIndexGrid, StatsCard, MarketBreadth, DataList, or Table",
+    "edition": "a tile, list, or table component from the catalog above",
+}
+
+
+def _snapshot_fallbacks(scope: GenUIComponentScope) -> str:
+    """The advice for one scope, after the registry has had its say.
+
+    Under an edition holding ``replace`` this repository's names are gone from
+    every scope, so the advice falls back to the ``edition`` wording — which
+    names nothing, and is the only honest thing to say when the catalog's
+    contents were chosen by a build this one cannot see.
+    """
+
+    if _block_registry().baseline_suppressed():
+        return _A2UI_SNAPSHOT_FALLBACKS["edition"]
+    return _A2UI_SNAPSHOT_FALLBACKS[scope]
+
 
 A2UI_OPENUI_COMPONENT_CATALOG = """
 OpenUI component catalog supported by the A2UI renderer:
@@ -47,17 +108,18 @@ OpenUI component catalog supported by the A2UI renderer:
 - Forms: Form, FormControl, Label, Input, TextArea, Select, SelectItem,
   DatePicker, Slider, CheckBoxGroup, CheckBoxItem, RadioGroup, RadioItem,
   SwitchGroup, SwitchItem.
-- Actions/display: Button, Buttons, TagBlock, Tag, Metric, KPI, ListBlock,
-  ListItem, List.
+- Actions/display: Button, Buttons, TagBlock, Tag, Metric, KPI. For a list of
+  entries use the DataList, StatusList, Timeline or Feed blocks below.
+"""
+
+_A2UI_MESSAGE_SHAPE = """\
 Use official A2UI v0.9 component objects with component properties at the top
 level, not nested under "props":
 {"id":"title","component":"TextContent","text":"Revenue","size":"large-heavy"}
 Use flat component ids for layout children:
 {"id":"root","component":"Stack","children":["title","chart"],"direction":"column","gap":"m"}
 Do not create placeholder charts or charts with empty series. If supplied data
-does not include chart-ready arrays, show the raw values with DataList, Table,
-MarketIndexGrid, StatsCard, or MarketBreadth.
-"""
+does not include chart-ready arrays, show the raw values with {fallbacks}."""
 
 
 def _load_block_catalog() -> str:
@@ -78,47 +140,165 @@ def _load_block_catalog() -> str:
     )
 
 
+_A2UI_EDITION_HEADING = "- Edition components:\n"
+
+_A2UI_ROOT_ONLY_CATALOG = """
+OpenUI component catalog supported by the A2UI renderer:
+- Layout: Stack — the document root, and the only component from the general
+  vocabulary offered here. Everything else comes from the edition below.
+"""
+
+#: Every OpenUI component the hand-written catalog above names — the reserved
+#: set the block registry refuses collisions against. Kept adjacent to the
+#: prose blob because the two must move together. The regex also captures the
+#: category labels ("Layout", "Charts", …); deliberately kept — an edition
+#: block wearing a category's name would read as OpenUI vocabulary anyway.
+_OPENUI_COMPONENT_NAMES: tuple[str, ...] = tuple(
+    re.findall(r"[A-Z][A-Za-z0-9]*", A2UI_OPENUI_COMPONENT_CATALOG.replace("OpenUI", ""))
+)
+
+
+def _block_registry() -> GenUIBlockRegistry:
+    """The process-wide block registry, with the OSS baseline bound.
+
+    Binding is lazy rather than at import so an overlay that registers before
+    importing this module still gets its collisions checked — the registry
+    re-validates at bind and logs loudly on a drop.
+    """
+
+    registry = ext.genui_blocks
+    if not registry.baseline_bound:
+        catalog_text = _load_block_catalog()
+        names = re.findall(r"^\s*-\s*([A-Za-z0-9]+)\(", catalog_text, re.MULTILINE)
+        registry.bind_baseline(
+            names=[*names, *_OPENUI_COMPONENT_NAMES],
+            catalog_text=catalog_text,
+        )
+    return registry
+
+
 A2UI_COMPONENT_CATALOG = f"""{A2UI_OPENUI_COMPONENT_CATALOG}
 - Valuz blocks (cards, citations, report pages, diagrams):
 {_load_block_catalog()}
 """
 
 
-def normalize_genui_protocol(value: object) -> GenUIProtocol:
+def edition_catalog_text() -> str:
+    """Components registered from outside this repository.
+
+    The registry behind it is ``ext.genui_blocks``: an edition — a separate
+    build that vendors this one — registers the catalog its own frontend
+    generated, and this returns those layers and nothing else. Empty when
+    nothing is installed, which is what makes ``resolve_component_scope``
+    widen an ``edition`` scope back to ``all`` rather than offering a root
+    with no components under it.
+
+    Read per call, never cached: registration happens at edition startup, and
+    a module constant would freeze the prompt at import — one process restart
+    behind every edition, forever.
+    """
+
+    return _block_registry().catalog_text(baseline=False)
+
+
+def resolve_component_scope(scope: GenUIComponentScope) -> GenUIComponentScope:
+    """The scope actually available, which is not always the one asked for.
+
+    An ``edition`` scope with no edition registered would offer the root and
+    nothing else — that does not produce a smaller answer, it produces no
+    answer. Widening is the only safe direction when a scope turns out empty;
+    narrowing to nothing is the failure this whole seam guards against.
+
+    Resolved in one place so the catalog and the instructions cannot disagree
+    about which scope is live — instructions naming a fallback the catalog never
+    showed is the exact drift the scope exists to prevent.
+    """
+
+    if scope == "edition" and not edition_catalog_text():
+        return "all"
+    return scope
+
+
+def build_a2ui_catalog(scope: GenUIComponentScope = "all") -> str:
+    """The A2UI catalog for one scope.
+
+    Assembled rather than stored per scope because A2UI's primitive list is a
+    hand-written blob (the renderer maps those names one-for-one) while the
+    block half is generated — only the second half has a build step to hang a
+    variant on.
+    """
+
+    edition = edition_catalog_text()
+    scope = resolve_component_scope(scope)
+
+    own = (
+        f"{A2UI_OPENUI_COMPONENT_CATALOG}\n"
+        "- Valuz blocks (cards, citations, report pages, diagrams):\n"
+        f"{_load_block_catalog()}\n"
+    )
+    installed = f"{_A2UI_EDITION_HEADING}{edition}\n" if edition else ""
+    if _block_registry().baseline_suppressed():
+        # An edition holds `replace`: this repository's vocabulary is gone from
+        # the renderer, so no scope may describe it — a described-but-
+        # unrenderable component is the failure direction the seam keeps closed.
+        # Every scope collapses to the root plus what the edition installed,
+        # `atoms` included, since its whole content is what the edition removed.
+        components = f"{_A2UI_ROOT_ONLY_CATALOG}{installed}"
+    elif scope == "atoms":
+        components = own
+    elif scope == "edition":
+        # The root comes from the general set even here: it is the one component
+        # an edition cannot supply for itself, since every document is rooted in
+        # it before any edition component appears.
+        components = f"{_A2UI_ROOT_ONLY_CATALOG}{installed}"
+    else:
+        # `all` is the union, in this order — an edition's components read as an
+        # addition to the general vocabulary, which is what they are.
+        components = f"{own}{installed}"
+
+    fallbacks = _snapshot_fallbacks(scope)
+    # `.replace`, not `.format`: the message-shape text is JSON, and every brace
+    # in it would be read as a format field.
+    return f"{components}{_A2UI_MESSAGE_SHAPE.replace('{fallbacks}', fallbacks)}\n"
+
+
+def normalize_component_scope(value: object) -> GenUIComponentScope:
+    """Read a caller-supplied scope, defaulting to the whole vocabulary.
+
+    Tolerant on purpose: this argument is written by a model, and an unusable
+    value should cost the wider prompt rather than the whole generation.
+    """
+
     if isinstance(value, str):
-        normalized = value.strip().lower().replace("_", "-")
-        if normalized in {"a2ui", "a2ui-json", "a2ui-v0.9", "a2ui-0.9"}:
-            return "a2ui"
-        if normalized in {"openui", "openui-lang"}:
-            return "openui"
-    raise ValueError("genui protocol must be 'a2ui' or 'openui'")
+        normalized = value.strip().lower().replace("-", "_")
+        if normalized in {"all", "full", "everything"}:
+            return "all"
+        if normalized in {"edition", "vertical"}:
+            return "edition"
+        if normalized in {"atoms", "atom", "blocks", "openui", "valuz", "base"}:
+            return "atoms"
+    return "all"
 
 
-def session_instructions_for_protocol(protocol: GenUIProtocol) -> str:
-    if protocol == "a2ui":
-        return A2UI_GENERATIVE_UI_INSTRUCTIONS
-    return GENERATIVE_UI_INSTRUCTIONS
+def a2ui_instructions(scope: GenUIComponentScope = "all") -> str:
+    """The A2UI system instructions, saying only what this scope can back up."""
+
+    scope = resolve_component_scope(scope)
+    prefer_blocks = _A2UI_PREFER_BLOCKS if scope != "atoms" else ""
+    tail = _A2UI_NO_PLACEHOLDER_CHARTS.replace("{fallbacks}", _snapshot_fallbacks(scope))
+    return f"{_A2UI_INSTRUCTIONS_BASE}{prefer_blocks}{tail}"
 
 
-def output_format_for_protocol(protocol: GenUIProtocol) -> str:
-    if protocol == "a2ui":
-        return "A2UI v0.9 JSON message stream"
-    return "OpenUI Lang"
+A2UI_GENERATIVE_UI_INSTRUCTIONS = a2ui_instructions()
 
 
-def build_prompt_for_protocol(
-    protocol: GenUIProtocol,
+def build_a2ui_prompt(
     request: str,
     data: object | None = None,
+    scope: GenUIComponentScope = "all",
 ) -> str:
-    if protocol == "openui":
-        return build_openui_prompt(request, data)
-    return build_a2ui_prompt(request, data)
-
-
-def build_a2ui_prompt(request: str, data: object | None = None) -> str:
     parts = [
-        A2UI_GENERATIVE_UI_INSTRUCTIONS,
+        a2ui_instructions(scope),
         "",
         "A2UI v0.9 message contract:",
         '- createSurface: {"version":"v0.9","createSurface":{"surfaceId":"main","catalogId":"openui"}}',
@@ -127,7 +307,7 @@ def build_a2ui_prompt(request: str, data: object | None = None) -> str:
         "- deleteSurface is allowed only when removing a surface.",
         '- every UI must include a component with id "root"; put the visible tree under root.children.',
         "",
-        A2UI_COMPONENT_CATALOG.strip(),
+        build_a2ui_catalog(scope).strip(),
         "",
         "REQUEST:",
         request.strip(),
@@ -139,10 +319,10 @@ def build_a2ui_prompt(request: str, data: object | None = None) -> str:
     return "\n".join(parts)
 
 
-def wrap_generated_ui(protocol: GenUIProtocol, content: str) -> str:
+def wrap_generated_ui(content: str) -> str:
+    """Wrap the generated stream in the envelope the client dispatches on."""
+
     body = (content or "").strip()
-    if protocol == "openui":
-        return body
     return json.dumps(
         {"protocol": "a2ui-json", "content": body},
         ensure_ascii=False,

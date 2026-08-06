@@ -14,7 +14,7 @@
   "scripts": {
     "build": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run --passWithNoTests --config ../../vitest.config.ts",
-    "gen:openui-prompt": "vite-node --config ../../vitest.config.ts scripts/gen_openui_prompt.mjs",
+    "gen:genui-catalog": "vite-node --config ../../vitest.config.ts scripts/gen_genui_catalog.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "eslint src --ext .ts,.tsx",
     "clean": "rm -rf dist"

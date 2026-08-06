@@ -2,9 +2,9 @@
 
 Registered in the host toolkit MCP ``base`` toolset (runtime-agnostic). The
 handler resolves the caller's runtime/provider/model from the calling session,
-builds the OpenUI prompt (vendored genui-lib + request + optional data), and
-returns the OpenUI Lang as the tool result — which the frontend renders with
-OpenUI's ``<Renderer>``. Official Claude/Codex subscription channels still run
+builds the A2UI prompt (component catalog + request + optional data), and
+returns the A2UI v0.9 message stream as the tool result — which the frontend
+renders with ``A2UIRenderer``. Official Claude/Codex subscription channels still run
 through an ephemeral no-tools kernel session so their CLI keychain auth works;
 explicit-credential channels call the model directly and stream chunks back to
 the originating tool card. Best-effort: every failure becomes an ``is_error``
@@ -23,14 +23,13 @@ from src.core.tools import ExecContext
 
 import valuz_agent.boot.kernel  # noqa: F401  (sets kernel import path)
 from valuz_agent.adapters import kernel_client
-from valuz_agent.infra.config import settings
 from valuz_agent.modules.genui.ids import resolve_tool_use_id
 from valuz_agent.modules.genui.prompts import TOOL_DESCRIPTION
 from valuz_agent.modules.genui.protocol import (
-    build_prompt_for_protocol,
-    normalize_genui_protocol,
-    output_format_for_protocol,
-    session_instructions_for_protocol,
+    OUTPUT_FORMAT,
+    a2ui_instructions,
+    build_a2ui_prompt,
+    normalize_component_scope,
     wrap_generated_ui,
 )
 from valuz_agent.modules.genui.runner import _make_completer, _resolve_provider_id
@@ -102,6 +101,20 @@ _PARAMS = {
             "type": "object",
             "description": "Optional structured values to render directly into the components.",
             "additionalProperties": True,
+        },
+        "components": {
+            "type": "string",
+            "enum": ["all", "atoms", "edition"],
+            "default": "all",
+            "description": (
+                "Which set of components to offer this generation. 'all' "
+                "(default) is everything. 'atoms' is the general vocabulary — "
+                "OpenUI's primitives plus the built-in blocks. 'edition' is "
+                "only the components a vertical edition installed, for an "
+                "answer that should stay in that edition's house style. A "
+                "shorter menu is an easier one, so narrow whenever the shape of "
+                "the answer is already clear."
+            ),
         },
         "target_host": {
             "type": "object",
@@ -307,7 +320,7 @@ async def _generate_ui_handler(args: dict[str, Any], ctx: ExecContext) -> ToolRe
     tool_use_id = await resolve_tool_use_id(
         user_id=user_id, session_id=ctx.session_id, arguments=args
     )
-    protocol = normalize_genui_protocol(settings.genui_protocol)
+    scope = normalize_component_scope(args.get("components"))
     completer = _make_completer(
         user_id=user_id,
         runtime_provider=runtime_provider,
@@ -315,13 +328,13 @@ async def _generate_ui_handler(args: dict[str, Any], ctx: ExecContext) -> ToolRe
         mp=mp,
         calling_session_id=ctx.session_id if tool_use_id else None,
         tool_use_id=tool_use_id,
-        session_instructions=session_instructions_for_protocol(protocol),
-        output_format=output_format_for_protocol(protocol),
+        session_instructions=a2ui_instructions(scope),
+        output_format=OUTPUT_FORMAT,
     )
     try:
         generated = await _complete_with_retries(
             completer,
-            build_prompt_for_protocol(protocol, str(request), data),
+            build_a2ui_prompt(str(request), data, scope),
         )
     except Exception as exc:  # noqa: BLE001
         logger.debug("generate_ui: generation failed", exc_info=True)
@@ -330,7 +343,7 @@ async def _generate_ui_handler(args: dict[str, Any], ctx: ExecContext) -> ToolRe
     generated = (generated or "").strip()
     if not generated:
         return ToolResult(
-            content=f"generate_ui: model returned no {output_format_for_protocol(protocol)}",
+            content=f"generate_ui: model returned no {OUTPUT_FORMAT}",
             is_error=True,
         )
     receipt_trailer = await _offer_to_artifact_sinks(
@@ -339,11 +352,13 @@ async def _generate_ui_handler(args: dict[str, Any], ctx: ExecContext) -> ToolRe
         tool_use_id=tool_use_id,
         target_host=_parse_target_host(args, source),
         request=str(request),
-        protocol=protocol,
+        # Generation is A2UI-only since the protocol switch; the sink records
+        # the wire protocol so a stored document still says what it is.
+        protocol="a2ui-json",
         content=generated,
     )
     return ToolResult(
-        content=wrap_generated_ui(protocol, generated) + receipt_trailer,
+        content=wrap_generated_ui(generated) + receipt_trailer,
         is_error=False,
     )
 

@@ -26,7 +26,7 @@ from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.lifecycle import is_draining
 from valuz_agent.modules.tasks import planning
 from valuz_agent.modules.tasks.actor_runner import ActorRunner
-from valuz_agent.modules.tasks.manifest import collect_manifest_safe
+from valuz_agent.modules.tasks.manifest import MemberManifest, collect_manifest_safe
 from valuz_agent.modules.tasks.coordination import CoordinationService
 from valuz_agent.adapters.agent_resolver import resolve_agent_display_name
 from valuz_agent.modules.tasks import launcher
@@ -122,7 +122,7 @@ class RecoveryService:
         -delivery-races-the-respawn.
         """
 
-        member_done: list[tuple[str, dict[str, Any]]] = []
+        member_done: list[tuple[str, MemberManifest]] = []
         # (session_id, brief, run_dir, agent_slug, subtask_key) — run_dir + slug
         # + key let us spill an over-cap resume brief to a doc before re-injecting
         # it into the member's goal-mode session.
@@ -157,7 +157,7 @@ class RecoveryService:
                     getattr(ks, "stop_reason", None) if ks is not None else None,
                     node_attempts=(node.attempts if node else 0),
                 )
-                manifest: dict[str, Any] | None = None
+                manifest: MemberManifest | None = None
                 if rec.disposition == "completed":
                     manifest = await collect_manifest_safe(
                         run.session_id,
@@ -211,7 +211,7 @@ class RecoveryService:
                         changed = True
                     return changed
 
-                await planning.persist_plan(
+                await planning.persist_plan_best_effort(
                     task_ds,
                     event_ds,
                     task,
@@ -219,6 +219,8 @@ class RecoveryService:
                     actor="system",
                     session_id=lead_session_id,
                     user_id=user_id,
+                    diverges="reconcile could not write the node statuses it "
+                    f"derived from the run rows ({', '.join(k for k, _, _ in mutations)})",
                 )
 
         # Evict any stale kernel runtime BEFORE respawning. Load-bearing for
@@ -243,7 +245,7 @@ class RecoveryService:
             )
         for member_sid, brief, m_run_dir, m_slug, m_key in resume_members:
             await _evict_runtime(member_sid)
-            resume_prompt = brief or "继续完成你的子任务,完成后会汇报给 lead。"
+            resume_prompt = brief or t("task.brief.memberResumeDefault")
             # Fence the goal-mode re-injection: an over-cap subtask goal would
             # blow the ``/goal`` payload again on resume — spill it to a doc and
             # re-inject a short pointer instead (same fence as first dispatch).
@@ -268,19 +270,27 @@ class RecoveryService:
                 registry=self._members,
             )
         await _evict_runtime(lead_session_id)
+        # Localized: this is the lead's USER-turn prompt on resume, and a model
+        # answers in the language it was prompted in — a hardcoded one flips an
+        # otherwise-English task transcript after any restart.
         lead_brief = (
-            "<system-recovery>\n本任务已被恢复(系统重启或用户恢复)。子任务对账结果:\n"
-            + ("\n".join(summary) if summary else "(无在途子任务)")
-            + "\n\n请先调用 get_plan 对齐当前状态,然后继续编排:派发未决子任务、"
-            "审核 in_review、重试 rework;全部完成后调用 finish_task。\n</system-recovery>"
+            "<system-recovery>\n"
+            + t(
+                "task.brief.recoveryLead",
+                params={
+                    "summary": "\n".join(summary)
+                    if summary
+                    else t("task.brief.recoveryNoMembers")
+                },
+            )
+            + "\n</system-recovery>"
         )
         if lead_instruction and lead_instruction.strip():
             lead_brief += (
                 '\n<user-instruction source="resume">\n'
                 + lead_instruction.strip()
                 + "\n</user-instruction>\n"
-                "用户在恢复任务时附带了上面的指令——它是权威的用户意图,请优先据此调整编排"
-                "(必要时 modify_plan / rework)再继续。"
+                + t("task.brief.recoveryUserInstruction")
             )
         launcher.spawn_actor(
             self._actor,
@@ -360,7 +370,7 @@ class RecoveryService:
                         parked += 1
                 return parked > 0
 
-            await planning.persist_plan(
+            await planning.persist_plan_best_effort(
                 task_ds,
                 event_ds,
                 task,
@@ -368,6 +378,8 @@ class RecoveryService:
                 actor="user",
                 session_id=lead_session_id,
                 user_id=user_id,
+                diverges="running nodes stay in_progress on a halted task, so the "
+                "panel keeps spinning them until resume reconciles",
             )
             if target_status == "stopped":
                 # Terminal write — goes through finalize_task so the status
@@ -603,7 +615,7 @@ class RecoveryService:
                         )
                         return True
 
-                    await planning.persist_plan(
+                    await planning.persist_plan_best_effort(
                         task_ds,
                         event_ds,
                         task,
@@ -611,6 +623,8 @@ class RecoveryService:
                         actor="user",
                         session_id=lead_session_id or None,
                         user_id=user_id,
+                        diverges=f"node {subtask_key!r} not parked to rework after the "
+                        "user stopped its member",
                     )
             await record_subtask_stopped(
                 event_ds,
@@ -763,17 +777,10 @@ class TaskHealthMonitor:
         if is_draining():
             return []
         async with async_unit_of_work(commit=False) as db:
-            tasks = await TaskDatastore(db).list_active()
-            run_ds = TaskSessionDatastore(db)
-            # Snapshot (task_id, user_id, project_id, lead_session_id) so we
-            # don't hold the read UoW across the write below.
-            candidates: list[tuple[str, str, str, str | None]] = []
-            for task in tasks:
-                runs = await run_ds.list_runs(task.user_id, task.id)
-                lead = pick_lead_run(runs)
-                candidates.append(
-                    (task.id, task.user_id, task.project_id, lead.session_id if lead else None)
-                )
+            # ONE query for (task_id, user_id, project_id, lead_session_id) —
+            # this sweep runs every 60s forever, and the previous shape was a
+            # full-row scan plus one list_runs per active task.
+            candidates = await TaskDatastore(db).list_active_lead_bindings()
 
         acted: list[str] = []
         live_task_ids: set[str] = set()
