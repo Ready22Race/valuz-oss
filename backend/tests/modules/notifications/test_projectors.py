@@ -222,3 +222,73 @@ def test_completed_task_projects_informational_notification(db_factory) -> None:
     assert notification.action == "none"
     assert notification.urgency == "info"
     assert notification.route == "/tasks/t1"
+    # Ingested ALREADY RESOLVED. The open list is ``resolved_at IS NULL``, so a
+    # finished task fires its OS toast and lands in history without taking a
+    # slot in the action inbox — where it sat wearing a Resume button, and
+    # where a day of successful runs buried the failures that need attention.
+    assert notification.resolved_at is not None
+
+    from valuz_agent.infra.db import async_unit_of_work as _uow
+    from valuz_agent.modules.notifications.datastore import NotificationDatastore
+
+    async def _open() -> list:
+        async with _uow(commit=False) as db:
+            return await NotificationDatastore(db).list_open(OWNER)
+
+    assert asyncio.run(_open()) == [], "a completion must not sit in 未处理"
+
+
+def test_boot_sweep_closes_completions_left_open_by_older_builds(db_factory) -> None:
+    """Rows written before completions were ingested resolved are stuck.
+
+    Nothing else ever clears them: they carry ``action="none"``, so there is
+    no Resume to perform, and the user is left manually dismissing a list that
+    regrows with every successful task. The boot sweep drains them once, and
+    must leave the notifications that DO need attention alone.
+    """
+    from valuz_agent.boot import steps
+    from valuz_agent.infra.db import async_unit_of_work
+    from valuz_agent.modules.notifications.datastore import NotificationDatastore
+
+    async def _seed_legacy() -> None:
+        async with async_unit_of_work() as db:
+            ds = NotificationDatastore(db)
+            # Written the old way — informational, but left open.
+            await ds.upsert(
+                OWNER,
+                dedup_key="c:legacy",
+                kind="task_completed",
+                title="季度报告",
+                body="报告已经生成",
+                action="none",
+                urgency="info",
+                task_id="t1",
+            )
+            await ds.upsert(
+                OWNER,
+                dedup_key="f:real",
+                kind="task_failed",
+                title="季度报告",
+                body="lead crashed",
+                action="resume",
+                task_id="t1",
+            )
+
+    asyncio.run(_seed_legacy())
+
+    async def _open_kinds() -> list[str]:
+        async with async_unit_of_work(commit=False) as db:
+            return [r.kind for r in await NotificationDatastore(db).list_open(OWNER)]
+
+    assert sorted(asyncio.run(_open_kinds())) == ["task_completed", "task_failed"]
+
+    asyncio.run(steps.resolve_informational_notification_backlog())
+
+    assert asyncio.run(_open_kinds()) == ["task_failed"], (
+        "the sweep must close the completion and leave the failure — that one "
+        "still needs the user"
+    )
+
+    # Idempotent: a second boot closes nothing further.
+    asyncio.run(steps.resolve_informational_notification_backlog())
+    assert asyncio.run(_open_kinds()) == ["task_failed"]

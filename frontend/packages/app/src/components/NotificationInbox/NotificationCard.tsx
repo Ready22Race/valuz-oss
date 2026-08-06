@@ -11,7 +11,7 @@
 import { useCallback, useState, type ReactElement } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
-import { AlertTriangle, MessageCircleQuestion } from "lucide-react";
+import { AlertTriangle, CheckCircle2, MessageCircleQuestion } from "lucide-react";
 
 import {
   dismissNotification,
@@ -39,7 +39,57 @@ export function NotificationCard({
   if (entry.kind === "backup_failed") {
     return <BackupFailedCard entry={entry} onNavigateAway={onNavigateAway} />;
   }
+  // Informational kinds are ingested already-resolved, so they reach the
+  // drawer only through history. Guard the fallback anyway: it renders a
+  // FAILURE (Resume button, "任务受阻" label) purely because a kind has no
+  // branch, which is how a completed task came to announce itself as blocked.
+  if (INFORMATIONAL_KINDS.has(entry.kind)) {
+    return <InfoCard entry={entry} onNavigateAway={onNavigateAway} />;
+  }
   return <FailureCard entry={entry} onNavigateAway={onNavigateAway} />;
+}
+
+const INFORMATIONAL_KINDS = new Set(["task_completed"]);
+
+/** A finished thing: what happened, and a way to look at it. No action. */
+function InfoCard({ entry, onNavigateAway }: NotificationCardProps): ReactElement {
+  const { t } = useTranslation();
+  const navigate = useNavigate();
+
+  const handleDismiss = useCallback(() => {
+    dismissNotification(entry.id);
+  }, [entry.id]);
+
+  const handleOpen = useCallback(() => {
+    if (entry.route) navigate(entry.route);
+    onNavigateAway?.();
+  }, [entry.route, navigate, onNavigateAway]);
+
+  return (
+    <CardShell
+      icon={<CheckCircle2 className="h-3 w-3 text-ink-muted" />}
+      label={t("notification.kindCompleted" as I18nKey)}
+      title={entry.title}
+    >
+      <div className="flex flex-col gap-3 px-4 py-3">
+        {entry.body && (
+          <p className="line-clamp-6 whitespace-pre-wrap break-words text-xs leading-5 text-ink-body">
+            {entry.body}
+          </p>
+        )}
+        <div className="flex items-center justify-end gap-2">
+          <Button size="sm" variant="ghost" className="text-xs" onClick={handleDismiss}>
+            {t("notification.dismiss" as I18nKey)}
+          </Button>
+          {entry.route && (
+            <Button size="sm" variant="outline" className="text-xs" onClick={handleOpen}>
+              {t("notification.openTask" as I18nKey)}
+            </Button>
+          )}
+        </div>
+      </div>
+    </CardShell>
+  );
 }
 
 function BackupFailedCard({

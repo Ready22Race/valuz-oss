@@ -54,6 +54,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await steps.resume_queued_input_drains()
     await steps.seal_orphan_pendings()
     await steps.recover_active_tasks()
+    await steps.resolve_informational_notification_backlog()
 
     # long-lived runners
     await steps.start_mcp_session_managers(app)

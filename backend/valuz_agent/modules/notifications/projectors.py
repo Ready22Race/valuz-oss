@@ -20,7 +20,13 @@ async def record_task_completion_notification(
     task_title: str | None = None,
     user_id: str,
 ) -> None:
-    """Mirror one completed task event into the durable notification ledger."""
+    """Mirror one completed task event into the durable notification ledger.
+
+    Ingested ALREADY RESOLVED: a finished task asks nothing of the user, so it
+    belongs in history (and in the OS toast that fires on arrival), not in the
+    action inbox next to questions and blocked tasks. Left unresolved it sat
+    in "未处理" wearing a Resume button, and a day of successful runs buried
+    the failures that do need attention."""
 
     title = task_title
     if title is None:
@@ -45,6 +51,7 @@ async def record_task_completion_notification(
         project_id=project_id,
         source_event_id=event_id,
         payload={"summary": summary or ""},
+        resolved=True,
     )
 
 
