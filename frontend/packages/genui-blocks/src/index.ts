@@ -1,8 +1,16 @@
 import "./styles.css";
 
 export type { BlockComponent } from "./blocks";
-export type { RegisterOptions, RegisterResult } from "./registry";
+export type {
+  BlockRegistrationMode,
+  RegisterOptions,
+  RegisterResult,
+} from "./registry";
+export { ROOT_COMPONENT_NAME } from "./root";
 export {
+  builtInBlocksSuppressed,
+  effectiveBlockNames,
+  effectiveBlocks,
   getRegistryVersion,
   registerBlocks,
   resetRuntimeBlocks,

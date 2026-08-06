@@ -5,6 +5,7 @@ import { z } from "zod/v4";
 
 import { blockNames } from "./catalog";
 import { createValuzLibrary } from "./library";
+import { ROOT_COMPONENT_NAME } from "./root";
 import {
   registerBlocks,
   resetRuntimeBlocks,
@@ -109,6 +110,98 @@ describe("runtime block registration", () => {
     // the renderer, so it cannot know them on its own.
     const result = registerBlocks("demo", [DemoCard], { reserved: ["DemoCard"] });
     expect(result.accepted).toEqual([]);
+  });
+
+  it("uses only the edition's set in replace mode", () => {
+    registerBlocks("finance", [DemoCard], { mode: "replace", groupName: "Finance" });
+    const library = createValuzLibrary();
+    expect(library.components["DemoCard"]).toBeTruthy();
+    // The built-in blocks are gone from both halves — renderable and described.
+    expect(library.components["MiniCard"]).toBeUndefined();
+    const prompt = library.prompt();
+    expect(prompt).toContain("DemoCard");
+    expect(prompt).not.toContain("MiniCardBlock");
+  });
+
+  it("keeps only the root of OpenUI in replace mode", () => {
+    registerBlocks("finance", [DemoCard], { mode: "replace" });
+    const library = createValuzLibrary();
+    // The root survives every mode: createLibrary throws without it, and a
+    // document that cannot resolve its root renders nothing at all.
+    expect(library.components[ROOT_COMPONENT_NAME]).toBeTruthy();
+    expect(library.root).toBe(ROOT_COMPONENT_NAME);
+    // Everything above it is vocabulary the edition has taken over.
+    expect(library.components["Card"]).toBeUndefined();
+    expect(library.components["Table"]).toBeUndefined();
+    expect(Object.keys(library.components)).toEqual([ROOT_COMPONENT_NAME, "DemoCard"]);
+  });
+
+  it("still documents the root, and drops notes about what it removed", () => {
+    // Grouping is what puts a component into the prompt's signature section, so
+    // an ungrouped root would leave the model guessing at the arguments of the
+    // one component every document begins with.
+    registerBlocks("finance", [DemoCard], { mode: "replace", groupName: "Finance" });
+    const prompt = createValuzLibrary().prompt();
+    expect(prompt).toContain(`${ROOT_COMPONENT_NAME}(children`);
+    // Its group notes explain Modal and Tabs — misinformation once those are
+    // gone, and misinformation in a prompt is worse than silence.
+    expect(prompt).not.toContain("Modal:");
+    expect(prompt).not.toContain("Use Tabs for alternative views");
+  });
+
+  it("frees every name but the root in replace mode", () => {
+    // With the built-ins and OpenUI's set suppressed an edition may ship its
+    // own MiniCard, or its own Card; refusing either would be protecting
+    // something no longer there.
+    const own = ["MiniCard", "Card"].map((name) =>
+      defineComponent({
+        name,
+        props: z.object({ label: z.string() }),
+        description: `An edition's own ${name}, replacing the built-in vocabulary entirely.`,
+        component: ({ props }) => <div data-slot="edition-block">{props.label}</div>,
+      }),
+    );
+    const result = registerBlocks("finance", own, { mode: "replace" });
+    expect(result.accepted).toEqual(["MiniCard", "Card"]);
+    render(
+      <Renderer
+        library={createValuzLibrary()}
+        response={`root = ${ROOT_COMPONENT_NAME}([body])\nbody = MiniCard("自有")`}
+      />,
+    );
+    expect(screen.getByText("自有")).toBeTruthy();
+  });
+
+  it("still refuses the root's name in replace mode", () => {
+    const Impostor = defineComponent({
+      name: ROOT_COMPONENT_NAME,
+      props: z.object({ label: z.string() }),
+      description: "Would shadow the root every document is required to begin with.",
+      component: () => <div />,
+    });
+    const result = registerBlocks("finance", [Impostor], { mode: "replace" });
+    expect(result.accepted).toEqual([]);
+    expect(createValuzLibrary().root).toBe(ROOT_COMPONENT_NAME);
+  });
+
+  it("refuses a second source once one replaces", () => {
+    registerBlocks("finance", [DemoCard], { mode: "replace" });
+    const Other = defineComponent({
+      name: "OtherCard",
+      props: z.object({ label: z.string() }),
+      description: "A second edition trying to register while another already replaced the set.",
+      component: () => <div />,
+    });
+    const second = registerBlocks("team", [Other]);
+    expect(second.accepted).toEqual([]);
+    expect(second.rejected[0]?.reason).toContain("finance");
+  });
+
+  it("brings the built-ins back when the replacing source unregisters", () => {
+    registerBlocks("finance", [DemoCard], { mode: "replace" });
+    expect(createValuzLibrary().components["MiniCard"]).toBeUndefined();
+    unregisterBlocks("finance");
+    expect(createValuzLibrary().components["MiniCard"]).toBeTruthy();
   });
 
   it("leaves the built-in library untouched when nothing is registered", () => {

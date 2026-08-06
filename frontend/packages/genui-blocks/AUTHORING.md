@@ -156,6 +156,42 @@ prop is a block meant to have no icon.
 - Prefer one component with a variant prop over near-duplicate components. If
   two layouts differ only in density or alignment, that is a prop.
 
+## Registering blocks from an edition
+
+An edition adds blocks without forking this package by calling `registerBlocks`
+at startup. Two modes, chosen per registration:
+
+```ts
+registerBlocks("finance", financeBlocks, {
+  mode: "append",           // default — sits alongside the built-in blocks
+  groupName: "Finance",     // a block in no group is never described to the model
+  reserved: openuiNames,    // the host's OpenUI component names
+});
+
+registerBlocks("finance", financeBlocks, { mode: "replace" });
+```
+
+- **`append`** — the edition's blocks join the built-in set. A name already
+  taken by a built-in or by another source is refused (returned in
+  `rejected`), never merged, because merge order would decide it silently.
+- **`replace`** — the edition owns the whole vocabulary: the built-in blocks
+  go, and so does every OpenUI component **except the root**. A vertical with a
+  curated set then pays prompt budget for its own components only. Only one
+  source may hold `replace`; a second registration is refused wholesale.
+
+The root is the one name `replace` still refuses. `createLibrary` throws when
+its root is missing from the component list, and a document that cannot resolve
+its root renders nothing at all — so `Stack` survives every mode while
+everything above it is the edition's to define, including names like `Card` or
+`MiniCard` that a built-in used to hold.
+
+The root also keeps its prompt group (narrowed to itself), because grouping is
+what puts a component into the prompt's signature section; its notes are
+filtered to drop any that explain a component `replace` removed.
+
+Both halves move together: `unregisterBlocks(source)` takes the implementation
+and its prompt group away, and the built-ins come back.
+
 ## Verifying
 
 ```bash

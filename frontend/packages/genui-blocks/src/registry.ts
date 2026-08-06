@@ -3,6 +3,7 @@ import type { ComponentGroup } from "@openuidev/react-lang";
 import { blockComponents } from "./blocks";
 import type { BlockComponent } from "./blocks";
 import { describeBlock, type BlockSpec } from "./catalog";
+import { ROOT_COMPONENT_NAME } from "./root";
 
 /**
  * Blocks registered at runtime, on top of the built-in set.
@@ -21,9 +22,25 @@ import { describeBlock, type BlockSpec } from "./catalog";
  * its blocks with it.
  */
 
+/**
+ * How an edition's blocks sit against the built-in set.
+ *
+ * `replace` hands the edition the whole vocabulary: the built-in blocks go, and
+ * so does every OpenUI component **except the root**. The root is the one thing
+ * that cannot go — `createLibrary` throws when it is missing, and a document
+ * with no resolvable root renders nothing at all.
+ *
+ * The reason to want it: a vertical edition with a curated set does not want a
+ * hundred and fifty general components described to the model alongside its
+ * own, both because the model picks worse from a longer menu and because every
+ * one of them is prompt budget on every call.
+ */
+export type BlockRegistrationMode = "append" | "replace";
+
 interface Registration {
   blocks: BlockComponent[];
   group: ComponentGroup;
+  mode: BlockRegistrationMode;
 }
 
 const registered = new Map<string, Registration>();
@@ -33,10 +50,19 @@ let version = 0;
 export interface RegisterOptions {
   /**
    * Names this registration may not take — normally the host's OpenUI
-   * component names. Supplied by the caller because this package deliberately
-   * does not import the renderer.
+   * component names. Supplied by the caller rather than read from the renderer
+   * so the host stays free to mount a different component set. Ignored under
+   * `replace`, which removes that set.
    */
   reserved?: Iterable<string>;
+  /**
+   * `append` (default) adds to the built-in blocks; `replace` uses this
+   * edition's set instead of the built-in blocks *and* OpenUI's components,
+   * keeping only the root. Only one source may hold `replace` — a second is
+   * refused rather than silently layered, because "which edition's set is
+   * live" must have one answer.
+   */
+  mode?: BlockRegistrationMode;
   /**
    * How the group reads in the prompt. A block outside every group renders
    * fine but is never described to the model, so it is effectively invisible —
@@ -59,6 +85,22 @@ function builtInNames(): Set<string> {
   return new Set(blockComponents.map((b) => b.name));
 }
 
+/** The source holding `replace`, if any. */
+function replacingSource(exceptSource?: string): string | undefined {
+  for (const [source, entry] of registered) {
+    if (source !== exceptSource && entry.mode === "replace") return source;
+  }
+  return undefined;
+}
+
+/**
+ * True when an edition holds `replace`: the built-in blocks and OpenUI's
+ * components are suppressed, leaving the root plus that edition's blocks.
+ */
+export function builtInBlocksSuppressed(): boolean {
+  return replacingSource() !== undefined;
+}
+
 function registeredNames(exceptSource?: string): Set<string> {
   const names = new Set<string>();
   for (const [source, entry] of registered) {
@@ -71,22 +113,38 @@ function registeredNames(exceptSource?: string): Set<string> {
 /**
  * Add blocks under `source`, replacing anything that source registered before.
  *
- * Reserved names are refused rather than resolved by merge order: a plugin
- * shadowing `Card` or `Table` would break every document that uses one, and
- * whichever way the merge happened to fall would be silent. `reserved` is
- * usually the host's OpenUI component names — the caller supplies them because
- * this package deliberately does not import the renderer.
+ * Taken names are refused rather than resolved by merge order: under `append` a
+ * plugin shadowing `Card` or `Table` would break every document that uses one,
+ * and whichever way the merge happened to fall would be silent. Under `replace`
+ * the only name left to protect is the root, which shadowing would break far
+ * more loudly — every document at once.
  */
 export function registerBlocks(
   source: string,
   blocks: BlockComponent[],
   options: RegisterOptions = {},
 ): RegisterResult {
-  const taken = new Set([
-    ...builtInNames(),
-    ...registeredNames(source),
-    ...(options.reserved ?? []),
-  ]);
+  const mode: BlockRegistrationMode = options.mode ?? "append";
+  const conflicting = replacingSource(source);
+  if (conflicting) {
+    return {
+      accepted: [],
+      rejected: blocks.map((b) => ({
+        name: b.name,
+        reason: `"${conflicting}" already replaces the built-in set`,
+      })),
+      specs: [],
+    };
+  }
+
+  // Which names are off-limits follows from what survives the mode. Under
+  // `replace` only the root does, so that is the only name refused — `reserved`
+  // is the host's OpenUI surface, and honouring it would protect components
+  // this mode has just removed. Under `append` everything is still there.
+  const taken =
+    mode === "replace"
+      ? new Set([ROOT_COMPONENT_NAME, ...registeredNames(source)])
+      : new Set([...builtInNames(), ...registeredNames(source), ...(options.reserved ?? [])]);
 
   const accepted: BlockComponent[] = [];
   const rejected: RegisterResult["rejected"] = [];
@@ -109,6 +167,7 @@ export function registerBlocks(
   if (accepted.length) {
     registered.set(source, {
       blocks: accepted,
+      mode,
       group: {
         name: options.groupName ?? source,
         components: accepted.map((b) => b.name),
@@ -130,6 +189,22 @@ export function registerBlocks(
 /** Remove everything `source` registered. */
 export function unregisterBlocks(source: string): void {
   if (registered.delete(source)) emit();
+}
+
+/**
+ * The blocks actually live: built-ins plus registrations, or — when a source
+ * holds `replace` — only the registrations.
+ *
+ * Every consumer reads this rather than `blockComponents`, or a replaced set
+ * would still reach one of the two protocols.
+ */
+export function effectiveBlocks(): BlockComponent[] {
+  const runtime = runtimeBlocks();
+  return builtInBlocksSuppressed() ? runtime : [...blockComponents, ...runtime];
+}
+
+export function effectiveBlockNames(): string[] {
+  return effectiveBlocks().map((b) => b.name);
 }
 
 /** Every runtime-registered block, in registration order. */

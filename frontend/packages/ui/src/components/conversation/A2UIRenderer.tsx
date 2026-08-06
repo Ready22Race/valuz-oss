@@ -12,10 +12,11 @@ import {
 import * as OpenUI from "@openuidev/react-ui";
 import { Modal as OpenUIModal } from "@openuidev/react-ui/Modal";
 import {
-  blockComponents,
-  blockNames,
+  ROOT_COMPONENT_NAME,
+  builtInBlocksSuppressed,
+  effectiveBlockNames,
+  effectiveBlocks,
   getRegistryVersion,
-  runtimeBlocks,
   subscribeBlocks,
 } from "@valuz/genui-blocks";
 import { ChevronLeft, ChevronRight } from "lucide-react";
@@ -127,9 +128,10 @@ const OPENUI_COMPONENT_NAMES = [
  * in the prompt, which is the worst of the two failure directions.
  */
 function blockByName(name: string) {
-  const runtime = runtimeBlocks().find((block) => block.name === name);
-  if (runtime) return runtime;
-  return blockComponents.find((block) => block.name === name);
+  // `effectiveBlocks()` rather than the built-in list: under an edition that
+  // replaces the set, a built-in must not still resolve here — it would render
+  // from a payload while being absent from the prompt.
+  return effectiveBlocks().find((block) => block.name === name);
 }
 
 /**
@@ -166,10 +168,14 @@ const RETIRED_TO_BLOCK: Record<
  * accepts them; the adapter maps them onto their replacement.
  */
 function a2uiComponentNames(): string[] {
+  // Under an edition that replaces the set, the only OpenUI name left is the
+  // root — and the retired aliases go with it, since each maps onto a built-in
+  // block that is no longer there. Accepting a name the prompt no longer offers
+  // would let a stale payload render a component the edition removed.
+  if (builtInBlocksSuppressed()) return [ROOT_COMPONENT_NAME, ...effectiveBlockNames()];
   return [
     ...OPENUI_COMPONENT_NAMES,
-    ...blockNames,
-    ...runtimeBlocks().map((block) => block.name),
+    ...effectiveBlockNames(),
     ...Object.keys(RETIRED_TO_BLOCK),
   ];
 }

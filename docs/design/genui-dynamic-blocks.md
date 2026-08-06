@@ -64,9 +64,10 @@ starts and when an edition is active. It does not mean loading untrusted code.
 `@valuz/genui-blocks` gains a runtime overlay beside its built-in set:
 
 ```ts
-registerBlocks(source, blocks, { reserved }): RegisterResult
+registerBlocks(source, blocks, { reserved, mode }): RegisterResult
 unregisterBlocks(source): void
 subscribeBlocks(listener): () => void      // for useSyncExternalStore
+effectiveBlocks(): BlockComponent[]        // what is actually live
 ```
 
 `createValuzLibrary()` stops being a module constant and rebuilds when the
@@ -83,6 +84,41 @@ to keep in sync, so the halves cannot drift.
 OpenUI component's or a built-in block's. Merge order would decide it silently,
 and a plugin shadowing `Card` breaks every document. Refused names come back in
 `RegisterResult.rejected` so the caller can fail loudly.
+
+### Two modes: append, or the edition's set alone
+
+`mode: "append"` (the default) puts the edition's blocks beside the built-in
+ninety-nine. `mode: "replace"` gives the edition the whole vocabulary.
+
+Replace exists because prompt budget is per call and menu length costs
+accuracy: a finance edition with thirty curated components does not want a
+hundred and fifty general ones described alongside, both because the model
+picks worse from a longer menu and because every one of them is tokens on
+every `generate_ui`.
+
+| Layer | Under `replace` | Why |
+|---|---|---|
+| the root (`Stack`) | **kept** | `createLibrary` throws without it, and a document with no resolvable root renders nothing |
+| OpenUI's other components (53) | dropped | general vocabulary; a vertical brings its own |
+| Valuz blocks (99) | dropped | product vocabulary — exactly what a vertical wants to own |
+
+So the root is the only name `replace` still refuses; every other name is the
+edition's to take, including ones a built-in used to hold. The root keeps a
+prompt group narrowed to itself — grouping is what puts a component into the
+signature section, and an undocumented root leaves the model guessing at the
+one component every document begins with. Its notes are filtered to drop any
+that explain a removed component, because a prompt describing a `Modal` that no
+longer exists is worse than one that says nothing.
+
+Only one source may hold `replace`; a second registration is refused wholesale,
+because "which edition's set is live" must have exactly one answer.
+Unregistering the replacing source restores the built-ins.
+
+Suppression has to reach **every** consumer or a replaced component leaks back
+through whichever path was missed — the library's components, its prompt
+groups, and A2UI's name resolution all derive from the registry rather than
+from `blockComponents` or the hand-listed OpenUI names. A2UI is where this is
+easiest to forget, since it is the second protocol, so a test pins it.
 
 ## Backend: a registry port, and a catalog assembled per call
 
@@ -145,6 +181,8 @@ edition from registering different sets on each side. Two cheap guards:
 | spec registered, implementation missing | boot assertion; otherwise a blank section |
 | edition shadows `Card` | refused at registration, name returned |
 | two editions register one name | later layer refused; earlier wins, deterministically |
+| two editions both claim `replace` | second refused wholesale, with the holder named |
+| replaced block still reaches one protocol | every consumer reads `effectiveBlocks()`; pinned by test |
 | edition unloads | `unregisterBlocks(source)` clears both halves |
 
 ## Open decisions
@@ -154,7 +192,8 @@ edition from registering different sets on each side. Two cheap guards:
    and another does not would need the catalog keyed by owner, which is a
    larger change to prompt assembly.
 2. **Layer order.** `CitationQualityPolicyRegistry` fixes `oss → commercial →
-   distribution` and lets later layers tighten but not replace. Blocks are
-   additive rather than restrictive, so the same order works, but "can a
-   distribution layer replace a commercial block?" needs an answer before
-   someone assumes one.
+   distribution` and lets later layers tighten but not replace. The frontend
+   now answers half of this: a layer may replace the *OSS block set* wholesale,
+   but never another layer's blocks — the second `replace` is refused rather
+   than won by order. The backend registry should mirror that rule when it is
+   built, so the two sides cannot disagree about which set is live.
