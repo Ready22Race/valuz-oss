@@ -50,6 +50,11 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from valuz_agent.infra.database import Base, PrimaryKeyMixin, TimestampMixin, UserMixin
 
+# The one event type that is a full SNAPSHOT rather than an increment: each
+# carries the whole plan, so all but the newest are dead weight on a bulk read
+# (see TaskEventDatastore.list_events).
+PLAN_SNAPSHOT_EVENT = "task_plan_update"
+
 
 class TaskRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     """Durable task header — one row per task kickoff."""
