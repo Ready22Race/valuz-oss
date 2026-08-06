@@ -314,17 +314,28 @@ class TestInitialScan:
         assert len(docs) == 1
         assert docs[0].filename == "visible.txt"
 
-    async def test_should_skip_unsupported_extensions(self, svc, tmp_path):
+    async def test_should_ingest_text_and_skip_binary(self, svc, tmp_path):
+        """The scan gate mirrors the parser, it is not an extension allow-list.
+
+        ``code.py`` was previously skipped, which contradicted the parser: its
+        unknown-extension fallback reads any UTF-8 file as text, so the KB was
+        refusing content it could perfectly well index. Only genuinely binary
+        payloads are skipped now.
+        """
         root = tmp_path / "ext_test"
         root.mkdir()
         (root / "code.py").write_text("x = 1", encoding="utf-8")
         (root / "data.csv").write_text("a,b\n1,2", encoding="utf-8")
+        (root / "notes").write_text("no extension, still text", encoding="utf-8")
+        (root / "archive.zip").write_bytes(b"PK\x03\x04\x00\x00binary")
 
         kb = await _create_kb_and_settle(svc, name="Ext", root_path=str(root))
         docs = await svc.list_documents("local-test-owner", kb_id=kb.id)
         filenames = {d.filename for d in docs}
         assert "data.csv" in filenames
-        assert "code.py" not in filenames
+        assert "code.py" in filenames
+        assert "notes" in filenames
+        assert "archive.zip" not in filenames
 
 
 # ── 3. Rescan (D5/D6: missing lifecycle) ─────────────────────────────

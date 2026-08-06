@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import logging
 import mimetypes
 import os
@@ -50,6 +51,10 @@ _ENGINE_TO_PLUGIN_ID: dict[str, str] = {
     # light_local internal engines (one per file-kind handler).
     "rapidocr": "light_local",
     "pymupdf4llm": "light_local",
+    "anydoc": "light_local",
+    # ``markitdown`` is RETIRED as an engine but stays mapped so rows written
+    # before anydoc replaced it still resolve to a plugin instead of ``None``.
+    # Requeuing them is NOT this table's job — see ``_RETIRED_ENGINE_FOR_KIND``.
     "markitdown": "light_local",
     "html_to_markdown": "light_local",
     "plain_text": "light_local",
@@ -58,6 +63,30 @@ _ENGINE_TO_PLUGIN_ID: dict[str, str] = {
     "mineru": "mineru",
     "paddleocr": "paddleocr",
 }
+
+
+# ``(parser_mode, kind)`` pairs a rescan must re-parse even though the plugin
+# id is unchanged. ``_run_rescan``'s Trigger 3 compares PLUGIN ids, so swapping
+# one light_local engine for another is invisible to it — both sides resolve to
+# ``light_local`` and the doc keeps its stale content forever.
+#
+# Both entries below exist because anydoc replaced MarkItDown:
+#   * ``markitdown`` — office/spreadsheet docs whose markdown carries the pandas
+#     artifacts anydoc does not produce (``8.630000e+10``, ``NaN``).
+#   * ``plain_text`` on an ``office`` kind — only ``.rtf`` reaches this state: it
+#     had no parser, but RTF source is ASCII so it slipped past the strict-UTF-8
+#     guard and was stored as its own control words. Legitimate plain_text docs
+#     (.md/.txt/.csv) classify as ``text`` and are untouched.
+#
+# Entries are permanent: an install can skip any number of releases, so the
+# ability to recognise a stale engine must outlive the engine itself.
+_RETIRED_ENGINE_FOR_KIND: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("markitdown", "office"),
+        ("markitdown", "spreadsheet"),
+        ("plain_text", "office"),
+    }
+)
 
 
 def _engine_to_plugin_id(engine: str | None) -> str | None:
@@ -83,17 +112,46 @@ def _resolve_data_file_path(user_id: str, ref: str | None) -> Path | None:
     return target
 
 
+# Document types with a dedicated parser backend. NOT the full ingestion gate —
+# see ``is_ingestible``, which also accepts any UTF-8 text file so source code
+# and undeclared plain-text formats are read rather than skipped. This set must
+# stay in step with what the parsers actually read; the drift is pinned by
+# ``tests/modules/docs/test_supported_exts_cover_parser.py``.
 SUPPORTED_EXTS = {
     ".pdf",
+    # Word / PowerPoint / Excel, including the legacy OLE and macro-enabled
+    # variants — all handled locally by anydoc (see parser_light_local).
+    ".doc",
     ".docx",
-    ".xlsx",
-    ".csv",
+    ".docm",
+    ".ppt",
+    ".pps",
+    ".pot",
     ".pptx",
+    ".pptm",
+    ".ppsx",
+    ".ppsm",
+    ".xls",
+    ".xlsx",
+    ".xlsm",
+    ".xlsb",
+    # OpenDocument + other document containers
+    ".odt",
+    ".ods",
+    ".odp",
+    ".rtf",
+    ".epub",
+    # Plain text / markup
+    ".csv",
     ".html",
+    # ``.htm`` parsed fine but was absent here, so the KB scan skipped it
+    # while ``.html`` worked — found by the drift test, not by a user.
+    ".htm",
     ".txt",
     ".xml",
     ".json",
     ".md",
+    # Images (OCR; requires the RapidOCR model download)
     ".png",
     ".jpg",
     ".jpeg",
@@ -102,6 +160,51 @@ SUPPORTED_EXTS = {
     ".webp",
 }
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100 MB
+
+
+# How much of a file to sniff when deciding "is this text?". One read, capped —
+# phase 3 only sniffs files it has never seen before.
+_TEXT_SNIFF_BYTES = 64 * 1024
+
+
+def is_text_payload(data: bytes, *, complete: bool = True) -> bool:
+    """Whether ``LightLocalParser``'s unknown-extension fallback will keep this
+    file's content as-is.
+
+    Mirrors that fallback deliberately: it strict-decodes as UTF-8 so source
+    code (``.py`` / ``.go`` / ``.sh``) and undeclared plain-text formats stay
+    usable, and only genuinely binary payloads are refused. Keeping the gate
+    and the parser on the same rule is what stops a file from being accepted
+    here and then rejected there (or the reverse — silently skipped).
+
+    ``complete=False`` says ``data`` is only the head of a longer file. The
+    decode is then non-final, so a multi-byte character cut at the boundary is
+    not mistaken for corruption — an invalid sequence anywhere still fails.
+    A NUL byte is the usual binary tell and never appears in UTF-8 text.
+    """
+    head = data[:_TEXT_SNIFF_BYTES]
+    if b"\x00" in head:
+        return False
+    final = complete and len(data) <= _TEXT_SNIFF_BYTES
+    try:
+        codecs.getincrementaldecoder("utf-8")().decode(head, final=final)
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def is_ingestible(filename: str, data: bytes) -> bool:
+    """Whether the KB can produce real content from this file.
+
+    A declared extension wins outright; anything else has to prove it is text.
+    The policy lives here rather than at the HTTP layer because both callers
+    need the same answer — the directory scan (phase 3) and the upload
+    endpoint — and any disagreement between them shows up as a file that
+    uploads cleanly and then never becomes a document.
+    """
+    if Path(filename).suffix.lower() in SUPPORTED_EXTS:
+        return True
+    return is_text_payload(data)
 
 
 # ── Value Objects ─────────────────────────────────────────────────────
@@ -750,8 +853,9 @@ class DocumentLibraryService:
                 # parser_mode (e.g. ``"unknown"`` from a legacy row)
                 # leaves the doc alone to avoid loops.
                 elif doc.status == "ready":
+                    kind = classify(doc.relative_path)
                     actual_plugin = _engine_to_plugin_id(doc.parser_mode)
-                    expected_plugin = kind_to_plugin.get(classify(doc.relative_path))
+                    expected_plugin = kind_to_plugin.get(kind)
                     if (
                         actual_plugin is not None
                         and expected_plugin is not None
@@ -766,6 +870,19 @@ class DocumentLibraryService:
                             doc.parser_mode,
                             actual_plugin,
                             expected_plugin,
+                        )
+                    # Trigger 4: the plugin is unchanged but the ENGINE inside
+                    # it is retired for this kind. Trigger 3 compares plugin
+                    # ids, so a swap of one light_local engine for another is
+                    # invisible to it — both sides resolve to ``light_local``.
+                    elif (doc.parser_mode, kind) in _RETIRED_ENGINE_FOR_KIND:
+                        requeue = True
+                        logger.info(
+                            "rescan: doc %s parser_mode=%s is retired for kind "
+                            "%s — queuing for re-parse",
+                            doc.id,
+                            doc.parser_mode,
+                            kind,
                         )
 
                 if requeue:
@@ -793,8 +910,6 @@ class DocumentLibraryService:
         # ── Phase 3: new file ingestion ──
         for file_rel in current_files:
             ext = Path(file_rel).suffix.lower()
-            if ext not in SUPPORTED_EXTS:
-                continue
             file_path = str(root / file_rel)
             try:
                 stat = os.stat(file_path)
@@ -802,6 +917,18 @@ class DocumentLibraryService:
                 continue
             if stat.st_size > MAX_FILE_SIZE:
                 continue
+            # A declared extension is enough; anything else must prove it is
+            # text, which is exactly what the parser's unknown-extension
+            # fallback will do with it. Sniffing costs one capped read and only
+            # happens for files this scan has never seen before.
+            if ext not in SUPPORTED_EXTS:
+                try:
+                    with open(file_path, "rb") as fh:
+                        head = fh.read(_TEXT_SNIFF_BYTES)
+                except OSError:
+                    continue
+                if not is_text_payload(head, complete=stat.st_size <= len(head)):
+                    continue
             dir_rel = os.path.dirname(file_rel)
             folder_id = folder_map.get(dir_rel, "") if dir_rel else ""
             mime, _ = mimetypes.guess_type(file_rel)

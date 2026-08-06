@@ -67,12 +67,15 @@ _third_party_pkgs = [
     # LLM providers
     "anthropic", "openai",
     # Document parsing
-    "markitdown", "pymupdf4llm", "pymupdf",
-    "html_to_markdown", "rapidocr", "mammoth",
-    "markdown_it", "markdownify",
-    "beautifulsoup4",
-    "lxml", "openpyxl", "et_xmlfile",
-    "filetype", "magika",
+    "anydoc", "pymupdf4llm", "pymupdf",
+    "html_to_markdown", "rapidocr",
+    "markdown_it",
+    # ``bs4`` is the module name; the distribution is "beautifulsoup4". Only a
+    # module name means anything to PyInstaller, so the old spelling collected
+    # nothing. It mattered little while markitdown imported bs4 anyway — with
+    # markitdown gone, html-to-markdown is its only requester.
+    "bs4",
+    "filetype",
     # OCR / ML
     "onnxruntime", "flatbuffers", "numpy",
     "opencv-python",
@@ -103,9 +106,9 @@ _third_party_pkgs = [
     # Scheduling
     "croniter", "cron_descriptor", "pytz",
     # Data
-    "pandas", "orjson", "ormsgpack", "packaging",
+    "orjson", "ormsgpack", "packaging",
     # Crypto / security
-    "cryptography", "cffi", "defusedxml",
+    "cryptography", "cffi",
     # Templating
     "jinja2", "mako", "markupsafe",
     # Config / env
@@ -121,7 +124,7 @@ _third_party_pkgs = [
     # Misc
     "yaml", "networkx", "annotated_types",
     "distro", "docstring_parser", "nh3",
-    "cobble", "colorama", "jiter",
+    "colorama", "jiter",
     "attr", "pathspec", "iniconfig",
     "pathspec",
 ]
@@ -141,17 +144,11 @@ _data_pkgs = [
     "codex_cli_bin",      # bin/codex CLI binary (~75MB)
     "pymupdf",            # libmupdf.dylib + ONNX layout models (~51MB)
     "cron_descriptor",    # locale/*.mo translation catalogs
-    # magika is MarkItDown's filetype detector — constructed eagerly in
-    # ``MarkItDown.__init__`` (``magika.Magika()``). It loads an ONNX model +
-    # config that live as PACKAGE DATA (``magika/models/standard_v3_3/model.onnx``,
-    # ``magika/config/content_types_kb.min.json``). ``collect_submodules`` only
-    # grabs .py, so without collecting these data files ``Magika()`` raises
-    # ``MagikaError: model not found`` in the frozen build — and since every
-    # office format (.docx/.xlsx/.pptx) goes through MarkItDown, ALL office
-    # parsing fails ("*Office parse error: model not found...*") while PDF
-    # (pymupdf) and plain text keep working. No pyinstaller-hooks-contrib hook
-    # covers magika, so this explicit entry is the only thing that bundles it.
-    "magika",
+    # NOTE: magika used to live here — MarkItDown constructed it eagerly and its
+    # ONNX model ships as package data, so a missed entry broke ALL office
+    # parsing in the frozen build (PR #231). Both it and MarkItDown are gone:
+    # anydoc is a compiled extension with no data files, and detects formats
+    # from the bytes itself. Don't reintroduce either.
 ]
 _extra_datas = []
 for _dpkg in _data_pkgs:
@@ -244,7 +241,7 @@ a = Analysis(
         # ``ModuleNotFoundError: No module named 'plugins'`` and the registry
         # comes up with ZERO parsers (every attachment/KB parse then fails).
         # Same raw-.py-via-sys.path strategy as ``valuz_agent``; the plugins'
-        # own third-party deps (markitdown / pymupdf4llm / rapidocr / …) are
+        # own third-party deps (anydoc / pymupdf4llm / rapidocr / …) are
         # already collected through ``_third_party_pkgs`` above.
         (str(HERE / "plugins"), "plugins"),
         # Vendored kernel — same strategy; kernel/__init__.py injects its

@@ -773,7 +773,7 @@ async def upload_attachment(
     target.write_bytes(data)
 
     # Persist the row as ``parsing`` and kick the heavy parse off the event
-    # loop in a background task. The parser (PyMuPDF / MarkItDown / RapidOCR)
+    # loop in a background task. The parser (PyMuPDF / anydoc / RapidOCR)
     # is CPU/IO-heavy and fully synchronous — running it inline froze the
     # whole single-threaded server for the parse's duration (every other
     # request / SSE stream stalled). The upload now returns at once; the
@@ -858,7 +858,7 @@ async def _build_attachment_parser(db: Any, user_id: str) -> Any:
 _PARSE_TASKS: set[asyncio.Task[None]] = set()
 
 # Cap concurrent *local* (SYNC) parses. ``to_thread`` keeps a single parse off
-# the event loop, but a CPU-bound parser (pymupdf4llm / markitdown) holds the
+# the event loop, but a CPU-bound parser (pymupdf4llm) holds the
 # GIL in stretches, so N simultaneous parses (e.g. the user re-uploading the
 # same heavy PDF several times) would still starve the loop. Bounding the
 # worker threads to a small number keeps the loop getting fair time slices.

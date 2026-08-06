@@ -7,7 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Local document parsing now runs on anydoc instead of MarkItDown** — the
+  LightLocal parser's office backend was replaced wholesale. Local parsing now
+  reads legacy Office (`.doc` / `.ppt` / `.xls`), macro-enabled variants,
+  OpenDocument (`.odt` / `.ods` / `.odp`), RTF and EPUB, none of which were
+  supported before; spreadsheet output no longer carries pandas artifacts (a
+  revenue cell rendered as `8.630000e+10` and every empty cell as `NaN`); and
+  docx conversion is ~25× faster. Removing MarkItDown pruned 12 packages
+  including pandas and magika — whose eagerly-loaded ONNX model had broken all
+  office parsing in a frozen build once before. The knowledge base and the
+  parsing settings page were widened to match. Known trade-off: PowerPoint no
+  longer carries `<!-- Slide number: N -->` markers, so consecutive title-less
+  slides run together. See
+  [docs/design/local-parser-anydoc-migration.md](docs/design/local-parser-anydoc-migration.md).
+
 ### Fixed
+
+- **RTF files silently polluted the knowledge base** — `.rtf` had no parser,
+  but RTF source is ASCII, so it slipped past the unknown-extension guard and
+  was indexed as its own markup (`{\rtf1\ansi\deff3...}` stored as if it were
+  prose, with no error anywhere). RTF is now converted properly.
+- **`.htm` files were never ingested into the knowledge base** — they parsed
+  fine, but the extension was missing from the ingestion allow-list, so the
+  directory scan skipped them silently while `.html` worked.
+- **Text files without a known extension were skipped by the knowledge base** —
+  source files, config and logs (`.py`, `.go`, `.sh`, `.yaml`, extension-less
+  files) were dropped even though the parser reads any UTF-8 file as text. The
+  ingestion gate now mirrors the parser instead of using a fixed allow-list, so
+  they are indexed; only genuinely binary files are skipped.
+- **Uploading an unsupported file to a knowledge base silently did nothing** —
+  the file was written to disk, the scan skipped it, and no document row, error
+  or message ever appeared. Such uploads are now rejected with an explanation
+  naming the file, and the knowledge base page shows the server's reason
+  instead of a generic "import failed".
 
 - **Windows skill materialization** — a skill whose `SKILL.md` declares a
   namespaced frontmatter name (e.g. `react:components`) crashed session start
