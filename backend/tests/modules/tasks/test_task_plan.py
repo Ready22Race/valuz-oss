@@ -253,3 +253,33 @@ def test_panel_status_helper() -> None:
 def test_subtask_from_dict_defaults_title_to_key() -> None:
     st = Subtask.from_dict({"key": "x"})
     assert st.title == "x" and st.status == "planned" and st.attempts == 0
+
+
+def test_update_node_coerces_like_from_dict() -> None:
+    """``modify_plan`` feeds MODEL-SUPPLIED patch dicts straight into
+    ``update_node``, so the two ways a node gets built must agree on types.
+
+    Without coercion ``attempts="many"`` went through ``setattr`` untouched,
+    serialized into the persisted plan JSON, and detonated a turn later at
+    ``mark_node_dispatched``'s ``attempts + 1`` — a TypeError raised by a
+    dispatch on a plan that looks perfectly fine.
+    """
+    plan = TaskPlan.from_dict({"subtasks": [_node("a"), _node("b")]})
+
+    with pytest.raises(PlanError, match="'attempts' must be an integer"):
+        plan.update_node("a", attempts="many")
+    with pytest.raises(PlanError, match="'depends_on' must be a list"):
+        plan.update_node("a", depends_on="ab")
+    # ``key`` cannot even be expressed as a patch — it is the positional
+    # selector, so Python rejects the collision before the body runs.
+    with pytest.raises(TypeError):
+        plan.update_node("a", **{"key": "renamed"})
+
+    # Valid patches still behave, and are normalized the same as from_dict:
+    plan.update_node("a", attempts=3, depends_on=["b"], title=None, agent="")
+    node = plan.get("a")
+    assert node is not None
+    assert node.attempts == 3
+    assert node.depends_on == ["b"]
+    assert node.title == ""  # str(value or "") — never None
+    assert node.agent is None  # falsy → None, not ""
