@@ -780,7 +780,10 @@ interface TurnRowProps {
    * because the two positions mean different things: an action acts on a turn,
    * a leading control marks it.
    */
-  renderTurnLeading?: (turn: ConversationTurn) => ReactNode | null;
+  renderTurnLeading?: (
+    turn: ConversationTurn,
+    role: "user" | "assistant",
+  ) => ReactNode | null;
   /** Predicate marking an overridden tool card as *foldable* — it collapses
    * away with the process trail when the turn ends (visible while running or
    * when the turn is expanded), instead of staying pinned at its position.
@@ -1016,9 +1019,10 @@ const TurnRow = memo(
         {/* Host control rendered BEFORE the messages — a selection checkbox
             belongs beside the message it selects, not down in the action row
             where it reads as another action. */}
-        {renderTurnLeading?.(turn)}
         {turn.userText || (turn.attachments && turn.attachments.length > 0) ? (
-          <div className="group flex flex-col items-end gap-1">
+          <div className="flex items-start gap-2">
+            {renderTurnLeading?.(turn, "user")}
+            <div className="group flex min-w-0 flex-1 flex-col items-end gap-1">
             {turn.userText ? (
               <div className="max-w-[78%]">
                 <div className="whitespace-pre-wrap rounded-xl bg-surface-soft px-3.5 py-3 text-base leading-[1.6] text-ink-heading">
@@ -1043,10 +1047,12 @@ const TurnRow = memo(
                 timestamp={turn.userTimestamp}
               />
             ) : null}
+            </div>
           </div>
         ) : null}
 
         <div className="flex items-start gap-3">
+          {renderTurnLeading?.(turn, "assistant")}
           <div className="min-w-0 flex-1 space-y-3">
             {/* Turn-level "Worked for Xm Ys" header — always visible when the
                 turn has any thinking/tool work. While streaming it's a
@@ -1267,7 +1273,10 @@ interface ConversationTurnListProps {
    * because the two positions mean different things: an action acts on a turn,
    * a leading control marks it.
    */
-  renderTurnLeading?: (turn: ConversationTurn) => ReactNode | null;
+  renderTurnLeading?: (
+    turn: ConversationTurn,
+    role: "user" | "assistant",
+  ) => ReactNode | null;
   /** See ``TurnRowProps.isToolCardFoldable``. */
   isToolCardFoldable?: (tool: PrototypeToolCall) => boolean;
   /** See ``TurnRowProps.onRevealFile``. */

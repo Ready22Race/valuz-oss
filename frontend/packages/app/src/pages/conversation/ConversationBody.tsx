@@ -173,10 +173,10 @@ export function ConversationBody({
                   context={{ turn }}
                 />
               )}
-              renderTurnLeading={(turn) => (
+              renderTurnLeading={(turn, role) => (
                 <SlotRenderer
                   name="conversation.turn.leading"
-                  context={{ turn }}
+                  context={{ turn, role }}
                 />
               )}
               // Remount on true session switches so the virtualizer's
