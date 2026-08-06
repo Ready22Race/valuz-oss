@@ -2439,6 +2439,7 @@ I18nKey = Literal[
     "ui.artifact.zoomOut",
     "ui.artifact.zoomOutLabel",
     "ui.citation.ariaLabel",
+    "ui.citation.calculationDetails",
     "ui.citation.calculationInputs",
     "ui.citation.documentAddressUnavailable",
     "ui.citation.documentCoverageComplete",
