@@ -303,6 +303,68 @@ async def refresh_docs_capabilities_for_session(session_id: str, user_id: str) -
     return True
 
 
+async def refresh_bundled_skills_for_session(session_id: str, user_id: str) -> bool:
+    """Attach bundled official packages that landed after the session was created.
+
+    Why this exists
+    ---------------
+    Bundled official skills (``origin_label == "Built-in"``) are injected into
+    every session unconditionally — ``resolve_session_capabilities`` §1c. But
+    that resolver only runs at create time, while the packages themselves are
+    materialised into ``official_skill_root`` by a separate, asynchronous
+    writer: a release that adds a package, or a managed deployment landing an
+    owner's tree for the first time. A session created in that window gets a
+    snapshot taken before the package existed and never sees it, even though
+    every later session does.
+
+    Same shape and the same rule as the docs refresher above: additive only.
+    A package the user detached from this session stays detached, and nothing
+    here removes an entry the session already carries — the session's own
+    composition is not this function's business, only the packages that could
+    not have been in it.
+
+    Cheap enough for the per-turn path: one directory listing plus a marker
+    stat per package, no manifest parsing. Returns ``True`` when the session
+    row was changed. Safe to call repeatedly.
+    """
+    from valuz_agent.infra.fs_registry import fs_registry
+    from valuz_agent.integrations.skills_official_bootstrap import is_bundled_skill
+
+    session = await kernel_client.get_session(user_id, session_id)
+    if session is None or session.status in ("terminated",):
+        return False
+
+    official_root = fs_registry.official_skill_root(user_id=user_id)
+    if not official_root.is_dir():
+        return False
+
+    current_skills = list(session.skills or ())
+    known = set(current_skills)
+    missing: list[str] = []
+    for skill_dir in sorted(path for path in official_root.iterdir() if path.is_dir()):
+        if not is_bundled_skill(skill_dir):
+            continue
+        absolute = str(skill_dir.resolve(strict=False))
+        if absolute not in known:
+            known.add(absolute)
+            missing.append(absolute)
+    if not missing:
+        return False
+
+    await kernel_client.update_session(
+        user_id,
+        session_id,
+        UpdateSessionRequest(skills=[*current_skills, *missing]),
+    )
+    logger.info(
+        "Attached %d bundled skill(s) that landed after session %s was created: %s",
+        len(missing),
+        session_id,
+        ", ".join(Path(path).name for path in missing),
+    )
+    return True
+
+
 async def _refresh_external_connector_entries(user_id: str, entries: list) -> list:
     """Re-resolve user-attached connector entries with CURRENT credentials.
 
