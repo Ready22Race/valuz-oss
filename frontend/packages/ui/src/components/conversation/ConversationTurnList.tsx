@@ -773,6 +773,14 @@ interface TurnRowProps {
    * Returning null adds nothing, so OSS renders exactly as before.
    */
   renderTurnActions?: (turn: ConversationTurn) => ReactNode | null;
+  /**
+   * Host control rendered at the START of a turn, before its messages.
+   *
+   * Separate from ``renderTurnActions`` (which appends to the copy/retry row)
+   * because the two positions mean different things: an action acts on a turn,
+   * a leading control marks it.
+   */
+  renderTurnLeading?: (turn: ConversationTurn) => ReactNode | null;
   /** Predicate marking an overridden tool card as *foldable* — it collapses
    * away with the process trail when the turn ends (visible while running or
    * when the turn is expanded), instead of staying pinned at its position.
@@ -803,6 +811,7 @@ const TurnRow = memo(
     retryCount,
     renderToolCall,
     renderTurnActions,
+    renderTurnLeading,
     isToolCardFoldable,
     onRevealFile,
     isLocalFileHref,
@@ -1004,6 +1013,10 @@ const TurnRow = memo(
         : formatTurnElapsed(processedElapsedMs);
     return (
       <div data-conversation-turn className="space-y-[26px]">
+        {/* Host control rendered BEFORE the messages — a selection checkbox
+            belongs beside the message it selects, not down in the action row
+            where it reads as another action. */}
+        {renderTurnLeading?.(turn)}
         {turn.userText || (turn.attachments && turn.attachments.length > 0) ? (
           <div className="group flex flex-col items-end gap-1">
             {turn.userText ? (
@@ -1247,6 +1260,14 @@ interface ConversationTurnListProps {
   renderToolCall?: (tool: PrototypeToolCall) => ReactNode | null;
   /** See ``TurnRowProps.renderTurnActions``. */
   renderTurnActions?: (turn: ConversationTurn) => ReactNode | null;
+  /**
+   * Host control rendered at the START of a turn, before its messages.
+   *
+   * Separate from ``renderTurnActions`` (which appends to the copy/retry row)
+   * because the two positions mean different things: an action acts on a turn,
+   * a leading control marks it.
+   */
+  renderTurnLeading?: (turn: ConversationTurn) => ReactNode | null;
   /** See ``TurnRowProps.isToolCardFoldable``. */
   isToolCardFoldable?: (tool: PrototypeToolCall) => boolean;
   /** See ``TurnRowProps.onRevealFile``. */
@@ -1290,6 +1311,7 @@ export function ConversationTurnList({
   onVirtualApiReady,
   renderToolCall,
   renderTurnActions,
+  renderTurnLeading,
   isToolCardFoldable,
   onRevealFile,
   isLocalFileHref,
@@ -1454,6 +1476,7 @@ export function ConversationTurnList({
                     retryCount={retryCounts?.[turn.id] ?? 0}
                     renderToolCall={renderToolCall}
                     renderTurnActions={renderTurnActions}
+                    renderTurnLeading={renderTurnLeading}
                     isToolCardFoldable={isToolCardFoldable}
                     onRevealFile={onRevealFile}
                     isLocalFileHref={isLocalFileHref}

@@ -173,6 +173,12 @@ export function ConversationBody({
                   context={{ turn }}
                 />
               )}
+              renderTurnLeading={(turn) => (
+                <SlotRenderer
+                  name="conversation.turn.leading"
+                  context={{ turn }}
+                />
+              )}
               // Remount on true session switches so the virtualizer's
               // internal state starts fresh. The /conversation/new → real-id
               // promotion keeps this key stable so the first sent turn
