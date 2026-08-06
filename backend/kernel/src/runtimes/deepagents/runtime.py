@@ -35,6 +35,7 @@ import sqlite3
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict
+from datetime import timedelta
 from typing import Any, Literal
 
 from deepagents import SubAgent, create_deep_agent
@@ -95,6 +96,30 @@ def _is_internal_summarization_event(chunk: dict[str, Any]) -> bool:
 
     metadata = chunk.get("metadata")
     return isinstance(metadata, dict) and metadata.get("lc_source") == "summarization"
+
+
+async def _log_mcp_progress(
+    progress: float,
+    total: float | None,
+    message: str | None,
+    context: Any = None,
+) -> None:
+    """Consume MCP ``notifications/progress`` for a tool call.
+
+    Registering ANY callback is what makes the SDK attach a
+    ``progressToken`` to the request, which is what permits servers to
+    report at all. This one only logs: nothing here resets a timer (the
+    request timeout is a hard ceiling), so progress is an observability
+    signal, not a lifeline. No measured client does otherwise: codex and the
+    Claude CLI both abort exactly at their configured ceiling with beats
+    still arriving.
+    """
+    logger.debug(
+        "mcp progress: %s/%s %s",
+        progress,
+        total if total is not None else "?",
+        message or "",
+    )
 
 
 async def _preserve_mcp_source_metadata(request: Any, handler: Any) -> Any:
@@ -1612,6 +1637,7 @@ class DeepAgentsRuntime:
         if not session.mcp_servers:
             return []
         try:
+            from langchain_mcp_adapters.callbacks import Callbacks
             from langchain_mcp_adapters.client import MultiServerMCPClient
         except ImportError:
             logger.warning(
@@ -1656,6 +1682,27 @@ class DeepAgentsRuntime:
             entry: dict[str, Any] = {"transport": transport, "url": cfg.url}
             if cfg.headers:
                 entry["headers"] = dict(cfg.headers)
+            # A server that declares how long its tools may run must have that
+            # honoured here too. Measured, every client aborts exactly at its
+            # ceiling with progress still arriving (codex at ``tool_timeout_sec``,
+            # the Claude CLI at its per-server ``timeout``), and here
+            # ``mcp.shared.session`` wraps the receive in ``anyio.fail_after``,
+            # which no notification restarts. The ceiling is therefore the only
+            # lever, and a long generation dies on the default unless BOTH the
+            # transport read and the session read are raised.
+            timeout_sec = getattr(cfg, "tool_timeout_sec", None)
+            if isinstance(timeout_sec, (int, float)) and timeout_sec > 0:
+                # The two transports type this field differently
+                # (``SSEConnection`` seconds-as-float vs
+                # ``StreamableHttpConnection`` timedelta); give each its own.
+                entry["sse_read_timeout"] = (
+                    timedelta(seconds=float(timeout_sec))
+                    if transport == "streamable_http"
+                    else float(timeout_sec)
+                )
+                entry["session_kwargs"] = {
+                    "read_timeout_seconds": timedelta(seconds=float(timeout_sec))
+                }
             spec[cfg.name] = entry
 
         if not spec:
@@ -1663,6 +1710,13 @@ class DeepAgentsRuntime:
         client = MultiServerMCPClient(
             spec,  # type: ignore[arg-type]
             tool_interceptors=[_preserve_mcp_source_metadata],
+            # The MCP SDK only attaches ``_meta.progressToken`` when a progress
+            # callback exists, so a client with none tells servers "do not
+            # bother" and gets silence back. Registering one makes long tools
+            # observable (the host's ``generate_ui`` heartbeats through it);
+            # it cannot extend this client's hard timeout, so it is for
+            # visibility, not for survival — see the timeout mapping above.
+            callbacks=Callbacks(on_progress=_log_mcp_progress),
         )
         # Load per server instead of one ``get_tools()`` over everything: the
         # aggregate call fails the WHOLE turn when any single server is

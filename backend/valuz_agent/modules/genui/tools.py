@@ -330,6 +330,10 @@ async def _generate_ui_handler(args: dict[str, Any], ctx: ExecContext) -> ToolRe
         tool_use_id=tool_use_id,
         session_instructions=a2ui_instructions(scope),
         output_format=OUTPUT_FORMAT,
+        # Keep the MCP caller's idle timer alive while the model writes; the
+        # toolkit server supplies this only when the client asked for
+        # progress (see ``HostExecContext.report_progress``).
+        on_progress=getattr(ctx, "report_progress", None),
     )
     try:
         generated = await _complete_with_retries(

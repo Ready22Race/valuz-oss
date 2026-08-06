@@ -37,8 +37,10 @@ class _FakeClient:
         spec: dict[str, dict[str, object]],
         *,
         tool_interceptors: list[object] | None = None,
+        callbacks: object | None = None,
     ) -> None:
         self.spec = spec
+        self.callbacks = callbacks
         self.tool_interceptors = tool_interceptors
         type(self).instances.append(self)
 
