@@ -27,6 +27,7 @@ import {
 import { usePlatform } from "@valuz/app/platform";
 import { toAbsoluteProjectPath } from "../../lib/project-paths";
 import { formatFileSize } from "./file-tree-utils";
+import { SlotRenderer } from "@valuz/core";
 
 type ContextPanelParams = {
   /** Route param (``/conversation/{id}``), defaulted to ``NEW_SESSION_ID``. */
@@ -263,6 +264,12 @@ export function useContextPanel({
         // Agent-delivered deliverables (生成文件) — shown in both chat and
         // project sessions; rows open in the in-app artifact viewer.
         generatedFiles={generatedFiles}
+        generatedFilesAction={
+          <SlotRenderer
+            name="project.generatedFiles.actions"
+            context={{ generatedFiles }}
+          />
+        }
         onOpenGeneratedFile={(path) => void openArtifactFile(path)}
         onLoadArtifactVersions={handleLoadArtifactVersions}
         // KB binding tree — project sessions only, **read-only**: we
