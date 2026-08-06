@@ -929,6 +929,27 @@ paths:
                 $ref: "#/components/schemas/TaskDetail"
         "404":
           description: Task not found
+    delete:
+      summary: Delete a task and its runs and timeline
+      description: >-
+        Removes the task header, its run index and its event log. The kernel
+        sessions are left alone — they are ordinary sessions and are deleted
+        through the sessions API. A running task is refused (409): stop it
+        first, so its actors are not writing to rows that are being removed.
+      operationId: deleteTask
+      tags: [tasks]
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "204":
+          description: Deleted
+        "404":
+          description: Task not found
+        "409":
+          description: Task is still active — stop it first
   /v1/tasks/{task_id}/events:
     get:
       summary: Task event log (ACTIVITY)

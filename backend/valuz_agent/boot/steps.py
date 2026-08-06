@@ -656,6 +656,49 @@ async def recover_active_tasks() -> None:
         logging.getLogger(__name__).exception("recover_active_tasks failed")
 
 
+async def purge_tasks_of_deleted_projects() -> None:
+    """Remove tasks whose project is gone. Must run BEFORE recovery.
+
+    Project deletion now cascades, but installs created before that carry the
+    orphans it used to leave: an ``active`` task with no kernel sessions, which
+    recovery respawns against a dead session id and the health monitor then
+    announces as "blocked" — for a project the user deleted, on a row with no
+    delete path. Ordering matters: after ``recover_active_tasks`` this sweep
+    would still fire that notification once per boot before cleaning up.
+
+    Cross-owner, like the recovery sweep it precedes. A no-op once drained.
+    """
+    import logging
+
+    from sqlalchemy import select
+
+    from valuz_agent.infra.db import async_unit_of_work
+    from valuz_agent.modules.projects.models import ProjectRow
+    from valuz_agent.modules.tasks.models import TaskRow
+    from valuz_agent.modules.tasks.purge import purge_tasks
+
+    try:
+        async with async_unit_of_work(commit=False) as db:
+            live = {
+                pid for pid in (await db.execute(select(ProjectRow.id))).scalars().all()
+            }
+            orphans: dict[str, list[str]] = {}
+            for task_id, user_id, project_id in (
+                await db.execute(select(TaskRow.id, TaskRow.user_id, TaskRow.project_id))
+            ).all():
+                if project_id not in live:
+                    orphans.setdefault(user_id, []).append(task_id)
+        purged = 0
+        for user_id, task_ids in orphans.items():
+            purged += await purge_tasks(user_id, task_ids)
+        if purged:
+            logging.getLogger(__name__).warning(
+                "tasks: purged %d task(s) whose project no longer exists", purged
+            )
+    except Exception:  # noqa: BLE001 — startup must not block on bookkeeping
+        logging.getLogger(__name__).exception("deleted-project task sweep failed")
+
+
 async def resolve_informational_notification_backlog() -> None:
     """Close notifications that report a FINISHED thing but were left open.
 

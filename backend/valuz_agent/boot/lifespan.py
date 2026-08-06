@@ -53,6 +53,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await steps.recover_stranded_sessions()
     await steps.resume_queued_input_drains()
     await steps.seal_orphan_pendings()
+    await steps.purge_tasks_of_deleted_projects()
     await steps.recover_active_tasks()
     await steps.resolve_informational_notification_backlog()
 

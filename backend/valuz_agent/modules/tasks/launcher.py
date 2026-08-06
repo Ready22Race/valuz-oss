@@ -19,6 +19,8 @@ every edit. Work that must await belongs before the call, not inside it.
 from __future__ import annotations
 
 import asyncio
+import functools
+import logging
 from typing import Any, Literal
 
 from valuz_agent.adapters import kernel_client
@@ -27,6 +29,8 @@ from valuz_agent.modules.tasks.actor_runner import ActorRunner
 from valuz_agent.modules.tasks.live_member_registry import LiveMemberRegistry
 from valuz_agent.modules.tasks.mailbox import mailbox_registry
 from valuz_agent.ports.sandbox_allocator import SandboxScope
+
+logger = logging.getLogger(__name__)
 
 
 async def create_task_session(
@@ -88,7 +92,7 @@ def spawn_actor(
     # cannot pop the box recovery is about to seed with member_done results.
     # (run_actor_loop claims again for its own release token.)
     mailbox_registry.claim(session_id)
-    asyncio.create_task(
+    loop_task = asyncio.create_task(
         actor.run_actor_loop(
             session_id=session_id,
             initial_prompt=prompt,
@@ -98,6 +102,37 @@ def spawn_actor(
             user_id=user_id,
         )
     )
+    loop_task.add_done_callback(
+        functools.partial(_log_actor_exit, session_id=session_id, task_id=task_id, role=role)
+    )
+
+
+def _log_actor_exit(
+    task: asyncio.Task[None], *, session_id: str, task_id: str, role: str
+) -> None:
+    """Report an actor loop that died on an unhandled exception, AT the moment
+    it dies and WITH its identity.
+
+    Without this the only report is asyncio's ``Task exception was never
+    retrieved``, emitted whenever the task is garbage-collected — detached from
+    the session and task it belonged to, and often long after the fact. An
+    escaped exception is not cosmetic: the loop's ``finally`` settles the run
+    row to ``completed``, which makes both lead-side backstops
+    (``_heartbeat_pending`` / ``_probe_pending_members``, both filtering on
+    ``status == "active"``) treat the member as never-dispatched, and the lead
+    then burns its full await window with no diagnosis to show for it.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(
+            "actor loop for %s session %s (task %s) died on an unhandled exception",
+            role,
+            session_id,
+            task_id,
+            exc_info=exc,
+        )
 
 
 __all__ = ["create_task_session", "spawn_actor"]

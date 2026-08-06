@@ -165,7 +165,12 @@ async def inject_into_task(
 
     lead_session_id = lead_run.session_id
     wrapped = f'<user-instruction source="chat">\n{text}\n</user-instruction>'
-    delivered = mailbox_registry.put(
+    # OWNED, not merely registered. ``put`` succeeds whenever a box exists, and
+    # a box can exist with no loop reading it (a sender pre-seeded it for a lead
+    # that then failed to start). That reported ``delivered`` and wrote a
+    # ``user_inject`` event while the message sat in a queue nobody drains —
+    # strictly worse than LEAD_OFFLINE, which the caller can act on.
+    delivered = mailbox_registry.is_owned(lead_session_id) and mailbox_registry.put(
         lead_session_id,
         InboxMsg(kind="text", text=wrapped, from_session=from_session_id),
     )

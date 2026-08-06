@@ -115,12 +115,37 @@ class MailboxRegistry:
 
         Prefer :meth:`release` from actor loops — this bypasses the claim
         guard and exists for tests / non-loop teardown.
+
+        Drops the CLAIM as well: an owner recorded for a box that no longer
+        exists would report :meth:`is_owned` for a session nothing can be
+        delivered to — the same lie in the other direction.
         """
+        self._claims.pop(session_id, None)
         if self._boxes.pop(session_id, None) is not None:
             logger.debug("mailbox: unregistered %s", session_id)
 
     def is_registered(self, session_id: str) -> bool:
+        """A box EXISTS — messages can be queued. Says nothing about a reader.
+
+        Not a liveness signal: :meth:`register` is non-owning, so a box can
+        outlive (or precede) any actor loop. Use :meth:`is_owned` to ask
+        whether anyone is actually reading.
+        """
         return session_id in self._boxes
+
+    def is_owned(self, session_id: str) -> bool:
+        """An actor loop HOLDS this session — the liveness oracle.
+
+        A claim is taken by the loop itself (:meth:`claim`, from
+        ``spawn_actor``) and dropped by its ``finally`` (:meth:`release`), so
+        this tracks the loop, not the box. ``is_registered`` used to stand in
+        for this and could not: a box pre-seeded by a sender for a loop that
+        then failed to start stays registered for the life of the process
+        (nothing calls ``unregister`` in production), so every reader of it
+        saw a dead task as healthy — the watchdog never blocked it, and
+        ``inject_into_task`` reported delivery into a queue nobody reads.
+        """
+        return session_id in self._claims
 
     def has_pending(self, session_id: str) -> bool:
         """True if the session has at least one queued message (non-blocking).
