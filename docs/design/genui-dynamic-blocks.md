@@ -174,24 +174,37 @@ hang a variant on.
 ```python
 # valuz_agent/ports/genui_blocks.py  (OSS owns baseline + merge)
 class GenUIBlockRegistry:
-    def register(self, layer: Literal["commercial", "distribution"],
-                 specs: Sequence[BlockSpec]) -> None: ...
-    def catalog_text(self) -> str: ...        # built-in ⧺ registered, in layer order
+    def register(self, layer: Literal["commercial", "distribution"], *,
+                 group: str, entries: Sequence[tuple[str, str]],
+                 notes: Sequence[str] = (), mode: GenUIBlockMode = "append",
+                 ) -> GenUIBlockRegisterResult: ...
+    def catalog_text(self, *, baseline: bool = True) -> str: ...
 
 # valuz_agent/ports/extensions.py
 self.genui_blocks = GenUIBlockRegistry()
 ```
 
-Then the two prompt builders take the registry's text instead of a constant:
+An entry is a `(name, pre-rendered catalog line)` pair, not a `BlockSpec`: the
+line is authored by the edition's own generator from the same zod schemas its
+renderer registers, so this registry never re-renders it and the two halves
+cannot drift through a second formatter.
+
+The prompt then reads the registry instead of a constant, through the seam the
+`components` scope already had:
 
 ```python
--A2UI_COMPONENT_CATALOG = f"""{_HAND_WRITTEN}\n{_load_block_catalog()}"""
-+def build_component_catalog() -> str:
-+    return f"{_HAND_WRITTEN}\n{ext.genui_blocks.catalog_text()}"
+-def edition_catalog_text() -> str:
+-    return ""                                        # the seam, unfilled
++def edition_catalog_text() -> str:
++    return _block_registry().catalog_text(baseline=False)
 ```
 
-That single change is what makes the prompt dynamic. Everything else — the
-generated OSS asset and the group structure — stays.
+`baseline=False` is what makes the scope split real: `edition` offers what was
+installed *instead of* this repository's set, so including the baseline there
+would make it a synonym for `all`. Reading it per call is what makes the prompt
+dynamic — a module constant would freeze it at import, one restart behind every
+edition. Everything else — the generated OSS asset, the group structure, the
+scope rules — stays.
 
 **The commercial backend registers at startup**, from an asset its own build
 generates the same way OSS generates its own. Same generator, same
@@ -236,15 +249,23 @@ edition from registering different sets on each side. Two cheap guards:
 | replaced block still reaches the renderer | every consumer reads `effectiveBlocks()`; pinned by test |
 | edition unloads | `unregisterBlocks(source)` clears both halves |
 
-## Open decisions
+## Decisions (previously open, fixed by `ports/genui_blocks.py`)
 
-1. **Does the backend registry need per-owner scope?** A single-tenant desktop
-   build does not. A multi-tenant deployment where one org has finance blocks
-   and another does not would need the catalog keyed by owner, which is a
-   larger change to prompt assembly.
-2. **Layer order.** `CitationQualityPolicyRegistry` fixes `oss → commercial →
-   distribution` and lets later layers tighten but not replace. The frontend
-   now answers half of this: a layer may replace the *OSS block set* wholesale,
-   but never another layer's blocks — the second `replace` is refused rather
-   than won by order. The backend registry should mirror that rule when it is
-   built, so the two sides cannot disagree about which set is live.
+1. **No per-owner scope.** The catalog is an *edition build* property, not an
+   org property: a single-tenant desktop and a per-distribution deployment
+   both run exactly one edition per process, so the registry is process-wide.
+   If a deployment ever needs per-org catalogs, that arrives as a new port —
+   not a widening of this one — because it changes prompt assembly, caching,
+   and the boot assertion all at once.
+2. **Layer order mirrors the frontend.** Fixed `commercial → distribution`;
+   a cross-layer name collision is refused (the earlier layer wins
+   deterministically), never resolved by merge order. A layer may `replace`
+   the OSS baseline wholesale — suppressing the built-in blocks *and* the
+   OpenUI vocabulary from every prompt scope, with only the root surviving —
+   but never another layer's blocks; a second `replace` is refused wholesale
+   with the holder named. Under suppression the snapshot-fallback advice
+   collapses to "a component from the catalog above", because advice naming a
+   suppressed component is the exact described-but-unrenderable failure this
+   design closes. Registration before the baseline binds is legal (overlay
+   startup runs first); collisions are re-checked at bind and dropped loudly
+   (`rejected_at_bind()`).
