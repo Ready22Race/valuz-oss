@@ -23,9 +23,10 @@ import logging
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from valuz_agent.infra.db import async_unit_of_work
-from valuz_agent.modules.tasks.models import TaskEventRow
 from valuz_agent.modules.tasks.datastore import TaskDatastore, TaskEventDatastore
+from valuz_agent.modules.tasks.models import TaskEventRow
 
 logger = logging.getLogger(__name__)
 
