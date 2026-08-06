@@ -108,3 +108,39 @@ def test_parse_target_host_variants() -> None:
         {"target_host": {"host_type": "t", "host_id": "i", "slot": "side"}}
     )
     assert host is not None and host.slot == "side"
+
+
+class _Session:
+    def __init__(self, metadata: dict) -> None:
+        self.metadata = metadata
+
+
+def test_target_host_falls_back_to_the_turns_host_ref() -> None:
+    """The model forgetting the argument must not silently detach the
+    generation from the workbench the user is looking at."""
+    session = _Session(
+        {"valuz": {"host_ref": {"host_type": "finance.research-desk", "host_id": "desk"}}}
+    )
+    host = _parse_target_host({}, session)
+    assert host is not None
+    assert (host.host_type, host.host_id, host.slot) == (
+        "finance.research-desk",
+        "desk",
+        "main",
+    )
+
+
+def test_explicit_target_host_overrides_the_turn_host() -> None:
+    session = _Session(
+        {"valuz": {"host_ref": {"host_type": "finance.research-desk", "host_id": "desk"}}}
+    )
+    host = _parse_target_host(
+        {"target_host": {"host_type": "finance.company-research", "host_id": "US:NVDA"}},
+        session,
+    )
+    assert host is not None and host.host_id == "US:NVDA"
+
+
+def test_no_host_anywhere_is_still_none() -> None:
+    assert _parse_target_host({}, _Session({})) is None
+    assert _parse_target_host({}, _Session({"valuz": {"host_ref": {"host_type": "x"}}})) is None

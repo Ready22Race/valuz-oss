@@ -31,6 +31,37 @@ from valuz_agent.ports.message_context import HostRef
 logger = logging.getLogger(__name__)
 
 
+async def _stamp_turn_host_ref(
+    user_id: str, session_id: str, host_ref: HostRef
+) -> None:
+    """Persist the turn's declared host under ``metadata.valuz.host_ref``.
+
+    Read by tools that must act on the host the user is looking at
+    (``generate_ui``'s ``target_host``). Overwritten each turn that declares
+    one and left alone by turns that don't — a host-anchored conversation
+    keeps its host across follow-ups that omit it.
+    """
+    from app.schemas import UpdateSessionRequest
+
+    session = await kernel_client.get_session(user_id, session_id)
+    if session is None:
+        return
+    metadata = dict(session.metadata or {})
+    valuz = dict(metadata.get("valuz") or {})
+    stamped = {
+        "host_type": host_ref.host_type,
+        "host_id": host_ref.host_id,
+        "slot": host_ref.slot,
+    }
+    if valuz.get("host_ref") == stamped:
+        return
+    valuz["host_ref"] = stamped
+    metadata["valuz"] = valuz
+    await kernel_client.update_session(
+        user_id, session_id, UpdateSessionRequest(metadata=metadata)
+    )
+
+
 # ---------------------------------------------------------------------------
 # run_session_to_idle — the shared one-shot turn-to-idle primitive
 # (extracted from SessionService._run_agent_background)
@@ -219,6 +250,18 @@ async def run_session_to_idle(
             )
         except Exception:  # noqa: BLE001
             additional_context = ""
+
+        # Record the turn's declared host on the session so TOOLS can read it.
+        # The context section tells the MODEL where it is working, but asking
+        # the model to copy that back into a tool argument is probabilistic —
+        # a tool that needs the host (``generate_ui``'s ``target_host``) reads
+        # it from here instead and only treats the argument as an override.
+        # Best-effort: a failed stamp costs a default, never the turn.
+        if host_ref is not None:
+            try:
+                await _stamp_turn_host_ref(user_id, session_id, host_ref)
+            except Exception:  # noqa: BLE001
+                logger.debug("failed to stamp turn host_ref", exc_info=True)
 
         try:
             message = await kernel_client.run_turn(

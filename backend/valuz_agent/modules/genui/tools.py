@@ -124,8 +124,7 @@ _PARAMS = {
 }
 
 
-def _parse_target_host(args: dict[str, Any]) -> "UiArtifactTargetHost | None":
-    raw = args.get("target_host")
+def _host_from_mapping(raw: object) -> "UiArtifactTargetHost | None":
     if not isinstance(raw, dict):
         return None
     host_type = str(raw.get("host_type") or "").strip()
@@ -137,6 +136,25 @@ def _parse_target_host(args: dict[str, Any]) -> "UiArtifactTargetHost | None":
         host_id=host_id,
         slot=str(raw.get("slot") or "main").strip() or "main",
     )
+
+
+def _parse_target_host(args: dict[str, Any], session: Any = None) -> "UiArtifactTargetHost | None":
+    """Where the generated UI belongs: the tool argument when the model
+    supplied one, otherwise the host the TURN declared.
+
+    The argument is an override, not the source of truth. Asking the model to
+    copy the host out of its context into an argument is probabilistic — it
+    forgets, and the generation then silently becomes a conversation-only
+    visual for a user who is looking at that very workbench. The turn's own
+    ``host_ref`` (stamped by ``turn_driver``) is the deterministic answer.
+    """
+    explicit = _host_from_mapping(args.get("target_host"))
+    if explicit is not None:
+        return explicit
+    if session is None:
+        return None
+    valuz = ((getattr(session, "metadata", None) or {}).get("valuz") or {})
+    return _host_from_mapping(valuz.get("host_ref"))
 
 
 # Marker wrapping the sink receipt appended to a successful tool result. The
@@ -319,7 +337,7 @@ async def _generate_ui_handler(args: dict[str, Any], ctx: ExecContext) -> ToolRe
         user_id=user_id,
         session_id=ctx.session_id,
         tool_use_id=tool_use_id,
-        target_host=_parse_target_host(args),
+        target_host=_parse_target_host(args, source),
         request=str(request),
         protocol=protocol,
         content=generated,
