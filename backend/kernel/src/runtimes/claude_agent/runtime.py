@@ -3229,6 +3229,23 @@ def _build_usage_payload(default_model: str, result_msg: Any) -> dict[str, Any]:
     return payload
 
 
+def _apply_tool_timeout(entry: dict[str, Any], cfg: McpServerConfig) -> None:
+    """Carry ``tool_timeout_sec`` into the CLI's per-server idle timeout.
+
+    The Claude CLI aborts a silent MCP tool call after its own default
+    (300s) and tells the operator to set a per-server ``timeout`` in ms. A
+    generation tool legitimately runs longer than that with nothing to say
+    in between (``generate_ui`` streams a whole document from a model), so a
+    server that declared a tool timeout must have it honoured here — codex
+    already maps the same field onto its own config. The SDK forwards this
+    dict verbatim into ``--mcp-config``, so an extra key reaches the CLI
+    even though its TypedDict does not name one.
+    """
+    timeout_sec = getattr(cfg, "tool_timeout_sec", None)
+    if isinstance(timeout_sec, (int, float)) and timeout_sec > 0:
+        entry["timeout"] = int(float(timeout_sec) * 1000)
+
+
 def _to_sdk_mcp_server(
     cfg: McpServerConfig,
 ) -> SdkMcpHttpServerConfig | SdkMcpSSEServerConfig | SdkMcpStdioServerConfig:
@@ -3247,13 +3264,16 @@ def _to_sdk_mcp_server(
         env = resolve_stdio_env(cfg)
         if env is not None:
             stdio["env"] = env
+        _apply_tool_timeout(stdio, cfg)
         return stdio
     if cfg.transport == "sse":
         sse: SdkMcpSSEServerConfig = {"type": "sse", "url": cfg.url}
         if cfg.headers:
             sse["headers"] = dict(cfg.headers)
+        _apply_tool_timeout(sse, cfg)
         return sse
     http: SdkMcpHttpServerConfig = {"type": "http", "url": cfg.url}
     if cfg.headers:
         http["headers"] = dict(cfg.headers)
+    _apply_tool_timeout(http, cfg)
     return http

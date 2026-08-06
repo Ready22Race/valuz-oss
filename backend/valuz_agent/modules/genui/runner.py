@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 from uuid import uuid4
@@ -24,6 +25,12 @@ from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.modules.genui.protocol import OUTPUT_FORMAT, a2ui_instructions
 
 logger = logging.getLogger(__name__)
+
+# Minimum gap between MCP progress heartbeats. Frequent enough that a long
+# generation reads as alive in the caller's log, far enough off the token rate
+# that it never becomes a notification flood. It does NOT extend any client's
+# deadline (measured) — that is the server's ``tool_timeout_sec``.
+_PROGRESS_INTERVAL_S = 15.0
 
 Completer = Callable[[str], Awaitable[str]]
 _LOG_PREVIEW_CHARS = 240
@@ -83,6 +90,31 @@ def _with_direct_llm_final_output_requirement(
     return f"{prompt.rstrip()}\n\n{requirement}"
 
 
+def _make_progress_heartbeat(
+    on_progress: Callable[[str], Awaitable[None]] | None,
+) -> Callable[[int], Awaitable[None]]:
+    """Throttled progress heartbeat for a long, silent tool call.
+
+    Returns an ``await``-able the delta loop can call on EVERY chunk: it emits
+    at most one notification per ``_PROGRESS_INTERVAL_S`` (a token-rate stream
+    would otherwise flood the client) and is a no-op when the caller supplied
+    no reporter — the loop stays free of both concerns.
+    """
+    last_beat = 0.0
+
+    async def heartbeat(count: int) -> None:
+        nonlocal last_beat
+        if on_progress is None:
+            return
+        now = time.monotonic()
+        if last_beat and now - last_beat < _PROGRESS_INTERVAL_S:
+            return
+        last_beat = now
+        await on_progress(f"generating UI ({count} chunks)")
+
+    return heartbeat
+
+
 def _make_completer(
     *,
     user_id: str,
@@ -93,6 +125,7 @@ def _make_completer(
     tool_use_id: str | None = None,
     session_instructions: str = a2ui_instructions(),
     output_format: str = OUTPUT_FORMAT,
+    on_progress: Callable[[str], Awaitable[None]] | None = None,
 ) -> Completer:
     """Build the ``complete`` seam backed by a throwaway no-tools kernel session
     cloning the source's runtime/provider/model. Each call is a fresh ephemeral
@@ -119,6 +152,8 @@ def _make_completer(
     #         output_format=output_format,
     #     )
 
+    heartbeat = _make_progress_heartbeat(on_progress)
+
     async def _forward_deltas(ephem_id: str) -> None:
         forwarded = 0
         try:
@@ -136,6 +171,14 @@ def _make_completer(
                     {"id": tool_use_id, "text": text},
                 )
                 forwarded += 1
+                # Heartbeat the MCP caller. The generation is one long silent
+                # tool call from the client's point of view, and this is the
+                # only thing that says otherwise — it does not extend the
+                # client's deadline (that is ``tool_timeout_sec``), but it is
+                # what distinguishes "still writing" from "hung" while it
+                # runs. Throttled so a token-rate stream doesn't become a
+                # notification flood.
+                await heartbeat(forwarded)
                 logger.debug(
                     "generate_ui: forwarded %s #%d (%d chars) tool_use_id=%s",
                     live_type,
