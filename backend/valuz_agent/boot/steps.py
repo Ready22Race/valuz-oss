@@ -778,7 +778,7 @@ async def stop_polling_scheduler() -> None:
 
 def warm_parse_pool() -> None:
     """Pre-spawn the document-parser worker processes. Local parses
-    (pymupdf4llm / markitdown) run in a separate process so their GIL-bound
+    (pymupdf4llm) run in a separate process so their GIL-bound
     work can't stall the event loop; warming here pays the spawn + import cost
     at boot instead of on the first upload. Best-effort, never fatal."""
     from valuz_agent.infra import parse_pool

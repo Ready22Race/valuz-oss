@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import mimetypes
 from pathlib import Path
 from typing import Any
 
@@ -8,19 +7,44 @@ from valuz_agent.i18n import t
 from valuz_agent.ports.parser_backend import ParseOptions, ParseResult
 
 _PDF_EXTS = {".pdf"}
-# NOTE: .html intentionally NOT in plain-text; MarkItDown's HTML path uses
-# ASCII internally and crashes on non-ASCII content (CLAUDE.md pitfall).
-# HTML is handled via ``html-to-markdown`` (Goldziher fork) in ``_parse_html``.
+# NOTE: .html intentionally NOT in plain-text — it is converted, not kept
+# verbatim. ``html-to-markdown`` (Goldziher fork) does it in ``_parse_html``.
 _PLAIN_TEXT_EXTS = {".md", ".txt", ".csv", ".json", ".xml"}
 _HTML_EXTS = {".html", ".htm"}
-_OFFICE_EXTS = {".docx", ".xlsx", ".pptx"}
+# Everything ``anydoc`` converts. Far wider than the MarkItDown set it
+# replaced: the legacy OLE formats (.doc/.ppt/.xls), OpenDocument, RTF and
+# EPUB previously fell through to "unsupported" — or, for .rtf, were indexed
+# as their own control words, since RTF source is ASCII and slipped past the
+# unknown-extension UTF-8 guard below.
+_OFFICE_EXTS = {
+    # Word
+    ".doc",
+    ".docx",
+    ".docm",
+    # PowerPoint
+    ".ppt",
+    ".pps",
+    ".pot",
+    ".pptx",
+    ".pptm",
+    ".ppsx",
+    ".ppsm",
+    # Excel
+    ".xls",
+    ".xlsx",
+    ".xlsm",
+    ".xlsb",
+    # OpenDocument
+    ".odt",
+    ".ods",
+    ".odp",
+    # Other document containers
+    ".rtf",
+    ".epub",
+}
+
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tiff", ".bmp", ".webp"}
 _ALL_EXTS = _PDF_EXTS | _PLAIN_TEXT_EXTS | _HTML_EXTS | _OFFICE_EXTS | _IMAGE_EXTS
-
-
-def _guess_mime(path: Path) -> str:
-    mime, _ = mimetypes.guess_type(str(path))
-    return mime or "application/octet-stream"
 
 
 def _build_rapidocr(rapidocr_cls: Any) -> Any:
@@ -139,10 +163,10 @@ def _light_local_parse_worker(file_path: str, options: ParseOptions | None = Non
 
 
 class LightLocalParser:
-    """Personal baseline: in-process parser using PyMuPDF4LLM + MarkItDown + RapidOCR.
+    """Personal baseline: in-process parser using PyMuPDF4LLM + anydoc + RapidOCR.
 
-    The heavy backends (pymupdf4llm / markitdown) do their work in pure Python
-    and hold the GIL, so both entry points offload to a **separate process**
+    ``pymupdf4llm`` does its work in pure Python and holds the GIL, so both
+    entry points offload to a **separate process**
     via :mod:`valuz_agent.infra.parse_pool` — otherwise a ``to_thread`` worker
     (conversation-attachment parse) or the docs-reindex daemon thread would
     starve the single-threaded event loop through GIL contention. See the
@@ -185,12 +209,21 @@ class LightLocalParser:
         try:
             md = p.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
-            return ParseResult(
-                markdown=f"*Unsupported file type: {ext}*",
-                page_count=0,
-                metadata={"engine": "none", "error": f"unsupported extension {ext}"},
-            )
+            return self._unsupported(ext)
         return ParseResult(markdown=md, page_count=1, metadata={"engine": "plain_text"})
+
+    @staticmethod
+    def _unsupported(ext: str) -> ParseResult:
+        """The one shape for "this parser cannot read this file".
+
+        ``metadata["error"]`` is load-bearing downstream: the attachment
+        pipeline surfaces it verbatim as the user-visible ``error_message``.
+        """
+        return ParseResult(
+            markdown=f"*Unsupported file type: {ext}*",
+            page_count=0,
+            metadata={"engine": "none", "error": f"unsupported extension {ext}"},
+        )
 
     async def parse(self, file_path: str, options: ParseOptions | None = None) -> ParseResult:
         # Await the parse in a worker PROCESS so the GIL-bound work can't block
@@ -251,30 +284,41 @@ class LightLocalParser:
             )
 
     def _parse_office(self, path: Path) -> ParseResult:
+        """Convert any ``_OFFICE_EXTS`` document through anydoc (Rust, MIT).
+
+        Sole backend for these formats. It replaced MarkItDown, which handled
+        only docx/xlsx/pptx and routed sheets through pandas — an 863e8 revenue
+        cell rendered as ``8.630000e+10`` and every empty cell as ``NaN``, both
+        reaching the model verbatim.
+        """
         try:
-            from markitdown import MarkItDown
+            import anydoc
         except ImportError:
             return ParseResult(
-                markdown="*markitdown not installed*",
-                metadata={"engine": "markitdown", "error": "not_installed"},
+                markdown="*anydoc not installed*",
+                metadata={"engine": "anydoc", "error": "not_installed"},
             )
         try:
-            converter = MarkItDown()
-            result = converter.convert(str(path))
-            md = result.text_content if result.text_content else ""
-            return ParseResult(markdown=md, page_count=1, metadata={"engine": "markitdown"})
+            md = anydoc.to_markdown(str(path))
+            return ParseResult(markdown=md, page_count=1, metadata={"engine": "anydoc"})
         except Exception as exc:
+            # anydoc raises a typed ConvertError per failure mode (Encrypted,
+            # Unsupported, Malformed, ResourceLimit, MissingPart) plus OSError
+            # for unreadable files. Surface the reason rather than mapping it —
+            # every one of them means "no markdown came out of this file".
             return ParseResult(
                 markdown=f"*Office parse error: {exc}*",
-                metadata={"engine": "markitdown", "error": str(exc)},
+                metadata={"engine": "anydoc", "error": str(exc)},
             )
 
     def _parse_html(self, path: Path) -> ParseResult:
         """Convert HTML to Markdown via ``html-to-markdown`` (Goldziher fork).
 
-        We deliberately do NOT route HTML through MarkItDown: its HTML
-        backend operates on ASCII and corrupts non-ASCII content (the
-        Chinese-doc failure documented in backend/CLAUDE.md).
+        HTML has its own backend rather than riding with the office formats:
+        anydoc does not read HTML at all. (The predecessor here, MarkItDown,
+        did — but its HTML path operated on ASCII and corrupted Chinese
+        content, which is why HTML moved off it first, well before the office
+        formats followed.)
 
         ``html-to-markdown`` is a typed, modernized fork of markdownify
         (same MIT license) with better HTML5 + table (rowspan/colspan)

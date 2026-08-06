@@ -36,36 +36,45 @@ def test_spec_bundles_sibling_package(spec_source: str, package: str) -> None:
     )
 
 
-def test_spec_collects_magika_data_files(spec_source: str) -> None:
-    """magika ships its ONNX model + config as PACKAGE DATA, loaded eagerly by
-    ``MarkItDown.__init__``. If it's not in ``_data_pkgs`` (which drives
-    ``collect_data_files``), the frozen build raises ``MagikaError: model not
-    found`` and EVERY office parse (.docx/.xlsx/.pptx) fails while PDF/text
-    keep working. No pyinstaller-hooks-contrib hook covers magika, so this
-    explicit entry is the only thing that bundles it."""
-    assert '"magika"' in spec_source, (
-        "PyInstaller spec no longer lists 'magika' in _data_pkgs. The frozen "
-        "build will ship MarkItDown without magika's model.onnx/config, so "
-        "docx/xlsx/pptx parsing fails with 'model not found'."
+def test_spec_bundles_the_office_parser(spec_source: str) -> None:
+    """``anydoc`` is the ONLY backend for every office/spreadsheet/ODF/RTF/EPUB
+    format (LightLocal ``_OFFICE_EXTS``). It is imported lazily inside
+    ``_parse_office``, so it is named explicitly rather than left to static
+    analysis — dropping it yields a frozen build where every one of those
+    formats returns "*anydoc not installed*" while PDF/text keep working.
+
+    This replaces the former magika guard: magika existed only because
+    ``MarkItDown.__init__`` loaded it eagerly, and a build that missed its
+    package data shipped with all office parsing broken (PR #231). anydoc is a
+    compiled extension with no data files, so that whole failure mode is gone.
+    """
+    assert '"anydoc"' in spec_source, (
+        "PyInstaller spec no longer lists 'anydoc' in hiddenimports. The frozen "
+        "build will fail every .docx/.xlsx/.pptx/.doc/.odt/.rtf/.epub parse."
     )
 
 
-def test_magika_data_files_are_collectable() -> None:
-    """Sanity-check the assumption behind the spec entry: magika really does
-    expose its model + config via ``collect_data_files`` (and they include the
-    .onnx model). Guards against a magika layout change silently breaking the
-    bundle even while the spec still names it."""
-    # PyInstaller is a build-only tool — skip when it isn't installed (the
-    # static spec-source assertion above still guards the spec everywhere).
-    pytest.importorskip("PyInstaller")
-    from PyInstaller.utils.hooks import collect_data_files
-
-    collected = collect_data_files("magika", include_py_files=False)
-    sources = [src for src, _dest in collected]
-    assert any(s.endswith("model.onnx") for s in sources), (
-        f"magika no longer exposes model.onnx via collect_data_files; the "
-        f"frozen office-parsing bundle may be incomplete. Collected: {sources}"
-    )
+def test_spec_no_longer_carries_markitdown(spec_source: str) -> None:
+    """The markitdown tail (markitdown, mammoth, magika, markdownify, openpyxl,
+    lxml, et_xmlfile — and pandas transitively) was removed with it. Naming any
+    of them again means either a real new requester or a stale copy-paste;
+    either way it should be a deliberate edit, not a silent one."""
+    for pkg in (
+        "markitdown",
+        "mammoth",
+        "magika",
+        "markdownify",
+        "et_xmlfile",
+        # Transitive passengers, uninstalled by the same `uv sync`.
+        "pandas",
+        "cobble",
+        "defusedxml",
+    ):
+        assert f'"{pkg}"' not in spec_source, (
+            f"PyInstaller spec names {pkg!r} again. It came in with markitdown, "
+            f"which anydoc replaced — bundling it costs size for nothing unless "
+            f"something genuinely imports it now."
+        )
 
 
 def test_spec_collects_rapidocr_yaml_data(spec_source: str) -> None:

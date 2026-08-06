@@ -277,6 +277,17 @@ function kbStatusLabel(
   }
 }
 
+/** Prefer the server's own reason over a generic "import failed".
+ *  ``fetchJson`` already lifts FastAPI's ``{detail}`` into ``Error.message``,
+ *  so the upload endpoint's explanation of WHICH file it could not read reaches
+ *  the toast. Falls back to the generic string for network errors and anything
+ *  else without a message. Module-level and pure, so it adds no hook
+ *  dependencies at the call sites. */
+const uploadErrorMessage = (error: unknown, fallback: string): string => {
+  const detail = error instanceof Error ? error.message.trim() : "";
+  return detail || fallback;
+};
+
 export const KnowledgePage = ({
   directoryFieldMode = "picker",
 }: {
@@ -630,8 +641,14 @@ export const KnowledgePage = ({
           }),
         );
         await enterKb(activeKb.id);
-      } catch {
-        toast.error(t("knowledge.importFailed" as Parameters<typeof t>[0]));
+      } catch (error) {
+        // Surface the server's reason, not just "import failed". The upload
+        // endpoint rejects unsupported extensions with a 400 naming them; a
+        // bare `catch {}` swallowed that and left the user guessing — which
+        // was the whole point of making the rejection explicit.
+        toast.error(
+          uploadErrorMessage(error, t("knowledge.importFailed" as Parameters<typeof t>[0])),
+        );
       }
     },
     [activeKb, enterKb],
@@ -741,8 +758,10 @@ export const KnowledgePage = ({
         } else {
           await uploadKbFiles(files);
         }
-      } catch {
-        toast.error(t("knowledge.importFailed" as Parameters<typeof t>[0]));
+      } catch (error) {
+        toast.error(
+          uploadErrorMessage(error, t("knowledge.importFailed" as Parameters<typeof t>[0])),
+        );
       } finally {
         setDropping(false);
       }
