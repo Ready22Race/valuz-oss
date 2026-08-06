@@ -26,7 +26,7 @@ from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.lifecycle import is_draining
 from valuz_agent.modules.tasks import planning
 from valuz_agent.modules.tasks.actor_runner import ActorRunner
-from valuz_agent.modules.tasks.manifest import collect_manifest_safe
+from valuz_agent.modules.tasks.manifest import MemberManifest, collect_manifest_safe
 from valuz_agent.modules.tasks.coordination import CoordinationService
 from valuz_agent.adapters.agent_resolver import resolve_agent_display_name
 from valuz_agent.modules.tasks import launcher
@@ -122,7 +122,7 @@ class RecoveryService:
         -delivery-races-the-respawn.
         """
 
-        member_done: list[tuple[str, dict[str, Any]]] = []
+        member_done: list[tuple[str, MemberManifest]] = []
         # (session_id, brief, run_dir, agent_slug, subtask_key) — run_dir + slug
         # + key let us spill an over-cap resume brief to a doc before re-injecting
         # it into the member's goal-mode session.
@@ -157,7 +157,7 @@ class RecoveryService:
                     getattr(ks, "stop_reason", None) if ks is not None else None,
                     node_attempts=(node.attempts if node else 0),
                 )
-                manifest: dict[str, Any] | None = None
+                manifest: MemberManifest | None = None
                 if rec.disposition == "completed":
                     manifest = await collect_manifest_safe(
                         run.session_id,

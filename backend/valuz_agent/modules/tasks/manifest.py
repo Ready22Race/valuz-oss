@@ -11,11 +11,37 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
-from typing import Any
+from typing import NotRequired, TypedDict
 
 from valuz_agent.adapters import kernel_client
 
 logger = logging.getLogger(__name__)
+
+
+class ArtifactEntry(TypedDict):
+    """One file a member touched during its run."""
+
+    path: str
+    size: int
+
+
+class MemberManifest(TypedDict):
+    """What a member run produced — the module's most-travelled internal shape.
+
+    Read at a dozen sites across five files, persisted verbatim into
+    ``TaskSessionRow.result_manifest``, and shipped as the ``member_done``
+    mailbox payload the lead's next prompt is rendered from. A TypedDict
+    (rather than a dataclass) because every one of those readers uses
+    ``.get(...)`` and the value round-trips through JSON — so this costs no
+    call-site churn while making a key typo a type error.
+    """
+
+    session_id: str
+    status: str
+    summary: str
+    artifacts: NotRequired[list[ArtifactEntry]]
+    # Stamped by ``collect_manifest_safe`` for the callers that report to a lead.
+    agent: NotRequired[str]
 
 # Skip these directory names when scanning a (possibly project-root) cwd for
 # artifacts — they are noise, not member output.
@@ -27,12 +53,12 @@ _ARTIFACT_LIMIT = 200
 _SUMMARY_TURN_WINDOW = 2
 
 
-def _scan_artifacts(run_dir: Path, since_epoch: float) -> list[dict[str, Any]]:
+def _scan_artifacts(run_dir: Path, since_epoch: float) -> list[ArtifactEntry]:
     """List up to ``_ARTIFACT_LIMIT`` files under *run_dir* touched since
     *since_epoch*, in sorted path order. BLOCKING — always call via
     ``asyncio.to_thread`` (``run_dir`` is usually the whole project cwd).
     """
-    artifacts: list[dict[str, Any]] = []
+    artifacts: list[ArtifactEntry] = []
     if not run_dir.exists():
         return artifacts
     for fpath in sorted(run_dir.rglob("*")):
@@ -96,7 +122,7 @@ async def collect_manifest(
     *,
     since_epoch: float = 0.0,
     user_id: str,
-) -> dict[str, Any]:
+) -> MemberManifest:
     """Build a SubtaskResult manifest after a member session completes.
 
     summary    — text of the last assistant message (best-effort)
@@ -121,12 +147,12 @@ async def collect_manifest(
         logger.debug("collect_manifest: artifact scan failed for %s", run_dir)
         artifacts = []
 
-    return {
-        "session_id": session_id,
-        "status": status,
-        "summary": summary,
-        "artifacts": artifacts,
-    }
+    return MemberManifest(
+        session_id=session_id,
+        status=status,
+        summary=summary,
+        artifacts=artifacts,
+    )
 
 
 async def collect_manifest_safe(
@@ -137,7 +163,7 @@ async def collect_manifest_safe(
     agent_slug: str,
     since_epoch: float = 0.0,
     user_id: str,
-) -> dict[str, Any]:
+) -> MemberManifest:
     """``collect_manifest`` that never raises — the terminal-write callers'
     shape (heartbeat, recovery reconcile, loop-exit settle) spelled once:
     fall back to an empty-summary manifest and stamp the agent slug."""
@@ -147,9 +173,15 @@ async def collect_manifest_safe(
         )
     except Exception:  # noqa: BLE001
         logger.exception("collect_manifest failed for %s", session_id)
-        manifest = {"session_id": session_id, "status": status, "summary": ""}
+        manifest = MemberManifest(session_id=session_id, status=status, summary="")
     manifest["agent"] = agent_slug
     return manifest
 
 
-__all__ = ["collect_manifest", "collect_manifest_safe", "last_assistant_text"]
+__all__ = [
+    "ArtifactEntry",
+    "MemberManifest",
+    "collect_manifest",
+    "collect_manifest_safe",
+    "last_assistant_text",
+]

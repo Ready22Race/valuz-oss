@@ -102,7 +102,6 @@ def check_plan_writer_gate(sess: Any, task: Any) -> Failure | None:
 
 def check_plan_reader_gate(sess: Any, task: Any) -> Failure | None:
     """Loose read-only variant: any caller in the task's project may read."""
-    v = _valuz_meta(sess)
     caller_ws = _caller_project_id(sess)
     if caller_ws != task.project_id:
         return Failure(

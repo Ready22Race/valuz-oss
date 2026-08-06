@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+from collections.abc import Mapping
 from typing import Any, cast
 
 from sqlalchemy import case, func, select, update
@@ -30,6 +31,7 @@ from valuz_agent.infra.db import async_commit_with_retry
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionRow
 from valuz_agent.modules.tasks.task_state import (
+    RunStatus,
     TaskStateError,
     assert_transition,
     is_valid_status,
@@ -608,8 +610,8 @@ class TaskSessionDatastore:
     async def update_run_by_session(
         self,
         session_id: str,
-        status: str,
-        result_manifest: dict[str, Any] | None = None,
+        status: RunStatus,
+        result_manifest: Mapping[str, Any] | None = None,
         ended_at: int | None = None,
     ) -> bool:
         """SYSTEM update by the globally-unique kernel ``session_id`` (kernel-
@@ -635,8 +637,8 @@ class TaskSessionDatastore:
         self,
         session_id: str,
         *,
-        status: str,
-        result_manifest: dict[str, Any] | None = None,
+        status: RunStatus,
+        result_manifest: Mapping[str, Any] | None = None,
         ended_at: int | None = None,
     ) -> bool:
         """Loop-exit settlement, gated on the run still being ``active``.

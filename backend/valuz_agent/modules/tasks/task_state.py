@@ -135,3 +135,19 @@ __all__ = [
 NON_REVIEWABLE_DONE: frozenset[str] = frozenset(
     {"terminated", "error", "cancelled", "interrupted"}
 )
+
+
+# A ``valuz_task_session`` row's lifecycle. The one task vocabulary that was
+# still enforced only by a comment, while plan nodes, task status, member
+# dispositions and inbox kinds all had a Literal.
+#   active    — run in flight
+#   paused    — parked by a task pause/stop; resumable
+#   completed — finished normally, or approved by review_subtask
+#   rejected  — user-cancelled (stop_member / an interrupted member turn)
+#   archived  — the run errored terminally
+RunStatus = Literal["active", "paused", "completed", "rejected", "archived"]
+
+# What a member session is: the lead's own run, or one dispatched subtask.
+# Spelled three ways before (``kind`` on the row, ``role`` on the actor loop)
+# for one set of two values.
+RunKind = Literal["lead", "subtask"]
