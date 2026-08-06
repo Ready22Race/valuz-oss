@@ -471,7 +471,35 @@ async def always_on_http_mcp_servers(
             headers=dict(headers),
             tool_timeout_sec=_INTERNAL_MCP_TOOL_TIMEOUT_SEC,
         ),
+        *_edition_always_on_servers(base, headers),
     ]
+
+
+def _edition_always_on_servers(
+    base: str, headers: dict[str, str]
+) -> list[McpHttpServerConfig]:
+    """Edition-registered always-on servers (ports/mcp_always_on).
+
+    Same internal credential headers and timeout as the built-ins; reserved
+    built-in names are skipped so an edition can never shadow them.
+    """
+    from valuz_agent.ports.extensions import ext
+    from valuz_agent.ports.mcp_always_on import RESERVED_ALWAYS_ON_NAMES
+
+    servers: list[McpHttpServerConfig] = []
+    for spec in list(ext.always_on_mcp_specs):
+        if spec.name in RESERVED_ALWAYS_ON_NAMES:
+            continue
+        servers.append(
+            McpHttpServerConfig(
+                name=spec.name,
+                url=f"{base}{spec.path}/mcp",
+                transport="http",
+                headers=dict(headers),
+                tool_timeout_sec=_INTERNAL_MCP_TOOL_TIMEOUT_SEC,
+            )
+        )
+    return servers
 
 
 def harness_toolkit_for_run_kind(run_kind: str | None) -> str:

@@ -26,6 +26,7 @@ from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.modules.sessions.pre_turn import chat_capability_hook
 from valuz_agent.modules.sessions.turn_driver import run_session_to_idle
+from valuz_agent.ports.message_context import HostRef
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +152,7 @@ async def _run_agent_background(
     content: str,
     event_bus: EventBus,
     user_id: str | None = None,
+    host_ref: HostRef | None = None,
 ) -> None:
     """Drive one agent turn in the background, then drain any queued follow-ups.
 
@@ -177,6 +179,7 @@ async def _run_agent_background(
         on_message=meter,
         pre_turn=chat_capability_hook(session_id, owner_user_id),
         user_id=owner_user_id,
+        host_ref=host_ref,
     )
     await _drain_queue_after_turn(
         session_id,

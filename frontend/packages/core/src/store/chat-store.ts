@@ -4,6 +4,7 @@ import {
   parseTodosUpdate,
   sessionsApi,
   type SessionEventDTO,
+  type SessionMessageHostRef,
 } from "../api/sessions-api";
 import { queueApi, type QueuedInput } from "../api/queue-api";
 import {
@@ -87,7 +88,11 @@ export interface ChatStoreState {
   detach: () => void;
   send: (
     prompt: string,
-    opts?: { providerId?: string | null; modelId?: string | null },
+    opts?: {
+      providerId?: string | null;
+      modelId?: string | null;
+      hostRef?: SessionMessageHostRef | null;
+    },
   ) => Promise<void>;
   interrupt: () => Promise<void>;
   /** Append a follow-up input to the queue (drains after the active turn). */
@@ -312,6 +317,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         prompt,
         opts.providerId ?? null,
         opts.modelId ?? null,
+        opts.hostRef ?? null,
       );
     } catch (err) {
       // Roll back optimistic state — the turn never started.

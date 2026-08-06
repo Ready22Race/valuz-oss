@@ -341,10 +341,23 @@ export interface SessionCreateRequest {
   worktree?: { name?: string | null } | null;
 }
 
+/**
+ * Client-declared host location of a message — which product surface the
+ * conversation panel is attached to for this turn (e.g. an edition
+ * workbench page). Pure context: the backend re-validates the reference
+ * under the calling user; it never grants access.
+ */
+export interface SessionMessageHostRef {
+  host_type: string;
+  host_id: string;
+  slot?: string;
+}
+
 export interface SessionMessageRequest {
   prompt: string;
   provider_id?: string | null;
   model_id?: string | null;
+  host_ref?: SessionMessageHostRef | null;
 }
 
 /**
@@ -602,10 +615,12 @@ export const sessionsApi = {
     prompt: string,
     providerId?: string | null,
     modelId?: string | null,
+    hostRef?: SessionMessageHostRef | null,
   ): Promise<SessionDetail> {
     const body: SessionMessageRequest = { prompt };
     if (providerId) body.provider_id = providerId;
     if (modelId) body.model_id = modelId;
+    if (hostRef) body.host_ref = hostRef;
     return fetchJson(`/v1/sessions/${encodeURIComponent(sessionId)}/messages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

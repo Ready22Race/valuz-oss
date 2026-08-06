@@ -6814,6 +6814,33 @@ components:
             Idempotent retries surface the *original* ``rule_id`` so
             a WS/SSE reconnect doesn't think it created a new rule.
 
+    HostRef:
+      type: object
+      required: [host_type, host_id]
+      description: |
+        Client-declared host location of a message — which product surface
+        (e.g. an edition workbench page) the conversation panel is attached
+        to for this turn. Pure context for edition-registered per-turn
+        context providers: the backend resolves and validates the reference
+        under the calling user before acting on it; it never grants access.
+      properties:
+        host_type:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Host surface type, e.g. ``finance.research-desk``.
+        host_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: Host instance id within the surface type.
+        slot:
+          type: string
+          minLength: 1
+          maxLength: 64
+          default: main
+          description: Render seat within the host. First iteration uses ``main``.
+
     SessionMessageRequest:
       type: object
       required: [prompt]
@@ -6835,6 +6862,14 @@ components:
             Optional model override. Same back-compat semantics as
             ``provider_id`` — ignored when it does not match the
             session's frozen model.
+        host_ref:
+          allOf:
+            - $ref: '#/components/schemas/HostRef'
+          nullable: true
+          description: |
+            Optional per-turn host location. Omitted for plain
+            conversations; edition conversation panels attach it so
+            per-turn context providers can inject page context.
 
     CitationBundleV1:
       type: object

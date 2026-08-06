@@ -694,7 +694,9 @@ export const Composer = ({
           else break;
         }
         if (lastFullBottom > 0) {
-          maxH = Math.floor(maxH - (menuRect.bottom - (lastFullBottom + CHROME)));
+          maxH = Math.floor(
+            maxH - (menuRect.bottom - (lastFullBottom + CHROME)),
+          );
           el.style.maxHeight = `${maxH}px`;
         }
       }
@@ -819,12 +821,7 @@ export const Composer = ({
       updateAttachments([...attachments, ...accepted]);
       onAccept?.(accepted);
     },
-    [
-      attachments,
-      existingAttachmentCount,
-      updateAttachments,
-      uploadOnAttach,
-    ],
+    [attachments, existingAttachmentCount, updateAttachments, uploadOnAttach],
   );
 
   // Editor input handler — runs on every keystroke / IME composition
@@ -1269,18 +1266,21 @@ export const Composer = ({
   // ``deepagents`` runtime (only Claude tier ships the LLM classifier).
   const PERMISSION_LABELS: Record<
     "default" | "auto_review" | "full_access",
-    { label: string; hint: string }
+    { label: string; shortLabel: string; hint: string }
   > = {
     default: {
       label: t("conversation.permissionReview"),
+      shortLabel: t("conversation.permissionReviewShort"),
       hint: t("conversation.permissionReviewHint"),
     },
     auto_review: {
       label: t("conversation.permissionAuto"),
+      shortLabel: t("conversation.permissionAutoShort"),
       hint: t("conversation.permissionAutoHint"),
     },
     full_access: {
       label: t("conversation.permissionFull"),
+      shortLabel: t("conversation.permissionFullShort"),
       hint: t("conversation.permissionFullHint"),
     },
   };
@@ -1288,6 +1288,8 @@ export const Composer = ({
     permissionMode ?? "full_access";
   const selectedPermissionLabel =
     PERMISSION_LABELS[effectivePermissionMode].label;
+  const selectedPermissionShortLabel =
+    PERMISSION_LABELS[effectivePermissionMode].shortLabel;
   const isDeepAgents = selectedRuntimeId === "deepagents";
 
   // EFFORT_LABELS — visible labels for the reasoning-budget selector
@@ -1855,8 +1857,16 @@ export const Composer = ({
                       aria-disabled={permissionModeLocked}
                     >
                       <TriggerIcon className="block h-3 w-3 shrink-0" />
-                      <span className="max-w-[140px] truncate leading-none">
+                      {/* Narrow composers (e.g. a 345px embedded panel) get the
+                          two-character short form; the expanded MENU always
+                          shows full labels — only the collapsed trigger
+                          abbreviates. Same container threshold as the
+                          runtime/model cluster below. */}
+                      <span className="hidden max-w-[140px] truncate leading-none @[420px]/composer:inline">
                         {selectedPermissionLabel}
+                      </span>
+                      <span className="inline max-w-[80px] truncate leading-none @[420px]/composer:hidden">
+                        {selectedPermissionShortLabel}
                       </span>
                       {permissionModeLocked ? (
                         <Lock className="block h-3 w-3 shrink-0 opacity-70" />
@@ -2125,9 +2135,15 @@ export const Composer = ({
                       ? selectedAgentSlug
                       : allowAgentBrainOverride
                         ? // No agent = the "Default" entry (agentless quick chat).
-                          t("conversation.defaultBrain" as Parameters<typeof t>[0])
+                          t(
+                            "conversation.defaultBrain" as Parameters<
+                              typeof t
+                            >[0],
+                          )
                         : t(
-                            "conversation.selectAgent" as Parameters<typeof t>[0],
+                            "conversation.selectAgent" as Parameters<
+                              typeof t
+                            >[0],
                           );
                   // When an agent is selected use its own host-computed model
                   // label (correct for project members, whose model id may not
@@ -2224,10 +2240,14 @@ export const Composer = ({
                                 onMouseEnter={() => {
                                   setAgentSubmenu(null);
                                   setAgentListMenuOpen(false);
-                                  // The runtime/model 二级菜单 belongs to the
-                                  // Default selection (effort stays editable when
-                                  // locked); an agent run keeps it frozen.
-                                  if (!selectedAgentSlug)
+                                  // Hover previews the runtime/model/effort
+                                  // 二级菜单 whenever it could apply — including
+                                  // while an AGENT is still the selection
+                                  // (picking a runtime/model from it then
+                                  // switches to Default, see the row handlers).
+                                  // Only a locked agent run keeps it closed
+                                  // (nothing in it would be editable).
+                                  if (!(agentLocked && selectedAgentSlug))
                                     setDefaultBrainMenuOpen(true);
                                 }}
                                 onClick={() => {
@@ -2247,7 +2267,8 @@ export const Composer = ({
                                     )}
                                   </span>
                                   <span className="truncate text-2xs text-ink-meta">
-                                    {selectedRuntimeLabel} · {selectedModelLabel}
+                                    {selectedRuntimeLabel} ·{" "}
+                                    {selectedModelLabel}
                                   </span>
                                 </span>
                                 {!selectedAgentSlug && (
@@ -2440,16 +2461,16 @@ export const Composer = ({
                               Default row. Agents run on their own brain (shown
                               in the trigger) and carry no controls here. */}
                           {allowAgentBrainOverride &&
-                            !selectedAgentSlug &&
+                            !(agentLocked && selectedAgentSlug) &&
                             defaultBrainMenuOpen && (
-                            <div
-                              className={cn(
-                                "absolute top-1 z-50 min-w-[200px] rounded-lg border border-surface-border bg-surface p-1 shadow-lg",
-                                submenuSide === "left"
-                                  ? "right-full mr-1"
-                                  : "left-full ml-1",
-                              )}
-                            >
+                              <div
+                                className={cn(
+                                  "absolute top-1 z-50 min-w-[200px] rounded-lg border border-surface-border bg-surface p-1 shadow-lg",
+                                  submenuSide === "left"
+                                    ? "right-full mr-1"
+                                    : "left-full ml-1",
+                                )}
+                              >
                                 {(
                                   [
                                     {
@@ -2464,14 +2485,18 @@ export const Composer = ({
                                     {
                                       key: "model" as const,
                                       label: t(
-                                        "agent.model" as Parameters<typeof t>[0],
+                                        "agent.model" as Parameters<
+                                          typeof t
+                                        >[0],
                                       ),
                                       value: selectedModelLabel,
                                     },
                                     {
                                       key: "effort" as const,
                                       label: t(
-                                        "effort.label" as Parameters<typeof t>[0],
+                                        "effort.label" as Parameters<
+                                          typeof t
+                                        >[0],
                                       ),
                                       value: selectedEffortLabel,
                                     },
@@ -2548,6 +2573,13 @@ export const Composer = ({
                                               disabled={!r.available}
                                               className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] transition-colors hover:bg-[color:var(--fg-1)] disabled:cursor-not-allowed disabled:opacity-50"
                                               onClick={() => {
+                                                // Picking a runtime is a
+                                                // DEFAULT-brain choice: if an
+                                                // agent was still selected,
+                                                // switch to Default so the pick
+                                                // actually applies.
+                                                if (selectedAgentSlug)
+                                                  onAgentChange?.(null);
                                                 onRuntimeChange?.(r.id);
                                                 setAgentSubmenu(null);
                                               }}
@@ -2568,7 +2600,8 @@ export const Composer = ({
                                                   m.providerId,
                                                 ) ?? {
                                                   name: m.providerName,
-                                                  items: [] as ModelSelectorItem[],
+                                                  items:
+                                                    [] as ModelSelectorItem[],
                                                 };
                                                 g.items.push(m);
                                                 map.set(m.providerId, g);
@@ -2591,6 +2624,11 @@ export const Composer = ({
                                                     type="button"
                                                     className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] transition-colors hover:bg-[color:var(--fg-1)]"
                                                     onClick={() => {
+                                                      // Same as runtime: a
+                                                      // model pick belongs to
+                                                      // the Default brain.
+                                                      if (selectedAgentSlug)
+                                                        onAgentChange?.(null);
                                                       onModelChange?.(
                                                         m.providerId,
                                                         m.modelId,
@@ -2640,27 +2678,29 @@ export const Composer = ({
                           {/* Project mode keeps the inline 添加 Agent footer; the
                               collapsed (new-conversation) mode moves it into the
                               Agent roster 二级菜单 above. */}
-                          {onAddAgent && !agentLocked && !allowAgentBrainOverride && (
-                            <div className="relative p-1 before:absolute before:inset-x-1.5 before:top-0 before:h-px before:bg-[color:var(--fg-3)]">
-                              <button
-                                type="button"
-                                className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] text-ink-heading transition-colors hover:bg-[color:var(--fg-1)]"
-                                onClick={() => {
-                                  setAgentOpen(false);
-                                  onAddAgent();
-                                }}
-                              >
-                                <Plus className="h-4 w-4 shrink-0 text-ink-meta" />
-                                <span className="truncate">
-                                  {t(
-                                    "conversation.addAgent" as Parameters<
-                                      typeof t
-                                    >[0],
-                                  )}
-                                </span>
-                              </button>
-                            </div>
-                          )}
+                          {onAddAgent &&
+                            !agentLocked &&
+                            !allowAgentBrainOverride && (
+                              <div className="relative p-1 before:absolute before:inset-x-1.5 before:top-0 before:h-px before:bg-[color:var(--fg-3)]">
+                                <button
+                                  type="button"
+                                  className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] text-ink-heading transition-colors hover:bg-[color:var(--fg-1)]"
+                                  onClick={() => {
+                                    setAgentOpen(false);
+                                    onAddAgent();
+                                  }}
+                                >
+                                  <Plus className="h-4 w-4 shrink-0 text-ink-meta" />
+                                  <span className="truncate">
+                                    {t(
+                                      "conversation.addAgent" as Parameters<
+                                        typeof t
+                                      >[0],
+                                    )}
+                                  </span>
+                                </button>
+                              </div>
+                            )}
                         </div>
                       )}
                     </>

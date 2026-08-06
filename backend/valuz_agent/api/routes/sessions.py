@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
@@ -32,6 +32,7 @@ from valuz_agent.modules.sessions.schemas import (
     SessionWorktreeSpec,
 )
 from valuz_agent.modules.sessions.service import SessionService
+from valuz_agent.ports.message_context import HostRef
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +178,18 @@ class SessionActionResponse(BaseModel):
     rule_id: str | None = None
 
 
+class HostRefPayload(BaseModel):
+    """Client-declared host location of this message (see ports/message_context).
+
+    Pure context: the backend resolves and validates the reference under the
+    calling user before any provider acts on it; it never grants access.
+    """
+
+    host_type: str = Field(min_length=1, max_length=128)
+    host_id: str = Field(min_length=1, max_length=256)
+    slot: str = Field(default="main", min_length=1, max_length=64)
+
+
 class SessionMessageRequest(BaseModel):
     prompt: str
     # Hints carried over for backward compatibility with the existing chat UI.
@@ -184,6 +197,9 @@ class SessionMessageRequest(BaseModel):
     # frozen value the service ignores them rather than failing.
     provider_id: str | None = None
     model_id: str | None = None
+    # Optional per-turn host location (workbench page, company page, …). Fed
+    # to edition-registered message context providers; plain chats omit it.
+    host_ref: HostRefPayload | None = None
 
 
 class SessionEventsResponse(BaseModel):
@@ -332,6 +348,7 @@ async def send_message(
             provider_id=body.provider_id,
             model_id=body.model_id,
             user_id=user_id,
+            host_ref=_host_ref_of(body),
         )
     except BudgetExceeded as exc:
         # The session service runs a channel-aware wallet pre-check before the
@@ -357,7 +374,22 @@ async def send_message_sync(
     svc: SessionService = Depends(get_session_service),
 ) -> SessionRunResponse:
     """Synchronous variant — blocks until execution completes. For tests."""
-    return await svc.send_message_sync(session_id, body.prompt, user_id=user_id)
+    return await svc.send_message_sync(
+        session_id,
+        body.prompt,
+        user_id=user_id,
+        host_ref=_host_ref_of(body),
+    )
+
+
+def _host_ref_of(body: SessionMessageRequest) -> HostRef | None:
+    if body.host_ref is None:
+        return None
+    return HostRef(
+        host_type=body.host_ref.host_type,
+        host_id=body.host_ref.host_id,
+        slot=body.host_ref.slot,
+    )
 
 
 @router.post("/{session_id}/interrupt")

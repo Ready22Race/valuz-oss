@@ -591,10 +591,7 @@ function buildTrailingCitationContext(
   messageIdByCitationId: ReadonlyMap<string, string | undefined>;
 } {
   const content: string[] = [];
-  const citations = new Map<
-    string,
-    CitationBundleV1["citations"][number]
-  >();
+  const citations = new Map<string, CitationBundleV1["citations"][number]>();
   const displayOrder = new Map<string, number>();
   const messageIdByCitationId = new Map<string, string | undefined>();
 
@@ -1290,6 +1287,10 @@ interface ConversationTurnListProps {
   emptyTitle?: string;
   emptySuggestions?: string[];
   onEmptySuggestionClick?: (text: string) => void;
+  /** Hide the mascot illustration in the welcome state. Embedding hosts
+   *  (e.g. an edition workbench panel) keep the title + suggestions but drop
+   *  the illustration, which reads as filler at panel widths. */
+  hideEmptyMascot?: boolean;
   /** Show the new-chat welcome (mascot + title + suggestions) when there are no
    *  turns. Only true for a genuinely fresh conversation — an existing
    *  conversation whose transcript is still loading has no turns yet either, and
@@ -1329,6 +1330,7 @@ export function ConversationTurnList({
   emptyTitle,
   emptySuggestions,
   onEmptySuggestionClick,
+  hideEmptyMascot,
   showWelcome,
   startingRuntime,
 }: ConversationTurnListProps) {
@@ -1537,12 +1539,14 @@ export function ConversationTurnList({
                   empty new-chat page feels less bare. Gated on ``showWelcome``
                   so an existing conversation still fetching its transcript (no
                   turns yet) doesn't flash this new-chat state mid-load. */}
-              <img
-                src={assetUrl("mascot.png")}
-                alt=""
-                aria-hidden="true"
-                className="pointer-events-none mx-auto mb-6 h-[160px] w-auto select-none opacity-80"
-              />
+              {hideEmptyMascot ? null : (
+                <img
+                  src={assetUrl("mascot.png")}
+                  alt=""
+                  aria-hidden="true"
+                  className="pointer-events-none mx-auto mb-6 h-[160px] w-auto select-none opacity-80"
+                />
+              )}
               <div className="text-center text-2xl font-medium leading-tight text-ink-heading">
                 {emptyTitle ?? t("conversation.startHere")}
               </div>

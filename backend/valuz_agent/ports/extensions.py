@@ -52,6 +52,9 @@ from valuz_agent.ports.instructions import (
     OSSGlobalInstructionsProvider,
 )
 from valuz_agent.ports.llm_provider import LLMProvider, NoopLLMProvider
+from valuz_agent.ports.mcp_always_on import AlwaysOnMcpServerSpec
+from valuz_agent.ports.message_context import MessageContextProviderPort
+from valuz_agent.ports.ui_artifact import UiArtifactSinkPort
 from valuz_agent.ports.model_defaults import ModelDefaultsPort, SettingsModelDefaults
 from valuz_agent.ports.provider_policy import AllowAllProviderPolicy, ProviderPolicyPort
 from valuz_agent.ports.resource_list_hook import NoopResourceListHook, ResourceListHook
@@ -154,6 +157,22 @@ class Extensions:
         # distribution. Managed editions replace this provider; they do not
         # append to the OSS prompt.
         self.global_instructions: GlobalInstructionsPort = OSSGlobalInstructionsProvider()
+        # Per-turn message context providers (list semantics — editions append,
+        # they do not replace). Each provider turns the client-declared
+        # ``host_ref`` of a message into one extra additional-context section
+        # after resolving it server-side. OSS registers none; a failing
+        # provider is skipped so it can never block a turn.
+        self.message_context_providers: list[MessageContextProviderPort] = []
+        # Edition-owned always-on internal MCP servers (list semantics —
+        # editions append). The capability resolver appends them to every
+        # session after the four built-ins, with the same internal credential
+        # headers and timeout; reserved built-in names are skipped.
+        self.always_on_mcp_specs: list[AlwaysOnMcpServerSpec] = []
+        # Generated-UI artifact sinks (list semantics — editions append).
+        # ``generate_ui`` offers every successful generation to each sink in
+        # order and appends the FIRST returned receipt to its tool result;
+        # a failing sink is skipped and never breaks generation.
+        self.ui_artifact_sinks: list[UiArtifactSinkPort] = []
 
     @property
     def instructions(self) -> GlobalInstructionsPort:

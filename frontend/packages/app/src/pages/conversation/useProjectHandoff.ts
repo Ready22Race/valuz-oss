@@ -21,6 +21,23 @@ type ProjectHandoffParams = {
    *  settled when the handoff is consumed). */
   markPendingConsumed: (sessionId?: string, consumedAt?: number) => void;
   historyCursorRef: { current: number };
+  /** Owned by ``useConversationOrchestration`` (shared with
+   *  ``useConversationSend`` / ``useConversationHistory`` /
+   *  ``useSessionSubscription``, which all read or write it too) — passed in
+   *  rather than created here so the panel variant (which never calls this
+   *  hook) still gets a working ref for those core hooks. */
+  projectSendHandoffRef: {
+    current: {
+      worktree?: { name?: string };
+      permissionMode?: PermissionMode;
+    } | null;
+  };
+  /** Same rationale as ``projectSendHandoffRef`` above. */
+  handoffSessionIdRef: { current: string | null };
+  /** Owned by ``useConversationOrchestration`` (``useConversationHistory``'s
+   *  bootstrap is what flips it true) — read-only here, same rationale as
+   *  the two refs above. */
+  draftBootstrapSettled: boolean;
   /** Narrower than the raw ``useState`` setters on purpose — the moved
    *  bodies only ever pass a full value (or ``null``), never an updater. */
   setPendingUserMessage: (
@@ -76,6 +93,9 @@ export function useProjectHandoff({
   attachmentsParsing,
   markPendingConsumed,
   historyCursorRef,
+  projectSendHandoffRef,
+  handoffSessionIdRef,
+  draftBootstrapSettled,
   setPendingUserMessage,
   setTurnStartAnchor,
   setSending,
@@ -85,7 +105,6 @@ export function useProjectHandoff({
   performSend,
 }: ProjectHandoffParams) {
   const navigate = useNavigate();
-
 
   // Optimistic turn handed over by a page that minted the session itself (the
   // project-detail composer). That page navigates here the moment it has an id
@@ -101,20 +120,10 @@ export function useProjectHandoff({
   const consumedHandoffSessionIdsRef = useRef<Set<string>>(new Set());
   /** Oldest a handoff may be and still be the live one. See its use. */
   const HANDOFF_MAX_AGE_MS = 30_000;
-  // Session-creation options the project-detail composer owns and this page
-  // otherwise knows nothing about. Read by ``ensureSession`` while it mints
-  // the handed-over session, so a project chat that asked for worktree
-  // isolation still gets it. A ref, not state: ``ensureSession`` needs the
-  // value in the same tick the send starts, before any re-render.
-  const projectSendHandoffRef = useRef<{
-    worktree?: { name?: string };
-    permissionMode?: PermissionMode;
-  } | null>(null);
-  // Set while a handed-over pending is live, and read by ``refreshEventsInner``
-  // so its unconditional "switching sessions invalidates the pending" clear
-  // does not wipe a pending that belongs to the session being loaded. Bootstrap
-  // runs that refresh on landing, i.e. always right after this seeds.
-  const handoffSessionIdRef = useRef<string | null>(null);
+  // ``projectSendHandoffRef`` (worktree/permission-mode options ``ensureSession``
+  // reads at the point of no return) and ``handoffSessionIdRef`` (the pending
+  // guard ``refreshEventsInner`` reads) are owned by ``useConversationOrchestration``
+  // and passed in — see the param doc on ``ProjectHandoffParams``.
   useEffect(() => {
     const handoff = (
       location.state as {
@@ -206,12 +215,10 @@ export function useProjectHandoff({
   //
   // Placed after ``performSend`` so the reference is not a forward one.
   const consumedProjectSendRef = useRef(false);
-  // Set when bootstrap's ``/conversation/new`` branch has run to completion.
-  // The handoff waits on it because that branch binds the project BEFORE it
-  // clears per-session state — sending in between created the optimistic turn
-  // and then had it wiped, so the message went out with no bubble and no
-  // runtime-startup header. Cleared whenever a fresh bootstrap starts.
-  const [draftBootstrapSettled, setDraftBootstrapSettled] = useState(false);
+  // ``draftBootstrapSettled`` — set when bootstrap's ``/conversation/new``
+  // branch has run to completion — is owned by
+  // ``useConversationOrchestration`` (``useConversationHistory``'s bootstrap
+  // flips it) and passed in read-only; see the param doc.
   // True from the moment this page is entered by a project-detail send until
   // the send has produced its optimistic turn. Suppresses the new-chat
   // welcome for exactly that window.
@@ -313,9 +320,6 @@ export function useProjectHandoff({
   ]);
 
   return {
-    projectSendHandoffRef,
-    handoffSessionIdRef,
-    setDraftBootstrapSettled,
     handleSend,
     hasPendingProjectSend,
   };

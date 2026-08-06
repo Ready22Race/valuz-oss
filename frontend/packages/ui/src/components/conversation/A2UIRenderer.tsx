@@ -138,16 +138,24 @@ function blockByName(name: string) {
  */
 const RETIRED_TO_BLOCK: Record<
   string,
-  { block: string; map: (props: Record<string, unknown>) => Record<string, unknown> }
+  {
+    block: string;
+    map: (props: Record<string, unknown>) => Record<string, unknown>;
+  }
 > = {
   FinanceMetric: {
     block: "StatsCard",
     map: (props) => ({
       label: readText(props.label ?? props.name ?? props.title),
-      value: [readText(props.value ?? props.latest ?? props.text), readText(props.unit)]
+      value: [
+        readText(props.value ?? props.latest ?? props.text),
+        readText(props.unit),
+      ]
         .filter(Boolean)
         .join(" "),
-      delta: readText(props.changePct ?? props.change_pct ?? props.pct ?? props.change),
+      delta: readText(
+        props.changePct ?? props.change_pct ?? props.pct ?? props.change,
+      ),
       description: readText(props.description),
     }),
   },
@@ -265,7 +273,9 @@ function a2uiCatalogs(): A2UICatalogPair {
  * way to reach it. It rendered its category axis with no series at all: a tall
  * empty plot rather than an error.
  */
-const A2UIComponentIndex = createContext<Map<string, Record<string, unknown>>>(new Map());
+const A2UIComponentIndex = createContext<Map<string, Record<string, unknown>>>(
+  new Map(),
+);
 
 export function A2UIRenderer({ body }: A2UIRendererProps) {
   // Surfaces are rebuilt when a registration lands, not only when the payload
@@ -286,7 +296,9 @@ export function A2UIRenderer({ body }: A2UIRendererProps) {
   );
 }
 
-function buildComponentIndex(body: string): Map<string, Record<string, unknown>> {
+function buildComponentIndex(
+  body: string,
+): Map<string, Record<string, unknown>> {
   const index = new Map<string, Record<string, unknown>>();
   for (const message of normalizeMessages(parseA2UIMessages(body))) {
     const update = (message as Record<string, unknown>).updateComponents;
@@ -300,8 +312,34 @@ function buildComponentIndex(body: string): Map<string, Record<string, unknown>>
   return index;
 }
 
-function buildSurfaces(body: string): SurfaceModel<ReactComponentImplementation>[] {
-  const messages = normalizeMessages(parseA2UIMessages(body));
+/**
+ * Drop repeated ``createSurface`` messages for a surface id that already
+ * exists. Models occasionally "restart" mid-document and emit the surface
+ * header again; the A2UI state machine throws on the duplicate, and the
+ * catch below would blank the WHOLE payload. Keeping the first create and
+ * letting the later ``updateComponents`` merge is the graceful-degradation
+ * behavior the genui contract asks for (render what can be rendered).
+ */
+function dropDuplicateCreateSurface(
+  messages: Record<string, unknown>[],
+): Record<string, unknown>[] {
+  const seen = new Set<string>();
+  return messages.filter((message) => {
+    const create = message.createSurface;
+    if (!isRecord(create)) return true;
+    const id = readText(create.surfaceId) ?? "";
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
+
+function buildSurfaces(
+  body: string,
+): SurfaceModel<ReactComponentImplementation>[] {
+  const messages = dropDuplicateCreateSurface(
+    normalizeMessages(parseA2UIMessages(body)),
+  );
   if (!messages.length) return [];
 
   const processor = new MessageProcessor<ReactComponentImplementation>(
@@ -382,11 +420,7 @@ function OpenUIComponent({
         </StackBox>
       );
     case "Card":
-      return (
-        <CardBox variant={readVariant(props.variant)}>
-          {children}
-        </CardBox>
-      );
+      return <CardBox variant={readVariant(props.variant)}>{children}</CardBox>;
     case "Section":
       return (
         <SectionBox
@@ -413,7 +447,9 @@ function OpenUIComponent({
           ? readText(props.text ?? props.value)
           : children;
       return (
-        <TextBlock size={readString(props.size) ?? defaultTextSizeForComponent(name)}>
+        <TextBlock
+          size={readString(props.size) ?? defaultTextSizeForComponent(name)}
+        >
           {content}
         </TextBlock>
       );
@@ -563,7 +599,10 @@ function OpenUIComponent({
     }
     case "Form":
       return (
-        <div role="form" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        <div
+          role="form"
+          style={{ display: "flex", flexDirection: "column", gap: 16 }}
+        >
           {readRefs(props.fields, buildChild)}
           {readRefs(props.buttons, buildChild)}
           {children}
@@ -634,7 +673,10 @@ function OpenUIComponent({
       );
     case "RadioGroup":
       return (
-        <OpenUI.RadioGroup name={readString(props.name)} defaultValue={readString(props.defaultValue)}>
+        <OpenUI.RadioGroup
+          name={readString(props.name)}
+          defaultValue={readString(props.defaultValue)}
+        >
           {readRefs(props.items ?? props.children, buildChild) as never}
         </OpenUI.RadioGroup>
       );
@@ -669,7 +711,11 @@ function OpenUIComponent({
       );
     case "Buttons":
       return (
-        <OpenUI.Buttons variant={readString(props.direction) === "column" ? "vertical" : "horizontal"}>
+        <OpenUI.Buttons
+          variant={
+            readString(props.direction) === "column" ? "vertical" : "horizontal"
+          }
+        >
           {readRefs(props.buttons ?? props.children, buildChild) as never}
         </OpenUI.Buttons>
       );
@@ -682,7 +728,11 @@ function OpenUIComponent({
     case "Carousel":
       return <MappedCarousel props={props} buildChild={buildChild} />;
     case "Separator":
-      return <OpenUI.Separator orientation={readString(props.orientation) as never} />;
+      return (
+        <OpenUI.Separator
+          orientation={readString(props.orientation) as never}
+        />
+      );
     case "Tag":
       return (
         <OpenUI.Tag
@@ -701,7 +751,11 @@ function OpenUIComponent({
       );
     case "Modal":
       return (
-        <OpenUIModal title={readText(props.title)} open={readBoolean(props.open) ?? false} onOpenChange={() => undefined}>
+        <OpenUIModal
+          title={readText(props.title)}
+          open={readBoolean(props.open) ?? false}
+          onOpenChange={() => undefined}
+        >
           {children}
         </OpenUIModal>
       );
@@ -711,7 +765,9 @@ function OpenUIComponent({
       // second list to keep in step with the first.
       const block = renderBlockComponent(name, props, buildChild);
       if (block) return block;
-      return <TextBlock>{readText(props.text ?? props.label ?? name)}</TextBlock>;
+      return (
+        <TextBlock>{readText(props.text ?? props.label ?? name)}</TextBlock>
+      );
     }
   }
 }
@@ -906,7 +962,9 @@ function MappedTable({
       <OpenUI.TableHeader>
         <OpenUI.TableRow>
           {columns.map((column) => (
-            <OpenUI.TableHead key={column.label}>{column.label}</OpenUI.TableHead>
+            <OpenUI.TableHead key={column.label}>
+              {column.label}
+            </OpenUI.TableHead>
           ))}
         </OpenUI.TableRow>
       </OpenUI.TableHeader>
@@ -935,9 +993,14 @@ function MappedSelect({
   const resolve = useRefResolver();
   const items = readOptionItems(resolve(props.items ?? props.children), buildChild);
   return (
-    <OpenUI.Select name={readString(props.name)} defaultValue={readString(props.value)}>
+    <OpenUI.Select
+      name={readString(props.name)}
+      defaultValue={readString(props.value)}
+    >
       <OpenUI.SelectTrigger>
-        <OpenUI.SelectValue placeholder={readString(props.placeholder) ?? "Select..."} />
+        <OpenUI.SelectValue
+          placeholder={readString(props.placeholder) ?? "Select..."}
+        />
       </OpenUI.SelectTrigger>
       <OpenUI.SelectContent>
         {items.map((item) => (
@@ -965,7 +1028,11 @@ function MappedTabs({
     <OpenUI.Tabs defaultValue={firstValue}>
       <OpenUI.TabsList>
         {items.map((item) => (
-          <OpenUI.TabsTrigger key={item.value} value={item.value} text={item.trigger} />
+          <OpenUI.TabsTrigger
+            key={item.value}
+            value={item.value}
+            text={item.trigger}
+          />
         ))}
       </OpenUI.TabsList>
       {items.map((item) => (
@@ -1123,7 +1190,9 @@ function salvagePartialComponents(line: string): A2UIMessage | null {
 }
 
 function normalizeMessages(messages: A2UIMessage[]): A2UIMessage[] {
-  const normalized = messages.map(normalizeMessage).filter(Boolean) as A2UIMessage[];
+  const normalized = messages
+    .map(normalizeMessage)
+    .filter(Boolean) as A2UIMessage[];
   const defaultSurfaceId = inferSurfaceId(normalized);
   if (!normalized.some((message) => isRecord(message.createSurface))) {
     normalized.unshift({
@@ -1185,7 +1254,8 @@ function flattenComponent(component: A2UIComponent): A2UIComponent[] {
   const extra: A2UIComponent[] = [];
   for (const key of structuralKeysForComponent(normalized.component)) {
     const normalizedNested = normalizeNestedRefs(normalized[key], id);
-    if (normalizedNested.value !== undefined) normalized[key] = normalizedNested.value;
+    if (normalizedNested.value !== undefined)
+      normalized[key] = normalizedNested.value;
     extra.push(...normalizedNested.components);
   }
 
@@ -1235,9 +1305,13 @@ function ensureRootComponent(
         ? toArray(message.updateComponents.components)
         : [],
     )
-    .find((component) => isRecord(component) && typeof component.id === "string");
+    .find(
+      (component) => isRecord(component) && typeof component.id === "string",
+    );
 
-  const childId = isRecord(firstComponentId) ? readString(firstComponentId.id) : null;
+  const childId = isRecord(firstComponentId)
+    ? readString(firstComponentId.id)
+    : null;
   if (!childId) return messages;
 
   return [
@@ -1307,7 +1381,9 @@ function readColumns(
   if (explicitColumns.length) {
     return explicitColumns
       .map((column) => readColumn(column, buildChild))
-      .filter((column): column is { label: string; values: unknown[] } => Boolean(column));
+      .filter((column): column is { label: string; values: unknown[] } =>
+        Boolean(column),
+      );
   }
 
   const labels = toArray(props.labels ?? props.headers);
@@ -1324,7 +1400,12 @@ function readColumn(column: unknown, buildChild: BuildChild) {
   }
   if (!isRecord(column)) return null;
   const record = isA2UIComponent(column) ? mergeProps(column) : column;
-  if (typeof record.id === "string" && !record.label && !record.data && !record.values) {
+  if (
+    typeof record.id === "string" &&
+    !record.label &&
+    !record.data &&
+    !record.values
+  ) {
     return { label: record.id, values: [buildChild(record.id)] };
   }
   return {
@@ -1343,13 +1424,17 @@ function readOptionItems(value: unknown, buildChild: BuildChild) {
         return { value: record.id, label: buildChild(record.id) };
       }
       const valueText =
-        readString(record.value) ?? readString(record.name) ?? readText(record.label);
+        readString(record.value) ??
+        readString(record.name) ??
+        readText(record.label);
       return {
         value: valueText,
         label: readText(record.label ?? record.text ?? valueText),
       };
     })
-    .filter((item): item is { value: string; label: ReactNode } => Boolean(item?.value));
+    .filter((item): item is { value: string; label: ReactNode } =>
+      Boolean(item?.value),
+    );
 }
 
 function readTabItems(
@@ -1363,7 +1448,9 @@ function readTabItems(
     if (!valueText) continue;
     items.push({
       value: valueText,
-      trigger: readText(record.trigger ?? record.label ?? record.title ?? valueText),
+      trigger: readText(
+        record.trigger ?? record.label ?? record.title ?? valueText,
+      ),
       content: record.content ?? record.children,
     });
   }
@@ -1388,9 +1475,11 @@ function readTags(value: unknown): string[] {
 }
 
 function renderCell(value: unknown, buildChild: BuildChild): ReactNode {
-  if (typeof value === "string" && value.startsWith("#")) return buildChild(value.slice(1));
+  if (typeof value === "string" && value.startsWith("#"))
+    return buildChild(value.slice(1));
   if (typeof value === "string") return value;
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (typeof value === "number" || typeof value === "boolean")
+    return String(value);
   if (isA2UIComponent(value)) {
     return (
       <OpenUIComponent
@@ -1400,13 +1489,22 @@ function renderCell(value: unknown, buildChild: BuildChild): ReactNode {
       />
     );
   }
-  if (isRecord(value) && typeof value.id === "string") return buildChild(value.id);
+  if (isRecord(value) && typeof value.id === "string")
+    return buildChild(value.id);
   if (value === null || value === undefined) return "";
   return JSON.stringify(value);
 }
 
 /** Array props that can hold nested components, inline or by id. */
-const NESTED_PROPS = ["children", "data", "points", "series", "slices", "columns", "items"];
+const NESTED_PROPS = [
+  "children",
+  "data",
+  "points",
+  "series",
+  "slices",
+  "columns",
+  "items",
+];
 
 /**
  * Expand id references into the components they name — all the way down.
@@ -1500,9 +1598,14 @@ function scanForPoints(value: unknown): Record<string, string | number>[] {
     if (depth > 6 || rows.length > 200) return;
     for (const item of toArray(node)) {
       if (!isRecord(item)) continue;
-      const label = readText(item.label ?? item.category ?? item.name ?? item.x);
-      const numeric = readNumber(item.value ?? item.y ?? item.amount ?? item.count);
-      if (label && numeric !== undefined) rows.push({ category: label, value: numeric });
+      const label = readText(
+        item.label ?? item.category ?? item.name ?? item.x,
+      );
+      const numeric = readNumber(
+        item.value ?? item.y ?? item.amount ?? item.count,
+      );
+      if (label && numeric !== undefined)
+        rows.push({ category: label, value: numeric });
       // Any array, not just the known nesting props: this path exists precisely
       // for the case where the key is one nobody has seen before.
       for (const nested of Object.values(item)) {
@@ -1566,7 +1669,9 @@ function collectSeriesNodes(
   return out;
 }
 
-function buildRowsFromSeriesData(value: unknown): Record<string, string | number>[] {
+function buildRowsFromSeriesData(
+  value: unknown,
+): Record<string, string | number>[] {
   const rows = new Map<string, Record<string, string | number>>();
   // `value` arrives materialised; resolving again would restart the cycle
   // guard from empty and re-enter any self-reference.
@@ -1636,7 +1741,9 @@ function readSeries(value: unknown): { category: string; values: number[] }[] {
       const record = isA2UIComponent(item) ? mergeProps(item) : item;
       return {
         category: readText(record.category ?? record.name ?? record.label),
-        values: toArray(record.values ?? record.data).map((point) => Number(point) || 0),
+        values: toArray(record.values ?? record.data).map(
+          (point) => Number(point) || 0,
+        ),
       };
     })
     .filter((item) => item.category);
@@ -1685,10 +1792,17 @@ function normalizeOpenUIComponentName(value: unknown): string {
 function structuralKeysForComponent(value: unknown): string[] {
   const name = normalizeOpenUIComponentName(value);
   if (
-    ["Stack", "Row", "Grid", "Card", "Section", "DataList", "MarketIndexGrid"].includes(
-      name,
-    )
-  ) return ["children"];
+    [
+      "Stack",
+      "Row",
+      "Grid",
+      "Card",
+      "Section",
+      "DataList",
+      "MarketIndexGrid",
+    ].includes(name)
+  )
+    return ["children"];
   if (name === "Form") return ["fields", "buttons", "children"];
   if (name === "FormControl") return ["children"];
   if (name === "Buttons") return ["buttons", "children"];
@@ -1696,16 +1810,22 @@ function structuralKeysForComponent(value: unknown): string[] {
   return [];
 }
 
-function makeComponentId(component: A2UIComponent, fallback = "component"): string {
+function makeComponentId(
+  component: A2UIComponent,
+  fallback = "component",
+): string {
   return `${fallback}_${normalizeOpenUIComponentName(component.component ?? component.type).toLowerCase()}_${Math.random()
     .toString(36)
     .slice(2, 8)}`;
 }
 
 function looksLikeA2UIMessage(value: Record<string, unknown>): boolean {
-  return ["createSurface", "updateComponents", "updateDataModel", "deleteSurface"].some(
-    (key) => key in value,
-  );
+  return [
+    "createSurface",
+    "updateComponents",
+    "updateDataModel",
+    "deleteSurface",
+  ].some((key) => key in value);
 }
 
 function isA2UIComponent(value: unknown): value is A2UIComponent {
@@ -1752,7 +1872,8 @@ function readBoolean(value: unknown): boolean | undefined {
 function readText(value: unknown): string {
   if (value === null || value === undefined) return "";
   if (typeof value === "string") return value;
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (typeof value === "number" || typeof value === "boolean")
+    return String(value);
   return JSON.stringify(value);
 }
 
@@ -1782,7 +1903,9 @@ function readTextCalloutVariant(
     : "neutral";
 }
 
-function readButtonVariant(value: unknown): "primary" | "secondary" | "tertiary" {
+function readButtonVariant(
+  value: unknown,
+): "primary" | "secondary" | "tertiary" {
   return value === "secondary" || value === "tertiary" || value === "ghost"
     ? value === "ghost"
       ? "tertiary"

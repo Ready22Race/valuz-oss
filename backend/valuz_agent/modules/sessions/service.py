@@ -113,6 +113,7 @@ from valuz_agent.modules.sessions.run_orchestrator import (
 )
 from valuz_agent.modules.sessions.schemas import SessionWorktreeSpec
 from valuz_agent.modules.skills.datastore import SkillDatastore
+from valuz_agent.ports.message_context import HostRef
 
 if TYPE_CHECKING:
     from src.core.types import Session as KernelSessionT
@@ -1390,6 +1391,7 @@ class SessionService:
         provider_id: str | None = None,
         model_id: str | None = None,
         user_id: str | None = None,
+        host_ref: HostRef | None = None,
     ) -> SessionDetail:
         """Kick off an async agent turn in the background.  Returns immediately."""
         # Capability convergence (citation policy / docs caps / always-on MCP
@@ -1456,6 +1458,7 @@ class SessionService:
                 content=content,
                 event_bus=self._bus,
                 user_id=user_id,
+                host_ref=host_ref,
             )
         )
 
@@ -1469,6 +1472,7 @@ class SessionService:
         *,
         citation_enabled_override: bool | None = None,
         citation_verification_enabled_override: bool | None = None,
+        host_ref: HostRef | None = None,
     ) -> SessionRunResponse:
         """Block until the agent turn completes.  Used by the schedule runner."""
         # Mirror ``send_message``: convergence rides the turn, not this call —
@@ -1544,6 +1548,7 @@ class SessionService:
                 pending_attachments,
                 user_id=user_id,
                 worktree=worktree_name_of(session),
+                host_ref=host_ref,
             )
 
             try:

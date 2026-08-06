@@ -14,6 +14,11 @@ export { AutomationDetailPage } from "./AutomationDetailPage";
 export { SkillDetailPage } from "./SkillDetailPage";
 export { ProjectsPage } from "./ProjectsPage";
 export { ConversationPage } from "./ConversationPage";
+export {
+  ConversationView,
+  type ConversationViewProps,
+} from "./conversation/ConversationView";
+export type { ConversationViewVariant } from "./conversation/useConversationRouting";
 export { OnboardingFlow } from "./onboarding";
 export { KnowledgePage } from "./KnowledgePage";
 export { MarketplacePage } from "./MarketplacePage";
