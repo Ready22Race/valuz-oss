@@ -43,6 +43,7 @@ export const MiniCardBlock = defineComponent({
   props: MiniCardBlockSchema,
   description:
     "Row of MiniCards that wraps as space runs out. This is the KPI strip: reach for it whenever you are about to show three or more single-number metrics side by side. " +
+    "Never build that strip out of Cards instead — a Card frames each figure as its own section, so three of them read as three separate blocks rather than one row of related numbers. " +
     "children is an array of MiniCard.",
   component: ({ props, renderNode }) => (
     <div className="vgb-block" data-slot="vgb-mini-card-block">
