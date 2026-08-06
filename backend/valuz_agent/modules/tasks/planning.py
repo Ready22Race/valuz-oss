@@ -592,7 +592,10 @@ async def review_subtask(
     # (asyncio.Queue is NOT thread-safe), then the DB write reflects it.
 
     delivered = False
-    if target_session and mailbox_registry.is_registered(target_session):
+    # OWNED, not merely registered — an unread box would report the rework
+    # as delivered and then silently swallow it (the member re-dispatches
+    # from the plan node instead).
+    if target_session and mailbox_registry.is_owned(target_session):
         delivered = mailbox_registry.put(
             target_session,
             InboxMsg(

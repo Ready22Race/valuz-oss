@@ -125,7 +125,7 @@ def test_recovered_lead_clears_suspicion(db_factory) -> None:
     _seed(db_factory)
     mon = _monitor()
     assert asyncio.run(mon.sweep_once()) == []  # suspected once
-    mailbox_registry.register("lead-s")  # a resume landed — loop back
+    mailbox_registry.claim("lead-s")  # a resume landed — loop back, owning its box
     assert asyncio.run(mon.sweep_once()) == []  # suspicion cleared
     assert _task_status(db_factory) == "active"
     # A later death restarts the 2-sweep count from scratch.

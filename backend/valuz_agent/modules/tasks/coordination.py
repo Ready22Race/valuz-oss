@@ -587,45 +587,36 @@ class CoordinationService:
         ``payload.direction``; the append-only log is never rewritten.)
         """
 
-        async with async_unit_of_work() as db:
-            run_ds = TaskSessionDatastore(db)
-            event_ds = TaskEventDatastore(db)
-            run = await run_ds.get_run(session_id)
+        async with async_unit_of_work(commit=False) as db:
+            run = await TaskSessionDatastore(db).get_run(session_id)
             if run is None:
                 return
             lead_session_id = run.dispatched_by or ""
+            project_id = run.project_id
+            task_id = run.task_id or ""
+            agent_slug = run.agent_slug or ""
             run_dir = Path(run.run_dir) if run.run_dir else Path()
-            since = self._members.dispatch_started_at(session_id)
-            manifest = await collect_manifest_safe(
-                session_id,
-                run_dir,
-                status,
-                agent_slug=run.agent_slug or "",
-                since_epoch=since,
-                user_id=user_id,
-            )
-            # Stamp the display name at emit time (established rule): the
-            # frontend renders ``payload.agent_name`` directly instead of
-            # joining the slug against an async members list, which races the
-            # load and misses agents removed since.
-            agent_name = await resolve_agent_display_name(
-                run.project_id, run.agent_slug or "", user_id
-            )
-            await event_ds.append_event(
-                user_id,
-                project_id=run.project_id,
-                task_id=run.task_id or "",
-                type="subtask_reported",
-                actor=run.agent_slug,
-                session_id=session_id,
-                payload={
-                    "agent_name": agent_name,
-                    "summary": manifest.get("summary", ""),
-                    "status": status,
-                },
-            )
 
-        # Mailbox delivery on the event loop (asyncio.Queue is not thread-safe).
+        since = self._members.dispatch_started_at(session_id)
+        manifest = await collect_manifest_safe(
+            session_id,
+            run_dir,
+            status,
+            agent_slug=agent_slug,
+            since_epoch=since,
+            user_id=user_id,
+        )
+
+        # DELIVER FIRST — this is the load-bearing leg, and the timeline write
+        # below used to run ahead of it inside one unit of work. When that write
+        # raised (WAL contention exhausting the commit retry, a display-name
+        # lookup failing) the loop unwound into its ``finally``, which settles
+        # the run row to ``completed`` — and both lead-side backstops
+        # (``_heartbeat_pending`` / ``_probe_pending_members``) filter on
+        # ``status == "active"``, so the member read as never-dispatched. The
+        # lead then burned its whole await window and eventually parked the task.
+        # Mailbox delivery must run on the event loop (asyncio.Queue is not
+        # thread-safe), which it does — this is a plain call.
         if lead_session_id:
             mailbox_registry.put(
                 lead_session_id,
@@ -634,6 +625,34 @@ class CoordinationService:
                     from_session=session_id,
                     payload=manifest,
                 ),
+            )
+
+        # Timeline bookkeeping — on its own unit of work so a failure here costs
+        # a row in the log, never the delivery above.
+        try:
+            async with async_unit_of_work() as db:
+                # Stamp the display name at emit time (established rule): the
+                # frontend renders ``payload.agent_name`` directly instead of
+                # joining the slug against an async members list, which races
+                # the load and misses agents removed since.
+                agent_name = await resolve_agent_display_name(project_id, agent_slug, user_id)
+                await TaskEventDatastore(db).append_event(
+                    user_id,
+                    project_id=project_id,
+                    task_id=task_id,
+                    type="subtask_reported",
+                    actor=agent_slug,
+                    session_id=session_id,
+                    payload={
+                        "agent_name": agent_name,
+                        "summary": manifest.get("summary", ""),
+                        "status": status,
+                    },
+                )
+        except Exception:  # noqa: BLE001 — never let the timeline cost the report
+            logger.exception(
+                "subtask_reported timeline write failed for %s (member_done was delivered)",
+                session_id,
             )
 
     async def lead_idle_with_no_pending(

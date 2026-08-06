@@ -791,9 +791,12 @@ class TaskHealthMonitor:
                 # it to boot recovery / user action.
                 self._suspect.pop(task_id, None)
                 continue
-            if mailbox_registry.is_registered(lead_session_id):
+            if mailbox_registry.is_owned(lead_session_id):
                 # Live lead loop (running a turn, or parked on its mailbox
-                # awaiting member_done / a user question) — healthy.
+                # awaiting member_done / a user question) — healthy. OWNED,
+                # not merely registered: a box pre-seeded for a loop that
+                # never started would otherwise read as healthy forever, and
+                # this monitor exists to catch exactly that task.
                 self._suspect.pop(task_id, None)
                 continue
             # Dead-looking: the loop has exited but the task is still active.
@@ -832,7 +835,7 @@ class TaskHealthMonitor:
                 return False
             # Double-check liveness right before writing — the loop may have
             # re-registered (a resume landed) in the sweep gap.
-            if mailbox_registry.is_registered(lead_session_id):
+            if mailbox_registry.is_owned(lead_session_id):
                 return False
             reason = (
                 "The lead stopped without finishing the task (the process "

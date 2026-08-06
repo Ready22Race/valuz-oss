@@ -19,10 +19,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
-from sqlalchemy import case, func, select, update
+from sqlalchemy import case, delete, func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -356,6 +356,35 @@ class TaskDatastore:
         )
         return False
 
+    async def list_ids_by_project(self, user_id: str, project_id: str) -> list[str]:
+        """Task ids owned by this project — the input to :mod:`tasks.purge`."""
+        return list(
+            (
+                await self._db.execute(
+                    select(TaskRow.id).where(
+                        TaskRow.user_id == user_id, TaskRow.project_id == project_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    async def delete_tasks(self, user_id: str, task_ids: Sequence[str]) -> int:
+        """Delete task headers. Owner-scoped; returns the row count."""
+        if not task_ids:
+            return 0
+        res = cast(
+            "CursorResult[Any]",
+            await self._db.execute(
+                delete(TaskRow).where(
+                    TaskRow.user_id == user_id, TaskRow.id.in_(list(task_ids))
+                )
+            ),
+        )
+        await async_commit_with_retry(self._db, where="TaskDatastore.delete_tasks")
+        return int(res.rowcount or 0)
+
 
 class TaskEventDatastore:
     """Append-only event log for tasks."""
@@ -521,6 +550,22 @@ class TaskEventDatastore:
             f"append_event: could not commit event for task {task_id} "
             f"after {_LOCK_RETRY_ATTEMPTS} attempts"
         ) from last_exc
+
+    async def delete_for_tasks(self, user_id: str, task_ids: Sequence[str]) -> int:
+        """Drop every timeline row for these tasks. Owner-scoped."""
+        if not task_ids:
+            return 0
+        res = cast(
+            "CursorResult[Any]",
+            await self._db.execute(
+                delete(TaskEventRow).where(
+                    TaskEventRow.user_id == user_id,
+                    TaskEventRow.task_id.in_(list(task_ids)),
+                )
+            ),
+        )
+        await async_commit_with_retry(self._db, where="TaskEventDatastore.delete_for_tasks")
+        return int(res.rowcount or 0)
 
 
 class TaskSessionDatastore:
@@ -713,3 +758,24 @@ class TaskSessionDatastore:
         )
         await async_commit_with_retry(self._db, where="TaskSessionDatastore.settle_run_if_active")
         return bool(res.rowcount)
+
+    async def delete_for_tasks(self, user_id: str, task_ids: Sequence[str]) -> int:
+        """Drop every run-index row for these tasks. Owner-scoped.
+
+        The kernel sessions themselves are NOT touched here — this table is
+        only the host's index of them. Whoever purges the task decides what
+        happens to the sessions (project deletion already removes them).
+        """
+        if not task_ids:
+            return 0
+        res = cast(
+            "CursorResult[Any]",
+            await self._db.execute(
+                delete(TaskSessionRow).where(
+                    TaskSessionRow.user_id == user_id,
+                    TaskSessionRow.task_id.in_(list(task_ids)),
+                )
+            ),
+        )
+        await async_commit_with_retry(self._db, where="TaskSessionDatastore.delete_for_tasks")
+        return int(res.rowcount or 0)

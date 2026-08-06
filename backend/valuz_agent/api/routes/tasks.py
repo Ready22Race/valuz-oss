@@ -5,6 +5,7 @@ Endpoints:
   POST   /v1/projects/{id}/tasks:draft      — open a draft task (VALUZ-CHATPLAN S3)
   GET    /v1/projects/{id}/tasks            — list project tasks
   GET    /v1/tasks/{task_id}                  — task header + runs + events
+  DELETE /v1/tasks/{task_id}                  — purge header + runs + events (409 if active)
   GET    /v1/tasks/{task_id}/events           — full event log (ACTIVITY)
   GET    /v1/tasks/{task_id}/events/stream    — SSE: live task events (cursor: ?after_seq=N;
                                                 terminal → ``stream_end`` unless ?keep_alive=1)
@@ -36,6 +37,7 @@ from valuz_agent.modules.automations.datastore import AutomationDatastore
 from valuz_agent.modules.tasks import plan_commands
 from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow
 from valuz_agent.modules.tasks.orchestrator import task_orchestrator
+from valuz_agent.modules.tasks.purge import purge_tasks
 from valuz_agent.modules.tasks.service import TaskService
 from valuz_agent.modules.tasks.task_state import TERMINAL_STATUSES
 
@@ -331,6 +333,30 @@ async def get_task(
         runs=[RunResponse.model_validate(r) for r in detail.runs],
         events=[EventResponse.model_validate(e) for e in detail.events],
     )
+
+
+@router.delete("/v1/tasks/{task_id}", status_code=204)
+async def delete_task(
+    task_id: str,
+    db: AsyncSession = Depends(get_async_session),
+    user_id: str = Depends(get_current_user_id),
+) -> None:
+    """Delete a task with its runs and timeline.
+
+    Refuses an ``active`` task rather than stopping it implicitly: stopping is
+    a decision with its own semantics (park the nodes, settle the runs, tell
+    the lead) and silently folding it into a delete would make the two
+    indistinguishable in the log.
+    """
+    task = await TaskService(db).get_owned_task(user_id, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
+    if task.status == "active":
+        raise HTTPException(
+            status_code=409,
+            detail="Task is still active — stop it before deleting.",
+        )
+    await purge_tasks(user_id, [task_id])
 
 
 @router.get("/v1/tasks/{task_id}/events", response_model=dict[str, list[EventResponse]])

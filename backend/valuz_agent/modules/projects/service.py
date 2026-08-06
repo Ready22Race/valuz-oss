@@ -571,6 +571,17 @@ class ProjectService:
             await self._skills.set_project_skills(user_id, project_id, [])
         if self._members:
             await self._members.delete_by_project(user_id, project_id)
+        # Tasks, before the project row goes: they are the one child that
+        # SURVIVES its parent in a way the user can see. Left behind, an
+        # ``active`` task with no kernel sessions gets respawned by the next
+        # boot's recovery sweep against a session id that no longer exists,
+        # dies, and is announced as "blocked" — for a project that is gone,
+        # on a row with no delete path. Module-local import: this leaf is
+        # reached only from here, and a top-level one would pair with
+        # ``tasks.resolution``'s project import to make a cycle.
+        from valuz_agent.modules.tasks.purge import purge_project_tasks
+
+        await purge_project_tasks(user_id, project_id)
         await self._ds.delete(user_id, project_id)
         # Source-driven forgetting (memory-system-design §11): a deleted project's
         # centralized memory dir is Valuz-owned (never the user's bound repo), so
