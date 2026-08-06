@@ -371,6 +371,13 @@ export interface ProjectContextPanelProps {
    * open via {@link onOpenGeneratedFile}.
    */
   generatedFiles?: GeneratedArtifactItem[];
+  /**
+   * Host-supplied control rendered in the generated-files section header
+   * (share, export…). Passed straight through to
+   * {@link AccordionSection}'s existing ``action`` slot, so OSS renders
+   * unchanged when it is absent.
+   */
+  generatedFilesAction?: React.ReactNode;
   /** Open one delivered artifact (its absolute path) in the OS. */
   onOpenGeneratedFile?: (path: string) => void;
   /**
@@ -1065,6 +1072,7 @@ export const ProjectDetailContextPanel = ({
   uploadedFiles,
   onRemoveUploadedFile,
   generatedFiles,
+  generatedFilesAction,
   onOpenGeneratedFile,
   todos,
   worktrees,
@@ -1546,6 +1554,7 @@ export const ProjectDetailContextPanel = ({
       iconClassName="text-brand"
       contentClassName="px-5 py-2"
       count={visibleGeneratedFiles.length || undefined}
+      action={generatedFilesAction}
     >
       {visibleGeneratedFiles.length > 0 ? (
         <div className="space-y-1">
