@@ -180,6 +180,38 @@ class TaskDatastore:
             .all()
         )
 
+    async def list_active_lead_bindings(self) -> list[tuple[str, str, str, str | None]]:
+        """SYSTEM SWEEP: ``(task_id, user_id, project_id, lead_session_id)`` for
+        every active task, in ONE query.
+
+        The health watchdog runs per minute for the life of the process. It
+        used to call ``list_active`` — full rows, ``plan`` JSON and all — and
+        then one ``list_runs`` per task to find the lead: 1 + N queries a
+        minute, growing with install age, to read four columns. The lead run
+        is joined here instead, and a rejected lead (a commit-race loser, see
+        ``pick_lead_run``) is excluded in SQL so the live one wins the pick.
+        """
+        lead = TaskSessionRow
+        rows = (
+            await self._db.execute(
+                select(TaskRow.id, TaskRow.user_id, TaskRow.project_id, lead.session_id)
+                .select_from(TaskRow)
+                .outerjoin(
+                    lead,
+                    (lead.task_id == TaskRow.id)
+                    & (lead.kind == "lead")
+                    & (lead.status != "rejected"),
+                )
+                .where(TaskRow.status == "active")
+            )
+        ).all()
+        # An active task with two non-rejected lead rows would duplicate; keep
+        # the first binding per task so the sweep still sees each task once.
+        seen: dict[str, tuple[str, str, str, str | None]] = {}
+        for task_id, user_id, project_id, session_id in rows:
+            seen.setdefault(task_id, (task_id, user_id, project_id, session_id))
+        return list(seen.values())
+
     async def list_active(self) -> list[TaskRow]:
         """SYSTEM SWEEP (cross-owner). All ``active`` tasks across every owner —
         startup recovery (VALUZ-RESUME Layer 1) resumes each under its own owner

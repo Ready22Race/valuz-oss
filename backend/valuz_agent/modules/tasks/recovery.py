@@ -771,17 +771,10 @@ class TaskHealthMonitor:
         if is_draining():
             return []
         async with async_unit_of_work(commit=False) as db:
-            tasks = await TaskDatastore(db).list_active()
-            run_ds = TaskSessionDatastore(db)
-            # Snapshot (task_id, user_id, project_id, lead_session_id) so we
-            # don't hold the read UoW across the write below.
-            candidates: list[tuple[str, str, str, str | None]] = []
-            for task in tasks:
-                runs = await run_ds.list_runs(task.user_id, task.id)
-                lead = pick_lead_run(runs)
-                candidates.append(
-                    (task.id, task.user_id, task.project_id, lead.session_id if lead else None)
-                )
+            # ONE query for (task_id, user_id, project_id, lead_session_id) —
+            # this sweep runs every 60s forever, and the previous shape was a
+            # full-row scan plus one list_runs per active task.
+            candidates = await TaskDatastore(db).list_active_lead_bindings()
 
         acted: list[str] = []
         live_task_ids: set[str] = set()
