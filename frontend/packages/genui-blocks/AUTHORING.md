@@ -207,10 +207,10 @@ Forgetting this is the quiet failure: the block renders when named, but nothing
 ever tells the model it exists, so it is never named.
 
 `generate_ui` takes a `components` argument that narrows what a single
-generation is offered — `all` (default), `edition` (root + blocks) or `atoms`
-(OpenUI primitives). It is assembled backend-side, so nothing here changes; what
-it means for you is that your `description` is the block's entire pitch under
-`edition`, where the primitives are not there to fall back on.
+generation is offered — `all` (default), `atoms` (everything this repo ships,
+primitives and blocks alike) or `edition` (only what a vertical edition
+registered from outside). It is assembled backend-side, so nothing here changes:
+a block you add is in the `atoms` set by definition.
 
 ## Verifying
 

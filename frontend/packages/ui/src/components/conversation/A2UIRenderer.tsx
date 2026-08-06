@@ -77,9 +77,6 @@ const OPENUI_COMPONENT_NAMES = [
   "KPI",
   "Label",
   "LineChart",
-  "List",
-  "ListBlock",
-  "ListItem",
   "MarkDownRenderer",
   "Markdown",
   "Modal",
@@ -585,6 +582,18 @@ function OpenUIComponent({
           defaultValue={readString(props.value)}
         />
       );
+    case "DatePicker":
+      // Presentational, like the other form controls here: A2UI renders a
+      // result, so the picker shows the date the answer is about rather than
+      // taking one. OpenUI's DatePicker is fully controlled, so an unparseable
+      // or absent value leaves it empty instead of defaulting to today —
+      // showing today's date for a value we do not have would be a fabrication.
+      return (
+        <OpenUI.DatePicker
+          mode={readString(props.mode) === "range" ? "range" : "single"}
+          selectedSingleDate={readDate(props.value ?? props.date)}
+        />
+      );
     case "TextArea":
       return (
         <OpenUI.TextArea
@@ -862,6 +871,22 @@ function textStyleForSize(size: string): CSSProperties {
   }
 }
 
+/**
+ * Resolve id references against the surface's components.
+ *
+ * The catalog teaches flat ids — `{"id":"root","component":"Tabs","children":
+ * ["t1"]}` with `t1` declared as its own component — so a container's children
+ * arrive as strings, not records. Every sub-item reader below parses records,
+ * and a string that is not resolved first is either skipped outright or read as
+ * its own label: a Tabs that renders nothing, a column headed "c1". Charts
+ * already resolved theirs; the containers did not, and no test used the flat
+ * form, so the gap held.
+ */
+function useRefResolver(): (value: unknown) => unknown[] {
+  const componentIndex = useContext(A2UIComponentIndex);
+  return (value: unknown) => materializeRefs(value, componentIndex);
+}
+
 function MappedTable({
   props,
   buildChild,
@@ -869,7 +894,7 @@ function MappedTable({
   props: Record<string, unknown>;
   buildChild: BuildChild;
 }) {
-  const columns = readColumns(props, buildChild);
+  const columns = readColumns(props, buildChild, useRefResolver());
   const rowCount = columns.length
     ? Math.max(...columns.map((column) => column.values.length), 0)
     : 0;
@@ -907,7 +932,8 @@ function MappedSelect({
   props: Record<string, unknown>;
   buildChild: BuildChild;
 }) {
-  const items = readOptionItems(props.items ?? props.children, buildChild);
+  const resolve = useRefResolver();
+  const items = readOptionItems(resolve(props.items ?? props.children), buildChild);
   return (
     <OpenUI.Select name={readString(props.name)} defaultValue={readString(props.value)}>
       <OpenUI.SelectTrigger>
@@ -931,7 +957,8 @@ function MappedTabs({
   props: Record<string, unknown>;
   buildChild: BuildChild;
 }) {
-  const items = readTabItems(props.items ?? props.children);
+  const resolve = useRefResolver();
+  const items = readTabItems(resolve(props.items ?? props.children));
   if (!items.length) return null;
   const firstValue = items[0]?.value ?? "";
   return (
@@ -957,7 +984,8 @@ function MappedAccordion({
   props: Record<string, unknown>;
   buildChild: BuildChild;
 }) {
-  const items = readTabItems(props.items ?? props.children);
+  const resolve = useRefResolver();
+  const items = readTabItems(resolve(props.items ?? props.children));
   if (!items.length) return null;
   return (
     <OpenUI.Accordion type="single" collapsible defaultValue={items[0]?.value}>
@@ -980,7 +1008,7 @@ function MappedSteps({
   props: Record<string, unknown>;
   buildChild: BuildChild;
 }) {
-  const items = toArray(props.items ?? props.children);
+  const items = useRefResolver()(props.items ?? props.children);
   return (
     <OpenUI.Steps>
       {items.map((item, index) => {
@@ -1008,7 +1036,7 @@ function MappedCarousel({
   props: Record<string, unknown>;
   buildChild: BuildChild;
 }) {
-  const items = toArray(props.items ?? props.children);
+  const items = useRefResolver()(props.items ?? props.children);
   return (
     <OpenUI.Carousel showButtons variant={readString(props.variant) as never}>
       <OpenUI.CarouselContent>
@@ -1270,8 +1298,12 @@ function readRefs(value: unknown, buildChild: BuildChild): ReactNode {
   });
 }
 
-function readColumns(props: Record<string, unknown>, buildChild: BuildChild) {
-  const explicitColumns = toArray(props.columns ?? props.children);
+function readColumns(
+  props: Record<string, unknown>,
+  buildChild: BuildChild,
+  resolve: (value: unknown) => unknown[] = toArray,
+) {
+  const explicitColumns = resolve(props.columns ?? props.children);
   if (explicitColumns.length) {
     return explicitColumns
       .map((column) => readColumn(column, buildChild))
@@ -1695,6 +1727,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function readString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function readDate(value: unknown): Date | undefined {
+  const text = readString(value);
+  if (!text) return undefined;
+  const date = new Date(text);
+  return Number.isNaN(date.getTime()) ? undefined : date;
 }
 
 function readNumber(value: unknown): number | undefined {

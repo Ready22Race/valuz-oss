@@ -14,13 +14,19 @@ from typing import Literal
 
 OUTPUT_FORMAT = "A2UI v0.9 JSON message stream"
 
-#: Which layer of the component vocabulary one generation is offered.
+#: Which set of components one generation is offered.
 #:
-#: The catalog is the bulk of every ``generate_ui`` prompt — ~64k characters
-#: with everything against ~3k for the primitives alone — so letting the caller
-#: pick a layer is the difference between paying for a hundred and fifty
-#: components and paying for the ones the answer can actually use. A shorter
-#: menu is also an easier menu: the model chooses better from it.
+#: The split follows where a component comes from, not what it is made of:
+#:
+#: - ``atoms`` — everything this repository ships: OpenUI's primitives *and*
+#:   the built-in blocks. The general vocabulary.
+#: - ``edition`` — only what an edition registered from outside this repo.
+#:   A vertical's own set, unmixed with the general one.
+#: - ``all`` — both. The default, and right when the shape of the answer is not
+#:   known up front.
+#:
+#: A shorter menu is an easier menu: the model chooses better from one, and the
+#: catalog is the bulk of every ``generate_ui`` prompt.
 #:
 #: Narrowing is prompt-side only. The renderer keeps accepting every component
 #: it ever accepted, so a narrowed prompt can never produce a payload the client
@@ -59,10 +65,14 @@ _A2UI_NO_PLACEHOLDER_CHARTS = (
 # What to fall back to when the data has no chart-ready series. Named per scope
 # because a fallback the catalog does not offer is worse than no advice at all:
 # the model is being told to reach for something it was never shown.
+#
+# The `edition` entry names nothing, and cannot: this repository does not know
+# what an edition installed. Generic advice is the honest limit — better than
+# naming components from a set that scope just excluded.
 _A2UI_SNAPSHOT_FALLBACKS: dict[str, str] = {
     "all": "MarketIndexGrid, StatsCard, MarketBreadth, DataList, or Table",
-    "edition": "MarketIndexGrid, StatsCard, MarketBreadth, or DataList",
-    "atoms": "Table, TagBlock, or a plain TextContent row",
+    "atoms": "MarketIndexGrid, StatsCard, MarketBreadth, DataList, or Table",
+    "edition": "a tile, list, or table component from the catalog above",
 }
 
 A2UI_OPENUI_COMPONENT_CATALOG = """
@@ -79,8 +89,8 @@ OpenUI component catalog supported by the A2UI renderer:
 - Forms: Form, FormControl, Label, Input, TextArea, Select, SelectItem,
   DatePicker, Slider, CheckBoxGroup, CheckBoxItem, RadioGroup, RadioItem,
   SwitchGroup, SwitchItem.
-- Actions/display: Button, Buttons, TagBlock, Tag, Metric, KPI, ListBlock,
-  ListItem, List.
+- Actions/display: Button, Buttons, TagBlock, Tag, Metric, KPI. For a list of
+  entries use the DataList, StatusList, Timeline or Feed blocks below.
 """
 
 _A2UI_MESSAGE_SHAPE = """\
@@ -111,16 +121,49 @@ def _load_block_catalog() -> str:
     )
 
 
+_A2UI_EDITION_HEADING = "- Edition components:\n"
+
 _A2UI_ROOT_ONLY_CATALOG = """
 OpenUI component catalog supported by the A2UI renderer:
-- Layout: Stack — the document root, and the only OpenUI primitive offered
-  here. Everything else comes from the Valuz blocks below.
+- Layout: Stack — the document root, and the only component from the general
+  vocabulary offered here. Everything else comes from the edition below.
 """
 
 A2UI_COMPONENT_CATALOG = f"""{A2UI_OPENUI_COMPONENT_CATALOG}
 - Valuz blocks (cards, citations, report pages, diagrams):
 {_load_block_catalog()}
 """
+
+
+def edition_catalog_text() -> str:
+    """Components registered from outside this repository.
+
+    Empty here, and that is the point: an edition is a separate build that
+    vendors this one, so nothing in OSS registers into it. The backend registry
+    that lets one is still to be built — see
+    ``docs/design/genui-dynamic-blocks.md``. Until then this is the seam the
+    scope reads, so the two land together rather than the scope being retrofitted.
+    """
+
+    return ""
+
+
+def resolve_component_scope(scope: GenUIComponentScope) -> GenUIComponentScope:
+    """The scope actually available, which is not always the one asked for.
+
+    An ``edition`` scope with no edition registered would offer the root and
+    nothing else — that does not produce a smaller answer, it produces no
+    answer. Widening is the only safe direction when a scope turns out empty;
+    narrowing to nothing is the failure this whole seam guards against.
+
+    Resolved in one place so the catalog and the instructions cannot disagree
+    about which scope is live — instructions naming a fallback the catalog never
+    showed is the exact drift the scope exists to prevent.
+    """
+
+    if scope == "edition" and not edition_catalog_text():
+        return "all"
+    return scope
 
 
 def build_a2ui_catalog(scope: GenUIComponentScope = "all") -> str:
@@ -132,21 +175,28 @@ def build_a2ui_catalog(scope: GenUIComponentScope = "all") -> str:
     variant on.
     """
 
-    fallbacks = _A2UI_SNAPSHOT_FALLBACKS[scope]
+    edition = edition_catalog_text()
+    scope = resolve_component_scope(scope)
+
+    own = (
+        f"{A2UI_OPENUI_COMPONENT_CATALOG}\n"
+        "- Valuz blocks (cards, citations, report pages, diagrams):\n"
+        f"{_load_block_catalog()}\n"
+    )
+    installed = f"{_A2UI_EDITION_HEADING}{edition}\n" if edition else ""
     if scope == "atoms":
-        components = A2UI_OPENUI_COMPONENT_CATALOG
+        components = own
     elif scope == "edition":
-        components = (
-            f"{_A2UI_ROOT_ONLY_CATALOG}"
-            "- Valuz blocks (cards, citations, report pages, diagrams):\n"
-            f"{_load_block_catalog()}\n"
-        )
+        # The root comes from the general set even here: it is the one component
+        # an edition cannot supply for itself, since every document is rooted in
+        # it before any edition component appears.
+        components = f"{_A2UI_ROOT_ONLY_CATALOG}{installed}"
     else:
-        components = (
-            f"{A2UI_OPENUI_COMPONENT_CATALOG}\n"
-            "- Valuz blocks (cards, citations, report pages, diagrams):\n"
-            f"{_load_block_catalog()}\n"
-        )
+        # `all` is the union, in this order — an edition's components read as an
+        # addition to the general vocabulary, which is what they are.
+        components = f"{own}{installed}"
+
+    fallbacks = _A2UI_SNAPSHOT_FALLBACKS[scope]
     # `.replace`, not `.format`: the message-shape text is JSON, and every brace
     # in it would be read as a format field.
     return f"{components}{_A2UI_MESSAGE_SHAPE.replace('{fallbacks}', fallbacks)}\n"
@@ -163,9 +213,9 @@ def normalize_component_scope(value: object) -> GenUIComponentScope:
         normalized = value.strip().lower().replace("-", "_")
         if normalized in {"all", "full", "everything"}:
             return "all"
-        if normalized in {"edition", "blocks", "valuz", "semantic"}:
+        if normalized in {"edition", "vertical"}:
             return "edition"
-        if normalized in {"atoms", "atom", "openui", "primitives", "basic"}:
+        if normalized in {"atoms", "atom", "blocks", "openui", "valuz", "base"}:
             return "atoms"
     return "all"
 
@@ -173,6 +223,7 @@ def normalize_component_scope(value: object) -> GenUIComponentScope:
 def a2ui_instructions(scope: GenUIComponentScope = "all") -> str:
     """The A2UI system instructions, saying only what this scope can back up."""
 
+    scope = resolve_component_scope(scope)
     prefer_blocks = _A2UI_PREFER_BLOCKS if scope != "atoms" else ""
     tail = _A2UI_NO_PLACEHOLDER_CHARTS.replace(
         "{fallbacks}", _A2UI_SNAPSHOT_FALLBACKS[scope]
