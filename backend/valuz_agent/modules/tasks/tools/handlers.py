@@ -540,7 +540,7 @@ async def _authorize_task_conversation_caller(
     if task is None:
         return ToolResult(content=f"{tool}: task {task_id!r} not found", is_error=True)
     v: dict[str, Any] = (sess.metadata or {}).get("valuz", {})
-    caller_ws = getattr(sess, "project_id", "") or v.get("project_id", "")
+    caller_ws = v.get("project_id", "")  # SessionData has no project_id field
     origin = (task.metadata_ or {}).get("originating_session_id")
     if not ((origin and sess.id == origin) or (caller_ws and caller_ws == task.project_id)):
         return ToolResult(
@@ -712,7 +712,7 @@ async def _list_members_handler(
     if sess is None:
         return ToolResult(content="list_members: caller session not found", is_error=True)
     v: dict[str, Any] = (sess.metadata or {}).get("valuz", {})
-    project_id = v.get("project_id", "") or getattr(sess, "project_id", "")
+    project_id = v.get("project_id", "")  # SessionData has no project_id field
     if not project_id:
         return ToolResult(content="list_members: caller session has no project", is_error=True)
 
