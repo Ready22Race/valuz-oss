@@ -17,7 +17,12 @@
 // Generating either by hand is the silent failure mode here: a block would
 // still render if the model emitted it, but nothing would have told the model
 // it exists — or worse, the model is told about a component that was removed.
-import { createValuzLibrary, renderBlockCatalogText, valuzPromptOptions } from "@valuz/genui-blocks";
+import {
+  COMPONENT_SCOPES,
+  createValuzLibrary,
+  promptOptionsForScope,
+  renderBlockCatalogText,
+} from "@valuz/genui-blocks";
 import { writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
@@ -31,5 +36,13 @@ const write = (name, contents) => {
   console.log(`wrote ${path} (${contents.length} chars)`);
 };
 
-write("openui_genui_lib_prompt.txt", createValuzLibrary().prompt(valuzPromptOptions));
+// One OpenUI asset per scope, because the catalog IS the prompt: `generate_ui`
+// takes a `components` argument so a caller can pay for the atoms alone, or the
+// blocks alone, instead of all hundred and fifty. Splitting the asset at build
+// time keeps the backend a file read — assembling the same thing at runtime
+// would mean re-deriving prompt structure the generator already knows.
+for (const scope of COMPONENT_SCOPES) {
+  const name = scope === "all" ? "openui_genui_lib_prompt.txt" : `openui_genui_lib_prompt_${scope}.txt`;
+  write(name, createValuzLibrary(scope).prompt(promptOptionsForScope(scope)));
+}
 write("a2ui_block_catalog.txt", `${renderBlockCatalogText()}\n`);

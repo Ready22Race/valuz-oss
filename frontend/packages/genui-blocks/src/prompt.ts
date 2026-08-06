@@ -1,6 +1,9 @@
 import type { PromptOptions } from "@openuidev/react-lang";
 import { openuiPromptOptions } from "@openuidev/react-ui/genui-lib";
 
+import { createValuzLibrary, missingNames, namesAnyOf } from "./library";
+import type { ComponentScope } from "./scope";
+
 /**
  * Prompt material for the blocks in this package.
  *
@@ -65,3 +68,24 @@ export const valuzPromptOptions: PromptOptions = {
     ...blockAdditionalRules,
   ],
 };
+
+/**
+ * The same material, kept to what a scope actually offers.
+ *
+ * An example is the strongest signal in the prompt — a model that has read
+ * `MiniCardBlock([a, b, c])` reaches for it far more reliably than one that has
+ * only read a sentence. That cuts both ways: an example calling a component the
+ * scope does not offer teaches the model to emit something the renderer will
+ * drop. So an example survives only if every component it names is available,
+ * and a rule only if it explains one.
+ */
+export function promptOptionsForScope(scope: ComponentScope): PromptOptions {
+  const available = new Set(Object.keys(createValuzLibrary(scope).components));
+  const missing = missingNames(available);
+  if (!missing.length) return valuzPromptOptions;
+  const keep = (text: string) => !namesAnyOf(text, missing);
+  return {
+    examples: (valuzPromptOptions.examples ?? []).filter(keep),
+    additionalRules: (valuzPromptOptions.additionalRules ?? []).filter(keep),
+  };
+}

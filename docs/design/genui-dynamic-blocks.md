@@ -120,6 +120,44 @@ groups, and A2UI's name resolution all derive from the registry rather than
 from `blockComponents` or the hand-listed OpenUI names. A2UI is where this is
 easiest to forget, since it is the second protocol, so a test pins it.
 
+### Narrowing per call: the `components` argument
+
+Replace is a startup decision. The same question comes up per generation, and
+`generate_ui` answers it with a `components` argument:
+
+| value | offered | OpenUI Lang prompt |
+|---|---|---|
+| `all` (default) | everything | ~90k chars |
+| `edition` | root + the active edition's blocks | ~70k |
+| `atoms` | root + OpenUI's primitives | ~20k |
+
+The lever is worth having because the catalog *is* the prompt: a request the
+agent already knows will be a form, or a plain table, pays for a hundred and
+fifty component signatures it will not use. A shorter menu also makes the model
+choose better.
+
+Two properties keep it safe:
+
+**Narrowing is prompt-side only.** The renderer keeps accepting every component
+it ever accepted, so a narrow prompt can never produce a payload the client
+cannot draw. The dangerous direction — describing something that cannot render
+— stays closed.
+
+**A scope can only narrow, never widen.** Under a `replace` edition the
+primitives are gone from the renderer as well, so `atoms` and `all` both
+collapse onto what is live (`resolveScope`). Asking for a layer that no longer
+exists must not resurrect it in the prompt.
+
+Everything the scope withholds is withheld consistently: group notes, examples,
+and the "if the data has no chart series, fall back to…" advice are all filtered
+against the offered set. An example is the strongest signal in a prompt, so one
+calling an absent component is the strongest way to teach the wrong thing.
+
+The three OpenUI Lang prompts are generated as three assets by the same
+generator run, rather than filtered at runtime — the generator already holds
+the group and signature structure, and re-deriving it in Python would be
+invisible when subtly wrong.
+
 ## Backend: a registry port, and a catalog assembled per call
 
 ```python

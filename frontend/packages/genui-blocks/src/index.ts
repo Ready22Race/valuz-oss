@@ -27,7 +27,14 @@ export {
   describeBlock,
   renderBlockCatalogText,
 } from "./catalog";
-export { blockAdditionalRules, blockExamples, valuzPromptOptions } from "./prompt";
+export {
+  blockAdditionalRules,
+  blockExamples,
+  promptOptionsForScope,
+  valuzPromptOptions,
+} from "./prompt";
+export type { ComponentScope } from "./scope";
+export { COMPONENT_SCOPES, resolveScope } from "./scope";
 export {
   createBlockOnlyLibrary,
   createValuzLibrary,

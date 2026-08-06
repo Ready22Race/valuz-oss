@@ -192,6 +192,27 @@ filtered to drop any that explain a component `replace` removed.
 Both halves move together: `unregisterBlocks(source)` takes the implementation
 and its prompt group away, and the built-ins come back.
 
+## Scopes
+
+`createValuzLibrary(scope)` narrows the offer to one layer — `all` (default),
+`edition` (root + blocks), or `atoms` (root + OpenUI primitives). The
+`generate_ui` tool exposes it as its `components` argument so one generation can
+skip a catalog it will not use.
+
+This matters when you author a block: **the group notes and prompt examples you
+write are filtered against the offered set**, on word boundaries. A note or
+example that names an OpenUI primitive is dropped under `edition`, so an example
+built only from blocks survives more scopes than one that reaches for
+`TextContent` to write its title. Descriptions are not filtered — they are the
+block's own documentation, and the renderer accepts every component regardless
+of scope.
+
+After adding or changing a block, regenerate all three assets:
+
+```bash
+pnpm --filter @valuz/ui gen:openui-prompt
+```
+
 ## Verifying
 
 ```bash

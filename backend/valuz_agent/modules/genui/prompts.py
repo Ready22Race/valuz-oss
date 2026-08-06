@@ -19,6 +19,10 @@ TOOL_DESCRIPTION = (
     "does not name one. Never infer this intent from data, and do "
     "not call it merely because the user asks to list items or show a table. Pass "
     "a natural-language `request` describing what to show, and optional `data`. "
+    "Optionally narrow `components` to 'edition' (curated semantic blocks — KPI "
+    "cards, market tiles, report pages, citations) or 'atoms' (OpenUI "
+    "primitives — layout, text, tables, charts, forms) when the shape of the "
+    "answer is already clear; it generates faster from the smaller set. "
     "The client renders the returned GenUI protocol payload inline; do not repeat "
     "the same content as text afterwards."
 )
@@ -68,19 +72,26 @@ GENERATIVE_UI_INSTRUCTIONS = (
 )
 
 
-def _load_library_prompt() -> str:
-    return (
-        resources.files(__package__)
-        .joinpath("openui_genui_lib_prompt.txt")
-        .read_text(encoding="utf-8")
-    )
+def _load_library_prompt(scope: str = "all") -> str:
+    """The generated library prompt for one component scope.
+
+    One asset per scope, all three written by the same generator run: the
+    catalog is the prompt, so narrowing it is a different document rather than a
+    filter over this one. Assembling them here instead would mean re-deriving
+    group and signature structure that the generator already has in hand — and
+    getting it subtly wrong is invisible until a generation comes back empty.
+    """
+
+    suffix = "" if scope == "all" else f"_{scope}"
+    name = f"openui_genui_lib_prompt{suffix}.txt"
+    return resources.files(__package__).joinpath(name).read_text(encoding="utf-8")
 
 
-def build_openui_prompt(request: str, data: object | None = None) -> str:
+def build_openui_prompt(request: str, data: object | None = None, scope: str = "all") -> str:
     parts = [
         GENERATIVE_UI_INSTRUCTIONS,
         "",
-        _load_library_prompt(),
+        _load_library_prompt(scope),
         "",
         "REQUEST:",
         request.strip(),

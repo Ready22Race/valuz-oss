@@ -1,12 +1,16 @@
-"""The vendored OpenUI prompt asset is present and loadable as a package resource."""
+"""The vendored OpenUI prompt assets are present and loadable as package resources."""
 
-from importlib import resources
+import pytest
+
+from valuz_agent.modules.genui.prompts import _load_library_prompt
 
 
-def test_library_prompt_asset_is_nonempty():
-    text = (
-        resources.files("valuz_agent.modules.genui")
-        .joinpath("openui_genui_lib_prompt.txt")
-        .read_text(encoding="utf-8")
+@pytest.mark.parametrize("scope", ["all", "edition", "atoms"])
+def test_library_prompt_asset_is_nonempty(scope):
+    # One asset per scope, all written by the same generator run. A missing one
+    # is a hard failure at generation time rather than a degraded prompt, which
+    # is the right trade — but only if something notices before release.
+    text = _load_library_prompt(scope)
+    assert len(text) > 200, (
+        f"vendored OpenUI prompt for scope {scope!r} looks empty — run gen:openui-prompt"
     )
-    assert len(text) > 200, "vendored OpenUI prompt looks empty — run gen:openui-prompt"

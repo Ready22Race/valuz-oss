@@ -13,7 +13,21 @@ from valuz_agent.modules.genui.prompts import (
 
 GenUIProtocol = Literal["a2ui", "openui"]
 
-A2UI_GENERATIVE_UI_INSTRUCTIONS = (
+#: Which layer of the component vocabulary one generation is offered.
+#:
+#: The catalog is the bulk of every ``generate_ui`` prompt — 90k characters for
+#: OpenUI Lang against ~20k for the primitives alone — so letting the caller
+#: pick a layer is the difference between paying for a hundred and fifty
+#: components and paying for the ones the answer can actually use. A shorter
+#: menu is also an easier menu: the model chooses better from it.
+#:
+#: Narrowing is prompt-side only. The renderer keeps accepting every component
+#: it ever accepted, so a narrowed prompt can never produce a payload the client
+#: cannot draw — the failure direction runs the other way, and that one stays
+#: closed.
+GenUIComponentScope = Literal["all", "edition", "atoms"]
+
+_A2UI_INSTRUCTIONS_BASE = (
     "You generate user interfaces as an A2UI v0.9 JSON message stream. Output "
     "ONLY newline-delimited JSON objects, with no markdown fences, prose, or "
     "explanations. The first message must create a surface, and later messages "
@@ -24,14 +38,31 @@ A2UI_GENERATIVE_UI_INSTRUCTIONS = (
     "readable full-width section, and tables may scroll horizontally only when "
     "their columns cannot stay readable. Use OpenUI component names from the "
     "catalog below so the @a2ui/react renderer can map them to OpenUI React "
-    "components one-for-one. For financial market dashboards, prefer the Valuz "
+    "components one-for-one."
+)
+
+_A2UI_PREFER_BLOCKS = (
+    " For financial market dashboards, prefer the Valuz "
     "semantic components in the catalog: they are rendered as OpenUI surfaces "
-    "but avoid fragile Card/TextContent/Chart compositions. Do not create "
+    "but avoid fragile Card/TextContent/Chart compositions."
+)
+
+_A2UI_NO_PLACEHOLDER_CHARTS = (
+    " Do not create "
     "placeholder charts: only render chart components when the request or data "
     "contains real chart series, labels, slices, or points. When the data is a "
-    "current snapshot rather than a time series, use MarketIndexGrid, "
-    "StatsCard, MarketBreadth, DataList, or Table instead of an empty chart."
+    "current snapshot rather than a time series, use {fallbacks} instead of an "
+    "empty chart."
 )
+
+# What to fall back to when the data has no chart-ready series. Named per scope
+# because a fallback the catalog does not offer is worse than no advice at all:
+# the model is being told to reach for something it was never shown.
+_A2UI_SNAPSHOT_FALLBACKS: dict[str, str] = {
+    "all": "MarketIndexGrid, StatsCard, MarketBreadth, DataList, or Table",
+    "edition": "MarketIndexGrid, StatsCard, MarketBreadth, or DataList",
+    "atoms": "Table, TagBlock, or a plain TextContent row",
+}
 
 A2UI_OPENUI_COMPONENT_CATALOG = """
 OpenUI component catalog supported by the A2UI renderer:
@@ -49,15 +80,16 @@ OpenUI component catalog supported by the A2UI renderer:
   SwitchGroup, SwitchItem.
 - Actions/display: Button, Buttons, TagBlock, Tag, Metric, KPI, ListBlock,
   ListItem, List.
+"""
+
+_A2UI_MESSAGE_SHAPE = """\
 Use official A2UI v0.9 component objects with component properties at the top
 level, not nested under "props":
 {"id":"title","component":"TextContent","text":"Revenue","size":"large-heavy"}
 Use flat component ids for layout children:
 {"id":"root","component":"Stack","children":["title","chart"],"direction":"column","gap":"m"}
 Do not create placeholder charts or charts with empty series. If supplied data
-does not include chart-ready arrays, show the raw values with DataList, Table,
-MarketIndexGrid, StatsCard, or MarketBreadth.
-"""
+does not include chart-ready arrays, show the raw values with {fallbacks}."""
 
 
 def _load_block_catalog() -> str:
@@ -78,10 +110,63 @@ def _load_block_catalog() -> str:
     )
 
 
+_A2UI_ROOT_ONLY_CATALOG = """
+OpenUI component catalog supported by the A2UI renderer:
+- Layout: Stack — the document root, and the only OpenUI primitive offered
+  here. Everything else comes from the Valuz blocks below.
+"""
+
 A2UI_COMPONENT_CATALOG = f"""{A2UI_OPENUI_COMPONENT_CATALOG}
 - Valuz blocks (cards, citations, report pages, diagrams):
 {_load_block_catalog()}
 """
+
+
+def build_a2ui_catalog(scope: GenUIComponentScope = "all") -> str:
+    """The A2UI catalog for one scope.
+
+    Assembled rather than stored per scope because A2UI's primitive list is a
+    hand-written blob (the renderer maps those names one-for-one) while the
+    block half is generated — only the second half has a build step to hang a
+    variant on.
+    """
+
+    fallbacks = _A2UI_SNAPSHOT_FALLBACKS[scope]
+    if scope == "atoms":
+        components = A2UI_OPENUI_COMPONENT_CATALOG
+    elif scope == "edition":
+        components = (
+            f"{_A2UI_ROOT_ONLY_CATALOG}"
+            "- Valuz blocks (cards, citations, report pages, diagrams):\n"
+            f"{_load_block_catalog()}\n"
+        )
+    else:
+        components = (
+            f"{A2UI_OPENUI_COMPONENT_CATALOG}\n"
+            "- Valuz blocks (cards, citations, report pages, diagrams):\n"
+            f"{_load_block_catalog()}\n"
+        )
+    # `.replace`, not `.format`: the message-shape text is JSON, and every brace
+    # in it would be read as a format field.
+    return f"{components}{_A2UI_MESSAGE_SHAPE.replace('{fallbacks}', fallbacks)}\n"
+
+
+def normalize_component_scope(value: object) -> GenUIComponentScope:
+    """Read a caller-supplied scope, defaulting to the whole vocabulary.
+
+    Tolerant on purpose: this argument is written by a model, and an unusable
+    value should cost the wider prompt rather than the whole generation.
+    """
+
+    if isinstance(value, str):
+        normalized = value.strip().lower().replace("-", "_")
+        if normalized in {"all", "full", "everything"}:
+            return "all"
+        if normalized in {"edition", "blocks", "valuz", "semantic"}:
+            return "edition"
+        if normalized in {"atoms", "atom", "openui", "primitives", "basic"}:
+            return "atoms"
+    return "all"
 
 
 def normalize_genui_protocol(value: object) -> GenUIProtocol:
@@ -94,9 +179,24 @@ def normalize_genui_protocol(value: object) -> GenUIProtocol:
     raise ValueError("genui protocol must be 'a2ui' or 'openui'")
 
 
-def session_instructions_for_protocol(protocol: GenUIProtocol) -> str:
+def a2ui_instructions(scope: GenUIComponentScope = "all") -> str:
+    """The A2UI system instructions, saying only what this scope can back up."""
+
+    prefer_blocks = _A2UI_PREFER_BLOCKS if scope != "atoms" else ""
+    tail = _A2UI_NO_PLACEHOLDER_CHARTS.replace(
+        "{fallbacks}", _A2UI_SNAPSHOT_FALLBACKS[scope]
+    )
+    return f"{_A2UI_INSTRUCTIONS_BASE}{prefer_blocks}{tail}"
+
+
+A2UI_GENERATIVE_UI_INSTRUCTIONS = a2ui_instructions()
+
+
+def session_instructions_for_protocol(
+    protocol: GenUIProtocol, scope: GenUIComponentScope = "all"
+) -> str:
     if protocol == "a2ui":
-        return A2UI_GENERATIVE_UI_INSTRUCTIONS
+        return a2ui_instructions(scope)
     return GENERATIVE_UI_INSTRUCTIONS
 
 
@@ -110,15 +210,20 @@ def build_prompt_for_protocol(
     protocol: GenUIProtocol,
     request: str,
     data: object | None = None,
+    scope: GenUIComponentScope = "all",
 ) -> str:
     if protocol == "openui":
-        return build_openui_prompt(request, data)
-    return build_a2ui_prompt(request, data)
+        return build_openui_prompt(request, data, scope)
+    return build_a2ui_prompt(request, data, scope)
 
 
-def build_a2ui_prompt(request: str, data: object | None = None) -> str:
+def build_a2ui_prompt(
+    request: str,
+    data: object | None = None,
+    scope: GenUIComponentScope = "all",
+) -> str:
     parts = [
-        A2UI_GENERATIVE_UI_INSTRUCTIONS,
+        a2ui_instructions(scope),
         "",
         "A2UI v0.9 message contract:",
         '- createSurface: {"version":"v0.9","createSurface":{"surfaceId":"main","catalogId":"openui"}}',
@@ -127,7 +232,7 @@ def build_a2ui_prompt(request: str, data: object | None = None) -> str:
         "- deleteSurface is allowed only when removing a surface.",
         '- every UI must include a component with id "root"; put the visible tree under root.children.',
         "",
-        A2UI_COMPONENT_CATALOG.strip(),
+        build_a2ui_catalog(scope).strip(),
         "",
         "REQUEST:",
         request.strip(),

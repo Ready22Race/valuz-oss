@@ -28,6 +28,7 @@ from valuz_agent.modules.genui.ids import resolve_tool_use_id
 from valuz_agent.modules.genui.prompts import TOOL_DESCRIPTION
 from valuz_agent.modules.genui.protocol import (
     build_prompt_for_protocol,
+    normalize_component_scope,
     normalize_genui_protocol,
     output_format_for_protocol,
     session_instructions_for_protocol,
@@ -101,6 +102,21 @@ _PARAMS = {
             "type": "object",
             "description": "Optional structured values to render directly into the components.",
             "additionalProperties": True,
+        },
+        "components": {
+            "type": "string",
+            "enum": ["all", "edition", "atoms"],
+            "default": "all",
+            "description": (
+                "Which components to offer this generation. 'all' (default) is "
+                "every component. 'edition' is the curated semantic blocks — "
+                "KPI cards, market tiles, report pages, citations, diagrams — "
+                "for a polished, house-style answer. 'atoms' is the OpenUI "
+                "primitives only (layout, text, tables, charts, forms) for "
+                "generic UI that no semantic block covers. Narrowing makes the "
+                "generation faster and cheaper, so pick a narrower set whenever "
+                "the shape of the answer is already clear."
+            ),
         },
     },
     "required": ["request"],
@@ -210,6 +226,7 @@ async def _generate_ui_handler(args: dict[str, Any], ctx: ExecContext) -> ToolRe
         user_id=user_id, session_id=ctx.session_id, arguments=args
     )
     protocol = normalize_genui_protocol(settings.genui_protocol)
+    scope = normalize_component_scope(args.get("components"))
     completer = _make_completer(
         user_id=user_id,
         runtime_provider=runtime_provider,
@@ -217,13 +234,13 @@ async def _generate_ui_handler(args: dict[str, Any], ctx: ExecContext) -> ToolRe
         mp=mp,
         calling_session_id=ctx.session_id if tool_use_id else None,
         tool_use_id=tool_use_id,
-        session_instructions=session_instructions_for_protocol(protocol),
+        session_instructions=session_instructions_for_protocol(protocol, scope),
         output_format=output_format_for_protocol(protocol),
     )
     try:
         generated = await _complete_with_retries(
             completer,
-            build_prompt_for_protocol(protocol, str(request), data),
+            build_prompt_for_protocol(protocol, str(request), data, scope),
         )
     except Exception as exc:  # noqa: BLE001
         logger.debug("generate_ui: generation failed", exc_info=True)
