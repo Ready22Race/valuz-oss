@@ -119,3 +119,42 @@ def test_default_model_only_channel_synthesizes_a_model_row() -> None:
     item = _row_to_list_item(row)
     assert [m.id for m in item.models] == ["doubao-x"]
     assert "codex" in (item.models[0].runtimes or ())
+
+
+# ── Per-model codex capability on built-in channels ─────────────────────────
+# DeepSeek serves the Responses wire for exactly one model today
+# (deepseek-v4-flash); the channel stays chat-completions-derived, and the
+# codex capability is declared per model — appended last so the channel's
+# default runtime (runtimes[0]) is unchanged.
+
+
+def test_deepseek_v4_flash_gets_codex_appended() -> None:
+    row = _row(
+        provider_kind="deepseek",
+        model_ids='["deepseek-v4-flash", "deepseek-v4-pro"]',
+    )
+    by_id = {m.id: m for m in _row_to_list_item(row).models}
+    flash = tuple(by_id["deepseek-v4-flash"].runtimes or ())
+    channel_derived = tuple(by_id["deepseek-v4-pro"].runtimes or ())
+    # codex is APPENDED — the channel-derived prefix (and with it the
+    # default runtime, runtimes[0]) is unchanged.
+    assert flash == (*channel_derived, "codex")
+    assert "codex" not in channel_derived
+
+
+def test_deepseek_synthetic_default_row_gets_codex() -> None:
+    row = _row(
+        provider_kind="deepseek",
+        model_ids="[]",
+        default_model="deepseek-v4-flash",
+    )
+    models = _row_to_list_item(row).models
+    assert [m.id for m in models] == ["deepseek-v4-flash"]
+    assert "codex" in (models[0].runtimes or ())
+
+
+def test_codex_capability_is_kind_scoped() -> None:
+    # The same model id on a custom (compatible) channel is NOT stamped —
+    # the declaration is about DeepSeek's own endpoint, not the name.
+    row = _row(provider_kind="compatible", model_ids='["deepseek-v4-flash"]')
+    assert "codex" not in (_row_to_list_item(row).models[0].runtimes or ())
