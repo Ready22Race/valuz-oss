@@ -1,4 +1,10 @@
-"""GenUI protocol selection and prompt/payload helpers."""
+"""A2UI prompt and payload assembly for the ``generate_ui`` tool.
+
+A2UI v0.9 is the one wire protocol. The tool used to be able to emit OpenUI
+Lang instead, chosen by ``VALUZ_GENUI_PROTOCOL``; carrying two generation
+formats meant two prompt vocabularies, two renderers and two sets of failure
+modes for one feature, so the second was removed rather than maintained.
+"""
 
 from __future__ import annotations
 
@@ -6,17 +12,12 @@ import json
 from importlib import resources
 from typing import Literal
 
-from valuz_agent.modules.genui.prompts import (
-    GENERATIVE_UI_INSTRUCTIONS,
-    build_openui_prompt,
-)
-
-GenUIProtocol = Literal["a2ui", "openui"]
+OUTPUT_FORMAT = "A2UI v0.9 JSON message stream"
 
 #: Which layer of the component vocabulary one generation is offered.
 #:
-#: The catalog is the bulk of every ``generate_ui`` prompt — 90k characters for
-#: OpenUI Lang against ~20k for the primitives alone — so letting the caller
+#: The catalog is the bulk of every ``generate_ui`` prompt — ~64k characters
+#: with everything against ~3k for the primitives alone — so letting the caller
 #: pick a layer is the difference between paying for a hundred and fifty
 #: components and paying for the ones the answer can actually use. A shorter
 #: menu is also an easier menu: the model chooses better from it.
@@ -169,16 +170,6 @@ def normalize_component_scope(value: object) -> GenUIComponentScope:
     return "all"
 
 
-def normalize_genui_protocol(value: object) -> GenUIProtocol:
-    if isinstance(value, str):
-        normalized = value.strip().lower().replace("_", "-")
-        if normalized in {"a2ui", "a2ui-json", "a2ui-v0.9", "a2ui-0.9"}:
-            return "a2ui"
-        if normalized in {"openui", "openui-lang"}:
-            return "openui"
-    raise ValueError("genui protocol must be 'a2ui' or 'openui'")
-
-
 def a2ui_instructions(scope: GenUIComponentScope = "all") -> str:
     """The A2UI system instructions, saying only what this scope can back up."""
 
@@ -190,31 +181,6 @@ def a2ui_instructions(scope: GenUIComponentScope = "all") -> str:
 
 
 A2UI_GENERATIVE_UI_INSTRUCTIONS = a2ui_instructions()
-
-
-def session_instructions_for_protocol(
-    protocol: GenUIProtocol, scope: GenUIComponentScope = "all"
-) -> str:
-    if protocol == "a2ui":
-        return a2ui_instructions(scope)
-    return GENERATIVE_UI_INSTRUCTIONS
-
-
-def output_format_for_protocol(protocol: GenUIProtocol) -> str:
-    if protocol == "a2ui":
-        return "A2UI v0.9 JSON message stream"
-    return "OpenUI Lang"
-
-
-def build_prompt_for_protocol(
-    protocol: GenUIProtocol,
-    request: str,
-    data: object | None = None,
-    scope: GenUIComponentScope = "all",
-) -> str:
-    if protocol == "openui":
-        return build_openui_prompt(request, data, scope)
-    return build_a2ui_prompt(request, data, scope)
 
 
 def build_a2ui_prompt(
@@ -244,10 +210,10 @@ def build_a2ui_prompt(
     return "\n".join(parts)
 
 
-def wrap_generated_ui(protocol: GenUIProtocol, content: str) -> str:
+def wrap_generated_ui(content: str) -> str:
+    """Wrap the generated stream in the envelope the client dispatches on."""
+
     body = (content or "").strip()
-    if protocol == "openui":
-        return body
     return json.dumps(
         {"protocol": "a2ui-json", "content": body},
         ensure_ascii=False,

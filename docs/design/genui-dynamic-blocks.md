@@ -21,9 +21,9 @@ four times already, always presenting as "the section is blank".
 Today both halves come from one source at **build time**:
 
 ```
-blocks.ts ─▶ catalog.ts ─▶ gen_openui_prompt.mjs ─▶ two .txt assets
+blocks.ts ─▶ catalog.ts ─▶ gen_genui_catalog.mjs ─▶ a2ui_block_catalog.txt
                                                      ↓
-                                       backend package resources,
+                                       backend package resource,
                                        read once at import
 ```
 
@@ -70,9 +70,10 @@ subscribeBlocks(listener): () => void      // for useSyncExternalStore
 effectiveBlocks(): BlockComponent[]        // what is actually live
 ```
 
-`createValuzLibrary()` stops being a module constant and rebuilds when the
-registry version changes; both renderers read it through `useSyncExternalStore`,
-which is how this repo already handles module-level stores.
+`A2UIRenderer` resolves names through `effectiveBlocks()` on every render and
+subscribes with `useSyncExternalStore`, which is how this repo already handles
+module-level stores — a conversation already on screen picks up an edition that
+registered at startup.
 
 Two rules carry the weight:
 
@@ -103,38 +104,38 @@ every `generate_ui`.
 | Valuz blocks (99) | dropped | product vocabulary — exactly what a vertical wants to own |
 
 So the root is the only name `replace` still refuses; every other name is the
-edition's to take, including ones a built-in used to hold. The root keeps a
-prompt group narrowed to itself — grouping is what puts a component into the
-signature section, and an undocumented root leaves the model guessing at the
-one component every document begins with. Its notes are filtered to drop any
-that explain a removed component, because a prompt describing a `Modal` that no
-longer exists is worse than one that says nothing.
+edition's to take, including ones a built-in used to hold. The root is still
+described to the model — it is the one component every document begins with,
+and leaving its arguments undocumented would make the model guess at them.
 
 Only one source may hold `replace`; a second registration is refused wholesale,
 because "which edition's set is live" must have exactly one answer.
 Unregistering the replacing source restores the built-ins.
 
 Suppression has to reach **every** consumer or a replaced component leaks back
-through whichever path was missed — the library's components, its prompt
-groups, and A2UI's name resolution all derive from the registry rather than
-from `blockComponents` or the hand-listed OpenUI names. A2UI is where this is
-easiest to forget, since it is the second protocol, so a test pins it.
+through whichever path was missed — A2UI's name resolution and the block
+package's own render harness both derive from the registry rather than from
+`blockComponents` or the hand-listed OpenUI names, and a test pins it.
 
 ### Narrowing per call: the `components` argument
 
 Replace is a startup decision. The same question comes up per generation, and
 `generate_ui` answers it with a `components` argument:
 
-| value | offered | OpenUI Lang prompt |
+| value | offered | prompt |
 |---|---|---|
-| `all` (default) | everything | ~90k chars |
-| `edition` | root + the active edition's blocks | ~70k |
-| `atoms` | root + OpenUI's primitives | ~20k |
+| `all` (default) | everything | ~64k chars |
+| `edition` | root + the active edition's blocks | ~64k |
+| `atoms` | OpenUI's primitives | ~3k |
 
 The lever is worth having because the catalog *is* the prompt: a request the
 agent already knows will be a form, or a plain table, pays for a hundred and
 fifty component signatures it will not use. A shorter menu also makes the model
 choose better.
+
+Note what the numbers say: `atoms` is a twenty-fold saving, `edition` is
+almost none — the blocks are most of what the catalog weighs. `edition` earns
+its place by steering the model to the house vocabulary, not by saving tokens.
 
 Two properties keep it safe:
 
@@ -143,20 +144,14 @@ it ever accepted, so a narrow prompt can never produce a payload the client
 cannot draw. The dangerous direction — describing something that cannot render
 — stays closed.
 
-**A scope can only narrow, never widen.** Under a `replace` edition the
-primitives are gone from the renderer as well, so `atoms` and `all` both
-collapse onto what is live (`resolveScope`). Asking for a layer that no longer
-exists must not resurrect it in the prompt.
+**A scope withholds consistently.** The "if the data has no chart series, fall
+back to…" advice names components per scope, so it never points at something
+the catalog did not show. Advice to reach for a component the model was never
+given is worse than no advice.
 
-Everything the scope withholds is withheld consistently: group notes, examples,
-and the "if the data has no chart series, fall back to…" advice are all filtered
-against the offered set. An example is the strongest signal in a prompt, so one
-calling an absent component is the strongest way to teach the wrong thing.
-
-The three OpenUI Lang prompts are generated as three assets by the same
-generator run, rather than filtered at runtime — the generator already holds
-the group and signature structure, and re-deriving it in Python would be
-invisible when subtly wrong.
+The catalog is assembled per call from one generated block asset plus a
+hand-written primitive list, because only the block half has a build step to
+hang a variant on.
 
 ## Backend: a registry port, and a catalog assembled per call
 
@@ -180,7 +175,7 @@ Then the two prompt builders take the registry's text instead of a constant:
 ```
 
 That single change is what makes the prompt dynamic. Everything else — the
-generated OSS asset, the per-protocol split, the group structure — stays.
+generated OSS asset and the group structure — stays.
 
 **The commercial backend registers at startup**, from an asset its own build
 generates the same way OSS generates its own. Same generator, same
@@ -207,9 +202,10 @@ edition from registering different sets on each side. Two cheap guards:
   steer the model. That is fine for code inside the commercial build, and is the
   reason this design does **not** grow a remote loader: the moment blocks arrive
   from outside the build, prompt content arrives with them.
-- **Protocol reach.** `A2UIRenderer` resolves names through `blockNames`, so
-  registered blocks reach A2UI automatically. Its hand-written OpenUI component
-  list is untouched.
+- **Protocol reach.** A2UI v0.9 is the only wire protocol; the OpenUI Lang
+  generation path was removed rather than maintained beside it. `A2UIRenderer`
+  resolves names through the registry, so registered blocks reach it
+  automatically; its hand-written OpenUI primitive list is untouched.
 
 ## Failure modes
 
@@ -220,7 +216,7 @@ edition from registering different sets on each side. Two cheap guards:
 | edition shadows `Card` | refused at registration, name returned |
 | two editions register one name | later layer refused; earlier wins, deterministically |
 | two editions both claim `replace` | second refused wholesale, with the holder named |
-| replaced block still reaches one protocol | every consumer reads `effectiveBlocks()`; pinned by test |
+| replaced block still reaches the renderer | every consumer reads `effectiveBlocks()`; pinned by test |
 | edition unloads | `unregisterBlocks(source)` clears both halves |
 
 ## Open decisions

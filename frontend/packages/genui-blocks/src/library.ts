@@ -6,40 +6,40 @@ import type { BlockComponent } from "./blocks";
 import { blockComponents, blockComponentGroups } from "./blocks";
 import { builtInBlocksSuppressed, effectiveBlocks, runtimeBlockGroups } from "./registry";
 import { ROOT_COMPONENT_NAME } from "./root";
-import { resolveScope, type ComponentScope } from "./scope";
 
 export type { BlockComponent };
 export { blockComponents, blockComponentGroups };
 
 /**
- * OpenUI's own library plus every block in this package.
+ * OpenUI's own components plus every live block, as one renderable library.
  *
- * Composed from `openuiLibrary.components` rather than by re-importing
- * OpenUI's component definitions, because `@openuidev/react-ui/genui-lib`
- * exports the assembled library but not the individual definitions. Reading
- * them back off the library is the only public path, and it has the useful
- * property that an OpenUI upgrade adding a component picks it up for free.
+ * This is the package's **rendering-contract harness**, not a wire format. A2UI
+ * is the only generative-UI protocol, and the product renders through
+ * `A2UIRenderer`; but that renderer lives in `@valuz/ui`, which sits above this
+ * package and cannot be imported from here. Composing the same components into
+ * an OpenUI Lang library is the cheapest way for a block's own tests to prove it
+ * renders from props — the schemas and components are the identical objects the
+ * A2UI adapter drives.
  *
- * Later entries win on name collision, so a block here can deliberately
- * override an OpenUI component of the same name. None currently does.
+ * Composed from `openuiLibrary.components` rather than by re-importing OpenUI's
+ * component definitions, because `@openuidev/react-ui/genui-lib` exports the
+ * assembled library but not the individual definitions. Reading them back off
+ * the library is the only public path, and it has the useful property that an
+ * OpenUI upgrade adding a component picks it up for free.
  *
- * `scope` narrows the offer to one layer of the vocabulary — see `scope.ts` for
- * why that is worth doing. The root is in every scope: `createLibrary` throws
- * without it, and a document that cannot resolve its root renders nothing.
+ * Suppression mirrors the renderer: under an edition holding `replace` only the
+ * root and that edition's blocks resolve here, exactly as in A2UI — a harness
+ * that resolved more than the product would prove the wrong thing.
  */
-export function createValuzLibrary(scope: ComponentScope = "all"): Library {
-  const resolved = resolveScope(scope);
+export function createValuzLibrary(): Library {
   const openuiComponents = Object.values(openuiLibrary.components) as BlockComponent[];
-  const atoms =
-    resolved === "edition"
-      ? openuiComponents.filter((c) => c.name === ROOT_COMPONENT_NAME)
-      : openuiComponents;
+  const atoms = builtInBlocksSuppressed()
+    ? openuiComponents.filter((c) => c.name === ROOT_COMPONENT_NAME)
+    : openuiComponents;
   // Runtime blocks last: they were refused at registration if they took a name
   // already in use, so by the time they get here the merge cannot shadow
-  // anything. Order is registration order, which keeps the prompt stable
-  // between boots.
-  const blocks = resolved === "atoms" ? [] : effectiveBlocks();
-  const components = [...atoms, ...blocks];
+  // anything. Order is registration order, which keeps it stable between boots.
+  const components = [...atoms, ...effectiveBlocks()];
 
   const groups: ComponentGroup[] = [
     ...(openuiLibrary.componentGroups ?? []),
@@ -56,12 +56,10 @@ export function createValuzLibrary(scope: ComponentScope = "all"): Library {
 /**
  * Groups rewritten to describe only what is actually in the library.
  *
- * Groups are not cosmetic — the prompt's signature section is built from them,
- * so a group naming a component that is not registered describes it to the
- * model anyway, and the model emits something the renderer cannot draw. The
- * notes get the same treatment for the same reason: a note explaining `Modal`
- * or `Tabs` is misinformation once those are gone, and misinformation in a
- * prompt is worse than silence.
+ * `createLibrary` tolerates a group naming an absent component, which is
+ * exactly why this is here: the harness would then claim a vocabulary the
+ * product does not have, and a block test could pass against a component the
+ * renderer would never resolve.
  */
 export function narrowGroups(groups: ComponentGroup[], available: Set<string>): ComponentGroup[] {
   const missing = missingNames(available);

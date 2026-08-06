@@ -1,11 +1,5 @@
-import { useMemo, useSyncExternalStore, type ComponentProps, type ReactNode } from "react";
-import { Renderer } from "@openuidev/react-lang";
+import { type ComponentProps, type ReactNode } from "react";
 import { ThemeProvider } from "@openuidev/react-ui";
-import {
-  createValuzLibrary,
-  getRegistryVersion,
-  subscribeBlocks,
-} from "@valuz/genui-blocks";
 
 import { A2UIRenderer } from "./A2UIRenderer";
 import {
@@ -21,27 +15,6 @@ export type {
   GenerativeUIPayload,
   GenerativeUIProtocol,
 } from "./generative-ui-payload";
-
-/**
- * OpenUI's own components plus the Valuz blocks, as one library.
- *
- * Rebuilt when the block registry changes rather than frozen at module scope:
- * an edition registers its components at startup, and a conversation already on
- * screen has to pick them up. The subscription snapshot is a version number,
- * not the block list — the list is a fresh array each call, so using it would
- * re-render forever.
- *
- * The merge stays additive. A registered block that took the name of an OpenUI
- * component or a built-in was refused at registration, so nothing here can
- * shadow anything.
- *
- * This covers the OpenUI Lang protocol only. The A2UI branch below resolves
- * names through `A2UIRenderer`, which reads the same registry.
- */
-function useGenerativeUILibrary() {
-  const version = useSyncExternalStore(subscribeBlocks, getRegistryVersion, getRegistryVersion);
-  return useMemo(() => createValuzLibrary(), [version]);
-}
 
 export type GenerativeUIStatus = "running" | "success" | "error";
 
@@ -297,39 +270,12 @@ export function GenerativeUIRenderer({
   status,
 }: GenerativeUIRendererProps) {
   const parsed = parseGenerativeUIPayload(payload);
-  if (!parsed.body) return null;
+  // Nothing to draw rather than raw text on screen: a tool result that is not
+  // an A2UI stream has no renderer, and printing its source where a rendered UI
+  // belongs reads as a bug in the answer rather than in the payload.
+  if (!parsed?.body) return null;
 
-  if (parsed.protocol === "a2ui-json") {
-    return <A2UIBody body={parsed.body} status={status} />;
-  }
-
-  return <OpenUIBody body={parsed.body} status={status} />;
-}
-
-function OpenUIBody({
-  body,
-  status,
-}: {
-  body: string;
-  status?: GenerativeUIStatus;
-}) {
-  const library = useGenerativeUILibrary();
-  return (
-    <OpenUITheme>
-      {/* `vgb-root` is the container the blocks' `@container vgb` queries
-          resolve against, and the scope of their `min-width: 0` reset. Without
-          it every breakpoint silently never matches: a tile keeps its widest
-          floor at every width and overflows the column it sits in, painting
-          over whatever is beside it. */}
-      <div className="vgb-root">
-        <Renderer
-          library={library}
-          response={body}
-          isStreaming={status === "running"}
-        />
-      </div>
-    </OpenUITheme>
-  );
+  return <A2UIBody body={parsed.body} status={status} />;
 }
 
 function OpenUITheme({ children }: { children: ReactNode }) {

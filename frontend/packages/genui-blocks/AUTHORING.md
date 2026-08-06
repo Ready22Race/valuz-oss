@@ -42,13 +42,14 @@ export const ThingSchema = z.object({
   `z.unknown()` slot accepts both those and other blocks.
 - Keep props flat and few. Every prop is prompt surface: if the model would
   have to guess when to set it, it does not belong.
-- **Key order is load-bearing, and getting it wrong fails silently.** OpenUI
-  Lang calls are positional and bind in zod key order, so declaring
-  `{ label?, children }` makes `Thing([a, b])` assign the array to `label` and
-  leave `children` empty — no parse error, no type error, just an empty block.
-  Put required props first, `children` before optional scalars, and match the
-  order a human would write the call in. OpenUI's own `Card(children, variant?)`
-  is the pattern. Always render one positional call in a test.
+- **Key order is load-bearing in the tests, and getting it wrong fails
+  silently.** A2UI passes props by name, so the wire does not care; the render
+  harness (`createValuzLibrary`, see below) speaks OpenUI Lang, which is
+  positional and binds in zod key order. Declaring `{ label?, children }` makes
+  `Thing([a, b])` assign the array to `label` and leave `children` empty — no
+  parse error, no type error, just an empty block. Put required props first,
+  `children` before optional scalars, and match the order a human would write
+  the call in; OpenUI's own `Card(children, variant?)` is the pattern.
 
 ## index.tsx
 
@@ -192,26 +193,24 @@ filtered to drop any that explain a component `replace` removed.
 Both halves move together: `unregisterBlocks(source)` takes the implementation
 and its prompt group away, and the built-ins come back.
 
-## Scopes
+## The catalog
 
-`createValuzLibrary(scope)` narrows the offer to one layer — `all` (default),
-`edition` (root + blocks), or `atoms` (root + OpenUI primitives). The
-`generate_ui` tool exposes it as its `components` argument so one generation can
-skip a catalog it will not use.
-
-This matters when you author a block: **the group notes and prompt examples you
-write are filtered against the offered set**, on word boundaries. A note or
-example that names an OpenUI primitive is dropped under `edition`, so an example
-built only from blocks survives more scopes than one that reaches for
-`TextContent` to write its title. Descriptions are not filtered — they are the
-block's own documentation, and the renderer accepts every component regardless
-of scope.
-
-After adding or changing a block, regenerate all three assets:
+A block reaches the model through one generated asset — the A2UI block catalog,
+built from every block's name, zod schema and `description`. Regenerate it after
+adding or changing a block:
 
 ```bash
-pnpm --filter @valuz/ui gen:openui-prompt
+pnpm --filter @valuz/ui gen:genui-catalog
 ```
+
+Forgetting this is the quiet failure: the block renders when named, but nothing
+ever tells the model it exists, so it is never named.
+
+`generate_ui` takes a `components` argument that narrows what a single
+generation is offered — `all` (default), `edition` (root + blocks) or `atoms`
+(OpenUI primitives). It is assembled backend-side, so nothing here changes; what
+it means for you is that your `description` is the block's entire pitch under
+`edition`, where the primitives are not there to fall back on.
 
 ## Verifying
 
@@ -220,3 +219,12 @@ cd frontend
 pnpm exec tsc --noEmit -p packages/genui-blocks/tsconfig.json
 pnpm exec vitest run --config vitest.config.ts packages/genui-blocks
 ```
+
+### The render harness
+
+Tests render through `createValuzLibrary()` and OpenUI's `<Renderer>`, not
+through A2UI. A2UI is the product's only wire protocol, but its renderer lives
+in `@valuz/ui` — above this package, so unreachable from here. The library
+drives the identical component objects and zod schemas the A2UI adapter drives,
+so it is the closest proof available from inside. The one place the two differ
+is argument binding, which is why key order matters above.

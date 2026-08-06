@@ -17,9 +17,14 @@ import {
  * Runtime injection is how an edition adds components without forking this
  * package. What the tests here pin is not that registration "works" but that
  * the two halves of a block stay together: an implementation the renderer can
- * draw, and a spec the prompt can describe. Either one alone is a silent
+ * draw, and a spec the catalog can describe. Either one alone is a silent
  * failure — an undescribed block is never emitted, and an unimplemented one
  * renders nothing.
+ *
+ * `createValuzLibrary()` stands in for the renderer here. A2UI is the wire
+ * protocol, but its renderer lives in `@valuz/ui`, above this package; the
+ * library drives the identical component objects, so it is the closest proof
+ * available from inside.
  */
 
 const DemoCard = defineComponent({
@@ -49,11 +54,10 @@ describe("runtime block registration", () => {
 
   it("describes it to the model in the same pass", () => {
     // The half that is easy to forget: a block the renderer can draw but the
-    // prompt never mentions is dead weight.
+    // catalog never mentions is dead weight. The specs are what an edition
+    // hands the backend to splice into the prompt.
     registerBlocks("demo", [DemoCard], { groupName: "Demo" });
-    const prompt = createValuzLibrary().prompt();
-    expect(prompt).toContain("DemoCard");
-    expect(prompt).toContain("Demo");
+    expect(runtimeBlockSpecs().map((s) => s.name)).toContain("DemoCard");
   });
 
   it("derives the spec from the implementation rather than taking one", () => {
@@ -93,7 +97,6 @@ describe("runtime block registration", () => {
     registerBlocks("demo", [DemoCard], { groupName: "Demo" });
     unregisterBlocks("demo");
     expect(runtimeBlockSpecs()).toEqual([]);
-    expect(createValuzLibrary().prompt()).not.toContain("DemoCard");
     expect(createValuzLibrary().components["DemoCard"]).toBeUndefined();
   });
 
@@ -118,9 +121,7 @@ describe("runtime block registration", () => {
     expect(library.components["DemoCard"]).toBeTruthy();
     // The built-in blocks are gone from both halves — renderable and described.
     expect(library.components["MiniCard"]).toBeUndefined();
-    const prompt = library.prompt();
-    expect(prompt).toContain("DemoCard");
-    expect(prompt).not.toContain("MiniCardBlock");
+    expect(runtimeBlockSpecs().map((s) => s.name)).toEqual(["DemoCard"]);
   });
 
   it("keeps only the root of OpenUI in replace mode", () => {
@@ -136,17 +137,16 @@ describe("runtime block registration", () => {
     expect(Object.keys(library.components)).toEqual([ROOT_COMPONENT_NAME, "DemoCard"]);
   });
 
-  it("still documents the root, and drops notes about what it removed", () => {
-    // Grouping is what puts a component into the prompt's signature section, so
-    // an ungrouped root would leave the model guessing at the arguments of the
-    // one component every document begins with.
+  it("stops claiming a vocabulary it no longer has, in replace mode", () => {
+    // Groups are the library's account of what it offers. One still naming
+    // Modal or Tabs would let a block test pass against a component the
+    // renderer would never resolve.
     registerBlocks("finance", [DemoCard], { mode: "replace", groupName: "Finance" });
-    const prompt = createValuzLibrary().prompt();
-    expect(prompt).toContain(`${ROOT_COMPONENT_NAME}(children`);
-    // Its group notes explain Modal and Tabs — misinformation once those are
-    // gone, and misinformation in a prompt is worse than silence.
-    expect(prompt).not.toContain("Modal:");
-    expect(prompt).not.toContain("Use Tabs for alternative views");
+    const library = createValuzLibrary();
+    const offered = new Set(Object.keys(library.components));
+    for (const group of library.componentGroups ?? []) {
+      for (const name of group.components) expect(offered.has(name)).toBe(true);
+    }
   });
 
   it("frees every name but the root in replace mode", () => {

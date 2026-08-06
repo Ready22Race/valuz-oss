@@ -15,7 +15,7 @@ from valuz_agent.modules.genui.protocol import (
     GenUIComponentScope,
     a2ui_instructions,
     build_a2ui_catalog,
-    build_prompt_for_protocol,
+    build_a2ui_prompt,
     normalize_component_scope,
 )
 from valuz_agent.modules.genui.tools import _PARAMS
@@ -58,41 +58,34 @@ def test_the_tool_advertises_the_argument():
 
 
 def test_each_scope_offers_its_own_layer_and_drops_the_other():
-    for protocol in ("openui", "a2ui"):
-        full = build_prompt_for_protocol(protocol, "revenue dashboard", None, "all")
-        edition = build_prompt_for_protocol(protocol, "revenue dashboard", None, "edition")
-        atoms = build_prompt_for_protocol(protocol, "revenue dashboard", None, "atoms")
+    full = build_a2ui_prompt("revenue dashboard", None, "all")
+    edition = build_a2ui_prompt("revenue dashboard", None, "edition")
+    atoms = build_a2ui_prompt("revenue dashboard", None, "atoms")
 
-        assert _BLOCK_ONLY in full and _ATOM_ONLY in full
+    assert _BLOCK_ONLY in full and _ATOM_ONLY in full
 
-        assert _BLOCK_ONLY in edition, protocol
-        assert _ATOM_ONLY not in edition, protocol
+    assert _BLOCK_ONLY in edition
+    assert _ATOM_ONLY not in edition
 
-        assert _ATOM_ONLY in atoms, protocol
-        assert _BLOCK_ONLY not in atoms, protocol
+    assert _ATOM_ONLY in atoms
+    assert _BLOCK_ONLY not in atoms
 
 
 def test_the_root_survives_every_scope():
     # Stack roots every document. A scope that dropped it would produce output
     # nothing can render — the one failure narrowing must never introduce.
     for scope in SCOPES:
-        for protocol in ("openui", "a2ui"):
-            assert "Stack" in build_prompt_for_protocol(protocol, "chart", None, scope)
+        assert "Stack" in build_a2ui_prompt("chart", None, scope)
 
 
 def test_narrowing_actually_costs_less():
-    for protocol in ("openui", "a2ui"):
-        sizes = {
-            scope: len(build_prompt_for_protocol(protocol, "chart", None, scope))
-            for scope in SCOPES
-        }
-        assert sizes["atoms"] < sizes["all"], protocol
-        assert sizes["edition"] <= sizes["all"], protocol
-    # The primitives alone are a fraction of the full catalog — the reason the
-    # argument is worth having at all.
-    assert len(build_prompt_for_protocol("openui", "chart", None, "atoms")) < len(
-        build_prompt_for_protocol("openui", "chart", None, "all")
-    ) / 2
+    sizes = {scope: len(build_a2ui_prompt("chart", None, scope)) for scope in SCOPES}
+    assert sizes["edition"] < sizes["all"]
+    # The primitives alone are a small fraction of the full catalog — the reason
+    # the argument is worth having at all. `edition` saves far less, because the
+    # blocks are what the catalog is mostly made of; it earns its keep by
+    # steering the model to the house vocabulary, not by saving tokens.
+    assert sizes["atoms"] < sizes["all"] / 10
 
 
 def test_instructions_never_recommend_a_component_the_scope_withheld():

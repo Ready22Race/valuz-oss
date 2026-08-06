@@ -178,11 +178,11 @@ export function useToolCallCards({
     }) => {
       const name = tool.title || "";
 
-      // generate_ui — generative UI. The MCP tool returns OpenUI Lang as
+      // generate_ui — generative UI. The MCP tool returns an A2UI stream as
       // ``tool.output`` (growing token-by-token while running, as the host
       // forwards ephemeral text_deltas as tool_output_delta) plus a live
       // reasoning stream on ``tool.thinking`` (tool.call.thinking_delta).
-      // Render with OpenUI's <Renderer> via GenerativeUICard, including while
+      // Render with A2UIRenderer via GenerativeUICard, including while
       // running so the UI paints progressively and the thinking phase shows
       // as dimmed progress; only error falls through (return null) to the
       // generic ToolCallCard so the failure text stays visible.
