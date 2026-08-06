@@ -89,8 +89,8 @@ OpenUI component catalog supported by the A2UI renderer:
 - Forms: Form, FormControl, Label, Input, TextArea, Select, SelectItem,
   DatePicker, Slider, CheckBoxGroup, CheckBoxItem, RadioGroup, RadioItem,
   SwitchGroup, SwitchItem.
-- Actions/display: Button, Buttons, TagBlock, Tag, Metric, KPI, ListBlock,
-  ListItem, List.
+- Actions/display: Button, Buttons, TagBlock, Tag, Metric, KPI. For a list of
+  entries use the DataList, StatusList, Timeline or Feed blocks below.
 """
 
 _A2UI_MESSAGE_SHAPE = """\

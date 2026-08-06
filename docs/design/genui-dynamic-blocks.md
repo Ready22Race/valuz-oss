@@ -227,6 +227,7 @@ edition from registering different sets on each side. Two cheap guards:
 
 | Failure | Caught by |
 |---|---|
+| container's sub-items referenced by id, not inline | `A2UIRenderer.refs.test.tsx` — the form the catalog teaches |
 | implementation registered, spec never reaches the prompt | boot assertion; otherwise invisible |
 | spec registered, implementation missing | boot assertion; otherwise a blank section |
 | edition shadows `Card` | refused at registration, name returned |
