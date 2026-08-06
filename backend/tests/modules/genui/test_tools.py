@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from types import SimpleNamespace
 
@@ -33,10 +34,15 @@ def patched(monkeypatch):
         return SimpleNamespace(base_url=None, api_key="k", api_protocol="anthropic")
 
     monkeypatch.setattr(t.kernel_client, "get_session", _get_session)
+
+    async def _list_messages(user_id, sid, *, limit=1):
+        return [SimpleNamespace(user_message=SimpleNamespace(text="请生成销售图表"))]
+
+    monkeypatch.setattr(t.kernel_client, "list_messages", _list_messages)
     monkeypatch.setattr(t, "resolve_model_provider", _resolve)
 
     async def _fake_completer(prompt):
-        return "Chart\n  data: 5,10"
+        return '{"version":"v0.9","createSurface":{"surfaceId":"s"}}'
 
     monkeypatch.setattr(t, "_make_completer", lambda **kw: _fake_completer)
 
@@ -46,12 +52,38 @@ def patched(monkeypatch):
     monkeypatch.setattr(t, "resolve_tool_use_id", _no_tool_use_id)
 
 
-async def test_handler_returns_openui_lang(patched):
+async def test_handler_wraps_the_stream_in_the_client_envelope(patched):
     defs = build_generative_ui_tool_defs()
     handler = defs[0].handler
     res = await handler({"request": "sales chart"}, _ctx())
     assert res.is_error is False
-    assert res.content == "Chart\n  data: 5,10"
+    assert json.loads(res.content)["protocol"] == "a2ui-json"
+
+
+async def test_handler_defaults_to_a2ui_payload(monkeypatch, patched):
+    seen = {}
+
+    async def _comp(prompt):
+        seen["prompt"] = prompt
+        return '{"version":"v0.9","createSurface":{"surfaceId":"dashboard"}}'
+
+    def _make(**kw):
+        seen["make_kwargs"] = kw
+        return _comp
+
+    monkeypatch.setattr(t, "_make_completer", _make)
+    handler = build_generative_ui_tool_defs()[0].handler
+
+    res = await handler({"request": "sales chart"}, _ctx())
+
+    assert res.is_error is False
+    assert json.loads(res.content) == {
+        "protocol": "a2ui-json",
+        "content": '{"version":"v0.9","createSurface":{"surfaceId":"dashboard"}}',
+    }
+    assert "A2UI" in seen["prompt"]
+    assert seen["make_kwargs"]["output_format"] == "A2UI v0.9 JSON message stream"
+    assert "A2UI" in seen["make_kwargs"]["session_instructions"]
 
 
 async def test_handler_requires_request(patched):
@@ -59,6 +91,23 @@ async def test_handler_requires_request(patched):
     res = await handler({"request": "   "}, _ctx())
     assert res.is_error is True
     assert "request" in res.content
+
+
+async def test_handler_rejects_dashboard_when_user_only_asked_for_a_list(monkeypatch, patched):
+    async def _list_messages(user_id, sid, *, limit=1):
+        # The gate now looks back a few turns, so the whole window has to be
+        # free of a visual request for the rejection to be the one under test.
+        return [
+            SimpleNamespace(user_message=SimpleNamespace(text="列出最近四个季度的数据")),
+            SimpleNamespace(user_message=SimpleNamespace(text="这些数字怎么来的")),
+        ]
+
+    monkeypatch.setattr(t.kernel_client, "list_messages", _list_messages)
+    handler = build_generative_ui_tool_defs()[0].handler
+    res = await handler({"request": "Create a quarterly dashboard"}, _ctx())
+
+    assert res.is_error is True
+    assert "no recent user message asked for" in res.content
 
 
 async def test_handler_passes_data_into_prompt(monkeypatch, patched):
@@ -124,7 +173,7 @@ async def test_handler_resolves_tool_use_id_and_streams(monkeypatch, patched):
     monkeypatch.setattr(t, "_make_completer", _make)
     handler = build_generative_ui_tool_defs()[0].handler
     res = await handler({"request": "chart"}, _ctx())
-    assert res.content == "Chart" and res.is_error is False
+    assert json.loads(res.content)["content"] == "Chart" and res.is_error is False
     assert completer_calls["kw"]["calling_session_id"] == "s1"
     assert completer_calls["kw"]["tool_use_id"] == "R-FOUND"
     assert captured["resolve_args"]["session_id"] == "s1"
@@ -173,7 +222,7 @@ async def test_handler_retries_when_generation_returns_blank(monkeypatch, patche
         res = await handler({"request": "chart"}, _ctx())
 
     assert res.is_error is False
-    assert res.content == "Chart"
+    assert json.loads(res.content)["content"] == "Chart"
     assert calls == 2
     assert "generate_ui: generation returned blank output on attempt 1/2" in caplog.text
 
@@ -199,6 +248,6 @@ async def test_handler_retries_when_generation_raises(monkeypatch, patched, capl
         res = await handler({"request": "chart"}, _ctx())
 
     assert res.is_error is False
-    assert res.content == "Chart"
+    assert json.loads(res.content)["content"] == "Chart"
     assert calls == 2
     assert "generate_ui: generation attempt 1/2 failed" in caplog.text

@@ -4,6 +4,10 @@ export { SystemLogsSection } from "./SystemLogsSection";
 export { SkillEditDialog } from "./SkillEditDialog";
 export { SkillAddDialog } from "./SkillAddDialog";
 export { BindChatDialog } from "./BindChatDialog";
+export {
+  CitationDocumentPreviewProvider,
+  useCitationDocumentPreview,
+} from "./CitationDocumentPreviewProvider";
 export { MarketplaceImportDialog } from "./MarketplaceImportDialog";
 export { ConnectorAddDialog } from "./ConnectorAddDialog";
 export type { ConnectorAddMode } from "./ConnectorAddDialog";
@@ -23,6 +27,7 @@ export type { AgentEditFormProps, AgentEditValue } from "./AgentEditForm";
 export {
   ResourceActionSlot,
   ResourceDetailActionSlot,
+  ResourceCopyMenuItemSlot,
 } from "./ResourceActionSlot";
 export { useCliLoginFlow } from "./CliLoginFlow";
 export type { CliTool, CliLoginState, CliLoginStatus } from "./CliLoginFlow";

@@ -6,7 +6,8 @@ import {
   useStableTurns,
   type SessionEventDTO,
 } from "@valuz/core";
-import { ConversationTurnList } from "@valuz/ui";
+import type { OpenCitationInput } from "@valuz/shared";
+import { ConversationTurnList, usePersistentScroll } from "@valuz/ui";
 
 export interface SessionStreamViewProps {
   sessionId: string;
@@ -19,6 +20,9 @@ export interface SessionStreamViewProps {
    * closed — the hydrated history is already final.
    */
   active?: boolean;
+  onCitationClick?: (input: OpenCitationInput) => void;
+  onIdle?: () => void;
+  scrollStorageKey?: string;
 }
 
 /** Delay before resuming the SSE stream after it closes on idle. */
@@ -39,6 +43,9 @@ export const SessionStreamView = ({
   sessionId,
   heightClass = "h-[320px]",
   active = true,
+  onCitationClick,
+  onIdle,
+  scrollStorageKey,
 }: SessionStreamViewProps) => {
   const [events, setEvents] = useState<SessionEventDTO[]>([]);
   const [loading, setLoading] = useState(true);
@@ -46,9 +53,11 @@ export const SessionStreamView = ({
   // Mirror ``active`` into a ref so the SSE effect (keyed only on sessionId)
   // reads the latest value in its onStateChange closure without resubscribing.
   const activeRef = useRef(active);
+  const onIdleRef = useRef(onIdle);
   useEffect(() => {
     activeRef.current = active;
-  }, [active]);
+    onIdleRef.current = onIdle;
+  }, [active, onIdle]);
 
   // Remounted via key={sessionId} by the parent, so state starts fresh per
   // session — no synchronous reset needed here (which would trip the
@@ -57,7 +66,7 @@ export const SessionStreamView = ({
     let cancelled = false;
     // Cross-path dedup: REST history and live SSE frames use INDEPENDENT
     // seq spaces (durable vs kernel-local), so persisted events dedup on
-    // the store-independent ``event_uid``. uid-less events (legacy rows)
+      // the store-independent ``event_uid``. uid-less events (legacy rows)
     // keep the historical monotonic-seq filter — only ever fed same-space
     // values, since uid-bearing frames don't touch it.
     const seenUids = new Set<string>();
@@ -87,7 +96,10 @@ export const SessionStreamView = ({
       // Resume from the latest hydrated seq once history is loaded; until
       // then onEvent still dedupes by seq so early live deltas are safe.
       startSeq: 0,
-      onEvent: (e) => append([e]),
+      onEvent: (e) => {
+        append([e]);
+        if (e.event.event_type === "session.idle") onIdleRef.current?.();
+      },
       onStateChange: (snap) => {
         // Stream closed on idle — resume while the run is still active so
         // subsequent turns keep streaming (the kernel ends the SSE per turn).
@@ -123,6 +135,7 @@ export const SessionStreamView = ({
   }, [sessionId]);
 
   const turns = useStableTurns(useMemo(() => buildTurns(events), [events]));
+  usePersistentScroll(scrollRef, scrollStorageKey ?? null, !loading);
 
   return (
     <div
@@ -135,6 +148,7 @@ export const SessionStreamView = ({
         sending={false}
         loading={loading}
         error={null}
+        onCitationClick={onCitationClick}
       />
     </div>
   );

@@ -760,6 +760,129 @@ paths:
                 $ref: "#/components/schemas/ResolveFilesResponse"
         "422":
           description: Invalid request or more than 256 refs
+  /v1/citations/resolve:
+    post:
+      summary: Resolve a canonical message citation for in-app reading
+      description: |
+        Reloads the citation from the owner-scoped canonical message, checks
+        that it belongs to the requested session, reauthorizes the current
+        document identity, and only then returns a temporary reading address.
+        Source metadata, locators, file paths, and URLs supplied by the client
+        are never trusted.
+      operationId: resolveCitation
+      tags: [citations]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResolveCitationRequest"
+      responses:
+        "200":
+          description: Current document and best available locator
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResolveCitationResponse"
+        "403":
+          description: The current owner no longer has document access
+        "404":
+          description: Message, citation, or document unavailable
+  /v1/document-research/sessions:
+    post:
+      summary: Create or restore a locked single-document research session
+      operationId: createDocumentResearchSession
+      tags: [document-research]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DocumentResearchSessionRequest"
+      responses:
+        "201":
+          description: Owner-scoped child session with a server-enforced source scope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentResearchSession"
+        "404":
+          description: Document or origin session unavailable
+  /v1/document-research/documents/{document_id}/summary:
+    get:
+      summary: Get a cached citation-bearing document summary
+      operationId: getDocumentSummary
+      tags: [document-research]
+      parameters:
+        - name: document_id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: profile
+          in: query
+          required: false
+          schema: {type: string, enum: [brief, detailed], default: brief}
+      responses:
+        "200":
+          description: Cached artifact, or null when none has been generated
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/DocumentSummaryArtifactV1"
+                  - type: "null"
+        "404":
+          description: Document unavailable to the current owner
+    post:
+      summary: Generate or refresh a citation-bearing document summary
+      operationId: generateDocumentSummary
+      tags: [document-research]
+      parameters:
+        - name: document_id
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GenerateDocumentSummaryRequest"
+      responses:
+        "200":
+          description: Current summary artifact
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentSummaryArtifactV1"
+        "404":
+          description: Document unavailable to the current owner
+  /v1/document-research/share:
+    post:
+      summary: Copy one stored canonical research answer into its origin chat
+      description: |
+        The client submits identities only. The server reloads the completed
+        source message and copies its canonical citation bundle within the same
+        owner scope; client-authored prose or citations are never accepted.
+      operationId: shareDocumentResearchMessage
+      tags: [document-research]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ShareDocumentResearchMessageRequest"
+      responses:
+        "200":
+          description: Imported message identity
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SharedResearchMessage"
+        "404":
+          description: Research session, origin, or source message unavailable
+        "409":
+          description: Source message cannot be safely copied
   /v1/tasks:
     get:
       summary: List tasks across every project
@@ -1158,6 +1281,43 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/RuntimeListItem"
+
+  # ── Personalization preferences ─────────────────────────────────────
+
+  /v1/settings/preferences:
+    get:
+      summary: Get user personalization preferences
+      operationId: getPreferences
+      tags: [settings]
+      responses:
+        "200":
+          description: Current personalization preferences
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PreferencesResponse"
+    patch:
+      summary: Update user personalization preferences
+      operationId: patchPreferences
+      tags: [settings]
+      description: |
+        Only supplied fields are updated. Conversation citations default on;
+        citation verification defaults off because it can add latency and model
+        usage. Verification requires citations. Disabling citations also
+        disables verification.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PreferencesPatch"
+      responses:
+        "200":
+          description: Updated personalization preferences
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PreferencesResponse"
 
   # ── Memory (inspect / prune / toggle the agent memory system) ────────
 
@@ -3506,6 +3666,35 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/NotificationListResponse"
+  /v1/notifications/history:
+    get:
+      summary: Resolved (dismissed / handled) notifications, newest first
+      description: |
+        The read-only history behind the drawer's History tab. Returns resolved
+        rows only — the open set stays on GET /v1/notifications. Paginated by a
+        created_at cursor: pass the last entry's created_at as `before` to load
+        the next page.
+      operationId: listNotificationHistory
+      tags: [notifications]
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: {type: integer, minimum: 1, maximum: 200, default: 50}
+        - name: before
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int64
+            description: "Only entries with created_at strictly below this (ms cursor)."
+      responses:
+        "200":
+          description: Resolved notifications page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotificationHistoryResponse"
   /v1/notifications/stream:
     get:
       summary: SSE stream of notification changes (snapshot/added/updated/resolved)
@@ -3514,6 +3703,18 @@ paths:
       responses:
         "200":
           description: SSE stream
+  /v1/notifications:dismiss-all:
+    post:
+      summary: Dismiss (resolve) every open notification of the caller
+      description: |
+        The drawer's "clear all" — resolves every open entry (marking unread ones
+        read) so they move to history. Pending questions stay answerable in
+        their session; only the notification entry is cleared.
+      operationId: dismissAllNotifications
+      tags: [notifications]
+      responses:
+        "200":
+          description: OK
   /v1/notifications:read-all:
     post:
       summary: Mark all of the caller's notifications read
@@ -3961,6 +4162,45 @@ components:
     MemoryTarget:
       type: string
       enum: [user, global, project]
+    PreferencesResponse:
+      type: object
+      required:
+        - default_timezone
+        - default_locale
+        - detected_timezone
+        - theme
+        - font_size
+        - conversation_citations_enabled
+        - conversation_verification_enabled
+        - conversation_task_coverage_enabled
+      properties:
+        default_timezone: {type: string}
+        default_locale: {type: string}
+        detected_timezone: {type: string}
+        theme: {type: string}
+        font_size: {type: string}
+        conversation_citations_enabled:
+          type: boolean
+          default: true
+          description: Render canonical citation indices when source evidence is available.
+        conversation_verification_enabled:
+          type: boolean
+          default: false
+          description: Run claim and citation quality verification before publishing a reply.
+        conversation_task_coverage_enabled:
+          type: boolean
+          default: true
+          description: Check explicit task completeness and repair bounded omissions before publishing a reply.
+    PreferencesPatch:
+      type: object
+      properties:
+        default_timezone: {type: string, nullable: true}
+        default_locale: {type: string, nullable: true}
+        theme: {type: string, nullable: true}
+        font_size: {type: string, nullable: true}
+        conversation_citations_enabled: {type: boolean}
+        conversation_verification_enabled: {type: boolean}
+        conversation_task_coverage_enabled: {type: boolean}
     MemoryView:
       type: object
       required: [enabled, auto_extract, custom_instructions, entries]
@@ -5001,6 +5241,17 @@ components:
           items:
             $ref: "#/components/schemas/NotificationEntry"
         unread: {type: integer}
+    NotificationHistoryResponse:
+      type: object
+      required: [entries]
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/NotificationEntry"
+        has_more:
+          type: boolean
+          description: "True when another page exists below the returned entries."
     DraftTaskRequest:
       type: object
       required: [goal, lead_agent_slug, originating_session_id]
@@ -6585,6 +6836,653 @@ components:
             ``provider_id`` — ignored when it does not match the
             session's frozen model.
 
+    CitationBundleV1:
+      type: object
+      required: [version, citations]
+      properties:
+        version:
+          type: integer
+          enum: [1]
+        citations:
+          type: array
+          items:
+            $ref: "#/components/schemas/CitationRefV1"
+        projection:
+          $ref: "#/components/schemas/CitationProjectionV1"
+        integrity:
+          $ref: "#/components/schemas/CitationIntegrityV1"
+        quality:
+          $ref: "#/components/schemas/CitationQualityResultV1"
+
+    CitationProjectionV1:
+      type: object
+      required: [evidenceHandleToCitationId]
+      properties:
+        evidenceHandleToCitationId:
+          type: object
+          additionalProperties: {type: string}
+        anchors:
+          type: array
+          items:
+            $ref: "#/components/schemas/CitationAnchorV1"
+        provenanceRegions:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProvenanceRegionV1"
+
+    CitationAnchorV1:
+      type: object
+      required: [citationId, claimId, location, sourceOffset, origin]
+      properties:
+        citationId: {type: string}
+        claimId: {type: string}
+        location:
+          $ref: "#/components/schemas/ClaimLocationV1"
+        sourceOffset:
+          type: integer
+          minimum: 0
+          description: Unicode code-point offset in raw Markdown, used only by the renderer.
+        origin:
+          type: string
+          enum: [explicit, auto-bound, equivalent-claim]
+
+    ProvenanceRegionV1:
+      type: object
+      required:
+        [regionId, blockIndex, rowStart, rowEnd, columnStart, columnEnd,
+         citationIds, anchor, sourceOffset]
+      properties:
+        regionId: {type: string}
+        claimGroupId:
+          type: string
+          description: Stable Evidence-lineage group shared by disconnected render regions.
+        blockIndex: {type: integer, minimum: 0}
+        rowStart: {type: integer, minimum: 0}
+        rowEnd: {type: integer, minimum: 0}
+        columnStart: {type: integer, minimum: 0}
+        columnEnd: {type: integer, minimum: 0}
+        citationIds:
+          type: array
+          minItems: 1
+          items: {type: string}
+        anchor:
+          $ref: "#/components/schemas/ClaimLocationV1"
+        sourceOffset:
+          type: integer
+          minimum: 0
+          description: Unicode code-point offset of the terminal table cell in raw Markdown.
+
+    DocumentResearchSessionRequest:
+      type: object
+      required: [document_id]
+      properties:
+        document_id: {type: string, minLength: 1}
+        origin_session_id: {type: string, nullable: true}
+        origin_message_id: {type: string, nullable: true}
+
+    GenerateDocumentSummaryRequest:
+      type: object
+      properties:
+        profile:
+          type: string
+          enum: [brief, detailed]
+          default: brief
+        origin_session_id: {type: string, nullable: true}
+        origin_message_id: {type: string, nullable: true}
+        force: {type: boolean, default: false}
+
+    ShareDocumentResearchMessageRequest:
+      type: object
+      required: [research_session_id]
+      properties:
+        research_session_id: {type: string, minLength: 1}
+        source_message_id: {type: string, nullable: true}
+
+    DocumentResearchSession:
+      type: object
+      required:
+        [session_id, purpose, document_ids, document_versions,
+         source_scope, reused]
+      properties:
+        session_id: {type: string}
+        purpose: {type: string, enum: [document-research]}
+        document_ids:
+          type: array
+          minItems: 1
+          items: {type: string}
+        document_versions:
+          type: array
+          minItems: 1
+          items: {type: string}
+        source_scope: {type: string, enum: [locked]}
+        origin_session_id: {type: string, nullable: true}
+        origin_message_id: {type: string, nullable: true}
+        reused: {type: boolean}
+
+    DocumentSummaryArtifactV1:
+      type: object
+      required:
+        [version, summary_id, document_id, document_version, status,
+         profile, content, citation_bundle, generated_at, model_id,
+         prompt_revision, policy_revision, research_session_id,
+         message_id, error_message]
+      properties:
+        version: {type: integer, enum: [1]}
+        summary_id: {type: string}
+        document_id: {type: string}
+        document_version: {type: string}
+        status:
+          type: string
+          enum: [pending, ready, degraded, failed, stale]
+        profile: {type: string}
+        content: {type: string}
+        citation_bundle:
+          $ref: "#/components/schemas/CitationBundleV1"
+        generated_at: {type: string, format: date-time, nullable: true}
+        model_id: {type: string, nullable: true}
+        prompt_revision: {type: string}
+        policy_revision: {type: string}
+        research_session_id: {type: string, nullable: true}
+        message_id: {type: string, nullable: true}
+        error_message: {type: string, nullable: true}
+
+    SharedResearchMessage:
+      type: object
+      required:
+        [target_session_id, message_id, source_session_id, source_message_id]
+      properties:
+        target_session_id: {type: string}
+        message_id: {type: string}
+        source_session_id: {type: string}
+        source_message_id: {type: string}
+
+    ResolveCitationRequest:
+      type: object
+      required: [session_id, message_id, citation_id]
+      properties:
+        session_id: {type: string, minLength: 1}
+        message_id: {type: string, minLength: 1}
+        citation_id: {type: string, minLength: 1}
+
+    CitationDocumentAddress:
+      type: object
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          enum: [local, remote]
+        absPath:
+          type: string
+          nullable: true
+          description: Present only for a local desktop resolver.
+        url:
+          type: string
+          nullable: true
+          description: Short-lived address; never persisted in CitationBundle.
+        expiresAt:
+          type: integer
+          format: int64
+          nullable: true
+
+    ResolvedCitationDocumentSource:
+      type: object
+      required: [id, title, render]
+      properties:
+        id: {type: string}
+        title: {type: string}
+        source:
+          type: object
+          properties:
+            name: {type: string}
+            logoUrl: {type: string}
+        render:
+          oneOf:
+            - type: object
+              required: [kind, mimeType, address]
+              properties:
+                kind: {type: string, enum: [file]}
+                mimeType: {type: string}
+                address: {$ref: "#/components/schemas/CitationDocumentAddress"}
+            - type: object
+              required: [kind, html]
+              properties:
+                kind: {type: string, enum: [html]}
+                html:
+                  type: string
+                  description: Trusted backend-fetched HTML; sanitized by the app host.
+            - type: object
+              required: [kind, chunks]
+              properties:
+                kind: {type: string, enum: [chunks]}
+                chunks:
+                  type: array
+                  items:
+                    type: object
+                    additionalProperties: true
+            - type: object
+              required: [kind, url]
+              properties:
+                kind: {type: string, enum: [external]}
+                url: {type: string, format: uri}
+        chunks:
+          type: array
+          description: Optional locator index independent of the primary render.
+          items:
+            type: object
+            additionalProperties: true
+        documentVersion:
+          type: string
+          nullable: true
+        originalUrl:
+          type: string
+          nullable: true
+
+    ResolveCitationResponse:
+      type: object
+      required: [document, status]
+      properties:
+        document:
+          allOf:
+            - $ref: "#/components/schemas/ResolvedCitationDocumentSource"
+          nullable: true
+        effective_locator:
+          nullable: true
+          oneOf:
+            - $ref: "#/components/schemas/ChunkLocatorV1"
+            - $ref: "#/components/schemas/HtmlLocatorV1"
+            - $ref: "#/components/schemas/PdfLocatorV1"
+            - $ref: "#/components/schemas/ExternalLocatorV1"
+        status:
+          type: string
+          enum: [ready, stale, missing, forbidden, degraded]
+        fallback_reason:
+          type: string
+          nullable: true
+        canonical_url:
+          type: string
+          nullable: true
+
+    CitationRefV1:
+      type: object
+      required: [citationId, source, evidence]
+      properties:
+        citationId:
+          type: string
+          minLength: 1
+        source:
+          $ref: "#/components/schemas/CitationSourceV1"
+        evidence:
+          oneOf:
+            - $ref: "#/components/schemas/TextCitationEvidenceV1"
+            - $ref: "#/components/schemas/StructuredDataEvidenceV1"
+            - $ref: "#/components/schemas/CalculationEvidenceV1"
+        locator:
+          oneOf:
+            - $ref: "#/components/schemas/ChunkLocatorV1"
+            - $ref: "#/components/schemas/HtmlLocatorV1"
+            - $ref: "#/components/schemas/PdfLocatorV1"
+            - $ref: "#/components/schemas/ExternalLocatorV1"
+        resolutionStatus:
+          type: string
+          enum: [ready, stale, missing, forbidden, degraded]
+        annotations:
+          type: object
+          additionalProperties: true
+
+    CitationSourceV1:
+      type: object
+      required:
+        [sourceId, providerId, sourceType, title, retrievedAt]
+      properties:
+        sourceId: {type: string, minLength: 1}
+        providerId: {type: string, minLength: 1}
+        documentId: {type: string}
+        documentVersion: {type: string}
+        sourceType:
+          type: string
+          enum: [document, web, dataset, tool-result, conversation]
+        sourceCategory: {type: string}
+        mimeType: {type: string}
+        title: {type: string, minLength: 1}
+        organization: {type: string}
+        author: {type: string}
+        publishedAt: {type: string, format: date-time}
+        retrievedAt: {type: string, format: date-time}
+        canonicalUrl:
+          type: string
+          format: uri
+          description: Stable public URL only. Signed or secret-bearing URLs are forbidden.
+
+    TextCitationEvidenceV1:
+      type: object
+      required: [kind, quote, snippet, capturedAt]
+      properties:
+        kind: {type: string, enum: [text]}
+        quote: {type: string}
+        snippet: {type: string}
+        prefix: {type: string}
+        suffix: {type: string}
+        language: {type: string}
+        capturedAt: {type: string, format: date-time}
+        contentHash: {type: string}
+
+    StructuredDataEvidenceV1:
+      type: object
+      required: [kind, datasetId, toolName, field, value, capturedAt]
+      properties:
+        kind: {type: string, enum: [structured-data]}
+        datasetId: {type: string}
+        toolName: {type: string}
+        recordKey: {type: string}
+        entityId: {type: string}
+        entityName: {type: string}
+        field: {type: string}
+        metric: {type: string}
+        value:
+          nullable: true
+          oneOf:
+            - {type: string}
+            - {type: number}
+            - {type: boolean}
+        unit: {type: string}
+        currency: {type: string}
+        scale:
+          oneOf:
+            - {type: string}
+            - {type: number}
+        period: {type: string}
+        asOf: {type: string}
+        scope: {type: string}
+        basis: {type: string}
+        capturedAt: {type: string, format: date-time}
+        toolTraceRef: {type: string}
+        coverage:
+          type: object
+          properties:
+            start: {type: string}
+            end: {type: string}
+
+    CalculationEvidenceV1:
+      type: object
+      required: [kind, expression, inputs, result, calculatedAt]
+      properties:
+        kind: {type: string, enum: [calculation]}
+        expression: {type: string}
+        inputs:
+          type: array
+          items:
+            type: object
+            required: [name, citationId, value]
+            properties:
+              name: {type: string}
+              citationId: {type: string}
+              value:
+                oneOf:
+                  - {type: string}
+                  - {type: number}
+              unit: {type: string}
+        result:
+          oneOf:
+            - {type: string}
+            - {type: number}
+        unit: {type: string}
+        rounding: {type: string}
+        calculatedAt: {type: string, format: date-time}
+        entityId: {type: string}
+        entityName: {type: string}
+        metric: {type: string}
+        period: {type: string}
+        scope: {type: string}
+        basis: {type: string}
+
+    TextQuoteSelectorV1:
+      type: object
+      required: [exact]
+      properties:
+        exact: {type: string}
+        prefix: {type: string}
+        suffix: {type: string}
+
+    NormalizedRectV1:
+      type: object
+      required: [x, y, width, height]
+      properties:
+        x: {type: number, minimum: 0, maximum: 1}
+        y: {type: number, minimum: 0, maximum: 1}
+        width: {type: number, minimum: 0, maximum: 1}
+        height: {type: number, minimum: 0, maximum: 1}
+
+    ChunkLocatorV1:
+      type: object
+      required: [kind, chunkId]
+      properties:
+        kind: {type: string, enum: [chunk]}
+        chunkId: {type: string}
+        segmentId: {type: string}
+        quote: {$ref: "#/components/schemas/TextQuoteSelectorV1"}
+
+    HtmlLocatorV1:
+      type: object
+      required: [kind, quote]
+      properties:
+        kind: {type: string, enum: [html]}
+        chunkId: {type: string}
+        elementId: {type: string}
+        cssSelector: {type: string}
+        quote: {$ref: "#/components/schemas/TextQuoteSelectorV1"}
+
+    PdfLocatorV1:
+      type: object
+      required: [kind, page]
+      properties:
+        kind: {type: string, enum: [pdf]}
+        page: {type: integer, minimum: 1}
+        chunkId: {type: string}
+        rects:
+          type: array
+          items: {$ref: "#/components/schemas/NormalizedRectV1"}
+        quote: {$ref: "#/components/schemas/TextQuoteSelectorV1"}
+        coordinateSpace:
+          type: string
+          enum: [viewport-normalized-v1]
+        pageRotation:
+          type: integer
+          enum: [0, 90, 180, 270]
+
+    ExternalLocatorV1:
+      type: object
+      required: [kind]
+      properties:
+        kind: {type: string, enum: [external]}
+        fragment: {type: string}
+
+    CitationIntegrityV1:
+      type: object
+      required:
+        [status, unknownCitationIds, unusedCitationIds,
+         missingLocatorCitationIds, repairAttempts, policyRevision]
+      properties:
+        status:
+          type: string
+          enum: [passed, repaired, degraded, not-required]
+        unknownCitationIds:
+          type: array
+          items: {type: string}
+        unusedCitationIds:
+          type: array
+          items: {type: string}
+        missingLocatorCitationIds:
+          type: array
+          items: {type: string}
+        repairAttempts: {type: integer, minimum: 0, maximum: 1}
+        policyRevision: {type: string}
+        evidenceRegisteredCount: {type: integer, minimum: 0}
+        evidenceRejectedCount: {type: integer, minimum: 0}
+        evidenceOverflowReasons:
+          type: array
+          items: {type: string}
+        publicationBlocked: {type: boolean}
+
+    CitationQualityIssueV1:
+      type: object
+      required: [code, layer, severity]
+      properties:
+        code: {type: string}
+        layer: {type: string}
+        severity: {type: string, enum: [degraded, unverified]}
+        citationIds:
+          type: array
+          items: {type: string}
+        claimId: {type: string}
+        claim:
+          $ref: "#/components/schemas/TextQuoteSelectorV1"
+        location:
+          $ref: "#/components/schemas/ClaimLocationV1"
+
+    ClaimLocationV1:
+      oneOf:
+        - type: object
+          required: [kind, blockIndex, start, end]
+          properties:
+            kind: {type: string, enum: [text]}
+            blockIndex: {type: integer, minimum: 0}
+            start: {type: integer, minimum: 0}
+            end: {type: integer, minimum: 0}
+            sourceStart: {type: integer, minimum: 0}
+            sourceEnd: {type: integer, minimum: 0}
+        - type: object
+          required: [kind, blockIndex, itemIndex, start, end]
+          properties:
+            kind: {type: string, enum: [list-item]}
+            blockIndex: {type: integer, minimum: 0}
+            itemIndex: {type: integer, minimum: 0}
+            start: {type: integer, minimum: 0}
+            end: {type: integer, minimum: 0}
+            sourceStart: {type: integer, minimum: 0}
+            sourceEnd: {type: integer, minimum: 0}
+        - type: object
+          required: [kind, blockIndex, rowIndex, columnIndex]
+          properties:
+            kind: {type: string, enum: [table-cell]}
+            blockIndex: {type: integer, minimum: 0}
+            rowIndex: {type: integer, minimum: 0}
+            columnIndex: {type: integer, minimum: 0}
+            sourceStart: {type: integer, minimum: 0}
+            sourceEnd: {type: integer, minimum: 0}
+        - type: object
+          required: [kind]
+          properties:
+            kind: {type: string, enum: [legacy]}
+
+    ClaimEvidenceBindingV1:
+      type: object
+      required: [citationId, role, supportStatus]
+      properties:
+        citationId: {type: string}
+        role:
+          type: string
+          enum:
+            [primary, corroborating, component, calculation-input, conflicting]
+        supportStatus:
+          type: string
+          enum: [supported, partially-supported, contradicted, not-found]
+
+    CitationClaimAuditV1:
+      type: object
+      required:
+        [claimId, exact, segmentIndex, citationRequired, citationIds,
+         status, issueCodes]
+      properties:
+        claimId: {type: string}
+        exact: {type: string}
+        segmentIndex: {type: integer, minimum: 0}
+        citationRequired: {type: boolean}
+        auditPriority:
+          type: string
+          enum: [critical, supporting, optional]
+        auditSelected: {type: boolean}
+        selectionReasons:
+          type: array
+          items: {type: string}
+        claimGroupId: {type: string}
+        citationIds:
+          type: array
+          items: {type: string}
+        bindings:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClaimEvidenceBindingV1"
+        status:
+          type: string
+          enum: [passed, auto-bound, repaired, degraded, unverified, unsupported, not-selected]
+        issueCodes:
+          type: array
+          items: {type: string}
+        location:
+          $ref: "#/components/schemas/ClaimLocationV1"
+
+    CitationQualityResultV1:
+      type: object
+      required:
+        [policyId, policyRevision, mode, status, publishStatus,
+         layers, issues, metrics]
+      properties:
+        policyId: {type: string}
+        policyRevision: {type: string}
+        mode:
+          type: string
+          enum: [required-on-evidence, strict-domain]
+        status:
+          type: string
+          enum: [passed, unverified, degraded]
+        auditOutcome:
+          type: string
+          enum: [passed, partial, needs-review]
+        publishStatus:
+          type: string
+          enum: [ready, draft-only, blocked]
+        layers:
+          type: object
+          additionalProperties:
+            type: string
+            enum: [passed, degraded]
+        issues:
+          type: array
+          items:
+            $ref: "#/components/schemas/CitationQualityIssueV1"
+        claims:
+          type: array
+          items:
+            $ref: "#/components/schemas/CitationClaimAuditV1"
+        extractorRevision: {type: string}
+        selectorRevision: {type: string}
+        verifierRevision: {type: string}
+        metrics:
+          type: object
+          required:
+            [citationCount, unsourcedClaimCount,
+             unverifiedClaimCount, tierCounts]
+          properties:
+            citationCount: {type: integer, minimum: 0}
+            claimDetectedCount: {type: integer, minimum: 0}
+            claimCitationRequiredCount: {type: integer, minimum: 0}
+            claimBoundCount: {type: integer, minimum: 0}
+            claimAutoBoundCount: {type: integer, minimum: 0}
+            claimUnsupportedCount: {type: integer, minimum: 0}
+            claimSemanticMismatchCount: {type: integer, minimum: 0}
+            claimAmbiguousCount: {type: integer, minimum: 0}
+            claimAuditTruncated: {type: boolean}
+            criticalClaimSelectedCount: {type: integer, minimum: 0}
+            criticalClaimSupportedCount: {type: integer, minimum: 0}
+            criticalClaimUnresolvedCount: {type: integer, minimum: 0}
+            criticalConfirmedConflictCount: {type: integer, minimum: 0}
+            optionalClaimObservedCount: {type: integer, minimum: 0}
+            unsourcedClaimCount: {type: integer, minimum: 0}
+            unverifiedClaimCount: {type: integer, minimum: 0}
+            tierCounts:
+              type: object
+              additionalProperties: {type: integer, minimum: 0}
+
     SessionEvent:
       type: object
       required: [event_type]
@@ -6593,6 +7491,9 @@ components:
           type: string
         payload:
           type: object
+          description: >-
+            Flat string map. Final message.assistant.delta frames may carry a
+            JSON-encoded CitationBundleV1 under citation_bundle.
           additionalProperties:
             type: string
 

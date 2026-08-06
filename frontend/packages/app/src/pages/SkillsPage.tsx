@@ -27,6 +27,7 @@ import {
 } from "@valuz/ui";
 import {
   ResourceActionSlot,
+  ResourceCopyMenuItemSlot,
   ResourceDetailActionSlot,
 } from "../components/ResourceActionSlot";
 import {
@@ -34,6 +35,7 @@ import {
   usePanelStore,
   useResourceCategories,
   useResourceGuard,
+  useRegistryStore,
 } from "@valuz/core";
 import type {
   SkillView,
@@ -203,6 +205,10 @@ function badgeForCategory(
 
 export const SkillsPage = () => {
   const { t } = useTranslation();
+  const hasCopyMenuItems = useRegistryStore(
+    (state) =>
+      (state.slots["resource.skill.copy.menu-items"]?.length ?? 0) > 0,
+  );
   const navigate = useNavigate();
   const {
     setHeader,
@@ -588,6 +594,16 @@ export const SkillsPage = () => {
         }
         onDelete={canDeleteSkill ? handleDeleteOpen : undefined}
         onCopy={handleCopy}
+        copyMenuItems={
+          hasCopyMenuItems ? (
+            <ResourceCopyMenuItemSlot
+              resourceType="skill"
+              resource={
+                currentSkill as unknown as Record<string, unknown>
+              }
+            />
+          ) : undefined
+        }
         headerActions={
           <ResourceDetailActionSlot
             resourceType="skill"
@@ -605,6 +621,7 @@ export const SkillsPage = () => {
     currentSkill,
     currentCardSkill,
     activeFilesForCurrentSkill,
+    hasCopyMenuItems,
     navigate,
     setRightPanel,
   ]);

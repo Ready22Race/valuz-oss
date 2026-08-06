@@ -55,6 +55,127 @@ describe("buildTurns — streaming deltas", () => {
     ]);
   });
 
+  it("should preserve a valid citation bundle on the canonical assistant block", () => {
+    const bundle = {
+      version: 1,
+      citations: [
+        {
+          citationId: "cit_1",
+          source: {
+            sourceId: "doc:1",
+            providerId: "docs",
+            sourceType: "document",
+            title: "Annual report",
+            retrievedAt: "2026-07-30T08:00:00Z",
+          },
+          evidence: {
+            kind: "text",
+            quote: "Revenue increased.",
+            snippet: "Revenue increased.",
+            capturedAt: "2026-07-30T08:00:00Z",
+          },
+        },
+      ],
+    };
+    const turns = buildTurns([
+      evt(1, "message.user", { text: "hi", message_id: "u1" }),
+      evt(2, "message.assistant.delta", {
+        text: "Revenue increased. [1](citation://cit_1)",
+        message_id: "a1",
+        citation_bundle: JSON.stringify(bundle),
+      }),
+    ]);
+
+    expect(turns[0]!.blocks[0]).toMatchObject({
+      kind: "assistant",
+      messageId: "a1",
+      citationBundle: bundle,
+    });
+  });
+
+  it("attaches a later sidecar without replacing or duplicating assistant text", () => {
+    const bundle = {
+      version: 1 as const,
+      citations: [
+        {
+          citationId: "cit_1",
+          source: {
+            sourceId: "doc:1",
+            providerId: "docs",
+            sourceType: "document" as const,
+            title: "Annual report",
+            retrievedAt: "2026-08-04T00:00:00Z",
+          },
+          evidence: {
+            kind: "text" as const,
+            quote: "Revenue increased.",
+            snippet: "Revenue increased.",
+            capturedAt: "2026-08-04T00:00:00Z",
+          },
+        },
+      ],
+    };
+    const original = "Revenue [source](evidence://ev_revenue_12345678).";
+    const turns = buildTurns([
+      evt(1, "message.user", { text: "hi", message_id: "a1" }),
+      evt(2, "message.assistant.delta", {
+        text: original,
+        message_id: "a1",
+      }),
+      evt(3, "message.assistant.sidecar", {
+        assistant_segment_index: "0",
+        citation_bundle: JSON.stringify(bundle),
+        message_id: "a1",
+      }),
+    ]);
+
+    expect(turns[0]!.blocks).toHaveLength(1);
+    expect(turns[0]!.blocks[0]).toMatchObject({
+      kind: "assistant",
+      text: original,
+      citationBundle: bundle,
+    });
+  });
+
+  it("should ignore malformed citation bundles without dropping answer text", () => {
+    const turns = buildTurns([
+      evt(1, "message.user", { text: "hi", message_id: "u1" }),
+      evt(2, "message.assistant.delta", {
+        text: "Answer",
+        message_id: "a1",
+        citation_bundle: "{not-json",
+      }),
+    ]);
+
+    expect(turns[0]!.blocks[0]).toEqual({
+      kind: "assistant",
+      text: "Answer",
+      messageId: "a1",
+      sealed: true,
+      parentToolUseId: undefined,
+    });
+  });
+
+  it("should ignore structurally incomplete citation bundles", () => {
+    const turns = buildTurns([
+      evt(1, "message.user", { text: "hi", message_id: "u1" }),
+      evt(2, "message.assistant.delta", {
+        text: "Answer [source](citation://cit_1)",
+        message_id: "a1",
+        citation_bundle: JSON.stringify({
+          version: 1,
+          citations: [{ citationId: "cit_1", source: {}, evidence: {} }],
+        }),
+      }),
+    ]);
+
+    expect(turns[0]!.blocks[0]).not.toHaveProperty("citationBundle");
+    expect(turns[0]!.blocks[0]).toMatchObject({
+      kind: "assistant",
+      text: "Answer [source](citation://cit_1)",
+    });
+  });
+
   it("should accumulate thinking_delta separately from text_delta", () => {
     const turns = buildTurns([
       evt(1, "message.user", { text: "hi", message_id: "u1" }),

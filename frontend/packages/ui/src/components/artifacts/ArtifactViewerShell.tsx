@@ -1,5 +1,7 @@
 import {
+  Code2,
   Copy,
+  Eye,
   ExternalLink,
   File,
   FileCode2,
@@ -15,9 +17,11 @@ import {
   ZoomOut,
 } from "lucide-react";
 import {
+  createContext,
   lazy,
   Suspense,
   useCallback,
+  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -36,6 +40,8 @@ import type {
   ArtifactRendererProps,
   ArtifactViewerShellProps,
 } from "./artifact-viewer.types";
+
+import { useI18n } from "../../hooks/use-i18n";
 
 export type {
   ArtifactContent,
@@ -63,6 +69,31 @@ const SpreadsheetRenderer = lazy(() =>
 
 type ArtifactRendererComponent = ComponentType<ArtifactRendererProps>;
 type PreviewSourceMode = "preview" | "source";
+type ImageZoom = number | "fit";
+
+interface ArtifactViewModeContextValue {
+  mode: PreviewSourceMode;
+  onModeChange: (mode: PreviewSourceMode) => void;
+}
+
+const ArtifactViewModeContext =
+  createContext<ArtifactViewModeContextValue | null>(null);
+
+interface ArtifactImageZoomContextValue {
+  zoom: ImageZoom;
+  onZoomChange: (zoom: ImageZoom) => void;
+}
+
+const ArtifactImageZoomContext =
+  createContext<ArtifactImageZoomContextValue | null>(null);
+
+function clampImageZoom(value: number): number {
+  return Math.min(Math.max(value, 0.25), 4);
+}
+
+function numericImageZoom(zoom: ImageZoom): number {
+  return zoom === "fit" ? 1 : zoom;
+}
 
 const PREVIEW_LABELS: Record<ArtifactPreviewKind, string> = {
   markdown: "Markdown",
@@ -91,7 +122,7 @@ function formatModified(value?: string | null): string | null {
   return date.toLocaleString();
 }
 
-function ArtifactIcon({ kind }: { kind: ArtifactPreviewKind }) {
+export function ArtifactIcon({ kind }: { kind: ArtifactPreviewKind }) {
   if (kind === "markdown" || kind === "plain") {
     return <FileText className="h-4 w-4 text-ink-meta" />;
   }
@@ -138,15 +169,16 @@ function PreviewSourceToggle({
 }
 
 function EmptyArtifactState() {
+  const { t } = useI18n();
   return (
     <div className="flex h-full items-center justify-center px-6 py-16">
       <div className="max-w-[360px] text-center">
         <FileText className="mx-auto mb-3 h-8 w-8 text-ink-muted" />
         <div className="text-sm font-medium text-ink-heading">
-          选择一个项目文件
+          {t("ui.artifact.emptyTitle")}
         </div>
         <p className="mt-1 text-xs leading-5 text-ink-body">
-          在右侧项目文件树中点击文件后，会在这里以 Artifact 方式打开。
+          {t("ui.artifact.emptyHint")}
         </p>
       </div>
     </div>
@@ -162,26 +194,27 @@ function UnsupportedRenderer({
   content: ArtifactContent | null;
   onOpenExternal?: () => void;
 }) {
+  const { t } = useI18n();
   const reason =
     content?.kind === "external"
       ? content.reason
       : content?.kind === "binary" && content.reason
         ? content.reason
-        : "当前类型暂未注册内嵌 renderer。";
+        : t("ui.artifact.unsupportedReason");
   return (
     <div className="flex h-full items-center justify-center px-6 py-16">
       <div className="max-w-[460px] rounded-[10px] border border-surface-border bg-surface-soft px-5 py-5">
         <div className="flex items-center gap-2 text-sm font-medium text-ink-heading">
           <ArtifactIcon kind={artifact.previewKind} />
-          暂不支持内嵌预览
+          {t("ui.artifact.unsupportedTitle")}
         </div>
         <p className="mt-2 text-xs leading-5 text-ink-body">{reason}</p>
         <div className="mt-4 grid grid-cols-[96px_1fr] gap-x-3 gap-y-1 text-2xs">
-          <span className="text-ink-meta">文件名</span>
+          <span className="text-ink-meta">{t("ui.artifact.fieldName")}</span>
           <span className="min-w-0 truncate text-ink-heading">{artifact.name}</span>
-          <span className="text-ink-meta">路径</span>
+          <span className="text-ink-meta">{t("ui.artifact.fieldPath")}</span>
           <span className="min-w-0 truncate text-ink-heading">{artifact.path}</span>
-          <span className="text-ink-meta">类型</span>
+          <span className="text-ink-meta">{t("ui.artifact.fieldType")}</span>
           <span className="text-ink-heading">
             {artifact.mimeType ?? artifact.extension ?? "unknown"}
           </span>
@@ -193,7 +226,7 @@ function UnsupportedRenderer({
               onClick={onOpenExternal}
               className="inline-flex h-8 items-center rounded-md border border-surface-border bg-surface px-3 text-xs font-medium text-ink-heading transition hover:bg-surface-muted"
             >
-              本地打开
+              {t("ui.artifact.openLocally")}
             </button>
           </div>
         ) : null}
@@ -206,8 +239,11 @@ function TextRenderer({
   artifact,
   content,
 }: ArtifactRendererProps) {
-  const [markdownMode, setMarkdownMode] =
-    useState<PreviewSourceMode>("preview");
+  const { t } = useI18n();
+  const shellViewMode = useContext(ArtifactViewModeContext);
+  const [localMode, setLocalMode] = useState<PreviewSourceMode>("preview");
+  const markdownMode = shellViewMode?.mode ?? localMode;
+  const setMarkdownMode = shellViewMode?.onModeChange ?? setLocalMode;
   if (!content || content.kind !== "text") {
     return <UnsupportedRenderer artifact={artifact} content={content} />;
   }
@@ -215,15 +251,20 @@ function TextRenderer({
   if (artifact.previewKind === "markdown" && markdownMode === "preview") {
     return (
       <div className="flex h-full min-h-0 flex-col">
-        <div className="flex h-10 shrink-0 items-center justify-between border-b border-surface-border bg-surface-soft px-4">
-          <span className="text-xs text-ink-body">Markdown</span>
-          <PreviewSourceToggle mode={markdownMode} onModeChange={setMarkdownMode} />
-        </div>
+        {!shellViewMode ? (
+          <div className="flex h-10 shrink-0 items-center justify-between border-b border-surface-border bg-surface-soft px-4">
+            <span className="text-xs text-ink-body">Markdown</span>
+            <PreviewSourceToggle
+              mode={markdownMode}
+              onModeChange={setMarkdownMode}
+            />
+          </div>
+        ) : null}
         <div className="min-h-0 flex-1 overflow-y-auto px-8 py-7">
           <div className="mx-auto max-w-[820px]">
             {content.truncated ? (
               <div className="mb-4 rounded-md border border-warning-light bg-warning-light px-3 py-2 text-xs text-warning-text">
-                文件较大，当前仅显示前 5 MiB。
+                {t("ui.artifact.truncated")}
               </div>
             ) : null}
             <MarkdownContent content={content.content} />
@@ -235,26 +276,32 @@ function TextRenderer({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {artifact.previewKind === "markdown" ? (
+      {artifact.previewKind === "markdown" && !shellViewMode ? (
         <div className="flex h-10 shrink-0 items-center justify-between border-b border-surface-border bg-surface-soft px-4">
           <span className="text-xs text-ink-body">Markdown</span>
-          <PreviewSourceToggle mode={markdownMode} onModeChange={setMarkdownMode} />
+          <PreviewSourceToggle
+            mode={markdownMode}
+            onModeChange={setMarkdownMode}
+          />
         </div>
       ) : null}
-      <pre className="min-h-0 flex-1 overflow-auto bg-surface-base p-4 font-mono text-xs leading-6 text-ink-heading">
-        {content.content}
-      </pre>
-      {content.truncated ? (
-        <div className="border-t border-surface-border bg-warning-light px-4 py-2 text-xs text-warning-text">
-          文件较大，当前仅显示前 5 MiB。
-        </div>
-      ) : null}
+      <div className="min-h-0 flex-1">
+        <CodeMirrorRenderer
+          artifact={artifact}
+          content={content}
+          wrapLines={artifact.previewKind === "markdown"}
+        />
+      </div>
     </div>
   );
 }
 
 function ImageRenderer({ artifact, content, onReload }: ArtifactRendererProps) {
-  const [zoom, setZoom] = useState<number | "fit">("fit");
+  const { t } = useI18n();
+  const shellImageZoom = useContext(ArtifactImageZoomContext);
+  const [localZoom, setLocalZoom] = useState<ImageZoom>("fit");
+  const zoom = shellImageZoom?.zoom ?? localZoom;
+  const setZoom = shellImageZoom?.onZoomChange ?? setLocalZoom;
   const [loadState, setLoadState] = useState<"loading" | "ready" | "error">(
     "loading",
   );
@@ -274,9 +321,9 @@ function ImageRenderer({ artifact, content, onReload }: ArtifactRendererProps) {
     setLoadState("loading");
   }, [imageUrl]);
 
-  const zoomValue = zoom === "fit" ? 1 : zoom;
+  const zoomValue = numericImageZoom(zoom);
   const updateZoom = (nextZoom: number) => {
-    setZoom(Math.min(Math.max(nextZoom, 0.25), 4));
+    setZoom(clampImageZoom(nextZoom));
   };
 
   const handleDragStart = (event: MouseEvent<HTMLDivElement>) => {
@@ -298,40 +345,43 @@ function ImageRenderer({ artifact, content, onReload }: ArtifactRendererProps) {
   if (imageUrl) {
     return (
       <div className="flex h-full min-h-0 flex-col bg-surface-base">
-        <div className="flex h-10 shrink-0 items-center justify-between border-b border-surface-border bg-surface-soft px-4">
-          <span className="text-xs text-ink-body">Image</span>
-          <div className="flex items-center gap-1">
-            <button
-              type="button"
-              onClick={() => updateZoom(zoomValue - 0.25)}
-              className="flex h-7 w-7 items-center justify-center rounded-md text-ink-body transition hover:bg-surface-muted hover:text-ink-heading disabled:opacity-40"
-              disabled={zoom !== "fit" && zoom <= 0.25}
-              aria-label="缩小图片"
-              title="缩小"
-            >
-              <ZoomOut className="h-3.5 w-3.5" />
-            </button>
-            <button
-              type="button"
-              onClick={() => setZoom("fit")}
-              aria-label="图片适合窗口"
-              className="h-7 min-w-12 rounded-md px-2 text-xs text-ink-body transition hover:bg-surface-muted hover:text-ink-heading"
-              title="适合窗口"
-            >
-              {zoom === "fit" ? "Fit" : `${Math.round(zoom * 100)}%`}
-            </button>
-            <button
-              type="button"
-              onClick={() => updateZoom(zoomValue + 0.25)}
-              className="flex h-7 w-7 items-center justify-center rounded-md text-ink-body transition hover:bg-surface-muted hover:text-ink-heading disabled:opacity-40"
-              disabled={zoom !== "fit" && zoom >= 4}
-              aria-label="放大图片"
-              title="放大"
-            >
-              <ZoomIn className="h-3.5 w-3.5" />
-            </button>
+        {!shellImageZoom ? (
+          <div className="flex h-10 shrink-0 items-center justify-end border-b border-surface-border bg-surface px-4">
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => updateZoom(zoomValue - 0.25)}
+                className="flex h-7 w-7 items-center justify-center rounded-md text-ink-body transition hover:bg-surface-muted hover:text-ink-heading disabled:opacity-40"
+                disabled={zoom !== "fit" && zoom <= 0.25}
+                aria-label={t("ui.artifact.zoomOutLabel")}
+                title={t("ui.artifact.zoomOut")}
+              >
+                <ZoomOut className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setZoom("fit")}
+                aria-label={t("ui.artifact.fitWindowLabel")}
+                className="h-7 min-w-12 rounded-md px-2 text-xs text-ink-body transition hover:bg-surface-muted hover:text-ink-heading"
+                title={t("ui.artifact.fitWindow")}
+              >
+                {zoom === "fit"
+                  ? t("ui.artifact.fitWindow")
+                  : `${Math.round(zoom * 100)}%`}
+              </button>
+              <button
+                type="button"
+                onClick={() => updateZoom(zoomValue + 0.25)}
+                className="flex h-7 w-7 items-center justify-center rounded-md text-ink-body transition hover:bg-surface-muted hover:text-ink-heading disabled:opacity-40"
+                disabled={zoom !== "fit" && zoom >= 4}
+                aria-label={t("ui.artifact.zoomInLabel")}
+                title={t("ui.artifact.zoomIn")}
+              >
+                <ZoomIn className="h-3.5 w-3.5" />
+              </button>
+            </div>
           </div>
-        </div>
+        ) : null}
         <div
           ref={viewportRef}
           onMouseDown={handleDragStart}
@@ -348,7 +398,7 @@ function ImageRenderer({ artifact, content, onReload }: ArtifactRendererProps) {
               role="status"
             >
               <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              正在加载图片
+              {t("ui.artifact.loadingImage")}
             </div>
           ) : null}
           {loadState === "error" ? (
@@ -356,7 +406,7 @@ function ImageRenderer({ artifact, content, onReload }: ArtifactRendererProps) {
               className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-surface-base px-6 text-sm text-error-text"
               role="alert"
             >
-              无法加载图片
+              {t("ui.artifact.imageFailed")}
               {/* Re-resolve, don't re-request: the address may be an expired
                   presigned URL, which would just fail again. */}
               {onReload ? (
@@ -369,7 +419,7 @@ function ImageRenderer({ artifact, content, onReload }: ArtifactRendererProps) {
                   className="inline-flex h-7 items-center gap-1.5 rounded-md border border-error-text/20 bg-surface px-2.5 text-xs font-medium text-error-text transition hover:bg-surface-soft"
                 >
                   <RefreshCw className="h-3.5 w-3.5" />
-                  重试
+                  {t("ui.artifact.retry")}
                 </button>
               ) : null}
             </div>
@@ -399,6 +449,7 @@ function ImageRenderer({ artifact, content, onReload }: ArtifactRendererProps) {
 }
 
 function MediaRenderer({ artifact, content, onReload }: ArtifactRendererProps) {
+  const { t } = useI18n();
   const [loadState, setLoadState] = useState<"loading" | "ready" | "error">(
     "loading",
   );
@@ -419,14 +470,14 @@ function MediaRenderer({ artifact, content, onReload }: ArtifactRendererProps) {
         role="status"
       >
         <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-        正在加载媒体
+        {t("ui.artifact.loadingMedia")}
       </div>
     ) : loadState === "error" ? (
       <div
         className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-surface-base px-6 text-sm text-error-text"
         role="alert"
       >
-        无法加载媒体文件
+        {t("ui.artifact.mediaFailed")}
         {/* Re-resolve, don't re-request: the address may be an expired
             presigned URL, which would just fail again. */}
         {onReload ? (
@@ -439,7 +490,7 @@ function MediaRenderer({ artifact, content, onReload }: ArtifactRendererProps) {
             className="inline-flex h-7 items-center gap-1.5 rounded-md border border-error-text/20 bg-surface px-2.5 text-xs font-medium text-error-text transition hover:bg-surface-soft"
           >
             <RefreshCw className="h-3.5 w-3.5" />
-            重试
+            {t("ui.artifact.retry")}
           </button>
         ) : null}
       </div>
@@ -457,7 +508,7 @@ function MediaRenderer({ artifact, content, onReload }: ArtifactRendererProps) {
           onError={() => setLoadState("error")}
           className={`w-full max-w-[720px] ${loadState === "ready" ? "opacity-100" : "opacity-0"}`}
         >
-          当前环境不支持音频预览。
+          {t("ui.artifact.audioUnsupported")}
         </audio>
       </div>
     );
@@ -476,7 +527,7 @@ function MediaRenderer({ artifact, content, onReload }: ArtifactRendererProps) {
             loadState === "ready" ? "opacity-100" : "opacity-0"
           }`}
         >
-          当前环境不支持视频预览。
+          {t("ui.artifact.videoUnsupported")}
         </video>
       </div>
     );
@@ -536,7 +587,11 @@ function htmlPreviewSrcDoc(source: string): string {
 }
 
 function HtmlRenderer({ artifact, content }: ArtifactRendererProps) {
-  const [mode, setMode] = useState<PreviewSourceMode>("preview");
+  const { t } = useI18n();
+  const shellViewMode = useContext(ArtifactViewModeContext);
+  const [localMode, setLocalMode] = useState<PreviewSourceMode>("preview");
+  const mode = shellViewMode?.mode ?? localMode;
+  const setMode = shellViewMode?.onModeChange ?? setLocalMode;
   const htmlSource = content?.kind === "text" ? content.content : null;
   const previewHostRef = useRef<HTMLDivElement | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
@@ -598,12 +653,18 @@ function HtmlRenderer({ artifact, content }: ArtifactRendererProps) {
   if (mode === "source") {
     return (
       <div className="flex h-full min-h-0 flex-col">
-        <div className="flex h-10 shrink-0 items-center justify-between border-b border-surface-border bg-surface-soft px-4">
-          <span className="text-xs text-ink-body">HTML</span>
-          <PreviewSourceToggle mode={mode} onModeChange={setMode} />
-        </div>
+        {!shellViewMode ? (
+          <div className="flex h-10 shrink-0 items-center justify-between border-b border-surface-border bg-surface-soft px-4">
+            <span className="text-xs text-ink-body">HTML</span>
+            <PreviewSourceToggle mode={mode} onModeChange={setMode} />
+          </div>
+        ) : null}
         <div className="min-h-0 flex-1">
-          <CodeMirrorRenderer artifact={artifact} content={content} />
+          <CodeMirrorRenderer
+            artifact={artifact}
+            content={content}
+            wrapLines
+          />
         </div>
       </div>
     );
@@ -611,10 +672,12 @@ function HtmlRenderer({ artifact, content }: ArtifactRendererProps) {
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-surface-base">
-      <div className="flex h-10 shrink-0 items-center justify-between border-b border-surface-border bg-surface-soft px-4">
-        <span className="text-xs text-ink-body">HTML</span>
-        <PreviewSourceToggle mode={mode} onModeChange={setMode} />
-      </div>
+      {!shellViewMode ? (
+        <div className="flex h-10 shrink-0 items-center justify-between border-b border-surface-border bg-surface-soft px-4">
+          <span className="text-xs text-ink-body">HTML</span>
+          <PreviewSourceToggle mode={mode} onModeChange={setMode} />
+        </div>
+      ) : null}
       <div
         ref={previewHostRef}
         className="min-h-0 flex-1 overflow-auto bg-surface-base p-4"
@@ -635,7 +698,7 @@ function HtmlRenderer({ artifact, content }: ArtifactRendererProps) {
       </div>
       {content.truncated ? (
         <div className="border-t border-surface-border bg-warning-light px-4 py-2 text-xs text-warning-text">
-          文件较大，当前仅显示前 5 MiB。
+          {t("ui.artifact.truncated")}
         </div>
       ) : null}
     </div>
@@ -666,6 +729,7 @@ export function ArtifactRenderer({
   onOpenExternal,
   onReload,
 }: ArtifactRendererProps) {
+  const { t } = useI18n();
   const Renderer = ARTIFACT_RENDERERS[artifact.previewKind] ?? UnsupportedRenderer;
   return (
     <Suspense
@@ -675,7 +739,7 @@ export function ArtifactRenderer({
           role="status"
         >
           <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-          正在加载预览器
+          {t("ui.artifact.loadingRenderer")}
         </div>
       }
     >
@@ -696,16 +760,50 @@ export function ArtifactViewerShell({
   target = null,
   loading = false,
   error = null,
+  framed = true,
+  compactHeader = false,
   onReload,
   onClose,
   onCopyContent,
   onOpenExternal,
 }: ArtifactViewerShellProps) {
+  const { t } = useI18n();
   const shellRef = useRef<HTMLElement | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [viewModeState, setViewModeState] = useState<{
+    artifactId: string | null;
+    mode: PreviewSourceMode;
+  }>({ artifactId: artifact?.id ?? null, mode: "preview" });
+  const viewMode =
+    viewModeState.artifactId === (artifact?.id ?? null)
+      ? viewModeState.mode
+      : "preview";
+  const setViewMode = useCallback(
+    (mode: PreviewSourceMode) => {
+      setViewModeState({ artifactId: artifact?.id ?? null, mode });
+    },
+    [artifact?.id],
+  );
+  const [imageZoomState, setImageZoomState] = useState<{
+    artifactId: string | null;
+    zoom: ImageZoom;
+  }>({ artifactId: artifact?.id ?? null, zoom: "fit" });
+  const imageZoom =
+    imageZoomState.artifactId === (artifact?.id ?? null)
+      ? imageZoomState.zoom
+      : "fit";
+  const setImageZoom = useCallback(
+    (zoom: ImageZoom) => {
+      setImageZoomState({ artifactId: artifact?.id ?? null, zoom });
+    },
+    [artifact?.id],
+  );
   const fullscreenSupported =
     typeof Element !== "undefined" &&
     typeof Element.prototype.requestFullscreen === "function";
+  // Compact mode answers "where is this, how big" only — the tab strip above
+  // already carries the name, and the kind is obvious from the tab's icon.
+  const compactSize = formatBytes(artifact?.size);
   const metadata = useMemo(() => {
     if (!artifact) return [];
     return [
@@ -773,36 +871,138 @@ export function ArtifactViewerShell({
   return (
     <article
       ref={shellRef}
-      className="flex h-full min-h-0 flex-col overflow-hidden rounded-[14px] border border-surface-border bg-surface shadow-sm outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
+      className={`flex h-full min-h-0 flex-col overflow-hidden bg-surface outline-none ${
+        framed
+          ? "rounded-[14px] border border-surface-border shadow-sm focus-visible:ring-2 focus-visible:ring-primary/30"
+          : ""
+      }`}
       tabIndex={0}
       aria-busy={loading}
       onKeyDown={handleKeyDown}
     >
       <header className="shrink-0 border-b border-surface-border bg-surface">
-        <div className="flex items-start gap-4 px-5 py-4">
-          <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-surface-soft">
-            {artifact ? (
-              <ArtifactIcon kind={artifact.previewKind} />
-            ) : (
-              <Loader2 className="h-4 w-4 animate-spin text-ink-meta" />
-            )}
-          </div>
-          <div className="min-w-0 flex-1">
-            <h2 className="truncate text-lg font-medium text-ink-heading">
-              {artifact?.name ?? "读取文件中"}
-            </h2>
-            <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-body">
-              {artifact?.path && artifact.path !== artifact.name ? (
-                <span className="min-w-0 max-w-full truncate">{artifact.path}</span>
+        <div
+          className={
+            compactHeader
+              ? "flex items-center gap-3 px-3 py-1"
+              : "flex items-start gap-4 px-5 py-4"
+          }
+        >
+          {compactHeader ? (
+            // One line: the tab strip above carries the name and the kind is
+            // already in its icon, so this row only answers "where, how big".
+            <div className="flex min-w-0 flex-1 items-center gap-2 text-xs text-ink-body">
+              <span className="min-w-0 truncate">
+                {artifact?.path ?? t("ui.artifact.readingFileName")}
+              </span>
+              {compactSize ? (
+                <span className="shrink-0 text-ink-meta">{compactSize}</span>
               ) : null}
-              {metadata.map((item) => (
-                <Badge key={item} variant="outline">
-                  {item}
-                </Badge>
-              ))}
             </div>
-          </div>
+          ) : (
+            <>
+              <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-surface-soft">
+                {artifact ? (
+                  <ArtifactIcon kind={artifact.previewKind} />
+                ) : (
+                  <Loader2 className="h-4 w-4 animate-spin text-ink-meta" />
+                )}
+              </div>
+              <div className="min-w-0 flex-1">
+                <h2 className="truncate text-lg font-medium text-ink-heading">
+                  {artifact?.name ?? t("ui.artifact.readingFileName")}
+                </h2>
+                <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-body">
+                  {artifact?.path && artifact.path !== artifact.name ? (
+                    <span className="min-w-0 max-w-full truncate">{artifact.path}</span>
+                  ) : null}
+                  {metadata.map((item) => (
+                    <Badge key={item} variant="outline">
+                      {item}
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
           <div className="flex shrink-0 items-center gap-1">
+            {artifact?.previewKind === "image" ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setImageZoom(
+                      clampImageZoom(numericImageZoom(imageZoom) - 0.25),
+                    )
+                  }
+                  disabled={imageZoom !== "fit" && imageZoom <= 0.25}
+                  aria-label={t("ui.artifact.zoomOutLabel")}
+                  className="flex h-9 w-9 items-center justify-center rounded-md text-ink-body transition hover:bg-surface-soft hover:text-ink-heading disabled:opacity-40"
+                  title={t("ui.artifact.zoomOut")}
+                >
+                  <ZoomOut className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setImageZoom("fit")}
+                  aria-label={t("ui.artifact.fitWindowLabel")}
+                  className="h-9 min-w-12 rounded-md px-2 text-xs text-ink-body transition hover:bg-surface-soft hover:text-ink-heading"
+                  title={t("ui.artifact.fitWindow")}
+                >
+                  {imageZoom === "fit"
+                    ? t("ui.artifact.fitWindow")
+                    : `${Math.round(imageZoom * 100)}%`}
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setImageZoom(
+                      clampImageZoom(numericImageZoom(imageZoom) + 0.25),
+                    )
+                  }
+                  disabled={imageZoom !== "fit" && imageZoom >= 4}
+                  aria-label={t("ui.artifact.zoomInLabel")}
+                  className="flex h-9 w-9 items-center justify-center rounded-md text-ink-body transition hover:bg-surface-soft hover:text-ink-heading disabled:opacity-40"
+                  title={t("ui.artifact.zoomIn")}
+                >
+                  <ZoomIn className="h-3.5 w-3.5" />
+                </button>
+              </>
+            ) : null}
+            {artifact &&
+            (artifact.previewKind === "markdown" ||
+              artifact.previewKind === "html") ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setViewMode("preview")}
+                  aria-label={t("ui.artifact.preview")}
+                  aria-pressed={viewMode === "preview"}
+                  className={`flex h-9 w-9 items-center justify-center rounded-md transition ${
+                    viewMode === "preview"
+                      ? "bg-surface-soft text-ink-heading"
+                      : "text-ink-body hover:bg-surface-soft hover:text-ink-heading"
+                  }`}
+                  title={t("ui.artifact.preview")}
+                >
+                  <Eye className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setViewMode("source")}
+                  aria-label={t("ui.artifact.sourceCode")}
+                  aria-pressed={viewMode === "source"}
+                  className={`flex h-9 w-9 items-center justify-center rounded-md transition ${
+                    viewMode === "source"
+                      ? "bg-surface-soft text-ink-heading"
+                      : "text-ink-body hover:bg-surface-soft hover:text-ink-heading"
+                  }`}
+                  title={t("ui.artifact.sourceCode")}
+                >
+                  <Code2 className="h-3.5 w-3.5" />
+                </button>
+              </>
+            ) : null}
             {artifact?.previewKind === "pdf" && fullscreenSupported ? (
               <button
                 type="button"
@@ -813,9 +1013,17 @@ export function ArtifactViewerShell({
                     void shellRef.current?.requestFullscreen();
                   }
                 }}
-                aria-label={isFullscreen ? "退出全屏" : "进入全屏"}
+                aria-label={
+                  isFullscreen
+                    ? t("ui.artifact.exitFullscreen")
+                    : t("ui.artifact.enterFullscreen")
+                }
                 className="flex h-9 w-9 items-center justify-center rounded-md text-ink-body transition hover:bg-surface-soft hover:text-ink-heading"
-                title={`${isFullscreen ? "退出全屏" : "进入全屏"}（⌘⇧F）`}
+                title={t("ui.artifact.fullscreenTitle", {
+                  action: isFullscreen
+                    ? t("ui.artifact.exitFullscreen")
+                    : t("ui.artifact.enterFullscreen"),
+                })}
               >
                 {isFullscreen ? (
                   <Minimize2 className="h-3.5 w-3.5" />
@@ -829,9 +1037,9 @@ export function ArtifactViewerShell({
                 type="button"
                 onClick={onCopyContent}
                 disabled={!artifact?.capabilities.canCopyContent}
-                aria-label="复制内容"
+                aria-label={t("ui.artifact.copyContent")}
                 className="flex h-9 w-9 items-center justify-center rounded-md text-ink-body transition hover:bg-surface-soft hover:text-ink-heading disabled:pointer-events-none disabled:opacity-40"
-                title="复制内容"
+                title={t("ui.artifact.copyContent")}
               >
                 <Copy className="h-3.5 w-3.5" />
               </button>
@@ -841,9 +1049,9 @@ export function ArtifactViewerShell({
                 type="button"
                 onClick={onOpenExternal}
                 disabled={!artifact?.capabilities.canOpenExternal}
-                aria-label="外部打开"
+                aria-label={t("ui.artifact.openExternal")}
                 className="flex h-9 w-9 items-center justify-center rounded-md text-ink-body transition hover:bg-surface-soft hover:text-ink-heading disabled:pointer-events-none disabled:opacity-40"
-                title="外部打开"
+                title={t("ui.artifact.openExternal")}
               >
                 <ExternalLink className="h-3.5 w-3.5" />
               </button>
@@ -852,9 +1060,9 @@ export function ArtifactViewerShell({
               <button
                 type="button"
                 onClick={onReload}
-                aria-label="刷新"
+                aria-label={t("ui.artifact.refresh")}
                 className="flex h-9 w-9 items-center justify-center rounded-md text-ink-body transition hover:bg-surface-soft hover:text-ink-heading"
-                title="刷新"
+                title={t("ui.artifact.refresh")}
               >
                 <RefreshCw className="h-3.5 w-3.5" />
               </button>
@@ -863,9 +1071,9 @@ export function ArtifactViewerShell({
               <button
                 type="button"
                 onClick={onClose}
-                aria-label="关闭"
+                aria-label={t("ui.artifact.close")}
                 className="flex h-9 w-9 items-center justify-center rounded-md text-ink-body transition hover:bg-surface-soft hover:text-ink-heading"
-                title="关闭"
+                title={t("ui.artifact.close")}
               >
                 <X className="h-3.5 w-3.5" />
               </button>
@@ -881,7 +1089,7 @@ export function ArtifactViewerShell({
             aria-live="polite"
           >
             <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-            正在读取文件
+            {t("ui.artifact.readingFile")}
           </div>
         ) : error ? (
           <div className="flex h-full items-center justify-center px-6 py-16">
@@ -889,7 +1097,7 @@ export function ArtifactViewerShell({
               className="max-w-[420px] rounded-[10px] border border-error-light bg-error-light px-5 py-4 text-error-text"
               role="alert"
             >
-              <div className="text-sm font-medium">无法预览文件</div>
+              <div className="text-sm font-medium">{t("ui.artifact.previewFailed")}</div>
               <p className="mt-1 text-xs leading-5">{error}</p>
               {onReload ? (
                 <button
@@ -897,19 +1105,27 @@ export function ArtifactViewerShell({
                   onClick={onReload}
                   className="mt-3 inline-flex h-8 items-center rounded-md border border-error-text/20 bg-surface px-3 text-xs font-medium text-error-text transition hover:bg-surface-soft"
                 >
-                  重试
+                  {t("ui.artifact.retry")}
                 </button>
               ) : null}
             </div>
           </div>
         ) : artifact ? (
-          <ArtifactRenderer
-            artifact={artifact}
-            content={content}
-            target={target}
-            onOpenExternal={onOpenExternal}
-            onReload={onReload}
-          />
+          <ArtifactImageZoomContext.Provider
+            value={{ zoom: imageZoom, onZoomChange: setImageZoom }}
+          >
+            <ArtifactViewModeContext.Provider
+              value={{ mode: viewMode, onModeChange: setViewMode }}
+            >
+              <ArtifactRenderer
+                artifact={artifact}
+                content={content}
+                target={target}
+                onOpenExternal={onOpenExternal}
+                onReload={onReload}
+              />
+            </ArtifactViewModeContext.Provider>
+          </ArtifactImageZoomContext.Provider>
         ) : null}
       </div>
     </article>

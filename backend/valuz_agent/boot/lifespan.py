@@ -26,6 +26,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # mid-boot must not leave an orphan holding the lock either. No-op unless
     # the spawner passed VALUZ_PARENT_PID (packaged desktop only).
     parent_watchdog.start_parent_watchdog()
+    # PATH enrichment runs before ANY step that resolves executables or hands
+    # the environment to a child (kernel init registers tools via
+    # ``node_available()``; stdio MCP children and the CLI login probe resolve
+    # through this process's PATH). A Finder/launchd-launched backend only has
+    # launchd's minimal PATH — see ``boot/login_path.py``.
+    await steps.enrich_login_shell_path()
     # Data-dir cutover runs BEFORE identity: the owner id is read from the
     # migrated ``installation.json``, so it must be in place before
     # ``ensure_local_identity`` caches the id (else the cached id mismatches the

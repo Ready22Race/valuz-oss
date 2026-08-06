@@ -4,12 +4,20 @@ import { beforeAll, describe, expect, it } from "vitest";
 import type { ArtifactDescriptor } from "./artifact-viewer.types";
 import { CodeMirrorRenderer } from "./CodeMirrorRenderer";
 
-function artifact(previewKind: "code" | "plain"): ArtifactDescriptor {
+function artifact(
+  previewKind: "code" | "plain" | "markdown",
+): ArtifactDescriptor {
+  const path =
+    previewKind === "code"
+      ? "example.unknown"
+      : previewKind === "markdown"
+        ? "notes.md"
+        : "notes.txt";
   return {
     id: `artifact:${previewKind}`,
     kind: "project_file",
-    path: previewKind === "code" ? "example.unknown" : "notes.txt",
-    name: previewKind === "code" ? "example.unknown" : "notes.txt",
+    path,
+    name: path,
     previewKind,
     capabilities: {
       canPreview: true,
@@ -61,5 +69,55 @@ describe("CodeMirrorRenderer", () => {
       expect(container.querySelector(".cm-editor")).not.toBeNull(),
     );
     expect(container.querySelector(".cm-lineWrapping")).toBeNull();
+  });
+
+  it("can wrap source code when the host requests it", async () => {
+    const { container } = render(
+      <CodeMirrorRenderer
+        artifact={artifact("code")}
+        content={content}
+        wrapLines
+      />,
+    );
+
+    await waitFor(() =>
+      expect(container.querySelector(".cm-lineWrapping")).not.toBeNull(),
+    );
+  });
+
+  it("shows line numbers and an active line while remaining read-only", async () => {
+    const { container } = render(
+      <CodeMirrorRenderer artifact={artifact("code")} content={content} />,
+    );
+
+    await waitFor(() =>
+      expect(container.querySelector(".cm-editor")).not.toBeNull(),
+    );
+    expect(container.querySelector(".cm-lineNumbers")).not.toBeNull();
+    expect(container.querySelector(".cm-activeLine")).not.toBeNull();
+    const editorContent = container.querySelector(".cm-content");
+    expect(editorContent?.getAttribute("contenteditable")).toBe("true");
+    expect(editorContent?.getAttribute("aria-readonly")).toBe("true");
+    expect(editorContent?.getAttribute("spellcheck")).toBe("false");
+    expect(editorContent?.getAttribute("autocorrect")).toBe("off");
+    expect(editorContent?.getAttribute("autocapitalize")).toBe("off");
+  });
+
+  it("applies the no-underline theme to Markdown source", async () => {
+    const { container } = render(
+      <CodeMirrorRenderer
+        artifact={artifact("markdown")}
+        content={{
+          ...content,
+          content: "# Heading\n\n[Link](https://example.com)",
+        }}
+        wrapLines
+      />,
+    );
+
+    await waitFor(() =>
+      expect(container.querySelector(".cm-editor")).not.toBeNull(),
+    );
+    expect(container.querySelector(".valuz-markdown-source")).not.toBeNull();
   });
 });

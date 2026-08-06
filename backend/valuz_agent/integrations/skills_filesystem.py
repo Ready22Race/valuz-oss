@@ -124,6 +124,14 @@ def _extract_frontmatter(raw: str) -> tuple[dict[str, object], str]:
     frontmatter that doesn't parse as YAML at all, so malformed manifests
     still degrade softly instead of dropping their metadata.
     """
+    # Normalize line endings first: a CRLF manifest (skills authored on
+    # Windows, or repackaged by a tool that rewrites newlines) starts with
+    # ``---\r\n``, which failed the delimiter check below. The whole file then
+    # became the body and the summary fallback surfaced the literal ``---``
+    # delimiter as the skill's description — 30 installed skills showed "---"
+    # in the library before this. yaml.safe_load handles \n fine either way.
+    raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+
     if not raw.startswith("---\n"):
         return {}, raw
 
@@ -339,6 +347,11 @@ class FilesystemSkillSource:
     def _summary_from_body(body: str) -> str:
         for line in body.splitlines():
             candidate = line.strip()
+            # Skip YAML document markers: when frontmatter can't be parsed the
+            # delimiters stay in the body, and returning one of them shows a
+            # bare "---" where the description belongs.
+            if candidate in {"---", "..."}:
+                continue
             if candidate and not candidate.startswith("#"):
                 return candidate[:180]
         return "Skill discovered from the local filesystem."

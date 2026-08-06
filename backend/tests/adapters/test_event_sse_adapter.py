@@ -103,6 +103,89 @@ def test_should_propagate_message_id_on_assistant_message_frames():
     assert payload["message_id"] == "msg-3"
 
 
+def test_should_propagate_citation_bundle_on_final_assistant_frames():
+    bundle = {
+        "version": 1,
+        "citations": [
+            {
+                "citationId": "cit_1",
+                "source": {
+                    "sourceId": "doc:1",
+                    "providerId": "docs",
+                    "sourceType": "document",
+                    "title": "Annual report",
+                    "retrievedAt": "2026-07-30T08:00:00Z",
+                },
+                "evidence": {
+                    "kind": "text",
+                    "quote": "Revenue increased.",
+                    "snippet": "Revenue increased.",
+                    "capturedAt": "2026-07-30T08:00:00Z",
+                },
+            }
+        ],
+    }
+
+    result = _translate_kernel_event(
+        "assistant_message",
+        {"text": "Revenue increased. [1](citation://cit_1)", "citation_bundle": bundle},
+    )
+
+    assert result is not None
+    legacy_type, payload = result
+    assert legacy_type == "message.assistant.delta"
+    assert json.loads(payload["citation_bundle"]) == bundle
+
+
+def test_should_translate_post_publish_assistant_sidecar_without_body_text():
+    bundle = {"version": 1, "citations": []}
+    coverage = {
+        "status": "complete",
+        "supplemented": True,
+        "assistant_segment_indices": [2],
+    }
+
+    result = _translate_kernel_event(
+        "assistant_message_sidecar",
+        {
+            "assistant_segment_index": 2,
+            "citation_bundle": bundle,
+            "task_coverage": coverage,
+            "message_id": "msg-3",
+        },
+    )
+
+    assert result is not None
+    legacy_type, payload = result
+    assert legacy_type == "message.assistant.sidecar"
+    assert payload["assistant_segment_index"] == "2"
+    assert json.loads(payload["citation_bundle"]) == bundle
+    assert json.loads(payload["task_coverage"]) == coverage
+    assert payload["message_id"] == "msg-3"
+    assert "text" not in payload
+
+
+def test_should_propagate_task_coverage_on_final_assistant_frames():
+    coverage = {
+        "version": 1,
+        "status": "partial",
+        "metrics": {
+            "taskRequirementRequiredCount": 12,
+            "answerRequirementFulfilledCount": 10,
+        },
+    }
+
+    result = _translate_kernel_event(
+        "assistant_message",
+        {"text": "answer", "task_coverage": coverage},
+    )
+
+    assert result is not None
+    legacy_type, payload = result
+    assert legacy_type == "message.assistant.delta"
+    assert json.loads(payload["task_coverage"]) == coverage
+
+
 def test_should_translate_thinking_delta_when_kernel_streams_reasoning_chunks():
     # Reasoning content streams in incrementally (V5+streaming) so the
     # frontend can render a live "Thinking..." preview before the full
@@ -322,4 +405,3 @@ def test_should_omit_parent_tool_use_id_when_event_is_top_level():
     assert result is not None
     _, payload = result
     assert "parent_tool_use_id" not in payload
-

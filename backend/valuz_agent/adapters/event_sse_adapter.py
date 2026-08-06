@@ -270,13 +270,40 @@ def _translate_kernel_event(
         )
 
     if kernel_type == "assistant_message":
+        payload = {
+            "text": _stringify(data.get("text") or data.get("content") or ""),
+        }
+        citation_bundle = data.get("citation_bundle")
+        if isinstance(citation_bundle, dict):
+            payload["citation_bundle"] = _stringify(citation_bundle)
+        task_coverage = data.get("task_coverage")
+        if isinstance(task_coverage, dict):
+            payload["task_coverage"] = _stringify(task_coverage)
         return "message.assistant.delta", _with_parent_tool_use_id(
             _with_message_id(
-                {
-                    "text": _stringify(data.get("text") or data.get("content") or ""),
-                },
+                payload,
                 data,
             ),
+            data,
+        )
+
+    if kernel_type == "assistant_message_sidecar":
+        payload = {
+            "assistant_segment_index": _stringify(
+                data.get("assistant_segment_index") or 0
+            ),
+        }
+        citation_bundle = data.get("citation_bundle")
+        if isinstance(citation_bundle, dict):
+            payload["citation_bundle"] = _stringify(citation_bundle)
+        claim_audit = data.get("claim_audit")
+        if isinstance(claim_audit, dict):
+            payload["claim_audit"] = _stringify(claim_audit)
+        task_coverage = data.get("task_coverage")
+        if isinstance(task_coverage, dict):
+            payload["task_coverage"] = _stringify(task_coverage)
+        return "message.assistant.sidecar", _with_parent_tool_use_id(
+            _with_message_id(payload, data),
             data,
         )
 

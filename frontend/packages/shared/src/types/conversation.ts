@@ -1,3 +1,5 @@
+import type { CitationBundleV1 } from "./citation";
+
 /* ── Tool call types ──────────────────────────────────────── */
 
 export type PrototypeToolCallStatus =
@@ -62,6 +64,8 @@ export type ConversationBlock =
       messageId?: string;
       sealed?: boolean;
       parentToolUseId?: string;
+      /** Present only on the canonical/final assistant block. */
+      citationBundle?: CitationBundleV1;
     }
   | {
       kind: "thinking";
@@ -114,6 +118,20 @@ export interface ConversationTurn {
   attachments?: ConversationTurnAttachment[];
   /** Unix epoch milliseconds (UTC). */
   userTimestamp?: number;
+  /** Unix epoch milliseconds (CLIENT clock) at which the user pressed Send
+   * for this turn.
+   *
+   * ``userTimestamp`` comes off the kernel's ``message.user`` event, which is
+   * stamped when the RUNTIME started — after local warm-up or, in sandboxed /
+   * cloud execution, after the whole instance boots. Anchoring the turn
+   * header's elapsed counter on it therefore makes the counter jump back to
+   * zero the moment the optimistic turn is replaced by the real one. The host
+   * page carries the send time across that handover here so one continuous
+   * counter spans "runtime starting" and "processing".
+   *
+   * Absent on history-loaded turns (nobody was watching the clock) — consumers
+   * fall back to ``userTimestamp``. */
+  clientSentAtMs?: number;
   /** Unix epoch milliseconds (UTC) of the last event currently associated
    * with this turn. Used as the fallback "finish time" when computing the
    * ``已处理 X 秒`` header for turns that have no thinking/tool work to

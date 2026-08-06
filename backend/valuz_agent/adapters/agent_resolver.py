@@ -44,9 +44,11 @@ from valuz_agent.adapters.capability_resolver import (
     resolve_skill_slugs_to_paths,
 )
 from valuz_agent.adapters.system_prompt_builder import (
+    AUTHORIZATION_BOUNDARY_INSTRUCTIONS,
     OUTPUT_FORMAT_INSTRUCTIONS,
     assemble_session_instructions,
     build_project_system_prompt,
+    ensure_citation_system_policy,
 )
 from valuz_agent.i18n import t
 from valuz_agent.modules.agents.datastore import ProjectMemberDatastore
@@ -1094,6 +1096,7 @@ async def build_member_session(
                 "global-instructions",
                 prompt_snapshot.content if prompt_snapshot is not None else "",
             ),
+            ("authorization-boundary", AUTHORIZATION_BOUNDARY_INSTRUCTIONS),
             ("agent-instructions", agent.instructions or ""),
             ("project-instructions", project_prompt),
             ("memory", mem_block),
@@ -1108,6 +1111,7 @@ async def build_member_session(
             ("output-format", OUTPUT_FORMAT_INSTRUCTIONS),
         ]
     )
+    instructions = ensure_citation_system_policy(instructions)
 
     run_kind = "lead" if is_lead else "subtask"
 
@@ -1139,7 +1143,26 @@ async def build_member_session(
     # That's a per-model constraint — clear effort on those agents — not a
     # reason to strip it for every deepagents session.
     agent_effort = getattr(agent, "effort", None)
-    model_settings = ModelSettingsSchema(effort=agent_effort) if agent_effort else None
+    # Channel-declared input window (gateway aliases only; None otherwise).
+    # Consults the agent's pinned provider when set — falling back to any
+    # channel hosting the model, mirroring ``_resolve_agent_provider``'s own
+    # provider fallback. Skipped when the caller didn't wire resolver deps
+    # (same env-fallback path as the provider resolution above).
+    declared_window: int | None = None
+    if providers is not None:
+        from valuz_agent.adapters.provider_resolver import resolve_model_max_input_tokens
+
+        declared_window = await resolve_model_max_input_tokens(
+            provider_id=pinned_provider_id,
+            model_id=model_override or agent.model,
+            providers=providers,  # type: ignore[arg-type]
+            user_id=user_id,
+        )
+    model_settings = (
+        ModelSettingsSchema(effort=agent_effort, max_input_tokens=declared_window)
+        if agent_effort or declared_window
+        else None
+    )
 
     # Session-modes (docs/exec-plans/active/task-goal-mode.md): when the
     # caller opts into goal mode (lead whole-task / member sub-run), set

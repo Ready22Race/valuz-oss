@@ -159,11 +159,18 @@ class ModelSettingsSchema(BaseModel):
     ``ModelSettings`` in ``backend/src/core/types.py`` for the per-
     runtime mapping. The harness accepts the full union; runtimes that
     don't support a level map it down.
+
+    ``max_input_tokens`` is the model's maximum INPUT context size
+    (langchain model-profile semantics, not the vendor total "context
+    window") — set by the host only for channel-declared models the
+    SDKs can't know; runtimes derive their auto-compaction triggers
+    from it. See ``ModelSettings`` for the per-runtime mapping.
     """
 
     temperature: float | None = None
     max_tokens: int | None = None
     effort: EffortLiteral | None = None
+    max_input_tokens: int | None = None
 
 
 RuntimeProvider = Literal["claude_agent", "codex", "deepagents"]
@@ -436,6 +443,18 @@ class MessageResponse(BaseModel):
 class MessageListResponse(BaseModel):
     data: list[MessageData]
     error: ApiError | None = None
+
+
+class ImportMessageRequest(BaseModel):
+    """Clone one completed canonical message into another owned session.
+
+    The client supplies only the source message id and a display label for the
+    synthetic user turn.  Assistant text, citation metadata, and provenance
+    are always copied server-side from the stored source message.
+    """
+
+    source_message_id: str
+    user_text: str = Field(min_length=1, max_length=500)
 
 
 # -- Events --

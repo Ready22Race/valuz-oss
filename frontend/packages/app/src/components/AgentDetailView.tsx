@@ -6,12 +6,10 @@ import {
   BookOpen,
   Bot,
   ChevronRight,
-  Copy,
   KeyRound,
   Plug,
   Plus,
   Trash2,
-  Upload,
 } from "lucide-react";
 import {
   Button,
@@ -62,6 +60,7 @@ import {
 } from "@valuz/core";
 import { modelLabel } from "@valuz/shared";
 import { AgentModelPicker, type AgentModelSelection } from "./AgentModelPicker";
+import { AgentDetailCopyActions } from "./AgentDetailCopyActions";
 import { CatalogPickerDialog } from "./CatalogPickerDialog";
 import { ExportPackDialog } from "./ExportPackDialog";
 import { ResourceDetailActionSlot } from "./ResourceActionSlot";
@@ -1011,26 +1010,12 @@ export const AgentDetailView = ({
               use the same plain ``h-7 w-7`` icon buttons as the Skills
               detail panel; 派驻到项目 is the agent-specific primary CTA. */}
           <div className="flex shrink-0 items-center gap-0.5">
-            {!isSystem ? (
-              <button
-              type="button"
-              onClick={() => setExportOpen(true)}
-              title={t("agent.pack.export" as Parameters<typeof t>[0])}
-              aria-label={t("agent.pack.export" as Parameters<typeof t>[0])}
-              className="flex h-7 w-7 cursor-default items-center justify-center rounded-md text-ink-meta transition-colors hover:bg-surface-soft hover:text-ink-body"
-            >
-              <Upload className="h-3.5 w-3.5" />
-              </button>
-            ) : null}
-            <button
-              type="button"
-              onClick={() => setCopyConfirmOpen(true)}
-              title={t("agent.copyAgent" as Parameters<typeof t>[0])}
-              aria-label={t("agent.copyAgent" as Parameters<typeof t>[0])}
-              className="flex h-7 w-7 cursor-default items-center justify-center rounded-md text-ink-meta transition-colors hover:bg-surface-soft hover:text-ink-body"
-            >
-              <Copy className="h-3.5 w-3.5" />
-            </button>
+            <AgentDetailCopyActions
+              resource={agent as unknown as Record<string, unknown>}
+              isSystem={isSystem}
+              onExport={() => setExportOpen(true)}
+              onCopy={() => setCopyConfirmOpen(true)}
+            />
             {canDelete && agent.deletable && (
               <button
                 type="button"

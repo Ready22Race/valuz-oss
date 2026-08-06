@@ -38,6 +38,7 @@ from app.schemas import (  # noqa: E402
     EventPayload,
     EventWindowData,
     FinalizeSessionRequest,
+    ImportMessageRequest,
     MessageData,
     SessionData,
     SubmitActionRequest,
@@ -241,9 +242,7 @@ class HttpKernelClient:
 
     async def delete_session(self, user_id: str, session_id: str) -> bool:
         try:
-            await self._request(
-                "DELETE", f"{self._prefix}/v1/sessions/{session_id}", owner=user_id
-            )
+            await self._request("DELETE", f"{self._prefix}/v1/sessions/{session_id}", owner=user_id)
         except KernelSessionNotFoundError:
             return False
         return True
@@ -381,6 +380,31 @@ class HttpKernelClient:
             owner=user_id,
         )
         return [MessageData(**item) for item in result["data"]]
+
+    async def get_message(self, user_id: str, message_id: str) -> MessageData | None:
+        try:
+            result = await self._request(
+                "GET",
+                f"{self._prefix}/v1/messages/{message_id}",
+                owner=user_id,
+            )
+        except KernelSessionNotFoundError:
+            return None
+        return MessageData(**result["data"])
+
+    async def import_message(
+        self,
+        user_id: str,
+        session_id: str,
+        req: ImportMessageRequest,
+    ) -> MessageData:
+        result = await self._request(
+            "POST",
+            f"{self._prefix}/v1/sessions/{session_id}/messages/import",
+            json_body=req.model_dump(mode="json"),
+            owner=user_id,
+        )
+        return MessageData(**result["data"])
 
     async def submit_action(
         self, user_id: str, session_id: str, req: SubmitActionRequest

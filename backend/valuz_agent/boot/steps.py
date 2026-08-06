@@ -8,7 +8,6 @@ expressed explicitly in ``boot/lifespan.py``.
 
 import asyncio
 import logging
-from pathlib import Path
 
 from fastapi import FastAPI
 
@@ -60,12 +59,14 @@ def guard_source_run_data_dir() -> None:
             "or set VALUZ_DATA_DIR. To operate on the packaged store on purpose, "
             "set VALUZ_ALLOW_PACKAGED_DATA_DIR=1."
         )
-    if Path(settings.log_dir).expanduser().resolve() == (packaged_root / "logs").resolve():
+    if settings.log_file_path.expanduser().resolve().parent == (
+        packaged_root / "logs"
+    ).resolve():
         raise RuntimeError(
             "refusing to start: this backend runs from source but its log dir "
             f"resolves to {PACKAGED_DATA_DIR / 'logs'} — the packaged app's logs "
             "(source-run log lines there corrupt release forensics). The default "
-            "log dir follows VALUZ_DATA_DIR; unset VALUZ_LOG_DIR or point it "
+            "log path follows VALUZ_DATA_DIR; unset VALUZ_LOG_FILE_PATH or point it "
             "elsewhere, or set VALUZ_ALLOW_PACKAGED_DATA_DIR=1 to operate on "
             "the packaged store on purpose."
         )
@@ -149,6 +150,20 @@ def acquire_single_writer_lock() -> None:
             "refusing to start a second instance.\n"
         )
         _sys.exit(2)
+
+
+async def enrich_login_shell_path() -> None:
+    """Merge the user's login-shell PATH into this process's PATH.
+
+    A Finder / launchd-launched backend inherits launchd's minimal PATH and
+    can't see user-installed tools (nvm's ``npx``, ``uv``, homebrew) that
+    stdio MCP connectors, the CLI login probe and the browser dev fallback
+    resolve by name. Append-only, fail-open, ``VALUZ_DISABLE_LOGIN_PATH=1``
+    opts out — see ``boot/login_path.py``.
+    """
+    from valuz_agent.boot.login_path import enrich_login_shell_path as _enrich
+
+    await _enrich()
 
 
 def migrate_data_dir() -> None:
@@ -351,6 +366,9 @@ async def init_kernel(app: FastAPI) -> None:
     from valuz_agent.integrations.tools_skill_creator import build_submit_skill_tool_defs
     from valuz_agent.modules.browser import service as browser_service
     from valuz_agent.modules.browser.tools import build_browser_tool_defs
+    from valuz_agent.modules.citations.calculation_tool import (
+        build_citation_calculation_tool_defs,
+    )
     from valuz_agent.modules.genui.tools import build_generative_ui_tool_defs
     from valuz_agent.modules.memory.tools import build_memory_tool_defs
     from valuz_agent.modules.projects.tools import build_project_instructions_tool_defs
@@ -372,6 +390,7 @@ async def init_kernel(app: FastAPI) -> None:
         + build_submit_skill_tool_defs()
         + build_agent_proposal_tool_defs()
         + build_deliver_artifacts_tool_defs()
+        + build_citation_calculation_tool_defs()
         + build_generative_ui_tool_defs()
     )
     # browser_start/browser_stop only work when the engine (Node +

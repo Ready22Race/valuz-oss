@@ -24,10 +24,12 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from valuz_agent.infra.db_urls import (
+    db_url,
     db_url_async,
     kernel_db_url,
     kernel_db_url_async,
@@ -55,9 +57,10 @@ KERNEL_ALEMBIC_INI: Path = KERNEL_ALEMBIC_DIR / "alembic.ini"
 # uses ``alembic_version_host`` in the same file so the two never collide).
 KERNEL_VERSION_TABLE = "alembic_version"
 # Kernel-owned tables the schema preflight inspects (never drops) — the
-# current trio plus pre-cutover fossils. Host ``valuz_*`` tables and the DeepAgents
-# langgraph checkpoint tables in the same file are off-limits.
+# current trio plus pre-cutover fossils. Host ``valuz_*`` tables are off-limits;
+# DeepAgents langgraph checkpoint tables live in their own sibling database.
 _KERNEL_OWNED_TABLES = ("sessions", "messages", "events", "projects", "agents", "environments")
+_SQLITE_HEADER = b"SQLite format 3\x00"
 
 
 def kernel_api_prefix() -> str:
@@ -85,18 +88,19 @@ def _set_kernel_env() -> None:
     ``app.config``.
 
     ``DEEPAGENTS_CHECKPOINT_DB`` points the kernel's DeepAgentsRuntime
-    langgraph checkpointer at the kernel's OWN SQLite file (``kernel.db``),
-    alongside ``sessions/messages/events`` — so the checkpoint tables
-    (``checkpoints`` / ``writes`` / ``checkpoint_blobs``) travel with the
-    kernel into a sandbox/remote deployment instead of being stranded in the
-    host ``valuz.db``. No stray ``./deepagents_checkpoints.db`` in whatever
-    cwd happened to be active at first boot; setdefault honours an external
-    override.
+    langgraph checkpointer at a deterministic sibling file next to
+    ``kernel.db``. It must not share ``kernel.db`` itself: each live
+    ``AsyncSqliteSaver`` initializes WAL and checkpoint tables, which can
+    interfere with the kernel session/message engine when multiple runtimes
+    overlap. Keeping the files adjacent preserves sandbox/user-log lifecycle
+    semantics without leaving a cwd-relative database behind. ``setdefault``
+    honours an external deployment override.
     """
     os.environ["DATABASE_URL"] = kernel_db_url_async()
     kernel_db_path = sqlite_path_from_url(kernel_db_url())
     if kernel_db_path is not None:
-        os.environ.setdefault("DEEPAGENTS_CHECKPOINT_DB", str(kernel_db_path))
+        checkpoint_db_path = kernel_db_path.parent / "deepagents_checkpoints.db"
+        os.environ.setdefault("DEEPAGENTS_CHECKPOINT_DB", str(checkpoint_db_path))
         # Local resident process uses the sqlite checkpointer above. The
         # ephemeral cloud SANDBOX instead uses FileCheckpointSaver (write-once
         # files on a per-owner COS mount — sqlite-on-COS corrupts), gated by
@@ -127,6 +131,67 @@ def _known_kernel_revisions() -> set[str]:
     cfg = Config(str(KERNEL_ALEMBIC_INI))
     cfg.set_main_option("script_location", str(KERNEL_ALEMBIC_DIR))
     return {rev.revision for rev in ScriptDirectory.from_config(cfg).walk_revisions()}
+
+
+def _prepare_default_kernel_db() -> Path | None:
+    """Quarantine an unreadable legacy local ``kernel.db`` before migration.
+
+    Older builds placed the DeepAgents checkpointer in the same file as the
+    kernel store.  A checkpoint/WAL failure could therefore leave the file
+    without a SQLite header.  Newer builds keep checkpoints in a sibling DB,
+    but would still fail every startup while trying to reflect that legacy
+    file.  The host ``valuz.db`` is the durable/read authority and receives the
+    same session history through dual-write, so a default local installation
+    can safely rebuild its execution-local kernel cache.
+
+    This recovery is deliberately narrow: configured kernel URLs, shared DBs,
+    missing/empty files, and installations without a healthy local durable DB
+    are left untouched.  The unreadable file and sidecars are renamed in place
+    for operator recovery; nothing is deleted.
+    """
+
+    from valuz_agent.infra.config import settings
+
+    if settings.kernel_database_url is not None:
+        return None
+    kernel_path = sqlite_path_from_url(kernel_db_url())
+    durable_path = sqlite_path_from_url(db_url())
+    if (
+        kernel_path is None
+        or durable_path is None
+        or kernel_path == durable_path
+        or not kernel_path.is_file()
+        or kernel_path.stat().st_size == 0
+        or not durable_path.is_file()
+    ):
+        return None
+    with kernel_path.open("rb") as stream:
+        if stream.read(len(_SQLITE_HEADER)) == _SQLITE_HEADER:
+            return None
+    with durable_path.open("rb") as stream:
+        if stream.read(len(_SQLITE_HEADER)) != _SQLITE_HEADER:
+            return None
+
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    recovery_path = kernel_path.with_name(f"{kernel_path.name}.unreadable-{timestamp}")
+    counter = 1
+    while recovery_path.exists():
+        recovery_path = kernel_path.with_name(
+            f"{kernel_path.name}.unreadable-{timestamp}-{counter}"
+        )
+        counter += 1
+    kernel_path.rename(recovery_path)
+    for suffix in ("-wal", "-shm"):
+        sidecar = kernel_path.with_name(kernel_path.name + suffix)
+        if sidecar.exists():
+            sidecar.rename(recovery_path.with_name(recovery_path.name + suffix))
+    logger.warning(
+        "quarantined unreadable legacy kernel DB at %s; rebuilding the local "
+        "execution store from healthy durable DB %s",
+        recovery_path,
+        durable_path,
+    )
+    return recovery_path
 
 
 async def _any_kernel_rows(engine: AsyncEngine, tables: list[str]) -> bool:
@@ -164,8 +229,8 @@ async def ensure_kernel_schema_migratable(engine: AsyncEngine | None = None) -> 
       restart. No committed data to lose, and still nothing is auto-deleted.
 
     Scoped to kernel-owned tables (``_KERNEL_OWNED_TABLES``); host ``valuz_*``
-    tables and the langgraph checkpoint tables in the same file are never read or
-    touched. No drops, ever. Reflects through an ASYNC engine (so a Postgres
+    tables are never read or touched, while langgraph checkpoints use their own
+    sibling database. No drops, ever. Reflects through an ASYNC engine (so a Postgres
     ``database_url`` resolves to asyncpg rather than choking a sync engine on an
     async driver); the caller runs it off the event loop in a worker thread.
     """
@@ -258,6 +323,7 @@ def run_kernel_migrations() -> None:
     import asyncio
     import threading
 
+    _prepare_default_kernel_db()
     error: list[BaseException] = []
 
     def _runner() -> None:

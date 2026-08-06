@@ -63,6 +63,14 @@ export interface ArtifactViewerShellProps {
   target?: ArtifactOpenTarget | null;
   loading?: boolean;
   error?: string | null;
+  /** Draw the viewer's own panel frame. Disable when embedded in a framed host. */
+  framed?: boolean;
+  /**
+   * Collapse the header to a single metadata row. Use when the host already
+   * names the document above the shell (e.g. a tab strip) — the tall title
+   * block would just repeat the tab label and eat the content area.
+   */
+  compactHeader?: boolean;
   onReload?: () => void;
   onClose?: () => void;
   onCopyContent?: () => void;
@@ -73,6 +81,8 @@ export interface ArtifactRendererProps {
   artifact: ArtifactDescriptor;
   content: ArtifactContent | null;
   target?: ArtifactOpenTarget | null;
+  /** Wrap long source lines instead of requiring horizontal scrolling. */
+  wrapLines?: boolean;
   onOpenExternal?: () => void;
   /**
    * Re-resolve the file and rebuild ``content``. Renderers that fetch from

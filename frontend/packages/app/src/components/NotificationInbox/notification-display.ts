@@ -19,6 +19,15 @@ export interface NotificationDisplay {
   tag: string;
 }
 
+/** Alert/list surfaces hard-cap the body — a raw provider error dump can be
+ * several KB and blows the toast / OS notification / history row across the
+ * screen. The notification is a pointer; the full text lives in the session
+ * ("查看详情" there). */
+const BODY_MAX = 300;
+
+const clampBody = (text: string): string =>
+  text.length <= BODY_MAX ? text : `${text.slice(0, BODY_MAX - 1)}…`;
+
 export function notificationDisplay(entry: NotificationEntry): NotificationDisplay {
   const route =
     entry.route ??
@@ -30,7 +39,7 @@ export function notificationDisplay(entry: NotificationEntry): NotificationDispl
         "{agent}",
         entry.title,
       ),
-      body: entry.body,
+      body: clampBody(entry.body),
       route,
       tag: `question:${entry.pending_id ?? entry.id}`,
     };
@@ -38,12 +47,13 @@ export function notificationDisplay(entry: NotificationEntry): NotificationDispl
   if (entry.kind === "task_failed") {
     return {
       title: _t("notification.notifFailureTitle" as I18nKey),
-      body:
+      body: clampBody(
         entry.body ||
-        _t("notification.notifFailureBody" as I18nKey).replace(
-          "{task}",
-          entry.title,
-        ),
+          _t("notification.notifFailureBody" as I18nKey).replace(
+            "{task}",
+            entry.title,
+          ),
+      ),
       route,
       // Per-task tag so repeat failures of one task collapse in the OS.
       tag: `failure:${entry.task_id ?? entry.id}`,
@@ -55,7 +65,7 @@ export function notificationDisplay(entry: NotificationEntry): NotificationDispl
         "{agent}",
         entry.title || "",
       ),
-      body: entry.body,
+      body: clampBody(entry.body),
       route,
       // Per-session tag so repeat failures of one conversation collapse in the OS.
       tag: `run_failed:${entry.session_id ?? entry.id}`,
@@ -66,12 +76,17 @@ export function notificationDisplay(entry: NotificationEntry): NotificationDispl
       // Backend sends an empty title for this kind — the localized label is
       // composed entirely here (the body carries the raw error).
       title: _t("notification.notifBackupFailedTitle" as I18nKey),
-      body: entry.body,
+      body: clampBody(entry.body),
       route,
       // One tag for all backup failures — repeats collapse in the OS.
       tag: "backup_failed",
     };
   }
-  // Unknown kind — render whatever the backend snapshotted.
-  return { title: entry.title, body: entry.body, route, tag: `notif:${entry.id}` };
+  // Unknown kind — render whatever the backend snapshotted (clamped).
+  return {
+    title: entry.title,
+    body: clampBody(entry.body),
+    route,
+    tag: `notif:${entry.id}`,
+  };
 }

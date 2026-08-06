@@ -40,6 +40,17 @@ export interface ChatMessage {
 interface ChatStreamCursor {
   /** Current ``message_id`` whose deltas are being accumulated. */
   messageId: string | null;
+  /**
+   * Store id of the assistant entry currently receiving committed output
+   * (thinking flushes / tool cards / canonical text). Kernel streams reuse
+   * the TURN's ``message_id`` — the same id the ``message.user`` echo
+   * carries — for every assistant event of the turn, so the entry cannot
+   * be keyed by ``message_id`` alone: the cursor pins the open entry and a
+   * canonical ``message.assistant.delta`` closes it, letting a later
+   * thinking/tool block in the same turn open a fresh entry instead of
+   * overwriting this one.
+   */
+  assistantId: string | null;
   text: string;
   thinking: string;
 }
@@ -111,6 +122,7 @@ export type IngestSource = "history" | "live";
 
 const emptyCursor = (): ChatStreamCursor => ({
   messageId: null,
+  assistantId: null,
   text: "",
   thinking: "",
 });
@@ -486,9 +498,9 @@ export const reduce = (
       const text = payload.text ?? "";
       return {
         streaming: {
+          ...state.streaming,
           messageId: messageId ?? state.streaming.messageId,
           text: isLiveSnapshot(payload) ? text : state.streaming.text + text,
-          thinking: state.streaming.thinking,
         },
         isStreaming: true,
         lastSeq: nextLastSeq,
@@ -499,8 +511,8 @@ export const reduce = (
       const text = payload.text ?? "";
       return {
         streaming: {
+          ...state.streaming,
           messageId: messageId ?? state.streaming.messageId,
-          text: state.streaming.text,
           thinking: isLiveSnapshot(payload)
             ? text
             : state.streaming.thinking + text,
@@ -515,15 +527,15 @@ export const reduce = (
       // committed assistant message. The renderer shows thinking[]
       // dimmed/italic above the assistant turn body.
       const text = payload.text ?? state.streaming.thinking;
-      const target = ensureAssistantMessage(state.messages, messageId);
+      const target = ensureAssistantMessage(state, messageId);
       const updatedMessages = upsertAssistantMessage(state.messages, target, {
         thinking: [...target.thinking, text],
       });
       return {
         messages: updatedMessages,
         streaming: {
-          messageId: state.streaming.messageId,
-          text: state.streaming.text,
+          ...state.streaming,
+          assistantId: target.id,
           thinking: "",
         },
         lastSeq: nextLastSeq,
@@ -532,9 +544,13 @@ export const reduce = (
 
     case "message.assistant.delta": {
       // Canonical end-of-message text — flush streamingText into the
-      // committed assistant message and clear the cursor.
+      // committed assistant message and clear the cursor. Clearing
+      // ``assistantId`` closes the entry: the kernel can emit several
+      // assistant messages per turn (text → tools → text), and the next
+      // thinking/tool event must open a fresh entry rather than overwrite
+      // this one's text.
       const text = payload.text ?? state.streaming.text;
-      const target = ensureAssistantMessage(state.messages, messageId);
+      const target = ensureAssistantMessage(state, messageId);
       const updatedMessages = upsertAssistantMessage(state.messages, target, {
         text,
       });
@@ -542,6 +558,7 @@ export const reduce = (
         messages: updatedMessages,
         streaming: {
           messageId: null,
+          assistantId: null,
           text: "",
           thinking: state.streaming.thinking,
         },
@@ -550,7 +567,7 @@ export const reduce = (
     }
 
     case "tool.call.started": {
-      const target = ensureAssistantMessage(state.messages, messageId);
+      const target = ensureAssistantMessage(state, messageId);
       const toolId =
         payload.tool_use_id ?? payload.id ?? `tool-${generateId()}`;
       // A preceding tool.call.input_delta may already have built a
@@ -570,7 +587,11 @@ export const reduce = (
       const updatedMessages = upsertAssistantMessage(state.messages, target, {
         tools,
       });
-      return { messages: updatedMessages, lastSeq: nextLastSeq };
+      return {
+        messages: updatedMessages,
+        streaming: { ...state.streaming, assistantId: target.id },
+        lastSeq: nextLastSeq,
+      };
     }
 
     case "tool.call.input_delta": {
@@ -581,7 +602,7 @@ export const reduce = (
       const toolId = payload.tool_use_id ?? "";
       if (!toolId) return { lastSeq: nextLastSeq };
       const text = payload.text ?? "";
-      const target = ensureAssistantMessage(state.messages, messageId);
+      const target = ensureAssistantMessage(state, messageId);
       const existing = target.tools.find((t) => t.id === toolId);
       const nextTool: ChatToolUse = existing
         ? { ...existing, input: existing.input + text }
@@ -600,6 +621,7 @@ export const reduce = (
       });
       return {
         messages: updatedMessages,
+        streaming: { ...state.streaming, assistantId: target.id },
         isStreaming: true,
         lastSeq: nextLastSeq,
       };
@@ -732,7 +754,7 @@ export const reduce = (
         messages = [
           ...messages,
           {
-            id: messageId ?? `error-${generateId()}`,
+            id: assistantEntryId(messages, messageId),
             role: "assistant",
             text: `[${message}]`,
             thinking: [],
@@ -757,10 +779,35 @@ export const reduce = (
   }
 };
 
-const ensureAssistantMessage = (
+/**
+ * Pick the store id for a NEW assistant entry. The natural choice is the
+ * event's ``message_id`` — but kernel streams reuse the TURN's id (the one
+ * the ``message.user`` echo already claimed) for every assistant event, and
+ * ids key both React rendering and upsert lookups, so a taken id must never
+ * be shared across entries: fall back to a locally generated one.
+ */
+const assistantEntryId = (
   messages: ChatMessage[],
   messageId: string | null,
+): string => {
+  if (messageId && !messages.some((m) => m.id === messageId)) return messageId;
+  return `assistant-${generateId()}`;
+};
+
+const ensureAssistantMessage = (
+  state: Pick<ChatStoreState, "messages" | "streaming">,
+  messageId: string | null,
 ): ChatMessage => {
+  const { messages } = state;
+  // The open entry pinned by the streaming cursor wins — with turn-scoped
+  // message_ids the id alone cannot identify the entry (see ChatStreamCursor).
+  const openId = state.streaming.assistantId;
+  if (openId) {
+    const open = messages.find(
+      (m) => m.id === openId && m.role === "assistant",
+    );
+    if (open) return open;
+  }
   const existing = messageId
     ? messages.find((m) => m.id === messageId && m.role === "assistant")
     : messages
@@ -769,7 +816,7 @@ const ensureAssistantMessage = (
         .find((m) => m.role === "assistant" && !m.stopReason);
   if (existing) return existing;
   return {
-    id: messageId ?? `assistant-${generateId()}`,
+    id: assistantEntryId(messages, messageId),
     role: "assistant",
     text: "",
     thinking: [],
@@ -784,7 +831,12 @@ const upsertAssistantMessage = (
   target: ChatMessage,
   patch: Partial<ChatMessage>,
 ): ChatMessage[] => {
-  const idx = messages.findIndex((m) => m.id === target.id);
+  // Role-scoped lookup: the turn's user echo can share ``target.id`` when
+  // the kernel reuses the turn id — matching on id alone would patch the
+  // assistant payload onto the user bubble.
+  const idx = messages.findIndex(
+    (m) => m.id === target.id && m.role === "assistant",
+  );
   if (idx === -1) {
     return [...messages, { ...target, ...patch }];
   }

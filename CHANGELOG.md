@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Windows skill materialization** — a skill whose `SKILL.md` declares a
+  namespaced frontmatter name (e.g. `react:components`) crashed session start
+  with `[WinError 267] The directory name is invalid`, because Windows cannot
+  use `:` (and `<>"|?*`, device names, trailing dots/spaces) in a directory
+  name. Such names now fall back to the skill's source directory name on every
+  platform, and skill naming is sanitized at the source: creating, renaming,
+  copying or importing a skill scrubs those characters out of both the
+  directory slug and the `SKILL.md` name (a reserved device name like `con`
+  gets a suffix), and pack import does the same for embedded skill slugs.
+- **Turn timer** — the conversation header's elapsed counter ran twice per turn:
+  it re-anchored from the client's Send time onto the kernel's `message.user`
+  stamp (written once the runtime is up), so it fell back to zero mid-turn and
+  dropped again when the turn settled. It is now one continuous counter, and
+  while the runtime is still coming up the header names that (local or cloud)
+  instead of claiming to process (#674 @Ready22Race).
+- **Task follow-up chat** — the user's message stayed invisible until the kernel
+  echoed it back, with no in-flight indicator in between, because the send HTTP
+  call returns as soon as the run is scheduled (#674 @Ready22Race).
+
 ## [0.3.6] - 2026-07-29
 
 ### Added

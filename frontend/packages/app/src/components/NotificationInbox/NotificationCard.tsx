@@ -14,7 +14,7 @@ import { toast } from "sonner";
 import { AlertTriangle, MessageCircleQuestion } from "lucide-react";
 
 import {
-  notificationsApi,
+  dismissNotification,
   sessionsApi,
   tasksApi,
   useTranslation,
@@ -49,12 +49,10 @@ function BackupFailedCard({
   const { t } = useTranslation();
   const navigate = useNavigate();
 
-  const handleDismiss = useCallback(async () => {
-    try {
-      await notificationsApi.dismiss(entry.id);
-    } catch {
-      // best-effort
-    }
+  // Optimistic — the card leaves the drawer immediately; a failed persist
+  // self-heals on the next SSE snapshot.
+  const handleDismiss = useCallback(() => {
+    dismissNotification(entry.id);
   }, [entry.id]);
 
   return (
@@ -65,7 +63,7 @@ function BackupFailedCard({
     >
       <div className="flex flex-col gap-3 px-4 py-3">
         {entry.body && (
-          <p className="whitespace-pre-wrap text-xs leading-5 text-ink-body">
+          <p className="line-clamp-6 whitespace-pre-wrap break-words text-xs leading-5 text-ink-body">
             {entry.body}
           </p>
         )}
@@ -74,7 +72,7 @@ function BackupFailedCard({
             size="sm"
             variant="ghost"
             className="text-xs"
-            onClick={() => void handleDismiss()}
+            onClick={handleDismiss}
           >
             {t("notification.dismiss" as I18nKey)}
           </Button>
@@ -171,7 +169,9 @@ function QuestionCard({ entry, onNavigateAway }: NotificationCardProps): ReactEl
           />
         ) : (
           <div className="flex items-center justify-between px-3 py-3">
-            <span className="text-sm text-ink-muted">{entry.body}</span>
+            <span className="line-clamp-3 break-words text-sm text-ink-muted">
+              {entry.body}
+            </span>
             {entry.session_id && (
               <button
                 type="button"
@@ -213,12 +213,10 @@ function FailureCard({ entry, onNavigateAway }: NotificationCardProps): ReactEle
     }
   }, [entry.task_id, t]);
 
-  const handleDismiss = useCallback(async () => {
-    try {
-      await notificationsApi.dismiss(entry.id);
-    } catch {
-      // best-effort
-    }
+  // Optimistic — the card leaves the drawer immediately; a failed persist
+  // self-heals on the next SSE snapshot.
+  const handleDismiss = useCallback(() => {
+    dismissNotification(entry.id);
   }, [entry.id]);
 
   return (
@@ -240,7 +238,7 @@ function FailureCard({ entry, onNavigateAway }: NotificationCardProps): ReactEle
     >
       <div className="flex flex-col gap-3 px-4 py-3">
         {entry.body && (
-          <p className="whitespace-pre-wrap text-xs leading-5 text-ink-body">
+          <p className="line-clamp-6 whitespace-pre-wrap break-words text-xs leading-5 text-ink-body">
             {entry.body}
           </p>
         )}
@@ -249,7 +247,7 @@ function FailureCard({ entry, onNavigateAway }: NotificationCardProps): ReactEle
             size="sm"
             variant="ghost"
             className="text-xs"
-            onClick={() => void handleDismiss()}
+            onClick={handleDismiss}
             disabled={busy}
           >
             {t("notification.dismiss" as I18nKey)}

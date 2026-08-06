@@ -14,7 +14,9 @@ import os
 import re
 import uuid
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Literal
 
 from claude_agent_sdk import (
@@ -70,6 +72,16 @@ from src.core.approval_rule_matcher import (
     RuntimeApprovalRuleMatcher,
     _permission_update_to_dict,
 )
+from src.core.citation import (
+    compact_citation_tool_content,
+    private_citation_tool_content,
+    rebase_collection_projections,
+)
+from src.core.citation_document_search import (
+    augment_indexed_document_evidence,
+    extract_raw_document,
+    grep_document_evidence,
+)
 from src.core.events import (
     AVAILABLE_DECISIONS_CLARIFYING,
     AVAILABLE_DECISIONS_EDITABLE_WITH_SESSION,
@@ -78,10 +90,12 @@ from src.core.events import (
     EventSink,
 )
 from src.core.hooks import Hooks
+from src.core.mcp_source_metadata import adapt_mcp_source_result
 from src.core.rule_canonicalize import reduce_args_for_subject
 from src.core.session_approval_cache import SessionRule
 from src.core.tools import ExecContext, ToolDef, ToolKit, ToolResult
 from src.core.types import (
+    AUTO_COMPACT_WINDOW_FRACTION,
     BudgetExhausted,
     EndTurn,
     Error,
@@ -119,6 +133,24 @@ logger = logging.getLogger(__name__)
 # stderr stream. 40 lines is enough for a typical Rust / node panic
 # trace without flooding event payloads.
 _STDERR_TAIL_LINES: int = 40
+
+# Claude CLI replaces large tool results with a small ``<persisted-output>``
+# notice and stores the original payload under its private project journal.
+# The model can still read that file, so citation handles inside it must also
+# reach the host-side EvidenceRegistry.  This ceiling is aligned with the
+# Registry's private-sidecar limit; oversized files stay unavailable to
+# citation binding rather than being read unboundedly from a path supplied in
+# text.
+# Persisted results stay outside the model transcript.  The larger bound lets
+# citation registration recover evidence envelopes from transcript/search
+# payloads without feeding those bytes back into the LLM context.
+_MAX_PERSISTED_CITATION_CONTENT_BYTES: int = 16_000_000
+_CITATION_FILING_MODEL_EVIDENCE_LIMIT: int = 24
+_CITATION_TRANSCRIPT_MODEL_EVIDENCE_LIMIT: int = 60
+_PERSISTED_OUTPUT_PATH_RE = re.compile(
+    r"\A<persisted-output>\s*\n"
+    r"Output too large \([^)]+\)\. Full output saved to: ([^\r\n]+)"
+)
 
 
 # The Claude Agent SDK buffers the CLI's stdout into a single JSON message whose
@@ -319,6 +351,8 @@ _TERMINAL_BG_TASK_STATUSES = frozenset({"completed", "failed", "stopped"})
 class ClaudeAgentRuntime:
     """Wraps Claude Agent SDK (ClaudeSDKClient) as a RuntimePort implementation."""
 
+    supports_native_continuation = True
+
     def __init__(
         self,
         config: AgentConfig,
@@ -398,6 +432,16 @@ class ClaudeAgentRuntime:
         # ``stopped`` terminal event is flushed then, or the event stream
         # would say "running" forever and the UI would spin on a corpse.
         self._live_bg_tasks: dict[str, str] = {}
+        # Raw source-bearing MCP outputs captured before Claude Code replaces
+        # them with a compact model-visible view. The host still needs the
+        # immutable envelopes for CitationGuard registration; the model only
+        # needs bounded handle/excerpt rows. Entries are consumed by the
+        # matching ToolResultBlock and reset at each user turn.
+        self._citation_tool_result_sidecars: dict[str, str] = {}
+        self._citation_compaction_enabled: bool = True
+        self._citation_transcript_documents: set[str] = set()
+        self._citation_raw_documents: dict[str, dict[str, Any]] = {}
+        self._citation_document_metadata: dict[str, dict[str, Any]] = {}
 
         # Slice 3 — approval contract.
         # ``_pending_futures`` maps pending_id → asyncio.Future that
@@ -534,6 +578,10 @@ class ClaudeAgentRuntime:
         self._workflow_tool_use_ids = set()
         self._workflow_pollers = []
         self._active_workflows = []
+        self._citation_tool_result_sidecars = {}
+        self._citation_transcript_documents = set()
+        self._citation_raw_documents = {}
+        self._citation_document_metadata = {}
         self._cur_session_id = session.id
         self._cancelled = False
         # Reset stderr buffer so any ``session_error`` from this turn
@@ -603,6 +651,7 @@ class ClaudeAgentRuntime:
                 message="cancelled",
             )
             await self._destroy_client()
+
         except Exception as exc:
             session.status = "idle"
             if self._cancelled:
@@ -716,6 +765,30 @@ class ClaudeAgentRuntime:
             # clean turn.
             if not self._cancelled and self._client is not None:
                 self._start_idle_drainer(session)
+
+    async def run_task_coverage(
+        self,
+        session: Session,
+        user_message: UserMessage,
+        *,
+        no_op_tool: ToolDef,
+    ) -> None:
+        """Resume the same Claude session with a turn-scoped private tool."""
+
+        previous = self.toolkit.get(no_op_tool.name)
+        self.toolkit.register(no_op_tool)
+        # Claude SDK fixes in-process MCP tools at client construction.  A
+        # rebuild resumes ``session.runtime_session_id`` rather than creating
+        # a fresh conversation.
+        await self._destroy_client()
+        try:
+            await self.run(session, user_message)
+        finally:
+            if previous is None:
+                self.toolkit.unregister(no_op_tool.name)
+            else:
+                self.toolkit.register(previous)
+            await self._destroy_client()
 
     # -- Background tasks: turn brackets, wake-up turns, idle drainer --
     #
@@ -1572,6 +1645,12 @@ class ClaudeAgentRuntime:
             perm = "plan"
         else:
             perm = PERMISSION_MAP.get(session.permission_mode, "default")
+        # Source metadata capture is shared Evidence infrastructure, not a
+        # user-visible Citation feature.  Keep the tool hook active even when
+        # Citation and Audit are both disabled; the switches only decide
+        # whether the Host later projects or verifies the registered data.
+        # Bare completions have no tool surface, so the hook remains omitted.
+        self._citation_compaction_enabled = not is_bare_completion(session)
         sdk_hooks = self._map_hooks()
 
         system_prompt = self._build_system_prompt(session)
@@ -1709,14 +1788,20 @@ class ClaudeAgentRuntime:
         omitted.
 
         The workspace's own settings are read once up front so each harness
-        default can defer to an explicit project value. Two defaults today:
+        default can defer to an explicit project value. Three defaults today:
 
         - dynamic workflows / ``/deep-research`` (``enableWorkflows``), which
           the ``setting_sources=["project"]`` scoping otherwise drops (it
           lives in the user surface; see ``_WORKFLOW_SETTINGS``);
         - ``skipWebFetchPreflight`` when the deployment opts in via
           ``VALUZ_SKIP_WEBFETCH_PREFLIGHT`` (see
-          ``SKIP_WEBFETCH_PREFLIGHT_ENV``).
+          ``SKIP_WEBFETCH_PREFLIGHT_ENV``);
+        - ``autoCompactWindow`` when the session carries a channel-declared
+          ``max_input_tokens`` (gateway aliases the CLI's per-model tuning
+          can't know). The trigger is ``AUTO_COMPACT_WINDOW_FRACTION`` of
+          the input window, clamped to the CLI's documented 100k–1M range —
+          a sub-100k trigger is skipped entirely (emitting the 100k floor
+          would place the trigger past the real window).
 
         Keep each a true *default*: inject it only when the project hasn't
         set the key, so a project's explicit value (loaded via
@@ -1740,6 +1825,11 @@ class ClaudeAgentRuntime:
             settings.update(_WORKFLOW_SETTINGS)
         if _skip_webfetch_preflight_enabled() and "skipWebFetchPreflight" not in project:
             settings["skipWebFetchPreflight"] = True
+        max_input_tokens = self.model_settings.max_input_tokens if self.model_settings else None
+        if max_input_tokens and "autoCompactWindow" not in project:
+            window = int(max_input_tokens * AUTO_COMPACT_WINDOW_FRACTION)
+            if window >= 100_000:
+                settings["autoCompactWindow"] = min(window, 1_000_000)
         return json.dumps(settings) if settings else None
 
     def _build_model_provider_env(self) -> dict[str, str] | None:
@@ -1930,10 +2020,11 @@ class ClaudeAgentRuntime:
         ]
         | None
     ):
-        if not self.config.hooks:
+        configured_hooks = self.config.hooks
+        if not configured_hooks and not self._citation_compaction_enabled:
             return None
 
-        hooks: Hooks = self.config.hooks
+        hooks: Hooks | None = configured_hooks
         sdk_hooks: dict[
             Literal[
                 "PreToolUse",
@@ -1950,40 +2041,196 @@ class ClaudeAgentRuntime:
             list[HookMatcher],
         ] = {}
 
-        if hooks._handlers.get("before_tool"):
+        if self._citation_compaction_enabled or (
+            hooks is not None and hooks._handlers.get("before_tool")
+        ):
 
             async def pre_tool_use(
                 input_data: HookInput, tool_use_id: str | None, context: HookContext
             ) -> SyncHookJSONOutput:
                 data: dict[str, Any] = dict(input_data)
-                r = await hooks.fire(
-                    "before_tool",
-                    tool_name=data.get("tool_name", ""),
-                    input=data.get("tool_input", {}),
-                )
-                if r.action == "block":
-                    return SyncHookJSONOutput(continue_=False, stopReason=r.reason or "blocked")
+                if hooks is not None and hooks._handlers.get("before_tool"):
+                    r = await hooks.fire(
+                        "before_tool",
+                        tool_name=data.get("tool_name", ""),
+                        input=data.get("tool_input", {}),
+                    )
+                    if r.action == "block":
+                        return SyncHookJSONOutput(
+                            continue_=False,
+                            stopReason=r.reason or "blocked",
+                        )
                 return SyncHookJSONOutput()
 
             sdk_hooks["PreToolUse"] = [HookMatcher(hooks=[pre_tool_use])]
 
-        if hooks._handlers.get("after_tool"):
+        if self._citation_compaction_enabled or (
+            hooks is not None and hooks._handlers.get("after_tool")
+        ):
 
             async def post_tool_use(
                 input_data: HookInput, tool_use_id: str | None, context: HookContext
             ) -> SyncHookJSONOutput:
                 data: dict[str, Any] = dict(input_data)
-                await hooks.fire(
-                    "after_tool",
-                    tool_name=data.get("tool_name", ""),
-                    input=data.get("tool_input", {}),
-                    result=ToolResult(content=str(data.get("tool_response", ""))),
+                tool_name = str(data.get("tool_name") or "")
+                tool_response = data.get("tool_response", "")
+                if hooks is not None and hooks._handlers.get("after_tool"):
+                    await hooks.fire(
+                        "after_tool",
+                        tool_name=tool_name,
+                        input=data.get("tool_input", {}),
+                        result=ToolResult(content=str(tool_response)),
+                    )
+                if not self._citation_compaction_enabled:
+                    return SyncHookJSONOutput()
+                serialized_tool_response = _stringify_tool_result_content(tool_response)
+                persisted_tool_response = (
+                    _load_persisted_tool_result_content(
+                        serialized_tool_response,
+                        tool_use_id=str(tool_use_id or ""),
+                    )
+                    if tool_use_id
+                    else None
                 )
-                return SyncHookJSONOutput()
+                effective_tool_response: Any = (
+                    persisted_tool_response
+                    if persisted_tool_response is not None
+                    else tool_response
+                )
+                source_adaptation = adapt_mcp_source_result(
+                    effective_tool_response,
+                    tool_name=tool_name or None,
+                )
+                source_metadata_handled = source_adaptation is not None
+                if source_adaptation is not None and source_adaptation.resource_kinds != {
+                    "operational"
+                }:
+                    effective_tool_response = source_adaptation.model_content
+                simple_name = tool_name.rsplit("__", 1)[-1].lower()
+                if (
+                    source_adaptation is not None
+                    and not source_adaptation.citable
+                    and simple_name == "kb_search"
+                ):
+                    # Keep parity with DeepAgents during rolling MCP metadata
+                    # upgrades: an exact indexed chunk remains locally
+                    # provable even when the provider temporarily labels the
+                    # result as discovery/non-citable.
+                    augmented_indexed_content = augment_indexed_document_evidence(
+                        effective_tool_response,
+                        tool_name=tool_name,
+                        captured_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                    )
+                    if augmented_indexed_content is not None:
+                        effective_tool_response = augmented_indexed_content
+                self._record_citation_discovery_documents(
+                    tool_name=tool_name,
+                    tool_response=effective_tool_response,
+                )
+                if simple_name == "document_raw_content":
+                    raw_document = extract_raw_document(effective_tool_response)
+                    if raw_document is not None:
+                        document_id = str(
+                            raw_document.get("doc_id") or raw_document.get("document_id") or ""
+                        )
+                        metadata = self._citation_document_metadata.get(document_id, {})
+                        for key in ("title", "url", "file_url", "category"):
+                            if not raw_document.get(key) and metadata.get(key):
+                                raw_document[key] = metadata[key]
+                        cache_key = str(tool_use_id or document_id or "")
+                        if cache_key:
+                            if len(self._citation_raw_documents) >= 8:
+                                self._citation_raw_documents.pop(
+                                    next(iter(self._citation_raw_documents))
+                                )
+                            self._citation_raw_documents[cache_key] = raw_document
+                if simple_name in {"grep", "bash"}:
+                    focused = grep_document_evidence(
+                        effective_tool_response,
+                        tool_args=dict(_tool_input_mapping(data.get("tool_input"))),
+                        raw_documents=self._citation_raw_documents,
+                        captured_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                    )
+                    if focused is not None:
+                        visible, envelope = focused
+                        if tool_use_id:
+                            self._citation_tool_result_sidecars[tool_use_id] = json.dumps(
+                                {"_valuz_evidence": [envelope]},
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            )
+                        output_key = (
+                            "updatedMCPToolOutput"
+                            if tool_name.startswith("mcp__")
+                            else "updatedToolOutput"
+                        )
+                        return SyncHookJSONOutput(
+                            hookSpecificOutput={
+                                "hookEventName": "PostToolUse",
+                                output_key: visible,
+                            }
+                        )
+                if not source_metadata_handled:
+                    augmented_indexed_content = augment_indexed_document_evidence(
+                        effective_tool_response,
+                        tool_name=tool_name,
+                        captured_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                    )
+                    if augmented_indexed_content is not None:
+                        effective_tool_response = augmented_indexed_content
+                # Claude Agent receives the task-selected Model Content with
+                # repeated trusted metadata removed. The private sidecar keeps
+                # only immutable Evidence/Collection descriptors; it is not a
+                # second copy of document text or structured data. Long filings
+                # and transcripts frequently place the requested metric well
+                # after the first dozen chunks, so preserve the complete
+                # selected chunk window instead of replacing it with evidence
+                # excerpts or forcing repeated small-page reads.
+                input_mapping = _tool_input_mapping(data.get("tool_input"))
+                document_id = str(
+                    input_mapping.get("doc_id") or input_mapping.get("document_id") or ""
+                )
+                evidence_limit = (
+                    _CITATION_TRANSCRIPT_MODEL_EVIDENCE_LIMIT
+                    if document_id in self._citation_transcript_documents
+                    else _CITATION_FILING_MODEL_EVIDENCE_LIMIT
+                )
+                # Citation capture must not select the Primary Agent's search
+                # candidates. Preserve provider row order, duplicates,
+                # summaries, and result cardinality exactly as returned.
+                model_projection = effective_tool_response
+                model_projection = rebase_collection_projections(model_projection)
+                compacted = compact_citation_tool_content(
+                    model_projection,
+                    max_text_evidence_items=evidence_limit,
+                )
+                private_citation_content = private_citation_tool_content(
+                    model_projection,
+                    model_content=compacted if compacted is not None else model_projection,
+                )
+                if (
+                    tool_use_id
+                    and private_citation_content is not None
+                    and len(private_citation_content.encode())
+                    <= _MAX_PERSISTED_CITATION_CONTENT_BYTES
+                ):
+                    self._citation_tool_result_sidecars[tool_use_id] = private_citation_content
+                if compacted is None:
+                    return SyncHookJSONOutput()
+                output_key = (
+                    "updatedMCPToolOutput" if tool_name.startswith("mcp__") else "updatedToolOutput"
+                )
+                hook_output: dict[str, Any] = {
+                    "hookEventName": "PostToolUse",
+                    output_key: compacted,
+                }
+                return SyncHookJSONOutput(
+                    hookSpecificOutput=hook_output,
+                )
 
             sdk_hooks["PostToolUse"] = [HookMatcher(hooks=[post_tool_use])]
 
-        if hooks._handlers.get("on_stop"):
+        if hooks is not None and hooks._handlers.get("on_stop"):
 
             async def stop_hook(
                 input_data: HookInput, tool_use_id: str | None, context: HookContext
@@ -1994,6 +2241,30 @@ class ClaudeAgentRuntime:
             sdk_hooks["Stop"] = [HookMatcher(hooks=[stop_hook])]
 
         return sdk_hooks if sdk_hooks else None
+
+    def _record_citation_discovery_documents(
+        self,
+        *,
+        tool_name: str,
+        tool_response: Any,
+    ) -> None:
+        simple_name = tool_name.rsplit("__", 1)[-1]
+        for payload in _iter_tool_response_mappings(tool_response):
+            docs = payload.get("docs")
+            if not isinstance(docs, list):
+                continue
+            for doc in docs:
+                if not isinstance(doc, Mapping):
+                    continue
+                doc_id = str(doc.get("doc_id") or doc.get("document_id") or "")
+                if doc_id:
+                    self._citation_document_metadata[doc_id] = {
+                        key: doc.get(key)
+                        for key in ("title", "url", "file_url", "category")
+                        if doc.get(key)
+                    }
+                    if simple_name in {"conferences_search", "minutes_search"}:
+                        self._citation_transcript_documents.add(doc_id)
 
     # -- Permission handler --
 
@@ -2617,8 +2888,18 @@ class ClaudeAgentRuntime:
                             # Matching TodoWrite result — suppress (todo_update
                             # already carried the structured payload).
                             continue
-                        result_content = (
-                            block.content if isinstance(block.content, str) else str(block.content)
+                        result_content = _stringify_tool_result_content(block.content)
+                        citation_content = self._citation_tool_result_sidecars.pop(
+                            block.tool_use_id,
+                            None,
+                        ) or _load_persisted_tool_result_content(
+                            result_content,
+                            tool_use_id=block.tool_use_id,
+                        )
+                        citation_extra = (
+                            {"_citation_content": citation_content}
+                            if citation_content is not None
+                            else {}
                         )
                         await self.event_sink.emit(
                             Event(
@@ -2627,6 +2908,7 @@ class ClaudeAgentRuntime:
                                     "id": block.tool_use_id,
                                     "content": result_content,
                                     "is_error": bool(block.is_error),
+                                    **citation_extra,
                                     **parent_extra,
                                 },
                             )
@@ -2787,6 +3069,97 @@ def _stop_reason_to_dict(reason: Any) -> dict[str, Any]:
     from dataclasses import asdict
 
     return asdict(reason)
+
+
+def _stringify_tool_result_content(content: Any) -> str:
+    """Preserve structured MCP content blocks as valid JSON text."""
+
+    if isinstance(content, str):
+        return content
+
+    def default(value: Any) -> Any:
+        model_dump = getattr(value, "model_dump", None)
+        if callable(model_dump):
+            return model_dump(mode="json")
+        return str(value)
+
+    try:
+        return json.dumps(content, ensure_ascii=False, default=default)
+    except (TypeError, ValueError):
+        return str(content)
+
+
+def _iter_tool_response_mappings(value: Any):  # noqa: ANN202
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            return
+        yield from _iter_tool_response_mappings(parsed)
+        return
+    if isinstance(value, Mapping):
+        yield value
+        for key in ("structuredContent", "structured_content", "result", "data"):
+            if key in value:
+                yield from _iter_tool_response_mappings(value[key])
+        text = value.get("text")
+        if isinstance(text, str):
+            yield from _iter_tool_response_mappings(text)
+        return
+    if isinstance(value, list):
+        for item in value:
+            yield from _iter_tool_response_mappings(item)
+
+
+def _tool_input_mapping(value: Any) -> Mapping[str, Any]:
+    if isinstance(value, Mapping):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            return {}
+        return parsed if isinstance(parsed, Mapping) else {}
+    return {}
+
+
+def _load_persisted_tool_result_content(
+    content: str,
+    *,
+    tool_use_id: str,
+    projects_root: Path | None = None,
+) -> str | None:
+    """Read a Claude-owned large tool result for citation registration only.
+
+    A tool can print arbitrary text, including a forged persisted-output
+    notice.  Treat the embedded path as untrusted and accept it only when it
+    resolves to the exact ``tool-results/<tool_use_id>.txt`` file beneath
+    Claude's own projects directory.  Symlinks, non-files and oversized
+    payloads fail closed.
+    """
+
+    match = _PERSISTED_OUTPUT_PATH_RE.match(content)
+    if match is None or not tool_use_id:
+        return None
+
+    root = (projects_root or (Path.home() / ".claude" / "projects")).resolve()
+    candidate = Path(match.group(1).strip())
+    if candidate.name != f"{tool_use_id}.txt" or candidate.parent.name != "tool-results":
+        return None
+    try:
+        if candidate.is_symlink():
+            return None
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(root)
+        stat = resolved.stat()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if not resolved.is_file() or stat.st_size > _MAX_PERSISTED_CITATION_CONTENT_BYTES:
+        return None
+    try:
+        return resolved.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
 
 
 def _normalize_anthropic_usage(raw: Any) -> dict[str, int]:

@@ -686,8 +686,35 @@ def _resolve_models(row: ProviderRow) -> list[LLMModel]:
                 continue
             raw_label = item.get("label") or item.get("display_name")
             label = raw_label if isinstance(raw_label, str) and raw_label.strip() else None
-            models.append(LLMModel(id=mid, label=label or fallback_labels.get(mid)))
+            models.append(
+                LLMModel(
+                    id=mid,
+                    label=label or fallback_labels.get(mid),
+                    max_input_tokens=_coerce_max_input_tokens(item.get("max_input_tokens")),
+                )
+            )
     return models
+
+
+def _coerce_max_input_tokens(raw: object) -> int | None:
+    """Validate a stored ``max_input_tokens`` entry — positive int or None."""
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+        return None
+    return raw
+
+
+def declared_model_max_input_tokens(row: ProviderRow, model_id: str) -> int | None:
+    """The row's declared input window for ``model_id``, or ``None``.
+
+    Public lookup for ``provider_resolver`` — user rows can only declare a
+    window through stored dict model entries (no UI yet), so this is
+    usually ``None``; contributed (ADR-011) channels declare through
+    ``LLMModel.max_input_tokens`` directly and don't come through here.
+    """
+    for m in _resolve_models(row):
+        if m.id == model_id:
+            return m.max_input_tokens
+    return None
 
 
 def _models_with_runtimes(row: ProviderRow, compatible: list[str]) -> list[LLMModel]:
@@ -711,6 +738,7 @@ def _models_with_runtimes(row: ProviderRow, compatible: list[str]) -> list[LLMMo
             id=m.id,
             label=m.label,
             runtimes=(m.runtimes if m.runtimes is not None else ch_runtimes),
+            max_input_tokens=m.max_input_tokens,
         )
         for m in _resolve_models(row)
     ]
@@ -733,7 +761,14 @@ def _stamp_contributed_runtimes(ch: LLMChannel) -> LLMChannel:
     # ``ch`` is a fresh per-call object from the contributor; ``LLMChannel`` is a
     # mutable dataclass and ``LLMModel`` is frozen, so rebuild the model rows.
     ch.models = [
-        m if m.runtimes is not None else LLMModel(id=m.id, label=m.label, runtimes=ch_runtimes)
+        m
+        if m.runtimes is not None
+        else LLMModel(
+            id=m.id,
+            label=m.label,
+            runtimes=ch_runtimes,
+            max_input_tokens=m.max_input_tokens,
+        )
         for m in ch.models
     ]
     return ch

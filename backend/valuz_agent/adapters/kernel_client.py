@@ -35,6 +35,7 @@ it to ``/kernel`` (ADR-013; the kernel's own upstream default is ``/api`` — se
 | subscribe_all_events     | SSE    {KERNEL_API_PREFIX}/v1/events/stream                   |
 | usage_rollup             | GET    {KERNEL_API_PREFIX}/v1/usage                            |
 | list_messages            | GET    {KERNEL_API_PREFIX}/v1/sessions/{id}/messages           |
+| get_message              | GET    {KERNEL_API_PREFIX}/v1/messages/{id}                    |
 | submit_action            | POST   {KERNEL_API_PREFIX}/v1/sessions/{id}/actions            |
 | interrupt                | POST   {KERNEL_API_PREFIX}/v1/sessions/{id}/interrupt          |
 | run_turn                 | WS     {KERNEL_API_PREFIX}/v1/sessions/{id}/run                |
@@ -53,6 +54,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextvars import ContextVar
 from typing import Any, NoReturn, Protocol, TypedDict
 
 import valuz_agent.boot.kernel  # noqa: F401  (sys.path side-effect)
@@ -69,6 +71,7 @@ from app.schemas import (  # noqa: E402
     EventPayload,
     EventWindowData,
     FinalizeSessionRequest,
+    ImportMessageRequest,
     MessageData,
     SessionData,
     SetSessionModeRequest,
@@ -221,6 +224,15 @@ class KernelClient(Protocol):
     async def list_messages(
         self, user_id: str, session_id: str, *, limit: int = 50, offset: int = 0
     ) -> list[MessageData]: ...
+
+    async def get_message(self, user_id: str, message_id: str) -> MessageData | None: ...
+
+    async def import_message(
+        self,
+        user_id: str,
+        session_id: str,
+        req: ImportMessageRequest,
+    ) -> MessageData: ...
 
     async def submit_action(
         self, user_id: str, session_id: str, req: SubmitActionRequest
@@ -561,6 +573,37 @@ class InProcessKernelClient:
             _raise_mapped(exc)
         return result["data"]
 
+    async def get_message(self, user_id: str, message_id: str) -> MessageData | None:
+        from app.routes.messages import get_message
+
+        try:
+            result = await get_message(message_id, self._store(), user_id)
+        except HTTPException as exc:
+            if exc.status_code == 404:
+                return None
+            _raise_mapped(exc)
+        return result["data"]
+
+    async def import_message(
+        self,
+        user_id: str,
+        session_id: str,
+        req: ImportMessageRequest,
+    ) -> MessageData:
+        from app.routes.messages import import_canonical_message
+
+        try:
+            result = await import_canonical_message(
+                session_id,
+                req,
+                self._store(),
+                _orchestrator(),
+                user_id,
+            )
+        except HTTPException as exc:
+            _raise_mapped(exc)
+        return result["data"]
+
     async def submit_action(
         self, user_id: str, session_id: str, req: SubmitActionRequest
     ) -> dict[str, Any]:
@@ -713,6 +756,22 @@ def _data_plane() -> KernelClient:
     return _host_data_client if _host_data_client is not None else client
 
 
+# The kernel a ``pre_turn`` hook's control writes must land on: the very
+# instance ``run_turn`` just allocated for this turn. Set only for the duration
+# of that hook (see ``run_turn``), and only ever consulted for the session it
+# was pinned for.
+#
+# Why a pin rather than letting ``_control_kernel`` re-resolve: the hook runs in
+# the gap between allocation and the turn, and re-resolving would (a) cost a
+# second allocator round-trip (a live health probe per turn) and (b) be
+# genuinely racy — a concurrent ``ensure`` on the same scope can repoint the
+# registry row between the two lookups, so the refresh would be written to an
+# instance that is NOT the one about to read it.
+_pinned_control_kernel: ContextVar[tuple[str, KernelClient] | None] = ContextVar(
+    "valuz_pinned_control_kernel", default=None
+)
+
+
 async def _control_kernel(user_id: str, session_id: str) -> KernelClient:
     """Route a session CONTROL write (update/mode/finalize/append/delete).
 
@@ -720,7 +779,14 @@ async def _control_kernel(user_id: str, session_id: str) -> KernelClient:
     session its runtime sqlite is the authority, so the write must land there
     (its dual-write mirrors it to the durable). No live kernel (at-rest
     session, sandbox gone) → write the durable directly via the data plane.
+
+    A ``pre_turn`` hook runs with the turn's kernel pinned (``run_turn``); the
+    pin is keyed by session id so it can never mis-route a write for a
+    different session that happens to share the task/context.
     """
+    pinned = _pinned_control_kernel.get()
+    if pinned is not None and pinned[0] == session_id:
+        return pinned[1]
     k = await _kernel_for_existing(user_id, await _scope_for(user_id, session_id))
     return k if k is not None else _data_plane()
 
@@ -1100,6 +1166,18 @@ async def list_messages(
     return await _data_plane().list_messages(user_id, session_id, limit=limit, offset=offset)
 
 
+async def get_message(user_id: str, message_id: str) -> MessageData | None:
+    return await _data_plane().get_message(user_id, message_id)
+
+
+async def import_message(
+    user_id: str,
+    session_id: str,
+    req: ImportMessageRequest,
+) -> MessageData:
+    return await _data_plane().import_message(user_id, session_id, req)
+
+
 async def latest_message_id(user_id: str, session_id: str) -> str | None:
     messages = await _data_plane().list_messages(user_id, session_id, limit=1)
     return messages[0].id if messages else None
@@ -1121,10 +1199,47 @@ async def run_turn(
     text: str,
     attachments: list[dict[str, Any]] | None = None,
     additional_context: str = "",
+    *,
+    pre_turn: Callable[[], Awaitable[None]] | None = None,
 ) -> MessageData:
+    """Drive one turn on the session's execution kernel.
+
+    ``pre_turn`` is the per-turn capability convergence hook (always-on MCP
+    re-stamp, docs capabilities, citation policy — see
+    ``modules/sessions/pre_turn``). It MUST run here, between allocation and
+    the turn, and callers must not run it themselves beforehand:
+
+    Those refreshers write through ``update_session``, which routes
+    live-kernel-first via ``_control_kernel`` → ``peek`` — and ``peek`` never
+    provisions. Run before allocation, an at-rest session has no live kernel,
+    so the write lands on the DURABLE only. The scoped allocator then boots
+    this turn's instance and seeds its runtime sqlite from the scope's COS
+    snapshot, and the kernel has no remote read path — so the durable write is
+    simply never read, and the turn runs on whatever the snapshot froze.
+
+    That is not hypothetical: it is why external connector MCPs 401'd on every
+    turn of a conversation resumed after its ~1h OAuth bearer expired. The
+    re-stamp minted a fresh token each turn, wrote it to the durable, and the
+    sandbox kept using the fossil from the snapshot — with the connectors page
+    truthfully reporting "connected" the whole time. (Below the sandbox's idle
+    grace the previous instance is still live, the write reaches it, and the
+    retire write-back carries it forward — which is exactly why the failure
+    only ever showed up on long-idle sessions.)
+
+    Hooks are best-effort by contract: a refresh failure degrades a capability,
+    it must never sink the turn.
+    """
     # new_turn=True: a scoped allocator may run a fresh instance for this turn
     # (chat = per-turn instance; task reuses its shared one). See sandbox §2.
     k = await _kernel_for(user_id, await _scope_for(user_id, session_id), new_turn=True)
+    if pre_turn is not None:
+        token = _pinned_control_kernel.set((session_id, k))
+        try:
+            await pre_turn()
+        except Exception:  # noqa: BLE001 — a hook must never block a turn
+            logger.warning("pre-turn hook failed for session %s", session_id, exc_info=True)
+        finally:
+            _pinned_control_kernel.reset(token)
     return await k.run_turn(user_id, session_id, text, attachments, additional_context)
 
 

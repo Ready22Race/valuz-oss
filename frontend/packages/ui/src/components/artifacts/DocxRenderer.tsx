@@ -3,7 +3,12 @@ import { useEffect, useRef, useState } from "react";
 
 import type { ArtifactRendererProps } from "./artifact-viewer.types";
 
+import { t as _t } from "@valuz/shared/i18n";
+import { useI18n } from "../../hooks/use-i18n";
+
+
 export function DocxRenderer({ artifact, content }: ArtifactRendererProps) {
+  const { t } = useI18n();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -21,7 +26,10 @@ export function DocxRenderer({ artifact, content }: ArtifactRendererProps) {
     async function renderDocx() {
       try {
         const response = await fetch(documentUrl, { signal: controller.signal });
-        if (!response.ok) throw new Error(`读取失败：HTTP ${response.status}`);
+        if (!response.ok)
+          throw new Error(
+            _t("ui.artifact.httpReadFailed", { status: response.status }),
+          );
         const buffer = await response.arrayBuffer();
         const { renderAsync } = await import("docx-preview");
         if (controller.signal.aborted) return;
@@ -39,7 +47,9 @@ export function DocxRenderer({ artifact, content }: ArtifactRendererProps) {
         });
       } catch (cause) {
         if (controller.signal.aborted) return;
-        setError(cause instanceof Error ? cause.message : "无法渲染 DOCX 文件。");
+        setError(
+          cause instanceof Error ? cause.message : _t("ui.artifact.docxRenderError"),
+        );
       } finally {
         if (!controller.signal.aborted) setLoading(false);
       }
@@ -57,7 +67,7 @@ export function DocxRenderer({ artifact, content }: ArtifactRendererProps) {
       <div className="flex h-full items-center justify-center px-6 py-16">
         <div className="max-w-[420px] rounded-lg border border-surface-border bg-surface-soft px-5 py-4">
           <div className="text-sm font-medium text-ink-heading">
-            无法读取 DOCX
+            {t("ui.artifact.docxReadFailed")}
           </div>
           <p className="mt-1 text-xs leading-5 text-ink-body">{artifact.name}</p>
         </div>
@@ -73,7 +83,7 @@ export function DocxRenderer({ artifact, content }: ArtifactRendererProps) {
           role="status"
         >
           <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-          正在渲染 DOCX
+          {t("ui.artifact.docxRendering")}
         </div>
       ) : null}
       {error ? (
@@ -82,7 +92,7 @@ export function DocxRenderer({ artifact, content }: ArtifactRendererProps) {
             className="max-w-[420px] rounded-[10px] border border-error-light bg-error-light px-5 py-4 text-error-text"
             role="alert"
           >
-            <div className="text-sm font-medium">无法预览 DOCX</div>
+            <div className="text-sm font-medium">{t("ui.artifact.docxPreviewFailed")}</div>
             <p className="mt-1 text-xs leading-5">{error}</p>
           </div>
         </div>

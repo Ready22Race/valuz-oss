@@ -44,7 +44,10 @@ from valuz_agent.adapters import kernel_client
 from valuz_agent.adapters.capability_resolver import resolve_session_capabilities
 from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.adapters.model_resolver import resolve_model
-from valuz_agent.adapters.system_prompt_builder import build_project_system_prompt
+from valuz_agent.adapters.system_prompt_builder import (
+    build_project_system_prompt,
+    ensure_citation_system_policy,
+)
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.integrations.skills_filesystem import FilesystemSkillSource
@@ -64,11 +67,10 @@ from valuz_agent.modules.sessions.attachments import (
     _load_pending_attachments,
     _mark_attachments_consumed,
 )
-from valuz_agent.modules.sessions.capabilities import (
-    refresh_always_on_mcp_for_session,
-    refresh_docs_capabilities_for_session,
+from valuz_agent.modules.sessions.context_builder import (
+    _build_additional_context,
+    worktree_name_of,
 )
-from valuz_agent.modules.sessions.context_builder import _build_additional_context
 from valuz_agent.modules.sessions.datastore import SessionDatastore
 from valuz_agent.modules.sessions.dto import (
     QueuedInput,
@@ -101,6 +103,7 @@ from valuz_agent.modules.sessions.mappers import (
     _valuz_meta,
 )
 from valuz_agent.modules.sessions.models import QueuedInputRow
+from valuz_agent.modules.sessions.pre_turn import chat_capability_hook
 from valuz_agent.modules.sessions.run_orchestrator import (
     _derive_session_name,
     _run_agent_background,
@@ -675,6 +678,7 @@ class SessionService:
         """
         from valuz_agent.adapters.provider_resolver import (
             ProviderNotResolvable,
+            resolve_model_max_input_tokens,
             resolve_model_provider,
             resolve_runtime_provider,
         )
@@ -803,6 +807,7 @@ class SessionService:
         # flow through this code path.
         from valuz_agent.adapters.agent_resolver import CHAT_TASK_PLAYBOOK
         from valuz_agent.adapters.system_prompt_builder import (
+            AUTHORIZATION_BOUNDARY_INSTRUCTIONS,
             OUTPUT_FORMAT_INSTRUCTIONS,
             assemble_session_instructions,
         )
@@ -834,6 +839,7 @@ class SessionService:
                     "global-instructions",
                     prompt_snapshot.content if prompt_snapshot is not None else "",
                 ),
+                ("authorization-boundary", AUTHORIZATION_BOUNDARY_INSTRUCTIONS),
                 ("agent-instructions", agent.instructions or ""),
                 ("project-instructions", project_prompt),
                 ("memory", mem_block),
@@ -845,6 +851,7 @@ class SessionService:
                 ("output-format", OUTPUT_FORMAT_INSTRUCTIONS),
             ]
         )
+        instructions = ensure_citation_system_policy(instructions)
 
         effective_permission_mode = _coerce_session_permission_mode(
             permission_mode or agent.permission_mode
@@ -856,10 +863,17 @@ class SessionService:
         # set"). That's a per-model constraint — clear effort on those specific
         # agents — not a reason to drop it runtime-wide.
         effective_effort = override_effort or getattr(agent, "effort", None)
-        model_settings = (
-            ModelSettingsSchema(effort=_coerce_session_effort(effective_effort))
-            if effective_effort
-            else ModelSettingsSchema()
+        model_settings = ModelSettingsSchema(
+            effort=_coerce_session_effort(effective_effort) if effective_effort else None,
+            # Channel-declared input window (gateway aliases only; None for
+            # models the runtimes' own defaults already know) — the runtimes
+            # derive their auto-compaction triggers from it.
+            max_input_tokens=await resolve_model_max_input_tokens(
+                provider_id=provider_id,
+                model_id=effective_model,
+                providers=self._providers,
+                user_id=user_id,
+            ),
         )
 
         session_id = uuid4().hex
@@ -1100,6 +1114,7 @@ class SessionService:
         # without a provider.
         from valuz_agent.adapters.provider_resolver import (
             ProviderNotResolvable,
+            resolve_model_max_input_tokens,
             resolve_model_provider,
             resolve_runtime_provider,
         )
@@ -1302,7 +1317,17 @@ class SessionService:
         # accepts reasoning_effort; deepseek-v4-flash 400s on it), not a
         # runtime-wide one. Don't strip it for deepagents wholesale.
         effective_effort = _coerce_session_effort(effort)
-        model_settings = ModelSettingsSchema(effort=effective_effort)
+        model_settings = ModelSettingsSchema(
+            effort=effective_effort,
+            # Channel-declared input window (gateway aliases only) — see the
+            # agent-conversation path above.
+            max_input_tokens=await resolve_model_max_input_tokens(
+                provider_id=resolved_provider_id,
+                model_id=resolution.model,
+                providers=self._providers,
+                user_id=user_id,
+            ),
+        )
 
         if project_row is None:
             raise SessionNotRunnable(f"project '{project_id}' not found")
@@ -1320,6 +1345,7 @@ class SessionService:
             session_instructions = (
                 f"{session_instructions}\n\n{notice}" if session_instructions else notice
             )
+        session_instructions = ensure_citation_system_policy(session_instructions)
 
         from app.serializers import agent_config_to_schema
 
@@ -1366,33 +1392,11 @@ class SessionService:
         user_id: str | None = None,
     ) -> SessionDetail:
         """Kick off an async agent turn in the background.  Returns immediately."""
-        # Lazy refresh — if the user bound docs to this project AFTER
-        # the session was created, the docs skill+MCP would be missing
-        # from session.{skills,mcp_servers} (capability_resolver only
-        # fires at create-time). The proactive eventbus subscriber
-        # already handles the binding-change moment, but a lazy refresh
-        # here is a belt-and-braces guarantee — by the time the user
-        # actually types a message, the docs caps are present.
-        try:
-            await refresh_docs_capabilities_for_session(session_id, user_id)
-        except Exception:  # noqa: BLE001 — never block send on refresh
-            logger.exception(
-                "send_message: docs capability refresh failed for %s",
-                session_id,
-            )
-
-        # Re-stamp the always-on in-process MCP token: it rotates per process,
-        # so a session resumed after a backend restart would otherwise carry a
-        # stale X-Valuz-Internal → gate 403 → Claude Code parks the server in
-        # needsAuth (only OAuth stubs, real tools hidden). Self-heals here.
-        try:
-            await refresh_always_on_mcp_for_session(session_id, user_id)
-        except Exception:  # noqa: BLE001 — never block send on refresh
-            logger.exception(
-                "send_message: always-on MCP re-stamp failed for %s",
-                session_id,
-            )
-
+        # Capability convergence (citation policy / docs caps / always-on MCP
+        # re-stamp) is NOT done here. It rides the turn as ``pre_turn`` — see
+        # ``sessions/pre_turn`` and ``kernel_client.run_turn``. Refreshing at
+        # this point would write to the durable of an at-rest session and the
+        # turn's freshly-seeded kernel would never read it.
         session = await data_reader().get_session(user_id, session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
@@ -1458,30 +1462,24 @@ class SessionService:
         return _session_to_detail(updated)
 
     async def send_message_sync(
-        self, session_id: str, content: str, user_id: str | None = None
+        self,
+        session_id: str,
+        content: str,
+        user_id: str | None = None,
+        *,
+        citation_enabled_override: bool | None = None,
+        citation_verification_enabled_override: bool | None = None,
     ) -> SessionRunResponse:
         """Block until the agent turn completes.  Used by the schedule runner."""
-        # Mirror send_message: lazy refresh of docs caps before the turn
-        # so scheduled runs (which never go through the eventbus
-        # subscriber on bind-time) also pick up KB bindings added since
-        # the session was created.
-        try:
-            await refresh_docs_capabilities_for_session(session_id, user_id)
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                "send_message_sync: docs capability refresh failed for %s",
-                session_id,
-            )
-
-        # See send_message: re-stamp always-on MCP token so scheduled/automation
-        # runs resuming across a backend restart don't hit the stale-token 403.
-        try:
-            await refresh_always_on_mcp_for_session(session_id, user_id)
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                "send_message_sync: always-on MCP re-stamp failed for %s",
-                session_id,
-            )
+        # Mirror ``send_message``: convergence rides the turn, not this call —
+        # see ``sessions/pre_turn``. The citation overrides are bound into the
+        # hook below so an internal document-summary run keeps its policy.
+        pre_turn = chat_capability_hook(
+            session_id,
+            user_id,
+            citation_enabled_override=citation_enabled_override,
+            verification_enabled_override=citation_verification_enabled_override,
+        )
 
         session = await data_reader().get_session(user_id, session_id)
         if session is None:
@@ -1545,6 +1543,7 @@ class SessionService:
                 project_id,
                 pending_attachments,
                 user_id=user_id,
+                worktree=worktree_name_of(session),
             )
 
             try:
@@ -1557,6 +1556,7 @@ class SessionService:
                         for source, parsed in attachment_specs
                     ],
                     additional_context=additional_context,
+                    pre_turn=pre_turn,
                 )
             finally:
                 try:
@@ -2017,7 +2017,9 @@ class SessionService:
                     return  # still in use by a live session
             from valuz_agent.modules.worktrees.service import worktree_service
 
-            removed = await worktree_service.cleanup_if_clean(snapshot)
+            removed = await worktree_service.cleanup_if_clean(
+                snapshot, user_id=user_id, project_id=project_id or ""
+            )
             if removed:
                 logger.info(
                     "delete_session: removed clean worktree '%s' (%s)",
@@ -2128,6 +2130,7 @@ class SessionService:
                     temperature=previous.temperature,
                     max_tokens=previous.max_tokens,
                     effort=target_effort,
+                    max_input_tokens=previous.max_input_tokens,
                 )
             ),
         )

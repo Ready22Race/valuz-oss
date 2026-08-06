@@ -65,8 +65,9 @@ from src.core.approval_rule_matcher import ExactArgsRuleMatcher, RuntimeApproval
 from src.core.events import AVAILABLE_DECISIONS_V1_WITH_SESSION, Event, EventSink
 from src.core.rule_canonicalize import reduce_args_for_subject
 from src.core.session_approval_cache import SessionRule
-from src.core.tools import ExecContext, ToolKit
+from src.core.tools import ExecContext, ToolDef, ToolKit
 from src.core.types import (
+    AUTO_COMPACT_WINDOW_FRACTION,
     BudgetExhausted,
     EndTurn,
     Error,
@@ -135,6 +136,8 @@ _HARNESS_TOOLKIT_TOOL_TIMEOUT_SEC = 720.0
 
 class CodexRuntime:
     """Wraps the Codex SDK (``AsyncCodex`` + ``AsyncThread``) as a RuntimePort."""
+
+    supports_native_continuation = True
 
     def __init__(
         self,
@@ -576,6 +579,29 @@ class CodexRuntime:
                     },
                 )
             )
+
+    async def run_task_coverage(
+        self,
+        session: Session,
+        user_message: UserMessage,
+        *,
+        no_op_tool: ToolDef,
+    ) -> None:
+        """Resume the same Codex thread with a turn-scoped private tool."""
+
+        previous = self.toolkit.get(no_op_tool.name)
+        self.toolkit.register(no_op_tool)
+        # Codex discovers harness MCP tools at process startup.  Reconnect the
+        # SDK client, then resume the persisted native thread id.
+        await self.close()
+        try:
+            await self.run(session, user_message)
+        finally:
+            if previous is None:
+                self.toolkit.unregister(no_op_tool.name)
+            else:
+                self.toolkit.register(previous)
+            await self.close()
 
     async def submit_action(
         self,
@@ -1381,6 +1407,23 @@ def _build_config_overrides(
     # Config-level is therefore the right home for a system-wide
     # default that isn't user-tunable.
     overrides.append(f"model_reasoning_summary={_toml_quote(_CODEX_REASONING_SUMMARY_DEFAULT)}")
+
+    # Channel-declared input window for models codex's own catalog can't
+    # know (gateway aliases). ``model_context_window`` feeds codex's
+    # remaining-context bookkeeping; ``model_auto_compact_token_limit``
+    # triggers compaction at the shared fraction. Both are bare TOML
+    # integers (quoting turns them into strings codex rejects). Unlike
+    # ``model_reasoning_effort`` there is no thread-metadata pin trap:
+    # the model is locked per session, so the value never changes between
+    # thread_start and any later resume.
+    max_input_tokens = (
+        session.model_settings.max_input_tokens if session.model_settings is not None else None
+    )
+    if max_input_tokens:
+        overrides.append(f"model_context_window={max_input_tokens}")
+        overrides.append(
+            f"model_auto_compact_token_limit={int(max_input_tokens * AUTO_COMPACT_WINDOW_FRACTION)}"
+        )
 
     if provider is not None:
         # Codex's ``web_search`` tool is wired against the OpenAI

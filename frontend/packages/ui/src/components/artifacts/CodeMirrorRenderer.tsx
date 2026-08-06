@@ -4,6 +4,9 @@ import { basicSetup } from "codemirror";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { ArtifactRendererProps } from "./artifact-viewer.types";
+import "./CodeMirrorRenderer.css";
+
+import { useI18n } from "../../hooks/use-i18n";
 
 async function languageForPath(path: string): Promise<Extension[]> {
   const extension = path.split(".").pop()?.toLowerCase() ?? "";
@@ -64,7 +67,9 @@ async function languageForPath(path: string): Promise<Extension[]> {
 export function CodeMirrorRenderer({
   artifact,
   content,
+  wrapLines = false,
 }: ArtifactRendererProps) {
+  const { t } = useI18n();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [languageExtensions, setLanguageExtensions] = useState<Extension[]>([]);
   const sourcePath = artifact.path ?? artifact.name;
@@ -89,8 +94,15 @@ export function CodeMirrorRenderer({
     () => [
       basicSetup,
       EditorState.readOnly.of(true),
-      EditorView.editable.of(false),
-      ...(artifact.previewKind === "plain" ? [EditorView.lineWrapping] : []),
+      EditorView.contentAttributes.of({
+        spellcheck: "false",
+        autocorrect: "off",
+        autocapitalize: "off",
+        translate: "no",
+      }),
+      ...(artifact.previewKind === "plain" || wrapLines
+        ? [EditorView.lineWrapping]
+        : []),
       EditorView.theme({
         "&": {
           height: "100%",
@@ -125,7 +137,7 @@ export function CodeMirrorRenderer({
       }),
       ...languageExtensions,
     ],
-    [artifact.previewKind, languageExtensions],
+    [artifact.previewKind, languageExtensions, wrapLines],
   );
 
   useEffect(() => {
@@ -143,17 +155,22 @@ export function CodeMirrorRenderer({
   if (content?.kind !== "text") {
     return (
       <div className="flex h-full items-center justify-center text-sm text-ink-meta">
-        无法读取文本内容
+        {t("ui.artifact.textReadFailed")}
       </div>
     );
   }
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-surface-base">
-      <div ref={containerRef} className="min-h-0 flex-1 overflow-hidden" />
+      <div
+        ref={containerRef}
+        className={`min-h-0 flex-1 overflow-hidden ${
+          artifact.previewKind === "markdown" ? "valuz-markdown-source" : ""
+        }`}
+      />
       {content.truncated ? (
         <div className="border-t border-surface-border bg-warning-light px-4 py-2 text-xs text-warning-text">
-          文件较大，当前仅显示前 5 MiB。
+          {t("ui.artifact.truncated")}
         </div>
       ) : null}
     </div>

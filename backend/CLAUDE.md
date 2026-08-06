@@ -293,7 +293,7 @@ cd backend
 uv sync                          # create .venv, install deps
 uv sync --extra dev              # + pytest, mypy, ruff
 
-VALUZ_DATA_DIR=~/.valuz-oss-dev VALUZ_LOG_DIR=~/.valuz-oss-dev/logs \
+VALUZ_DATA_DIR=~/.valuz-oss-dev VALUZ_LOG_FILE_PATH=~/.valuz-oss-dev/logs/backend.log \
 uv run python -m valuz_agent --port 8000 --reload   # what dev.sh spawns
 # Direct invocation REQUIRES VALUZ_DATA_DIR: a source-run backend refuses to
 # boot on the packaged app's ~/.valuz-oss (boot/steps.py
@@ -321,6 +321,21 @@ logs land under `.ai/dev/{backend,frontend}.log`.
 - **ruff**: line-length 100, target `py312`. **mypy**: the kernel is on
   `mypy_path` but `src.*` / `kernel.*` use `follow_imports = "skip"`, so host
   mypy never type-checks kernel internals — keep host code self-contained.
+- **Login-shell PATH**: at boot the host merges the user's login-shell PATH
+  into `os.environ["PATH"]` (`boot/login_path.py`; append-only, fail-open,
+  opt out with `VALUZ_DISABLE_LOGIN_PATH=1`). A Finder/launchd-launched
+  backend otherwise only sees launchd's minimal PATH and can't resolve
+  user-installed tools (nvm `npx`, `uv`, homebrew) needed by stdio MCP
+  connectors, the CLI login probe, and the browser dev fallback.
+- **`max_input_tokens` is the model's INPUT cap, not the vendor "context
+  window"** (GPT-5 class: 272k input ≠ 400k total; Anthropic: the two
+  coincide). Channel model entries declare it (`LLMModel.max_input_tokens`,
+  producer-declared per ADR-011) ONLY for gateway aliases the SDK/CLI
+  per-model defaults can't know; the host snapshots it into kernel
+  `ModelSettings.max_input_tokens` at session create and each runtime derives
+  its auto-compaction trigger (deepagents langchain `profile`, claude
+  `autoCompactWindow`, codex `model_context_window` +
+  `model_auto_compact_token_limit`). Never guess it from a model name.
 - **`rg`** (ripgrep) is a runtime helper for `integrations/docs_embedded`,
   located via the `VALUZ_RG_PATH` env the Electron sidecar sets to the packaged
   `libexec/rg`. The binary is vendored per platform at

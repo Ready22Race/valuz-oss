@@ -30,7 +30,6 @@ import {
   XCircle,
 } from "lucide-react";
 import {
-  ArtifactViewerShell,
   BackLink,
   Badge,
   Button,
@@ -44,6 +43,7 @@ import {
   PageLoader,
   Textarea,
   cn,
+  type RuntimeStartLocation,
 } from "@valuz/ui";
 import {
   agentsApi,
@@ -57,6 +57,7 @@ import {
   type TaskDetail,
   type TaskEvent,
   recordEntityOrigin,
+  useEntityOrigin,
 } from "@valuz/core";
 import type { FileTreeNode } from "@valuz/ui";
 import { useProjectOutlet } from "@valuz/app/layout";
@@ -74,8 +75,10 @@ import {
   useSkillSubmissionCards,
 } from "../hooks";
 import { deriveDeliverable } from "./task-detail/deliverable";
+import { ArtifactSplitPane } from "../components/ArtifactSplitPane";
 import { useArtifactFile } from "../hooks/use-artifact-file";
 import { eventDetail } from "../lib/task-event-detail";
+import { toAbsoluteProjectPath, toProjectRelativePath } from "../lib/project-paths";
 
 interface EventMeta {
   icon: ComponentType<{ className?: string }>;
@@ -257,35 +260,6 @@ type Translator = (
   params?: Record<string, string | number>,
 ) => string;
 
-/** Resolve an artifact path to an absolute filesystem location. Agents
- *  typically pass project-relative paths to ``finish_task`` (e.g.
- *  ``"reports/desktop.md"``), but some pass absolute paths too. Join
- *  with the project cwd when relative, leave alone when absolute or
- *  cwd is unknown. */
-function resolveArtifactPath(path: string, rootPath: string): string {
-  if (!path) return path;
-  if (path.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(path)) return path;
-  if (!rootPath) return path;
-  const sep = rootPath.includes("\\") ? "\\" : "/";
-  const trimmed = rootPath.endsWith(sep) ? rootPath.slice(0, -1) : rootPath;
-  return `${trimmed}${sep}${path}`;
-}
-
-function toProjectRelativeArtifactPath(
-  path: string,
-  rootPath: string,
-): string | null {
-  if (!path) return null;
-  const normalizedPath = path.replace(/\\/g, "/");
-  if (!normalizedPath.startsWith("/") && !/^[a-zA-Z]:\//.test(normalizedPath)) {
-    return normalizedPath.replace(/^\/+/, "");
-  }
-  if (!rootPath) return null;
-  const normalizedRoot = rootPath.replace(/\\/g, "/").replace(/\/+$/, "");
-  if (normalizedPath === normalizedRoot) return null;
-  if (!normalizedPath.startsWith(`${normalizedRoot}/`)) return null;
-  return normalizedPath.slice(normalizedRoot.length + 1);
-}
 
 function artifactIconClassName(filename: string): string {
   const extension = filename.split(".").pop()?.toLowerCase();
@@ -494,8 +468,8 @@ export const TaskDetailPage = () => {
 
   const locateArtifactFile = useCallback(
     (path: string) => ({
-      absolutePath: resolveArtifactPath(path, rootPath),
-      relativePath: toProjectRelativeArtifactPath(path, rootPath) ?? path,
+      absolutePath: toAbsoluteProjectPath(path, rootPath),
+      relativePath: toProjectRelativePath(path, rootPath) ?? path,
     }),
     [rootPath],
   );
@@ -507,14 +481,16 @@ export const TaskDetailPage = () => {
     // The file lives on the backend that owns the task — route the resolve with
     // the same ref the rest of this page uses.
     baseRef: { taskId: taskId || undefined, projectId: projectId ?? undefined },
+    // The preview pane carries a tab strip, so opening a second document adds
+    // to the set instead of replacing what's on screen.
+    multiTab: true,
   });
+  // The split pane consumes the loaded document itself; the page keeps only
+  // what it needs for URL sync and the copy / reveal actions.
   const {
+    activePath: activeArtifactPath,
     selectedPath: selectedArtifactPath,
-    artifact,
     content: artifactContent,
-    target: artifactTarget,
-    loading: artifactLoading,
-    error: artifactError,
     open: loadArtifact,
     reload: reloadArtifact,
     close: closeArtifact,
@@ -523,7 +499,7 @@ export const TaskDetailPage = () => {
   const openArtifactFile = useCallback(
     async (relPath: string, options?: { syncUrl?: boolean }) => {
       if (!projectId) return;
-      const normalized = toProjectRelativeArtifactPath(relPath, rootPath);
+      const normalized = toProjectRelativePath(relPath, rootPath);
       if (
         options?.syncUrl !== false &&
         normalized &&
@@ -543,35 +519,74 @@ export const TaskDetailPage = () => {
     [loadArtifact, projectId, rootPath, searchParams, setSearchParams],
   );
 
+  // ?file is an output of the focused tab, and only an input when it changed
+  // from outside this page. Without that distinction the two effects below
+  // ping-pong: each reads the other's not-yet-settled value and "corrects" it.
+  // ?file names the focused document. It is an *output* while anything is
+  // open — the tab strip is the source of truth — and only an input when the
+  // preview is closed, i.e. on load or after a deep link. Treating a stale
+  // param as an instruction is what made these two effects ping-pong: each
+  // read the other's not-yet-settled value and "corrected" it.
+  const authoredFileParamRef = useRef<string | null>(null);
+  const hadArtifactRef = useRef(false);
+
+  useEffect(() => {
+    if (activeArtifactPath) {
+      hadArtifactRef.current = true;
+      if (activeArtifactPath === selectedFileParam) return;
+      authoredFileParamRef.current = activeArtifactPath;
+      setSearchParams(
+        (current) => {
+          const next = new URLSearchParams(current);
+          next.set("file", activeArtifactPath);
+          return next;
+        },
+        { replace: true },
+      );
+      return;
+    }
+    // Nothing open. Clear the param only if something *was* open — on mount it
+    // just means the deep link hasn't been consumed yet.
+    if (!hadArtifactRef.current || !selectedFileParam) return;
+    hadArtifactRef.current = false;
+    // Claim the value being removed, not null: effects run in declaration
+    // order, so the reader below sees this stale param before the clear lands
+    // and would otherwise reopen what was just closed.
+    authoredFileParamRef.current = selectedFileParam;
+    setSearchParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        next.delete("file");
+        return next;
+      },
+      { replace: true },
+    );
+  }, [activeArtifactPath, selectedFileParam, setSearchParams]);
+
   useEffect(() => {
     if (!selectedFileParam) {
-      if (selectedArtifactPath) {
-        const timer = window.setTimeout(() => {
-          closeArtifact();
-        }, 0);
-        return () => window.clearTimeout(timer);
-      }
+      // The clear has landed; drop the claim so a later deep link to the same
+      // document is honoured rather than mistaken for our own echo.
+      authoredFileParamRef.current = null;
       return;
     }
-    if (
-      selectedFileParam === selectedArtifactPath &&
-      (artifact || artifactLoading || artifactError)
-    ) {
-      return;
-    }
+    // Something is already focused, so the param is this effect's own trailing
+    // output rather than a request.
+    if (activeArtifactPath) return;
+    // Nothing is focused but the param still names what we last wrote — the
+    // reader just closed it and the clear hasn't landed. Reopening it here is
+    // how "close the last tab" used to bounce straight back.
+    if (selectedFileParam === authoredFileParamRef.current) return;
+    // The project root arrives with the detail fetch, and the path the deep
+    // link names is relative to it. Resolving before it lands builds a bogus
+    // absolute path and lands the tab in an error state it never retries out
+    // of — wait for the root, then open.
+    if (!rootPath) return;
     const timer = window.setTimeout(() => {
       void openArtifactFile(selectedFileParam, { syncUrl: false });
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [
-    artifact,
-    artifactError,
-    artifactLoading,
-    closeArtifact,
-    openArtifactFile,
-    selectedArtifactPath,
-    selectedFileParam,
-  ]);
+  }, [rootPath, activeArtifactPath, openArtifactFile, selectedFileParam]);
 
   const handleArtifactReload = useCallback(() => {
     void reloadArtifact();
@@ -614,7 +629,7 @@ export const TaskDetailPage = () => {
     (relPath: string) => {
       if (!rootPath) return;
       void openArtifact(
-        resolveArtifactPath(relPath, rootPath),
+        toAbsoluteProjectPath(relPath, rootPath),
         t as Translator,
       );
     },
@@ -740,6 +755,17 @@ export const TaskDetailPage = () => {
     leadSessionId: isCompleted ? leadSessionId : null,
     sinceTs: completionInfo?.completedAt ?? null,
   });
+  // Startup phase for the follow-up turn header, mirroring the conversation
+  // page: while the lead's runtime is coming up the header names that rather
+  // than claiming to process. OSS registers no execution targets, so the
+  // origin is undefined there and this always reads "local".
+  const leadExecOrigin = useEntityOrigin(leadSessionId, "session");
+  const followUpStartingRuntime: RuntimeStartLocation | null =
+    followUp.awaitingRuntime
+      ? leadExecOrigin === "cloud"
+        ? "cloud"
+        : "local"
+      : null;
   // Render the Lead's ``AskUserQuestion`` tool as the interactive question card
   // (matching the main chat), driven by the follow-up event stream.
   const askCards = useAskUserQuestionCards({
@@ -1133,24 +1159,6 @@ export const TaskDetailPage = () => {
   // distinct from the title, or staged attachments.
   const goalDiffersFromTitle = task.goal.trim() !== task.title.trim();
 
-  if (selectedArtifactPath || artifactLoading || artifactError) {
-    return (
-      <div className="flex h-full min-h-0 flex-col p-3">
-        <ArtifactViewerShell
-          artifact={artifact}
-          content={artifactContent}
-          target={artifactTarget}
-          loading={artifactLoading}
-          error={artifactError}
-          onReload={handleArtifactReload}
-          onClose={handleArtifactClose}
-          onCopyContent={handleArtifactCopy}
-          onOpenExternal={handleArtifactOpenExternal}
-        />
-      </div>
-    );
-  }
-
   // ``leadSessionId`` / ``subtaskRuns`` / ``activeSubtask`` used to live here
   // for the inline right-rail aside. The aside now lives in the AppShell's
   // panel slot via ``setRightPanel(<TaskContextPanel … />)`` (see the effect
@@ -1315,13 +1323,21 @@ export const TaskDetailPage = () => {
   // TaskContextPanel itself — no derived state at the page level.
 
   return (
-    // In-flight: ``min-h-full`` lets the wrapper fill the scrolling viewport so
-    // the sticky action bar can pin to its bottom edge even when content is
-    // short (``mt-auto`` on the bar pushes it down). Completed: ``h-full`` locks
-    // the wrapper to exactly the viewport so the follow-up chat below can flex
-    // to fill the remaining height and pin its composer to the bottom — the
-    // page becomes a chat surface, not a scrolling document.
-    <div
+    <ArtifactSplitPane
+      file={artifactFile}
+      onReload={handleArtifactReload}
+      onClose={handleArtifactClose}
+      onCopyContent={handleArtifactCopy}
+      onOpenExternal={handleArtifactOpenExternal}
+    >
+      {/* In-flight: ``min-h-full`` lets the wrapper fill the scrolling viewport
+          so the sticky action bar can pin to its bottom edge even when content
+          is short (``mt-auto`` on the bar pushes it down). Completed:
+          ``h-full`` locks the wrapper to exactly the viewport so the follow-up
+          chat below can flex to fill the remaining height and pin its composer
+          to the bottom — the page becomes a chat surface, not a scrolling
+          document. */}
+      <div
       ref={contentRef}
       className={cn(
         "flex w-full flex-col px-5 pb-5 pt-5",
@@ -1533,7 +1549,7 @@ export const TaskDetailPage = () => {
                   <ul className="flex max-h-[280px] flex-col overflow-y-auto">
                     {completionInfo.artifacts.map((path) => {
                       const basename = path.split(/[\\/]/).pop() || path;
-                      const absolute = resolveArtifactPath(path, rootPath);
+                      const absolute = toAbsoluteProjectPath(path, rootPath);
                       return (
                         <li key={path}>
                           <button
@@ -1637,6 +1653,7 @@ export const TaskDetailPage = () => {
                   loading={false}
                   error={null}
                   renderToolCall={renderFollowUpToolCall}
+                  startingRuntime={followUpStartingRuntime}
                 />
               )}
             </div>
@@ -1971,7 +1988,8 @@ export const TaskDetailPage = () => {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </div>
+      </div>
+    </ArtifactSplitPane>
   );
 };
 

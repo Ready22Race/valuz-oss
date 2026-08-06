@@ -13,24 +13,43 @@ this orchestrator does not create or own the directory beyond seeding the
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import logging
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 from src.core import recovery
 from src.core.agent_config import AgentConfig
+from src.core.citation import (
+    CitationGuard,
+    EvidenceRegistry,
+    compact_citation_tool_content,
+    private_citation_tool_content,
+)
+from src.core.claim_evidence_resolution import SemanticVerifierPort
 from src.core.events import Event, EventSink, GlobalEventTap
 from src.core.prompt_builder import wrap_for_mode
 from src.core.runtime_port import RuntimePort
 from src.core.session_approval_cache import SessionApprovalCache, SessionRule
 from src.core.session_bus import SessionEventBus
 from src.core.store_port import StorePort
+from src.core.task_coverage_continuation import (
+    TASK_COVERAGE_NOOP_TOOL_NAME,
+    build_task_coverage_continuation_prompt,
+    build_task_coverage_noop_tool,
+)
 from src.core.time_utils import now_ms
-from src.core.types import Error, Message, Session, UserMessage
+from src.core.types import (
+    Error,
+    Message,
+    Session,
+    UserMessage,
+)
 from src.core.workspace import bootstrap_session_workspace
 
 # Per-session callable injected into runtimes that wire ``approve_for_session``.
@@ -39,8 +58,64 @@ from src.core.workspace import bootstrap_session_workspace
 # Return value: matching ``SessionRule`` on hit, ``None`` on miss.
 # See ``docs/design/approve-for-session.md`` §3.3 for the cache-hit flow.
 SessionRuleFinder = Callable[[str, str, dict[str, Any], dict[str, Any]], "SessionRule | None"]
+SemanticVerifierFactory = Callable[
+    [str, Session],
+    Awaitable[SemanticVerifierPort | None],
+]
 
 logger = logging.getLogger(__name__)
+
+
+def _is_task_coverage_noop_tool_name(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    # Claude and Codex expose harness tools through MCP-qualified names;
+    # DeepAgents uses the plain ToolDef name.
+    return value == TASK_COVERAGE_NOOP_TOOL_NAME or value.endswith(
+        f"__{TASK_COVERAGE_NOOP_TOOL_NAME}"
+    )
+
+
+class _TaskCoverageProtocolSink:
+    """Hide only the explicit private no-gap protocol tool.
+
+    Every normal Runtime event is forwarded unchanged.  In particular, an
+    assistant message such as ``(empty)`` is *not* interpreted or suppressed;
+    it remains visible.  A no-gap pass can be silent only when the Runtime
+    calls the turn-scoped private tool supplied by ``run_task_coverage``.
+    """
+
+    def __init__(self, inner: EventSink) -> None:
+        self._inner = inner
+        self._private_tool_ids: set[str] = set()
+        self.no_gap_declared = False
+
+    async def emit(self, event: Event) -> None:
+        tool_id = event.data.get("id") or event.data.get("tool_use_id")
+        tool_name = event.data.get("name") or event.data.get("tool_name")
+        if event.type in {"tool_use", "tool_input_delta"} and (
+            _is_task_coverage_noop_tool_name(tool_name)
+            or (isinstance(tool_id, str) and tool_id in self._private_tool_ids)
+        ):
+            if isinstance(tool_id, str):
+                self._private_tool_ids.add(tool_id)
+            if event.type == "tool_use":
+                self.no_gap_declared = True
+            return
+        if event.type in {"tool_result", "tool_output_delta"} and isinstance(
+            tool_id, str
+        ) and tool_id in self._private_tool_ids:
+            return
+        await self._inner.emit(event)
+
+
+def _is_externalized_tool_content(value: Any) -> bool:
+    """Recognize runtime placeholders whose full result lives in a sidecar."""
+
+    if not isinstance(value, str):
+        return False
+    stripped = value.strip()
+    return stripped.startswith("<persisted-output") or stripped.startswith("/large_tool_results/")
 
 
 class SessionNotFoundError(Exception):
@@ -165,104 +240,606 @@ class _MessageIdStampSink:
         await self._inner.emit(stamped)
 
 
-class _MessageObserverSink:
-    """Forwards events to ``inner`` while accumulating per-Message state.
+def _session_citation_quality_policy(
+    session: Session,
+) -> dict[str, Any] | None:
+    """Read only the host-stamped, JSON-safe policy snapshot."""
 
-    Captures the assistant text fragments emitted as ``assistant_message``
-    events, the live ``text_delta`` stream, the ``num_turns`` reported in
-    ``session_idle``, and any ``session_error`` payload. The orchestrator reads
-    these accumulators when finalizing the Message row.
+    metadata = session.metadata if isinstance(session.metadata, dict) else {}
+    valuz = metadata.get("valuz")
+    if not isinstance(valuz, dict):
+        return None
+    snapshot = valuz.get("citation_quality_policy")
+    if not isinstance(snapshot, dict):
+        return None
+    if snapshot.get("mode") not in {"required-on-evidence", "strict-domain"}:
+        return None
+    if not isinstance(snapshot.get("config"), dict):
+        return None
+    return snapshot
+
+
+def _session_citation_enabled(session: Session) -> bool:
+    metadata = session.metadata if isinstance(session.metadata, dict) else {}
+    valuz = metadata.get("valuz")
+    if not isinstance(valuz, dict):
+        return True
+    value = valuz.get("citation_enabled")
+    return value if isinstance(value, bool) else True
+
+
+def _session_citation_verification_enabled(session: Session) -> bool:
+    metadata = session.metadata if isinstance(session.metadata, dict) else {}
+    valuz = metadata.get("valuz")
+    if not isinstance(valuz, dict):
+        return False
+    value = valuz.get("citation_verification_enabled")
+    return value if isinstance(value, bool) else False
+
+
+def _session_task_coverage_enabled(session: Session) -> bool:
+    """Task Coverage is independent from citation display/verification."""
+
+    metadata = session.metadata if isinstance(session.metadata, dict) else {}
+    valuz = metadata.get("valuz")
+    if not isinstance(valuz, dict):
+        return True
+    value = valuz.get("task_coverage_enabled")
+    return value if isinstance(value, bool) else True
+
+
+def _session_task_coverage_policy(session: Session) -> dict[str, Any] | None:
+    metadata = session.metadata if isinstance(session.metadata, dict) else {}
+    valuz = metadata.get("valuz")
+    if not isinstance(valuz, dict):
+        return None
+    policy = valuz.get("task_coverage_policy")
+    if not isinstance(policy, dict):
+        return None
+    if not isinstance(policy.get("revision"), str):
+        return None
+    if not isinstance(policy.get("review_guidance"), dict):
+        return None
+    return policy
+
+
+_PENDING_TASK_CLARIFICATION_KEY = "pending_task_clarification"
+
+
+def _clear_legacy_pending_task_clarification(session: Session) -> None:
+    """Discard Host-owned preflight state written by older builds."""
+
+    metadata = copy.deepcopy(session.metadata) if isinstance(session.metadata, dict) else {}
+    raw_valuz = metadata.get("valuz")
+    if not isinstance(raw_valuz, dict) or _PENDING_TASK_CLARIFICATION_KEY not in raw_valuz:
+        return
+    valuz = dict(raw_valuz)
+    valuz.pop(_PENDING_TASK_CLARIFICATION_KEY, None)
+    metadata["valuz"] = valuz
+    session.metadata = metadata
+
+
+def _session_document_scope(session: Session) -> set[str] | None:
+    """Return the host-stamped locked document scope, if present."""
+
+    metadata = session.metadata if isinstance(session.metadata, dict) else {}
+    valuz = metadata.get("valuz")
+    if not isinstance(valuz, dict):
+        return None
+    research = valuz.get("document_research")
+    if (
+        not isinstance(research, dict)
+        or research.get("purpose") != "document-research"
+        or research.get("source_scope") != "locked"
+    ):
+        return None
+    document_ids = research.get("document_ids")
+    if not isinstance(document_ids, list):
+        return set()
+    return {str(item) for item in document_ids if str(item)}
+
+
+class _MessageObserverSink:
+    """Pass Runtime events through first, then attach optional sidecars.
+
+    The observer is intentionally not an answer controller.  It never edits,
+    ranks, suppresses, or replaces Runtime-authored assistant text.  Evidence
+    registration is shared infrastructure; Citation, Audit, and Task Coverage
+    are three independent consumers controlled by separate switches.
     """
 
-    def __init__(self, inner: EventSink) -> None:
+    def __init__(
+        self,
+        inner: EventSink,
+        *,
+        message_id: str = "message",
+        user_prompt: str = "",
+        citation_policy_available: bool = False,
+        citation_quality_policy: dict[str, Any] | None = None,
+        allowed_document_ids: set[str] | None = None,
+        force_citation_required: bool = False,
+        citation_enabled: bool = True,
+        citation_verification_enabled: bool = True,
+        semantic_verifier: SemanticVerifierPort | None = None,
+        task_coverage_enabled: bool = True,
+    ) -> None:
         self._inner = inner
+        self._message_id = message_id
+        self._user_prompt = user_prompt
+        self._citation_policy_available = citation_policy_available
+        self._citation_quality_policy = citation_quality_policy
+        self._citation_enabled = citation_enabled
+        self._citation_verification_enabled = citation_verification_enabled
+        self._semantic_verifier = semantic_verifier
+        self._task_coverage_enabled = task_coverage_enabled
+        self._force_citation_required = force_citation_required or (
+            isinstance(citation_quality_policy, dict)
+            and citation_quality_policy.get("mode") == "strict-domain"
+        )
+
         self._assistant_chunks: list[str] = []
         self._assistant_delta_chunks: list[str] = []
-        self.num_turns: int = 0
+        self._assistant_sidecar_inputs: list[
+            tuple[int, str, EvidenceRegistry, str | None]
+        ] = []
+        self._sidecars_finalized = False
+        self._pending_idle_event: Event | None = None
+        self._task_coverage_continuation_active = False
+        self._task_coverage_continuation_attempts = 0
+        self._task_coverage_segment_indices: list[int] = []
+
+        self._tool_names: dict[str, str] = {}
+        self._evidence_registry = EvidenceRegistry(
+            allowed_document_ids=allowed_document_ids,
+        )
+
+        self.num_turns = 0
         self.error_payload: dict[str, Any] | None = None
         self.usage: dict[str, int] | None = None
         self.model_usage: dict[str, Any] | None = None
-        # Last `todo_update` payload observed in this turn. None means the
-        # agent did not touch the TODO list. An empty list is a meaningful
-        # "all done" signal from the SDK and is preserved.
+        self.citation_bundle: dict[str, Any] | None = None
+        self.claim_audits: list[dict[str, Any]] = []
+        self.task_coverage: dict[str, Any] | None = None
         self.last_todos: list[dict[str, Any]] | None = None
-        # Captures runtime-emitted ``mode_changed{by: "runtime"}`` events
-        # (codex ``thread/goal/cleared`` listener, Claude bare-``/goal``
-        # poll). Used by ``run_turn`` to decide whether the final
-        # ``save_session`` should honor the runtime's in-memory
-        # ``session.mode`` (runtime emitted a change → keep it) or
-        # reload from disk (user mutated mode mid-turn via ``POST /mode``
-        # → don't clobber). ``None`` means no runtime-emitted mode
-        # change observed this turn.
         self.runtime_mode_change: Literal["default", "plan", "goal"] | None = None
 
     async def emit(self, event: Event) -> None:
+        if event.type == "citation_evidence":
+            self._register_private_evidence(event)
+            return
+
         if event.type == "assistant_message":
-            self._record_assistant_message(event)
-        elif event.type == "text_delta":
+            await self._publish_runtime_assistant(event)
+            return
+
+        if event.type == "text_delta":
             text = event.data.get("text") or event.data.get("delta") or ""
             if text:
                 self._assistant_delta_chunks.append(str(text))
+
+        elif event.type == "tool_use":
+            tool_use_id = event.data.get("id")
+            tool_name = event.data.get("name")
+            if isinstance(tool_use_id, str) and isinstance(tool_name, str):
+                self._tool_names[tool_use_id] = tool_name
+
+        elif event.type == "tool_result":
+            event = self._register_and_redact_tool_result(event)
+
         elif event.type == "session_idle":
-            raw = event.data.get("num_turns")
-            if isinstance(raw, int) and raw > 0:
-                self.num_turns = raw
+            raw_turns = event.data.get("num_turns")
+            if isinstance(raw_turns, int) and raw_turns > 0:
+                self.num_turns += raw_turns
             await self.ensure_partial_assistant_message()
+            stop_reason = event.data.get("stop_reason")
+            coverage_active = self._task_coverage_continuation_active
+            coverage_stop_type = (
+                str(stop_reason.get("type") or "error")
+                if isinstance(stop_reason, dict)
+                else "error"
+            )
+            if coverage_active and coverage_stop_type != "end_turn":
+                event = Event(
+                    type="session_idle",
+                    data={
+                        **event.data,
+                        "stop_reason": {"type": "end_turn"},
+                        "task_coverage_failure": coverage_stop_type,
+                    },
+                    timestamp=event.timestamp,
+                )
+            if coverage_active:
+                self.task_coverage = (
+                    {
+                        "status": "complete",
+                        "supplemented": bool(self._task_coverage_segment_indices),
+                        "assistant_segment_indices": list(
+                            self._task_coverage_segment_indices
+                        ),
+                    }
+                    if coverage_stop_type == "end_turn"
+                    else {
+                        "status": "failed",
+                        "reason": coverage_stop_type,
+                        "supplemented": bool(self._task_coverage_segment_indices),
+                        "assistant_segment_indices": list(
+                            self._task_coverage_segment_indices
+                        ),
+                    }
+                )
+            self._task_coverage_continuation_active = False
+            self._pending_idle_event = event
+            if not self._task_coverage_enabled:
+                await self.finalize_sidecars()
+                await self.release_session_idle()
+            return
+
         elif event.type == "session_error":
             self.error_payload = {
-                "category": "execution_error",
-                "message": str(event.data.get("message", "")),
+                "category": str(event.data.get("category") or "execution_error"),
+                "message": str(event.data.get("message") or ""),
             }
+
         elif event.type == "usage_update":
-            self.usage = {
+            current = {
                 "input_tokens": int(event.data.get("input_tokens") or 0),
                 "output_tokens": int(event.data.get("output_tokens") or 0),
-                "cache_read_tokens": int(event.data.get("cache_read_tokens") or 0),
-                "cache_write_tokens": int(event.data.get("cache_write_tokens") or 0),
+                "cache_read_tokens": int(
+                    event.data.get("cache_read_tokens") or 0
+                ),
+                "cache_write_tokens": int(
+                    event.data.get("cache_write_tokens") or 0
+                ),
             }
+            if self.usage is None:
+                self.usage = current
+            else:
+                self.usage = {
+                    key: self.usage.get(key, 0) + value
+                    for key, value in current.items()
+                }
             raw_model_usage = event.data.get("model_usage")
-            self.model_usage = dict(raw_model_usage) if isinstance(raw_model_usage, dict) else None
+            if isinstance(raw_model_usage, dict):
+                self.model_usage = copy.deepcopy(raw_model_usage)
+
         elif event.type == "todo_update":
             raw_todos = event.data.get("todos")
             if isinstance(raw_todos, list):
-                self.last_todos = [dict(t) for t in raw_todos if isinstance(t, dict)]
+                self.last_todos = [
+                    dict(item) for item in raw_todos if isinstance(item, dict)
+                ]
+
         elif event.type == "mode_changed":
             if event.data.get("by") == "runtime":
-                raw_mode = event.data.get("mode")
-                if raw_mode in ("default", "plan", "goal"):
-                    self.runtime_mode_change = raw_mode
+                mode = event.data.get("mode")
+                if mode in ("default", "plan", "goal"):
+                    self.runtime_mode_change = mode
+
         await self._inner.emit(event)
 
-    def _record_assistant_message(self, event: Event) -> None:
-        text = event.data.get("text") or event.data.get("content") or ""
-        if text:
-            self._assistant_chunks.append(str(text))
-            self._assistant_delta_chunks.clear()
-
-    async def ensure_partial_assistant_message(self) -> None:
-        text = self.partial_assistant_text
-        if not text:
+    def _register_private_evidence(self, event: Event) -> None:
+        citation_content = event.data.get("content")
+        if not isinstance(citation_content, str):
             return
-        event = Event(type="assistant_message", data={"text": text})
-        self._record_assistant_message(event)
-        await self._inner.emit(event)
+        tool_name = event.data.get("tool_name")
+        model_content = event.data.get("model_content")
+        self._evidence_registry.register_tool_projection(
+            model_content if model_content is not None else citation_content,
+            citation_content,
+            tool_name=str(tool_name) if tool_name else None,
+            trusted_private=True,
+        )
 
-    @property
-    def assistant_text(self) -> str | None:
-        partial = self.partial_assistant_text
-        if self._assistant_chunks:
-            chunks = list(self._assistant_chunks)
-            if partial:
-                chunks.append(partial)
-            return "\n".join(chunks)
-        return partial
+    def _register_and_redact_tool_result(self, event: Event) -> Event:
+        tool_use_id = event.data.get("id")
+        tool_name = (
+            self._tool_names.get(tool_use_id)
+            if isinstance(tool_use_id, str)
+            else None
+        )
+        citation_content = event.data.get("_citation_content")
+        visible_content = event.data.get("content")
+        compacted_content = compact_citation_tool_content(visible_content)
+        private_projection = (
+            citation_content
+            if isinstance(citation_content, str)
+            else private_citation_tool_content(
+                visible_content,
+                model_content=compacted_content,
+            )
+            if compacted_content is not None
+            else None
+        )
+        self._evidence_registry.register_tool_projection(
+            compacted_content if compacted_content is not None else visible_content,
+            private_projection,
+            tool_name=tool_name,
+            trusted_private=(
+                private_projection is not None or compacted_content is not None
+            ),
+        )
+        if "_citation_content" not in event.data and compacted_content is None:
+            return event
+        return Event(
+            type=event.type,
+            data={
+                key: (compacted_content if key == "content" else value)
+                for key, value in event.data.items()
+                if key != "_citation_content"
+            },
+            timestamp=event.timestamp,
+        )
+
+    async def _publish_runtime_assistant(self, event: Event) -> bool:
+        text = str(event.data.get("text") or event.data.get("content") or "")
+        if not text:
+            return False
+        segment_index = len(self._assistant_sidecar_inputs)
+        parent = event.data.get("parent_tool_use_id")
+        parent_tool_use_id = str(parent) if parent is not None else None
+        self._assistant_chunks.append(text)
+        self._assistant_delta_chunks.clear()
+        if self._task_coverage_continuation_active:
+            self._task_coverage_segment_indices.append(segment_index)
+        self._assistant_sidecar_inputs.append(
+            (
+                segment_index,
+                text,
+                self._evidence_registry.read_snapshot(),
+                parent_tool_use_id,
+            )
+        )
+        # This await is the persist-then-broadcast boundary.  Nothing in
+        # Citation or Audit runs before it.
+        await self._inner.emit(event)
+        return True
 
     @property
     def partial_assistant_text(self) -> str | None:
-        if not self._assistant_delta_chunks:
-            return None
         text = "".join(self._assistant_delta_chunks)
         return text or None
+
+    @property
+    def assistant_text(self) -> str | None:
+        return "\n".join(self._assistant_chunks) if self._assistant_chunks else None
+
+    async def ensure_partial_assistant_message(self) -> bool:
+        text = self.partial_assistant_text
+        if not text:
+            return False
+        return await self._publish_runtime_assistant(
+            Event(type="assistant_message", data={"text": text})
+        )
+
+    async def begin_task_coverage_continuation(self) -> None:
+        if self._task_coverage_continuation_attempts:
+            raise RuntimeError("Task Coverage continuation may run at most once")
+        await self.ensure_partial_assistant_message()
+        self._task_coverage_continuation_attempts = 1
+        self._task_coverage_continuation_active = True
+        self._assistant_delta_chunks.clear()
+
+    async def abort_task_coverage_continuation(self, *, reason: str) -> None:
+        await self.ensure_partial_assistant_message()
+        self._task_coverage_continuation_active = False
+        self.task_coverage = {
+            "status": "failed",
+            "reason": reason,
+            "supplemented": bool(self._task_coverage_segment_indices),
+            "assistant_segment_indices": list(
+                self._task_coverage_segment_indices
+            ),
+        }
+        self._pending_idle_event = Event(
+            type="session_idle",
+            data={
+                "stop_reason": {"type": "end_turn"},
+                "num_turns": 0,
+                "task_coverage_failure": reason,
+            },
+        )
+
+    def mark_task_coverage_unavailable(self, *, reason: str) -> None:
+        self.task_coverage = {"status": "unavailable", "reason": reason}
+
+    def mark_task_coverage_no_gap(self) -> None:
+        """Record a structured private no-gap result without adding text."""
+
+        if self._task_coverage_segment_indices:
+            # Runtime-authored assistant content always wins the visibility
+            # contract.  A model that both calls the private no-op tool and
+            # writes text produced a supplement; never hide or relabel it.
+            return
+        self.task_coverage = {
+            "status": "complete",
+            "supplemented": False,
+            "assistant_segment_indices": [],
+            "decision": "no-gap",
+        }
+
+    async def finalize_sidecars(self) -> None:
+        if self._sidecars_finalized:
+            return
+        self._sidecars_finalized = True
+        coverage_targets = set(self._task_coverage_segment_indices)
+        if (
+            self.task_coverage is not None
+            and not coverage_targets
+            and self._assistant_sidecar_inputs
+        ):
+            # Silent/no-op and unavailable continuations have no assistant
+            # segment of their own. Attach the turn-level observation to the
+            # last real Runtime message without inventing user-visible text.
+            coverage_targets.add(self._assistant_sidecar_inputs[-1][0])
+
+        if not (self._citation_enabled or self._citation_verification_enabled):
+            if self.task_coverage is not None:
+                for segment_index, _text, _registry, parent_tool_use_id in (
+                    self._assistant_sidecar_inputs
+                ):
+                    if segment_index not in coverage_targets:
+                        continue
+                    sidecar_data: dict[str, Any] = {
+                        "assistant_segment_index": segment_index,
+                        "task_coverage": copy.deepcopy(self.task_coverage),
+                    }
+                    if parent_tool_use_id is not None:
+                        sidecar_data["parent_tool_use_id"] = parent_tool_use_id
+                    await self._inner.emit(
+                        Event(type="assistant_message_sidecar", data=sidecar_data)
+                    )
+            return
+
+        aggregate_citations: list[dict[str, Any]] = []
+        aggregate_projection: dict[str, str] = {}
+        seen_citation_ids: set[str] = set()
+
+        for segment_index, text, registry, parent_tool_use_id in (
+            self._assistant_sidecar_inputs
+        ):
+            guard = CitationGuard(
+                registry,
+                # All assistant messages in one user turn share a canonical
+                # Citation id space. Message-local audit placement is carried
+                # by ``assistant_segment_index`` on the sidecar, not by
+                # minting a second id for the same Evidence identity.
+                message_id=self._message_id,
+                user_prompt=self._user_prompt,
+                policy_available=self._citation_policy_available,
+                quality_policy=self._citation_quality_policy,
+                force_required=self._force_citation_required,
+                enabled=True,
+                verification_enabled=self._citation_verification_enabled,
+                semantic_verifier=self._semantic_verifier,
+            )
+            try:
+                result = (
+                    await asyncio.to_thread(
+                        guard.finalize,
+                        text,
+                    )
+                    if self._citation_verification_enabled
+                    else await asyncio.to_thread(
+                        guard.finalize_projection,
+                        text,
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "assistant sidecar failed segment=%s",
+                    segment_index,
+                    exc_info=True,
+                )
+                if (
+                    self.task_coverage is not None
+                    and segment_index in coverage_targets
+                ):
+                    sidecar_data: dict[str, Any] = {
+                        "assistant_segment_index": segment_index,
+                        "task_coverage": copy.deepcopy(self.task_coverage),
+                    }
+                    if parent_tool_use_id is not None:
+                        sidecar_data["parent_tool_use_id"] = parent_tool_use_id
+                    await self._inner.emit(
+                        Event(type="assistant_message_sidecar", data=sidecar_data)
+                    )
+                continue
+
+            bundle = result.bundle
+            if not isinstance(bundle, dict):
+                if (
+                    self.task_coverage is not None
+                    and segment_index in coverage_targets
+                ):
+                    sidecar_data = {
+                        "assistant_segment_index": segment_index,
+                        "task_coverage": copy.deepcopy(self.task_coverage),
+                    }
+                    if parent_tool_use_id is not None:
+                        sidecar_data["parent_tool_use_id"] = parent_tool_use_id
+                    await self._inner.emit(
+                        Event(type="assistant_message_sidecar", data=sidecar_data)
+                    )
+                continue
+
+            sidecar_data: dict[str, Any] = {
+                "assistant_segment_index": segment_index,
+            }
+            if parent_tool_use_id is not None:
+                sidecar_data["parent_tool_use_id"] = parent_tool_use_id
+
+            has_payload = False
+            if (
+                self.task_coverage is not None
+                and segment_index in coverage_targets
+            ):
+                sidecar_data["task_coverage"] = copy.deepcopy(
+                    self.task_coverage
+                )
+                has_payload = True
+            if self._citation_enabled:
+                sidecar_data["citation_bundle"] = bundle
+                has_payload = True
+                projection = bundle.get("projection")
+                if isinstance(projection, dict):
+                    mapping = projection.get("evidenceHandleToCitationId")
+                    if isinstance(mapping, dict):
+                        aggregate_projection.update(
+                            {
+                                str(handle): str(citation_id)
+                                for handle, citation_id in mapping.items()
+                                if handle and citation_id
+                            }
+                        )
+                citations = bundle.get("citations")
+                if isinstance(citations, list):
+                    for citation in citations:
+                        if not isinstance(citation, dict):
+                            continue
+                        citation_id = citation.get("citationId")
+                        if (
+                            not isinstance(citation_id, str)
+                            or not citation_id
+                            or citation_id in seen_citation_ids
+                        ):
+                            continue
+                        seen_citation_ids.add(citation_id)
+                        aggregate_citations.append(copy.deepcopy(citation))
+
+            quality = bundle.get("quality")
+            if self._citation_verification_enabled and isinstance(quality, dict):
+                audit = copy.deepcopy(quality)
+                audit["assistantSegmentIndex"] = segment_index
+                self.claim_audits.append(audit)
+                # When citations are enabled the same audit already lives in
+                # ``citation_bundle.quality``.  Persist the canonical audit for
+                # history, but do not send a second byte-for-byte copy on the
+                # live sidecar.  Audit-only mode still exposes ``claim_audit``.
+                if not self._citation_enabled:
+                    sidecar_data["claim_audit"] = audit
+                    has_payload = True
+
+            if has_payload:
+                await self._inner.emit(
+                    Event(type="assistant_message_sidecar", data=sidecar_data)
+                )
+
+        if self._citation_enabled and (
+            aggregate_citations or aggregate_projection
+        ):
+            self.citation_bundle = {
+                "version": 1,
+                "citations": aggregate_citations,
+                "projection": {
+                    "evidenceHandleToCitationId": aggregate_projection,
+                },
+            }
+
+    async def release_session_idle(self) -> None:
+        event = self._pending_idle_event
+        self._pending_idle_event = None
+        if event is not None:
+            await self._inner.emit(event)
 
 
 class SessionOrchestrator:
@@ -307,6 +884,7 @@ class SessionOrchestrator:
         runtime_idle_ttl_s: float | None = None,
         sweep_interval_s: float | None = None,
         bg_busy_runtime_ttl_s: float | None = None,
+        semantic_verifier_factory: SemanticVerifierFactory | None = None,
     ) -> None:
         self._store = store
         self._runtimes: dict[str, RuntimePort] = {}
@@ -353,13 +931,27 @@ class SessionOrchestrator:
         # ``_get_or_create_bus``, so registration is effective for buses
         # created both before and after the tap was added.
         self._global_taps: list[GlobalEventTap] = []
-
+        self._semantic_verifier_factory = semantic_verifier_factory
     @property
     def active_sessions(self) -> set[str]:
         return set(self._active)
 
     def has_cached_runtime(self, session_id: str) -> bool:
         return session_id in self._runtimes
+
+    def set_semantic_verifier_factory(
+        self,
+        factory: SemanticVerifierFactory | None,
+    ) -> None:
+        """Install an owner-scoped bounded verifier factory.
+
+        The factory receives the explicit owner and immutable Session model
+        configuration.  It may return ``None`` when the deployment has no
+        authorized provider; verification then stays deterministic and safely
+        unresolved instead of borrowing ambient request identity.
+        """
+
+        self._semantic_verifier_factory = factory
 
     def _get_or_create_bus(self, session_id: str) -> SessionEventBus:
         bus = self._buses.get(session_id)
@@ -516,6 +1108,16 @@ class SessionOrchestrator:
         from src.adapters.persist_then_broadcast_sink import PersistThenBroadcastSink
 
         session, agent = await self._load_session(user_id, session_id)
+        # Older builds persisted Host-owned prerequisite state that could
+        # rewrite or block a later user turn.  The native Agent now owns all
+        # clarification decisions, so discard that obsolete control state at
+        # the turn boundary without changing the user's current message.
+        _clear_legacy_pending_task_clarification(session)
+        citation_policy_snapshot = _session_citation_quality_policy(session)
+        document_scope = _session_document_scope(session)
+        task_coverage_enabled = _session_task_coverage_enabled(session)
+        task_coverage_policy = _session_task_coverage_policy(session)
+        current_task_prompt = user_message.text
 
         # Slice 3 of session-modes (broadened in slice 6 simplification):
         # both Claude and Codex process ``/plan <text>`` / ``/goal <text>``
@@ -572,7 +1174,31 @@ class SessionOrchestrator:
         # count without changing the canonical assistant_message/thinking
         # record.
         coalesced: EventSink = DeltaCoalescingSink(persist_then_live)
-        observer = _MessageObserverSink(coalesced)
+        citation_enabled = _session_citation_enabled(session)
+        citation_verification_enabled = _session_citation_verification_enabled(session)
+        semantic_verifier: SemanticVerifierPort | None = None
+        if citation_verification_enabled and self._semantic_verifier_factory is not None:
+            try:
+                semantic_verifier = await self._semantic_verifier_factory(user_id, session)
+            except Exception:  # noqa: BLE001 — optional sidecar must fail open
+                logger.warning(
+                    "semantic verifier provider unavailable for session %s",
+                    session_id,
+                    exc_info=True,
+                )
+        observer = _MessageObserverSink(
+            coalesced,
+            message_id=message.id,
+            user_prompt=current_task_prompt,
+            citation_policy_available=any(Path(path).name == "citation" for path in session.skills),
+            citation_quality_policy=citation_policy_snapshot,
+            allowed_document_ids=document_scope,
+            force_citation_required=(document_scope is not None and citation_enabled),
+            citation_enabled=citation_enabled,
+            citation_verification_enabled=citation_verification_enabled,
+            semantic_verifier=semantic_verifier,
+            task_coverage_enabled=task_coverage_enabled,
+        )
 
         # Sessions are self-sufficient: ``session.cwd`` is required at
         # creation. Seed the workspace stub lazily (idempotent, one stat on
@@ -614,7 +1240,62 @@ class SessionOrchestrator:
                 )
             )
             await runtime.run(session, user_message)
+            if (
+                task_coverage_enabled
+                and getattr(session.stop_reason, "type", None) == "end_turn"
+            ):
+                if not bool(
+                    getattr(runtime, "supports_native_continuation", False)
+                ):
+                    observer.mark_task_coverage_unavailable(
+                        reason="runtime-native-continuation-unsupported"
+                    )
+                else:
+                    primary_status = session.status
+                    primary_stop_reason = session.stop_reason
+                    await observer.begin_task_coverage_continuation()
+                    session.status = "running"
+                    session.stop_reason = None
+                    logger.info(
+                        "task_coverage continuing message=%s session=%s on native thread",
+                        message.id,
+                        session.id,
+                    )
+                    coverage_sink = _TaskCoverageProtocolSink(observer)
+                    runtime.update_sink(coverage_sink)
+                    try:
+                        await runtime.run_task_coverage(
+                            session,
+                            UserMessage(
+                                text=build_task_coverage_continuation_prompt(
+                                    task_coverage_policy
+                                )
+                            ),
+                            no_op_tool=build_task_coverage_noop_tool(),
+                        )
+                    except Exception:  # noqa: BLE001 — optional enhancement is fail-open
+                        logger.exception(
+                            "task_coverage continuation failed message=%s session=%s; "
+                            "preserving primary",
+                            message.id,
+                            session.id,
+                        )
+                        session.status = primary_status
+                        session.stop_reason = primary_stop_reason
+                        await observer.abort_task_coverage_continuation(
+                            reason="runtime-exception"
+                        )
+                    else:
+                        if coverage_sink.no_gap_declared:
+                            observer.mark_task_coverage_no_gap()
+                        if getattr(session.stop_reason, "type", None) != "end_turn":
+                            session.status = primary_status
+                            session.stop_reason = primary_stop_reason
+                    finally:
+                        runtime.update_sink(observer)
             await observer.ensure_partial_assistant_message()
+            await observer.finalize_sidecars()
+            await observer.release_session_idle()
             # finalize must run BEFORE save_session — it writes session.todos
             # (and message.todos) from the observer's last todo_update payload;
             # saving first would persist a stale snapshot.
@@ -685,6 +1366,21 @@ class SessionOrchestrator:
     ) -> None:
         message.ended_at = now_ms()
         message.assistant_message = observer.assistant_text
+        if observer.citation_bundle is not None:
+            message.metadata = {
+                **message.metadata,
+                "citation_bundle": observer.citation_bundle,
+            }
+        if observer.claim_audits:
+            message.metadata = {
+                **message.metadata,
+                "claim_audits": copy.deepcopy(observer.claim_audits),
+            }
+        if observer.task_coverage is not None:
+            message.metadata = {
+                **message.metadata,
+                "task_coverage": observer.task_coverage,
+            }
         message.total_turns = observer.num_turns or 1
         message.stop_reason = session.stop_reason
         if observer.usage is not None:

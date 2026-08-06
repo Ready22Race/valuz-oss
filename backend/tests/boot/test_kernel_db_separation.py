@@ -97,6 +97,90 @@ def _tables(path: Path) -> set[str]:
 KERNEL_TABLES = {"sessions", "messages", "events"}
 
 
+def test_kernel_env_keeps_deepagents_checkpoints_in_a_sibling_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A new runtime must not reconfigure WAL on the live kernel database."""
+    import valuz_agent.boot.kernel as kb
+
+    kernel_db = tmp_path / "kernel.db"
+    monkeypatch.setattr(kb, "kernel_db_url_async", lambda: f"sqlite+aiosqlite:///{kernel_db}")
+    monkeypatch.setattr(kb, "kernel_db_url", lambda: f"sqlite:///{kernel_db}")
+    monkeypatch.delenv("DEEPAGENTS_CHECKPOINT_DB", raising=False)
+    monkeypatch.delenv("DEEPAGENTS_CHECKPOINT_ROOT", raising=False)
+    monkeypatch.setenv("KERNEL_STORE", "remote")
+
+    kb._set_kernel_env()
+
+    checkpoint_db = Path(os.environ["DEEPAGENTS_CHECKPOINT_DB"])
+    assert checkpoint_db == tmp_path / "deepagents_checkpoints.db"
+    assert checkpoint_db != kernel_db
+    assert Path(os.environ["DEEPAGENTS_CHECKPOINT_ROOT"]) == tmp_path / "deepagents-checkpoints"
+
+
+def test_kernel_env_preserves_an_explicit_checkpoint_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import valuz_agent.boot.kernel as kb
+
+    kernel_db = tmp_path / "kernel.db"
+    external_checkpoint_db = tmp_path / "operator-checkpoints.db"
+    monkeypatch.setattr(kb, "kernel_db_url_async", lambda: f"sqlite+aiosqlite:///{kernel_db}")
+    monkeypatch.setattr(kb, "kernel_db_url", lambda: f"sqlite:///{kernel_db}")
+    monkeypatch.setenv("DEEPAGENTS_CHECKPOINT_DB", str(external_checkpoint_db))
+    monkeypatch.setenv("KERNEL_STORE", "remote")
+
+    kb._set_kernel_env()
+
+    assert Path(os.environ["DEEPAGENTS_CHECKPOINT_DB"]) == external_checkpoint_db
+
+
+def test_unreadable_legacy_kernel_db_is_quarantined_when_durable_is_healthy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import valuz_agent.boot.kernel as kb
+    from valuz_agent.infra.config import settings
+
+    kernel_db = tmp_path / "kernel.db"
+    durable_db = tmp_path / "valuz.db"
+    kernel_db.write_bytes(b"legacy-checkpoint-corruption")
+    with sqlite3.connect(durable_db) as conn:
+        conn.execute("CREATE TABLE valuz_projects (id TEXT PRIMARY KEY)")
+    monkeypatch.setattr(kb, "kernel_db_url", lambda: f"sqlite:///{kernel_db}")
+    monkeypatch.setattr(kb, "db_url", lambda: f"sqlite:///{durable_db}")
+    monkeypatch.setattr(settings, "kernel_database_url", None)
+
+    recovery = kb._prepare_default_kernel_db()
+
+    assert recovery is not None
+    assert recovery.read_bytes() == b"legacy-checkpoint-corruption"
+    assert not kernel_db.exists()
+    assert durable_db.read_bytes().startswith(b"SQLite format 3\x00")
+
+
+def test_explicit_unreadable_kernel_db_is_never_quarantined(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import valuz_agent.boot.kernel as kb
+    from valuz_agent.infra.config import settings
+
+    kernel_db = tmp_path / "kernel.db"
+    durable_db = tmp_path / "valuz.db"
+    kernel_db.write_bytes(b"operator-managed")
+    with sqlite3.connect(durable_db) as conn:
+        conn.execute("CREATE TABLE valuz_projects (id TEXT PRIMARY KEY)")
+    monkeypatch.setattr(kb, "kernel_db_url", lambda: f"sqlite:///{kernel_db}")
+    monkeypatch.setattr(kb, "db_url", lambda: f"sqlite:///{durable_db}")
+    monkeypatch.setattr(
+        settings,
+        "kernel_database_url",
+        f"sqlite:///{kernel_db}",
+    )
+
+    assert kb._prepare_default_kernel_db() is None
+    assert kernel_db.read_bytes() == b"operator-managed"
+
+
 @pytest.mark.asyncio
 async def test_kernel_tables_live_only_in_kernel_db(split_db) -> None:
     host_db, kernel_db = split_db

@@ -29,6 +29,9 @@ import asyncio
 import json
 import logging
 import os
+import re
+import shutil
+import sqlite3
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict
@@ -36,13 +39,18 @@ from typing import Any, Literal
 
 from deepagents import SubAgent, create_deep_agent
 from deepagents.backends import LocalShellBackend
+from deepagents.backends.protocol import FileData, ReadResult
+from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
 from langchain_core.tools import StructuredTool
 from langgraph.types import Command
 from src.core.agent_config import AgentConfig, SubAgentDef
 from src.core.approval_rule_matcher import ExactArgsRuleMatcher, RuntimeApprovalRuleMatcher
+from src.core.citation import EvidenceRegistry
 from src.core.events import AVAILABLE_DECISIONS_EDITABLE_WITH_SESSION, Event, EventSink
+from src.core.mcp_source_metadata import wrap_mcp_result_metadata_for_transport
 from src.core.rule_canonicalize import reduce_args_for_subject
 from src.core.session_approval_cache import SessionRule
+from src.core.task_coverage_continuation import TASK_COVERAGE_NOOP_TOOL_NAME
 from src.core.tools import ExecContext, ToolDef, ToolKit, ToolResult
 from src.core.types import (
     EndTurn,
@@ -63,11 +71,41 @@ from src.runtimes.deepagents.approval_bridge import (
     _build_pending_payload,
     _classify_subject,
 )
-from src.runtimes.deepagents.middleware import ToolErrorTolerantMiddleware
+from src.runtimes.deepagents.middleware import (
+    CitationEvidenceCompactionMiddleware,
+    InvalidToolCallPairMiddleware,
+    ToolErrorTolerantMiddleware,
+    citation_artifact_content,
+)
 from src.runtimes.interruption import describe_exception, is_runtime_interruption
 from src.runtimes.mcp_env import resolve_stdio_env
 
 logger = logging.getLogger(__name__)
+
+
+def _is_internal_summarization_event(chunk: dict[str, Any]) -> bool:
+    """Return whether a LangChain model event belongs to history compaction.
+
+    LangChain tags the nested summarizer invocation with this metadata.  Its
+    response is runtime state, not an Agent message: publishing it exposes the
+    private handoff prompt and makes Citation Audit treat the summary as a
+    second user-facing answer.  Normal primary, tool-adjacent, repair, and
+    continuation model events do not carry this marker and remain visible.
+    """
+
+    metadata = chunk.get("metadata")
+    return isinstance(metadata, dict) and metadata.get("lc_source") == "summarization"
+
+
+async def _preserve_mcp_source_metadata(request: Any, handler: Any) -> Any:
+    """Keep result-level MCP citation metadata through LangChain conversion."""
+
+    result = await handler(request)
+    return wrap_mcp_result_metadata_for_transport(
+        result,
+        server_name=str(getattr(request, "server_name", "") or "unknown"),
+    )
+
 
 # Apply third-party deepagents shims once, before any graph is built. See
 # ``_patches`` — raises *subagents* above langgraph's default 25-step recursion
@@ -82,6 +120,61 @@ apply_deepagents_patches()
 # alembic history don't interfere with each other. Override with env var.
 DEFAULT_CHECKPOINT_DB = "./deepagents_checkpoints.db"
 CHECKPOINT_DB_ENV = "DEEPAGENTS_CHECKPOINT_DB"
+
+_CITATION_SYSTEM_POLICY_BLOCK_RE = re.compile(
+    r'<citation-system-policy(?:\s+revision="[^"]*")?>\s*.*?'
+    r"</citation-system-policy>",
+    re.DOTALL,
+)
+
+
+def _citation_system_policy_block(instructions: str) -> str:
+    """Extract only the immutable Evidence protocol for nested agents."""
+
+    matches = list(_CITATION_SYSTEM_POLICY_BLOCK_RE.finditer(instructions or ""))
+    return matches[-1].group(0).strip() if matches else ""
+
+
+def _sanitize_anthropic_request_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Drop malformed signature-only thinking blocks from model history.
+
+    Some Anthropic-compatible streaming gateways emit the terminal signature
+    delta as a separate ``thinking`` content block. LangChain preserves that
+    block in the checkpoint, but Anthropic rejects it on the next round because
+    the required ``thinking`` field is absent. The signature-only block carries
+    no user-visible reasoning and is not the tool call, so remove only that
+    invalid transport fragment while preserving every complete thinking, text,
+    and tool-use block.
+    """
+
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return payload
+    dropped = 0
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        filtered: list[Any] = []
+        for block in content:
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "thinking"
+                and not isinstance(block.get("thinking"), str)
+            ):
+                dropped += 1
+                continue
+            filtered.append(block)
+        if len(filtered) != len(content):
+            message["content"] = filtered
+    if dropped:
+        logger.warning(
+            "deepagents: removed %s malformed signature-only thinking history block(s)",
+            dropped,
+        )
+    return payload
 
 # In an ephemeral cloud sandbox the checkpoint must be EXTERNALIZED (per-owner
 # COS mount) so it survives sandbox recreation ("resume in a fresh sandbox").
@@ -123,14 +216,157 @@ def _checkpoint_backend() -> str:
         return raw
     return "file" if _in_sandbox() else "sqlite"
 
+
+def _expand_embedded_json(value: Any, *, depth: int = 0) -> Any:
+    """Decode JSON strings embedded inside an offloaded MCP envelope.
+
+    MCP adapters commonly return a JSON content-block array whose ``text``
+    field is itself serialized JSON.  Pretty-printing only the outer array
+    leaves the useful dataset on one enormous line, so line-based pagination
+    still cannot advance.  Decode only strings that visibly contain JSON and
+    cap recursion to keep hostile or accidental nesting bounded.
+    """
+
+    if depth >= 6:
+        return value
+    if isinstance(value, dict):
+        return {
+            key: _expand_embedded_json(item, depth=depth + 1)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_expand_embedded_json(item, depth=depth + 1) for item in value]
+    if not isinstance(value, str):
+        return value
+    candidate = value.strip()
+    if len(candidate) < 2 or candidate[0] not in "[{" or candidate[-1] not in "]}":
+        return value
+    try:
+        decoded = json.loads(candidate)
+    except (TypeError, ValueError):
+        return value
+    return _expand_embedded_json(decoded, depth=depth + 1)
+
+
+def _logical_large_result_content(content: str) -> str:
+    """Expose one-line structured tool results as stable logical lines."""
+
+    if len(content.splitlines()) > 1:
+        return content
+    try:
+        decoded = json.loads(content)
+    except (TypeError, ValueError):
+        decoded = None
+    if decoded is not None:
+        rendered = json.dumps(
+            _expand_embedded_json(decoded),
+            ensure_ascii=False,
+            indent=2,
+        )
+        if len(rendered.splitlines()) > 1:
+            return rendered
+    # Non-JSON output can still be a single minified/log line.  Fixed-width
+    # logical lines make read_file pagination usable without mutating the
+    # immutable artifact consumed by Citation extraction.
+    width = 1_000
+    if len(content) > width:
+        return "\n".join(
+            content[index : index + width]
+            for index in range(0, len(content), width)
+        )
+    return content
+
+
+class _WorkspaceLocalShellBackend(LocalShellBackend):
+    """Keep DeepAgents virtual artifacts readable by both file and shell tools."""
+
+    _VIRTUAL_ARTIFACT_PREFIXES = (
+        "/large_tool_results/",
+        "/conversation_history/",
+    )
+
+    def read(
+        self,
+        file_path: str,
+        offset: int = 0,
+        limit: int = 2_000,
+    ) -> ReadResult:
+        if not file_path.startswith("/large_tool_results/"):
+            return super().read(file_path, offset=offset, limit=limit)
+
+        raw = super().read(file_path, offset=0, limit=1)
+        if (
+            raw.error
+            or raw.file_data is None
+            or raw.file_data.get("encoding") != "utf-8"
+        ):
+            return raw
+        content = str(raw.file_data.get("content") or "")
+        logical = _logical_large_result_content(content)
+        if logical == content:
+            return super().read(file_path, offset=offset, limit=limit)
+        lines = logical.splitlines(keepends=True)
+        if offset >= len(lines):
+            return ReadResult(
+                error=f"Line offset {offset} exceeds file length ({len(lines)} lines)"
+            )
+        return ReadResult(
+            file_data=FileData(
+                content="".join(lines[offset : offset + limit]),
+                encoding="utf-8",
+            )
+        )
+
+    def execute(self, command: str, *, timeout: int | None = None) -> Any:
+        # Filesystem tools use a virtual root, while LocalShellBackend executes
+        # with the workspace as cwd and does not translate virtual paths.
+        # Convert only the two DeepAgents-owned artifact namespaces to relative
+        # paths; ordinary absolute user paths retain their existing semantics.
+        translated = command
+        for prefix in self._VIRTUAL_ARTIFACT_PREFIXES:
+            translated = translated.replace(prefix, prefix.removeprefix("/"))
+        return super().execute(translated, timeout=timeout)
+
+
+def _build_local_shell_backend(workspace_root: str | None) -> LocalShellBackend:
+    """Create a backend that maps DeepAgents virtual paths into the workspace.
+
+    Built-in summarization writes to virtual absolute paths such as
+    ``/conversation_history/<thread>.md``. Without ``virtual_mode=True`` those
+    paths target the host filesystem root, where desktop runs fail and retry
+    summarization instead of completing the turn.
+    """
+
+    if workspace_root:
+        return _WorkspaceLocalShellBackend(
+            root_dir=workspace_root,
+            inherit_env=True,
+            virtual_mode=True,
+        )
+    return _WorkspaceLocalShellBackend(inherit_env=True, virtual_mode=True)
+
+
 # langchain TodoListMiddleware tool name (auto-included by deepagents). Treated
 # as a planning channel: emit `todo_update` and suppress the generic tool_use /
 # tool_result pair so the UI trace doesn't double-render it.
 DEEPAGENTS_TODO_TOOL_NAME = "write_todos"
 
 
+def _session_evidence_binding_enabled(session: Session) -> bool:
+    """Whether the model needs the minimal private Evidence binding protocol."""
+
+    metadata = session.metadata if isinstance(session.metadata, dict) else {}
+    valuz = metadata.get("valuz")
+    return bool(
+        isinstance(valuz, dict)
+        and (valuz.get("citation_enabled") or valuz.get("citation_verification_enabled"))
+    )
+
+
 class DeepAgentsRuntime:
     """Wraps deepagents `create_deep_agent` as a RuntimePort implementation."""
+
+    supports_native_continuation = True
 
     def __init__(
         self,
@@ -160,6 +396,11 @@ class DeepAgentsRuntime:
         self._checkpointer_cm: Any | None = None
         self._active_task: asyncio.Task[Any] | None = None
         self._cancelled: bool = False
+        # One immutable Evidence namespace per user turn, shared by the main
+        # agent and every nested subagent.  The graph and its middleware live
+        # across turns, so ``run`` resets this object instead of replacing it.
+        self._turn_evidence_registry = EvidenceRegistry()
+        self._continuing_same_user_turn = False
         # Identity of the session currently being run — exposed to
         # custom-tool handlers through ExecContext.
         self._cur_session_id: str = ""
@@ -193,6 +434,7 @@ class DeepAgentsRuntime:
         self._cached_permission_mode: Literal["default", "auto_review", "full_access"] = (
             "full_access"
         )
+
         # Last value actually applied to a turn. Used by ``run()`` to
         # detect a PATCH on ``session.permission_mode`` /
         # ``session.model_settings.effort`` between turns and trigger a
@@ -206,6 +448,7 @@ class DeepAgentsRuntime:
             None
         )
         self._applied_effort: str | None = None
+        self._applied_citation_mode: bool | None = None
         self._mcp_tool_names: set[str] = set()
         # Per-session callable injected by the orchestrator via
         # ``set_session_rule_finder``. Closes over (session_id, cache,
@@ -228,6 +471,27 @@ class DeepAgentsRuntime:
         # runtimes' phases. Held as a single instance — matcher is
         # stateless and re-instantiation per call would be wasteful.
         self._approval_rule_matcher: RuntimeApprovalRuleMatcher = ExactArgsRuleMatcher()
+
+    async def _emit_citation_evidence(
+        self,
+        citation_join_id: str,
+        tool_name: str | None,
+        model_content: Any,
+        citation_content: str,
+    ) -> None:
+        """Bridge a completed middleware sidecar into the generic event layer."""
+
+        await self.event_sink.emit(
+            Event(
+                type="citation_evidence",
+                data={
+                    "tool_name": tool_name,
+                    "model_content": model_content,
+                    "content": citation_content,
+                    "citation_join_id": citation_join_id,
+                },
+            )
+        )
 
     APPROVAL_TIMEOUT_SECONDS: float = 3600.0  # 1h; class attr for test override
 
@@ -262,6 +526,8 @@ class DeepAgentsRuntime:
         session.status = "running"
         self._cancelled = False
         self._cur_session_id = session.id
+        if not self._continuing_same_user_turn:
+            self._turn_evidence_registry.reset()
 
         try:
             # Reconcile live session-driven levers BEFORE ``_ensure_graph``
@@ -305,6 +571,15 @@ class DeepAgentsRuntime:
                 "configurable": {"thread_id": str(thread_id)},
                 "recursion_limit": MAIN_GRAPH_RECURSION_LIMIT,
             }
+            known_citation_tool_messages: set[str] = set()
+            if not bare:
+                initial_state = await graph.aget_state(stream_config)
+                known_citation_tool_messages = {
+                    key
+                    for key, _tool_name, _model_content, _private_content in (
+                        _state_citation_artifacts(initial_state)
+                    )
+                }
 
             usage_totals = {
                 "input_tokens": 0,
@@ -349,26 +624,28 @@ class DeepAgentsRuntime:
 
                     if event_name == "on_chat_model_stream":
                         chunk_obj = data.get("chunk")
+                        internal_summarization = _is_internal_summarization_event(chunk)
                         text = _extract_chunk_text(chunk_obj)
-                        if text:
+                        if text and not internal_summarization:
                             await self.event_sink.emit(
                                 Event(type="text_delta", data={"text": text})
                             )
                         thinking_text = _extract_chunk_thinking(chunk_obj)
-                        if thinking_text:
+                        if thinking_text and not internal_summarization:
                             await self.event_sink.emit(
                                 Event(type="thinking_delta", data={"text": thinking_text})
                             )
 
                     elif event_name == "on_chat_model_end":
                         output = data.get("output")
+                        internal_summarization = _is_internal_summarization_event(chunk)
                         full_text = _extract_full_text(output)
-                        if full_text:
+                        if full_text and not internal_summarization:
                             await self.event_sink.emit(
                                 Event(type="assistant_message", data={"text": full_text})
                             )
                         full_thinking = _extract_full_thinking(output)
-                        if full_thinking:
+                        if full_thinking and not internal_summarization:
                             await self.event_sink.emit(
                                 Event(type="thinking", data={"text": full_thinking})
                             )
@@ -411,14 +688,23 @@ class DeepAgentsRuntime:
                             continue
                         output = data.get("output")
                         is_error = _output_is_error(output)
+                        citation_content = citation_artifact_content(output)
+                        event_data = {
+                            "id": run_id,
+                            "content": _stringify_tool_output(output),
+                            "is_error": is_error,
+                        }
+                        raw_tool_call_id = getattr(output, "tool_call_id", None)
+                        if raw_tool_call_id is None and isinstance(output, dict):
+                            raw_tool_call_id = output.get("tool_call_id")
+                        if raw_tool_call_id:
+                            event_data["citation_join_id"] = str(raw_tool_call_id)
+                        if citation_content is not None:
+                            event_data["_citation_content"] = citation_content
                         await self.event_sink.emit(
                             Event(
                                 type="tool_result",
-                                data={
-                                    "id": run_id,
-                                    "content": _stringify_tool_output(output),
-                                    "is_error": is_error,
-                                },
+                                data=event_data,
                             )
                         )
 
@@ -434,6 +720,23 @@ class DeepAgentsRuntime:
                 # the turn or it paused on an interrupt. Snapshot state to
                 # find out which.
                 state = await graph.aget_state(stream_config)
+                for key, tool_name, model_content, citation_content in _state_citation_artifacts(
+                    state
+                ):
+                    if key in known_citation_tool_messages:
+                        continue
+                    known_citation_tool_messages.add(key)
+                    await self.event_sink.emit(
+                        Event(
+                            type="citation_evidence",
+                            data={
+                                "tool_name": tool_name,
+                                "model_content": model_content,
+                                "content": citation_content,
+                                "citation_join_id": key,
+                            },
+                        )
+                    )
                 pending_interrupts = list(getattr(state, "interrupts", ()) or ())
                 if not pending_interrupts:
                     break
@@ -547,6 +850,34 @@ class DeepAgentsRuntime:
                     },
                 )
             )
+
+    async def run_task_coverage(
+        self,
+        session: Session,
+        user_message: UserMessage,
+        *,
+        no_op_tool: ToolDef,
+    ) -> None:
+        """Resume this Runtime/thread with one private terminal no-gap tool."""
+
+        previous = self.toolkit.get(no_op_tool.name)
+        self.toolkit.register(no_op_tool)
+        # The compiled graph freezes its tool list.  Recompile on the same
+        # runtime and checkpointer; ``session.runtime_session_id`` remains the
+        # LangGraph thread id, so history and native continuity are preserved.
+        self._graph = None
+        self._continuing_same_user_turn = True
+        try:
+            await self.run(session, user_message)
+        finally:
+            self._continuing_same_user_turn = False
+            if previous is None:
+                self.toolkit.unregister(no_op_tool.name)
+            else:
+                self.toolkit.register(previous)
+            # Primary turns after Coverage must regain the exact public tool
+            # surface instead of inheriting the private protocol tool.
+            self._graph = None
 
     async def interrupt(self) -> None:
         self._cancelled = True
@@ -904,13 +1235,22 @@ class DeepAgentsRuntime:
         # the graph wasn't built via the normal path (most often a test
         # that mocked ``self._graph``). Reconcile only after we have a
         # real "previously applied" value to compare against.
-        if self._applied_permission_mode is None and self._applied_effort is None:
+        if (
+            self._applied_permission_mode is None
+            and self._applied_effort is None
+            and self._applied_citation_mode is None
+        ):
             return
 
         new_mode = session.permission_mode
         new_effort = session.model_settings.effort if session.model_settings else None
+        new_citation_mode = _session_evidence_binding_enabled(session)
 
-        if new_mode == self._applied_permission_mode and new_effort == self._applied_effort:
+        if (
+            new_mode == self._applied_permission_mode
+            and new_effort == self._applied_effort
+            and new_citation_mode == self._applied_citation_mode
+        ):
             return
 
         # Drop the cached graph so ``_ensure_graph`` rebuilds cleanly.
@@ -935,6 +1275,7 @@ class DeepAgentsRuntime:
             self._cached_permission_mode = session.permission_mode
             self._applied_permission_mode = session.permission_mode
             self._applied_effort = session.model_settings.effort if session.model_settings else None
+            self._applied_citation_mode = _session_evidence_binding_enabled(session)
             return self._graph
 
         # inherit_env=True so the agent shell sees the host's PATH / HOME / etc.
@@ -942,11 +1283,7 @@ class DeepAgentsRuntime:
         # EMPTY env — no PATH — so anything outside the shell's compiled-in
         # default path fails to resolve: the chrome-devtools wrapper, and in dev
         # even npx/node (nvm). See docs/design/browser-feature.md §8.
-        backend = (
-            LocalShellBackend(root_dir=self.workspace_root, inherit_env=True)
-            if self.workspace_root
-            else LocalShellBackend(inherit_env=True)
-        )
+        backend = _build_local_shell_backend(self.workspace_root)
 
         tools = self._build_tools()
         mcp_tools = await self._build_mcp_tools(session)
@@ -960,10 +1297,16 @@ class DeepAgentsRuntime:
         if mcp_tools:
             tools = [*tools, *mcp_tools]
 
-        subagents = self._build_subagents()
-        await self._open_checkpointer()
-
         skill_roots = self._materialize_skills(session)
+        subagents = self._build_subagents(
+            citation_protocol=(
+                _citation_system_policy_block(session.instructions)
+                if _session_evidence_binding_enabled(session)
+                else ""
+            ),
+            skill_roots=skill_roots,
+        )
+        await self._open_checkpointer()
 
         # D9: session is the runtime's source of truth for ``permission_mode``;
         # the agent value was prefilled at session creation but is decoupled
@@ -977,6 +1320,7 @@ class DeepAgentsRuntime:
         self._cached_permission_mode = session.permission_mode
         self._applied_permission_mode = session.permission_mode
         self._applied_effort = session.model_settings.effort if session.model_settings else None
+        self._applied_citation_mode = _session_evidence_binding_enabled(session)
         interrupt_on = self._build_interrupt_on(session.permission_mode, tools)
 
         graph_kwargs: dict[str, Any] = {
@@ -985,7 +1329,18 @@ class DeepAgentsRuntime:
             "subagents": subagents or None,
             "backend": backend,
             "checkpointer": self._checkpointer,
-            "middleware": [ToolErrorTolerantMiddleware()],
+            "middleware": [
+                InvalidToolCallPairMiddleware(),
+                ToolErrorTolerantMiddleware(),
+                CitationEvidenceCompactionMiddleware(
+                    # Evidence Registry is shared infrastructure.  Always
+                    # publish trusted source metadata to the Host; Citation
+                    # and Audit switches decide only which post-run sidecars
+                    # consume it.
+                    evidence_registry=self._turn_evidence_registry,
+                    citation_artifact_emitter=self._emit_citation_evidence,
+                ),
+            ],
         }
         # DeepAgents prepends our ``system_prompt`` argument to its base
         # prompt; we pass the per-session ``instructions`` straight through
@@ -1060,10 +1415,38 @@ class DeepAgentsRuntime:
         # graph is rebuilt on PATCH via ``_reconcile_session_levers``,
         # so this method re-runs with the fresh value on the next turn.
         effort = session.model_settings.effort if session.model_settings is not None else None
+        # Channel-declared input window for models the langchain profile
+        # registry can't know (gateway aliases like ``valuz-pro-anthropic``).
+        # Without a profile, deepagents' SummarizationMiddleware falls back
+        # to a fixed 170k trigger instead of 0.85 x the real window; the
+        # explicit ``profile`` kwarg restores fraction-based compaction.
+        # Known model names already get a registry profile — the host only
+        # sets ``max_input_tokens`` for declared aliases, never guesses.
+        max_input_tokens = (
+            session.model_settings.max_input_tokens if session.model_settings is not None else None
+        )
+        profile = {"max_input_tokens": max_input_tokens} if max_input_tokens else None
         from pydantic import SecretStr
 
         if protocol == "anthropic":
             from langchain_anthropic import ChatAnthropic
+
+            class _ValuzChatAnthropic(ChatAnthropic):
+                """ChatAnthropic with gateway-history compatibility cleanup."""
+
+                def _get_request_payload(
+                    self,
+                    input_: Any,
+                    *,
+                    stop: list[str] | None = None,
+                    **kwargs: Any,
+                ) -> dict[str, Any]:
+                    payload = super()._get_request_payload(
+                        input_,
+                        stop=stop,
+                        **kwargs,
+                    )
+                    return _sanitize_anthropic_request_payload(payload)
 
             # ChatAnthropic streams already include usage on the final
             # AIMessageChunk — no opt-in flag needed. ``effort`` is
@@ -1081,6 +1464,10 @@ class DeepAgentsRuntime:
                 kwargs["base_url"] = self.model_provider.base_url
             if effort is not None:
                 kwargs["effort"] = effort
+            if profile is not None:
+                # Does not disturb the max_tokens default fill below — that
+                # reads the bundled registry directly, not ``self.profile``.
+                kwargs["profile"] = profile
             # Unset max_tokens lets ChatAnthropic default from its profile
             # registry, which bottoms out at 4096 for model names it doesn't
             # know (gateway aliases, compatible third-party models) — pass an
@@ -1088,7 +1475,7 @@ class DeepAgentsRuntime:
             max_tokens = _resolve_anthropic_max_tokens(self.model)
             if max_tokens is not None:
                 kwargs["max_tokens"] = max_tokens
-            return ChatAnthropic(**kwargs)
+            return _ValuzChatAnthropic(**kwargs)
 
         if protocol == "gemini":
             from langchain_google_genai import ChatGoogleGenerativeAI
@@ -1108,6 +1495,8 @@ class DeepAgentsRuntime:
                 }
             if effort is not None:
                 gemini_kwargs["thinking_level"] = _map_effort_for_gemini(effort)
+            if profile is not None:
+                gemini_kwargs["profile"] = profile
             return ChatGoogleGenerativeAI(**gemini_kwargs)
 
         # openai_completion path (default for any non-anthropic /
@@ -1145,6 +1534,8 @@ class DeepAgentsRuntime:
             openai_kwargs["base_url"] = self.model_provider.base_url
         if effort is not None:
             openai_kwargs["reasoning_effort"] = _map_effort_for_openai(effort)
+        if profile is not None:
+            openai_kwargs["profile"] = profile
         return ChatOpenAI(**openai_kwargs)
 
     async def _open_checkpointer(self) -> Any:
@@ -1177,10 +1568,31 @@ class DeepAgentsRuntime:
         directory = os.path.dirname(self.checkpoint_db)
         if directory:
             os.makedirs(directory, exist_ok=True)
-        self._checkpointer_cm = AsyncSqliteSaver.from_conn_string(self.checkpoint_db)
-        self._checkpointer = await self._checkpointer_cm.__aenter__()
-        await self._checkpointer.setup()
-        return self._checkpointer
+        # A warm-runtime eviction closes the previous session's SQLite saver
+        # immediately before the next session opens its own one.  On macOS,
+        # removing/recreating WAL sidecars can briefly surface as SQLITE_IOERR
+        # even though the database itself is healthy.  Never retain the
+        # half-open saver: close it, yield once for the sidecar cleanup, and
+        # retry exactly once.  Other SQLite errors still fail immediately.
+        for attempt in range(2):
+            checkpointer_cm = AsyncSqliteSaver.from_conn_string(self.checkpoint_db)
+            checkpointer = await checkpointer_cm.__aenter__()
+            try:
+                await checkpointer.setup()
+            except sqlite3.OperationalError as exc:
+                await checkpointer_cm.__aexit__(type(exc), exc, exc.__traceback__)
+                if attempt > 0 or "disk i/o error" not in str(exc).lower():
+                    raise
+                logger.warning(
+                    "DeepAgents SQLite checkpointer setup hit a transient disk I/O "
+                    "error; retrying once"
+                )
+                await asyncio.sleep(0.05)
+                continue
+            self._checkpointer_cm = checkpointer_cm
+            self._checkpointer = checkpointer
+            return checkpointer
+        raise RuntimeError("unreachable")
 
     def _materialize_skills(self, session: Session) -> list[str]:
         if not self.workspace_root or not session.skills:
@@ -1211,6 +1623,17 @@ class DeepAgentsRuntime:
         spec: dict[str, dict[str, Any]] = {}
         for cfg in session.mcp_servers:
             if isinstance(cfg, McpStdioServerConfig):
+                # A stdio child is spawned by THIS process, so a which() miss
+                # here is definitive — spawning anyway would surface as a bare
+                # ``FileNotFoundError: [Errno 2]`` from deep inside anyio with
+                # no hint of which server or command was at fault.
+                if shutil.which(cfg.command) is None:
+                    logger.warning(
+                        "mcp server %r skipped: stdio command %r not found on PATH",
+                        cfg.name,
+                        cfg.command,
+                    )
+                    continue
                 # LangChain StdioConnection requires args even when empty;
                 # env_vars resolution happens harness-side via the shared
                 # resolver so the SDK only sees a flat env dict. Omit
@@ -1235,8 +1658,31 @@ class DeepAgentsRuntime:
                 entry["headers"] = dict(cfg.headers)
             spec[cfg.name] = entry
 
-        client = MultiServerMCPClient(spec)  # type: ignore[arg-type]
-        return list(await client.get_tools())
+        if not spec:
+            return []
+        client = MultiServerMCPClient(
+            spec,  # type: ignore[arg-type]
+            tool_interceptors=[_preserve_mcp_source_metadata],
+        )
+        # Load per server instead of one ``get_tools()`` over everything: the
+        # aggregate call fails the WHOLE turn when any single server is
+        # unreachable. The CLI runtimes degrade to "server unavailable, tools
+        # absent" — match that here. ``gather`` keeps the adapter's previous
+        # concurrent-connect behavior.
+        names = list(spec)
+        results = await asyncio.gather(
+            *(client.get_tools(server_name=name) for name in names),
+            return_exceptions=True,
+        )
+        tools: list[Any] = []
+        for name, result in zip(names, results, strict=True):
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+            if isinstance(result, BaseException):
+                logger.warning("mcp server %r unavailable — skipping its tools: %s", name, result)
+                continue
+            tools.extend(result)
+        return tools
 
     # -- Tool conversion --
 
@@ -1278,15 +1724,60 @@ class DeepAgentsRuntime:
             name=tdef.name,
             description=tdef.description or tdef.name,
             args_schema=tdef.parameters or None,
+            # A no-gap decision must terminate the agent loop at the tool
+            # boundary.  Otherwise LangGraph invokes the model once more and
+            # many providers manufacture a visible "(empty)" confirmation.
+            return_direct=tdef.name == TASK_COVERAGE_NOOP_TOOL_NAME,
         )
 
-    def _build_subagents(self) -> list[SubAgent]:
+    def _build_subagents(
+        self,
+        *,
+        citation_protocol: str = "",
+        skill_roots: list[str] | None = None,
+    ) -> list[SubAgent]:
         subagents: list[SubAgent] = []
         for sub_def in self.config.callable_agents:
-            subagents.append(self._to_subagent(sub_def))
+            subagents.append(
+                self._to_subagent(
+                    sub_def,
+                    citation_protocol=citation_protocol,
+                )
+            )
+        if citation_protocol and not any(
+            subagent["name"] == GENERAL_PURPOSE_SUBAGENT["name"] for subagent in subagents
+        ):
+            # DeepAgents auto-creates ``general-purpose`` with a private
+            # system prompt and middleware stack. Explicitly mirror that
+            # default only while Evidence binding is active so nested source
+            # tools expose the same handles and the nested assistant knows the
+            # same minimal protocol. Parent task instructions, Host plans, and
+            # other session text are intentionally not copied.
+            general_purpose: SubAgent = {
+                "name": GENERAL_PURPOSE_SUBAGENT["name"],
+                "description": GENERAL_PURPOSE_SUBAGENT["description"],
+                "system_prompt": (
+                    f"{GENERAL_PURPOSE_SUBAGENT['system_prompt']}\n\n{citation_protocol}"
+                ),
+                "middleware": [
+                    InvalidToolCallPairMiddleware(),
+                    CitationEvidenceCompactionMiddleware(
+                        evidence_registry=self._turn_evidence_registry,
+                        citation_artifact_emitter=self._emit_citation_evidence,
+                    )
+                ],
+            }
+            if skill_roots:
+                general_purpose["skills"] = list(skill_roots)
+            subagents.insert(0, general_purpose)
         return subagents
 
-    def _to_subagent(self, sub_def: SubAgentDef) -> SubAgent:
+    def _to_subagent(
+        self,
+        sub_def: SubAgentDef,
+        *,
+        citation_protocol: str = "",
+    ) -> SubAgent:
         sub_tools: list[StructuredTool] = []
         if sub_def.tools:
             for name in sub_def.tools:
@@ -1297,8 +1788,20 @@ class DeepAgentsRuntime:
         entry: SubAgent = {
             "name": sub_def.name,
             "description": sub_def.description,
-            "system_prompt": sub_def.prompt,
+            "system_prompt": (
+                f"{sub_def.prompt}\n\n{citation_protocol}".strip()
+                if citation_protocol
+                else sub_def.prompt
+            ),
         }
+        if citation_protocol:
+            entry["middleware"] = [
+                InvalidToolCallPairMiddleware(),
+                CitationEvidenceCompactionMiddleware(
+                    evidence_registry=self._turn_evidence_registry,
+                    citation_artifact_emitter=self._emit_citation_evidence,
+                )
+            ]
         if sub_tools:
             entry["tools"] = sub_tools
         if sub_def.model:
@@ -1509,6 +2012,39 @@ def _output_is_error(output: Any) -> bool:
     return False
 
 
+def _state_citation_artifacts(state: Any) -> list[tuple[str, str | None, Any, str]]:
+    """Return private evidence sidecars added by graph tool middleware.
+
+    LangChain emits the underlying tool's ``on_tool_end`` event before
+    ``awrap_tool_call`` has attached its compacted evidence artifact. The
+    completed graph state contains the final ToolMessage, so replay only those
+    private artifacts into Citation Guard before the answer is sealed.
+    """
+
+    values = getattr(state, "values", None)
+    if not isinstance(values, dict):
+        return []
+    messages = values.get("messages")
+    if not isinstance(messages, list):
+        return []
+    artifacts: list[tuple[str, str | None, Any, str]] = []
+    for index, message in enumerate(messages):
+        artifact = getattr(message, "artifact", None)
+        if not isinstance(artifact, dict):
+            continue
+        citation_content = artifact.get("_valuz_citation_content")
+        if not isinstance(citation_content, str):
+            continue
+        raw_id = getattr(message, "tool_call_id", None) or getattr(message, "id", None)
+        key = str(raw_id or f"tool-message-{index}")
+        raw_name = getattr(message, "name", None)
+        model_content = getattr(message, "content", None)
+        artifacts.append(
+            (key, str(raw_name) if raw_name else None, model_content, citation_content)
+        )
+    return artifacts
+
+
 def _stringify_tool_output(output: Any) -> str:
     if output is None:
         return ""
@@ -1516,7 +2052,7 @@ def _stringify_tool_output(output: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return "".join(str(p) for p in content)
+        return json.dumps(_jsonify(content), ensure_ascii=False)
     return str(output)
 
 

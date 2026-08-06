@@ -174,4 +174,111 @@ describe("useSessionAttachments", () => {
     expect(result.current.attachments[0].consumed_at).toBeTruthy();
     expect(result.current.attachments[0].parse_status).toBe("ready");
   });
+
+  it("handoff race: pending rows landing AFTER the consume are stamped by the watermark", async () => {
+    // Project-send handoff: the page mounts on /conversation/new with an
+    // empty attachments state; performSend promotes sessionId (null → s1),
+    // firing the first load, and then calls markPendingConsumed — which can
+    // run before that load resolves. The rows it never saw must still land
+    // consumed, or the composer chips resurrect with nothing to clear them.
+    let resolveLoad: (v: { items: SessionAttachmentItem[] }) => void = () => {};
+    const loadPromise = new Promise<{ items: SessionAttachmentItem[] }>((r) => {
+      resolveLoad = r;
+    });
+    listAttachments.mockReturnValueOnce(loadPromise);
+    const { result, rerender } = renderHook(
+      ({ sid }: { sid: string | null }) => useSessionAttachments(sid),
+      { initialProps: { sid: null as string | null } },
+    );
+    rerender({ sid: "s1" }); // promote → load fires (still pending)
+    act(() => {
+      result.current.markPendingConsumed(); // send resolved first
+    });
+    await act(async () => {
+      resolveLoad({
+        items: [row({ id: "p1", parse_status: "ready", consumed_at: null })],
+      });
+      await loadPromise;
+    });
+    expect(result.current.attachments[0].consumed_at).toBeTruthy();
+  });
+
+  it("session re-entry load re-asserts the consume watermark over server-pending rows", async () => {
+    // Same session, fresh load (s1 → null → s1): local stamps were reset with
+    // the state, and the server may still report the rows pending until the
+    // turn runs — the watermark must re-stamp them.
+    listAttachments.mockResolvedValue({
+      items: [row({ id: "p1", parse_status: "ready", consumed_at: null })],
+    });
+    const { result, rerender } = renderHook(
+      ({ sid }: { sid: string | null }) => useSessionAttachments(sid),
+      { initialProps: { sid: "s1" as string | null } },
+    );
+    await waitFor(() => expect(result.current.attachments).toHaveLength(1));
+    act(() => {
+      result.current.markPendingConsumed();
+    });
+    rerender({ sid: null });
+    await waitFor(() => expect(result.current.attachments).toHaveLength(0));
+    rerender({ sid: "s1" });
+    await waitFor(() => expect(result.current.attachments).toHaveLength(1));
+    expect(result.current.attachments[0].consumed_at).toBeTruthy();
+  });
+
+  it("explicit session/ts override records the watermark before the hook's sessionId settles (handoff)", async () => {
+    // ProjectDetailPage POSTs the message itself and navigates; the landing
+    // page consumes the handoff (calling markPendingConsumed with the route's
+    // session id + sentAt) while its own selectedSessionId may still be null.
+    let resolveLoad: (v: { items: SessionAttachmentItem[] }) => void = () => {};
+    const loadPromise = new Promise<{ items: SessionAttachmentItem[] }>((r) => {
+      resolveLoad = r;
+    });
+    listAttachments.mockReturnValueOnce(loadPromise);
+    const { result, rerender } = renderHook(
+      ({ sid }: { sid: string | null }) => useSessionAttachments(sid),
+      { initialProps: { sid: null as string | null } },
+    );
+    act(() => {
+      result.current.markPendingConsumed("s1", Date.now()); // hook sessionId still null
+    });
+    rerender({ sid: "s1" }); // settles later → load fires
+    await act(async () => {
+      resolveLoad({
+        items: [row({ id: "p1", parse_status: "ready", consumed_at: null })],
+      });
+      await loadPromise;
+    });
+    expect(result.current.attachments[0].consumed_at).toBeTruthy();
+  });
+
+  it("a row attached AFTER the send stays pending (watermark is not a blanket consume)", async () => {
+    let resolveLoad: (v: { items: SessionAttachmentItem[] }) => void = () => {};
+    const loadPromise = new Promise<{ items: SessionAttachmentItem[] }>((r) => {
+      resolveLoad = r;
+    });
+    listAttachments.mockReturnValueOnce(loadPromise);
+    const { result, rerender } = renderHook(
+      ({ sid }: { sid: string | null }) => useSessionAttachments(sid),
+      { initialProps: { sid: null as string | null } },
+    );
+    rerender({ sid: "s1" });
+    act(() => {
+      result.current.markPendingConsumed();
+    });
+    await act(async () => {
+      resolveLoad({
+        items: [
+          // Uploaded after the consume moment → belongs to the NEXT turn.
+          row({
+            id: "late1",
+            parse_status: "ready",
+            consumed_at: null,
+            created_at: Date.now() + 60_000,
+          }),
+        ],
+      });
+      await loadPromise;
+    });
+    expect(result.current.attachments[0].consumed_at).toBeNull();
+  });
 });

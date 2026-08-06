@@ -161,7 +161,17 @@ exports.default = async function afterSign(context) {
   let failed = 0;
   for (const f of machoFiles) {
     try {
-      codesign(['--force', '--sign', identity, '--timestamp', '--options', 'runtime', f]);
+      // --preserve-metadata=entitlements: --force replaces the WHOLE existing
+      // signature, entitlements included. Some sidecar binaries ship signed
+      // with entitlements that hardened runtime enforcement then requires at
+      // run time — the SDK-bundled Claude Code CLI (a Bun/JSC executable) has
+      // allow-jit + allow-unsigned-executable-memory, without which it dies on
+      // startup with "ReferenceError: SharedArrayBuffer is not defined".
+      // Preserving is a no-op for the PyInstaller helpers, which have none.
+      codesign([
+        '--force', '--sign', identity, '--timestamp', '--options', 'runtime',
+        '--preserve-metadata=entitlements', f,
+      ]);
     } catch (e) {
       failed += 1;
       console.error(`[afterSign] FAILED: ${f}\n${e.stderr || e.message}`);
