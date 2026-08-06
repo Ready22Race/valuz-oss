@@ -94,6 +94,29 @@ async def _refresh_docs_capabilities(session_id: str, user_id: str | None) -> No
         logger.warning("docs capability refresh failed for session %s", session_id, exc_info=True)
 
 
+async def _refresh_bundled_skills(session_id: str, user_id: str | None) -> None:
+    """Attach bundled official packages that landed after the session started.
+
+    Same staleness class as the docs skill above, one step earlier in the
+    chain: ``capability_resolver`` injects every bundled package into every
+    session, but it only runs at create time, and the packages are written by
+    an asynchronous, out-of-band materialiser (a release that adds one, or a
+    managed deployment landing an owner's tree for the first time). Without
+    this, a session created in that window is the only one on the whole
+    installation that cannot see the package.
+    """
+    if user_id is None:
+        return
+    try:
+        from valuz_agent.modules.sessions.capabilities import (
+            refresh_bundled_skills_for_session,
+        )
+
+        await refresh_bundled_skills_for_session(session_id, user_id)
+    except Exception:  # noqa: BLE001 — never block a turn on a refresh failure
+        logger.warning("bundled skill refresh failed for session %s", session_id, exc_info=True)
+
+
 async def _refresh_citation_policy(
     session_id: str,
     user_id: str | None,
@@ -149,9 +172,12 @@ def chat_capability_hook(
 
     A chat session is long-lived and user-editable between turns: the user can
     bind a KB, toggle citations, or re-auth a connector while the session sits
-    idle. Order matches the historical call order in ``SessionService``:
+    idle — and on a managed deployment the bundled packages themselves can land
+    mid-session. Order matches the historical call order in ``SessionService``:
     citation policy → docs capabilities → always-on MCP re-stamp (last, so it
-    re-stamps the docs MCP entry the step before it may have just added).
+    re-stamps the docs MCP entry the step before it may have just added). The
+    bundled sweep runs before the docs step, which is the one bundled package
+    with an MCP server to pair with.
     """
 
     async def _hook() -> None:
@@ -161,6 +187,7 @@ def chat_capability_hook(
             citation_enabled_override=citation_enabled_override,
             verification_enabled_override=verification_enabled_override,
         )
+        await _refresh_bundled_skills(session_id, user_id)
         await _refresh_docs_capabilities(session_id, user_id)
         await restamp_always_on_mcp(session_id, user_id)
 
