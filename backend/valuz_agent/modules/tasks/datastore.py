@@ -418,6 +418,49 @@ class TaskEventDatastore:
             )
         ).scalar_one_or_none()
 
+    async def latest_events_by_task(
+        self, user_id: str, task_ids: list[str]
+    ) -> dict[str, TaskEventRow]:
+        """The most recent event for EACH of several tasks, in one query.
+
+        The activity overview builds its rows concurrently
+        (``asyncio.gather``); calling the single-task read from inside that
+        fan-out issued concurrent statements on ONE ``AsyncSession``, which
+        SQLAlchemy does not support — and the overview's per-row
+        ``except Exception`` swallowed the resulting InvalidRequestError as
+        "failed to build summary", silently dropping runs from the list.
+        Resolve the whole batch up front instead.
+        """
+        if not task_ids:
+            return {}
+        # Window by (task_id, sequence desc) so SQLite returns one row per task.
+        ranked = (
+            select(
+                TaskEventRow,
+                func.row_number()
+                .over(
+                    partition_by=TaskEventRow.task_id,
+                    order_by=TaskEventRow.sequence.desc(),
+                )
+                .label("rn"),
+            )
+            .where(
+                TaskEventRow.task_id.in_(task_ids),
+                TaskEventRow.user_id == user_id,
+            )
+            .subquery()
+        )
+        rows = (
+            await self._db.execute(
+                select(TaskEventRow).from_statement(
+                    select(TaskEventRow).where(
+                        TaskEventRow.id.in_(select(ranked.c.id).where(ranked.c.rn == 1))
+                    )
+                )
+            )
+        ).scalars()
+        return {r.task_id: r for r in rows}
+
     # -- Commands --
 
     async def append_event(
