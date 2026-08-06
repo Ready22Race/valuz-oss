@@ -9,8 +9,12 @@ modes for one feature, so the second was removed rather than maintained.
 from __future__ import annotations
 
 import json
+import re
 from importlib import resources
 from typing import Literal
+
+from valuz_agent.ports.extensions import ext
+from valuz_agent.ports.genui_blocks import GenUIBlockRegistry
 
 OUTPUT_FORMAT = "A2UI v0.9 JSON message stream"
 
@@ -75,6 +79,21 @@ _A2UI_SNAPSHOT_FALLBACKS: dict[str, str] = {
     "edition": "a tile, list, or table component from the catalog above",
 }
 
+
+def _snapshot_fallbacks(scope: GenUIComponentScope) -> str:
+    """The advice for one scope, after the registry has had its say.
+
+    Under an edition holding ``replace`` this repository's names are gone from
+    every scope, so the advice falls back to the ``edition`` wording — which
+    names nothing, and is the only honest thing to say when the catalog's
+    contents were chosen by a build this one cannot see.
+    """
+
+    if _block_registry().baseline_suppressed():
+        return _A2UI_SNAPSHOT_FALLBACKS["edition"]
+    return _A2UI_SNAPSHOT_FALLBACKS[scope]
+
+
 A2UI_OPENUI_COMPONENT_CATALOG = """
 OpenUI component catalog supported by the A2UI renderer:
 - Layout: Stack, Row, Grid, Tabs, TabItem, Accordion, AccordionItem, Steps,
@@ -129,6 +148,35 @@ OpenUI component catalog supported by the A2UI renderer:
   vocabulary offered here. Everything else comes from the edition below.
 """
 
+#: Every OpenUI component the hand-written catalog above names — the reserved
+#: set the block registry refuses collisions against. Kept adjacent to the
+#: prose blob because the two must move together. The regex also captures the
+#: category labels ("Layout", "Charts", …); deliberately kept — an edition
+#: block wearing a category's name would read as OpenUI vocabulary anyway.
+_OPENUI_COMPONENT_NAMES: tuple[str, ...] = tuple(
+    re.findall(r"[A-Z][A-Za-z0-9]*", A2UI_OPENUI_COMPONENT_CATALOG.replace("OpenUI", ""))
+)
+
+
+def _block_registry() -> GenUIBlockRegistry:
+    """The process-wide block registry, with the OSS baseline bound.
+
+    Binding is lazy rather than at import so an overlay that registers before
+    importing this module still gets its collisions checked — the registry
+    re-validates at bind and logs loudly on a drop.
+    """
+
+    registry = ext.genui_blocks
+    if not registry.baseline_bound:
+        catalog_text = _load_block_catalog()
+        names = re.findall(r"^\s*-\s*([A-Za-z0-9]+)\(", catalog_text, re.MULTILINE)
+        registry.bind_baseline(
+            names=[*names, *_OPENUI_COMPONENT_NAMES],
+            catalog_text=catalog_text,
+        )
+    return registry
+
+
 A2UI_COMPONENT_CATALOG = f"""{A2UI_OPENUI_COMPONENT_CATALOG}
 - Valuz blocks (cards, citations, report pages, diagrams):
 {_load_block_catalog()}
@@ -138,14 +186,19 @@ A2UI_COMPONENT_CATALOG = f"""{A2UI_OPENUI_COMPONENT_CATALOG}
 def edition_catalog_text() -> str:
     """Components registered from outside this repository.
 
-    Empty here, and that is the point: an edition is a separate build that
-    vendors this one, so nothing in OSS registers into it. The backend registry
-    that lets one is still to be built — see
-    ``docs/design/genui-dynamic-blocks.md``. Until then this is the seam the
-    scope reads, so the two land together rather than the scope being retrofitted.
+    The registry behind it is ``ext.genui_blocks``: an edition — a separate
+    build that vendors this one — registers the catalog its own frontend
+    generated, and this returns those layers and nothing else. Empty when
+    nothing is installed, which is what makes ``resolve_component_scope``
+    widen an ``edition`` scope back to ``all`` rather than offering a root
+    with no components under it.
+
+    Read per call, never cached: registration happens at edition startup, and
+    a module constant would freeze the prompt at import — one process restart
+    behind every edition, forever.
     """
 
-    return ""
+    return _block_registry().catalog_text(baseline=False)
 
 
 def resolve_component_scope(scope: GenUIComponentScope) -> GenUIComponentScope:
@@ -184,7 +237,14 @@ def build_a2ui_catalog(scope: GenUIComponentScope = "all") -> str:
         f"{_load_block_catalog()}\n"
     )
     installed = f"{_A2UI_EDITION_HEADING}{edition}\n" if edition else ""
-    if scope == "atoms":
+    if _block_registry().baseline_suppressed():
+        # An edition holds `replace`: this repository's vocabulary is gone from
+        # the renderer, so no scope may describe it — a described-but-
+        # unrenderable component is the failure direction the seam keeps closed.
+        # Every scope collapses to the root plus what the edition installed,
+        # `atoms` included, since its whole content is what the edition removed.
+        components = f"{_A2UI_ROOT_ONLY_CATALOG}{installed}"
+    elif scope == "atoms":
         components = own
     elif scope == "edition":
         # The root comes from the general set even here: it is the one component
@@ -196,7 +256,7 @@ def build_a2ui_catalog(scope: GenUIComponentScope = "all") -> str:
         # addition to the general vocabulary, which is what they are.
         components = f"{own}{installed}"
 
-    fallbacks = _A2UI_SNAPSHOT_FALLBACKS[scope]
+    fallbacks = _snapshot_fallbacks(scope)
     # `.replace`, not `.format`: the message-shape text is JSON, and every brace
     # in it would be read as a format field.
     return f"{components}{_A2UI_MESSAGE_SHAPE.replace('{fallbacks}', fallbacks)}\n"
@@ -225,9 +285,7 @@ def a2ui_instructions(scope: GenUIComponentScope = "all") -> str:
 
     scope = resolve_component_scope(scope)
     prefer_blocks = _A2UI_PREFER_BLOCKS if scope != "atoms" else ""
-    tail = _A2UI_NO_PLACEHOLDER_CHARTS.replace(
-        "{fallbacks}", _A2UI_SNAPSHOT_FALLBACKS[scope]
-    )
+    tail = _A2UI_NO_PLACEHOLDER_CHARTS.replace("{fallbacks}", _snapshot_fallbacks(scope))
     return f"{_A2UI_INSTRUCTIONS_BASE}{prefer_blocks}{tail}"
 
 
