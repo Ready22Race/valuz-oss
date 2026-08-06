@@ -95,21 +95,37 @@ def _snapshot_fallbacks(scope: GenUIComponentScope) -> str:
 
 
 A2UI_OPENUI_COMPONENT_CATALOG = """
-OpenUI component catalog supported by the A2UI renderer:
-- Layout: Stack, Row, Grid, Tabs, TabItem, Accordion, AccordionItem, Steps,
-  StepsItem, Carousel, Separator, Modal.
-- Content: Card, Section, CardHeader, Heading, Title, TextContent, Text,
-  Paragraph, MarkDownRenderer, Markdown, Callout, TextCallout, CodeBlock,
-  Image, ImageBlock, ImageGallery.
-- Tables: Table, Col.
-- Charts: BarChart, LineChart, AreaChart, RadarChart, HorizontalBarChart,
-  PieChart, RadialChart, SingleStackedBarChart, ScatterChart, Series,
-  ScatterSeries, Point, Slice.
-- Forms: Form, FormControl, Label, Input, TextArea, Select, SelectItem,
-  DatePicker, Slider, CheckBoxGroup, CheckBoxItem, RadioGroup, RadioItem,
-  SwitchGroup, SwitchItem.
-- Actions/display: Button, Buttons, TagBlock, Tag, Metric, KPI. For a list of
-  entries use the DataList, StatusList, Timeline or Feed blocks below.
+OpenUI component catalog supported by the A2UI renderer. These sit alongside the
+Valuz blocks below; where both could serve, the block is the better answer —
+it is opinionated about the shape of the data, and these are not.
+
+- Stack(children: array, direction?: "row"|"column", gap?: string) — The document root every payload opens with, and the only general-purpose
+  container kept here: it stacks the answer's sections. Inline, Cluster, Split and DashboardGrid are the blocks for arranging things inside a section.
+- LineChart(labels: array, series: array, variant?: string, xLabel?: string, yLabel?: string) — Values over an ordered axis, one line per series. labels is the axis and series is {category, values} with the nth value under the nth label. This is the only multi-series line chart; ComboChart draws bars with a single line over them, so reach for that one only when the second measure genuinely is a rate over a level.
+- AreaChart(labels: array, series: array, variant?: string, xLabel?: string, yLabel?: string) — A LineChart with the area under each line filled. Use it when the quantity accumulates or when the total, not the path, is the point; a plain LineChart reads more precisely for levels that move both ways.
+- RadarChart(labels: array, series: array, variant?: string) — One subject scored across several named axes, drawn as a closed shape. Best from about four axes up, and only when the axes share a scale — mixed units make the shape meaningless. Two or three series at most before the shapes obscure each other.
+- ScatterChart(series: array, xLabel?: string, yLabel?: string) — Points in two dimensions, for the relationship between two measures rather than change over time.
+- PieChart(labels: array, values: array) — Parts of one whole. Keep it under about six slices and only when the parts really do sum to the whole; anything ranked or compared is a GroupedBar.
+- RadialChart(labels: array, values: array) — The same composition drawn as concentric arcs. Use it for a small number of shares where the ring reads better than a pie.
+
+- Callout(text: string, title?: string, variant?: string) — A tinted panel raising one thing about the answer: a caveat, a coverage gap, a figure on a different basis. variant carries the severity, and stating it is the point — a warning drawn neutral reads as a footnote. ContextCard is the neighbouring explanation of method; this is a flag above the answer.
+- Markdown(text: string) — Prose with markup: headings, bold, lists, links, inline code. The only component that parses markup — RichText renders its text literally. A real table is DataGrid or ComparisonTable, not a markdown table. (MarkDownRenderer is this component's former name and is still accepted.)
+- CodeBlock(code: string, language?: string) — Code or a formula kept verbatim and highlighted. Use it as a receipt the reader can check or re-run — the query behind a table, the formula behind a screen — and never paraphrase it to save space. language only selects highlighting; omit it rather than guess.
+- Tag(label: string, variant?: string) — A short classification label as a pill: a filing type, a category, a rating. IconTag is the sibling when the mark is an icon rather than a word.
+- TagBlock(tags: array) — A wrapping row of Tags, for a set worth reading together. A single tag needs no block.
+
+- Tabs(children: array) / TabItem(label: string, children: array) — Panels behind named tabs. Only one panel is visible, so never put the answer's main finding inside a tab the reader must discover. The selection is local to the page and reaches no agent.
+
+- Form(fields: array, buttons?: array) / FormControl(children: array) / Label(label: string) — A field group. Every control below is a picture of an input: nothing is submitted, nothing reaches an agent, and no value you set comes back. Render one to show what was asked or what a reader would fill in — never to collect an answer you intend to act on, and never write text promising that pressing something will do anything.
+- Input(name: string, type?: string, placeholder?: string, value?: string) — A single-line field.
+- TextArea(name: string, rows?: number, placeholder?: string, value?: string) — A multi-line field.
+- Select(name: string, children: array) / SelectItem(value: string, label?: string) — A dropdown and its options.
+- CheckBoxGroup(items: array) / CheckBoxItem(name: string, label: string, description?: string, checked?: boolean) — Independent toggles. StatusList is the better answer when you are reporting what is done rather than offering choices.
+- RadioGroup(name: string, items: array, defaultValue?: string) / RadioItem(value: string, label: string, description?: string) — One choice from a set. OptionCards reads better when each option needs a sentence.
+- SwitchGroup(items: array) / SwitchItem(name: string, label: string, description?: string, checked?: boolean) — On/off settings.
+- Slider(name: string, min?: number, max?: number, step?: number, value?: number, label?: string) — A value on a range.
+- DatePicker(mode?: string, value?: string) — A date or range field.
+- Button(label: string, variant?: string) / Buttons(buttons: array, direction?: string) — A button is drawn, not wired: clicking it does nothing. Use it only to depict an action that exists elsewhere, and say where — never as the way the reader is meant to proceed.
 """
 
 _A2UI_MESSAGE_SHAPE = """\
@@ -148,13 +164,28 @@ OpenUI component catalog supported by the A2UI renderer:
   vocabulary offered here. Everything else comes from the edition below.
 """
 
-#: Every OpenUI component the hand-written catalog above names — the reserved
-#: set the block registry refuses collisions against. Kept adjacent to the
-#: prose blob because the two must move together. The regex also captures the
-#: category labels ("Layout", "Charts", …); deliberately kept — an edition
-#: block wearing a category's name would read as OpenUI vocabulary anyway.
-_OPENUI_COMPONENT_NAMES: tuple[str, ...] = tuple(
-    re.findall(r"[A-Z][A-Za-z0-9]*", A2UI_OPENUI_COMPONENT_CATALOG.replace("OpenUI", ""))
+#: Every component the OpenUI library defines — the reserved set the block
+#: registry refuses collisions against.
+#:
+#: Deliberately NOT derived from the catalog above. The two answer different
+#: questions: the catalog decides what the model is *offered*, while this list
+#: decides what a block may not be *named*. A name dropped from the catalog is
+#: still defined by the OpenUI library, and a block taking it collides at JSON
+#: Schema conversion — "Duplicate schema id" at render time, nowhere near the
+#: registration that caused it. So this stays complete even as the catalog
+#: narrows; add a name here whenever OpenUI grows a component.
+_OPENUI_COMPONENT_NAMES: tuple[str, ...] = (
+    "Accordion", "AccordionItem", "AreaChart", "BarChart", "Button", "Buttons",
+    "Callout", "Card", "CardHeader", "Carousel", "CheckBoxGroup", "CheckBoxItem",
+    "CodeBlock", "Col", "DatePicker", "Form", "FormControl", "Grid", "Heading",
+    "HorizontalBarChart", "Image", "ImageBlock", "ImageGallery", "Input", "KPI",
+    "Label", "LineChart", "MarkDownRenderer", "Markdown", "Modal", "Paragraph",
+    "PieChart", "Point", "RadarChart", "RadialChart", "RadioGroup", "RadioItem",
+    "Row", "ScatterChart", "ScatterSeries", "Section", "Select", "SelectItem",
+    "Separator", "Series", "SingleStackedBarChart", "Slice", "Slider", "Stack",
+    "Steps", "StepsItem", "SwitchGroup", "SwitchItem", "TabItem", "Table",
+    "Tabs", "Tag", "TagBlock", "Text", "TextArea", "TextCallout", "TextContent",
+    "Title",
 )
 
 

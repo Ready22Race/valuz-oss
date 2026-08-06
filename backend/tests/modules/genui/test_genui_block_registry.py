@@ -63,11 +63,13 @@ def test_the_scope_split_follows_where_a_component_came_from() -> None:
     # edition cannot supply for itself.
     assert "SecurityHeader" in edition
     assert "MiniCard" not in edition
-    assert "BarChart" not in edition
+    # BarChart was dropped from the offered vocabulary (GroupedBar is the
+    # opinionated version); LineChart is the OpenUI sample that remains.
+    assert "LineChart" not in edition
     assert "Stack" in edition
     # `atoms` — everything this repository ships, and nothing installed.
     assert "MiniCard" in atoms
-    assert "BarChart" in atoms
+    assert "LineChart" in atoms
     assert "SecurityHeader" not in atoms
     # The narrower scope has to actually cost less, or the argument is decoration.
     assert len(edition) < len(protocol.build_a2ui_catalog("all"))
