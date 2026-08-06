@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from valuz_agent.infra.database import Base
-from valuz_agent.modules.agents.models import ProjectMemberRow
+from valuz_agent.modules.agents.models import AgentRow, ProjectMemberRow
 from valuz_agent.modules.notifications.models import NotificationRow
 from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionRow
 
@@ -34,6 +34,9 @@ _TASK_TABLES = [
     TaskEventRow.__table__,
     TaskSessionRow.__table__,
     ProjectMemberRow.__table__,
+    # ``resolve_agent_display_names`` joins membership → library agent to stamp
+    # ``agent_name`` into every event payload and plan snapshot.
+    AgentRow.__table__,
     # ``block_task`` writes a failure notification — a real path out of the
     # task module (events.block_task → notifications.projectors), so the
     # table has to exist wherever a task can go blocked.

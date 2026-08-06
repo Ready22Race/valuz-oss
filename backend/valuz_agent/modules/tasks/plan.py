@@ -139,6 +139,38 @@ class Subtask:
         )
 
 
+# Fields whose value is stored as-is when falsy-but-present (nullable strings).
+_NULLABLE_STR_FIELDS = frozenset(
+    {"agent", "parallel_group", "latest_run_session_id", "review_feedback"}
+)
+_PLAIN_STR_FIELDS = frozenset({"title", "goal", "review_criteria"})
+
+
+def _coerce_node_field(key: str, name: str, value: Any) -> Any:
+    """Normalize ONE patched field the way ``Subtask.from_dict`` normalizes it.
+
+    The two paths into a node must agree: a plan rebuilt from JSON and a plan
+    patched in place should not be able to hold different types in the same
+    field.
+    """
+    if name in _PLAIN_STR_FIELDS:
+        return str(value or "")
+    if name in _NULLABLE_STR_FIELDS:
+        return str(value) if value else None
+    if name == "attempts":
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            raise PlanError(f"subtask {key!r}: 'attempts' must be an integer") from None
+    if name == "depends_on":
+        deps = value or []
+        if not isinstance(deps, list) or not all(isinstance(x, str) for x in deps):
+            raise PlanError(f"subtask {key!r}: 'depends_on' must be a list of keys")
+        return list(deps)
+    # ``status`` is validated (enum + transition table) by the caller above.
+    return value
+
+
 class TaskPlan:
     """Mutable in-memory view of a task's plan; validates the DAG on build/change."""
 
@@ -243,6 +275,20 @@ class TaskPlan:
         self.validate()
 
     def update_node(self, key: str, **fields: Any) -> Subtask:
+        """Patch one node's fields, coercing exactly like :meth:`Subtask.from_dict`.
+
+        ``modify_plan`` feeds this MODEL-SUPPLIED patch dicts verbatim, so the
+        coercion is not a nicety: without it ``attempts="many"`` went through
+        ``setattr`` untouched, serialized into the persisted plan document, and
+        detonated a turn later at ``mark_node_dispatched``'s ``attempts + 1``
+        (a TypeError on a plan that looks fine). Reject at the write instead —
+        the caller gets an actionable PlanError, the document stays sane.
+
+        ``key`` is structurally unpatchable: it is this method's positional
+        selector, so a ``key`` entry in the patch collides before the body
+        runs. Renaming a node would orphan every ``depends_on`` pointing at it
+        anyway — add a new node instead.
+        """
         node = self.get(key)
         if node is None:
             raise PlanError(f"no subtask with key {key!r}")
@@ -260,7 +306,7 @@ class TaskPlan:
         for name, value in fields.items():
             if not hasattr(node, name):
                 raise PlanError(f"unknown subtask field {name!r}")
-            setattr(node, name, value)
+            setattr(node, name, _coerce_node_field(key, name, value))
         self.validate()
         return node
 

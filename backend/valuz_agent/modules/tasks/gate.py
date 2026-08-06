@@ -26,6 +26,24 @@ def _valuz_meta(sess: Any) -> dict[str, Any]:
     return v if isinstance(v, dict) else {}
 
 
+def _caller_project_id(sess: Any) -> str:
+    """The project a caller session belongs to.
+
+    Read from ``metadata["valuz"]["project_id"]`` — the ONLY place it lives.
+    Every site here used to try ``getattr(sess, "project_id", "")`` first,
+    commented as the authoritative kernel field, but the kernel's
+    ``SessionData`` has no such field: the attribute read always missed and
+    the metadata fallback is what has been running. Both session-creation
+    paths do write it (``sessions/service.py``), including plain project
+    conversations — which the old comment claimed they did not. Keeping the
+    dead read would preserve a false account of how authorization resolves a
+    project.
+    """
+    meta = getattr(sess, "metadata", None) or {}
+    valuz = meta.get("valuz", {})
+    return (valuz.get("project_id", "") if isinstance(valuz, dict) else "") or ""
+
+
 def check_lead_gate(sess: Any, *, tool: str = "dispatch") -> tuple[str, str] | Failure:
     """Lead-only tools (dispatch / await_members / send / review / finish).
 
@@ -62,7 +80,7 @@ def check_plan_writer_gate(sess: Any, task: Any) -> Failure | None:
         origin = meta.get("originating_session_id")
         if sess.id == origin:
             return None
-        caller_ws = getattr(sess, "project_id", "") or v.get("project_id", "")
+        caller_ws = _caller_project_id(sess)
         if caller_ws == task.project_id:
             return None
         return Failure(
@@ -84,8 +102,7 @@ def check_plan_writer_gate(sess: Any, task: Any) -> Failure | None:
 
 def check_plan_reader_gate(sess: Any, task: Any) -> Failure | None:
     """Loose read-only variant: any caller in the task's project may read."""
-    v = _valuz_meta(sess)
-    caller_ws = getattr(sess, "project_id", "") or v.get("project_id", "")
+    caller_ws = _caller_project_id(sess)
     if caller_ws != task.project_id:
         return Failure(
             f"plan tool: caller project {caller_ws!r} does not match "
@@ -109,10 +126,7 @@ def check_orchestration_caller(sess: Any) -> tuple[str, str] | Failure:
             "create_task is only available in a project conversation, not "
             "inside a running task (nested tasks are not supported)"
         )
-    # Project = the kernel Session.project_id (authoritative). Plain
-    # conversation sessions don't echo project_id into valuz metadata, so
-    # read project_id directly (valuz.project_id only exists on task runs).
-    project_id = getattr(sess, "project_id", "") or v.get("project_id", "")
+    project_id = _caller_project_id(sess)
     if not project_id:
         return Failure("create_task: caller session has no project")
     return project_id, v.get("agent_slug") or ""

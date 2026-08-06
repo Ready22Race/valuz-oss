@@ -31,6 +31,9 @@ class _FakeStore:
     async def list_by_ids(self, *_a, **_k):
         return []
 
+    async def latest_events_by_task(self, *_a, **_k):
+        return {}
+
     async def list_run_session_ids(self, *_a, **_k):
         return set()
 
@@ -74,3 +77,27 @@ def _async_return(value):
         return value
 
     return _inner
+
+
+def test_task_events_are_resolved_before_the_concurrent_build() -> None:
+    """The overview builds its rows with ``asyncio.gather``. Reading a task's
+    latest event from inside that fan-out issued concurrent statements on the
+    ONE request-scoped AsyncSession — unsupported by SQLAlchemy — and the
+    per-row ``except Exception`` turned the resulting InvalidRequestError into
+    "skipping session …", so runs silently vanished from the list.
+
+    Pin the shape: the batch read happens once, before any building.
+    """
+    import inspect
+
+    from valuz_agent.modules.runs.service import RunsService
+
+    src = inspect.getsource(RunsService.list_runs)
+    batch_at = src.index("latest_events_by_task")
+    gather_at = src.index("asyncio.gather")
+    assert batch_at < gather_at, (
+        "the per-task event read must be resolved BEFORE the gather, not "
+        "issued from inside it"
+    )
+    # And the single-task helper it replaced must not come back.
+    assert not hasattr(RunsService, "_latest_task_event")

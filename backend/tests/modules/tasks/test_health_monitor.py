@@ -175,3 +175,76 @@ def test_disabled_when_interval_zero() -> None:
 
     cfg = TaskHealthConfig(interval=timedelta(seconds=0))
     assert cfg.enabled is False
+
+
+def test_active_lead_bindings_is_one_query_and_skips_rejected_leads(db_factory) -> None:
+    """The sweep runs every 60s forever, so it reads four columns in ONE query
+    instead of a full-row scan plus a list_runs per task — and it must make the
+    same pick as ``pick_lead_run``: a commit-race loser's rejected lead row
+    never wins over the live one."""
+    import asyncio
+
+    from valuz_agent.infra.db import async_unit_of_work
+    from valuz_agent.modules.tasks.datastore import TaskDatastore
+    from valuz_agent.modules.tasks.models import TaskRow, TaskSessionRow
+
+    db = db_factory()
+    try:
+        db.add(
+            TaskRow(
+                id="t-live",
+                user_id=OWNER,
+                project_id="w1",
+                file_path="tasks/t-live.md",
+                title="live",
+                goal="g",
+                status="active",
+                lead_agent_slug="lead",
+                current_holder="lead",
+            )
+        )
+        db.add(
+            TaskRow(
+                id="t-done",
+                user_id=OWNER,
+                project_id="w1",
+                file_path="tasks/t-done.md",
+                title="done",
+                goal="g",
+                status="completed",
+                lead_agent_slug="lead",
+                current_holder="lead",
+            )
+        )
+        # A commit-race loser sits alongside the winner, inserted FIRST.
+        for rid, sid, status in (
+            ("r-loser", "loser-sess", "rejected"),
+            ("r-winner", "winner-sess", "active"),
+        ):
+            db.add(
+                TaskSessionRow(
+                    id=rid,
+                    user_id=OWNER,
+                    project_id="w1",
+                    task_id="t-live",
+                    session_id=sid,
+                    agent_slug="lead",
+                    sequence=0,
+                    kind="lead",
+                    status=status,
+                )
+            )
+        db.commit()
+    finally:
+        db.close()
+
+    async def _run() -> list[tuple]:
+        async with async_unit_of_work(commit=False) as adb:
+            return await TaskDatastore(adb).list_active_lead_bindings()
+
+    bindings = asyncio.run(_run())
+    assert [b[0] for b in bindings] == ["t-live"], "only ACTIVE tasks are swept"
+    assert bindings[0][1:] == (OWNER, "w1", "winner-sess"), (
+        "a rejected lead row must never be handed to the watchdog — it would "
+        "flip a healthy task to blocked via a mailbox that never registers"
+    )

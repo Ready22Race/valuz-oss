@@ -129,6 +129,38 @@ class ProjectMemberDatastore:
             .all()
         )
 
+    async def display_names_by_slug(
+        self, user_id: str, project_id: str, agent_slugs: list[str]
+    ) -> dict[str, str]:
+        """Map member ``agent_slug`` → library-agent display name, in ONE query.
+
+        A display name is the ONLY thing several hot paths want, and the
+        general route to it — resolve the membership, then build the member's
+        full ``AgentConfig`` — also resolves connectors and can refresh an
+        OAuth token. Plan snapshots stamp a name per node on every plan write,
+        so that route cost roughly nine queries per write for text that never
+        changes. Slugs with no membership, no ``source_agent_slug`` or no
+        library row are simply absent; callers fall back to the slug.
+        """
+        if not agent_slugs:
+            return {}
+        rows = (
+            await self._db.execute(
+                select(ProjectMemberRow.agent_slug, AgentRow.name)
+                .join(
+                    AgentRow,
+                    (AgentRow.slug == ProjectMemberRow.source_agent_slug)
+                    & (AgentRow.user_id == ProjectMemberRow.user_id),
+                )
+                .where(
+                    ProjectMemberRow.project_id == project_id,
+                    ProjectMemberRow.user_id == user_id,
+                    ProjectMemberRow.agent_slug.in_(agent_slugs),
+                )
+            )
+        ).all()
+        return {slug: name for slug, name in rows if name}
+
     async def get(self, user_id: str, project_id: str, agent_slug: str) -> ProjectMemberRow | None:
         return (
             (

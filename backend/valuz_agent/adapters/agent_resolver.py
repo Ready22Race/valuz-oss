@@ -694,9 +694,16 @@ async def resolve_agent_display_names(
     removed agents — the "成员智能体名称查询不到" bug).
 
     Resolves every unique non-empty slug in a **single** read-only unit of work
-    (its own, so a failure can't poison a caller's in-flight write transaction).
-    Each slug maps to its library-agent name, or to the slug itself when the
-    membership / source agent can't be resolved. Empty slugs are skipped.
+    (its own, so a failure can't poison a caller's in-flight write transaction)
+    and a single QUERY. Each slug maps to its library-agent name, or to the
+    slug itself when the membership / source agent can't be resolved. Empty
+    slugs are skipped.
+
+    Deliberately does NOT go through ``resolve_member_agent``: that builds the
+    member's whole ``AgentConfig`` — connectors, MCP servers, possibly an OAuth
+    refresh — and a plan snapshot stamps a name per node on EVERY plan write,
+    so the general route cost roughly nine queries per write for text that is
+    constant for the task's lifetime.
     """
     slugs = {s for s in agent_slugs if s}
     if not slugs:
@@ -706,10 +713,9 @@ async def resolve_agent_display_names(
     out: dict[str, str] = {}
     try:
         async with async_unit_of_work(commit=False) as db:
-            members = ProjectMemberDatastore(db)
-            for slug in slugs:
-                agent = await resolve_member_agent(project_id, slug, members, user_id)
-                out[slug] = agent.name if agent and agent.name else slug
+            out = await ProjectMemberDatastore(db).display_names_by_slug(
+                user_id, project_id, sorted(slugs)
+            )
     except Exception:  # noqa: BLE001 — name resolution must never fail a dispatch/review
         logger.warning(
             "resolve_agent_display_names: failed to resolve names for %s — falling back to slugs",
