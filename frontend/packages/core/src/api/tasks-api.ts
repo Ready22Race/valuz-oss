@@ -154,6 +154,27 @@ export interface TaskDetail {
   events: TaskEvent[];
 }
 
+export interface TaskRunTokenUsage {
+  session_id: string;
+  agent_slug: string;
+  kind: string;
+  sequence: number;
+  label: string | null;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  total_tokens: number;
+}
+
+export interface TaskTokenUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  total_tokens: number;
+  runs: TaskRunTokenUsage[];
+}
 
 export interface KickoffTaskPayload {
   goal: string;
@@ -297,6 +318,12 @@ export const tasksApi = {
 
   getTask(taskId: string): Promise<TaskDetail> {
     return fetchJson(`/v1/tasks/${encodeURIComponent(taskId)}`, {
+      baseUrl: taskBase(taskId),
+    });
+  },
+
+  getTaskUsage(taskId: string): Promise<TaskTokenUsage> {
+    return fetchJson(`/v1/tasks/${encodeURIComponent(taskId)}/usage`, {
       baseUrl: taskBase(taskId),
     });
   },

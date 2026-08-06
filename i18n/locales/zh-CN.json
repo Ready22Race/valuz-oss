@@ -2547,6 +2547,11 @@
     "statusLabel": "状态",
     "leadLabel": "Lead",
     "holderLabel": "持有者",
+    "tokenUsage": {
+      "byRun": "按 Agent / Run",
+      "showDetails": "查看任务 {count} Tokens 的用量明细",
+      "title": "任务总 Tokens"
+    },
     "runsTitle": "运行记录",
     "noRuns": "暂无运行记录。",
     "eventsTitle": "执行过程",

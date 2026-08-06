@@ -114,6 +114,7 @@ from valuz_agent.modules.sessions.run_orchestrator import (
 from valuz_agent.modules.sessions.schemas import SessionWorktreeSpec
 from valuz_agent.modules.skills.datastore import SkillDatastore
 from valuz_agent.ports.message_context import HostRef
+from valuz_agent.token_usage import read_session_token_usage
 
 if TYPE_CHECKING:
     from src.core.types import Session as KernelSessionT
@@ -419,40 +420,12 @@ class SessionService:
         if session is None:
             raise _kernel_session_not_found(session_id)
         detail = _session_to_detail(session)
-        # Token usage lives on Message rows (one normalized per-turn record),
-        # not on the Session row. Read every message through the durable
-        # DataReader seam so a dead/ephemeral runtime still serves an accurate
-        # conversation total. Include failed/cancelled turns: providers can
-        # consume tokens before either terminal state is known.
+        # Include failed/cancelled turns: providers can consume tokens before
+        # either terminal state is known.
         owner_id = user_id or str(session.user_id)
         try:
-            total_tokens = 0
-            offset = 0
-            page_size = 200
-            while True:
-                messages = await data_reader().list_messages(
-                    owner_id,
-                    session_id,
-                    limit=page_size,
-                    offset=offset,
-                )
-                for message in messages:
-                    for field in (
-                        "input_tokens",
-                        "output_tokens",
-                        "cache_read_tokens",
-                        "cache_write_tokens",
-                    ):
-                        raw = (
-                            message.get(field)
-                            if isinstance(message, dict)
-                            else getattr(message, field, None)
-                        )
-                        total_tokens += max(0, int(raw or 0))
-                if len(messages) < page_size:
-                    break
-                offset += len(messages)
-            detail.total_tokens = total_tokens
+            usage = await read_session_token_usage(owner_id, session_id)
+            detail.total_tokens = usage.total_tokens
         except Exception:  # noqa: BLE001
             # A history/statistics seam failure must not make the conversation
             # itself unreadable. Keep the contract's zero fallback and log the

@@ -2547,6 +2547,11 @@
     "statusLabel": "Status",
     "leadLabel": "Lead",
     "holderLabel": "Holder",
+    "tokenUsage": {
+      "byRun": "By Agent / Run",
+      "showDetails": "View usage details for this task's {count} Tokens",
+      "title": "Task Tokens"
+    },
     "runsTitle": "Runs",
     "noRuns": "No runs yet.",
     "eventsTitle": "Execution",

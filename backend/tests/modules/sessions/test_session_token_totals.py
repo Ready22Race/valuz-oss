@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import valuz_agent.boot.kernel  # noqa: F401  (puts kernel on the import path)
+from valuz_agent import token_usage as usage_mod
 from valuz_agent.modules.sessions import service as svc_mod
 
 
@@ -53,7 +54,9 @@ async def test_should_sum_all_token_buckets_across_message_statuses(monkeypatch)
         async def list_messages(self, *_args, limit: int, offset: int, **_kwargs):
             return messages[offset : offset + limit]
 
-    monkeypatch.setattr(svc_mod, "data_reader", lambda: _Reader())
+    reader = _Reader()
+    monkeypatch.setattr(svc_mod, "data_reader", lambda: reader)
+    monkeypatch.setattr(usage_mod, "data_reader", lambda: reader)
     monkeypatch.setattr(
         svc_mod,
         "_session_to_detail",
