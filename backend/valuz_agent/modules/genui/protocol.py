@@ -65,10 +65,14 @@ _A2UI_NO_PLACEHOLDER_CHARTS = (
 # What to fall back to when the data has no chart-ready series. Named per scope
 # because a fallback the catalog does not offer is worse than no advice at all:
 # the model is being told to reach for something it was never shown.
+#
+# The `edition` entry names nothing, and cannot: this repository does not know
+# what an edition installed. Generic advice is the honest limit — better than
+# naming components from a set that scope just excluded.
 _A2UI_SNAPSHOT_FALLBACKS: dict[str, str] = {
     "all": "MarketIndexGrid, StatsCard, MarketBreadth, DataList, or Table",
-    "edition": "MarketIndexGrid, StatsCard, MarketBreadth, or DataList",
-    "atoms": "Table, TagBlock, or a plain TextContent row",
+    "atoms": "MarketIndexGrid, StatsCard, MarketBreadth, DataList, or Table",
+    "edition": "a tile, list, or table component from the catalog above",
 }
 
 A2UI_OPENUI_COMPONENT_CATALOG = """
@@ -116,6 +120,8 @@ def _load_block_catalog() -> str:
         .rstrip("\n")
     )
 
+
+_A2UI_EDITION_HEADING = "- Edition components:\n"
 
 _A2UI_ROOT_ONLY_CATALOG = """
 OpenUI component catalog supported by the A2UI renderer:
@@ -177,16 +183,18 @@ def build_a2ui_catalog(scope: GenUIComponentScope = "all") -> str:
         "- Valuz blocks (cards, citations, report pages, diagrams):\n"
         f"{_load_block_catalog()}\n"
     )
+    installed = f"{_A2UI_EDITION_HEADING}{edition}\n" if edition else ""
     if scope == "atoms":
         components = own
     elif scope == "edition":
-        components = (
-            f"{_A2UI_ROOT_ONLY_CATALOG}"
-            "- Edition components:\n"
-            f"{edition}\n"
-        )
+        # The root comes from the general set even here: it is the one component
+        # an edition cannot supply for itself, since every document is rooted in
+        # it before any edition component appears.
+        components = f"{_A2UI_ROOT_ONLY_CATALOG}{installed}"
     else:
-        components = f"{own}{edition}" if edition else own
+        # `all` is the union, in this order — an edition's components read as an
+        # addition to the general vocabulary, which is what they are.
+        components = f"{own}{installed}"
 
     fallbacks = _A2UI_SNAPSHOT_FALLBACKS[scope]
     # `.replace`, not `.format`: the message-shape text is JSON, and every brace

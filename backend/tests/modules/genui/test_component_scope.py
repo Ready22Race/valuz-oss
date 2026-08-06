@@ -15,6 +15,7 @@ narrow prompt can only ever produce a payload the client can draw.
 
 from __future__ import annotations
 
+import valuz_agent.modules.genui.protocol as protocol
 from valuz_agent.modules.genui.protocol import (
     GenUIComponentScope,
     a2ui_instructions,
@@ -80,6 +81,33 @@ def test_the_root_survives_every_scope():
         assert "Stack" in build_a2ui_prompt("chart", None, scope)
 
 
+def test_all_is_the_union_of_both_sets(monkeypatch):
+    # The only way to see an edition from inside OSS: nothing registers here, so
+    # the seam is stood in for. Without this the union is untested until the
+    # first edition ships, which is the worst moment to discover it.
+    monkeypatch.setattr(
+        protocol, "edition_catalog_text", lambda: "  - FinanceTile(ticker: string)"
+    )
+
+    everything = build_a2ui_catalog("all")
+    assert "FinanceTile" in everything
+    assert _BLOCK in everything
+    assert _PRIMITIVE in everything
+    # Under a heading of its own, not appended to the general list — a component
+    # the edition wrote reading as one of ours is how the two sets blur.
+    assert "- Edition components:" in everything
+
+    # And each narrower scope still holds only its own half.
+    only_edition = build_a2ui_catalog("edition")
+    assert "FinanceTile" in only_edition
+    assert _BLOCK not in only_edition
+    assert "Stack" in only_edition
+
+    only_ours = build_a2ui_catalog("atoms")
+    assert "FinanceTile" not in only_ours
+    assert _BLOCK in only_ours
+
+
 def test_an_empty_scope_widens_rather_than_offering_nothing():
     # No edition registers into OSS, so `edition` has no set of its own here.
     # Narrowing to the root alone would not make a smaller answer; it would
@@ -100,15 +128,19 @@ def test_the_catalog_and_the_instructions_agree_on_the_live_scope():
         assert a2ui_instructions(scope) == a2ui_instructions(resolved)
 
 
-def test_instructions_never_recommend_a_component_the_scope_withheld():
+def test_instructions_never_recommend_a_component_the_scope_withheld(monkeypatch):
     # The instructions name fallbacks to use when data has no chart series.
     # Naming one that is not in the catalog teaches the model to reach for
     # something it was never shown.
+    monkeypatch.setattr(
+        protocol, "edition_catalog_text", lambda: "  - FinanceTile(ticker: string)"
+    )
     for scope in SCOPES:
         catalog = build_a2ui_catalog(scope)
         instructions = a2ui_instructions(scope)
-        if _BLOCK in instructions:
-            assert _BLOCK in catalog
+        for name in (_BLOCK, _PRIMITIVE, "FinanceTile"):
+            if name in instructions:
+                assert name in catalog, f"{scope}: instructions name absent {name}"
 
 
 def test_the_a2ui_catalog_keeps_its_message_shape_in_every_scope():

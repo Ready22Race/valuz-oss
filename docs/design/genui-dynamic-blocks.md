@@ -124,9 +124,15 @@ Replace is a startup decision. The same question comes up per generation, and
 
 | value | offered | prompt (OSS) |
 |---|---|---|
-| `all` (default) | everything | ~64k chars |
+| `all` (default) | the union — this repo's set **plus** the edition's | ~64k chars |
 | `atoms` | everything this repo ships — OpenUI's primitives **and** the built-in blocks | ~64k |
-| `edition` | only what an edition registered from outside this repo | widens to `all` |
+| `edition` | the root plus only what an edition registered from outside this repo | widens to `all` |
+
+In `all` the edition's components sit under a heading of their own rather than
+appended to the general list: a component the edition wrote reading as one of
+ours is how the two sets blur. The root comes from the general set even under
+`edition` — it is the one component an edition cannot supply for itself, since
+every document is rooted in it before any edition component appears.
 
 The split follows **where a component comes from**, not what it is made of.
 That is the only line that survives contact with the repo boundary: an edition
@@ -150,9 +156,10 @@ cannot draw. The dangerous direction — describing something that cannot render
 
 **A scope withholds consistently.** The "if the data has no chart series, fall
 back to…" advice names components per scope, so it never points at something
-the catalog did not show. Advice to reach for a component the model was never
-given is worse than no advice. Catalog and instructions resolve the scope
-through one function so they cannot disagree about which set is live.
+the catalog did not show. Under `edition` it names nothing at all and cannot:
+this repository does not know what an edition installed, so generic advice is
+the honest limit. Catalog and instructions resolve the scope through one
+function so they cannot disagree about which set is live.
 
 **An empty scope widens.** `edition` with no edition registered would offer the
 root and nothing else — that does not make a smaller answer, it makes none.
