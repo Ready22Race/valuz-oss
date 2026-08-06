@@ -87,19 +87,28 @@ asserts control words never reach the caller **whatever** the backend state.
 `h2` and emits nothing structural for a title-less slide, so consecutive
 title-less slides merge into an undifferentiated paragraph stream.
 
-Accepted, for reasons that were verified rather than assumed:
+Two separate losses were conflated here at first, and only one is permanent:
 
-- Nothing in this repo consumed the marker (whole-tree grep, py/ts/tsx).
-- It is not fixable upstream on our side. The slide anchor exists in anydoc's
-  parser (`pptx/mod.rs:99`) but is gated twice — once in the parser, once in
-  the renderer, whose `anchors.rs` states outright that *anchors nothing links
-  to render nothing*. Removing only the parser gate and rebuilding produced
-  **byte-identical output**, confirming the renderer gate is the binding one.
-  `to_markdown()` takes no options, so an opt-in would be a public API change
-  across four bindings.
-- Upstream's own accepted framing (issue #26, fixed) is that **"Markdown has
-  no pages, so dropping the break itself is the right call"**. A slide-number
-  request contradicts a stated design position, not a bug.
+**Slide numbers — not recoverable.** The slide anchor exists in anydoc's parser
+(`pptx/mod.rs:99`) but is gated twice: once there, and once in the renderer,
+whose `anchors.rs` states outright that *anchors nothing links to render
+nothing*. Removing only the parser gate and rebuilding produced **byte-identical
+output**, confirming the renderer gate is the binding one. `to_markdown()` takes
+no options, so an opt-in would be a public API change across four bindings, and
+upstream's accepted framing (their issue #26, fixed) is that *"Markdown has no
+pages, so dropping the break itself is the right call"*. Nothing in this repo
+consumed the marker anyway (whole-tree grep, py/ts/tsx).
+
+**Slide boundaries — fixable, patch prepared.** This is the loss that actually
+degrades quality: content from two slides reading as one. It is not the
+pagination upstream declined — a slide is a *container* in the source model, and
+`Block::Rule` is a separator anydoc already emits (for `<hr>`, rendered as
+`---`), so the fix introduces no new concept and implies no page number. A patch
+emitting it between slides in all three presentation parsers (`pptx`, `ppt`,
+`odp` — all shared the defect) is verified against upstream's own suite: **191
+passed, 0 failed**, snapshot delta **+6 `---` lines, +6 blank lines, 0
+removals**. 33 source lines. Not yet submitted upstream; this migration does not
+depend on it, and if it lands the loss goes away with a version bump.
 
 ## 5. Known upstream issues, and why they did not block
 
