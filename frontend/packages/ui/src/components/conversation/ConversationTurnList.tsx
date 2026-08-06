@@ -64,9 +64,19 @@ function formatFileSize(bytes: number): string {
 const MessageActions = ({
   text,
   onRetry,
+  extraActions,
 }: {
   text: string;
   onRetry?: () => void;
+  /**
+   * Host-supplied controls appended to this row (share, export, …).
+   *
+   * A ReactNode prop rather than a registry lookup on purpose: ``@valuz/ui``
+   * deliberately does not depend on ``@valuz/core``, so the package that owns
+   * the registry passes the rendered node down — same shape as
+   * ``TopBar.rightControl``.
+   */
+  extraActions?: ReactNode;
 }) => {
   const { t } = useI18n();
   const [copied, setCopied] = useState(false);
@@ -106,6 +116,7 @@ const MessageActions = ({
           <RotateCw className="h-3.5 w-3.5" />
         </button>
       ) : null}
+      {extraActions}
     </div>
   );
 };
@@ -757,6 +768,11 @@ interface TurnRowProps {
    * Used by the conversation page to render the SkillSubmissionCard
    * for ``submit_skill`` tool_use events. */
   renderToolCall?: (tool: PrototypeToolCall) => ReactNode | null;
+  /**
+   * Host-supplied controls appended to a turn's action row (share, export…).
+   * Returning null adds nothing, so OSS renders exactly as before.
+   */
+  renderTurnActions?: (turn: ConversationTurn) => ReactNode | null;
   /** Predicate marking an overridden tool card as *foldable* — it collapses
    * away with the process trail when the turn ends (visible while running or
    * when the turn is expanded), instead of staying pinned at its position.
@@ -786,6 +802,7 @@ const TurnRow = memo(
     onSwitchModel,
     retryCount,
     renderToolCall,
+    renderTurnActions,
     isToolCardFoldable,
     onRevealFile,
     isLocalFileHref,
@@ -1185,6 +1202,7 @@ const TurnRow = memo(
               <MessageActions
                 text={actionText}
                 onRetry={onRetry ? () => onRetry(turn.id) : undefined}
+                extraActions={renderTurnActions?.(turn)}
               />
             ) : null}
 
@@ -1227,6 +1245,8 @@ interface ConversationTurnListProps {
   ) => void;
   /** See ``TurnRowProps.renderToolCall``. */
   renderToolCall?: (tool: PrototypeToolCall) => ReactNode | null;
+  /** See ``TurnRowProps.renderTurnActions``. */
+  renderTurnActions?: (turn: ConversationTurn) => ReactNode | null;
   /** See ``TurnRowProps.isToolCardFoldable``. */
   isToolCardFoldable?: (tool: PrototypeToolCall) => boolean;
   /** See ``TurnRowProps.onRevealFile``. */
@@ -1269,6 +1289,7 @@ export function ConversationTurnList({
   skillsBySlug,
   onVirtualApiReady,
   renderToolCall,
+  renderTurnActions,
   isToolCardFoldable,
   onRevealFile,
   isLocalFileHref,
@@ -1432,6 +1453,7 @@ export function ConversationTurnList({
                     onSwitchModel={onSwitchModel}
                     retryCount={retryCounts?.[turn.id] ?? 0}
                     renderToolCall={renderToolCall}
+                    renderTurnActions={renderTurnActions}
                     isToolCardFoldable={isToolCardFoldable}
                     onRevealFile={onRevealFile}
                     isLocalFileHref={isLocalFileHref}
