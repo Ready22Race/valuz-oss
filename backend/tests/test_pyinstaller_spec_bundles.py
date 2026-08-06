@@ -66,3 +66,52 @@ def test_magika_data_files_are_collectable() -> None:
         f"magika no longer exposes model.onnx via collect_data_files; the "
         f"frozen office-parsing bundle may be incomplete. Collected: {sources}"
     )
+
+
+def test_spec_collects_rapidocr_yaml_data(spec_source: str) -> None:
+    """rapidocr reads two YAMLs out of its own package dir by
+    ``Path(__file__).parent`` — a path that doesn't exist on disk in a frozen
+    build. Without them every image parse dies with ``FileNotFoundError:
+    .../rapidocr/config.yaml``, including for users who completed the model
+    download (the config load happens before ``params`` overrides merge)."""
+    assert '"rapidocr": ["config.yaml", "default_models.yaml"]' in spec_source, (
+        "PyInstaller spec no longer collects rapidocr's config.yaml / "
+        "default_models.yaml. The frozen build will raise FileNotFoundError on "
+        "every image OCR parse."
+    )
+
+
+def test_rapidocr_reads_exactly_the_yamls_the_spec_collects() -> None:
+    """Tie the spec's include list to what rapidocr actually resolves, so a
+    layout/rename upstream fails here instead of in a packaged build."""
+    pytest.importorskip("rapidocr")
+    from rapidocr.inference_engine.base import MODEL_URL_PATH
+    from rapidocr.main import DEFAULT_CFG_PATH
+
+    collected = {"config.yaml", "default_models.yaml"}
+    assert DEFAULT_CFG_PATH.name in collected, (
+        f"rapidocr's default config is now {DEFAULT_CFG_PATH.name!r}; update "
+        f"_filtered_data_pkgs in the spec."
+    )
+    assert MODEL_URL_PATH.name in collected, (
+        f"rapidocr's model manifest is now {MODEL_URL_PATH.name!r}; update "
+        f"_filtered_data_pkgs in the spec."
+    )
+
+
+def test_rapidocr_yamls_are_collectable_without_the_onnx_weights() -> None:
+    """The filtered collection must yield the two YAMLs and NOT the ~16 MB of
+    bundled .onnx weights (those ship via the user-authorized model download)."""
+    pytest.importorskip("PyInstaller")
+    pytest.importorskip("rapidocr")
+    from PyInstaller.utils.hooks import collect_data_files
+
+    collected = collect_data_files(
+        "rapidocr",
+        include_py_files=False,
+        includes=["config.yaml", "default_models.yaml"],
+    )
+    names = sorted(Path(src).name for src, _dest in collected)
+    assert names == ["config.yaml", "default_models.yaml"], (
+        f"rapidocr filtered data collection changed shape: {names}"
+    )
