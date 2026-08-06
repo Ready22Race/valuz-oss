@@ -122,20 +122,24 @@ package's own render harness both derive from the registry rather than from
 Replace is a startup decision. The same question comes up per generation, and
 `generate_ui` answers it with a `components` argument:
 
-| value | offered | prompt |
+| value | offered | prompt (OSS) |
 |---|---|---|
 | `all` (default) | everything | ~64k chars |
-| `edition` | root + the active edition's blocks | ~64k |
-| `atoms` | OpenUI's primitives | ~3k |
+| `atoms` | everything this repo ships — OpenUI's primitives **and** the built-in blocks | ~64k |
+| `edition` | only what an edition registered from outside this repo | widens to `all` |
 
-The lever is worth having because the catalog *is* the prompt: a request the
-agent already knows will be a form, or a plain table, pays for a hundred and
-fifty component signatures it will not use. A shorter menu also makes the model
-choose better.
+The split follows **where a component comes from**, not what it is made of.
+That is the only line that survives contact with the repo boundary: an edition
+is a separate build that vendors this one, so "this repo's set" and "the
+edition's set" are the two things a caller can meaningfully ask for.
 
-Note what the numbers say: `atoms` is a twenty-fold saving, `edition` is
-almost none — the blocks are most of what the catalog weighs. `edition` earns
-its place by steering the model to the house vocabulary, not by saving tokens.
+The consequence in OSS is that the argument does nothing: with no edition
+registered, all three values resolve to the same catalog. It becomes a lever
+only once an edition is installed — which is what it is for. An earlier draft
+made `atoms` mean OpenUI's primitives alone, which cut the prompt twenty-fold,
+but that line does not exist outside this repo: to an edition, the built-in
+blocks and the primitives are equally "the general vocabulary they did not
+write".
 
 Two properties keep it safe:
 
@@ -147,7 +151,12 @@ cannot draw. The dangerous direction — describing something that cannot render
 **A scope withholds consistently.** The "if the data has no chart series, fall
 back to…" advice names components per scope, so it never points at something
 the catalog did not show. Advice to reach for a component the model was never
-given is worse than no advice.
+given is worse than no advice. Catalog and instructions resolve the scope
+through one function so they cannot disagree about which set is live.
+
+**An empty scope widens.** `edition` with no edition registered would offer the
+root and nothing else — that does not make a smaller answer, it makes none.
+Widening is the only safe direction when a scope turns out empty.
 
 The catalog is assembled per call from one generated block asset plus a
 hand-written primitive list, because only the block half has a build step to

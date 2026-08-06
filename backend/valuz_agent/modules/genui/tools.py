@@ -103,17 +103,16 @@ _PARAMS = {
         },
         "components": {
             "type": "string",
-            "enum": ["all", "edition", "atoms"],
+            "enum": ["all", "atoms", "edition"],
             "default": "all",
             "description": (
-                "Which components to offer this generation. 'all' (default) is "
-                "every component. 'edition' is the curated semantic blocks — "
-                "KPI cards, market tiles, report pages, citations, diagrams — "
-                "for a polished, house-style answer. 'atoms' is the OpenUI "
-                "primitives only (layout, text, tables, charts, forms) for "
-                "generic UI that no semantic block covers. Narrowing makes the "
-                "generation faster and cheaper, so pick a narrower set whenever "
-                "the shape of the answer is already clear."
+                "Which set of components to offer this generation. 'all' "
+                "(default) is everything. 'atoms' is the general vocabulary — "
+                "OpenUI's primitives plus the built-in blocks. 'edition' is "
+                "only the components a vertical edition installed, for an "
+                "answer that should stay in that edition's house style. A "
+                "shorter menu is an easier one, so narrow whenever the shape of "
+                "the answer is already clear."
             ),
         },
     },
