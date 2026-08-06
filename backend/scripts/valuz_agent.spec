@@ -160,6 +160,43 @@ for _dpkg in _data_pkgs:
     except Exception:
         pass
 
+# Packages whose data is collected SELECTIVELY — ``{package: [glob, ...]}``.
+# A blanket ``collect_data_files`` would also drag in model weights we
+# deliberately don't ship.
+_filtered_data_pkgs = {
+    # rapidocr resolves two YAMLs out of its OWN package directory via
+    # ``Path(__file__).resolve().parent`` — which in a frozen build points into
+    # the PYZ archive, i.e. at no path that exists on disk:
+    #
+    #   * ``default_models.yaml`` — read at IMPORT time, in a class body
+    #     (``InferSession.model_info = OmegaConf.load(MODEL_URL_PATH)`` in
+    #     ``rapidocr/inference_engine/base.py``). Merely importing the engine
+    #     fails without it.
+    #   * ``config.yaml`` — read by EVERY ``RapidOCR(...)`` construction:
+    #     ``_load_config`` falls back to ``DEFAULT_CFG_PATH`` whenever no
+    #     explicit ``config_path`` is passed, and we pass ``params=`` only
+    #     (``integrations/parser_light_local._build_rapidocr``).
+    #
+    # ``collect_submodules`` only grabs .py and no pyinstaller-hooks-contrib
+    # hook covers rapidocr, so without this entry a packaged build raises
+    # ``FileNotFoundError: .../rapidocr/config.yaml`` on every image parse —
+    # including for users who completed the model-download setup, because the
+    # config load happens BEFORE the ``params`` overrides are merged.
+    #
+    # The bundled ``models/*.onnx`` (~16 MB) are deliberately NOT collected:
+    # image OCR is a ``needs_setup`` capability whose weights are downloaded to
+    # ``~/.valuz-oss/models/light_local/rapidocr/`` and handed in by absolute
+    # path. Shipping them would bloat the bundle for files we never read.
+    "rapidocr": ["config.yaml", "default_models.yaml"],
+}
+for _fpkg, _includes in _filtered_data_pkgs.items():
+    try:
+        _extra_datas.extend(
+            collect_data_files(_fpkg, include_py_files=False, includes=_includes)
+        )
+    except Exception:
+        pass
+
 # --- Create a thin entry-point script ---
 _entry_script = str(HERE / "_pyinstaller_entry.py")
 entry_content = """\

@@ -71,6 +71,23 @@ def _build_rapidocr(rapidocr_cls: Any) -> Any:
                         # skipped rather than crashing the whole parse.
                         "Cls.model_path": str(cls),
                         "Global.use_cls": False,
+                        # Pin the model ROOT at our download dir. rapidocr
+                        # otherwise defaults it to ``<its own package>/models``
+                        # (``RapidOCR._load_config``), and every engine session
+                        # asserts that directory EXISTS before it even looks at
+                        # ``model_path``:
+                        #     model_root_dir = Path(cfg.get("model_root_dir"))
+                        #     if not model_root_dir.exists():
+                        #         raise FileNotFoundError(...)
+                        # (``inference_engine/onnxruntime/main.py``). In the
+                        # PyInstaller build that package dir does not exist —
+                        # rapidocr's ``.py`` live in the PYZ archive and we
+                        # deliberately don't ship its ~16 MB of bundled weights —
+                        # so OCR would die on the root-dir assert even though all
+                        # three explicit ``model_path`` values are valid. Source
+                        # runs happened to pass only because site-packages has
+                        # the directory.
+                        "Global.model_root_dir": str(target),
                     }
                 )
     except Exception:  # noqa: BLE001
@@ -78,7 +95,17 @@ def _build_rapidocr(rapidocr_cls: Any) -> Any:
         # We deliberately don't raise so that auto-download installs
         # keep working.
         pass
-    return rapidocr_cls()
+    # Auto-download fallback. Pin the root here too: left to its default this
+    # would resolve to rapidocr's own package dir, which the packaged build
+    # doesn't have — and if it ever did, rapidocr would write downloaded weights
+    # INTO the app bundle. Route them to the same user-owned directory.
+    try:
+        from valuz_agent.infra.fs_registry import fs_registry
+
+        root = fs_registry.parser_model_dir("light_local", "rapidocr")
+        return rapidocr_cls(params={"Global.model_root_dir": str(root)})
+    except Exception:  # noqa: BLE001
+        return rapidocr_cls()
 
 
 def _light_local_parse_worker(file_path: str, options: ParseOptions | None = None) -> ParseResult:
