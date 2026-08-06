@@ -211,7 +211,7 @@ class RecoveryService:
                         changed = True
                     return changed
 
-                await planning.persist_plan(
+                await planning.persist_plan_best_effort(
                     task_ds,
                     event_ds,
                     task,
@@ -219,6 +219,8 @@ class RecoveryService:
                     actor="system",
                     session_id=lead_session_id,
                     user_id=user_id,
+                    diverges="reconcile could not write the node statuses it "
+                    f"derived from the run rows ({', '.join(k for k, _, _ in mutations)})",
                 )
 
         # Evict any stale kernel runtime BEFORE respawning. Load-bearing for
@@ -368,7 +370,7 @@ class RecoveryService:
                         parked += 1
                 return parked > 0
 
-            await planning.persist_plan(
+            await planning.persist_plan_best_effort(
                 task_ds,
                 event_ds,
                 task,
@@ -376,6 +378,8 @@ class RecoveryService:
                 actor="user",
                 session_id=lead_session_id,
                 user_id=user_id,
+                diverges="running nodes stay in_progress on a halted task, so the "
+                "panel keeps spinning them until resume reconciles",
             )
             if target_status == "stopped":
                 # Terminal write — goes through finalize_task so the status
@@ -611,7 +615,7 @@ class RecoveryService:
                         )
                         return True
 
-                    await planning.persist_plan(
+                    await planning.persist_plan_best_effort(
                         task_ds,
                         event_ds,
                         task,
@@ -619,6 +623,8 @@ class RecoveryService:
                         actor="user",
                         session_id=lead_session_id or None,
                         user_id=user_id,
+                        diverges=f"node {subtask_key!r} not parked to rework after the "
+                        "user stopped its member",
                     )
             await record_subtask_stopped(
                 event_ds,

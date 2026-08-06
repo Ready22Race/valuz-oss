@@ -481,7 +481,7 @@ class CoordinationService:
                         changed = True
                     return changed
 
-                await planning.persist_plan(
+                await planning.persist_plan_best_effort(
                     task_ds,
                     event_ds,
                     task,
@@ -489,6 +489,8 @@ class CoordinationService:
                     actor="system",
                     session_id=None,
                     user_id=user_id,
+                    diverges="probed member outcomes not reflected on their nodes "
+                    f"({', '.join(k for k, _, _ in mutations)})",
                 )
         return out
 

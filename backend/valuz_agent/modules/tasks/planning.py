@@ -52,6 +52,32 @@ logger = logging.getLogger(__name__)
 _PLAN_CAS_RETRIES = 5
 
 
+# What the lead is told when its review lost the CAS. It has to say "retry the
+# same call" explicitly: a bare "conflict" reads as a dead end, and the model's
+# default recovery from a failed review is to re-plan the subtask.
+_RETRY_HINT = (
+    "could not record the {action} of {key!r} — another writer changed the plan "
+    "at the same moment. Nothing was written; call review_subtask again with the "
+    "same arguments."
+)
+
+
+class PlanConflictError(RuntimeError):
+    """The plan write was ABANDONED after losing every CAS round.
+
+    Deliberately not a :class:`PlanError` — that means "this mutation is
+    invalid" (bad key, illegal transition) and is answered by fixing the
+    request. This means "your mutation was fine and did not land"; the answer
+    is to try again. ``persist_plan`` returning ``None`` is the third, distinct
+    outcome: ``mutate`` itself declined, so there was nothing to write.
+
+    Collapsing conflict into ``None`` is what this type exists to prevent: the
+    review doors then reported a lost write as ``no subtask with key 'x'``,
+    which reads to the lead as "that key is gone" and steers it into re-planning
+    instead of retrying.
+    """
+
+
 async def persist_plan(
     task_ds: TaskDatastore,
     event_ds: TaskEventDatastore,
@@ -76,7 +102,10 @@ async def persist_plan(
     pair: they append ``task_planned`` / ``plan_revised`` BETWEEN the two (that
     order is on the wire) — but their write leg is the same CAS.
 
-    Returns the persisted plan, or None when nothing was written.
+    Returns the persisted plan, or None when ``mutate`` declined (nothing to
+    write). Raises :class:`PlanConflictError` when the write was valid but lost
+    every CAS round — a caller that cannot act on that should say so by using
+    :func:`persist_plan_best_effort`, not by ignoring the return value.
     """
     for _ in range(_PLAN_CAS_RETRIES):
         expected = task_row.plan_version or 0
@@ -100,10 +129,49 @@ async def persist_plan(
                 plan_version=expected + 1,
             )
             return plan
-    logger.error(
-        "persist_plan: gave up after %d CAS conflicts for task %s", _PLAN_CAS_RETRIES, task_row.id
+    raise PlanConflictError(
+        f"plan write for task {task_row.id} lost {_PLAN_CAS_RETRIES} CAS rounds"
     )
-    return None
+
+
+async def persist_plan_best_effort(
+    task_ds: TaskDatastore,
+    event_ds: TaskEventDatastore,
+    task_row: TaskRow,
+    *,
+    mutate: Callable[[TaskPlan], bool],
+    actor: str,
+    session_id: str | None,
+    user_id: str,
+    diverges: str,
+) -> TaskPlan | None:
+    """:func:`persist_plan` for sweeps that must keep going if the write is lost.
+
+    Every caller here is a bookkeeping write inside a larger sequence — parking
+    a node during a stop, reconciling after a crash, flipping a node on
+    dispatch. Aborting the sequence over a lost node write would leave a worse
+    state than the stale node does, and recovery's reconcile re-derives node
+    status from the run rows anyway.
+
+    ``diverges`` names what is now inconsistent, because that is the one thing
+    the log cannot infer: "node stays 'planned' while its member runs" is
+    actionable, "persist_plan gave up" is not.
+    """
+    try:
+        return await persist_plan(
+            task_ds,
+            event_ds,
+            task_row,
+            mutate=mutate,
+            actor=actor,
+            session_id=session_id,
+            user_id=user_id,
+        )
+    except PlanConflictError:
+        logger.error(
+            "task %s: plan write lost to concurrent writers — %s", task_row.id, diverges
+        )
+        return None
 
 
 async def emit_plan_update(
@@ -471,6 +539,8 @@ async def review_subtask(
                 # e.g. approving a never-dispatched node — the transition table
                 # (plan.NODE_TRANSITIONS) refuses planned → done.
                 return {"error": f"invalid review: {exc}"}
+            except PlanConflictError:
+                return {"error": _RETRY_HINT.format(action="approve", key=key)}
             if persisted is None:
                 return {"error": f"no subtask with key {key!r}"}
             if target_session:
@@ -568,6 +638,8 @@ async def review_subtask(
             )
         except PlanError as exc:
             return {"error": f"invalid review: {exc}"}
+        except PlanConflictError:
+            return {"error": _RETRY_HINT.format(action="rework", key=key)}
         if persisted is None:
             return {"error": f"no subtask with key {key!r}"}
         await event_ds.append_event(
@@ -668,7 +740,7 @@ async def mark_node_dispatched(
             )
             return True
 
-        await persist_plan(
+        await persist_plan_best_effort(
             task_ds,
             event_ds,
             task_row,
@@ -676,6 +748,10 @@ async def mark_node_dispatched(
             actor=agent,
             session_id=session_id,
             user_id=user_id,
+            # The member spawns right after this call either way — raising here
+            # would strand a session row + subtask_spawned event with no actor.
+            diverges=f"node {subtask_key!r} stays pre-dispatch while its member "
+            f"session {session_id} runs; recovery reconcile repairs it",
         )
 
 
@@ -710,7 +786,7 @@ async def mark_in_review(
                 p.update_node(key, status="in_review")
                 return True
 
-            await persist_plan(
+            await persist_plan_best_effort(
                 task_ds,
                 event_ds,
                 task_row,
@@ -718,6 +794,8 @@ async def mark_in_review(
                 actor="system",
                 session_id=member_session_id,
                 user_id=user_id,
+                diverges=f"node {key!r} stays in_progress though its member "
+                "finished and is awaiting review",
             )
     except Exception:  # noqa: BLE001
         logger.debug("mark_in_review skipped for %s", member_session_id, exc_info=True)
