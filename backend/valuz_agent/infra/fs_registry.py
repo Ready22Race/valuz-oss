@@ -56,6 +56,11 @@ class FsRegistry:
     the returned path is a directory. They never write file content.
     """
 
+    def __init__(self) -> None:
+        # Read-only bundled trees an overlay/edition declared — see
+        # ``register_system_skill_root``. Never written to.
+        self._extra_system_skill_roots: list[Path] = []
+
     # ---- FS-1 / FS-2 — data root + secrets ----
 
     def user_dir_name(self, user_id: str) -> str:
@@ -348,16 +353,77 @@ class FsRegistry:
     #     return self.user_skill_root(source) / slug
 
     def official_skill_root(self, *, user_id: str) -> Path:
-        """Return the canonical home for bundled / official skills.
+        """Return the per-user, WRITABLE home for official-scope skills.
 
-        Official skills are host-owned content under ``VALUZ_DATA_DIR``. The
-        directory is created lazily by ``sync_bundled_official_skills`` on
-        first boot.
+        Holds the official content that genuinely belongs to one user: template
+        skills materialized on demand by an agent-pack import, and externally
+        installed official skills. Packages that ship with the install live in
+        :meth:`system_skill_roots` instead and are never copied here.
 
         Passing ``user_id`` is required so ``data_dir`` templates naturally
-        materialize bundled official skills under the owner data root.
+        place this under the owner data root.
         """
         return self.data_dir(user_id) / "official-skills"
+
+    def system_skill_roots(self) -> tuple[Path, ...]:
+        """Read-only roots holding the packages that ship with this install.
+
+        A bundled package is a release artifact: identical bytes for every
+        user, read-only, versioned with the release that carries it. Resolving
+        it from one shared location — rather than copying it into each user's
+        data dir — is what keeps a multi-user deployment from having to make N
+        copies of immutable content converge.
+
+        Resolution order, first hit wins:
+
+        1. ``VALUZ_SYSTEM_SKILLS_DIR`` — ``os.pathsep``-separated. What a
+           container image sets after composing its trees into one directory.
+        2. The package's own ``resources`` trees. A source checkout and a
+           desktop install then work with no configuration at all.
+
+        Roots registered through :meth:`register_system_skill_root` are always
+        appended, which is how an overlay declares an edition's tree without
+        having to own the env var.
+        """
+        import os
+
+        configured = (settings.system_skills_dir or "").strip()
+        if configured:
+            roots = [Path(part).expanduser() for part in configured.split(os.pathsep) if part]
+        else:
+            resources = Path(__file__).resolve().parents[1] / "resources"
+            roots = [resources / "official_skills", resources / "builtin_skills"]
+        roots.extend(self._extra_system_skill_roots)
+        seen: set[Path] = set()
+        out: list[Path] = []
+        for root in roots:
+            resolved = root.resolve(strict=False)
+            if resolved not in seen and resolved.is_dir():
+                seen.add(resolved)
+                out.append(resolved)
+        return tuple(out)
+
+    def register_system_skill_root(self, root: Path) -> None:
+        """Declare one more read-only bundled tree (an edition's, typically).
+
+        Idempotent and process-global, matching how editions register their
+        other contributions at import time.
+        """
+        resolved = Path(root).resolve(strict=False)
+        if resolved not in self._extra_system_skill_roots:
+            self._extra_system_skill_roots.append(resolved)
+
+    def clear_system_skill_roots(self) -> None:
+        """Test hook — registration is process-global."""
+        self._extra_system_skill_roots.clear()
+
+    def find_system_skill(self, slug: str) -> Path | None:
+        """The shipped package directory for ``slug``, if this install has one."""
+        for root in self.system_skill_roots():
+            candidate = root / slug
+            if candidate.is_dir():
+                return candidate
+        return None
 
     def legacy_user_skill_roots(self) -> list[Path]:
         """Return the legacy CLI skill locations for read-only discovery.

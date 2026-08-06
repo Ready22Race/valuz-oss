@@ -76,31 +76,40 @@ logger = logging.getLogger(__name__)
 _BUILTIN_SKILLS_DIR = Path(__file__).resolve().parents[1] / "resources" / "builtin_skills"
 
 
-def project_docs_skill_dir(user_id: str) -> Path:
-    """Absolute path to the materialized ``valuz-project-docs`` skill for a user.
+def official_skill_dir(slug: str, user_id: str) -> Path:
+    """Absolute path to an official-scope skill directory for a user.
 
-    Resolves under ``fs_registry.official_skill_root`` (per-user data dir), so the
-    path is valid both in-process and inside a remote sandbox that mounts the
-    user's official-skills subtree. The materialized copy is produced by
-    ``sync_bundled_official_skills``.
+    Prefers the copy that ships with the install (``system_skill_roots``) and
+    falls back to the per-user official root, which is where an on-demand
+    template skill or an externally installed official skill lives. The
+    returned path is valid in-process and inside a sandbox alike: a shipped
+    package sits at the same absolute path in every image, and the per-user
+    root is mounted into the sandbox.
+
+    The path may not exist — every caller already treats a missing directory as
+    "this skill is not installed" and skips it.
     """
     from valuz_agent.infra.fs_registry import fs_registry
 
-    return fs_registry.official_skill_root(user_id=user_id) / "valuz-project-docs"
+    shipped = fs_registry.find_system_skill(slug)
+    if shipped is not None:
+        return shipped
+    return fs_registry.official_skill_root(user_id=user_id) / slug
+
+
+def project_docs_skill_dir(user_id: str) -> Path:
+    """Absolute path to the ``valuz-project-docs`` skill (see ``official_skill_dir``)."""
+    return official_skill_dir("valuz-project-docs", user_id)
 
 
 def browser_skill_dir(user_id: str) -> Path:
-    """Absolute path to the materialized ``browser`` skill (see ``project_docs_skill_dir``)."""
-    from valuz_agent.infra.fs_registry import fs_registry
-
-    return fs_registry.official_skill_root(user_id=user_id) / "browser"
+    """Absolute path to the ``browser`` skill (see ``official_skill_dir``)."""
+    return official_skill_dir("browser", user_id)
 
 
 def citation_skill_dir(user_id: str) -> Path:
-    """Absolute path to the materialized always-on citation protocol skill."""
-    from valuz_agent.infra.fs_registry import fs_registry
-
-    return fs_registry.official_skill_root(user_id=user_id) / "citation"
+    """Absolute path to the always-on citation protocol skill."""
+    return official_skill_dir("citation", user_id)
 
 
 @dataclass(frozen=True)
@@ -347,13 +356,12 @@ def always_on_skill_paths(*, user_id: str) -> list[str]:
     is identical everywhere. A missing dir is skipped + logged so a partial
     install can't break session creation.
     """
-    from valuz_agent.infra.fs_registry import fs_registry
     from valuz_agent.modules.browser import service as browser_service
 
     candidates = [
         project_docs_skill_dir(user_id),
         citation_skill_dir(user_id),
-        fs_registry.official_skill_root(user_id=user_id) / "skill-creator",
+        official_skill_dir("skill-creator", user_id),
     ]
     # The browser skill teaches the ``chrome-devtools`` CLI, which only works
     # when the engine (Node + chrome-devtools-mcp) is available; don't inject a

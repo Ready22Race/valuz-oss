@@ -36,6 +36,13 @@ class Settings(BaseSettings):
     # May contain {user_id} when the deployment mounts per-user config roots.
     # OSS defaults to the root itself, without a user-id subdirectory.
     data_dir: Path = PACKAGED_DATA_DIR
+    # Read-only roots for the skill packages that ship with this install
+    # (``os.pathsep``-separated). A container image sets this after composing
+    # its trees into one directory so the host and its sandboxes name the
+    # packages by the SAME absolute path. Empty on a source checkout or a
+    # desktop install, where ``fs_registry.system_skill_roots`` falls back to
+    # the package's own ``resources`` trees.
+    system_skills_dir: str = ""
     db_filename: str = "valuz.db"
     # The kernel's own SQLite file — sessions / messages / events, its
     # langgraph checkpoint tables, and the kernel ``alembic_version``. Kept
@@ -223,9 +230,7 @@ class Settings(BaseSettings):
     # The parent directory is created on first write — we don't ``mkdir`` here
     # so the field stays pure.
     log_file_path: Path = Field(
-        default_factory=lambda data: shared_root_of(data["data_dir"])
-        / "logs"
-        / "backend.log",
+        default_factory=lambda data: shared_root_of(data["data_dir"]) / "logs" / "backend.log",
     )
 
     # Optional legacy skill-creator staging directory. May contain

@@ -33,15 +33,9 @@ def test_sync_installs_bundled_skill_creator_on_first_run(_isolated_official_dir
 
 def test_sync_installs_builtin_skills_alongside_official(_isolated_official_dir: Path) -> None:
     """Builtin skills (valuz-project-docs, citation, browser) land in the SAME per-user
-    official-skills dir — no separate directory — so a remote sandbox kernel can
-    resolve their absolute source paths from the mounted official-skills subtree.
+    official-skills dir — no separate directory — so an install that predates
+    system skill roots keeps resolving them from the mounted subtree.
     """
-    from valuz_agent.adapters.capability_resolver import (
-        browser_skill_dir,
-        citation_skill_dir,
-        project_docs_skill_dir,
-    )
-
     installed = bootstrap.sync_bundled_official_skills(USER)
 
     assert "valuz-project-docs" in installed
@@ -54,11 +48,46 @@ def test_sync_installs_builtin_skills_alongside_official(_isolated_official_dir:
     assert (_isolated_official_dir / "citation" / "SKILL.md").is_file()
     assert (_isolated_official_dir / "citation" / "references" / "protocol.md").is_file()
 
-    # The capability_resolver accessors point at exactly these materialized dirs.
-    assert project_docs_skill_dir(USER).resolve(strict=False) == docs_dir.resolve(strict=False)
-    assert browser_skill_dir(USER).resolve(strict=False) == (
-        _isolated_official_dir / "browser"
-    ).resolve(strict=False)
+
+def test_accessors_prefer_the_shipped_package_over_a_per_user_copy(
+    _isolated_official_dir: Path,
+) -> None:
+    """A copy is not the authority any more — the release's own tree is.
+
+    An install that ran the old bootstrap keeps its copies, and they must not
+    shadow the version this release actually carries.
+    """
+    from valuz_agent.adapters.capability_resolver import (
+        browser_skill_dir,
+        citation_skill_dir,
+        project_docs_skill_dir,
+    )
+    from valuz_agent.infra.fs_registry import fs_registry
+
+    bootstrap.sync_bundled_official_skills(USER)
+    shipped = {root for root in fs_registry.system_skill_roots()}
+    assert shipped, "the package's own resources trees are the default system roots"
+
+    for accessor, slug in (
+        (project_docs_skill_dir, "valuz-project-docs"),
+        (citation_skill_dir, "citation"),
+        (browser_skill_dir, "browser"),
+    ):
+        resolved = accessor(USER).resolve(strict=False)
+        assert resolved.parent in shipped, slug
+        assert (resolved / "SKILL.md").is_file(), slug
+        assert resolved != (_isolated_official_dir / slug).resolve(strict=False), slug
+
+
+def test_accessor_falls_back_to_the_per_user_copy_when_nothing_ships_it(
+    _isolated_official_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from valuz_agent.adapters.capability_resolver import citation_skill_dir
+    from valuz_agent.infra.fs_registry import fs_registry
+
+    bootstrap.sync_bundled_official_skills(USER)
+    monkeypatch.setattr(fs_registry, "system_skill_roots", lambda: ())
+
     assert citation_skill_dir(USER).resolve(strict=False) == (
         _isolated_official_dir / "citation"
     ).resolve(strict=False)
