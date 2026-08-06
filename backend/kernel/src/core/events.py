@@ -67,6 +67,25 @@ OutboundEventType = Literal[
     "bg_task_progress",
     "bg_task_updated",
     "bg_task_finished",
+    # Turn-phase observability marker (persisted). Runtimes emit one event
+    # per otherwise-invisible boundary of a turn so latency can be read
+    # straight off the stored event timestamps — no aggregation layer:
+    #   {phase: "runtime_init", duration_ms}            cold client/process/
+    #                                                   graph construction;
+    #                                                   deepagents adds
+    #                                                   {mcp_tools_ms,
+    #                                                    checkpointer_ms}
+    #   {phase: "thread_init", mode: start|resume,
+    #    duration_ms}                                   codex only
+    #   {phase: "dispatch", duration_ms?}               request handed to the
+    #                                                   SDK/CLI — the gap from
+    #                                                   this row to the first
+    #                                                   thinking/text delta is
+    #                                                   runtime prep + model
+    #                                                   TTFT
+    # A phase that did not run this turn emits nothing (a warm turn carries
+    # only ``dispatch``).
+    "turn_phase",
 ]
 
 InboundEventType = Literal[

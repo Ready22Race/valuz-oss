@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import time
 import uuid
 from collections import deque
 from collections.abc import Callable, Mapping
@@ -564,6 +565,10 @@ class ClaudeAgentRuntime:
     def update_sink(self, sink: EventSink) -> None:
         self.event_sink = sink
 
+    async def _emit_turn_phase(self, phase: str, **fields: Any) -> None:
+        """Persisted latency marker — see ``turn_phase`` in ``events.py``."""
+        await self.event_sink.emit(Event(type="turn_phase", data={"phase": phase, **fields}))
+
     async def run(self, session: Session, user_message: UserMessage) -> None:
         from datetime import datetime
 
@@ -600,6 +605,7 @@ class ClaudeAgentRuntime:
             await self._reconcile_session_levers(session)
 
             if self._client is None:
+                t0 = time.monotonic()
                 self._materialize_skills(session)
                 opts = self._build_options(session)
                 self._client = ClaudeSDKClient(options=opts)
@@ -611,6 +617,9 @@ class ClaudeAgentRuntime:
                     session.model_settings.effort if session.model_settings else None
                 )
                 self._applied_mode = session.mode
+                await self._emit_turn_phase(
+                    "runtime_init", duration_ms=int((time.monotonic() - t0) * 1000)
+                )
 
             prompt = build_user_prompt(
                 user_message,
@@ -619,7 +628,13 @@ class ClaudeAgentRuntime:
             )
             self._active_client = self._client
             self._active_task = asyncio.current_task()
+            t_dispatch = time.monotonic()
             await self._client.query(prompt)
+            # Observability: the gap from this row to the first thinking/text
+            # delta = CLI turn preparation + model TTFT.
+            await self._emit_turn_phase(
+                "dispatch", duration_ms=int((time.monotonic() - t_dispatch) * 1000)
+            )
             await self._consume_turn_stream(session)
             # Slice 5 of session-modes: after the goal-mode turn's
             # ResultMessage lands, Claude doesn't surface a "goal

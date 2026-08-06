@@ -32,6 +32,7 @@ import os
 import re
 import shutil
 import sqlite3
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict
@@ -176,6 +177,7 @@ def _sanitize_anthropic_request_payload(payload: dict[str, Any]) -> dict[str, An
         )
     return payload
 
+
 # In an ephemeral cloud sandbox the checkpoint must be EXTERNALIZED (per-owner
 # COS mount) so it survives sandbox recreation ("resume in a fresh sandbox").
 # sqlite CANNOT live on COS — sqlite-on-COS-FUSE corrupts (WAL -shm mmap, no
@@ -230,10 +232,7 @@ def _expand_embedded_json(value: Any, *, depth: int = 0) -> Any:
     if depth >= 6:
         return value
     if isinstance(value, dict):
-        return {
-            key: _expand_embedded_json(item, depth=depth + 1)
-            for key, item in value.items()
-        }
+        return {key: _expand_embedded_json(item, depth=depth + 1) for key, item in value.items()}
     if isinstance(value, list):
         return [_expand_embedded_json(item, depth=depth + 1) for item in value]
     if not isinstance(value, str):
@@ -270,10 +269,7 @@ def _logical_large_result_content(content: str) -> str:
     # immutable artifact consumed by Citation extraction.
     width = 1_000
     if len(content) > width:
-        return "\n".join(
-            content[index : index + width]
-            for index in range(0, len(content), width)
-        )
+        return "\n".join(content[index : index + width] for index in range(0, len(content), width))
     return content
 
 
@@ -295,11 +291,7 @@ class _WorkspaceLocalShellBackend(LocalShellBackend):
             return super().read(file_path, offset=offset, limit=limit)
 
         raw = super().read(file_path, offset=0, limit=1)
-        if (
-            raw.error
-            or raw.file_data is None
-            or raw.file_data.get("encoding") != "utf-8"
-        ):
+        if raw.error or raw.file_data is None or raw.file_data.get("encoding") != "utf-8":
             return raw
         content = str(raw.file_data.get("content") or "")
         logical = _logical_large_result_content(content)
@@ -518,6 +510,10 @@ class DeepAgentsRuntime:
     def update_sink(self, sink: EventSink) -> None:
         self.event_sink = sink
 
+    async def _emit_turn_phase(self, phase: str, **fields: Any) -> None:
+        """Persisted latency marker — see ``turn_phase`` in ``events.py``."""
+        await self.event_sink.emit(Event(type="turn_phase", data={"phase": phase, **fields}))
+
     async def run(self, session: Session, user_message: UserMessage) -> None:
         from datetime import datetime
 
@@ -594,6 +590,10 @@ class DeepAgentsRuntime:
             todo_run_ids: set[str] = set()
 
             self._active_task = asyncio.current_task()
+            # Observability: the gap from this row to the first thinking/text
+            # delta = langgraph dispatch + model TTFT. Emitted once per turn
+            # (before the first stream pass, not per resume iteration).
+            await self._emit_turn_phase("dispatch")
             # Outer interrupt-resume loop. Each pass: stream events from
             # the graph until it pauses or completes; if it paused on a
             # HITL interrupt, park on host decisions and re-enter the
@@ -1285,8 +1285,11 @@ class DeepAgentsRuntime:
         # even npx/node (nvm). See docs/design/browser-feature.md §8.
         backend = _build_local_shell_backend(self.workspace_root)
 
+        t_build = time.monotonic()
         tools = self._build_tools()
+        t_mcp = time.monotonic()
         mcp_tools = await self._build_mcp_tools(session)
+        mcp_tools_ms = int((time.monotonic() - t_mcp) * 1000)
         # Capture MCP-origin tool names *before* concatenating so subject
         # classification can distinguish MCP tool calls from harness/builtin
         # ones at approval time. langchain-mcp's ``MultiServerMCPClient``
@@ -1306,7 +1309,9 @@ class DeepAgentsRuntime:
             ),
             skill_roots=skill_roots,
         )
+        t_ckpt = time.monotonic()
         await self._open_checkpointer()
+        checkpointer_ms = int((time.monotonic() - t_ckpt) * 1000)
 
         # D9: session is the runtime's source of truth for ``permission_mode``;
         # the agent value was prefilled at session creation but is decoupled
@@ -1358,6 +1363,14 @@ class DeepAgentsRuntime:
             graph_kwargs["interrupt_on"] = interrupt_on
 
         self._graph = create_deep_agent(**graph_kwargs)
+        # Observability: MCP connect + tools/list is this runtime's dominant
+        # variable build cost — surfaced as its own field.
+        await self._emit_turn_phase(
+            "runtime_init",
+            duration_ms=int((time.monotonic() - t_build) * 1000),
+            mcp_tools_ms=mcp_tools_ms,
+            checkpointer_ms=checkpointer_ms,
+        )
         return self._graph
 
     def _build_interrupt_on(
@@ -1764,7 +1777,7 @@ class DeepAgentsRuntime:
                     CitationEvidenceCompactionMiddleware(
                         evidence_registry=self._turn_evidence_registry,
                         citation_artifact_emitter=self._emit_citation_evidence,
-                    )
+                    ),
                 ],
             }
             if skill_roots:
@@ -1800,7 +1813,7 @@ class DeepAgentsRuntime:
                 CitationEvidenceCompactionMiddleware(
                     evidence_registry=self._turn_evidence_registry,
                     citation_artifact_emitter=self._emit_citation_evidence,
-                )
+                ),
             ]
         if sub_tools:
             entry["tools"] = sub_tools
