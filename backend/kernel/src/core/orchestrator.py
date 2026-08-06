@@ -76,21 +76,113 @@ def _is_task_coverage_noop_tool_name(value: Any) -> bool:
     )
 
 
-class _TaskCoverageProtocolSink:
-    """Hide only the explicit private no-gap protocol tool.
+# The completion-pass prompt forbids these meta-responses and demands the
+# private no-op tool instead — but prompt-level enforcement is probabilistic,
+# and a model that emits "No response requested." anyway used to leave that
+# line in the transcript. The sink treats a pass whose ONLY visible output is
+# such a meta-response (or nothing) as the no-op it was supposed to be.
+# Normalized containment match, lowercase, whitespace-collapsed.
+_TASK_COVERAGE_META_RESPONSES = (
+    "no response requested",
+    "no response is requested",
+    "nothing was omitted",
+    "nothing further",
+    "no correction is needed",
+    "no supplement is needed",
+    "response is complete",
+    "answer is complete",
+    "already complete",
+    "(empty)",
+    "无需补充",
+    "无需更正",
+    "无需回复",
+    "没有遗漏",
+    "回答已完整",
+    "已完整",
+)
 
-    Every normal Runtime event is forwarded unchanged.  In particular, an
-    assistant message such as ``(empty)`` is *not* interpreted or suppressed;
-    it remains visible.  A no-gap pass can be silent only when the Runtime
-    calls the turn-scoped private tool supplied by ``run_task_coverage``.
+
+def _is_task_coverage_meta_response(text: str) -> bool:
+    normalized = " ".join(text.lower().split())
+    if not normalized:
+        return True
+    return any(marker in normalized for marker in _TASK_COVERAGE_META_RESPONSES)
+
+
+class _TaskCoverageProtocolSink:
+    """Hide the coverage pass's protocol machinery: the private no-gap tool
+    and the pass's own reasoning stream.
+
+    Every event that flows through this sink belongs to the COVERAGE
+    continuation, so the classification the UI cannot make ("is this trailing
+    thinking just the completeness check?") is definitional here. The pass's
+    ``thinking`` / ``thinking_delta`` events are meta-reasoning about whether
+    the answer is complete — never user-facing content — so they are dropped
+    at the source; a silent no-op therefore streams NOTHING (previously the
+    transcript still grew a trailing 思考中 segment). A real supplement's
+    visible assistant text still streams unchanged, and an assistant message
+    such as ``(empty)`` is *not* interpreted or suppressed; it remains
+    visible. A no-gap pass can be silent only when the Runtime calls the
+    turn-scoped private tool supplied by ``run_task_coverage``.
     """
+
+    # Visible characters after which held-back text is presumed a genuine
+    # supplement and flushed; meta-refusals are one short sentence, so the
+    # streaming penalty for a real continuation is at most this prefix.
+    _FLUSH_THRESHOLD_CHARS = 200
 
     def __init__(self, inner: EventSink) -> None:
         self._inner = inner
         self._private_tool_ids: set[str] = set()
         self.no_gap_declared = False
+        # Held-back visible-text events until the pass proves substantive
+        # (real tool call / enough text) or ``finalize`` classifies them.
+        self._held: list[Event] = []
+        self._held_delta_chars = 0
+        self._held_message_texts: list[str] = []
+        self._passthrough = False
+
+    def _held_visible_len(self) -> int:
+        message_len = max(
+            (len(text) for text in self._held_message_texts), default=0
+        )
+        return max(self._held_delta_chars, message_len)
+
+    async def _flush_held(self) -> None:
+        self._passthrough = True
+        held = self._held
+        self._held = []
+        for event in held:
+            await self._inner.emit(event)
+
+    async def _classify_and_settle_held(self) -> None:
+        """Classify held-back pass text: meta-refusal (or empty) → drop it and
+        treat the pass as the silent no-op the protocol demanded; anything
+        else is a real supplement and flushes downstream."""
+        if self._passthrough or not self._held:
+            return
+        combined = " ".join(
+            self._held_message_texts
+            or [
+                str(event.data.get("text") or "")
+                for event in self._held
+                if event.type == "text_delta"
+            ]
+        )
+        if _is_task_coverage_meta_response(combined):
+            self._held = []
+            self.no_gap_declared = True
+            return
+        await self._flush_held()
+
+    async def finalize(self) -> None:
+        """Backstop for a pass that ended without a ``session_idle`` reaching
+        this sink (the idle path settles held text inline in ``emit``)."""
+        await self._classify_and_settle_held()
 
     async def emit(self, event: Event) -> None:
+        if event.type in {"thinking", "thinking_delta"}:
+            return
         tool_id = event.data.get("id") or event.data.get("tool_use_id")
         tool_name = event.data.get("name") or event.data.get("tool_name")
         if event.type in {"tool_use", "tool_input_delta"} and (
@@ -106,6 +198,26 @@ class _TaskCoverageProtocolSink:
             tool_id, str
         ) and tool_id in self._private_tool_ids:
             return
+        if event.type in {"text_delta", "assistant_message"} and not self._passthrough:
+            self._held.append(event)
+            text = str(event.data.get("text") or "")
+            if event.type == "text_delta":
+                self._held_delta_chars += len(text)
+            else:
+                self._held_message_texts.append(text)
+            if self._held_visible_len() > self._FLUSH_THRESHOLD_CHARS:
+                await self._flush_held()
+            return
+        if event.type in {"tool_use", "tool_result"}:
+            # A real (non-private) tool call is substantive work — whatever
+            # text preceded it is part of a genuine continuation.
+            await self._flush_held()
+        elif event.type == "session_idle":
+            # The idle event closes the observer's coverage-segment window;
+            # settle the held text FIRST so a real supplement is attributed
+            # to the pass and a meta-refusal vanishes with the correct
+            # no-gap accounting.
+            await self._classify_and_settle_held()
         await self._inner.emit(event)
 
 
@@ -1286,6 +1398,10 @@ class SessionOrchestrator:
                             reason="runtime-exception"
                         )
                     else:
+                        # Classify text still held back at pass end (a
+                        # meta-refusal drops silently and counts as no-gap)
+                        # BEFORE reading ``no_gap_declared``.
+                        await coverage_sink.finalize()
                         if coverage_sink.no_gap_declared:
                             observer.mark_task_coverage_no_gap()
                         if getattr(session.stop_reason, "type", None) != "end_turn":
