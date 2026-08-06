@@ -49,44 +49,35 @@ def test_sync_installs_builtin_skills_alongside_official(_isolated_official_dir:
     assert (_isolated_official_dir / "citation" / "references" / "protocol.md").is_file()
 
 
-def test_accessors_prefer_the_shipped_package_over_a_per_user_copy(
-    _isolated_official_dir: Path,
+def test_accessors_prefer_a_declared_shipped_package_over_a_per_user_copy(
+    _isolated_official_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A copy is not the authority any more — the release's own tree is.
+    """A copy is not the authority once a deployment declares a system root.
 
     An install that ran the old bootstrap keeps its copies, and they must not
-    shadow the version this release actually carries.
+    shadow the version the release actually carries.
     """
-    from valuz_agent.adapters.capability_resolver import (
-        browser_skill_dir,
-        citation_skill_dir,
-        project_docs_skill_dir,
-    )
-    from valuz_agent.infra.fs_registry import fs_registry
-
-    bootstrap.sync_bundled_official_skills(USER)
-    shipped = {root for root in fs_registry.system_skill_roots()}
-    assert shipped, "the package's own resources trees are the default system roots"
-
-    for accessor, slug in (
-        (project_docs_skill_dir, "valuz-project-docs"),
-        (citation_skill_dir, "citation"),
-        (browser_skill_dir, "browser"),
-    ):
-        resolved = accessor(USER).resolve(strict=False)
-        assert resolved.parent in shipped, slug
-        assert (resolved / "SKILL.md").is_file(), slug
-        assert resolved != (_isolated_official_dir / slug).resolve(strict=False), slug
-
-
-def test_accessor_falls_back_to_the_per_user_copy_when_nothing_ships_it(
-    _isolated_official_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
     from valuz_agent.adapters.capability_resolver import citation_skill_dir
+    from valuz_agent.infra import fs_registry as fsr
     from valuz_agent.infra.fs_registry import fs_registry
 
     bootstrap.sync_bundled_official_skills(USER)
-    monkeypatch.setattr(fs_registry, "system_skill_roots", lambda: ())
+    shipped = tmp_path / "opt" / "citation"
+    shipped.mkdir(parents=True)
+    (shipped / "SKILL.md").write_text("---\nname: citation\n---\n", encoding="utf-8")
+    monkeypatch.setattr(fsr.settings, "system_skills_dir", str(tmp_path / "opt"))
+
+    assert fs_registry.system_skill_roots() == ((tmp_path / "opt").resolve(),)
+    assert citation_skill_dir(USER).resolve(strict=False) == shipped.resolve()
+
+
+def test_accessor_uses_the_per_user_copy_when_no_root_is_declared(
+    _isolated_official_dir: Path,
+) -> None:
+    """The default. Nothing declared → today's behaviour, unchanged."""
+    from valuz_agent.adapters.capability_resolver import citation_skill_dir
+
+    bootstrap.sync_bundled_official_skills(USER)
 
     assert citation_skill_dir(USER).resolve(strict=False) == (
         _isolated_official_dir / "citation"

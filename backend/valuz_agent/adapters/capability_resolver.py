@@ -60,20 +60,20 @@ class _SkillSource(Protocol):
 logger = logging.getLogger(__name__)
 
 # Bundled builtin skills — ``valuz-project-docs`` (teaches KB ``doc_search`` /
-# ``list_doc_scope``) and ``browser`` (teaches the ``chrome-devtools`` CLI, paired
-# with the ``browser_start``/``browser_stop`` toolkit tools). They ship under this
-# package's ``resources/builtin_skills`` tree, but are MATERIALIZED per-user into
-# ``fs_registry.official_skill_root`` by ``sync_bundled_official_skills`` — the same
-# COS-synced landing dir as ``skill-creator``.
+# ``list_doc_scope``), ``citation``, ``skill-creator`` and ``browser`` (teaches the
+# ``chrome-devtools`` CLI, paired with the ``browser_start``/``browser_stop``
+# toolkit tools).
 #
-# Session skill paths MUST resolve to that per-user location, NOT this
-# ``/srv``-side package path: a remote kernel runs INSIDE a sandbox that mounts
-# only the user's data subtree (official-skills), not the host's package tree, so
-# a package path would fail materialization with "Skill source path not found".
-# The two accessors below are the single source of truth for those paths — both
-# ``always_on_skill_paths`` and ``sessions.capabilities`` go through them so the
-# injected path strings match exactly (dedup depends on it).
-_BUILTIN_SKILLS_DIR = Path(__file__).resolve().parents[1] / "resources" / "builtin_skills"
+# A session skill path must resolve somewhere the process that MATERIALIZES it
+# can see. A remote kernel runs inside a sandbox that mounts only the owner's
+# data subtrees, so a host-side package path resolves to nothing there and
+# materialization fails with "Skill source path not found". Two locations
+# satisfy the requirement, and ``official_skill_dir`` is the single source of
+# truth for choosing between them: a declared system root (an image-wide
+# location the deployment has put in EVERY image, sandbox included), else the
+# per-user official root the sandbox mounts. Both ``always_on_skill_paths`` and
+# ``sessions.capabilities`` go through it so the injected path strings match
+# exactly — dedup depends on that.
 
 
 def official_skill_dir(slug: str, user_id: str) -> Path:
@@ -483,9 +483,7 @@ async def always_on_http_mcp_servers(
     ]
 
 
-def _edition_always_on_servers(
-    base: str, headers: dict[str, str]
-) -> list[McpHttpServerConfig]:
+def _edition_always_on_servers(base: str, headers: dict[str, str]) -> list[McpHttpServerConfig]:
     """Edition-registered always-on servers (ports/mcp_always_on).
 
     Same internal credential headers and timeout as the built-ins; reserved
