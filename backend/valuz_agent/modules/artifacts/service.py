@@ -33,7 +33,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from valuz_agent.modules.artifacts import snapshot as snap
 from valuz_agent.modules.artifacts.datastore import ArtifactDatastore, Scope
-from valuz_agent.modules.artifacts.models import REVISION_STATUS_READY, ArtifactKind
+from valuz_agent.modules.artifacts.models import (
+    REVISION_STATUS_READY,
+    STORAGE_KIND_FILE,
+    STORAGE_KIND_INLINE,
+    ArtifactKind,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -71,9 +76,17 @@ class DeliveryRequest:
     the bytes, which this layer is about to read.
     """
 
-    #: The file to record. A future request form may carry content instead of a
-    #: path; that is a change to this shape, not a second entry point.
-    abs_path: Path
+    #: The file to record. Mutually exclusive with ``content``: a request
+    #: carries a path OR the bytes themselves, never both.
+    abs_path: Path | None = None
+    #: The second input form. A generated document (A2UI/OpenUI JSON) exists
+    #: only as a tool result — there is no file to point at, and asking the
+    #: producer to write one first would put a temp-file dance in front of
+    #: every generation. ``file_name`` names it; the snapshot still lands on
+    #: disk so the agent can ``Read`` the version it is asked to revise.
+    content: str | None = None
+    #: Required with ``content``; ignored with ``abs_path`` (the basename wins).
+    file_name: str | None = None
     #: Label for the deliverable. Defaults to the file's basename.
     display_name: str | None = None
     #: What the deliverable IS. Never inferred — an extension says how a file is
@@ -129,37 +142,61 @@ async def deliver_artifact(
     which is what lets a batch be all-or-nothing.
     """
     ds = ArtifactDatastore(db)
-    abs_path = Path(os.path.abspath(os.path.expanduser(str(request.abs_path))))
 
     if request.artifact_id and request.as_new_artifact:
         return DeliveryResult(
             status=DeliveryStatus.INVALID,
             detail="artifact_id and as_new_artifact say opposite things",
         )
+    if (request.abs_path is None) == (request.content is None):
+        return DeliveryResult(
+            status=DeliveryStatus.INVALID,
+            detail="a request carries exactly one of abs_path or content",
+        )
 
-    # Owner boundary first, before anything reads the path — otherwise the
-    # difference between "not found" and "not yours" would tell a caller whether
-    # somebody else holds it.
-    from valuz_agent.modules.files.service import assert_owned
+    inline_bytes: bytes | None = None
+    abs_path: Path | None = None
 
-    try:
-        assert_owned(abs_path, owner_roots)
-    except PermissionError:
-        logger.warning("deliver: refused out-of-bounds path for owner %s", scope.user_id)
-        return DeliveryResult(status=DeliveryStatus.NOT_OWNED)
+    if request.content is not None:
+        # Content form. There is no path to police: the bytes came from this
+        # process, not from a location the caller could have pointed anywhere.
+        # Identity is the file name at the scope root — the same key a file of
+        # that name delivered from there would get, which is what makes
+        # "regenerate this page" land on the existing deliverable.
+        if not request.file_name:
+            return DeliveryResult(
+                status=DeliveryStatus.INVALID, detail="content form needs a file_name"
+            )
+        inline_bytes = request.content.encode("utf-8")
+        rel_path = request.file_name
+        display_name = request.display_name or request.file_name
+    else:
+        abs_path = Path(os.path.abspath(os.path.expanduser(str(request.abs_path))))
 
-    if snap.is_inside_artifact_root(abs_path, scope_cwd):
-        return DeliveryResult(status=DeliveryStatus.IN_ARTIFACT_STORE)
+        # Owner boundary first, before anything reads the path — otherwise the
+        # difference between "not found" and "not yours" would tell a caller
+        # whether somebody else holds it.
+        from valuz_agent.modules.files.service import assert_owned
 
-    try:
-        rel_path = str(abs_path.relative_to(scope_cwd))
-    except ValueError:
-        return DeliveryResult(status=DeliveryStatus.NOT_IN_SCOPE)
+        try:
+            assert_owned(abs_path, owner_roots)
+        except PermissionError:
+            logger.warning("deliver: refused out-of-bounds path for owner %s", scope.user_id)
+            return DeliveryResult(status=DeliveryStatus.NOT_OWNED)
 
-    if not abs_path.is_file():
-        return DeliveryResult(status=DeliveryStatus.NOT_FOUND)
+        if snap.is_inside_artifact_root(abs_path, scope_cwd):
+            return DeliveryResult(status=DeliveryStatus.IN_ARTIFACT_STORE)
 
-    display_name = request.display_name or abs_path.name
+        try:
+            rel_path = str(abs_path.relative_to(scope_cwd))
+        except ValueError:
+            return DeliveryResult(status=DeliveryStatus.NOT_IN_SCOPE)
+
+        if not abs_path.is_file():
+            return DeliveryResult(status=DeliveryStatus.NOT_FOUND)
+
+        display_name = request.display_name or abs_path.name
+
     mime_type = request.mime_type or snap.guess_mime(display_name)
 
     artifact = None
@@ -201,16 +238,29 @@ async def deliver_artifact(
             # number, so a retry needs its own. The bytes are hashed on the way
             # through rather than in a separate pass: both need to read the whole
             # file, and on the cloud deployment that read crosses an object mount.
-            staged = await asyncio.to_thread(
-                snap.stage_snapshot,
-                abs_path,
-                scope_cwd,
-                artifact.id,
-                version_no,
-                display_name,
-            )
+            if inline_bytes is not None:
+                staged = await asyncio.to_thread(
+                    snap.stage_snapshot_bytes,
+                    inline_bytes,
+                    scope_cwd,
+                    artifact.id,
+                    version_no,
+                    display_name,
+                )
+            else:
+                assert abs_path is not None  # the form check above guarantees it
+                staged = await asyncio.to_thread(
+                    snap.stage_snapshot,
+                    abs_path,
+                    scope_cwd,
+                    artifact.id,
+                    version_no,
+                    display_name,
+                )
         except OSError:
-            logger.warning("deliver: snapshot failed for %s", abs_path, exc_info=True)
+            logger.warning(
+                "deliver: snapshot failed for %s", abs_path or display_name, exc_info=True
+            )
             return DeliveryResult(status=DeliveryStatus.SNAPSHOT_FAILED)
 
         # A replay, a transport retry, or a caller re-delivering something it
@@ -234,11 +284,19 @@ async def deliver_artifact(
 
         content = await ds.find_content_by_hash(scope.user_id, staged.content_hash)
         if content is None:
+            # Inline content is small and is what every reader actually wants
+            # (a generated page is rendered from the document, not opened as a
+            # file), so it rides on the row as well as on disk — the snapshot
+            # exists so the AGENT can read the version it is revising.
             content = await ds.create_content(
                 scope.user_id,
                 content_hash=staged.content_hash,
                 byte_size=staged.byte_size,
                 storage_key=str(staged.final),
+                content_inline=request.content if inline_bytes is not None else None,
+                storage_kind=(
+                    STORAGE_KIND_INLINE if inline_bytes is not None else STORAGE_KIND_FILE
+                ),
             )
 
         revision = await ds.append_revision(
@@ -297,3 +355,75 @@ __all__ = [
     "DeliveryStatus",
     "deliver_artifact",
 ]
+
+
+class BindStatus(StrEnum):
+    """How an adoption ended."""
+
+    BOUND = "bound"
+    #: ``expected_revision_id`` did not match what the slot currently shows —
+    #: somebody adopted something else since this caller last looked. The
+    #: caller re-reads and decides again; it is never resolved by retrying
+    #: blindly, because the whole point is that the user's page moved.
+    STALE = "stale"
+    #: The revision id names nothing this owner holds.
+    UNKNOWN_REVISION = "unknown_revision"
+
+
+@dataclass(frozen=True)
+class BindResult:
+    status: BindStatus
+    artifact_id: str | None = None
+    artifact_revision_id: str | None = None
+    #: What the slot shows now — set on STALE so the caller can show the user
+    #: what they would be overwriting without a second round trip.
+    current_revision_id: str | None = None
+
+
+async def bind_host_revision(
+    db: AsyncSession,
+    user_id: str,
+    *,
+    host_type: str,
+    host_id: str,
+    slot: str = "main",
+    artifact_revision_id: str,
+    expected_revision_id: str | None = None,
+    check_expected: bool = True,
+) -> BindResult:
+    """Adopt one exact revision on a host slot.
+
+    Optimistic by design rather than last-write-wins: the caller states which
+    revision it believed was bound, and a mismatch is reported instead of
+    silently replacing what somebody else adopted. ``check_expected=False`` is
+    for the deliberate override a user makes after being shown the conflict.
+
+    Commits nothing — the caller's unit of work decides.
+    """
+    ds = ArtifactDatastore(db)
+    revision = await ds.get_revision(user_id, artifact_revision_id)
+    if revision is None:
+        return BindResult(status=BindStatus.UNKNOWN_REVISION)
+
+    current = await ds.get_binding(user_id, host_type, host_id, slot)
+    if check_expected:
+        current_id = current.artifact_revision_id if current is not None else None
+        if current_id != expected_revision_id:
+            return BindResult(
+                status=BindStatus.STALE,
+                current_revision_id=current_id,
+            )
+
+    row = await ds.upsert_binding(
+        user_id,
+        host_type=host_type,
+        host_id=host_id,
+        slot=slot,
+        artifact_id=revision.artifact_id,
+        artifact_revision_id=revision.id,
+    )
+    return BindResult(
+        status=BindStatus.BOUND,
+        artifact_id=row.artifact_id,
+        artifact_revision_id=row.artifact_revision_id,
+    )

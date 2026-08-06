@@ -328,3 +328,56 @@ def wrap_generated_ui(content: str) -> str:
         ensure_ascii=False,
         separators=(",", ":"),
     )
+
+
+# A2UI message keys that carry document state. A line with none of these is
+# not part of the document (models routinely close with a prose summary).
+_A2UI_MESSAGE_KEYS = (
+    "createSurface",
+    "updateComponents",
+    "updateDataModel",
+    "deleteSurface",
+)
+
+
+def extract_a2ui_document(raw: str) -> str | None:
+    """The document inside a model's raw output, or ``None`` if unusable.
+
+    Generations do not arrive clean. Two things happen routinely:
+
+    * The model closes with prose — "界面已生成，包含以下模块…". Harmless, but it
+      has no business being stored as part of the document: the renderer skips
+      it, every guard downstream has to know to skip it, and the same text is
+      already in the conversation.
+    * The generation is cut off mid-write (an aborted tool call), leaving a
+      half-written JSON line. Stored as-is, that becomes a bindable version
+      whose page renders as whatever stray component survived — a blank
+      workbench with no explanation.
+
+    So: keep the message lines, drop everything else, and refuse the document
+    outright when a line OPENS a JSON object and then fails to parse. That last
+    rule is why "any non-JSON line is corruption" would be wrong — it would
+    condemn every generation that ends with a sentence.
+    """
+    if not raw:
+        return None
+    kept: list[str] = []
+    saw_components = False
+    for raw_line in raw.split("\n"):
+        line = raw_line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(message, dict):
+            continue
+        if not any(key in message for key in _A2UI_MESSAGE_KEYS):
+            continue
+        if "updateComponents" in message:
+            saw_components = True
+        kept.append(line)
+    if not saw_components:
+        return None
+    return "\n".join(kept)

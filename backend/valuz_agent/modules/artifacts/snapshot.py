@@ -124,6 +124,37 @@ def stage_snapshot(
     )
 
 
+def stage_snapshot_bytes(
+    data: bytes, scope_cwd: Path, artifact_id: str, version_no: int, file_name: str
+) -> StagedSnapshot:
+    """Same as ``stage_snapshot``, for a deliverable that arrives as content.
+
+    Generated documents (A2UI/OpenUI JSON) have no source file to copy — the
+    model produced them into a tool result. They still get a snapshot on disk
+    for the reason at the top of this module: a version the agent cannot
+    ``Read`` is a version it cannot revise, and "generate the next version of
+    this page" is the whole point of a generated deliverable.
+
+    Staging discipline is identical to the copy path — two deliveries racing on
+    one deliverable compute the SAME version number, so only the one that wins
+    the head may promote into the shared destination.
+    """
+    dest_dir = snapshot_dir(scope_cwd, artifact_id, version_no)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    staging = dest_dir / f".{file_name}.{secrets.token_hex(4)}.partial"
+    try:
+        staging.write_bytes(data)
+    except OSError:
+        staging.unlink(missing_ok=True)
+        raise
+    return StagedSnapshot(
+        staging=staging,
+        final=dest_dir / file_name,
+        content_hash=f"sha256:{hashlib.sha256(data).hexdigest()}",
+        byte_size=len(data),
+    )
+
+
 def promote_snapshot(staged: StagedSnapshot) -> Path:
     """Make a staged copy the snapshot. On the object mount this is a
     server-side copy rather than a link swap, which is why it happens once and

@@ -20,7 +20,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.infra.db import get_async_session
 from valuz_agent.modules.artifacts.datastore import ArtifactDatastore, Scope
-from valuz_agent.modules.artifacts.models import REVISION_STATUS_READY
+from valuz_agent.modules.artifacts.models import (
+    REVISION_STATUS_READY,
+    ArtifactBindingRow,
+)
+from valuz_agent.modules.artifacts.service import BindStatus, bind_host_revision
 from valuz_agent.modules.files.uri import build_valuz_file_uri
 
 router = APIRouter(prefix="/v1/artifacts", tags=["artifacts"])
@@ -145,3 +149,120 @@ async def list_artifact_revisions(
     return RevisionListResponse(
         artifact_id=artifact.id, display_name=artifact.display_name, items=items
     )
+
+
+class HostBinding(BaseModel):
+    """What a host slot is showing, with enough of the revision to render it."""
+
+    host_type: str
+    host_id: str
+    slot: str
+    artifact_id: str
+    artifact_revision_id: str
+    version_no: int
+    file_name: str
+    mime_type: str | None = None
+    #: The document itself for inline deliverables (generated pages); ``None``
+    #: for file-backed ones, where the caller opens ``ref`` instead.
+    content: str | None = None
+    ref: str = ""
+    updated_at: int
+
+
+class BindRequest(BaseModel):
+    host_type: str
+    host_id: str
+    slot: str = "main"
+    artifact_revision_id: str
+    #: What the caller believed was bound. A mismatch is a 409 rather than a
+    #: silent overwrite — somebody else adopted something since it last looked.
+    expected_revision_id: str | None = None
+    #: Deliberate override after the user has been shown the conflict.
+    force: bool = False
+
+
+async def _binding_response(
+    ds: ArtifactDatastore, user_id: str, binding: ArtifactBindingRow
+) -> HostBinding:
+    revision = await ds.get_revision(user_id, binding.artifact_revision_id)
+    content = (
+        await ds.get_content(user_id, revision.content_id) if revision is not None else None
+    )
+    path = (revision.abs_path or "") if revision is not None else ""
+    return HostBinding(
+        host_type=binding.host_type,
+        host_id=binding.host_id,
+        slot=binding.slot,
+        artifact_id=binding.artifact_id,
+        artifact_revision_id=binding.artifact_revision_id,
+        version_no=revision.version_no if revision is not None else 0,
+        file_name=revision.file_name if revision is not None else "",
+        mime_type=revision.mime_type if revision is not None else None,
+        content=content.content_inline if content is not None else None,
+        ref=build_valuz_file_uri(path) if path else "",
+        updated_at=binding.updated_at,
+    )
+
+
+@router.get("/bindings")
+async def get_host_binding(
+    host_type: str = Query(..., description="Host family, e.g. finance.company-research."),
+    host_id: str = Query(..., description="Which host of that family."),
+    slot: str = Query("main", description="Which surface on that host."),
+    db: AsyncSession = Depends(get_async_session),
+    user_id: str = Depends(get_current_user_id),
+) -> HostBinding:
+    """What this host slot is currently showing."""
+    ds = ArtifactDatastore(db)
+    binding = await ds.get_binding(user_id, host_type, host_id, slot)
+    if binding is None:
+        raise HTTPException(status_code=404, detail="no binding for this host slot")
+    return await _binding_response(ds, user_id, binding)
+
+
+@router.put("/bindings")
+async def bind_host_slot(
+    body: BindRequest,
+    db: AsyncSession = Depends(get_async_session),
+    user_id: str = Depends(get_current_user_id),
+) -> HostBinding:
+    """Adopt one exact revision on a host slot (409 on a stale expectation)."""
+    result = await bind_host_revision(
+        db,
+        user_id,
+        host_type=body.host_type,
+        host_id=body.host_id,
+        slot=body.slot,
+        artifact_revision_id=body.artifact_revision_id,
+        expected_revision_id=body.expected_revision_id,
+        check_expected=not body.force,
+    )
+    if result.status is BindStatus.UNKNOWN_REVISION:
+        raise HTTPException(status_code=404, detail="no such revision")
+    if result.status is BindStatus.STALE:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "this host slot moved since you last read it",
+                "current_revision_id": result.current_revision_id,
+            },
+        )
+    await db.commit()
+    ds = ArtifactDatastore(db)
+    binding = await ds.get_binding(user_id, body.host_type, body.host_id, body.slot)
+    if binding is None:  # pragma: no cover — just written above
+        raise HTTPException(status_code=500, detail="binding vanished after write")
+    return await _binding_response(ds, user_id, binding)
+
+
+@router.delete("/bindings", status_code=204)
+async def unbind_host_slot(
+    host_type: str = Query(...),
+    host_id: str = Query(...),
+    slot: str = Query("main"),
+    db: AsyncSession = Depends(get_async_session),
+    user_id: str = Depends(get_current_user_id),
+) -> None:
+    """Clear a host slot. The revisions themselves are untouched."""
+    await ArtifactDatastore(db).delete_binding(user_id, host_type, host_id, slot)
+    await db.commit()

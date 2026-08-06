@@ -29,6 +29,7 @@ from valuz_agent.modules.genui.protocol import (
     OUTPUT_FORMAT,
     a2ui_instructions,
     build_a2ui_prompt,
+    extract_a2ui_document,
     normalize_component_scope,
     wrap_generated_ui,
 )
@@ -137,7 +138,7 @@ _PARAMS = {
 }
 
 
-def _host_from_mapping(raw: object) -> "UiArtifactTargetHost | None":
+def _host_from_mapping(raw: object) -> UiArtifactTargetHost | None:
     if not isinstance(raw, dict):
         return None
     host_type = str(raw.get("host_type") or "").strip()
@@ -151,7 +152,7 @@ def _host_from_mapping(raw: object) -> "UiArtifactTargetHost | None":
     )
 
 
-def _parse_target_host(args: dict[str, Any], session: Any = None) -> "UiArtifactTargetHost | None":
+def _parse_target_host(args: dict[str, Any], session: Any = None) -> UiArtifactTargetHost | None:
     """Where the generated UI belongs: the tool argument when the model
     supplied one, otherwise the host the TURN declared.
 
@@ -178,44 +179,116 @@ UI_ARTIFACT_RECEIPT_OPEN = "[[ui-artifact-receipt]]"
 UI_ARTIFACT_RECEIPT_CLOSE = "[[/ui-artifact-receipt]]"
 
 
-async def _offer_to_artifact_sinks(
+_HOST_NAME_SAFE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _document_file_name(target_host: UiArtifactTargetHost | None) -> str:
+    """Stable name per host slot, so regenerating a page appends a version.
+
+    Identity in the artifact layer is the scope-relative path, so this name IS
+    what makes "generate this page again" land on the deliverable the host is
+    already showing rather than starting a parallel one. Host-free visuals get
+    no stable name — each is its own one-off (see ``as_new_artifact`` below).
+    """
+    if target_host is None:
+        return "generated-ui.a2ui.jsonl"
+    parts = (target_host.host_type, target_host.host_id, target_host.slot or "main")
+    stem = _HOST_NAME_SAFE.sub("-", ".".join(p for p in parts if p)).strip("-")
+    return f"{stem}.a2ui.jsonl"
+
+
+async def _deliver_generated_ui(
     *,
     user_id: str,
     session_id: str | None,
     tool_use_id: str | None,
-    target_host: "UiArtifactTargetHost | None",
+    target_host: UiArtifactTargetHost | None,
     request: str,
-    protocol: str,
-    content: str,
+    document: str,
 ) -> str:
-    """Offer the generated document to registered sinks; return a receipt
-    trailer ("" when no sink persisted anything). Best-effort by contract."""
+    """Record the document as an artifact revision; return a receipt trailer.
+
+    The receipt is what lets the conversation offer "apply to the workbench"
+    later — it survives history replay because it rides IN the tool result.
+    Adoption is deliberately NOT done here: a generation creates a version, the
+    user adopts it.
+
+    Best-effort by contract: a delivery that fails must not fail the tool call,
+    because the generated page is still useful in the conversation.
+    """
     import json as _json
 
-    from valuz_agent.ports.extensions import ext
-    from valuz_agent.ports.ui_artifact import receipt_to_payload
-
-    for sink in list(ext.ui_artifact_sinks):
-        try:
-            receipt = await sink.store_generated_ui(
-                user_id=user_id,
-                session_id=session_id,
-                tool_use_id=tool_use_id,
-                target_host=target_host,
-                request=request,
-                protocol=protocol,
-                content=content,
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception("generate_ui: ui-artifact sink failed; skipping")
-            continue
-        if receipt is None:
-            continue
-        payload = _json.dumps(
-            receipt_to_payload(receipt), ensure_ascii=False, separators=(",", ":")
+    if not session_id:
+        return ""
+    try:
+        from valuz_agent.infra.db import async_unit_of_work
+        from valuz_agent.modules.artifacts.datastore import ArtifactDatastore
+        from valuz_agent.modules.artifacts.models import ArtifactKind
+        from valuz_agent.modules.artifacts.scope import (
+            ScopeUnavailableError,
+            resolve_delivery_scope,
         )
-        return f"\n{UI_ARTIFACT_RECEIPT_OPEN}{payload}{UI_ARTIFACT_RECEIPT_CLOSE}"
-    return ""
+        from valuz_agent.modules.artifacts.service import DeliveryRequest, deliver_artifact
+
+        try:
+            delivery = await resolve_delivery_scope(user_id, session_id)
+        except ScopeUnavailableError:
+            logger.debug("generate_ui: no delivery scope; not recorded", exc_info=True)
+            return ""
+
+        file_name = _document_file_name(target_host)
+        async with async_unit_of_work(commit=True) as db:
+            # Read the binding BEFORE writing: the receipt carries what the
+            # host was showing at generation time, which is the concurrency
+            # token the adopt click compares against.
+            expected_revision_id: str | None = None
+            if target_host is not None:
+                current = await ArtifactDatastore(db).get_binding(
+                    user_id,
+                    target_host.host_type,
+                    target_host.host_id,
+                    target_host.slot or "main",
+                )
+                expected_revision_id = (
+                    current.artifact_revision_id if current is not None else None
+                )
+
+            result = await deliver_artifact(
+                db,
+                scope=delivery.scope,
+                scope_cwd=delivery.cwd,
+                owner_roots=[],  # unused by the content form — nothing to police
+                request=DeliveryRequest(
+                    content=document,
+                    file_name=file_name,
+                    display_name=file_name,
+                    kind=ArtifactKind.UI,
+                    as_new_artifact=target_host is None,
+                ),
+                source_session_id=session_id,
+            )
+        if not result.ok or not result.revision_id:
+            logger.warning("generate_ui: not recorded (%s)", result.status)
+            return ""
+    except Exception:  # noqa: BLE001 — recording is never load-bearing
+        logger.exception("generate_ui: recording the document failed; skipping")
+        return ""
+
+    payload = _json.dumps(
+        {
+            "artifact_id": result.artifact_id,
+            "revision_id": result.revision_id,
+            "revision": result.version_no,
+            "host_type": target_host.host_type if target_host else None,
+            "host_id": target_host.host_id if target_host else None,
+            "slot": (target_host.slot or "main") if target_host else "main",
+            "expected_revision_id": expected_revision_id,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    del tool_use_id, request  # audit context lives on the revision row itself
+    return f"\n{UI_ARTIFACT_RECEIPT_OPEN}{payload}{UI_ARTIFACT_RECEIPT_CLOSE}"
 
 
 async def _complete_with_retries(
@@ -350,17 +423,27 @@ async def _generate_ui_handler(args: dict[str, Any], ctx: ExecContext) -> ToolRe
             content=f"generate_ui: model returned no {OUTPUT_FORMAT}",
             is_error=True,
         )
-    receipt_trailer = await _offer_to_artifact_sinks(
-        user_id=user_id,
-        session_id=ctx.session_id,
-        tool_use_id=tool_use_id,
-        target_host=_parse_target_host(args, source),
-        request=str(request),
-        # Generation is A2UI-only since the protocol switch; the sink records
-        # the wire protocol so a stored document still says what it is.
-        protocol="a2ui-json",
-        content=generated,
-    )
+    # Extract before recording. The raw output routinely carries a closing
+    # prose summary, and an aborted generation carries a half-written line —
+    # neither belongs in a version somebody can bind a page to. The CARD still
+    # shows the raw output: the renderer skips what it cannot parse, and a
+    # partial render in the conversation beats an empty one.
+    document = extract_a2ui_document(generated)
+    receipt_trailer = ""
+    if document is None:
+        logger.warning(
+            "generate_ui: output is not a usable document; not recorded (%d chars)",
+            len(generated),
+        )
+    else:
+        receipt_trailer = await _deliver_generated_ui(
+            user_id=user_id,
+            session_id=ctx.session_id,
+            tool_use_id=tool_use_id,
+            target_host=_parse_target_host(args, source),
+            request=str(request),
+            document=document,
+        )
     return ToolResult(
         content=wrap_generated_ui(generated) + receipt_trailer,
         is_error=False,

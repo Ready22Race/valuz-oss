@@ -10,6 +10,7 @@ import {
   ExternalLink,
   FilePenLine,
   FolderOpen,
+  LayoutDashboard,
   Link2,
   ListTodo,
   MessageCirclePlus,
@@ -137,6 +138,10 @@ const BOTTOM_ICON_MAP: Record<string, LucideIcon> = {
   projectTasks: ListTodo,
   star: Star,
   compass: Compass,
+  // Verticals that surface a composed "workbench"/dashboard landing page —
+  // ``activity`` was the closest existing key and collided with the Activity
+  // item one row above it in the same sidebar.
+  dashboard: LayoutDashboard,
 };
 
 /** Icon lookup with a gear fallback for unknown (plugin-supplied) ids. */

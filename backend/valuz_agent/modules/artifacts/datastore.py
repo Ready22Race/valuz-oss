@@ -29,6 +29,7 @@ from valuz_agent.modules.artifacts.models import (
     REVISION_STATUS_READY,
     SHARED_CWD,
     STORAGE_KIND_FILE,
+    ArtifactBindingRow,
     ArtifactContentRow,
     ArtifactHeadRow,
     ArtifactKeyRow,
@@ -726,3 +727,57 @@ class ArtifactDatastore:
             await self._db.delete(key)
         await self._db.flush()
         return row
+
+
+    # ── Host bindings ───────────────────────────────────────────────────
+    async def get_binding(
+        self, user_id: str, host_type: str, host_id: str, slot: str
+    ) -> ArtifactBindingRow | None:
+        return (
+            await self._db.execute(
+                select(ArtifactBindingRow).where(
+                    ArtifactBindingRow.user_id == user_id,
+                    ArtifactBindingRow.host_type == host_type,
+                    ArtifactBindingRow.host_id == host_id,
+                    ArtifactBindingRow.slot == slot,
+                )
+            )
+        ).scalar_one_or_none()
+
+    async def upsert_binding(
+        self,
+        user_id: str,
+        *,
+        host_type: str,
+        host_id: str,
+        slot: str,
+        artifact_id: str,
+        artifact_revision_id: str,
+    ) -> ArtifactBindingRow:
+        """Point a host slot at a revision, creating the binding if new."""
+        row = await self.get_binding(user_id, host_type, host_id, slot)
+        if row is None:
+            row = ArtifactBindingRow(
+                user_id=user_id,
+                host_type=host_type,
+                host_id=host_id,
+                slot=slot,
+                artifact_id=artifact_id,
+                artifact_revision_id=artifact_revision_id,
+            )
+            self._db.add(row)
+        else:
+            row.artifact_id = artifact_id
+            row.artifact_revision_id = artifact_revision_id
+        await self._db.flush()
+        return row
+
+    async def delete_binding(
+        self, user_id: str, host_type: str, host_id: str, slot: str
+    ) -> bool:
+        row = await self.get_binding(user_id, host_type, host_id, slot)
+        if row is None:
+            return False
+        await self._db.delete(row)
+        await self._db.flush()
+        return True
