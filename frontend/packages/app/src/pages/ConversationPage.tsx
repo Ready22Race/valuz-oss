@@ -72,8 +72,10 @@ import { ConversationBody } from "./conversation/ConversationBody";
 import { ConversationHeader } from "./conversation/ConversationHeader";
 import { ComposerPane } from "./conversation/ComposerPane";
 import { KbPickerOverlay } from "./conversation/KbPickerOverlay";
+import { useSurfaceSuppressed } from "@valuz/core";
 
 export const ConversationPage = () => {
+  const composerSuppressed = useSurfaceSuppressed("conversation.composer");
   const { t } = useTranslation();
   const { openCitation } = useCitationDocumentPreview();
   const platform = usePlatform();
@@ -1506,6 +1508,10 @@ export const ConversationPage = () => {
             state (finished / stopped-on-runtime-close). */}
           <BackgroundTaskStrip tasks={runningBgTasks} />
 
+          {/* An overlay in a take-over mode (share selection) suppresses this:
+              leaving the composer live invites sending a message in a mode
+              where that makes no sense. */}
+          {!composerSuppressed && (
           <ComposerPane
             showScrollBottom={showScrollBottom}
             handleScrollToBottom={handleScrollToBottom}
@@ -1583,6 +1589,7 @@ export const ConversationPage = () => {
             setParsingConfirmOpen={setParsingConfirmOpen}
             performSend={performSend}
           />
+          )}
         </div>
       </ArtifactSplitPane>
 
