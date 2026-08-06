@@ -2845,6 +2845,7 @@
     "historyEmpty": "No history yet",
     "historyLoadFailed": "Failed to load history",
     "loadMore": "Load more",
-    "kindCompleted": "Completed"
+    "kindCompleted": "Completed",
+    "notifCompletedTitle": "Task finished: {task}"
   }
 }

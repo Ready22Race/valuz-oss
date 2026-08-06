@@ -1155,6 +1155,7 @@ I18nKey = Literal[
     "notification.kindRunFailed",
     "notification.loadMore",
     "notification.notifBackupFailedTitle",
+    "notification.notifCompletedTitle",
     "notification.notifFailureBody",
     "notification.notifFailureTitle",
     "notification.notifQuestionTitle",

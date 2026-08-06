@@ -59,6 +59,18 @@ export function notificationDisplay(entry: NotificationEntry): NotificationDispl
       tag: `failure:${entry.task_id ?? entry.id}`,
     };
   }
+  if (entry.kind === "task_completed") {
+    return {
+      title: _t("notification.notifCompletedTitle" as I18nKey).replace(
+        "{task}",
+        entry.title,
+      ),
+      body: clampBody(entry.body),
+      route,
+      // Per-task tag: a re-fire for one task replaces its toast.
+      tag: `completed:${entry.task_id ?? entry.id}`,
+    };
+  }
   if (entry.kind === "run_failed") {
     return {
       title: _t("notification.notifRunFailedTitle" as I18nKey).replace(
