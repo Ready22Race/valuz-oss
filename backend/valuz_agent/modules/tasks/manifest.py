@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 _ARTIFACT_SKIP_DIRS = frozenset({"node_modules", "__pycache__", "dist", "build", ".venv"})
 # Cap on artifacts listed in a manifest (shared project cwd can be large).
 _ARTIFACT_LIMIT = 200
+# Turns of tail history to scan for the last assistant message. The reply we
+# want is in the final turn; 2 covers a turn that ended with only tool calls.
+_SUMMARY_TURN_WINDOW = 2
 
 
 def _scan_artifacts(run_dir: Path, since_epoch: float) -> list[dict[str, Any]]:
@@ -56,13 +59,25 @@ def _scan_artifacts(run_dir: Path, since_epoch: float) -> list[dict[str, Any]]:
 
 
 async def last_assistant_text(user_id: str, session_id: str, *, cap: int = 2000) -> str:
-    """Best-effort text of the session's last assistant message.
+    """Best-effort text of the session's LAST assistant message.
 
     The one spelling of the walk (event types + payload keys) — manifest
     summaries and auto-finalize summaries must not drift apart.
+
+    Reads a turn-aligned TAIL window, not ``get_events(limit=200)``: that one
+    is ``get_events_after(after_seq=0, limit=200)`` — "row id strictly greater
+    than 0, ordered ascending" — so it returns the session's FIRST 200 events.
+    Walking those backwards finds the newest assistant message *among the
+    oldest 200*, which on any session past that mark is a summary frozen near
+    its start. Members report to the lead through this text, so the lead was
+    reviewing stale work; the tail window also stops deserializing 200 full
+    event payloads on every member turn.
     """
     try:
-        events = await kernel_client.get_events(user_id, session_id, limit=200)
+        window = await kernel_client.get_events_window(
+            user_id, session_id, turn_limit=_SUMMARY_TURN_WINDOW
+        )
+        events = list(getattr(window, "items", None) or [])
         for event in reversed(events):
             payload = event.data if hasattr(event, "data") else {}
             if event.type in ("assistant_message", "text_delta", "content_block"):

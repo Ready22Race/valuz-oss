@@ -533,3 +533,39 @@ def test_lead_wake_up_restates_the_task_goal(loop_env) -> None:
         f"turn's goal becomes the member result (got: {prompts[0][:200]})"
     )
     assert "mem-1 done" in prompts[0], "the member result must still be carried"
+
+
+def test_last_assistant_text_reads_the_tail_not_the_head(monkeypatch) -> None:
+    """The summary must come from the session's LAST turn.
+
+    ``get_events(limit=200)`` is ``get_events_after(after_seq=0, limit=200)``
+    — "row id strictly greater than 0, ordered ASCENDING" — so it returns the
+    FIRST 200 events. Walking those backwards found the newest assistant
+    message among the OLDEST 200: on any session past that mark the member
+    reported a summary frozen near its start, and the lead reviewed stale
+    work. This pins the tail read.
+    """
+    from types import SimpleNamespace
+
+    from valuz_agent.modules.tasks import manifest as manifest_mod
+
+    called: dict[str, Any] = {}
+
+    async def _fake_window(user_id: str, session_id: str, **kw: Any) -> Any:
+        called.update(kw)
+        return SimpleNamespace(
+            items=[
+                SimpleNamespace(type="assistant_message", data={"text": "newest"}),
+            ],
+            has_more=True,
+        )
+
+    async def _explode(*_a: Any, **_k: Any) -> Any:
+        raise AssertionError("must not use the head-first get_events read")
+
+    monkeypatch.setattr(manifest_mod.kernel_client, "get_events_window", _fake_window)
+    monkeypatch.setattr(manifest_mod.kernel_client, "get_events", _explode)
+
+    out = asyncio.run(manifest_mod.last_assistant_text(OWNER, "s1"))
+    assert out == "newest"
+    assert called.get("turn_limit"), "the tail window must be turn-bounded"
