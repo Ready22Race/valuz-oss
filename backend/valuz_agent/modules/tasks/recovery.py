@@ -243,7 +243,7 @@ class RecoveryService:
             )
         for member_sid, brief, m_run_dir, m_slug, m_key in resume_members:
             await _evict_runtime(member_sid)
-            resume_prompt = brief or "继续完成你的子任务,完成后会汇报给 lead。"
+            resume_prompt = brief or t("task.brief.memberResumeDefault")
             # Fence the goal-mode re-injection: an over-cap subtask goal would
             # blow the ``/goal`` payload again on resume — spill it to a doc and
             # re-inject a short pointer instead (same fence as first dispatch).
@@ -268,19 +268,27 @@ class RecoveryService:
                 registry=self._members,
             )
         await _evict_runtime(lead_session_id)
+        # Localized: this is the lead's USER-turn prompt on resume, and a model
+        # answers in the language it was prompted in — a hardcoded one flips an
+        # otherwise-English task transcript after any restart.
         lead_brief = (
-            "<system-recovery>\n本任务已被恢复(系统重启或用户恢复)。子任务对账结果:\n"
-            + ("\n".join(summary) if summary else "(无在途子任务)")
-            + "\n\n请先调用 get_plan 对齐当前状态,然后继续编排:派发未决子任务、"
-            "审核 in_review、重试 rework;全部完成后调用 finish_task。\n</system-recovery>"
+            "<system-recovery>\n"
+            + t(
+                "task.brief.recoveryLead",
+                params={
+                    "summary": "\n".join(summary)
+                    if summary
+                    else t("task.brief.recoveryNoMembers")
+                },
+            )
+            + "\n</system-recovery>"
         )
         if lead_instruction and lead_instruction.strip():
             lead_brief += (
                 '\n<user-instruction source="resume">\n'
                 + lead_instruction.strip()
                 + "\n</user-instruction>\n"
-                "用户在恢复任务时附带了上面的指令——它是权威的用户意图,请优先据此调整编排"
-                "(必要时 modify_plan / rework)再继续。"
+                + t("task.brief.recoveryUserInstruction")
             )
         launcher.spawn_actor(
             self._actor,

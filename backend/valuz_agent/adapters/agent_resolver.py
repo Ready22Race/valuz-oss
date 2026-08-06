@@ -50,6 +50,7 @@ from valuz_agent.adapters.system_prompt_builder import (
     build_project_system_prompt,
     ensure_citation_system_policy,
 )
+from valuz_agent.i18n import t
 from valuz_agent.modules.agents.datastore import ProjectMemberDatastore
 from valuz_agent.modules.memory.injection import memory_instructions_block
 from valuz_agent.ports.instructions import (
@@ -254,14 +255,22 @@ def assert_goal_brief_length(brief: str, *, limit: int = GOAL_BRIEF_MAX_CHARS) -
 
 
 def _goal_brief_pointer(doc_path: str, *, is_lead: bool) -> str:
-    """Build the short ``/goal`` pointer that stands in for a spilled brief."""
-    noun = "任务" if is_lead else "子任务"
+    """Build the short ``/goal`` pointer that stands in for a spilled brief.
+
+    Localized: this text BECOMES the goal condition for an over-budget brief,
+    so hardcoding one language silently turns another user's task goal into a
+    foreign-language instruction — and the model answers in the language it
+    was prompted in.
+    """
+    params: dict[str, str | int | float] = {
+        "budget": GOAL_BRIEF_MAX_TOKENS,
+        "path": doc_path,
+    }
+    # Literal keys, not a variable — ``t`` is typed on the generated key union.
     return (
-        f"本{noun}的完整目标内容较长(超出 {GOAL_BRIEF_MAX_TOKENS} token 预算),已落地为"
-        f"文档,无法直接作为 goal 条件传入。\n\n"
-        f"请先用文件读取工具完整阅读下面这份文档——它包含本{noun}的完整目标、参考资料"
-        f"与验收标准——然后据此开展工作,直到达成其中描述的目标:\n\n"
-        f"{doc_path}"
+        t("task.brief.goalSpilledLead", params=params)
+        if is_lead
+        else t("task.brief.goalSpilledMember", params=params)
     )
 
 
@@ -311,23 +320,92 @@ def spill_goal_brief_if_too_long(
 # Explains the collaboration protocol to the lead LLM.
 # ---------------------------------------------------------------------------
 
-DISPATCH_PLAYBOOK = """\
+# The two lead playbooks below are ONE body with two headers. They used to be
+# two hand-maintained copies that were ~60% identical, and they drifted: each
+# kept guidance the other lacked (the committed copy taught a parameter name
+# the handler rejects; the kickoff copy never explained <user-instruction> or
+# expected_version). Sharing the protocol is what stops that recurring.
+_LEAD_GOAL_BUDGET_NOTE = """\
+NOTE — the goal-mode length budget (~2000 tokens per goal). Two directions:
+  • RECEIVING: if THIS task's goal was too long to pass inline you'll get a
+    short pointer to a doc file instead of the full goal — read that doc FIRST
+    (file-read tool) for the complete goal / references / criteria.
+  • DISPATCHING / modify_plan: keep each subtask's `goal` concise. When a
+    subtask needs a lot of context (over ~2000 tokens), FIRST write it to a
+    file in the project (e.g. tasks/_briefs/<name>.md) and put the FILE PATH
+    in the subtask `goal` (or in refs) — do NOT inline a huge goal. (Over-long
+    goals are auto-spilled to a doc as a safety net, but writing the file
+    yourself keeps the plan readable and the member focused.)"""
+
+# Steps 2..9 — identical for both variants; only step 1 differs (plan first vs
+# read the committed plan).
+_LEAD_PROTOCOL_TAIL = """\
+2. DISPATCH INDEPENDENT SUBTASKS IN PARALLEL. dispatch(subtask_key=...) is
+   NON-BLOCKING — it returns immediately and the member runs concurrently. For
+   every subtask whose deps are satisfied (get_plan's `ready` list), call
+   dispatch once per key, back to back, so they run AT THE SAME TIME. Never
+   serialize independent work. (`ready` omits nodes in `rework` — dispatch
+   those by key directly.)
+3. COLLECT with await_members(mode="any") in a loop: it blocks until the next
+   member finishes and returns its result — review that one immediately, then
+   loop to collect the rest. Use mode="all" only when you genuinely need the
+   whole batch before continuing. Omit `keys` to wait for all outstanding
+   subtasks.
+4. REVIEW each finished subtask with
+   review_subtask(subtask_key=..., decision=..., feedback=...) — judge against
+   that node's `review_criteria` (get_plan shows them). "approve" (optionally
+   with a one-line reason) marks it done and unlocks dependents. "rework"
+   sends it back: READ THE REPLY — `delivered_to_live_member: true` means the
+   member is already redoing it (just await_members again); `false` means the
+   node is parked in `rework`, so dispatch(subtask_key=...) to re-run it. Read
+   result files directly to judge.
+5. LOOP, AND EXTEND THE PLAN IF NEEDED. Once a batch is reviewed, dispatch the
+   newly-ready dependents → await_members → review, until every subtask is
+   done. If execution reveals the plan needs more nodes (a missed step, a
+   verification, a follow-up the user implicitly wanted), call
+   modify_plan(add=[...], expected_version=N) where N is the last
+   `current_version` you saw. On PLAN_VERSION_CONFLICT call get_plan() to
+   refresh and retry — a user inject may have just edited the plan from chat.
+   Subtasks cannot be removed; to retire one, re-scope its goal.
+6. You are the ONLY agent allowed to dispatch (single layer; members can't).
+   NEVER use the built-in `Agent` / `Task` tool to spawn sub-agents — it runs
+   a redundant nested agent that BLOCKS you for minutes. Delegate ALL sub-work
+   exclusively through `dispatch` + `await_members`. Likewise do not re-do a
+   member's work yourself; dispatch it.
+7. finish_task IS THE ONLY COMPLETION SIGNAL. EVERY plan node must be done
+   first — including a final summary/aggregation node (it becomes ready once
+   its deps finish, so dispatch + review it like any other). finish_task with
+   status="completed" is REJECTED while any node is still planned/in_progress/
+   in_review/rework/paused; it returns the pending keys — dispatch and review
+   them, then finish. Keep orchestrating until the goal is truly achieved; do
+   NOT stop just because intermediate results look complete. Then call
+   finish_task(summary, artifacts, status="completed") (list key result files
+   in `artifacts`); use status="stopped" only when the user explicitly asked
+   you to stop via an injected instruction, or when the goal has become
+   unreachable. Do not continue working after finish_task. (Task-level
+   "failed" is not a valid status — use "stopped".)
+8. EXTERNAL INSTRUCTIONS. You may receive turn-boundary messages tagged
+   <user-instruction source="chat"> — user follow-ups injected from a chat
+   session. Read them as authoritative user intent; typically translate them
+   into modify_plan + dispatch (or a rework for an in-flight subtask), then
+   continue. Each wake-up also restates your <task-goal>: that goal is
+   unchanged and is still what you are driving.
+9. RECOVERY: if your session is resumed after an app restart or user stop, you
+   may receive a <system-recovery> reconcile brief. ALWAYS call get_plan FIRST
+   to align with the reconciled truth (members may now be in_review, rework or
+   re-running) before dispatching, reviewing or finishing — never assume the
+   pre-restart state still holds."""
+
+DISPATCH_PLAYBOOK = (
+    """\
 ## Dispatch Playbook (lead session only)
 
 You are the lead for this Task. Drive the WHOLE task in this one turn —
 dispatch, collect, review, repeat — until you call finish_task.
 
-NOTE — the goal-mode length budget (~2000 tokens per goal). Two directions:
-  • RECEIVING: if THIS task's goal was too long to pass inline you'll get a
-    short pointer to a doc file instead of the full goal — read that doc FIRST
-    (file-read tool) for the complete goal / references / criteria before you
-    plan.
-  • DISPATCHING: keep each subtask's `goal` concise. When a subtask needs a lot
-    of context or instructions (over ~2000 tokens), FIRST write that content to
-    a file in the project (e.g. tasks/_briefs/<name>.md) and put the FILE PATH
-    in the subtask `goal` (or in refs) — do NOT inline a huge goal. (Over-long
-    goals are auto-spilled to a doc as a safety net, but writing the file
-    yourself keeps the plan readable and the member focused.)
+"""
+    + _LEAD_GOAL_BUDGET_NOTE
+    + """
 
 Protocol:
 
@@ -341,57 +419,19 @@ Protocol:
    time so you judge against your own stated criteria. You CANNOT dispatch
    before you plan. Members/roles are under "Team members" above (or
    list_members()).
-2. DISPATCH INDEPENDENT SUBTASKS IN PARALLEL. dispatch(subtask_key) is
-   NON-BLOCKING — it returns immediately and the member runs concurrently. For
-   every subtask whose deps are satisfied (get_plan() shows ready keys), call
-   dispatch once per key, back to back, so they run AT THE SAME TIME. Never
-   wait for one independent subtask before starting another.
-3. COLLECT with await_members. After dispatching, call
-   await_members(mode="any") in a loop: it blocks until the next member
-   finishes and returns its SubtaskResult — review that one immediately, then
-   loop to collect the rest. (Or await_members(mode="all") to get the whole
-   batch at once.) Omit `keys` to wait for all outstanding subtasks.
-4. REVIEW each finished subtask: review_subtask(subtask_key, decision, feedback)
-   — judge it against that subtask's `review_criteria` (call get_plan to see
-   the criteria). "approve" (optionally with a one-line reason) marks it done
-   and unlocks dependents. "rework" sends it back: READ THE REPLY —
-   `delivered_to_live_member: true` means the member is already redoing it
-   (just await_members again); `false` means the node is parked in `rework`,
-   so dispatch(subtask_key=...) to re-run it. Read result files to judge.
-5. LOOP: once a batch is reviewed, dispatch the newly-ready dependent subtasks
-   (get_plan() to see them) → await_members → review. Repeat until every
-   subtask is done. Use modify_plan(...) to add/patch subtasks mid-flight.
-6. You are the ONLY agent allowed to dispatch (single layer; members can't).
-   NEVER use the built-in `Agent` / `Task` tool to spawn sub-agents — it runs
-   a redundant nested agent that BLOCKS you for minutes. Delegate ALL sub-work
-   exclusively through `dispatch` + `await_members`. Likewise do not re-do a
-   member's work yourself; dispatch it.
-7. finish_task IS THE ONLY COMPLETION SIGNAL. EVERY plan node must be done
-   first — including a final summary/aggregation node (it becomes ready once
-   its deps finish, so dispatch + review it like any other). finish_task with
-   status="completed" is REJECTED while any node is still planned/in_progress/
-   in_review/rework/paused; it returns the pending keys — dispatch and review them,
-   then finish. Keep orchestrating until the goal is truly achieved; do NOT
-   stop just because intermediate results look complete. Then call
-   finish_task(summary, artifacts, status="completed") (list key result files
-   in `artifacts`); use status="stopped" only when the user explicitly asked
-   you to stop via an injected instruction, or when the goal has become
-   unreachable. Do not continue working after finish_task. (Task-level
-   "failed" is not a valid status — use "stopped".)
-8. RECOVERY: if your session is resumed after an app restart or user stop, you
-   may receive a <system-recovery> reconcile brief. ALWAYS call get_plan FIRST
-   to align with the reconciled truth (members may now be in_review, rework, or
-   re-running) before dispatching, reviewing, or finishing — never assume the
-   pre-restart state still holds.
 """
+    + _LEAD_PROTOCOL_TAIL
+    + "\n"
+)
 
 # Playbook variant for leads spawned from a chat draft commit_task path
 # (VALUZ-CHATPLAN). The plan is already laid out (and signed off by the user),
-# so the lead skips step 1 "PLAN FIRST" and goes straight to dispatch. The
-# handler-level gate also rejects plan_task when ``plan`` is non-empty, so this
-# is belt-and-suspenders: tell the model the right path, AND refuse the wrong
+# so step 1 reads the committed plan instead of writing one. The handler-level
+# gate also rejects plan_task when ``plan`` is non-empty, so this is
+# belt-and-suspenders: tell the model the right path, AND refuse the wrong
 # call if it tries anyway.
-COMMITTED_LEAD_PLAYBOOK = """\
+COMMITTED_LEAD_PLAYBOOK = (
+    """\
 ## Dispatch Playbook (lead session — plan pre-committed)
 
 You are the lead for this Task. Your plan was ALREADY laid down and approved
@@ -399,15 +439,9 @@ by the user during a chat draft session — DO NOT call plan_task (the handler
 will reject it because the plan is non-empty). Drive execution in this one
 turn until finish_task.
 
-NOTE — the goal-mode length budget (~2000 tokens per goal). Two directions:
-  • RECEIVING: if THIS task's goal was too long to pass inline you'll get a
-    short pointer to a doc file instead of the full goal — read that doc FIRST
-    (file-read tool) for the complete goal / references / criteria.
-  • DISPATCHING / modify_plan: keep each subtask's `goal` concise. When a
-    subtask needs a lot of context (over ~2000 tokens), FIRST write it to a
-    file in the project and put the FILE PATH in the subtask `goal` (or refs)
-    — do NOT inline a huge goal. (Over-long goals are auto-spilled as a safety
-    net, but writing the file yourself keeps the plan readable.)
+"""
+    + _LEAD_GOAL_BUDGET_NOTE
+    + """
 
 Protocol:
 
@@ -415,44 +449,10 @@ Protocol:
    DAG: each node carries a stable `key`, target `agent`, dependencies, and
    the `review_criteria` the user signed off on. The response includes
    `current_version` — remember this for any modify_plan call you make.
-2. DISPATCH INDEPENDENT SUBTASKS IN PARALLEL. For every key whose deps are
-   already satisfied (the `ready` list from get_plan), call
-   dispatch(subtask_key=...)
-   back-to-back — dispatch is NON-BLOCKING, members run concurrently. Never
-   serialize independent work.
-3. COLLECT with await_members(mode="any") in a loop, reviewing each result as
-   it arrives. Use await_members(mode="all") only when you genuinely need
-   the whole batch at once before continuing.
-4. REVIEW each finished subtask with
-   review_subtask(subtask_key=..., decision=..., feedback=...) — judge against
-   the node's `review_criteria`. "approve" marks done and unlocks dependents.
-   "rework" sends it back: READ THE REPLY — `delivered_to_live_member: true`
-   means the member is already redoing it (just await_members again); `false`
-   means the node is parked in `rework`, so dispatch(subtask_key=...) to
-   re-run it. Read result files directly to judge.
-5. EXTEND THE PLAN IF NEEDED. If during execution you discover the plan
-   needs new nodes (a missed step, a dependency to verify, a follow-up the
-   user implicitly wanted), call modify_plan(add=[...], expected_version=N)
-   where N is the last `current_version` you saw. On
-   PLAN_VERSION_CONFLICT, call get_plan() to refresh and retry — someone
-   else (a user inject) may have just edited the plan from a chat session.
-6. You are the ONLY agent allowed to dispatch (single layer; members can't).
-   NEVER use the built-in `Agent` / `Task` tool to spawn sub-agents.
-7. finish_task IS THE ONLY COMPLETION SIGNAL. Every plan node must be done
-   first. Call finish_task(summary, artifacts, status="completed"); use
-   status="stopped" when the user explicitly asked you to stop via an
-   injected instruction, or when the goal has become unreachable. Do not
-   continue working after finish_task. (Task-level "failed" is not a valid
-   status — use "stopped".)
-8. EXTERNAL INSTRUCTIONS. You may receive turn-boundary messages tagged
-   <user-instruction source="chat"> — these are user follow-ups injected
-   from the chat that drafted you. Read them as authoritative user intent;
-   typically translate them into modify_plan + dispatch (or rework for an
-   in-flight subtask), then continue.
-9. RECOVERY: if your session is resumed after an app restart, you may
-   receive a <system-recovery> reconcile brief. ALWAYS call get_plan FIRST
-   to align with the reconciled truth before dispatching or reviewing.
 """
+    + _LEAD_PROTOCOL_TAIL
+    + "\n"
+)
 
 
 # Max chars of a member's instructions surfaced in the lead roster / list_members.
@@ -486,12 +486,11 @@ task the user meant to amend is the #1 failure mode.
      task_id)`` to read its current subtask DAG (keys, agents, statuses).
   b. Route by the task's status — the goal is to touch SUBTASKS of the
      EXISTING task, not spawn a new task:
-       - ``active`` / ``paused`` → ``inject_into_task(task_id, text)`` with
-         a clear instruction ("加一个子任务 X：…" / "把子任务 Y 改成 …" /
-         "删掉子任务 Z"). The running lead turns it into modify_plan +
-         dispatch. (For ``paused``, ``resume_task`` first, then inject.)
-       - ``blocked`` / ``stopped`` → ``resume_task(task_id)`` to revive the
-         lead, then ``inject_into_task`` with the subtask change.
+       - ``active`` / ``paused`` / ``blocked`` / ``stopped`` →
+         ``inject_into_task(task_id, text)`` with a clear instruction
+         ("加一个子任务 X：…" / "把子任务 Y 改成 …"). ONE call: a halted task
+         is revived automatically (the reply says ``reason=TASK_RESUMED``)
+         and the running lead turns the text into modify_plan + dispatch.
        - ``completed`` → **区分场景** (judge the user's intent):
            · SUPPLEMENT / ADJUST subtasks of the SAME goal ("再补一个子任务"
              / "那一步重做一下") → ``resume_task(task_id)`` to REOPEN it
@@ -557,46 +556,12 @@ You may modify the plan of a DRAFT task directly with ``modify_plan``
 6. ABANDON ON USER REQUEST. If the user says "forget it" / "drop it",
    call ``abandon_task(task_id, reason)`` — terminal, no lead starts.
 
-Mid-execution intervention. If the task is already running (you see
-an entry from ``list_tasks(mine_only=true, status="active")``) and the
-user adds an instruction like "also add a competitor analysis":
-
-  → Call ``inject_into_task(task_id, text)`` to push the instruction
-    into the lead's mailbox. DO NOT start a new task. The lead reads
-    the message at its next turn boundary and typically translates it
-    into a ``modify_plan`` + ``dispatch``.
-  → If ``delivered=false`` with ``reason=LEAD_OFFLINE``, the lead has
-    already finished — see "Reviving a stopped lead" below.
-
-Reviving a paused/blocked/stopped/completed lead. If the user wants to
-continue (or reopen) a task whose lead has gone away:
-
-  → Call ``resume_task(task_id)``. This respawns the lead session and
-    flips the task back to ``active``; you can then inject_into_task as
-    normal. Qualifying sources:
-      - ``paused`` — REST /intervene action=pause
-      - ``blocked`` — auto-finalize couldn't close (or lead turn crashed)
-      - ``stopped`` — the user previously stopped it (typical: "停止此任务"
-        then they change their mind).
-      - ``completed`` — REOPEN a finished task to supplement/adjust its
-        subtasks (区分场景: only when the user is amending the SAME goal;
-        a brand-new goal → fresh follow-up draft_task instead).
-  → Only ``abandoned`` CANNOT be resumed — a discarded draft has no plan
-    to revive; if the user wants that plan back, draft_task + plan_task
-    from scratch.
-
-Quick rules of thumb:
-  - The user references an EXISTING task / names a subtask to add/change
-    → Step 0: inject_into_task (active/paused) or resume_task then inject
-    (blocked/stopped/completed). NEVER create a new task for an amendment.
-  - Single-step / one-off answer → answer in chat directly. No task.
-  - Brand-new multi-step goal / "go produce X" → draft_task + plan_task,
-    confirm, then commit_task.
-  - User talks while a task runs → inject_into_task.
-  - User wants to continue/reopen a paused/blocked/stopped/completed task
-    → resume_task (then inject the change).
-  - Genuinely new goal that builds on a finished task → new draft_task
-    with ``refs`` to the old one (follow-up), not a reopen.
+Two edges Step 0 does not cover:
+  - ``abandoned`` CANNOT be revived — a discarded draft has no plan left.
+    If the user wants it back, draft_task + plan_task from scratch.
+  - ``resume_task(task_id)`` exists for reopening WITHOUT a message to
+    deliver; when you have the user's instruction in hand, inject_into_task
+    already does both.
 """
 
 
@@ -1201,11 +1166,17 @@ async def build_member_session(
 
     # Session-modes (docs/exec-plans/active/task-goal-mode.md): when the
     # caller opts into goal mode (lead whole-task / member sub-run), set
-    # ``Session.mode="goal"`` so the kernel wraps this session's first
-    # message into ``/goal <brief>`` and the runtime auto-loops until the
-    # goal is met (Claude Haiku evaluator / codex goal protocol). Gated on
-    # runtime support — deepagents has no native goal mode (kernel routes
-    # 400), so it falls back to a single ``default`` run_turn.
+    # ``Session.mode="goal"`` so the kernel wraps the session's messages
+    # into ``/goal <text>`` and the runtime auto-loops until the goal is met
+    # (Claude Haiku evaluator / codex goal protocol). Gated on runtime
+    # support — deepagents has no native goal mode (kernel routes 400), so
+    # it falls back to a single ``default`` run_turn.
+    #
+    # NOTE the wrap is per-MESSAGE, not first-message-only (``wrap_for_mode``:
+    # "each turn enters its native mode for that turn"). This comment used to
+    # say "first message", and the task actor loop was written against that
+    # belief — see ActorRunner._with_goal_restated for what the real contract
+    # forces on every lead wake-up.
     session_mode = (
         "goal" if goal_mode and agent.runtime_provider in ("claude_agent", "codex") else "default"
     )

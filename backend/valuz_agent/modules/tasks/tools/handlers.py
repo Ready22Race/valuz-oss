@@ -625,7 +625,10 @@ async def _create_task_handler(
     lead_agent = await _resolve_task_lead(
         user_id=ctx.user_id,
         project_id=project_id,
-        explicit_slug=args.get("lead_agent"),
+        # ``lead_agent_slug`` is the declared name (matching draft_task);
+        # ``lead_agent`` was the old spelling — keep reading it so a model
+        # working from a cached tool schema still lands.
+        explicit_slug=args.get("lead_agent_slug") or args.get("lead_agent"),
         conversation_agent_slug=conversation_agent_slug,
     )
     if not lead_agent:
@@ -654,7 +657,7 @@ async def _create_task_handler(
             {
                 "task_id": task_row.id,
                 "title": task_row.title,
-                "lead_agent": lead_agent,
+                "lead_agent_slug": lead_agent,
                 "status": "active",
             },
             ensure_ascii=False,

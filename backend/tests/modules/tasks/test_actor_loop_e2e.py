@@ -462,3 +462,74 @@ def test_member_result_reaches_a_lead_that_is_mid_park(loop_env) -> None:
     # The node moved to in_review from the LOOP's mark_in_review, not a test call.
     node = _plan(loop_env.db_factory).get("a")
     assert node is not None and node.status in ("in_review", "done"), node.status
+
+
+def test_lead_wake_up_restates_the_task_goal(loop_env) -> None:
+    """A lead wake-up must carry the task goal, not just the member result.
+
+    The kernel wraps EVERY non-slash message of a goal-mode session as
+    ``/goal <text>`` (wrap_for_mode: "each turn enters its native mode for
+    that turn"), and task leads run in goal mode. So whatever we send on a
+    wake-up becomes that turn's goal: a bare member result would re-goal the
+    lead to "review this result", and the runtime's goal-auto-exit fires as
+    soon as that trivial goal is met — the lead stops driving the real task.
+    """
+    orch, state = loop_env.orch, loop_env.state
+    prompts: list[str] = []
+
+    asyncio.run(
+        planning.plan_task(
+            task_id=TASK,
+            project_id=PROJECT,
+            user_id=OWNER,
+            lead_session_id=LEAD,
+            subtasks=[{"key": "a", "title": "A", "agent": "worker"}],
+        )
+    )
+
+    async def _turn_1(_prompt: str) -> str:
+        await orch.dispatcher.dispatch_async(
+            task_id=TASK,
+            project_id=PROJECT,
+            lead_session_id=LEAD,
+            subtask_key="a",
+            user_id=OWNER,
+        )
+        return "idle"
+
+    async def _turn_2(prompt: str) -> str:
+        prompts.append(prompt)
+        await orch.finalization.finish_task(
+            task_id=TASK,
+            project_id=PROJECT,
+            lead_session_id=LEAD,
+            summary="done",
+            status="stopped",
+            user_id=OWNER,
+        )
+        return "idle"
+
+    state.script[LEAD] = [_turn_1, _turn_2]
+
+    async def _run() -> None:
+        await asyncio.wait_for(
+            orch.actor.run_actor_loop(
+                session_id=LEAD,
+                initial_prompt="go",
+                role="lead",
+                task_id=TASK,
+                project_id=PROJECT,
+                idle_ttl=5.0,
+                user_id=OWNER,
+            ),
+            timeout=10,
+        )
+
+    asyncio.run(_run())
+
+    assert prompts, "the lead never woke on member_done"
+    assert "<task-goal>do it</task-goal>" in prompts[0], (
+        "the wake-up prompt must restate the task goal — without it the "
+        f"turn's goal becomes the member result (got: {prompts[0][:200]})"
+    )
+    assert "mem-1 done" in prompts[0], "the member result must still be carried"
