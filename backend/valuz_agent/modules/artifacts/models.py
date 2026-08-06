@@ -322,3 +322,43 @@ class ArtifactContentRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     byte_size: Mapped[int] = mapped_column(BigInteger, default=0)
 
     __table_args__ = (Index("ix_artifact_content_hash", "user_id", "content_hash"),)
+
+
+class ArtifactBindingRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
+    """Which revision a host surface is currently showing.
+
+    A *host* is any place in a product that displays one deliverable: a
+    research desk, a company page, a dashboard slot. The binding says "this
+    slot shows exactly THIS revision" — not "the latest", which is why the
+    column is a revision id and not an artifact id. Regenerating a page creates
+    a version; adopting it is a separate, user-confirmed write here. That
+    separation is the whole point: a generation must never silently replace
+    what the user is looking at.
+
+    ``host_type`` is an OPEN string. The kernel does not enumerate hosts and
+    must not: the values are owned by whichever product surface defines them
+    (``finance.company-research``, and whatever the next edition adds). This
+    layer only stores, scopes and serialises the pointer.
+
+    One binding per slot, per owner: the unique constraint is what makes the
+    optimistic-lock write (compare-and-set on the currently bound revision)
+    meaningful — two tabs adopting different versions cannot both win.
+    """
+
+    __tablename__ = "valuz_artifact_binding"
+
+    host_type: Mapped[str] = mapped_column(String(64))
+    host_id: Mapped[str] = mapped_column(String(128))
+    slot: Mapped[str] = mapped_column(String(32), default="main")
+    artifact_id: Mapped[str] = mapped_column(String(16), index=True)
+    artifact_revision_id: Mapped[str] = mapped_column(String(16))
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "host_type",
+            "host_id",
+            "slot",
+            name="uq_artifact_binding_host_slot",
+        ),
+    )
