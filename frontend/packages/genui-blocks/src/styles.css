@@ -21,4 +21,10 @@
 @import "./styles/sources.css";
 @import "./styles/report.css";
 @import "./styles/market.css";
+@import "./styles/charts.css";
 @import "./styles/icons.css";
+@import "./styles/collections.css";
+@import "./styles/tabular.css";
+@import "./styles/content.css";
+@import "./styles/layout.css";
+@import "./styles/states.css";

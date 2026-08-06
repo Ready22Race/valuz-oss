@@ -2,25 +2,8 @@ import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 
-vi.mock("@openuidev/react-lang", () => ({
-  Renderer: (props: { response: string; isStreaming?: boolean }) => (
-    <div
-      data-testid="renderer"
-      data-streaming={props.isStreaming ? "true" : "false"}
-    >
-      {props.response}
-    </div>
-  ),
-}));
 vi.mock("@openuidev/react-ui", () => ({
   ThemeProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
-}));
-// The OpenUI Lang branch renders against the merged OpenUI + Valuz library.
-// Stubbing the factory keeps this file about protocol dispatch; the merge is
-// covered by @valuz/genui-blocks' own tests and by
-// GenerativeUICard.blocks.test.tsx, which use the real parser.
-vi.mock("@valuz/genui-blocks", () => ({
-  createValuzLibrary: () => ({}),
 }));
 vi.mock("./A2UIRenderer", () => ({
   A2UIRenderer: ({ body }: { body: string }) => (
@@ -32,14 +15,24 @@ import { GenerativeUIRenderer } from "./GenerativeUIRenderer";
 import { parseGenerativeUIPayload } from "./generative-ui-payload";
 
 describe("GenerativeUIRenderer", () => {
-  it("renders OpenUI Lang through the OpenUI renderer", () => {
-    render(
-      <GenerativeUIRenderer payload={"Chart\n  data: 1"} status="running" />,
+  it("draws nothing for a payload that is not an A2UI stream", () => {
+    // A2UI is the only protocol. Anything else — an older OpenUI Lang result,
+    // a plain-text error — has no renderer, and printing its source where a
+    // rendered UI belongs reads as a bug in the answer.
+    const { container } = render(
+      <GenerativeUIRenderer payload={"root = Stack([])"} status="success" />,
     );
 
-    const renderer = screen.getByTestId("renderer");
-    expect(renderer.textContent).toBe("Chart\n  data: 1");
-    expect(renderer.getAttribute("data-streaming")).toBe("true");
+    expect(screen.queryByTestId("a2ui-renderer")).toBeNull();
+    expect(container.textContent).toBe("");
+  });
+
+  it("refuses a payload whose envelope names an unknown protocol", () => {
+    expect(
+      parseGenerativeUIPayload(
+        JSON.stringify({ protocol: "openui-lang", content: "root = Stack([])" }),
+      ),
+    ).toBeNull();
   });
 
   it("parses an A2UI protocol envelope", () => {
@@ -80,7 +73,6 @@ describe("GenerativeUIRenderer", () => {
       />,
     );
 
-    expect(screen.queryByTestId("renderer")).toBeNull();
     expect(screen.getByTestId("a2ui-renderer").textContent).toBe(messages);
   });
 });

@@ -1,38 +1,35 @@
-"""GenUI protocol selection and payload tests."""
+"""A2UI prompt and payload tests.
+
+A2UI v0.9 is the only wire protocol; the OpenUI Lang generation path was
+removed rather than maintained alongside it.
+"""
 
 from __future__ import annotations
 
 import json
 
-from valuz_agent.infra.config import Settings
+from valuz_agent.modules.genui.prompts import TOOL_DESCRIPTION
 from valuz_agent.modules.genui.protocol import (
-    build_prompt_for_protocol,
-    normalize_genui_protocol,
-    output_format_for_protocol,
-    session_instructions_for_protocol,
+    OUTPUT_FORMAT,
+    a2ui_instructions,
+    build_a2ui_prompt,
     wrap_generated_ui,
 )
 
 
-def test_settings_defaults_generate_ui_to_a2ui():
-    assert Settings().genui_protocol == "a2ui"
+def test_tool_description_states_when_to_call_it():
+    assert "UI" in TOOL_DESCRIPTION and "chart" in TOOL_DESCRIPTION.lower()
 
 
-def test_settings_allows_openui_env_override(monkeypatch):
-    monkeypatch.setenv("VALUZ_GENUI_PROTOCOL", "openui")
-
-    assert Settings().genui_protocol == "openui"
-
-
-def test_protocol_normalization_accepts_wire_aliases():
-    assert normalize_genui_protocol("a2ui-json") == "a2ui"
-    assert normalize_genui_protocol("A2UI") == "a2ui"
-    assert normalize_genui_protocol("openui-lang") == "openui"
-    assert normalize_genui_protocol("OpenUI") == "openui"
+def test_prompt_splices_request_and_data():
+    prompt = build_a2ui_prompt("a bar chart of Q1-Q4 sales", {"q1": 10})
+    assert "REQUEST:" in prompt
+    assert "a bar chart of Q1-Q4 sales" in prompt
+    assert '"q1": 10' in prompt
 
 
 def test_a2ui_prompt_describes_message_stream_and_openui_catalog():
-    prompt = build_prompt_for_protocol("a2ui", "sales dashboard", {"revenue": 12})
+    prompt = build_a2ui_prompt("sales dashboard", {"revenue": 12})
 
     assert "A2UI" in prompt
     assert "v0.9" in prompt
@@ -61,19 +58,16 @@ def test_a2ui_prompt_describes_message_stream_and_openui_catalog():
     assert "Do not create placeholder charts" in prompt
 
 
-def test_a2ui_session_instruction_and_output_format_are_not_openui_lang():
-    assert "A2UI" in session_instructions_for_protocol("a2ui")
-    assert output_format_for_protocol("a2ui") == "A2UI v0.9 JSON message stream"
+def test_session_instruction_and_output_format_name_the_stream():
+    assert "A2UI" in a2ui_instructions()
+    assert OUTPUT_FORMAT == "A2UI v0.9 JSON message stream"
 
 
-def test_wrap_generated_ui_keeps_openui_raw_and_wraps_a2ui():
-    assert wrap_generated_ui("openui", "  root = Stack([])  ") == "root = Stack([])"
-
+def test_wrap_generated_ui_puts_the_stream_in_the_client_envelope():
+    # The envelope is what the client dispatches on; a bare stream would reach
+    # the renderer only by sniffing, which is what the envelope exists to avoid.
     wrapped = json.loads(
-        wrap_generated_ui(
-            "a2ui",
-            '{"version":"v0.9","createSurface":{"surfaceId":"s1"}}',
-        )
+        wrap_generated_ui('{"version":"v0.9","createSurface":{"surfaceId":"s1"}}')
     )
 
     assert wrapped == {

@@ -1,6 +1,25 @@
 import "./styles.css";
 
 export type { BlockComponent } from "./blocks";
+export type {
+  BlockRegistrationMode,
+  RegisterOptions,
+  RegisterResult,
+} from "./registry";
+export { ROOT_COMPONENT_NAME } from "./root";
+export {
+  builtInBlocksSuppressed,
+  effectiveBlockNames,
+  effectiveBlocks,
+  getRegistryVersion,
+  registerBlocks,
+  resetRuntimeBlocks,
+  runtimeBlockGroups,
+  runtimeBlockSpecs,
+  runtimeBlocks,
+  subscribeBlocks,
+  unregisterBlocks,
+} from "./registry";
 export type { BlockPropSpec, BlockSpec } from "./catalog";
 export {
   blockCatalog,
@@ -8,7 +27,6 @@ export {
   describeBlock,
   renderBlockCatalogText,
 } from "./catalog";
-export { blockAdditionalRules, blockExamples, valuzPromptOptions } from "./prompt";
 export {
   createBlockOnlyLibrary,
   createValuzLibrary,
@@ -44,6 +62,51 @@ export * from "./Report";
 export * from "./DataList";
 export * from "./MarketIndexGrid";
 export * from "./MarketBreadth";
+
+// Layout & structure
+export * from "./Layout";
+
+// Content & annotation
+export * from "./Avatar";
+export * from "./Footnote";
+export * from "./JsonView";
+export * from "./KeyValue";
+export * from "./MetricGroup";
+export * from "./RichText";
+export * from "./StatDelta";
+
+// Collections
+export * from "./Calendar";
+export * from "./ComparisonTable";
+export * from "./DataGrid";
+export * from "./EventStrip";
+export * from "./Kanban";
+export * from "./PivotTable";
+export * from "./Feed";
+export * from "./Outline";
+export * from "./StatusList";
+export * from "./Timeline";
+
+// Feedback states
+export * from "./EmptyState";
+export * from "./ErrorState";
+export * from "./Progress";
+export * from "./Result";
+export * from "./Skeleton";
+
+// Charts
+export * from "./BoxPlot";
+export * from "./BubbleChart";
+export * from "./ComboChart";
+export * from "./Sankey";
+export * from "./SmallMultiples";
+export * from "./CategoryBars";
+export * from "./Funnel";
+export * from "./Heatmap";
+export * from "./Histogram";
+export * from "./Sparkline";
+export * from "./Treemap";
+export * from "./Waterfall";
 
 // Diagrams
 export * from "./Mermaid";

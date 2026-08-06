@@ -349,23 +349,6 @@ class Settings(BaseSettings):
     default_provider_id: str | None = None
     default_effort: str = "high"
 
-    # GenUI wire protocol used by the ``generate_ui`` tool. A2UI is the system
-    # default because it gives the frontend a protocol envelope and lets the
-    # renderer evolve independently from OpenUI Lang. Override with
-    # ``VALUZ_GENUI_PROTOCOL=openui`` for the legacy OpenUI Lang path.
-    genui_protocol: Literal["a2ui", "openui"] = "a2ui"
-
-    @field_validator("genui_protocol", mode="before")
-    @classmethod
-    def _normalize_genui_protocol(cls, value: object) -> str:
-        if isinstance(value, str):
-            normalized = value.strip().lower().replace("_", "-")
-            if normalized in {"a2ui", "a2ui-json", "a2ui-v0.9", "a2ui-0.9"}:
-                return "a2ui"
-            if normalized in {"openui", "openui-lang"}:
-                return "openui"
-        raise ValueError("genui_protocol must be 'a2ui' or 'openui'")
-
     model_config = {"env_prefix": "VALUZ_"}
 
 

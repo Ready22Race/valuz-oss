@@ -1,4 +1,12 @@
-export type GenerativeUIProtocol = "openui-lang" | "a2ui-json";
+/**
+ * A2UI v0.9 is the only generative-UI protocol.
+ *
+ * The tool could once emit OpenUI Lang instead, so the payload carried a
+ * protocol to dispatch on. The union is kept as a one-member type rather than
+ * dropped because the envelope on the wire still names its protocol, and a
+ * payload whose name we do not recognise must be refused rather than assumed.
+ */
+export type GenerativeUIProtocol = "a2ui-json";
 
 export interface GenerativeUIPayload {
   protocol: GenerativeUIProtocol;
@@ -33,19 +41,23 @@ export function extractContentText(raw: string | undefined | null): string {
   return s;
 }
 
+/**
+ * The A2UI payload inside a tool result, or null when there is not one.
+ *
+ * Null rather than a best-effort body: anything that is not an A2UI stream has
+ * no renderer to go to, and passing it on would put raw source text on screen
+ * where a rendered UI belongs.
+ */
 export function parseGenerativeUIPayload(
   raw: string | GenerativeUIPayload | undefined | null,
-): GenerativeUIPayload {
+): GenerativeUIPayload | null {
   if (raw && typeof raw === "object") return raw;
 
   const body = extractContentText(raw);
   const envelope = parseProtocolEnvelope(body);
   if (envelope) return envelope;
 
-  return {
-    protocol: looksLikeA2UI(body) ? "a2ui-json" : "openui-lang",
-    body,
-  };
+  return looksLikeA2UI(body) ? { protocol: "a2ui-json", body } : null;
 }
 
 function parseProtocolEnvelope(body: string): GenerativeUIPayload | null {
@@ -84,10 +96,7 @@ function readPayloadBody(payload: Record<string, unknown>): string {
 
 function normalizeProtocol(value: unknown): GenerativeUIProtocol | null {
   if (typeof value !== "string") return null;
-  const normalized = value.toLowerCase();
-  if (normalized.includes("a2ui")) return "a2ui-json";
-  if (normalized.includes("openui")) return "openui-lang";
-  return null;
+  return value.toLowerCase().includes("a2ui") ? "a2ui-json" : null;
 }
 
 function looksLikeA2UI(body: string): boolean {

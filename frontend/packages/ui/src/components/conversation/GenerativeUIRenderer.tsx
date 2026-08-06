@@ -1,7 +1,5 @@
 import { type ComponentProps, type ReactNode } from "react";
-import { Renderer } from "@openuidev/react-lang";
 import { ThemeProvider } from "@openuidev/react-ui";
-import { createValuzLibrary } from "@valuz/genui-blocks";
 
 import { A2UIRenderer } from "./A2UIRenderer";
 import {
@@ -17,21 +15,6 @@ export type {
   GenerativeUIPayload,
   GenerativeUIProtocol,
 } from "./generative-ui-payload";
-
-/**
- * OpenUI's own components plus the Valuz blocks, as one library.
- *
- * Built once at module scope: `createValuzLibrary()` walks and re-registers
- * every component and the result is immutable, so rebuilding it per render
- * would be pure waste. The merge is additive — no block shadows an OpenUI
- * component (a test in `@valuz/genui-blocks` enforces that), so anything the
- * model could emit before it still emits now.
- *
- * This covers the OpenUI Lang protocol only. The A2UI branch below resolves
- * component names through `A2UIRenderer`'s own catalog, which is maintained
- * separately — a block added here is not automatically reachable there.
- */
-const OPENUI_LANG_LIBRARY = createValuzLibrary();
 
 export type GenerativeUIStatus = "running" | "success" | "error";
 
@@ -287,38 +270,12 @@ export function GenerativeUIRenderer({
   status,
 }: GenerativeUIRendererProps) {
   const parsed = parseGenerativeUIPayload(payload);
-  if (!parsed.body) return null;
+  // Nothing to draw rather than raw text on screen: a tool result that is not
+  // an A2UI stream has no renderer, and printing its source where a rendered UI
+  // belongs reads as a bug in the answer rather than in the payload.
+  if (!parsed?.body) return null;
 
-  if (parsed.protocol === "a2ui-json") {
-    return <A2UIBody body={parsed.body} status={status} />;
-  }
-
-  return <OpenUIBody body={parsed.body} status={status} />;
-}
-
-function OpenUIBody({
-  body,
-  status,
-}: {
-  body: string;
-  status?: GenerativeUIStatus;
-}) {
-  return (
-    <OpenUITheme>
-      {/* `vgb-root` is the container the blocks' `@container vgb` queries
-          resolve against, and the scope of their `min-width: 0` reset. Without
-          it every breakpoint silently never matches: a tile keeps its widest
-          floor at every width and overflows the column it sits in, painting
-          over whatever is beside it. */}
-      <div className="vgb-root">
-        <Renderer
-          library={OPENUI_LANG_LIBRARY}
-          response={body}
-          isStreaming={status === "running"}
-        />
-      </div>
-    </OpenUITheme>
-  );
+  return <A2UIBody body={parsed.body} status={status} />;
 }
 
 function OpenUITheme({ children }: { children: ReactNode }) {

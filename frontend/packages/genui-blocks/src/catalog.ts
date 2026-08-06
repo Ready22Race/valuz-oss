@@ -69,14 +69,26 @@ export const blockNames: string[] = blockCatalog.map((b) => b.name);
  * one line per component, props inline, description after an em dash.
  */
 export function renderBlockCatalogText(): string {
+  /**
+   * Types and enum members are spelled out, not just prop names.
+   *
+   * A2UI is the default protocol, so this catalog is what the model actually
+   * reads — and a bare `trend?` tells it nothing about which words are legal.
+   * It then guesses, and a guess that misses renders a block with a silently
+   * dropped prop. The information is already on `BlockPropSpec`; omitting it
+   * only made the catalog shorter, not cheaper.
+   */
+  const describeProp = (p: BlockPropSpec) => {
+    const name = p.optional ? `${p.name}?` : p.name;
+    if (p.values?.length) return `${name}: ${p.values.map((v) => `"${v}"`).join("|")}`;
+    return `${name}: ${p.type}`;
+  };
   const line = (b: BlockSpec) => {
-    const props = b.props
-      .map((p) => (p.optional ? `${p.name}?` : p.name))
-      .join(", ");
+    const props = b.props.map(describeProp).join(", ");
     // Collapse the description to one line — the catalog is a list, and a
     // multi-line entry reads as a new component to the model.
     const desc = b.description.replace(/\s+/g, " ").trim();
-    return `  - ${b.name}: props ${props || "(none)"}. ${desc}`;
+    return `  - ${b.name}(${props}) — ${desc}`;
   };
   return blockCatalog.map(line).join("\n");
 }

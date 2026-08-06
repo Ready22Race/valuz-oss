@@ -1,9 +1,59 @@
 import type { ComponentGroup, DefinedComponent } from "@openuidev/react-lang";
 
+import { Avatar } from "./Avatar";
+import { BoxPlot } from "./BoxPlot";
+import { BubbleChart } from "./BubbleChart";
+import { Calendar } from "./Calendar";
+import { GroupedBar, StackedBar } from "./CategoryBars";
+import { ComboChart } from "./ComboChart";
+import { ComparisonTable, DiffView } from "./ComparisonTable";
+import { EmptyState } from "./EmptyState";
+import { ErrorState } from "./ErrorState";
+import { EventStrip } from "./EventStrip";
+import { Feed } from "./Feed";
+import { Footnote, FootnoteList } from "./Footnote";
+import { Funnel } from "./Funnel";
+import { Heatmap } from "./Heatmap";
+import { Histogram } from "./Histogram";
+import { JsonView } from "./JsonView";
+import { Kanban } from "./Kanban";
+import { KeyValue, KeyValueGroup } from "./KeyValue";
+import {
+  AspectRatio,
+  Cluster,
+  Collapsible,
+  DashboardGrid,
+  Divider,
+  Inline,
+  Inset,
+  Page,
+  PageFooter,
+  PageHeader,
+  ScrollArea,
+  Spacer,
+  Split,
+  Well,
+} from "./Layout";
+import { MetricGroup } from "./MetricGroup";
+import { Breadcrumb, DescriptionList, Tree } from "./Outline";
+import { PivotTable } from "./PivotTable";
+import { Progress } from "./Progress";
+import { Result } from "./Result";
+import { RichText } from "./RichText";
+import { Sankey } from "./Sankey";
+import { Skeleton } from "./Skeleton";
+import { SmallMultiples } from "./SmallMultiples";
+import { Sparkline } from "./Sparkline";
+import { StatDelta } from "./StatDelta";
+import { ProgressList, StatusItem, StatusList } from "./StatusList";
+import { ActivityFeed, ActivityItem, Timeline, TimelineItem } from "./Timeline";
+import { Treemap } from "./Treemap";
+import { BridgeChart, Waterfall } from "./Waterfall";
 import { MediumCardBlock, SmallCardBlock } from "./CardBlock";
 import { Citation, CondensedSources, SourceItem, SourceList } from "./Citation";
 import { CompositeCard } from "./CompositeCard";
 import { ContextCard } from "./ContextCard";
+import { DataGrid } from "./DataGrid";
 import { DataList, DataListItem } from "./DataList";
 import { DataTileCard } from "./DataTileCard";
 import { IconTag, IconText } from "./IconTag";
@@ -95,6 +145,72 @@ export const blockComponents: BlockComponent[] = [
   MarketBreadth,
   DataList,
   DataListItem,
+  // Layout & structure
+  Page,
+  PageHeader,
+  PageFooter,
+  DashboardGrid,
+  Inline,
+  Cluster,
+  Split,
+  Inset,
+  Well,
+  Divider,
+  Spacer,
+  AspectRatio,
+  ScrollArea,
+  Collapsible,
+  // Content & annotation
+  RichText,
+  KeyValueGroup,
+  KeyValue,
+  DescriptionList,
+  FootnoteList,
+  Footnote,
+  JsonView,
+  MetricGroup,
+  StatDelta,
+  Avatar,
+  // Collections
+  Timeline,
+  TimelineItem,
+  ActivityFeed,
+  ActivityItem,
+  Feed,
+  StatusList,
+  StatusItem,
+  ProgressList,
+  ComparisonTable,
+  DiffView,
+  Tree,
+  Breadcrumb,
+  // Data views
+  DataGrid,
+  PivotTable,
+  Calendar,
+  EventStrip,
+  Kanban,
+  // Feedback states
+  EmptyState,
+  ErrorState,
+  Result,
+  Progress,
+  Skeleton,
+  // Charts
+  Sparkline,
+  Waterfall,
+  BridgeChart,
+  Funnel,
+  Heatmap,
+  Histogram,
+  BoxPlot,
+  Treemap,
+  GroupedBar,
+  StackedBar,
+  BubbleChart,
+  SmallMultiples,
+  ComboChart,
+  Sankey,
   // Diagrams
   Mermaid,
   MermaidBadge,
@@ -165,6 +281,62 @@ export const blockComponentGroups: ComponentGroup[] = [
     ],
     notes: [
       "Market answers open with a MarketIndexGrid of quotes and, when the answer claims the move was broad, a MarketBreadth beside it; DataList is the ranking/leaderboard shape and beats a Table whenever every row is name + figure + change.",
+    ],
+  },
+  {
+    name: "Layout & Structure",
+    components: [
+      "Page", "PageHeader", "PageFooter", "DashboardGrid", "Inline", "Cluster", "Split", "Inset", "Well",
+      "Divider", "Spacer", "AspectRatio", "ScrollArea", "Collapsible",
+    ],
+    notes: [
+      "Root a laid-out answer in a Page and place its blocks with DashboardGrid (equal columns that re-fit themselves — never state a column count), Inline (two or three blocks sharing a line) or Cluster (many small tags). A Page is a frame that grows, so anything taller or wider than its column goes in a ScrollArea, and anything the reader may skip goes in a Collapsible. Prefer a container's own gap to a Spacer, and reach for Divider only between sections that are already whole.",
+    ],
+  },
+  {
+    name: "Content & Annotation",
+    components: [
+      "RichText", "KeyValueGroup", "KeyValue", "DescriptionList",
+      "FootnoteList", "Footnote", "JsonView", "MetricGroup", "StatDelta", "Avatar",
+    ],
+    notes: [
+      "Named fields go in a KeyValueGroup and defined vocabulary in a DescriptionList — a Table only once a row carries more than a label and a figure. MetricGroup is for figures that only mean something together, and its basis line is not optional in practice: a set of figures with no stated as-of invites a comparison that is not valid. Close a qualified answer with a FootnoteList for the answer's own caveats, keeping Citation and SourceList for other people's sources. RichText never parses markup — anything needing bold, headings, lists or links is a MarkDownRenderer.",
+    ],
+  },
+  {
+    name: "Collections & Structure",
+    components: [
+      "Timeline", "TimelineItem", "ActivityFeed", "ActivityItem", "Feed",
+      "StatusList", "StatusItem", "ProgressList", "ComparisonTable", "DiffView",
+      "Tree", "Breadcrumb",
+    ],
+    notes: [
+      "Repeating entries that share a shape: Timeline for dated milestones and ActivityFeed for who-did-what (TimelineItem / ActivityItem / StatusItem only ever sit inside their parent); StatusList and ProgressList for state and completion; ComparisonTable for the same measures across two to four subjects and DiffView for before/after of one; Tree and Breadcrumb for structure without time. Every one renders a finished answer — nothing is clickable or live.",
+    ],
+  },
+  {
+    name: "Data Views",
+    components: ["DataGrid", "PivotTable", "Calendar", "EventStrip", "Kanban"],
+    notes: [
+      "Views of a result set that would normally be operable, rendered static: they show what was already computed and can never be sorted, filtered, paged, expanded or dragged, so never describe an action the reader could take on one. DataGrid is a wide result set denser than Table, and its sortedBy / filteredBy state how the answer was produced rather than offering a control. PivotTable checks any totals you supply against its cells and prints a disagreement instead of correcting it. Calendar shows one named month with no way to reach another. EventStrip draws events across a range you state, clamping and counting any that fall outside. Kanban is a board as a picture — limit is reported, never enforced.",
+    ],
+  },
+  {
+    name: "Feedback States",
+    components: ["EmptyState", "ErrorState", "Result", "Progress", "Skeleton"],
+    notes: [
+      "EmptyState when nothing matched and the absence is the answer, ErrorState when something failed and there is a technical line worth showing, Result to report the outcome of something that finished; Progress is a determinate bar for a figure you already have, and Skeleton stands in for content that is not here. None of them can act — no retry, no reload, nothing behind them — so never write text asking the reader to press one.",
+    ],
+  },
+  {
+    name: "Charts",
+    components: [
+      "Sparkline", "Waterfall", "BridgeChart", "Funnel", "Heatmap",
+      "Histogram", "BoxPlot", "Treemap", "GroupedBar", "StackedBar",
+      "BubbleChart", "SmallMultiples", "ComboChart", "Sankey",
+    ],
+    notes: [
+      "Hand-drawn shapes OpenUI's own charts lack — reach for BarChart / LineChart / AreaChart / PieChart / ScatterChart / RadarChart first and come here only for these. Every one needs its values in a single unit, named by `unit`; Waterfall computes its own closing total and flags a reported figure that disagrees; a chart with no data renders nothing rather than an empty frame. BubbleChart encodes its third value as area rather than radius; SmallMultiples puts every panel on one shared domain and states it; ComboChart keeps one scale unless two different units are both given; Sankey checks each node's inflow against its outflow and flags a discrepancy rather than balancing it.",
     ],
   },
   {

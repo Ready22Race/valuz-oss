@@ -21,7 +21,8 @@ export const Citation = defineComponent({
   name: "Citation",
   props: CitationSchema,
   description:
-    "Inline superscript reference marker. Place it in flowing prose immediately after the clause it supports — never on its own line, never as a list. " +
+    "Inline superscript reference marker. Every claim you took from a source gets one — an unattributed figure or quotation reads as your own assertion. " +
+    "Place it in flowing prose immediately after the clause it supports — never on its own line, never as a list. " +
     "index is the source's number and must match the SourceItem carrying the same index; title is the source's headline and url its address (http/https only — anything else renders as plain text, not a link). " +
     "Pair every Citation with a SourceList or CondensedSources further down the answer, so the reader can resolve the number.",
   component: ({ props }) => {

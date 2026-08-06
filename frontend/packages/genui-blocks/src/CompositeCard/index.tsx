@@ -14,7 +14,7 @@ export const CompositeCard = defineComponent({
   description:
     "A heading area stacked over a free children slot: eyebrow (a short kicker like \"Q3\" or \"NORTH AMERICA\") above the title, with value as a formatted figure trailing on the right. " +
     "Reach for it when a section needs both a headline number and nested content — a chart, a Table, a MiniCardBlock — under one roof; use OverviewCard when a plain title and paragraph will do. " +
-    "clickable only adds hover styling: these cards never navigate anywhere, so do not describe them as buttons." +
+    "clickable only adds hover styling: these cards never navigate anywhere, so do not describe them as buttons. " +
     "icon is any lucide-react icon name, shown as a small mark beside the heading — put it there rather than pasting an emoji into the text.",
   component: ({ props, renderNode }) => (
     <div

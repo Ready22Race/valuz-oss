@@ -14,7 +14,7 @@ export const OverviewCard = defineComponent({
   description:
     "The general-purpose section summary: a title, a short body paragraph, then whatever the section contains in the children slot — a MiniCardBlock, a Table, a chart. " +
     "Reach for it to introduce a group of blocks instead of leaving them floating unlabelled. " +
-    "Keep body to a sentence or two; if the card needs a headline figure beside the title use CompositeCard instead." +
+    "Keep body to a sentence or two; if the card needs a headline figure beside the title use CompositeCard instead. " +
     "icon is any lucide-react icon name, shown as a small mark beside the heading — put it there rather than pasting an emoji into the text.",
   component: ({ props, renderNode }) => (
     <div className="vgb-card vgb-overview-card" data-slot="vgb-overview-card">
