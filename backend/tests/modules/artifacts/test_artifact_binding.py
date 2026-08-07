@@ -174,3 +174,77 @@ async def test_unbinding_clears_the_slot_and_keeps_the_revision(
         ds = ArtifactDatastore(db)
         assert await ds.get_binding(SCOPE.user_id, **HOST) is None
         assert await ds.get_revision(SCOPE.user_id, revision_id) is not None
+
+
+async def test_binding_response_reads_a_file_stored_document_back(
+    session_factory, cwd
+) -> None:
+    """A revision does not have to arrive inline to get bound.
+
+    An agent that recovers a page by writing the document to a file and
+    delivering THAT path produces a file-stored revision; serving ``null``
+    for its content blanked the whole workbench while the bytes sat intact
+    on disk (observed live: a desk recovery bound v9 as ``file`` and the
+    surface lost even its version bar).
+    """
+    from valuz_agent.api.routes.artifacts import _binding_response
+
+    document = '{"version":"v0.9","createSurface":{"surfaceId":"main"}}\n' * 3
+    source = cwd / "recovered.a2ui.jsonl"
+    source.write_text(document, encoding="utf-8")
+
+    async with session_factory() as db:
+        result = await deliver_artifact(
+            db,
+            scope=SCOPE,
+            scope_cwd=cwd,
+            owner_roots=[cwd.resolve()],
+            request=DeliveryRequest(abs_path=str(source)),
+        )
+        await db.commit()
+        revision_id = result.revision_id
+
+    await _bind(session_factory, revision_id)
+
+    async with session_factory() as db:
+        ds = ArtifactDatastore(db)
+        binding = await ds.get_binding(SCOPE.user_id, **HOST)
+        assert binding is not None
+        response = await _binding_response(ds, SCOPE.user_id, binding)
+
+    assert response.content == document
+
+
+async def test_binding_response_is_null_when_the_file_is_gone(
+    session_factory, cwd
+) -> None:
+    """Missing bytes are reported as missing, not invented."""
+    from valuz_agent.api.routes.artifacts import _binding_response
+
+    source = cwd / "doomed.a2ui.jsonl"
+    source.write_text('{"version":"v0.9"}\n', encoding="utf-8")
+
+    async with session_factory() as db:
+        result = await deliver_artifact(
+            db,
+            scope=SCOPE,
+            scope_cwd=cwd,
+            owner_roots=[cwd.resolve()],
+            request=DeliveryRequest(abs_path=str(source)),
+        )
+        await db.commit()
+        revision_id = result.revision_id
+
+    await _bind(session_factory, revision_id)
+
+    # The snapshot under .artifact/ is the bound path — remove it.
+    async with session_factory() as db:
+        ds = ArtifactDatastore(db)
+        revision = await ds.get_revision(SCOPE.user_id, revision_id)
+        assert revision is not None and revision.abs_path
+        Path(revision.abs_path).unlink()
+        binding = await ds.get_binding(SCOPE.user_id, **HOST)
+        assert binding is not None
+        response = await _binding_response(ds, SCOPE.user_id, binding)
+
+    assert response.content is None
