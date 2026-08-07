@@ -30,17 +30,19 @@ def _tree(root: Path, *slugs: str) -> Path:
     return root
 
 
-def test_defaults_to_the_packages_own_resources() -> None:
-    """A source checkout and a desktop install need no configuration."""
-    roots = fs_registry.system_skill_roots()
+def test_empty_until_a_deployment_declares_one() -> None:
+    """Declared, never inferred.
 
-    assert roots, "the package ships its own trees"
-    assert any(root.name == "official_skills" for root in roots)
-    assert any(root.name == "builtin_skills" for root in roots)
-    assert fs_registry.find_system_skill("skill-creator") is not None
+    A system root must be visible to every process that materializes a package,
+    including a kernel inside a sandbox that mounts only the owner's subtrees.
+    Nothing here can tell such a deployment apart from a desktop install, so an
+    undeclared root stays empty and resolution falls back to the per-user root.
+    """
+    assert fs_registry.system_skill_roots() == ()
+    assert fs_registry.find_system_skill("skill-creator") is None
 
 
-def test_env_overrides_the_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_env_declares_the_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """What a container image sets after composing its trees into one dir."""
     from valuz_agent.infra import fs_registry as fsr
 
@@ -49,7 +51,6 @@ def test_env_overrides_the_default(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
     assert fs_registry.system_skill_roots() == (composed.resolve(),)
     assert fs_registry.find_system_skill("stock-analysis") == composed / "stock-analysis"
-    # The package's own trees are no longer consulted once a root is declared.
     assert fs_registry.find_system_skill("skill-creator") is None
 
 

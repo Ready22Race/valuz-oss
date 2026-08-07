@@ -374,25 +374,26 @@ class FsRegistry:
         data dir — is what keeps a multi-user deployment from having to make N
         copies of immutable content converge.
 
-        Resolution order, first hit wins:
+        Declared, never inferred: ``VALUZ_SYSTEM_SKILLS_DIR``
+        (``os.pathsep``-separated), plus anything an overlay registered through
+        :meth:`register_system_skill_root`. Empty when nothing is declared, and
+        resolution then falls back to the per-user root exactly as before.
 
-        1. ``VALUZ_SYSTEM_SKILLS_DIR`` — ``os.pathsep``-separated. What a
-           container image sets after composing its trees into one directory.
-        2. The package's own ``resources`` trees. A source checkout and a
-           desktop install then work with no configuration at all.
-
-        Roots registered through :meth:`register_system_skill_root` are always
-        appended, which is how an overlay declares an edition's tree without
-        having to own the env var.
+        **Deliberately not defaulted to the package's own ``resources`` trees.**
+        A system root has one hard requirement: every process that has to READ a
+        package must see it at the same absolute path. That holds for a desktop
+        install, where the host and its kernel share a filesystem. It does not
+        hold for a sandboxed deployment — the kernel runs inside a sandbox that
+        mounts the owner's data subtrees and nothing else, so a host package
+        path resolves to nothing there and skill materialization fails. Since
+        this class cannot tell those deployments apart, the safe default is to
+        stay out of the way and let a deployment that HAS composed its trees
+        into an image-wide location say so.
         """
         import os
 
         configured = (settings.system_skills_dir or "").strip()
-        if configured:
-            roots = [Path(part).expanduser() for part in configured.split(os.pathsep) if part]
-        else:
-            resources = Path(__file__).resolve().parents[1] / "resources"
-            roots = [resources / "official_skills", resources / "builtin_skills"]
+        roots = [Path(part).expanduser() for part in configured.split(os.pathsep) if part]
         roots.extend(self._extra_system_skill_roots)
         seen: set[Path] = set()
         out: list[Path] = []
