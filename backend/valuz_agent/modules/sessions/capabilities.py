@@ -303,6 +303,55 @@ async def refresh_docs_capabilities_for_session(session_id: str, user_id: str) -
     return True
 
 
+# One directory listing per owner, reused across turns. The scan behind it is
+# not free where it matters: on a managed deployment the official-skills root
+# is a network mount, and walking 20 packages measured **600 ms** on
+# valuz-prod 2026-08-07 (175 ms to list, 21 ms per marker stat). Paid once per
+# turn, on the event loop, that stalls every other request the worker is
+# serving.
+#
+# Keyed on the root's mtime, which moves when a package directory is added or
+# removed — the only change this refresher reacts to. The TTL is the backstop
+# for a filesystem that does not propagate parent mtime reliably: worst case a
+# package that landed mid-session is attached one minute later instead of on
+# the next turn, and the session that CREATED it after the landing had it from
+# the start anyway.
+_BUNDLED_PATHS_TTL_S = 60.0
+_bundled_paths_cache: dict[str, tuple[float, float, tuple[str, ...]]] = {}
+
+
+def _bundled_package_paths(user_id: str) -> tuple[str, ...]:
+    """Absolute dirs of every bundled package landed for ``user_id``."""
+    import time
+
+    from valuz_agent.infra.fs_registry import fs_registry
+    from valuz_agent.integrations.skills_official_bootstrap import is_bundled_skill
+
+    official_root = fs_registry.official_skill_root(user_id=user_id)
+    try:
+        mtime = official_root.stat().st_mtime
+    except OSError:
+        return ()
+
+    now = time.monotonic()
+    cached = _bundled_paths_cache.get(user_id)
+    if cached is not None and cached[0] == mtime and now < cached[1]:
+        return cached[2]
+
+    paths = tuple(
+        str(skill_dir.resolve(strict=False))
+        for skill_dir in sorted(path for path in official_root.iterdir() if path.is_dir())
+        if is_bundled_skill(skill_dir)
+    )
+    _bundled_paths_cache[user_id] = (mtime, now + _BUNDLED_PATHS_TTL_S, paths)
+    return paths
+
+
+def reset_bundled_paths_cache() -> None:
+    """Test hook — the cache is process-global."""
+    _bundled_paths_cache.clear()
+
+
 async def refresh_bundled_skills_for_session(session_id: str, user_id: str) -> bool:
     """Attach bundled official packages that landed after the session was created.
 
@@ -327,27 +376,13 @@ async def refresh_bundled_skills_for_session(session_id: str, user_id: str) -> b
     stat per package, no manifest parsing. Returns ``True`` when the session
     row was changed. Safe to call repeatedly.
     """
-    from valuz_agent.infra.fs_registry import fs_registry
-    from valuz_agent.integrations.skills_official_bootstrap import is_bundled_skill
-
     session = await kernel_client.get_session(user_id, session_id)
     if session is None or session.status in ("terminated",):
         return False
 
-    official_root = fs_registry.official_skill_root(user_id=user_id)
-    if not official_root.is_dir():
-        return False
-
     current_skills = list(session.skills or ())
     known = set(current_skills)
-    missing: list[str] = []
-    for skill_dir in sorted(path for path in official_root.iterdir() if path.is_dir()):
-        if not is_bundled_skill(skill_dir):
-            continue
-        absolute = str(skill_dir.resolve(strict=False))
-        if absolute not in known:
-            known.add(absolute)
-            missing.append(absolute)
+    missing = [path for path in _bundled_package_paths(user_id) if path not in known]
     if not missing:
         return False
 
