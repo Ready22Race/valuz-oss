@@ -51,8 +51,10 @@ export interface GeneratedUiArtifactReceipt {
   host_id: string | null;
   slot: string;
   expected_revision_id: string | null;
-  /** When the generation happened, same clock as the binding's updated_at.
-   *  Absent on receipts minted before it existed. */
+  /** When the generation happened, in epoch milliseconds (the clock the
+   *  binding's updated_at uses). Receipts persisted before 2026-08 carry
+   *  epoch SECONDS — consumers must normalize before comparing against a
+   *  millisecond timestamp — and older receipts omit the field entirely. */
   created_at?: number;
 }
 
