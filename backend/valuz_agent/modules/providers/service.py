@@ -441,18 +441,32 @@ def _load_subscription_models() -> dict[str, dict[str, Any]]:
     except (OSError, ValueError) as exc:
         logger.error("failed to load bundled subscription_models.json: %s", exc)
 
-    # Lazy import to avoid circular import at module load.
-    try:
-        from valuz_agent.infra.fs_registry import fs_registry
-        from valuz_agent.infra.local_identity import resolve_local_user_id
+    # Per-user model override file. Only meaningful for a LOCAL deployment:
+    # the file is a hand-placed override by the local install user, and
+    # finding it requires resolving the local install identity — which walks
+    # the whole data dir. On a cloud deployment there is no local user
+    # (identity comes from requests), the file is never written, and that
+    # walk cost minutes per pod start at module import on a network-mounted
+    # data dir. ``deployment_type`` is the field OSS already uses for exactly
+    # this boundary — its docstring: cloud skips "local identity seeding"
+    # that would leak synthetic owner ids into shared backends — so OSS
+    # desktop (``local``, default) keeps identical behaviour and cloud boot
+    # never touches local identity during import.
+    from valuz_agent.infra.config import settings
 
-        local_dir = fs_registry.data_dir(resolve_local_user_id())
-        local_path = local_dir / "subscription_models.local.json"
-        if local_path.is_file():
-            with local_path.open("r", encoding="utf-8") as fh:
-                _ingest(json.load(fh))
-    except Exception as exc:  # noqa: BLE001 — don't let user override break boot
-        logger.warning("ignoring subscription_models.local.json: %s", exc)
+    if settings.deployment_type == "local":
+        # Lazy import to avoid circular import at module load.
+        try:
+            from valuz_agent.infra.fs_registry import fs_registry
+            from valuz_agent.infra.local_identity import resolve_local_user_id
+
+            local_dir = fs_registry.data_dir(resolve_local_user_id())
+            local_path = local_dir / "subscription_models.local.json"
+            if local_path.is_file():
+                with local_path.open("r", encoding="utf-8") as fh:
+                    _ingest(json.load(fh))
+        except Exception as exc:  # noqa: BLE001 — don't let user override break boot
+            logger.warning("ignoring subscription_models.local.json: %s", exc)
 
     return merged
 
