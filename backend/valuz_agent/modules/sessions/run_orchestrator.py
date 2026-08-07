@@ -177,7 +177,7 @@ async def _run_agent_background(
         content,
         event_bus,
         on_message=meter,
-        pre_turn=chat_capability_hook(session_id, owner_user_id),
+        pre_turn=chat_capability_hook(session_id, owner_user_id, host_ref=host_ref),
         user_id=owner_user_id,
         host_ref=host_ref,
     )
