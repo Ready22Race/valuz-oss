@@ -289,9 +289,7 @@ def _translate_kernel_event(
 
     if kernel_type == "assistant_message_sidecar":
         payload = {
-            "assistant_segment_index": _stringify(
-                data.get("assistant_segment_index") or 0
-            ),
+            "assistant_segment_index": _stringify(data.get("assistant_segment_index") or 0),
         }
         citation_bundle = data.get("citation_bundle")
         if isinstance(citation_bundle, dict):
@@ -658,6 +656,24 @@ def _translate_kernel_event(
                     key: _stringify(value)
                     for key, value in data.items()
                     if key not in ("task_id", "message_id") and value is not None
+                },
+            },
+            data,
+        )
+
+    if kernel_type == "turn_phase":
+        # Turn-phase latency marker (persisted observability; no dedicated
+        # UI — read the timestamps straight off the events API). ``phase`` ∈
+        # runtime_init | thread_init | dispatch; the remaining fields are
+        # per-runtime extras (duration_ms, mode, mcp_tools_ms, …) forwarded
+        # stringified so new fields flow without adapter changes.
+        return "session.turn_phase", _with_message_id(
+            {
+                "phase": _stringify(data.get("phase") or ""),
+                **{
+                    key: _stringify(value)
+                    for key, value in data.items()
+                    if key not in ("phase", "message_id") and value is not None
                 },
             },
             data,

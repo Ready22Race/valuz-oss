@@ -35,6 +35,7 @@ import asyncio
 import logging
 import os
 import shutil
+import time
 import uuid
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import asdict
@@ -357,12 +358,18 @@ class CodexRuntime:
             # which overrides ``params.input``; the typed ``input`` here
             # just satisfies ``TurnStartParams``' required field.
             turn_input = UserInput(root=TextUserInput(type="text", text=prompt))
+            t_dispatch = time.monotonic()
             turn_resp = await self._codex._client.turn_start(
                 self._thread.id,
                 prompt,
                 TurnStartParams(thread_id=self._thread.id, input=[turn_input], **turn_kwargs),
             )
             self._active_turn = AsyncTurnHandle(self._codex, self._thread.id, turn_resp.turn.id)
+            # Observability: the gap from this row to the first thinking/text
+            # delta = codex's pre-sampling pipeline + model TTFT.
+            await self._emit_turn_phase(
+                "dispatch", duration_ms=int((time.monotonic() - t_dispatch) * 1000)
+            )
 
             completed: TurnCompletedNotification | None = None
             error_message: str | None = None
@@ -704,9 +711,14 @@ class CodexRuntime:
 
     # -- Lifecycle helpers --
 
+    async def _emit_turn_phase(self, phase: str, **fields: Any) -> None:
+        """Persisted latency marker — see ``turn_phase`` in ``events.py``."""
+        await self.event_sink.emit(Event(type="turn_phase", data={"phase": phase, **fields}))
+
     async def _ensure_codex(self, session: Session) -> None:
         if self._codex is not None:
             return
+        t0 = time.monotonic()
         expose_toolkit = self._register_toolkit_if_eligible(session)
         cfg = CodexConfig(
             codex_bin=_resolve_codex_bin(),
@@ -721,6 +733,7 @@ class CodexRuntime:
         self._codex = AsyncCodex(config=cfg)
         await self._codex.__aenter__()
         self._install_approval_handler()
+        await self._emit_turn_phase("runtime_init", duration_ms=int((time.monotonic() - t0) * 1000))
 
     def _install_approval_handler(self) -> None:
         """Monkey-patch the sync client's approval handler.
@@ -804,6 +817,7 @@ class CodexRuntime:
         # back into the ergonomic ``AsyncThread`` — the stream / interrupt
         # consumption path is unchanged.
         common = self._build_thread_kwargs(session)
+        t0 = time.monotonic()
         if session.runtime_session_id:
             # NB: ``ThreadResumeParams.model`` is documented as
             # "Configuration overrides for the resumed thread, if any."
@@ -818,11 +832,17 @@ class CodexRuntime:
                 ThreadResumeParams(thread_id=session.runtime_session_id, **common),
             )
             self._thread = AsyncThread(self._codex, resumed.thread.id)
+            await self._emit_turn_phase(
+                "thread_init", mode="resume", duration_ms=int((time.monotonic() - t0) * 1000)
+            )
             return
         started = await self._codex._client.thread_start(ThreadStartParams(**common))
         self._thread = AsyncThread(self._codex, started.thread.id)
         # Persist the freshly-allocated thread id for future resumes.
         session.runtime_session_id = self._thread.id
+        await self._emit_turn_phase(
+            "thread_init", mode="start", duration_ms=int((time.monotonic() - t0) * 1000)
+        )
 
     def _build_thread_kwargs(self, session: Session) -> dict[str, Any]:
         # Cache permission_mode so the sync approval handler (which does
