@@ -101,6 +101,7 @@ def evaluate_citation_quality(
     user_prompt: str = "",
     entity_aliases: Mapping[str, Iterable[str]] | None = None,
     semantic_verifier: SemanticVerifierPort | None = None,
+    semantic_verified_claim_citation_ids: Mapping[str, Iterable[str]] | None = None,
 ) -> dict[str, Any]:
     """Return a copy of *bundle* decorated with quality annotations."""
 
@@ -434,6 +435,9 @@ def evaluate_citation_quality(
         semantics=semantics,
         entity_aliases=entity_aliases,
         semantic_verifier=semantic_verifier,
+        semantic_verified_claim_citation_ids=(
+            semantic_verified_claim_citation_ids or {}
+        ),
         claim_audit_rule=claim_audit_rule,
         projection_claim_ids=_verified_projection_cell_claim_ids(
             answer,
@@ -548,6 +552,7 @@ def _audit_claims(
     semantics: dict[str, Any] | None,
     entity_aliases: Mapping[str, Iterable[str]] | None,
     semantic_verifier: SemanticVerifierPort | None,
+    semantic_verified_claim_citation_ids: Mapping[str, Iterable[str]],
     claim_audit_rule: Mapping[str, Any],
     projection_claim_ids: set[str],
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
@@ -644,6 +649,7 @@ def _audit_claims(
         semantic_verifier=semantic_verifier,
         semantics=semantics,
         entity_aliases=entity_aliases,
+        semantic_verified_claim_citation_ids=semantic_verified_claim_citation_ids,
     )
 
     for claim, required, citation_ids, adjacent_calculation_bound in claim_rows:
@@ -763,6 +769,22 @@ def _audit_claims(
                 semantics=semantics,
                 entity_aliases=entity_aliases,
             )
+            semantic_preverified_ids = tuple(
+                citation_id
+                for citation_id in semantic_verified_claim_citation_ids.get(
+                    claim.claim_id,
+                    (),
+                )
+                if citation_id in citation_ids
+            )
+            if semantic_preverified_ids:
+                semantic_support = {
+                    **semantic_support,
+                    **{
+                        citation_id: "supported"
+                        for citation_id in semantic_preverified_ids
+                    },
+                }
             if semantic_support:
                 support_rows = [
                     (
@@ -1138,6 +1160,7 @@ def _batch_semantic_results_for_bound_claims(
     semantic_verifier: SemanticVerifierPort | None,
     semantics: Mapping[str, Any] | None,
     entity_aliases: Mapping[str, Iterable[str]] | None,
+    semantic_verified_claim_citation_ids: Mapping[str, Iterable[str]],
 ) -> Mapping[str, SemanticVerificationResult]:
     """Invoke the model once per bounded batch, never once per Claim."""
 
@@ -1148,6 +1171,17 @@ def _batch_semantic_results_for_bound_claims(
         if not claim.audit_selected:
             continue
         if not citation_ids or not _bound_claim_is_auditable(claim):
+            continue
+        if any(
+            citation_id in citation_ids
+            for citation_id in semantic_verified_claim_citation_ids.get(
+                claim.claim_id,
+                (),
+            )
+        ):
+            # This exact Claim/local-Evidence pair was already established by
+            # the binding-stage batch. Reusing that sealed result avoids a
+            # second model call after handles become canonical citation ids.
             continue
         records, bound_ids = _bound_citation_records(citation_ids, citation_by_id)
         if not bound_ids:

@@ -3,8 +3,9 @@
 The verifier deliberately reuses the Session's already-authorized model
 provider. It batches several independent Claims to avoid repeated model
 round-trips, while every request still contains only that Claim's bounded,
-already-bound text candidates. It cannot search, call tools, create Evidence,
-bind a new Citation, or rewrite assistant text. Every failure returns an
+host-sealed text candidates (an existing binding or a Citation marker from the
+same paragraph/list item). It cannot search, call tools, create Evidence, pick
+from the wider Registry, or rewrite assistant text. Every failure returns an
 unresolved verdict so this optional sidecar can never block Runtime output.
 """
 

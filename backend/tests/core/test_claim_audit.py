@@ -20,6 +20,10 @@ from src.core.claim_audit import (
     text_components_cover_claim,
     verify_evidence_support,
 )
+from src.core.claim_evidence_resolution import (
+    SemanticVerificationRequest,
+    SemanticVerificationResult,
+)
 
 _FINANCE_SEMANTICS = {
     "metric_ontology": {
@@ -1763,6 +1767,93 @@ def test_paragraph_terminal_handles_bound_only_supported_preceding_claims() -> N
     assert "evidence://ev_company_b_revenue_12345678" not in first
     assert second.count("evidence://ev_company_b_revenue_12345678") == 2
     assert "evidence://ev_company_a_revenue_12345678" not in second
+
+
+class _BatchLocalSemanticVerifier:
+    def __init__(self) -> None:
+        self.batch_calls = 0
+        self.requests: list[SemanticVerificationRequest] = []
+
+    def verify_batch(
+        self,
+        requests: tuple[SemanticVerificationRequest, ...],
+    ) -> dict[str, SemanticVerificationResult]:
+        self.batch_calls += 1
+        self.requests.extend(requests)
+        return {
+            request.claim.claim_id: SemanticVerificationResult(
+                verdict="entailed",
+                evidence_handles=tuple(
+                    candidate.handle for candidate in request.candidates
+                ),
+                confidence=0.98,
+                covered_parts=(request.claim.exact,),
+                verifier_revision="batch-local-test-v1",
+            )
+            for request in requests
+        }
+
+
+def test_local_paraphrase_claims_are_semantically_bound_in_one_batch() -> None:
+    azure_handle = "ev_azure_growth_12345678"
+    cloud_handle = "ev_cloud_growth_12345678"
+    records = [
+        {
+            "evidenceHandle": azure_handle,
+            "source": {
+                "sourceId": "azure-call",
+                "providerId": "docs",
+                "sourceType": "document",
+                "title": "Azure earnings call",
+            },
+            "evidence": {
+                "kind": "text",
+                "quote": "Azure grew forty-three percent year over year this quarter.",
+            },
+        },
+        {
+            "evidenceHandle": cloud_handle,
+            "source": {
+                "sourceId": "cloud-call",
+                "providerId": "docs",
+                "sourceType": "document",
+                "title": "Cloud earnings call",
+            },
+            "evidence": {
+                "kind": "text",
+                "quote": "Cloud revenue increased thirty-two percent year over year.",
+            },
+        },
+    ]
+    answer = (
+        f"- Azure 本季度增长率达到43%；管理层预计下一季度增速约45% "
+        f"[source](evidence://{azure_handle})。\n"
+        f"- Cloud 收入同比增长32%；管理层预计下一季度资本支出约100亿美元 "
+        f"[source](evidence://{cloud_handle})。\n"
+        "- 客户需求保持稳定。"
+    )
+    verifier = _BatchLocalSemanticVerifier()
+
+    result = bind_claims_to_evidence(
+        answer,
+        records,
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+        semantic_verifier=verifier,
+    )
+
+    assert verifier.batch_calls == 1
+    assert len(verifier.requests) == 2
+    first, second, third = result.text.splitlines()
+    assert first.count(f"evidence://{azure_handle}") == 2
+    assert cloud_handle not in first
+    assert second.count(f"evidence://{cloud_handle}") == 2
+    assert azure_handle not in second
+    assert "evidence://" not in third
+    assert set(result.semantic_bound_claim_handles.values()) == {
+        (azure_handle,),
+        (cloud_handle,),
+    }
 
 
 def test_numbered_result_section_handles_are_candidates_without_sibling_spill() -> None:

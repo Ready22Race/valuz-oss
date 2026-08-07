@@ -18,10 +18,13 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from markdown_it import MarkdownIt
 from src.core.calculation import evaluate_decimal_expression
+
+if TYPE_CHECKING:
+    from src.core.claim_evidence_resolution import SemanticVerifierPort
 
 CLAIM_EXTRACTOR_REVISION = "claim-extractor-v2"
 CLAIM_VERIFIER_REVISION = "claim-verifier-local-v2"
@@ -733,6 +736,7 @@ class ClaimBindingResult:
     text: str
     auto_bound_claim_handles: dict[str, tuple[str, ...]]
     rebound_claim_handles: dict[str, str]
+    semantic_bound_claim_handles: dict[str, tuple[str, ...]]
 
 
 @dataclass(frozen=True)
@@ -1769,6 +1773,7 @@ def bind_claims_to_evidence(
     user_prompt: str = "",
     semantics: Mapping[str, Any] | None = None,
     entity_aliases: Mapping[str, Iterable[str]] | None = None,
+    semantic_verifier: SemanticVerifierPort | None = None,
 ) -> ClaimBindingResult:
     """Apply safe rebind, unique-bind and composite-bind edits in one pass.
 
@@ -1780,7 +1785,12 @@ def bind_claims_to_evidence(
     Resolver/cache while preserving their conservative action gates.
     """
 
-    from src.core.claim_evidence_resolution import ensure_evidence_candidate_index
+    from src.core.claim_evidence_resolution import (
+        SemanticVerificationResult,
+        ensure_evidence_candidate_index,
+        prepare_semantic_verification_request,
+        resolve_claim_evidence,
+    )
 
     candidate_index = ensure_evidence_candidate_index(records, semantics=semantics)
     available = list(candidate_index)
@@ -1800,8 +1810,11 @@ def bind_claims_to_evidence(
     edits: list[tuple[int, int, str]] = []
     auto_bound: dict[str, tuple[str, ...]] = {}
     rebound: dict[str, str] = {}
+    semantic_bound: dict[str, tuple[str, ...]] = {}
+    semantic_pending: list[tuple[ClaimCandidate, ClaimCandidate, tuple[Any, ...], Any]] = []
 
-    for claim in extract_claims(answer, mode=mode, semantics=semantics):
+    claims = extract_claims(answer, mode=mode, semantics=semantics)
+    for claim in claims:
         if not claim.citation_required:
             continue
         if claim.attached_citation_ids:
@@ -1853,6 +1866,7 @@ def bind_claims_to_evidence(
             continue
 
         attributed = bool(_EXPLICIT_ATTRIBUTION_RE.search(claim.exact))
+        local_handles: tuple[str, ...] = ()
         disclosure_handle = _unique_negative_disclosure_handle(claim, available)
         if disclosure_handle is not None:
             match = EvidenceMatch("exact", (disclosure_handle,))
@@ -1933,11 +1947,69 @@ def bind_claims_to_evidence(
                 semantics=semantics,
                 entity_aliases=entity_aliases,
             )
+        if (
+            not handles
+            and not attributed
+            and local_handles
+            and semantic_verifier is not None
+        ):
+            # A source marker at the end of one paragraph/list item is a
+            # bounded candidate for every Claim in that same local scope. The
+            # deterministic matcher remains the first gate; paraphrases that
+            # it cannot prove are verified together in one semantic batch.
+            # No global Evidence search is allowed on this path.
+            local_records = tuple(raw_records_by_handle[handle] for handle in local_handles)
+            semantic_claim = replace(
+                claim,
+                attached_evidence_handles=local_handles,
+            )
+            request = prepare_semantic_verification_request(
+                semantic_claim,
+                local_records,
+                semantics=semantics,
+                entity_aliases=entity_aliases,
+                limit=len(local_records),
+            )
+            if request is not None:
+                semantic_pending.append((claim, semantic_claim, local_records, request))
+            continue
         if not handles:
             continue
         replacement = " ".join(f"[source](evidence://{handle})" for handle in handles)
         edits.append((claim.insertion_offset, claim.insertion_offset, f" {replacement}"))
         auto_bound[claim.claim_id] = handles
+
+    if semantic_pending and semantic_verifier is not None:
+        try:
+            semantic_results = semantic_verifier.verify_batch(
+                tuple(row[3] for row in semantic_pending)
+            )
+        except Exception:  # noqa: BLE001 - optional sidecar always fails open
+            semantic_results = {}
+        if isinstance(semantic_results, Mapping):
+            for claim, semantic_claim, local_records, _request in semantic_pending:
+                semantic_result = semantic_results.get(claim.claim_id)
+                if not isinstance(semantic_result, SemanticVerificationResult):
+                    continue
+                resolution = resolve_claim_evidence(
+                    semantic_claim,
+                    local_records,
+                    semantics=semantics,
+                    entity_aliases=entity_aliases,
+                    semantic_result=semantic_result,
+                    limit=len(local_records),
+                )
+                handles = resolution.selected_handles if resolution.status == "verified" else ()
+                if not handles:
+                    continue
+                replacement = " ".join(
+                    f"[source](evidence://{handle})" for handle in handles
+                )
+                edits.append(
+                    (claim.insertion_offset, claim.insertion_offset, f" {replacement}")
+                )
+                auto_bound[claim.claim_id] = handles
+                semantic_bound[claim.claim_id] = handles
 
     text = answer
     for start, end, replacement in sorted(edits, reverse=True):
@@ -1946,6 +2018,7 @@ def bind_claims_to_evidence(
         text=text,
         auto_bound_claim_handles=auto_bound,
         rebound_claim_handles=rebound,
+        semantic_bound_claim_handles=semantic_bound,
     )
 
 

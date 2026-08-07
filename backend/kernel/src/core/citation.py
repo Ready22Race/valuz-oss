@@ -1279,6 +1279,7 @@ class CitationGuard:
             user_prompt=self._user_prompt,
             semantics=semantics,
             entity_aliases=entity_aliases,
+            semantic_verifier=self._semantic_verifier,
         )
         normalized_text = binding_result.text
         propagated_bind_result = propagate_equivalent_claim_bindings(
@@ -1297,6 +1298,10 @@ class CitationGuard:
         for claim_id, handles in binding_result.auto_bound_claim_handles.items():
             for handle in handles:
                 auto_bound_claims_by_handle.setdefault(handle, []).append(claim_id)
+        semantic_bound_claims_by_handle: dict[str, list[str]] = {}
+        for claim_id, handles in binding_result.semantic_bound_claim_handles.items():
+            for handle in handles:
+                semantic_bound_claims_by_handle.setdefault(handle, []).append(claim_id)
         equivalent_claims_by_handle: dict[str, list[str]] = {}
         for claim_id, handles in propagated_bind_result.claim_handles.items():
             for handle in handles:
@@ -1377,6 +1382,7 @@ class CitationGuard:
             if record.tool_name:
                 annotations["provenance"] = {"toolName": record.tool_name}
             auto_bound_claim_ids = auto_bound_claims_by_handle.get(identifier)
+            semantic_bound_claim_ids = semantic_bound_claims_by_handle.get(identifier)
             auto_rebound_claim_ids = auto_rebound_claims_by_handle.get(identifier)
             equivalent_claim_ids = equivalent_claims_by_handle.get(identifier)
             if (
@@ -1388,6 +1394,8 @@ class CitationGuard:
                 binding = annotations["binding"]
                 if auto_bound_claim_ids:
                     binding["autoBoundClaimIds"] = list(auto_bound_claim_ids)
+                if semantic_bound_claim_ids:
+                    binding["semanticBoundClaimIds"] = list(semantic_bound_claim_ids)
                 if auto_rebound_claim_ids:
                     binding["autoReboundClaimIds"] = list(auto_rebound_claim_ids)
                 if equivalent_claim_ids:
@@ -1538,6 +1546,17 @@ class CitationGuard:
             },
         }
         if self._verification_enabled:
+            semantic_verified_claim_citation_ids = {
+                claim_id: tuple(
+                    dict.fromkeys(
+                        citation_id
+                        for handle in handles
+                        for citation_id in [handle_to_citation_id.get(handle)]
+                        if citation_id is not None
+                    )
+                )
+                for claim_id, handles in binding_result.semantic_bound_claim_handles.items()
+            }
             bundle = evaluate_citation_quality(
                 canonical_text,
                 bundle,
@@ -1546,6 +1565,9 @@ class CitationGuard:
                 user_prompt=self._user_prompt,
                 entity_aliases=entity_aliases,
                 semantic_verifier=self._semantic_verifier,
+                semantic_verified_claim_citation_ids=(
+                    semantic_verified_claim_citation_ids
+                ),
             )
             _focus_text_citation_snippets(bundle)
         return GuardResult(text=canonical_text, bundle=bundle)
