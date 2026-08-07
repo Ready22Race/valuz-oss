@@ -227,6 +227,7 @@ async def _deliver_generated_ui(
         from valuz_agent.modules.artifacts.models import ArtifactKind
         from valuz_agent.modules.artifacts.scope import (
             ScopeUnavailableError,
+            resolve_artifact_scope,
             resolve_delivery_scope,
         )
         from valuz_agent.modules.artifacts.service import DeliveryRequest, deliver_artifact
@@ -238,22 +239,49 @@ async def _deliver_generated_ui(
             return ""
 
         file_name = _document_file_name(target_host)
-        async with async_unit_of_work(commit=True) as db:
-            # Read the binding BEFORE writing: the receipt carries what the
-            # host was showing at generation time, which is the concurrency
-            # token the adopt click compares against.
-            expected_revision_id: str | None = None
-            if target_host is not None:
-                current = await ArtifactDatastore(db).get_binding(
+        # Read phase: the binding (its revision id is the concurrency token the
+        # adopt click compares against) and, when one exists, the artifact it
+        # points at — the host's version lineage.
+        expected_revision_id: str | None = None
+        bound_artifact = None
+        if target_host is not None:
+            async with async_unit_of_work(commit=False) as db:
+                ds = ArtifactDatastore(db)
+                current = await ds.get_binding(
                     user_id,
                     target_host.host_type,
                     target_host.host_id,
                     target_host.slot or "main",
                 )
-                expected_revision_id = (
-                    current.artifact_revision_id if current is not None else None
+                if current is not None:
+                    expected_revision_id = current.artifact_revision_id
+                    bound_artifact = await ds.get_artifact(
+                        user_id, current.artifact_id
+                    )
+
+        # A hosted regeneration appends to the lineage the host is showing —
+        # the binding names it, and it may live in ANOTHER conversation's
+        # scope (each panel chat is its own project). The stable per-host file
+        # name was always meant to make "generate this page again" append a
+        # version; identity is scoped, so without this the new conversation
+        # quietly forked a parallel artifact starting over at v1. Deliver in
+        # the bound artifact's own scope; if that scope no longer resolves,
+        # fall back to this session's (a fork, but a recorded page beats a
+        # refusal).
+        target_artifact_id: str | None = None
+        if bound_artifact is not None:
+            own_scope = await resolve_artifact_scope(user_id, bound_artifact)
+            if own_scope is not None:
+                delivery = own_scope
+                target_artifact_id = bound_artifact.id
+            else:
+                logger.warning(
+                    "generate_ui: bound artifact %s scope no longer resolves; "
+                    "recording a new lineage in the session's scope",
+                    bound_artifact.id,
                 )
 
+        async with async_unit_of_work(commit=True) as db:
             result = await deliver_artifact(
                 db,
                 scope=delivery.scope,
@@ -264,6 +292,7 @@ async def _deliver_generated_ui(
                     file_name=file_name,
                     display_name=file_name,
                     kind=ArtifactKind.UI,
+                    artifact_id=target_artifact_id,
                     as_new_artifact=target_host is None,
                 ),
                 source_session_id=session_id,
