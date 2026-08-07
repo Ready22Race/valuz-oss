@@ -820,3 +820,17 @@ class TaskSessionDatastore:
         )
         await async_commit_with_retry(self._db, where="TaskSessionDatastore.delete_for_tasks")
         return int(res.rowcount or 0)
+
+    async def delete_run(self, user_id: str, session_id: str) -> bool:
+        """Drop the index row for one session. Owner-scoped, idempotent."""
+        res = cast(
+            "CursorResult[Any]",
+            await self._db.execute(
+                delete(TaskSessionRow).where(
+                    TaskSessionRow.user_id == user_id,
+                    TaskSessionRow.session_id == session_id,
+                )
+            ),
+        )
+        await async_commit_with_retry(self._db, where="TaskSessionDatastore.delete_run")
+        return bool(res.rowcount)

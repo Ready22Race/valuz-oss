@@ -1,14 +1,14 @@
 """What happens to a task when nobody is minding it.
 
-Three defects that shared one shape — a task whose actor is gone, or whose
-project is gone, kept looking fine to everything that checks:
+Defects that shared one shape — a task whose actor is gone, or whose project
+or session is gone, kept looking fine to everything that checks:
 
 * an inbox with no reader read as a live lead, so the watchdog never blocked
   the task and ``inject_into_task`` reported delivery into a queue nobody drains;
 * deleting a project left its tasks behind, and the next boot resurrected them
   against deleted kernel sessions and announced them as blocked;
-* a member report lost its mailbox delivery whenever the timeline write that
-  shared its unit of work failed.
+* deleting a session left its run-index row behind, pointing at a session that
+  no longer exists, with nothing anywhere to reconcile it.
 """
 
 from __future__ import annotations
@@ -234,3 +234,107 @@ def test_deleting_a_project_takes_its_tasks_with_it(db_factory) -> None:
     assert _counts(db_factory, "t-a") == (0, 0, 0)
     assert _counts(db_factory, "t-b") == (0, 0, 0)
     assert _counts(db_factory, "t-keep") == (1, 1, 1)
+
+
+# ---------------------------------------------------------------------------
+# Deleting the session behind a run
+# ---------------------------------------------------------------------------
+
+
+def _add_run(db_factory, *, task_id: str, session_id: str, kind: str) -> None:
+    db = db_factory()
+    try:
+        db.add(
+            TaskSessionRow(
+                id=f"run-{session_id}",
+                user_id=OWNER,
+                project_id="p1",
+                task_id=task_id,
+                session_id=session_id,
+                agent_slug="worker",
+                sequence=2,
+                kind=kind,
+                status="active",
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+def test_deleting_a_member_session_drops_its_run_index_row(db_factory) -> None:
+    """The row is an INDEX of kernel sessions — one pointing at a deleted
+    session is garbage that nothing else reconciles."""
+    from valuz_agent.modules.tasks.purge import forget_session
+
+    _seed(db_factory, task_id="t-member", status="active")
+    _add_run(db_factory, task_id="t-member", session_id="member-1", kind="subtask")
+
+    asyncio.run(forget_session(OWNER, "member-1"))
+
+    db = db_factory()
+    try:
+        left = [r.session_id for r in db.query(TaskSessionRow).all() if r.task_id == "t-member"]
+        assert "member-1" not in left
+        assert "lead-t-member" in left, "only the deleted session's row goes"
+    finally:
+        db.close()
+
+
+def test_deleting_the_lead_session_of_a_live_task_is_refused(db_factory) -> None:
+    """Dropping that row is not a cleanup, it's a lobotomy.
+
+    ``pick_lead_run`` would return None; recovery declines a task with no lead
+    and the health monitor's "no lead run at all" branch deliberately does
+    nothing — the task sits active forever with no actor and no way back.
+    """
+    import pytest
+
+    from valuz_agent.modules.tasks.errors import TaskLeadSessionInUse
+    from valuz_agent.modules.tasks.purge import forget_session
+
+    _seed(db_factory, task_id="t-live", status="active")
+
+    with pytest.raises(TaskLeadSessionInUse):
+        asyncio.run(forget_session(OWNER, "lead-t-live"))
+
+    db = db_factory()
+    try:
+        assert any(r.session_id == "lead-t-live" for r in db.query(TaskSessionRow).all())
+    finally:
+        db.close()
+
+
+def test_a_stopped_task_still_owns_its_lead_because_resume_needs_it(db_factory) -> None:
+    """``stopped`` and ``blocked`` are revivable — only completed/abandoned are
+    terminal, so the guard has to key on that, not on "not active"."""
+    import pytest
+
+    from valuz_agent.modules.tasks.errors import TaskLeadSessionInUse
+    from valuz_agent.modules.tasks.purge import forget_session
+
+    _seed(db_factory, task_id="t-stopped", status="stopped")
+
+    with pytest.raises(TaskLeadSessionInUse):
+        asyncio.run(forget_session(OWNER, "lead-t-stopped"))
+
+
+def test_the_lead_of_a_finished_task_can_be_deleted(db_factory) -> None:
+    from valuz_agent.modules.tasks.purge import forget_session
+
+    _seed(db_factory, task_id="t-done", status="completed")
+
+    asyncio.run(forget_session(OWNER, "lead-t-done"))
+
+    db = db_factory()
+    try:
+        assert not any(r.session_id == "lead-t-done" for r in db.query(TaskSessionRow).all())
+    finally:
+        db.close()
+
+
+def test_forgetting_an_unrelated_session_is_a_no_op(db_factory) -> None:
+    from valuz_agent.modules.tasks.purge import forget_session
+
+    _seed(db_factory, task_id="t-x", status="active")
+    asyncio.run(forget_session(OWNER, "some-plain-chat"))  # must not raise

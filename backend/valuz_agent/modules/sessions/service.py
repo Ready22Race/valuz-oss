@@ -1965,6 +1965,13 @@ class SessionService:
         session = await data_reader().get_session(user_id, session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
+        # A task's run index points at this session. Reconcile it FIRST: the
+        # call refuses (409) when this is the lead of a task that can still
+        # run, and nothing must be destroyed before that refusal. Module-local
+        # import — a leaf reached only from here.
+        from valuz_agent.modules.tasks.purge import forget_session
+
+        await forget_session(user_id or "", session_id)
         # Snapshot worktree attribution BEFORE the kernel row disappears —
         # the post-delete teardown below needs it.
         _pre_meta = _valuz_meta(session)
