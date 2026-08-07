@@ -542,7 +542,6 @@ function GenerationTail() {
       data-slot="a2ui-generation-tail"
       className="flex items-center gap-2 px-1 py-3 text-xs text-ink-meta"
     >
-      <span className="size-1.5 animate-pulse rounded-full bg-ink-meta" />
       <Skeleton className="h-3 w-32" />
     </div>
   );
