@@ -14,6 +14,12 @@
 .vgb-root {
   container-type: inline-size;
   container-name: vgb;
+  /* The explicit width is load-bearing: as a column-flex item, an
+     inline-size container's flex base size is measured against zero-width
+     contents (text stacks one glyph per line), inflating the box far past
+     its real content. A definite inline size restores a sane base size —
+     the same reason .vgb-chart carries width: 100%. */
+  width: 100%;
   min-width: 0;
   max-width: 100%;
 }
