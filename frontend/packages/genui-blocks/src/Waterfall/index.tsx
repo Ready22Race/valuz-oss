@@ -265,10 +265,14 @@ function WaterfallChart({
             {/* Only drawn when the walk actually goes negative — the same
                 condition the hand-drawn zero stripe used. */}
             {span.min < 0 ? <ReferenceLine stroke={GRID_STROKE} y={0} /> : null}
+            {/* The invisible base needs the same cap as the delta: a stacked
+                pair sizes to its widest member, so an uncapped base re-inflates
+                the whole bridge. */}
             <Bar
               dataKey="base"
               fill="transparent"
               isAnimationActive={false}
+              maxBarSize={MAX_BAR_SIZE}
               stackId="bridge"
             />
             <Bar
