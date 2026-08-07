@@ -130,6 +130,50 @@ async def list_scope_artifacts(
     return ArtifactListResponse(items=items, total=total)
 
 
+class HostRevisionItem(RevisionItem):
+    """A revision in a host's cross-artifact version history."""
+
+    artifact_id: str
+
+
+class HostRevisionListResponse(BaseModel):
+    items: list[HostRevisionItem]
+
+
+@router.get("/hosts/revisions")
+async def list_host_revisions(
+    host_type: str,
+    host_id: str,
+    slot: str = "main",
+    db: AsyncSession = Depends(get_async_session),
+    user_id: str = Depends(get_current_user_id),
+) -> HostRevisionListResponse:
+    """A host slot's FULL version history, oldest first — across artifacts.
+
+    Generations for a host share one stable document name but may live in
+    different artifacts (a regeneration from another conversation's scope
+    forked a lineage before deliveries followed the binding). The per-artifact
+    listing hides every lineage except the bound one; this one shows them all,
+    so a version switcher can offer pages the user made from any conversation.
+    Entries carry their ``artifact_id`` — version numbers restart per artifact
+    and only order entries within one.
+    """
+    from valuz_agent.modules.genui.tools import host_document_file_name
+
+    file_name = host_document_file_name(host_type, host_id, slot or "main")
+    ds = ArtifactDatastore(db)
+    revisions = await ds.list_revisions_by_file_name(user_id, file_name)
+    contents = await ds.get_contents(user_id, [rev.content_id for rev in revisions])
+    items = [
+        HostRevisionItem(
+            artifact_id=rev.artifact_id,
+            **_revision_item(rev, contents.get(rev.content_id)).model_dump(),
+        )
+        for rev in revisions
+    ]
+    return HostRevisionListResponse(items=items)
+
+
 @router.get("/{artifact_id}/revisions")
 async def list_artifact_revisions(
     artifact_id: str,

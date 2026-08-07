@@ -198,6 +198,21 @@ def _document_file_name(target_host: UiArtifactTargetHost | None) -> str:
     return f"{stem}.a2ui.jsonl"
 
 
+def host_document_file_name(host_type: str, host_id: str, slot: str = "main") -> str:
+    """The stable document name a host slot's generations are recorded under.
+
+    Public counterpart of ``_document_file_name`` for readers: the name is the
+    cross-scope identity of a host's pages (a regeneration from another
+    conversation may land in another scope but keeps this name), so listing a
+    host's FULL version history — bound lineage and historical forks alike —
+    means querying revisions by this name.
+    """
+
+    return _document_file_name(
+        UiArtifactTargetHost(host_type=host_type, host_id=host_id, slot=slot or "main")
+    )
+
+
 async def _deliver_generated_ui(
     *,
     user_id: str,
