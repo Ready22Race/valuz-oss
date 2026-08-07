@@ -104,7 +104,7 @@ class SemanticVerificationResult:
 
 @dataclass(frozen=True)
 class SemanticVerificationRequest:
-    """One isolated Claim plus only its already-bound text candidates."""
+    """One isolated Claim plus only its sealed, Claim-local text candidates."""
 
     claim: ClaimCandidate
     candidates: tuple[EvidenceCandidate, ...]
@@ -464,8 +464,9 @@ def prepare_semantic_verification_request(
     """Return the bounded semantic request after deterministic screening.
 
     This is the message-level batching seam. It never broadens the candidate
-    pool: only legal explicit bindings that point to text Evidence and remain
-    unresolved after deterministic checks are projected to the model.
+    pool: only legal explicit bindings or host-sealed local Citation candidates
+    that point to text Evidence and remain unresolved after deterministic
+    checks are projected to the model.
     """
 
     candidate_index = ensure_evidence_candidate_index(records, semantics=semantics)

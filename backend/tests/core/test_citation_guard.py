@@ -3052,3 +3052,31 @@ def test_guard_batches_all_message_semantic_claims_in_one_verifier_call() -> Non
     assert len(verifier.calls) == 2
     assert result.bundle is not None
     assert result.bundle["quality"]["metrics"]["unverifiedClaimCount"] == 0
+
+
+def test_guard_reuses_local_semantic_binding_without_a_second_model_call() -> None:
+    item = _item("ev_revenue_local_scope")
+    item["evidence"].update(
+        {
+            "quote": "Revenue increased by twelve percent. Demand remained stable.",
+            "snippet": "Revenue increased by twelve percent. Demand remained stable.",
+        }
+    )
+    verifier = _GuardSemanticVerifier()
+    guard = CitationGuard(
+        _registry(item),
+        message_id="msg-semantic-local-scope",
+        user_prompt="Summarize revenue growth and demand with citations.",
+        policy_available=True,
+        semantic_verifier=verifier,
+    )
+
+    result = guard.finalize(
+        "Revenue increased by 12%; Demand remained stable "
+        "[source](evidence://ev_revenue_local_scope)."
+    )
+
+    assert verifier.batch_calls == 1
+    assert result.text.count("citation://") == 2
+    assert result.bundle is not None
+    assert result.bundle["quality"]["metrics"]["unverifiedClaimCount"] == 0
