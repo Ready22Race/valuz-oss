@@ -13,6 +13,9 @@ where the owner boundary, the snapshot and the head compare-and-set live.
 
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -162,8 +165,9 @@ class HostBinding(BaseModel):
     version_no: int
     file_name: str
     mime_type: str | None = None
-    #: The document itself for inline deliverables (generated pages); ``None``
-    #: for file-backed ones, where the caller opens ``ref`` instead.
+    #: The bound document itself — inline when the delivery carried it, read
+    #: back from the revision's file otherwise. ``None`` only when the bytes
+    #: are genuinely gone (deleted worktree) or too large to be a document.
     content: str | None = None
     ref: str = ""
     updated_at: int
@@ -181,6 +185,24 @@ class BindRequest(BaseModel):
     force: bool = False
 
 
+#: Upper bound for reading a file-stored document back into the binding
+#: response. Generously above anything the delivery path accepts; a file
+#: bigger than this is not a renderable document and null is honest.
+_BOUND_DOCUMENT_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _read_bound_document(path: str) -> str | None:
+    try:
+        p = Path(path)
+        if not p.is_file() or p.stat().st_size > _BOUND_DOCUMENT_MAX_BYTES:
+            return None
+        return p.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    except UnicodeDecodeError:
+        return None
+
+
 async def _binding_response(
     ds: ArtifactDatastore, user_id: str, binding: ArtifactBindingRow
 ) -> HostBinding:
@@ -189,6 +211,15 @@ async def _binding_response(
         await ds.get_content(user_id, revision.content_id) if revision is not None else None
     )
     path = (revision.abs_path or "") if revision is not None else ""
+    inline = content.content_inline if content is not None else None
+    if inline is None and path:
+        # File-stored content. A revision does not have to arrive through the
+        # content-delivery path to get bound — an agent that recovers a page by
+        # writing the document to a file and delivering THAT ends up here, and
+        # serving ``null`` for it blanked the whole workbench (content intact
+        # on disk the entire time). The host renders from the document either
+        # way, so read it back; the delivery cap bounds how big it can be.
+        inline = await asyncio.to_thread(_read_bound_document, path)
     return HostBinding(
         host_type=binding.host_type,
         host_id=binding.host_id,
@@ -198,7 +229,7 @@ async def _binding_response(
         version_no=revision.version_no if revision is not None else 0,
         file_name=revision.file_name if revision is not None else "",
         mime_type=revision.mime_type if revision is not None else None,
-        content=content.content_inline if content is not None else None,
+        content=inline,
         ref=build_valuz_file_uri(path) if path else "",
         updated_at=binding.updated_at,
     )
