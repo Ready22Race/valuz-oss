@@ -216,6 +216,7 @@
  * same size either way and a missing image never shifts the row it sits in.
  */
 .vgb-avatar {
+  position: relative;
   display: inline-flex;
   flex: none;
   align-items: center;
@@ -232,6 +233,16 @@
   text-transform: uppercase;
   white-space: nowrap;
   overflow: hidden;
+}
+
+/* Layered over the initials: a loaded image covers them, a failed one paints
+   nothing (empty alt) and the initials stay visible underneath. */
+.vgb-avatar-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: var(--openui-radius-full);
   object-fit: cover;
 }
 
