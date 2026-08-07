@@ -1,25 +1,38 @@
 "use client";
 
 import { defineComponent } from "@openuidev/react-lang";
+import {
+  Line,
+  LineChart,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
-import { extentOf, formatValue, readItems, readLabel, readNumbers } from "../lib/chart";
+import {
+  extentOf,
+  formatValue,
+  readItems,
+  readLabel,
+  readNumbers,
+} from "../lib/chart";
+import type { Span } from "../lib/chart";
 import { ChartFrame } from "../lib/chart-parts";
 import { readTextFromKeys } from "../lib/props";
+import {
+  CHART_INITIAL_DIMENSION,
+  CHART_MARGIN,
+  GRID_STROKE,
+  TOOLTIP_CONTENT_STYLE,
+  TOOLTIP_CURSOR,
+  TOOLTIP_ITEM_STYLE,
+} from "../lib/recharts-chrome";
 import { toneText } from "../lib/tone";
 import { SmallMultiplesSchema } from "./schema";
 
 export { SmallMultipleSchema, SmallMultiplesSchema } from "./schema";
-
-/*
- * One panel's plot box, in user units. `preserveAspectRatio="none"` lets the
- * line fill whatever width the grid cell ends up with, and
- * `vector-effect: non-scaling-stroke` keeps the stroke from stretching with it
- * — without that pair the line is a wedge, thick at one end.
- */
-const PANEL_W = 100;
-const PANEL_H = 32;
-/** Half a stroke of headroom, so a series touching the domain edge never clips. */
-const PANEL_PAD = 3;
 
 /**
  * Panel cap.
@@ -37,6 +50,20 @@ interface Panel {
   values: number[];
 }
 
+/**
+ * A usable, shared Y domain from `extentOf`.
+ *
+ * All-equal and all-zero data has no range to scale against — a linear scale
+ * divides by that width — so instead of collapsing every panel onto one edge,
+ * the domain is padded a unit either side. Every value then lands exactly in
+ * the middle of every panel, which is the honest picture: nothing moved.
+ */
+function sharedDomain(span: Span): [number, number] {
+  return span.min === span.max
+    ? [span.min - 1, span.max + 1]
+    : [span.min, span.max];
+}
+
 export const SmallMultiples = defineComponent({
   name: "SmallMultiples",
   props: SmallMultiplesSchema,
@@ -47,12 +74,14 @@ export const SmallMultiples = defineComponent({
     "Use it to compare the shape of a dozen categories at once; use GroupedBar when the reader has to compare values rather than shapes, and Sparkline for a single series beside a figure.",
   component: ({ props }) => {
     const raw = props as unknown as Record<string, unknown>;
-    const parsed = readItems(raw.items ?? raw.series ?? raw.data ?? raw.panels).map(
-      (record) => ({
-        label: readLabel(record),
-        values: readNumbers(record.values ?? record.data ?? record.points ?? record.series),
-      }),
-    );
+    const parsed = readItems(
+      raw.items ?? raw.series ?? raw.data ?? raw.panels,
+    ).map((record) => ({
+      label: readLabel(record),
+      values: readNumbers(
+        record.values ?? record.data ?? record.points ?? record.series,
+      ),
+    }));
     const usable: Panel[] = parsed.filter((panel) => panel.values.length > 0);
     // Zero panels is not a chart. It renders nothing at all rather than an empty
     // grid holding its height.
@@ -79,15 +108,12 @@ export const SmallMultiples = defineComponent({
     // All-equal and all-zero data has no range to scale against. Every panel is
     // then drawn down the middle, which is the honest picture: nothing moved.
     const flat = span.max === span.min;
+    const yDomain = sharedDomain(span);
+    // A shared domain that straddles zero gets a reference line in every panel,
+    // so a positive run and a negative one are told apart by more than colour.
+    const hasZeroLine = span.min < 0 && span.max > 0;
 
-    const yOf = (value: number) => {
-      const ratio = flat ? 0.5 : (value - span.min) / span.size;
-      return Math.round((PANEL_H - PANEL_PAD - ratio * (PANEL_H - PANEL_PAD * 2)) * 100) / 100;
-    };
-    const zeroY = span.min < 0 && span.max > 0 ? yOf(0) : undefined;
-
-    const scaleText =
-      `${formatValue(span.min)} to ${formatValue(span.max)}${unit ? ` ${unit}` : ""}`;
+    const scaleText = `${formatValue(span.min)} to ${formatValue(span.max)}${unit ? ` ${unit}` : ""}`;
     const summary =
       `Small multiples${title ? ` of ${title}` : ""}: ${panels.length} panels ` +
       `(${panels.map((panel) => panel.label || "unlabelled").join(", ")}), ` +
@@ -125,7 +151,13 @@ export const SmallMultiples = defineComponent({
     );
 
     return (
-      <ChartFrame footnote={footnote} slot="small-multiples" summary={summary} title={title} unit={unit}>
+      <ChartFrame
+        footnote={footnote}
+        slot="small-multiples"
+        summary={summary}
+        title={title}
+        unit={unit}
+      >
         <div
           className="vgb-multiples"
           data-a2ui-small-multiples
@@ -134,46 +166,78 @@ export const SmallMultiples = defineComponent({
         >
           {panels.map((panel, index) => {
             const last = panel.values[panel.values.length - 1] ?? 0;
-            const step = panel.values.length > 1 ? PANEL_W / (panel.values.length - 1) : 0;
-            const points =
-              panel.values.length > 1
-                ? panel.values
-                    .map((value, i) => `${Math.round(i * step * 100) / 100},${yOf(value)}`)
-                    .join(" ")
-                : // One reading is a level, not a trend: a short tick marks where
-                  // it sits on the shared scale instead of drawing a line that
-                  // would imply movement.
-                  `45,${yOf(panel.values[0] ?? 0)} 55,${yOf(panel.values[0] ?? 0)}`;
+            // One reading is a level, not a trend: a single point with a visible
+            // dot marks where it sits on the shared scale, rather than a line
+            // that would imply movement recharts has no second point to draw.
+            const single = panel.values.length === 1;
+            const data = single
+              ? [{ index: 0, value: panel.values[0] ?? 0 }]
+              : panel.values.map((value, i) => ({ index: i, value }));
 
             return (
               <div className="vgb-multiple" key={`${panel.label}-${index}`}>
                 <span className="vgb-multiple-label">{panel.label}</span>
-                <svg
-                  aria-hidden="true"
-                  className="vgb-multiple-svg"
-                  preserveAspectRatio="none"
-                  viewBox={`0 0 ${PANEL_W} ${PANEL_H}`}
-                >
-                  {zeroY === undefined ? null : (
-                    <line
-                      className="vgb-multiple-zero"
-                      x1={0}
-                      x2={PANEL_W}
-                      y1={zeroY}
-                      y2={zeroY}
-                    />
-                  )}
-                  <polyline
-                    className="vgb-multiple-line"
-                    fill="none"
-                    points={points}
-                    stroke={toneText(PANEL_TONE)}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={1.5}
-                    vectorEffect="non-scaling-stroke"
-                  />
-                </svg>
+                <div className="vgb-recharts vgb-recharts-small">
+                  <ResponsiveContainer
+                    width="100%"
+                    height="100%"
+                    minWidth={0}
+                    minHeight={0}
+                    initialDimension={CHART_INITIAL_DIMENSION}
+                  >
+                    <LineChart data={data} margin={CHART_MARGIN}>
+                      <XAxis
+                        dataKey="index"
+                        domain={[0, Math.max(1, panel.values.length - 1)]}
+                        hide
+                        type="number"
+                      />
+                      <YAxis domain={yDomain} hide type="number" />
+                      {hasZeroLine ? (
+                        <ReferenceLine
+                          className="vgb-multiple-zero"
+                          stroke={GRID_STROKE}
+                          strokeOpacity={0.6}
+                          y={0}
+                        />
+                      ) : null}
+                      <Tooltip
+                        content={({ active, payload }) => {
+                          if (!active || !payload?.length) return null;
+                          const point = payload[0]?.payload as
+                            { value: number } | undefined;
+                          if (!point) return null;
+                          return (
+                            <div style={TOOLTIP_CONTENT_STYLE}>
+                              <div style={TOOLTIP_ITEM_STYLE}>
+                                {`${formatValue(point.value)}${unit ? ` ${unit}` : ""}`}
+                              </div>
+                            </div>
+                          );
+                        }}
+                        cursor={TOOLTIP_CURSOR}
+                        isAnimationActive={false}
+                      />
+                      <Line
+                        className="vgb-multiple-line"
+                        dataKey="value"
+                        dot={
+                          single
+                            ? {
+                                r: 3,
+                                fill: toneText(PANEL_TONE),
+                                stroke: "none",
+                              }
+                            : false
+                        }
+                        isAnimationActive={false}
+                        stroke={toneText(PANEL_TONE)}
+                        strokeWidth={1.5}
+                        type="linear"
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
                 <span className="vgb-multiple-figure">
                   <span className="vgb-chart-value">{formatValue(last)}</span>
                   <span className="vgb-chart-sub">

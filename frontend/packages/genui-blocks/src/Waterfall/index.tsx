@@ -1,21 +1,41 @@
 "use client";
 
 import { defineComponent } from "@openuidev/react-lang";
-
-import { ChartFrame, ChartRow } from "../lib/chart-parts";
 import {
-  asPct,
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  LabelList,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+
+import { ChartFrame } from "../lib/chart-parts";
+import {
   formatSigned,
   formatValue,
-  offsetPct,
   readItems,
   readLabel,
-  sizePct,
   spanOf,
   toneTint,
 } from "../lib/chart";
 import { readLooseNumber, readTextFromKeys } from "../lib/props";
 import type { Tone } from "../lib/schema";
+import {
+  AXIS_TICK,
+  CHART_INITIAL_DIMENSION,
+  CHART_MARGIN,
+  GRID_STROKE,
+  MAX_BAR_SIZE,
+  TOOLTIP_CONTENT_STYLE,
+  TOOLTIP_CURSOR,
+  TOOLTIP_ITEM_STYLE,
+  TOOLTIP_LABEL_STYLE,
+} from "../lib/recharts-chrome";
 import { toneText, trendTone } from "../lib/tone";
 import { BridgeChartSchema, WaterfallSchema } from "./schema";
 
@@ -76,8 +96,9 @@ function buildBridge(raw: Record<string, unknown>): Bridge | null {
       ),
       kind: readTextFromKeys(record, ["kind", "type", "role"]).toLowerCase(),
     }))
-    .filter((item): item is { label: string; value: number; kind: string } =>
-      item.value !== undefined,
+    .filter(
+      (item): item is { label: string; value: number; kind: string } =>
+        item.value !== undefined,
     );
   if (parsed.length === 0) return null;
 
@@ -90,8 +111,8 @@ function buildBridge(raw: Record<string, unknown>): Bridge | null {
       : undefined,
   );
   const hasStart = declared.includes("start");
-  const kinds: Kind[] = declared.map((kind, index) =>
-    kind ?? (!hasStart && index === 0 ? "start" : "delta"),
+  const kinds: Kind[] = declared.map(
+    (kind, index) => kind ?? (!hasStart && index === 0 ? "start" : "delta"),
   );
 
   const bars: Bar[] = [];
@@ -142,7 +163,8 @@ function buildBridge(raw: Record<string, unknown>): Bridge | null {
   });
 
   const computed = running;
-  const mismatch = reported !== undefined && Math.abs(reported - computed) > EPSILON;
+  const mismatch =
+    reported !== undefined && Math.abs(reported - computed) > EPSILON;
   bars.push({
     label: endLabel,
     kind: "end",
@@ -156,14 +178,19 @@ function buildBridge(raw: Record<string, unknown>): Bridge | null {
   return { bars, computed, reported, mismatch, start, deltas };
 }
 
-function WaterfallChart({ raw, slot }: { raw: Record<string, unknown>; slot: string }) {
+function WaterfallChart({
+  raw,
+  slot,
+}: {
+  raw: Record<string, unknown>;
+  slot: string;
+}) {
   const bridge = buildBridge(raw);
   if (!bridge) return null;
 
   const title = readTextFromKeys(raw, ["title", "label"]);
   const unit = readTextFromKeys(raw, ["unit", "units", "basis"]);
   const span = spanOf(bridge.bars.flatMap((bar) => [bar.lo, bar.hi]));
-  const zero = offsetPct(0, span);
 
   const summary =
     `Waterfall bridge${title ? ` of ${title}` : ""}${unit ? ` in ${unit}` : ""}: ` +
@@ -181,43 +208,91 @@ function WaterfallChart({ raw, slot }: { raw: Record<string, unknown>; slot: str
     </span>
   ) : null;
 
+  /*
+   * The invisible-base stacked technique: `base` (transparent) carries the
+   * bar up to wherever it starts, `delta` (visible, `stackId`-glued on top of
+   * it) is the segment that actually reads as the bar. Because `lo <= hi`
+   * always, `delta` is never negative — the direction lives in the tone and
+   * in the signed figure, not in the bar's height.
+   */
+  const rows = bridge.bars.map((bar) => ({
+    label: bar.label,
+    base: bar.lo,
+    delta: bar.hi - bar.lo,
+    figure:
+      bar.kind === "delta" ? formatSigned(bar.figure) : formatValue(bar.figure),
+    fill: bar.kind === "delta" ? toneText(bar.tone) : toneTint(bar.tone, 45),
+    mismatch: bar.mismatch,
+  }));
+
   return (
-    <ChartFrame footnote={footnote} slot={slot} summary={summary} title={title} unit={unit}>
-      <div className="vgb-chart-rows">
-        {bridge.bars.map((bar, index) => {
-          const width = sizePct(bar.hi - bar.lo, span);
-          return (
-            <ChartRow
-              figure={bar.kind === "delta" ? formatSigned(bar.figure) : formatValue(bar.figure)}
-              key={`${bar.label}-${index}`}
-              label={bar.label}
-              mismatch={bar.mismatch}
+    <ChartFrame
+      footnote={footnote}
+      slot={slot}
+      summary={summary}
+      title={title}
+      unit={unit}
+    >
+      <div className="vgb-recharts">
+        <ResponsiveContainer
+          height="100%"
+          initialDimension={CHART_INITIAL_DIMENSION}
+          minHeight={0}
+          minWidth={0}
+          width="100%"
+        >
+          <BarChart data={rows} margin={CHART_MARGIN}>
+            <CartesianGrid stroke={GRID_STROKE} vertical={false} />
+            <XAxis
+              axisLine={false}
+              dataKey="label"
+              tick={AXIS_TICK}
+              tickLine={false}
+            />
+            <YAxis
+              axisLine={false}
+              tick={AXIS_TICK}
+              tickFormatter={formatValue}
+              tickLine={false}
+            />
+            <Tooltip
+              contentStyle={TOOLTIP_CONTENT_STYLE}
+              cursor={TOOLTIP_CURSOR}
+              isAnimationActive={false}
+              itemStyle={TOOLTIP_ITEM_STYLE}
+              labelStyle={TOOLTIP_LABEL_STYLE}
+            />
+            {/* Only drawn when the walk actually goes negative — the same
+                condition the hand-drawn zero stripe used. */}
+            {span.min < 0 ? <ReferenceLine stroke={GRID_STROKE} y={0} /> : null}
+            <Bar
+              dataKey="base"
+              fill="transparent"
+              isAnimationActive={false}
+              stackId="bridge"
+            />
+            <Bar
+              dataKey="delta"
+              isAnimationActive={false}
+              maxBarSize={MAX_BAR_SIZE}
+              stackId="bridge"
             >
-              {span.min < 0 ? (
-                <span
-                  aria-hidden="true"
-                  className="vgb-chart-zero"
-                  style={{ left: asPct(zero) }}
+              {rows.map((row, index) => (
+                <Cell
+                  data-chart-mismatch={row.mismatch ? "true" : undefined}
+                  fill={row.fill}
+                  key={`${row.label}-${index}`}
                 />
-              ) : null}
-              {/* A zero contribution draws no bar at all: a 2px stub reads as a
-                  small value rather than as no movement. */}
-              {width > 0 ? (
-                <span
-                  aria-hidden="true"
-                  className="vgb-chart-bar"
-                  data-chart-kind={bar.kind}
-                  style={{
-                    backgroundColor:
-                      bar.kind === "delta" ? toneText(bar.tone) : toneTint(bar.tone, 45),
-                    left: asPct(offsetPct(bar.lo, span)),
-                    width: asPct(width),
-                  }}
-                />
-              ) : null}
-            </ChartRow>
-          );
-        })}
+              ))}
+              <LabelList
+                dataKey="figure"
+                fill={toneText("neutral")}
+                fontSize={11}
+                position="top"
+              />
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
       </div>
     </ChartFrame>
   );
@@ -225,16 +300,19 @@ function WaterfallChart({ raw, slot }: { raw: Record<string, unknown>; slot: str
 
 const DESCRIPTION =
   "A bridge from an opening value to a closing one: the start, each signed contribution, and the total. " +
-  "items is the walk in order — {label, value, kind} where kind is \"start\" for the opening balance, \"delta\" for a contribution (value signed: -12 is a decrease), and \"end\" for a stated closing figure. " +
-  "The closing bar is always computed from start + deltas; supply an \"end\" item only to have it checked, because a reported total that disagrees is printed and flagged, not silently accepted. " +
-  "unit names the basis of every value (\"USD m\", \"% of revenue\") — the numbers carry no unit of their own. Use it for revenue and margin bridges, budget variance, and headcount movement.";
+  'items is the walk in order — {label, value, kind} where kind is "start" for the opening balance, "delta" for a contribution (value signed: -12 is a decrease), and "end" for a stated closing figure. ' +
+  'The closing bar is always computed from start + deltas; supply an "end" item only to have it checked, because a reported total that disagrees is printed and flagged, not silently accepted. ' +
+  'unit names the basis of every value ("USD m", "% of revenue") — the numbers carry no unit of their own. Use it for revenue and margin bridges, budget variance, and headcount movement.';
 
 export const Waterfall = defineComponent({
   name: "Waterfall",
   props: WaterfallSchema,
   description: DESCRIPTION,
   component: ({ props }) => (
-    <WaterfallChart raw={props as unknown as Record<string, unknown>} slot="waterfall" />
+    <WaterfallChart
+      raw={props as unknown as Record<string, unknown>}
+      slot="waterfall"
+    />
   ),
 });
 
@@ -246,6 +324,9 @@ export const BridgeChart = defineComponent({
     `${DESCRIPTION} Identical to Waterfall — the two names exist because "bridge" and "waterfall" ` +
     "are the same chart in different vocabularies; pick whichever the answer uses.",
   component: ({ props }) => (
-    <WaterfallChart raw={props as unknown as Record<string, unknown>} slot="bridge-chart" />
+    <WaterfallChart
+      raw={props as unknown as Record<string, unknown>}
+      slot="bridge-chart"
+    />
   ),
 });

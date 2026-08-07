@@ -1,13 +1,16 @@
 /*
- * Hand-drawn charts — Sparkline, Waterfall/BridgeChart, Funnel, Heatmap,
+ * Chart-family blocks — Sparkline, Waterfall/BridgeChart, Funnel, Heatmap,
  * Histogram, BoxPlot, Treemap, GroupedBar, StackedBar, BubbleChart,
  * SmallMultiples, ComboChart, Sankey.
  *
- * These are CSS boxes and one inline SVG, not a charting library: OpenUI
- * already ships recharts-backed BarChart/LineChart/AreaChart/PieChart/
- * ScatterChart/RadarChart, and these are the shapes it lacks. A second renderer
- * in a package whose contract is "@openuidev/* + react + zod" would be a
- * dependency nobody asked for.
+ * These blocks draw through recharts — the same engine behind OpenUI's own
+ * BarChart/LineChart/AreaChart family — so the whole chart vocabulary shares
+ * one look and one interaction (the tooltip). The earlier hand-drawn CSS-box
+ * implementation is retired: it diverged visually from the react-ui charts
+ * and had no interaction to recover a value the geometry squeezed out.
+ * Sparkline stays a hand-drawn inline SVG: it is a glyph beside a figure,
+ * not a chart, and per-row chart runtimes would be real cost for no gain.
+ * Heatmap stays an SVG grid: recharts has no matrix primitive.
  *
  * Family rules, same as every file under styles/: `.vgb-` prefix, `--openui-*`
  * custom properties only, container queries rather than media queries.
@@ -114,8 +117,7 @@
   list-style: none;
 }
 
-.vgb-chart-legend-item,
-.vgb-stack-part {
+.vgb-chart-legend-item {
   display: inline-flex;
   align-items: center;
   gap: var(--openui-space-2xs);
@@ -135,26 +137,12 @@
   border-radius: var(--openui-radius-full);
 }
 
-/* ── Rows: label · track · figure ─────────────────────────────────── */
-
-.vgb-chart-rows {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: var(--openui-space-s);
-}
-
 .vgb-chart-row {
   display: grid;
   min-width: 0;
   grid-template-columns: minmax(0, 9rem) minmax(0, 1fr) max-content;
   align-items: center;
   gap: var(--openui-space-2xs) var(--openui-space-s);
-}
-
-/* A grouped row has no single figure — each series carries its own. */
-.vgb-chart-row-group {
-  grid-template-columns: minmax(0, 9rem) minmax(0, 1fr);
 }
 
 .vgb-chart-label {
@@ -214,22 +202,6 @@
   background: var(--openui-highlight-subtle);
 }
 
-.vgb-chart-bar {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  border-radius: var(--openui-radius-full);
-  /* A contribution too small to see is still a contribution. Zero draws no bar
-     at all, so this floor never invents one. */
-  min-width: 2px;
-}
-
-/* Funnel bars are centred on the track, so the narrowing is the shape. */
-.vgb-chart-bar-centred {
-  left: 50%;
-  transform: translateX(-50%);
-}
-
 .vgb-chart-zero {
   position: absolute;
   top: -2px;
@@ -237,56 +209,6 @@
   width: 1px;
   transform: translateX(-0.5px);
   background: var(--openui-border-default);
-}
-
-/* ── GroupedBar ───────────────────────────────────────────────────── */
-
-/*
- * One thin track per series, stacked inside the category's cell with its value
- * in an aligned column. Horizontal rather than vertical columns: a chat column
- * is narrow, and vertical columns put the category names on an axis that has
- * nowhere to put a long or CJK label.
- */
-.vgb-group {
-  display: grid;
-  min-width: 0;
-  grid-template-columns: minmax(0, 1fr) max-content;
-  align-items: center;
-  gap: 2px var(--openui-space-s);
-}
-
-.vgb-group .vgb-chart-track {
-  height: 0.45rem;
-}
-
-/* ── StackedBar ───────────────────────────────────────────────────── */
-
-.vgb-stack {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  /* 2px of the surface between segments. A border drawn round each one would
-     add ink that is not data; the gap does the separating. */
-  gap: 2px;
-}
-
-.vgb-stack-segment {
-  min-width: 2px;
-}
-
-.vgb-stack-segment:first-child {
-  border-start-start-radius: var(--openui-radius-full);
-  border-end-start-radius: var(--openui-radius-full);
-}
-
-.vgb-stack-segment:last-child {
-  border-start-end-radius: var(--openui-radius-full);
-  border-end-end-radius: var(--openui-radius-full);
-}
-
-.vgb-stack-part {
-  font-variant-numeric: tabular-nums;
-  overflow-wrap: anywhere;
 }
 
 /* ── Sparkline ────────────────────────────────────────────────────── */
@@ -318,39 +240,6 @@
   align-items: stretch;
   gap: 2px;
   min-width: 100%;
-}
-
-.vgb-histogram-bin {
-  display: flex;
-  flex: 1 1 auto;
-  /* `min(…, 100%)` rather than a bare floor: a floor wider than the container
-     does not shrink the container, it overflows it. Here the overflow is the
-     point — `.vgb-scroll-x` catches it — but the container still has to win
-     when there is only one bin. */
-  min-width: min(2.75rem, 100%);
-  flex-direction: column;
-  align-items: center;
-  gap: var(--openui-space-3xs);
-}
-
-.vgb-histogram-count,
-.vgb-histogram-label {
-  color: var(--openui-text-neutral-secondary);
-  font-size: var(--openui-font-size-2xs);
-  text-align: center;
-  /* Wraps inside its own bin rather than overlapping the next one. */
-  overflow-wrap: anywhere;
-}
-
-.vgb-histogram-count {
-  font-variant-numeric: tabular-nums;
-}
-
-.vgb-histogram-column {
-  display: flex;
-  width: 100%;
-  height: 7rem;
-  align-items: flex-end;
 }
 
 .vgb-histogram-fill {
@@ -427,44 +316,6 @@
   border-radius: var(--openui-radius-xs);
 }
 
-/* ── BoxPlot ──────────────────────────────────────────────────────── */
-
-.vgb-box-whisker {
-  position: absolute;
-  top: 50%;
-  height: 1px;
-  transform: translateY(-50%);
-  opacity: 0.55;
-}
-
-.vgb-box {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  min-width: 2px;
-  border: 1px solid;
-  border-radius: var(--openui-radius-xs);
-}
-
-.vgb-box-median {
-  position: absolute;
-  top: -2px;
-  bottom: -2px;
-  width: 2px;
-  transform: translateX(-1px);
-  border-radius: var(--openui-radius-full);
-}
-
-.vgb-box-outlier {
-  position: absolute;
-  top: 50%;
-  width: 5px;
-  height: 5px;
-  transform: translate(-50%, -50%);
-  border-radius: var(--openui-radius-full);
-  opacity: 0.7;
-}
-
 /* ── Treemap ──────────────────────────────────────────────────────── */
 
 /*
@@ -479,13 +330,6 @@
   min-width: 0;
   height: 14rem;
   flex-direction: column;
-  gap: 2px;
-}
-
-.vgb-treemap-row {
-  display: flex;
-  min-height: 0;
-  flex-basis: 0;
   gap: 2px;
 }
 
@@ -514,41 +358,6 @@
 .vgb-treemap-value {
   color: var(--openui-text-neutral-secondary);
   font-variant-numeric: tabular-nums;
-}
-
-/* ── BubbleChart ──────────────────────────────────────────────────── */
-
-/*
- * Axis names beside the plot, never rotated onto it. The y axis is a column of
- * three lines read top to bottom — high value, what is being measured, low
- * value — which is the same information a rotated caption carries and is
- * legible at this size, in Latin and in CJK alike.
- */
-.vgb-bubble {
-  display: grid;
-  min-width: 0;
-  grid-template-columns: max-content minmax(0, 1fr);
-  gap: var(--openui-space-2xs) var(--openui-space-xs);
-}
-
-.vgb-bubble-axis {
-  display: flex;
-  color: var(--openui-text-neutral-secondary);
-  font: var(--openui-text-label-sm);
-}
-
-.vgb-bubble-axis-y {
-  flex-direction: column;
-  align-items: flex-end;
-  justify-content: space-between;
-  text-align: right;
-}
-
-.vgb-bubble-axis-x {
-  grid-column: 2;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--openui-space-xs);
 }
 
 .vgb-bubble-axis-name {
@@ -644,14 +453,6 @@
   overflow-wrap: anywhere;
 }
 
-.vgb-multiple-svg {
-  width: 100%;
-  height: 2.25rem;
-  border-radius: var(--openui-radius-xs);
-  background: var(--openui-highlight-subtle);
-  overflow: visible;
-}
-
 .vgb-multiple-zero {
   stroke: var(--openui-border-default);
   stroke-width: 1;
@@ -665,116 +466,8 @@
   gap: var(--openui-space-2xs);
 }
 
-/* ── ComboChart ───────────────────────────────────────────────────── */
-
-/*
- * Three grid columns — left axis, plot, optional right axis — with the labels
- * on a second row under the plot only. The plot and the foot row are separate
- * flex rows whose cells share `flex: 1 1 0` and no gap, so cell *n* sits at the
- * same x in both; that is what lets the line overlay, which is positioned in
- * percentages of the plot box, land on the centre of its bar.
- */
-.vgb-combo {
-  display: grid;
-  min-width: 0;
-  grid-template-columns: max-content minmax(0, 1fr) max-content;
-  column-gap: var(--openui-space-xs);
-}
-
-.vgb-combo-axis {
-  display: flex;
-  grid-row: 1;
-  flex-direction: column;
-  justify-content: space-between;
-  color: var(--openui-text-neutral-secondary);
-  font: var(--openui-text-label-sm);
-  text-align: center;
-}
-
-.vgb-combo-axis-left {
-  grid-column: 1;
-}
-
 .vgb-combo-axis-right {
   grid-column: 3;
-}
-
-.vgb-combo-axis-name {
-  max-width: 4rem;
-  overflow-wrap: anywhere;
-}
-
-.vgb-combo-plot {
-  position: relative;
-  grid-row: 1;
-  grid-column: 2;
-  min-width: 0;
-  height: 8rem;
-}
-
-.vgb-combo-cells,
-.vgb-combo-foot {
-  display: flex;
-  min-width: 0;
-  /* No gap: the line overlay's x positions are computed as (n + 0.5) / count of
-     the plot's width, which is only the centre of cell n while the cells tile
-     it exactly. */
-  gap: 0;
-}
-
-.vgb-combo-cells {
-  height: 100%;
-}
-
-.vgb-combo-foot {
-  grid-row: 2;
-  grid-column: 2;
-  padding-top: var(--openui-space-2xs);
-}
-
-.vgb-combo-cell,
-.vgb-combo-foot-cell {
-  /* No width floor, and no sideways scroll: a combination chart's claim is how
-     the line moves against the bars, and half of that scrolled out of view is
-     the comparison not being made. The category cap is what keeps the columns
-     wide enough instead. */
-  flex: 1 1 0;
-  min-width: 0;
-}
-
-.vgb-combo-cell {
-  position: relative;
-  height: 100%;
-}
-
-.vgb-combo-foot-cell {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--openui-space-3xs);
-  padding: 0 var(--openui-space-3xs);
-}
-
-.vgb-combo-label {
-  color: var(--openui-text-neutral-secondary);
-  font-size: var(--openui-font-size-2xs);
-  text-align: center;
-  /* Wraps inside its own column rather than overlapping the next one. */
-  overflow-wrap: anywhere;
-}
-
-.vgb-combo-foot-cell .vgb-chart-value {
-  font-size: var(--openui-font-size-2xs);
-}
-
-.vgb-combo-bar {
-  position: absolute;
-  left: 18%;
-  right: 18%;
-  /* A value too small to see is still a value. Zero draws no bar at all, so
-     this floor never invents one. */
-  min-height: 2px;
-  border-radius: var(--openui-radius-xs);
 }
 
 .vgb-combo-zero {
@@ -785,15 +478,6 @@
   background: var(--openui-border-default);
 }
 
-.vgb-combo-line {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  overflow: visible;
-  pointer-events: none;
-}
-
 /* ── Sankey ───────────────────────────────────────────────────────── */
 
 .vgb-sankey {
@@ -801,11 +485,6 @@
   width: 100%;
   min-width: 0;
   height: 15rem;
-}
-
-.vgb-sankey-svg {
-  width: 100%;
-  height: 100%;
 }
 
 /*
@@ -852,24 +531,20 @@
  * — auto-placement would push the figure onto a third row.
  */
 @container vgb (max-width: 30rem) {
-  .vgb-chart-row:not(.vgb-chart-row-group) {
+  .vgb-chart-row {
     grid-template-columns: minmax(0, 1fr) max-content;
   }
 
-  .vgb-chart-row:not(.vgb-chart-row-group) > .vgb-chart-label {
+  .vgb-chart-row > .vgb-chart-label {
     grid-area: 1 / 1 / 2 / 2;
   }
 
-  .vgb-chart-row:not(.vgb-chart-row-group) > .vgb-chart-figure {
+  .vgb-chart-row > .vgb-chart-figure {
     grid-area: 1 / 2 / 2 / 3;
   }
 
-  .vgb-chart-row:not(.vgb-chart-row-group) > .vgb-chart-track {
+  .vgb-chart-row > .vgb-chart-track {
     grid-area: 2 / 1 / 3 / 3;
-  }
-
-  .vgb-chart-row-group {
-    grid-template-columns: minmax(0, 1fr);
   }
 
   .vgb-treemap {
@@ -886,15 +561,37 @@
     max-width: 4rem;
   }
 
-  .vgb-combo-plot {
-    height: 6.5rem;
-  }
-
   .vgb-sankey {
     height: 12rem;
   }
 
   .vgb-sankey-label {
     max-width: min(6rem, 45%);
+  }
+}
+
+/* ── recharts containers ─────────────────────────────────────────────
+   The blocks in this family now draw through recharts (owner decision
+   reversing the "no second renderer" rule above: react-ui already ships
+   recharts, so the engine is shared, and the hand-drawn plots diverged
+   from the react-ui charts in look and interaction). ResponsiveContainer
+   needs a sized box — height is geometry, not spacing, so it stays px. */
+.vgb-recharts {
+  height: 200px;
+  width: 100%;
+}
+
+/* Small-multiple panels: readable but deliberately modest. */
+.vgb-recharts-small {
+  height: 120px;
+}
+
+@container vgb (max-width: 30rem) {
+  .vgb-recharts {
+    height: 160px;
+  }
+
+  .vgb-recharts-small {
+    height: 100px;
   }
 }

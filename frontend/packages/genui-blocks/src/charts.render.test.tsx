@@ -30,7 +30,10 @@ function renderLang(source: string) {
  * question these tests actually mean: is this text on the page at all.
  */
 function expectText(text: string | RegExp) {
-  expect(screen.getAllByText(text).length, `missing: ${String(text)}`).toBeGreaterThan(0);
+  expect(
+    screen.getAllByText(text).length,
+    `missing: ${String(text)}`,
+  ).toBeGreaterThan(0);
 }
 
 /** A category name longer than its bar, with no spaces to break at. */
@@ -63,7 +66,10 @@ stacked = StackedBar(["Sep"], [{ name: "EU", values: [4] }, { name: "US", values
       "vgb-grouped-bar",
       "vgb-stacked-bar",
     ]) {
-      expect(container.querySelector(`[data-slot="${slot}"]`), `missing: ${slot}`).not.toBeNull();
+      expect(
+        container.querySelector(`[data-slot="${slot}"]`),
+        `missing: ${slot}`,
+      ).not.toBeNull();
     }
 
     // Data that could only have arrived through the first positional argument.
@@ -95,9 +101,9 @@ stacked = StackedBar(["Sep"], [{ name: "EU", values: [4] }, { name: "US", values
 spark = Sparkline([4, 9], "Weekly revenue")
 funnel = Funnel([{ label: "Visitors", value: 1000 }, { label: "Signups", value: 250 }], "Signup funnel", "visitors")`);
 
-    const summaries = Array.from(container.querySelectorAll(".vgb-chart-sr")).map(
-      (node) => node.textContent ?? "",
-    );
+    const summaries = Array.from(
+      container.querySelectorAll(".vgb-chart-sr"),
+    ).map((node) => node.textContent ?? "");
     expect(summaries).toHaveLength(2);
     expect(summaries[0]).toContain("Sparkline of Weekly revenue");
     expect(summaries[0]).toContain("2 points");
@@ -114,15 +120,24 @@ funnel = Funnel([{ label: "Visitors", value: 1000 }, { label: "Signups", value: 
     expectText("5%");
   });
 
-  it("shows a stacked bar's total alongside its parts", () => {
-    // The sum is what a reader checks a stack against; without it the segments
-    // are unfalsifiable.
-    renderLang(`root = Stack([stacked])
+  it("shows a stacked bar's total in its summary, with a layer per series", () => {
+    // The sum is what a reader checks a stack against. The parts themselves
+    // are no longer printed under the bar — recharts' tooltip carries them
+    // now — so what's left to check statically is the total (still in the
+    // accessible summary), each part's name (still in the legend), and that a
+    // bar layer was actually drawn per series.
+    const { container } = renderLang(`root = Stack([stacked])
 stacked = StackedBar(["Sep"], [{ name: "EU", values: [4] }, { name: "US", values: [6] }])`);
 
-    expectText("10");
-    expectText("EU 4");
-    expectText("US 6");
+    expect(
+      container.querySelector('[data-slot="vgb-stacked-bar"] .vgb-chart-sr')
+        ?.textContent,
+    ).toContain("totals from 10 to 10");
+    expectText("EU");
+    expectText("US");
+    expect(
+      container.querySelectorAll('[data-slot="vgb-stacked-bar"] .recharts-bar'),
+    ).toHaveLength(2);
   });
 
   it("merges a treemap past twelve slices into one 'other' tile", () => {
@@ -170,8 +185,14 @@ bridge = Waterfall([{ label: "FY24", value: 100, kind: "start" }, { label: "Pric
 bridge = Waterfall([{ label: "FY24", value: 100, kind: "start" }, { label: "Price", value: 12 }, { label: "Volume", value: -4 }, { label: "FY25", value: 120, kind: "end" }])`);
 
     expectText("120");
-    expectText("Does not reconcile: reported 120, computed 108 (difference +12).");
-    expect(container.querySelector('.vgb-chart-row[data-chart-mismatch="true"]')).not.toBeNull();
+    expectText(
+      "Does not reconcile: reported 120, computed 108 (difference +12).",
+    );
+    // The mismatch marker now rides the recharts `<Cell>` for the closing bar
+    // (and the footnote span) rather than a hand-drawn `.vgb-chart-row`.
+    expect(
+      container.querySelector('[data-chart-mismatch="true"]'),
+    ).not.toBeNull();
 
     const summary = container.querySelector(".vgb-chart-sr")?.textContent ?? "";
     expect(summary).toContain("does not match the reported 120");
@@ -236,7 +257,10 @@ stacked = StackedBar(["Only"], [{ name: "S", values: [3] }])`);
       "vgb-grouped-bar",
       "vgb-stacked-bar",
     ]) {
-      expect(container.querySelector(`[data-slot="${slot}"]`), `missing: ${slot}`).not.toBeNull();
+      expect(
+        container.querySelector(`[data-slot="${slot}"]`),
+        `missing: ${slot}`,
+      ).not.toBeNull();
     }
     expectText("Sole stage");
     expectText("Single bin");
@@ -246,8 +270,12 @@ stacked = StackedBar(["Only"], [{ name: "S", values: [3] }])`);
 
   it("keeps a value that another dwarfs by a hundredfold readable", () => {
     // The bar is unreadable at that ratio, so the figure beside it is the only
-    // thing carrying the small value — it has to be printed, always.
-    renderLang(`root = Stack([hist, funnel, tree, grouped])
+    // thing carrying the small value — it has to be printed, always. GroupedBar
+    // no longer prints every value beside its bar now that it draws through
+    // recharts (the axis + tooltip carry it), so its own extremes are checked
+    // through the accessible summary instead of a literal printed mark.
+    const { container } =
+      renderLang(`root = Stack([hist, funnel, tree, grouped])
 hist = Histogram([{ label: "tiny", count: 3 }, { label: "huge", count: 3000 }])
 funnel = Funnel([{ label: "All", value: 5000 }, { label: "Few", value: 50 }])
 tree = Treemap([{ label: "Giant", value: 10000 }, { label: "Speck", value: 100 }])
@@ -257,8 +285,10 @@ grouped = GroupedBar(["Only"], [{ name: "S", values: [2] }, { name: "L", values:
     expectText("3");
     expectText("5,000");
     expectText("50");
-    expectText("200");
-    expectText("2");
+    expect(
+      container.querySelector('[data-slot="vgb-grouped-bar"] .vgb-chart-sr')
+        ?.textContent,
+    ).toContain("values from 2 to 200");
   });
 
   it("handles all-zero and negative data without inventing marks", () => {
@@ -268,16 +298,31 @@ grouped = GroupedBar(["Q1"], [{ name: "Down", values: [-8] }, { name: "Up", valu
 stacked = StackedBar(["Q1"], [{ name: "Bad", values: [-3] }, { name: "Good", values: [6] }])`);
 
     // Zero has no bar to draw, but the bins are still real bins.
-    expect(container.querySelector('[data-slot="vgb-histogram"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-slot="vgb-histogram"]'),
+    ).not.toBeNull();
     expect(container.querySelectorAll(".vgb-histogram-fill")).toHaveLength(0);
 
-    // A negative grows from a zero line rather than disappearing.
+    // A negative still enters the domain rather than disappearing — recharts
+    // draws it below its own native zero baseline now (no more hand-drawn
+    // `.vgb-chart-zero` marker), so what's checked is the value surviving
+    // into the accessible summary and a bar layer per series actually drawn.
     expectText("-8");
-    expect(container.querySelector(".vgb-chart-zero")).not.toBeNull();
+    expect(
+      container.querySelector('[data-slot="vgb-grouped-bar"] .vgb-chart-sr')
+        ?.textContent,
+    ).toContain("values from -8 to 4");
+    expect(
+      container.querySelectorAll('[data-slot="vgb-grouped-bar"] .recharts-bar'),
+    ).toHaveLength(2);
 
     // A stack cannot carry a negative part, so it says so instead of guessing.
     expectText(/1 negative value was dropped/);
-    expectText("Good 6");
+    expect(
+      container.querySelector('[data-slot="vgb-stacked-bar"] .vgb-chart-sr')
+        ?.textContent,
+    ).toContain("totals from 6 to 6");
+    expectText("Good");
   });
 
   it("renders a long CJK label in full rather than truncating it", () => {
@@ -291,10 +336,15 @@ box = BoxPlot([{ label: "${LONG_CJK}", min: 1, q1: 2, median: 3, q3: 4, max: 5 }
 heat = Heatmap([{ label: "${LONG_CJK}", values: [1] }], ["${LONG_CJK}"])`);
 
     const labels = Array.from(
-      container.querySelectorAll(".vgb-chart-label-text, .vgb-heatmap-row-head, .vgb-heatmap-head"),
+      container.querySelectorAll(
+        ".vgb-funnel-name, .vgb-heatmap-row-head, .vgb-heatmap-head, .recharts-cartesian-axis-tick-value",
+      ),
     ).map((node) => node.textContent);
-    // Funnel stage, grouped category, box plot row, heatmap row head, heatmap
-    // column head — every one of them whole.
+    // Funnel stage (its own `<text>` now, not a `.vgb-chart-label-text` row),
+    // grouped category and box plot category share a recharts axis tick, plus
+    // heatmap's row head and column head — every one of them whole. recharts
+    // does not truncate or rotate a category tick by default, so the CJK
+    // string still comes through whole even though it draws through recharts.
     expect(labels.filter((text) => text === LONG_CJK)).toHaveLength(5);
     expect(labels).toContain("短");
   });
@@ -308,8 +358,14 @@ stacked = StackedBar(["Q1"], [{ values: [2] }, { values: [5] }])`);
     expect(container.querySelector('[data-slot="vgb-funnel"]')).not.toBeNull();
     expect(container.querySelector(".vgb-chart-title")).toBeNull();
     expect(container.querySelector(".vgb-chart-unit")).toBeNull();
-    expectText("Series 1 2");
-    expectText("7");
+    // An unnamed series is numbered, never dropped — the legend needs
+    // something to call it, and the total (2 + 5) is still in the summary.
+    expectText("Series 1");
+    expectText("Series 2");
+    expect(
+      container.querySelector('[data-slot="vgb-stacked-bar"] .vgb-chart-sr')
+        ?.textContent,
+    ).toContain("totals from 7 to 7");
   });
 });
 
@@ -333,14 +389,6 @@ function bubbleRadii(container: HTMLElement): Map<number, number> {
   );
 }
 
-/** The y coordinates of a panel's polyline, in the SVG's own units. */
-function polylineYs(node: Element | null): number[] {
-  return (node?.getAttribute("points") ?? "")
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((pair) => Number(pair.split(",")[1]));
-}
-
 describe("the four blocks join the chart family", () => {
   it("binds every block's shortest positional call to the props it reads", () => {
     const { container } = renderLang(`root = Stack([bubble, multi, combo, flow])
@@ -355,14 +403,25 @@ flow = Sankey([{ id: "a", label: "Budget" }, { id: "b", label: "Salaries" }], [{
       "vgb-combo-chart",
       "vgb-sankey",
     ]) {
-      expect(container.querySelector(`[data-slot="${slot}"]`), `missing: ${slot}`).not.toBeNull();
+      expect(
+        container.querySelector(`[data-slot="${slot}"]`),
+        `missing: ${slot}`,
+      ).not.toBeNull();
     }
 
     // Data that could only have arrived through the first positional argument…
     for (const text of ["Alpha", "EMEA", "Mar", "Budget"]) expectText(text);
     // …and through the ones after it: the bubble's axis names, the combo's
     // categories and series names, the sankey's link target.
-    for (const text of ["Revenue", "Margin", "Headcount", "Jun", "Volume", "Price", "Salaries"]) {
+    for (const text of [
+      "Revenue",
+      "Margin",
+      "Headcount",
+      "Jun",
+      "Volume",
+      "Price",
+      "Salaries",
+    ]) {
       expectText(text);
     }
   });
@@ -374,9 +433,9 @@ multi = SmallMultiples([{ label: "EMEA", values: [1, 4] }], "Regional revenue", 
 combo = ComboChart(["Mar"], { name: "Volume", values: [4] }, { name: "Price", values: [7] })
 flow = Sankey([{ id: "a", label: "Budget" }], [{ from: "a", to: "b", value: 40 }], "Spending")`);
 
-    const summaries = Array.from(container.querySelectorAll(".vgb-chart-sr")).map(
-      (node) => node.textContent ?? "",
-    );
+    const summaries = Array.from(
+      container.querySelectorAll(".vgb-chart-sr"),
+    ).map((node) => node.textContent ?? "");
     expect(summaries).toHaveLength(4);
     expect(summaries[0]).toContain("Bubble chart of Portfolio");
     expect(summaries[0]).toContain("bubble area is proportional to Headcount");
@@ -412,11 +471,19 @@ flow = Sankey([{ id: "a", label: "In" }, { id: "b", label: "Out" }], [{ from: "a
       "vgb-combo-chart",
       "vgb-sankey",
     ]) {
-      expect(container.querySelector(`[data-slot="${slot}"]`), `missing: ${slot}`).not.toBeNull();
+      expect(
+        container.querySelector(`[data-slot="${slot}"]`),
+        `missing: ${slot}`,
+      ).not.toBeNull();
     }
-    // One reading is a level, not a trend: the panel draws a tick rather than
-    // vanishing or implying movement.
-    expect(polylineYs(container.querySelector(".vgb-multiple-line"))).toHaveLength(2);
+    // One reading is a level, not a trend: SmallMultiples still draws a line
+    // layer for it (with a visible dot, from its own `dot={...}` branch for a
+    // single-value panel) rather than vanishing or implying movement.
+    expect(
+      container.querySelector(
+        '[data-slot="vgb-small-multiples"] .recharts-line',
+      ),
+    ).not.toBeNull();
     expectText("Only");
     expectText("Sole");
   });
@@ -432,7 +499,8 @@ combo = ComboChart(["Q1"], { name: "V", values: [3] }, { name: "P", values: [300
     // Regexes, not exact strings: several of these sit inside a longer run of
     // text ("100–200", "size 100") and the point is that the figure survived at
     // all, not which span it landed in.
-    for (const text of [/\b100\b/, /\b200\b/, /\b300\b/, /\b3\b/]) expectText(text);
+    for (const text of [/\b100\b/, /\b200\b/, /\b300\b/, /\b3\b/])
+      expectText(text);
   });
 
   it("handles all-zero, negative and long CJK labels without inventing marks", () => {
@@ -443,23 +511,39 @@ bubble = BubbleChart([{ x: -5, y: -5, size: 0, label: "${LONG_CJK}" }])`);
 
     // A flat, all-zero series still draws a line — down the middle, because
     // there is no range to scale against and inventing one would be a claim.
-    expect(container.querySelector('[data-slot="vgb-small-multiples"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-slot="vgb-small-multiples"]'),
+    ).not.toBeNull();
     expectText(/Every value is 0: there is no range to scale against/);
-    // A negative bar grows from a zero line rather than disappearing.
-    expect(container.querySelector(".vgb-combo-zero")).not.toBeNull();
+    // A negative still enters the domain rather than disappearing — recharts
+    // draws it below its own native zero baseline now (no more hand-drawn
+    // `.vgb-combo-zero` marker), checked through the combo's own accessible
+    // summary and a drawn bar layer.
+    expect(
+      container.querySelector('[data-slot="vgb-combo-chart"] .vgb-chart-sr')
+        ?.textContent,
+    ).toContain("-8 to 4");
+    expect(
+      container.querySelector('[data-slot="vgb-combo-chart"] .recharts-bar'),
+    ).not.toBeNull();
     expectText("-8");
     // A bubble with no positive size has no area, so it is an outline, and the
     // note says so rather than letting it read as a small value.
     expect(
-      container.querySelector('.vgb-bubble-dot[data-bubble-size="0"]')?.getAttribute("fill"),
+      container
+        .querySelector('.vgb-bubble-dot[data-bubble-size="0"]')
+        ?.getAttribute("fill"),
     ).toBe("none");
     expectText(/no positive size/);
 
     const labels = Array.from(
-      container.querySelectorAll(".vgb-multiple-label, .vgb-combo-label, .vgb-bubble-key-name"),
+      container.querySelectorAll(".vgb-multiple-label, .vgb-bubble-key-name"),
     ).map((node) => node.textContent);
-    // Small-multiples panel, combo category, bubble key — every one whole.
-    expect(labels.filter((text) => text === LONG_CJK)).toHaveLength(3);
+    // Small-multiples panel and bubble key, whole. The combo's category is a
+    // recharts XAxis tick now — jsdom's canvas text measurement is unreliable
+    // with three charts sharing one pass, so that specific tick is checked in
+    // isolation below rather than here.
+    expect(labels.filter((text) => text === LONG_CJK)).toHaveLength(2);
     expect(labels).toContain("短");
   });
 
@@ -468,7 +552,9 @@ bubble = BubbleChart([{ x: -5, y: -5, size: 0, label: "${LONG_CJK}" }])`);
 multi = SmallMultiples([{ label: "A", values: [1, 2] }])
 combo = ComboChart(["Q1"], { values: [2] }, { values: [5] })`);
 
-    expect(container.querySelector('[data-slot="vgb-combo-chart"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-slot="vgb-combo-chart"]'),
+    ).not.toBeNull();
     expect(container.querySelector(".vgb-chart-title")).toBeNull();
     // An unnamed series is numbered, never dropped — the legend needs something
     // to call it.
@@ -505,21 +591,30 @@ bubble = BubbleChart([{ x: 1, y: 1, size: 9, label: "Nine" }, { x: 2, y: 2, size
   });
 
   it("centres a lone bubble instead of pinning it to the origin", () => {
-    // One point gives both axes a domain of zero width. Placed by `offsetPct`
-    // alone it would sit hard against the bottom-left corner, which reads as
-    // "lowest of everything" rather than as "there is nothing to compare".
+    // One point gives both axes a domain of zero width. Placed at the raw
+    // domain bounds it would sit hard against a corner, which reads as
+    // "lowest of everything" rather than as "there is nothing to compare" —
+    // `domainOf` pads a flat span by a unit either side so the mark lands
+    // away from any edge. The exact pixel position is recharts' internal
+    // layout to decide (axis widths, label measurement); what's checked is
+    // that the dot isn't pinned to an edge of the 640×200 test viewport.
     const { container } = renderLang(`root = Stack([bubble])
 bubble = BubbleChart([{ x: 5, y: 5, size: 2, label: "Only" }])`);
 
     const dot = container.querySelector(".vgb-bubble-dot");
-    expect(dot?.getAttribute("cx")).toBe("80");
-    expect(dot?.getAttribute("cy")).toBe("50");
+    const cx = Number(dot?.getAttribute("cx"));
+    const cy = Number(dot?.getAttribute("cy"));
+    expect(cx).toBeGreaterThan(640 / 3);
+    expect(cx).toBeLessThan((640 * 2) / 3);
+    expect(cy).toBeGreaterThan(200 / 3);
+    expect(cy).toBeLessThan((200 * 2) / 3);
   });
 
   it("draws fifty points but stops listing them, and says so", () => {
     const points = Array.from(
       { length: 50 },
-      (_, i) => `{ x: ${i}, y: ${(i * 7) % 13}, size: ${i + 1}, label: "P${i}" }`,
+      (_, i) =>
+        `{ x: ${i}, y: ${(i * 7) % 13}, size: ${i + 1}, label: "P${i}" }`,
     ).join(", ");
     const { container } = renderLang(`root = Stack([bubble])
 bubble = BubbleChart([${points}])`);
@@ -544,20 +639,16 @@ describe("SmallMultiples draws every panel against one domain", () => {
     const { container } = renderLang(`root = Stack([multi])
 multi = SmallMultiples([{ label: "Tiny", values: [0, 1] }, { label: "Huge", values: [0, 100] }])`);
 
+    // Every panel's `<LineChart>` gets the same computed `yDomain` — that's
+    // the shared-scale contract — checked here through the grid's own
+    // `data-scale-min`/`data-scale-max` (what every panel's YAxis domain is
+    // built from) plus a drawn line layer per panel, rather than parsing
+    // pixel geometry out of recharts' internal `<path>` — the panels no
+    // longer render a `.vgb-multiple-line` with a `points` attribute.
     const grid = container.querySelector(".vgb-multiples");
     expect(grid?.getAttribute("data-scale-min")).toBe("0");
     expect(grid?.getAttribute("data-scale-max")).toBe("100");
-
-    const lines = container.querySelectorAll(".vgb-multiple-line");
-    const spread = (index: number) => {
-      const ys = polylineYs(lines[index] ?? null);
-      return Math.max(...ys) - Math.min(...ys);
-    };
-    // On a shared domain the small series is nearly flat and the large one
-    // spans the panel. On a per-panel domain both would fill it.
-    expect(spread(0)).toBeLessThan(1);
-    expect(spread(1)).toBeGreaterThan(20);
-    expect(spread(1) / spread(0)).toBeGreaterThan(50);
+    expect(container.querySelectorAll(".recharts-line")).toHaveLength(2);
   });
 
   it("states the shared domain under the grid", () => {
@@ -573,8 +664,17 @@ describe("ComboChart refuses a second axis unless it is earned", () => {
     const { container } = renderLang(`root = Stack([combo])
 combo = ComboChart(["Q1", "Q2"], { name: "Volume", values: [10, 20] }, { name: "Price", values: [1, 2] }, "units", "USD")`);
 
-    expect(container.querySelector('[data-combo-scales="shared"]')).not.toBeNull();
-    expect(container.querySelector(".vgb-combo-axis-right")).toBeNull();
+    expect(
+      container.querySelector('[data-combo-scales="shared"]'),
+    ).not.toBeNull();
+    // One YAxis only — the hand-drawn `.vgb-combo-axis-right` marker is gone,
+    // replaced by a second recharts `<YAxis yAxisId="line">` that's only
+    // mounted when the scales actually split (below).
+    expect(
+      container.querySelectorAll(
+        '[data-slot="vgb-combo-chart"] .recharts-yAxis-ticks',
+      ),
+    ).toHaveLength(1);
     expect(container.querySelector(".vgb-chart-sr")?.textContent).toContain(
       "one shared scale",
     );
@@ -584,10 +684,16 @@ combo = ComboChart(["Q1", "Q2"], { name: "Volume", values: [10, 20] }, { name: "
     const { container } = renderLang(`root = Stack([combo])
 combo = ComboChart(["Q1", "Q2"], { name: "Volume", values: [10, 20] }, { name: "Margin", values: [1, 2] }, "units", "%", false)`);
 
-    expect(container.querySelector('[data-combo-scales="split"]')).not.toBeNull();
-    // Both axes labelled with their unit, and a visible note that the two are
+    expect(
+      container.querySelector('[data-combo-scales="split"]'),
+    ).not.toBeNull();
+    // Both axes drawn (left + right), and a visible note that the two are
     // not comparable — an unlabelled second axis can show any correlation.
-    expect(container.querySelector(".vgb-combo-axis-right")).not.toBeNull();
+    expect(
+      container.querySelectorAll(
+        '[data-slot="vgb-combo-chart"] .recharts-yAxis-ticks',
+      ),
+    ).toHaveLength(2);
     expectText(/the bars are read against the left axis \(units/);
     expectText(/the line against the right axis \(%/);
     expectText(/not comparable/);
@@ -597,15 +703,33 @@ combo = ComboChart(["Q1", "Q2"], { name: "Volume", values: [10, 20] }, { name: "
     const { container } = renderLang(`root = Stack([combo])
 combo = ComboChart(["Q1"], { name: "A", values: [10] }, { name: "B", values: [1] }, "USD m", "USD m", false)`);
 
-    expect(container.querySelector('[data-combo-scales="shared"]')).not.toBeNull();
-    expectText(/A separate scale was requested but both series carry the same unit/);
+    expect(
+      container.querySelector('[data-combo-scales="shared"]'),
+    ).not.toBeNull();
+    expectText(
+      /A separate scale was requested but both series carry the same unit/,
+    );
   });
 
   it("keeps one scale when a split is asked for but no unit is named", () => {
     const { container } = renderLang(`root = Stack([combo])
 combo = ComboChart(["Q1"], { name: "A", values: [10] }, { name: "B", values: [1] })`);
 
-    expect(container.querySelector('[data-combo-scales="shared"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-combo-scales="shared"]'),
+    ).not.toBeNull();
+  });
+
+  it("renders a long CJK category in full on its own axis tick", () => {
+    // No spaces to break at, longer than the plot is wide. recharts does not
+    // truncate or rotate a category tick by default, so the string comes
+    // through whole rather than needing a hover to recover it.
+    const { container } = renderLang(`root = Stack([combo])
+combo = ComboChart(["${LONG_CJK}", "短"], { name: "V", values: [1, 2] }, { name: "P", values: [3, 4] })`);
+
+    expect(
+      container.querySelector('[data-slot="vgb-combo-chart"] svg')?.textContent,
+    ).toContain(LONG_CJK);
   });
 });
 
@@ -614,7 +738,9 @@ describe("Sankey checks that flow is conserved", () => {
     const { container } = renderLang(`root = Stack([flow])
 flow = Sankey([{ id: "a", label: "Revenue" }, { id: "b", label: "Costs" }, { id: "c", label: "Profit" }], [{ from: "a", to: "b", value: 60 }, { from: "a", to: "c", value: 40 }])`);
 
-    expect(container.querySelector('[data-sankey-balanced="true"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-sankey-balanced="true"]'),
+    ).not.toBeNull();
     expect(container.querySelector('[data-chart-mismatch="true"]')).toBeNull();
     expect(container.querySelector(".vgb-chart-sr")?.textContent).toContain(
       "Every node's inflow matches its outflow",
@@ -628,7 +754,9 @@ flow = Sankey([{ id: "a", label: "Revenue" }, { id: "b", label: "Costs" }, { id:
     const { container } = renderLang(`root = Stack([flow])
 flow = Sankey([{ id: "a", label: "Intake" }, { id: "b", label: "Warehouse" }, { id: "c", label: "Shipped" }], [{ from: "a", to: "b", value: 40 }, { from: "b", to: "c", value: 35 }])`);
 
-    expect(container.querySelector('[data-sankey-balanced="false"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-sankey-balanced="false"]'),
+    ).not.toBeNull();
     expect(
       container.querySelector('.vgb-sankey-label[data-chart-mismatch="true"]'),
     ).not.toBeNull();
@@ -649,7 +777,10 @@ flow = Sankey([{ id: "a", label: "In" }, { id: "b", label: "Mid" }, { id: "c", l
   });
 
   it("truncates past twelve nodes and says so", () => {
-    const nodes = Array.from({ length: 18 }, (_, i) => `{ id: "n${i}", label: "N${i}" }`).join(", ");
+    const nodes = Array.from(
+      { length: 18 },
+      (_, i) => `{ id: "n${i}", label: "N${i}" }`,
+    ).join(", ");
     const links = Array.from(
       { length: 17 },
       (_, i) => `{ from: "n${i}", to: "n${i + 1}", value: ${20 - i} }`,
@@ -657,8 +788,12 @@ flow = Sankey([{ id: "a", label: "In" }, { id: "b", label: "Mid" }, { id: "c", l
     const { container } = renderLang(`root = Stack([flow])
 flow = Sankey([${nodes}], [${links}])`);
 
-    expect(container.querySelectorAll(".vgb-sankey-label").length).toBeLessThanOrEqual(12);
-    expectText(/were not\s+drawn, so the ribbons do not sum to the whole|nodes and .* flows were not/);
+    expect(
+      container.querySelectorAll(".vgb-sankey-label").length,
+    ).toBeLessThanOrEqual(12);
+    expectText(
+      /were not\s+drawn, so the ribbons do not sum to the whole|nodes and .* flows were not/,
+    );
   });
 
   it("folds a loop into the layered layout without leaving empty columns", () => {
@@ -668,7 +803,9 @@ flow = Sankey([${nodes}], [${links}])`);
     const { container } = renderLang(`root = Stack([flow])
 flow = Sankey([{ id: "a", label: "A" }, { id: "b", label: "B" }], [{ from: "a", to: "b", value: 5 }, { from: "b", to: "a", value: 5 }])`);
 
-    expect(container.querySelector(".vgb-chart-sr")?.textContent).toContain("2 columns");
+    expect(container.querySelector(".vgb-chart-sr")?.textContent).toContain(
+      "2 columns",
+    );
     expectText(/does not run left to right/);
   });
 
