@@ -129,6 +129,15 @@
   max-width: 100%;
 }
 
+/* A Cluster dropped into the slot must shrink-to-fit: its own `width: 100%`
+   (right for a standalone wrap run) is circular against the slot's auto
+   width — a percentage contributes nothing to the parent's intrinsic size,
+   so the pair resolved to zero and the badges spilled out of the header. */
+.vgb-page-head-slot > .vgb-cluster,
+.vgb-page-foot-slot > .vgb-cluster {
+  width: auto;
+}
+
 /* ── PageFooter ──────────────────────────────────────────────────── */
 
 .vgb-page-foot {
