@@ -210,6 +210,118 @@ describe("A2UIRenderer", () => {
     expect(screen.getByTestId("bar-chart").textContent).toContain("Q1");
   });
 
+
+  it("resolves {path} data bindings against the surface data model", () => {
+    // M2's whole premise: a component property may be {"path": "/..."} and the
+    // value lives in the data model, seeded or refreshed by updateDataModel
+    // messages. Binderless rendering showed such a property as nothing.
+    const messages = [
+      {
+        version: "v0.9",
+        createSurface: { surfaceId: "s", catalogId: "openui" },
+      },
+      {
+        version: "v0.9",
+        updateDataModel: {
+          surfaceId: "s",
+          path: "/quote",
+          value: { label: "现价", value: "¥1,234.56" },
+        },
+      },
+      {
+        version: "v0.9",
+        updateComponents: {
+          surfaceId: "s",
+          components: [
+            { id: "root", component: "Stack", children: ["m"] },
+            {
+              id: "m",
+              component: "Metric",
+              label: { path: "/quote/label" },
+              value: { path: "/quote/value" },
+            },
+          ],
+        },
+      },
+    ]
+      .map((message) => JSON.stringify(message))
+      .join("\n");
+
+    render(<A2UIRenderer body={messages} />);
+
+    expect(screen.getByText("现价")).toBeTruthy();
+    expect(screen.getByText("¥1,234.56")).toBeTruthy();
+  });
+
+  it("re-renders a bound property when a later updateDataModel touches its path", () => {
+    // The refresh loop: same components, a second updateDataModel appended to
+    // the stream (what the host channel pushes after a poll). The bound value
+    // must show the newest write, not the seed.
+    const base = [
+      {
+        version: "v0.9",
+        createSurface: { surfaceId: "s", catalogId: "openui" },
+      },
+      {
+        version: "v0.9",
+        updateDataModel: { surfaceId: "s", path: "/q", value: { v: "old" } },
+      },
+      {
+        version: "v0.9",
+        updateComponents: {
+          surfaceId: "s",
+          components: [
+            { id: "root", component: "Stack", children: ["m"] },
+            { id: "m", component: "Metric", label: "价", value: { path: "/q/v" } },
+          ],
+        },
+      },
+      {
+        version: "v0.9",
+        updateDataModel: { surfaceId: "s", path: "/q/v", value: "new" },
+      },
+    ]
+      .map((message) => JSON.stringify(message))
+      .join("\n");
+
+    render(<A2UIRenderer body={base} />);
+
+    expect(screen.getByText("new")).toBeTruthy();
+    expect(screen.queryByText("old")).toBeNull();
+  });
+
+  it("passes through an ordinary object that merely contains a path key", () => {
+    // Only the exact DataBinding shape ({path} as the sole key) resolves;
+    // a legitimate record with more keys must reach the component untouched.
+    const messages = [
+      {
+        version: "v0.9",
+        createSurface: { surfaceId: "s", catalogId: "openui" },
+      },
+      {
+        version: "v0.9",
+        updateComponents: {
+          surfaceId: "s",
+          components: [
+            { id: "root", component: "Stack", children: ["m"] },
+            {
+              id: "m",
+              component: "Metric",
+              label: "路径",
+              value: "/a/b",
+            },
+          ],
+        },
+      },
+    ]
+      .map((message) => JSON.stringify(message))
+      .join("\n");
+
+    render(<A2UIRenderer body={messages} />);
+
+    expect(screen.getByText("/a/b")).toBeTruthy();
+  });
+
   it("accepts legacy nested props and inline child component objects", () => {
     const messages = [
       {

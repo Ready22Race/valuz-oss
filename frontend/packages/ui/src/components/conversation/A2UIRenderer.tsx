@@ -226,6 +226,58 @@ function renderBlockComponent(
   return <Impl props={resolved} renderNode={(value) => value as ReactNode} />;
 }
 
+/**
+ * A `{path}` DynamicValue resolver over a component's raw properties.
+ *
+ * A2UI v0.9 lets any property be a data binding — `{"path": "/quote/items"}`
+ * — resolved against the surface's DataModel. This renderer was binderless:
+ * a bound property reached the component as that literal record and rendered
+ * as nothing. Resolution happens here, at the single seam where properties
+ * flow into components, so every component — block or OpenUI — gets bound
+ * values without knowing bindings exist. `updateDataModel` messages then
+ * re-render whatever was bound to the touched path on the next pass.
+ *
+ * The walk is conservative: only a record whose ONLY key is a string `path`
+ * is treated as a binding (exactly the DataBinding schema), so a legitimate
+ * object that happens to carry a `path` field among others passes through.
+ * An unresolvable path yields undefined, which readers already degrade on —
+ * the same posture as every other untrusted-model input here.
+ */
+function resolveBoundProps(
+  props: Record<string, unknown>,
+  resolve: (binding: { path: string }) => unknown,
+  depth = 0,
+): Record<string, unknown> {
+  if (depth > 6) return props;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(props)) {
+    out[key] = resolveBoundValue(value, resolve, depth);
+  }
+  return out;
+}
+
+function resolveBoundValue(
+  value: unknown,
+  resolve: (binding: { path: string }) => unknown,
+  depth: number,
+): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => resolveBoundValue(item, resolve, depth + 1));
+  }
+  if (isRecord(value)) {
+    const keys = Object.keys(value);
+    if (keys.length === 1 && keys[0] === "path" && typeof value.path === "string") {
+      try {
+        return resolve(value as { path: string });
+      } catch {
+        return undefined;
+      }
+    }
+    return resolveBoundProps(value as Record<string, unknown>, resolve, depth + 1);
+  }
+  return value;
+}
+
 const createA2UIComponent = createBinderlessComponentImplementation as unknown as (
   api: ComponentApi,
   render: (props: {
@@ -233,6 +285,10 @@ const createA2UIComponent = createBinderlessComponentImplementation as unknown a
       componentModel: {
         type: string;
         properties: Record<string, unknown>;
+      };
+      /** The scoped DataModel view; resolves `{path}` bindings (web_core ComponentContext). */
+      dataContext?: {
+        resolveDynamicValue: (value: unknown) => unknown;
       };
     };
     buildChild: BuildChild;
@@ -366,7 +422,13 @@ function createOpenUIComponents(): ReactComponentImplementation[] {
       ({ context, buildChild }) => (
         <OpenUIComponent
           name={normalizeOpenUIComponentName(context.componentModel.type)}
-          props={context.componentModel.properties}
+          props={
+            context.dataContext
+              ? resolveBoundProps(context.componentModel.properties, (b) =>
+                  context.dataContext!.resolveDynamicValue(b),
+                )
+              : context.componentModel.properties
+          }
           buildChild={buildChild}
         />
       ),

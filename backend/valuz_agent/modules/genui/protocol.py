@@ -135,7 +135,25 @@ level, not nested under "props":
 Use flat component ids for layout children:
 {"id":"root","component":"Stack","children":["title","chart"],"direction":"column","gap":"m"}
 Do not create placeholder charts or charts with empty series. If supplied data
-does not include chart-ready arrays, show the raw values with {fallbacks}."""
+does not include chart-ready arrays, show the raw values with {fallbacks}.
+
+Live data slots (optional). By default, render supplied values directly into
+component properties — that snapshot is complete and correct on its own. When
+the answer names a host data source the edition catalog marks as pollable AND
+freshness genuinely matters (a quote line, a watchlist), you may bind instead:
+
+1. Seed a slot and declare its source in the data model:
+{"version":"v0.9","updateDataModel":{"surfaceId":"s","path":"/data/quote","value":{"items":[...]}}}
+{"version":"v0.9","updateDataModel":{"surfaceId":"s","path":"/refs/quote","value":{"source":"<source id>","params":{"symbol":"US:NVDA"},"refresh":{"interval":60}}}}
+2. Bind the component property to the slot instead of inlining:
+{"id":"q","component":"MetricStrip","items":{"path":"/data/quote/items"},"source":"Valuz","asOf":"..."}
+
+Always write the seed value — the binding must render correctly even if the
+host never refreshes it. One slot per source; the slot path and the ref path
+share the trailing name. Never invent a source id: only the ids the edition
+notes list as pollable exist, and anything else leaves the slot permanently
+stale. refresh.interval is seconds and must respect the source's stated
+minimum."""
 
 
 def _load_block_catalog() -> str:

@@ -9,7 +9,8 @@
     "./styles/project.css": "./src/styles/project.css",
     "./components/ui/*": "./src/components/ui/*.tsx",
     "./hooks/*": "./src/hooks/*.ts",
-    "./lib/*": "./src/lib/*.ts"
+    "./lib/*": "./src/lib/*.ts",
+    "./genui-channel": "./src/components/conversation/genui-channel/index.ts"
   },
   "scripts": {
     "build": "tsc --noEmit -p tsconfig.json",
