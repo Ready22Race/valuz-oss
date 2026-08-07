@@ -758,7 +758,24 @@ class ArtifactDatastore:
 
 
     # ── Host bindings ───────────────────────────────────────────────────
+    async def list_bindings_for_artifact(
+        self, user_id: str, artifact_id: str
+    ) -> list[ArtifactBindingRow]:
+        """Every host slot currently showing a revision of this artifact.
+
+        The deliver path uses it to tell "a page document the workbench is
+        showing" from an ordinary deliverable: a delivery that appends a
+        revision to a bound artifact must announce itself with the same
+        receipt a generation would, or the client never learns a new version
+        exists."""
+        stmt = select(ArtifactBindingRow).where(
+            ArtifactBindingRow.user_id == user_id,
+            ArtifactBindingRow.artifact_id == artifact_id,
+        )
+        return list((await self._db.execute(stmt)).scalars().all())
+
     async def get_binding(
+
         self, user_id: str, host_type: str, host_id: str, slot: str
     ) -> ArtifactBindingRow | None:
         return (
