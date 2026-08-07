@@ -52,9 +52,15 @@ class _SkillSource(Protocol):
 
     Used to type the optional ``extra_skill_sources`` (e.g. ``OfficialSkillSource``)
     without importing each implementation here.
+
+    ``compute_content_hash`` is part of the contract, not an implementation
+    detail: it gates a full read of every file in every package, which every
+    real source implements and which this resolver never wants.
     """
 
-    def list_skills(self, ctx: RuntimeContext) -> list[SkillManifest]: ...
+    def list_skills(
+        self, ctx: RuntimeContext, *, compute_content_hash: bool = True
+    ) -> list[SkillManifest]: ...
 
 
 logger = logging.getLogger(__name__)
@@ -190,7 +196,17 @@ async def resolve_session_capabilities(
         skill_paths.append(absolute)
 
     # 1b) For non-project (chat) projects, every user-library skill is
-    #     implicitly enabled. The skills panel UI advertises them as enabled
+    #     implicitly enabled.
+    #
+    #     Both scans below pass ``compute_content_hash=False``. The resolver
+    #     reads only ``path`` / ``scope`` / ``origin_label`` off each manifest —
+    #     it has never used ``content_hash``, which only the indexer needs for
+    #     change detection. Computing it reads EVERY file of EVERY package:
+    #     measured on a managed deployment 2026-08-07, 20 packages / 260 files
+    #     / 3.9 MiB on a network mount, **21–28 seconds**, paid at session
+    #     creation. ``FilesystemSkillSource.list_skills`` already documents the
+    #     flag as "display/catalog listing passes False"; this is one of those
+    #     callers and had simply never said so. The skills panel UI advertises them as enabled
     #     for chat (datastore.list_project_skills sets ``enabled=True`` for
     #     project.kind == "chat") and there is no per-project toggle to
     #     opt out, so the resolver must mirror that for the runtime.
@@ -209,7 +225,7 @@ async def resolve_session_capabilities(
             ),
         )
         if skill_source is not None:
-            for manifest in skill_source.list_skills(ctx):
+            for manifest in skill_source.list_skills(ctx, compute_content_hash=False):
                 if manifest.scope != "user":
                     continue
                 absolute = _resolve_to_absolute(manifest.path, project.root_path)
@@ -228,7 +244,7 @@ async def resolve_session_capabilities(
         #     manifests are surfaced in the UI for marketing but never
         #     materialized into the runtime cwd.
         for source in extra_skill_sources or []:
-            for manifest in source.list_skills(ctx):
+            for manifest in source.list_skills(ctx, compute_content_hash=False):
                 if manifest.scope != "official":
                     continue
                 is_bundled = manifest.origin_label == "Built-in"
