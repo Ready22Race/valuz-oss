@@ -1,6 +1,11 @@
 import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+
+import {
+  registerGenUIDataHost,
+  unregisterGenUIDataHost,
+} from "./genui-channel/host-registry";
+import { act, render, screen } from "@testing-library/react";
 
 vi.mock("@openuidev/react-ui", () => ({
   AreaChartCondensed: ({ data }: { data: Record<string, unknown>[] }) => (
@@ -210,6 +215,99 @@ describe("A2UIRenderer", () => {
     expect(screen.getByTestId("bar-chart").textContent).toContain("Q1");
   });
 
+
+
+  it("starts the registered data host for a surface with refs and re-renders on push", async () => {
+    // The whole M2 loop at the renderer's level: the payload declares a ref,
+    // the edition's host is started, its push lands as updateDataModel, and
+    // the bound property shows the fresh value — while the seed rendered
+    // correctly before the push.
+    const seen: { surfaceId: string; refs: unknown }[] = [];
+    let pushUpdate: ((message: Record<string, unknown>) => void) | undefined;
+    registerGenUIDataHost(({ surfaceId, refs, push }) => {
+      seen.push({ surfaceId, refs });
+      pushUpdate = push;
+      return { stop: vi.fn() };
+    });
+
+    try {
+      const messages = [
+        {
+          version: "v0.9",
+          createSurface: { surfaceId: "s", catalogId: "openui" },
+        },
+        {
+          version: "v0.9",
+          updateDataModel: {
+            surfaceId: "s",
+            path: "/data/quote",
+            value: { v: "seed" },
+          },
+        },
+        {
+          version: "v0.9",
+          updateDataModel: {
+            surfaceId: "s",
+            path: "/refs/quote",
+            value: {
+              source: "finance.market.quote",
+              params: { symbol: "US:NVDA" },
+              refresh: { interval: 60 },
+            },
+          },
+        },
+        {
+          version: "v0.9",
+          updateComponents: {
+            surfaceId: "s",
+            components: [
+              { id: "root", component: "Stack", children: ["m"] },
+              {
+                id: "m",
+                component: "Metric",
+                label: "现价",
+                value: { path: "/data/quote/v" },
+              },
+            ],
+          },
+        },
+      ]
+        .map((message) => JSON.stringify(message))
+        .join("\n");
+
+      render(<A2UIRenderer body={messages} />);
+
+      expect(screen.getByText("seed")).toBeTruthy();
+      expect(seen).toEqual([
+        {
+          surfaceId: "s",
+          refs: {
+            quote: {
+              source: "finance.market.quote",
+              params: { symbol: "US:NVDA" },
+              refresh: { interval: 60 },
+            },
+          },
+        },
+      ]);
+
+      await act(async () => {
+        pushUpdate?.({
+          version: "v0.9",
+          updateDataModel: {
+            surfaceId: "s",
+            path: "/data/quote/v",
+            value: "fresh",
+          },
+        });
+      });
+
+      expect(screen.getByText("fresh")).toBeTruthy();
+      expect(screen.queryByText("seed")).toBeNull();
+    } finally {
+      unregisterGenUIDataHost();
+    }
+  });
 
   it("resolves {path} data bindings against the surface data model", () => {
     // M2's whole premise: a component property may be {"path": "/..."} and the

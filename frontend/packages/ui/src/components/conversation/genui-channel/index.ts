@@ -75,3 +75,14 @@ export type {
   SourceRegistryLookup,
   VisibilitySource,
 } from "./scheduler";
+
+export {
+  getGenUIDataHost,
+  registerGenUIDataHost,
+  unregisterGenUIDataHost,
+} from "./host-registry";
+export type {
+  GenUIDataHostFactory,
+  GenUIDataHostHandle,
+  GenUIDataHostInput,
+} from "./host-registry";

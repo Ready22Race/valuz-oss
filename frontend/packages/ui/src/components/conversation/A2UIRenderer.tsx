@@ -20,14 +20,7 @@ import {
   subscribeBlocks,
 } from "@valuz/genui-blocks";
 import { ChevronLeft, ChevronRight } from "lucide-react";
-import {
-  createContext,
-  useContext,
-  useMemo,
-  useSyncExternalStore,
-  type CSSProperties,
-  type ReactNode,
-} from "react";
+import { createContext, type CSSProperties, type ReactNode, useContext, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { z } from "zod/v3";
 
 import { completeJsonFragment } from "./partial-json";
@@ -329,15 +322,79 @@ function a2uiCatalogs(): A2UICatalogPair {
  * way to reach it. It rendered its category axis with no series at all: a tall
  * empty plot rather than an error.
  */
+import { getGenUIDataHost } from "./genui-channel/host-registry";
+
 const A2UIComponentIndex = createContext<Map<string, Record<string, unknown>>>(
   new Map(),
 );
+
+
+/**
+ * Collect `/refs` declarations per surface by scanning the payload messages —
+ * no processor needed. The slot grammar writes one updateDataModel per slot
+ * (`/refs/<slot>`) or one object at `/refs`; both are folded into a single
+ * record per surface. Refs come only from the model-authored payload, never
+ * from host-pushed updates, so the scan reads the raw body alone.
+ */
+function collectDataRefs(body: string): Map<string, Record<string, unknown>> {
+  const bySurface = new Map<string, Record<string, unknown>>();
+  for (const message of parseA2UIMessages(body)) {
+    const update = message.updateDataModel;
+    if (!isRecord(update)) continue;
+    const surfaceId = readString(update.surfaceId);
+    const path = readString(update.path);
+    if (!surfaceId || !path) continue;
+    if (path === "/refs" && isRecord(update.value)) {
+      const existing = bySurface.get(surfaceId) ?? {};
+      bySurface.set(surfaceId, { ...existing, ...update.value });
+    } else if (path.startsWith("/refs/")) {
+      const slot = path.slice("/refs/".length);
+      if (!slot || slot.includes("/")) continue;
+      const existing = bySurface.get(surfaceId) ?? {};
+      bySurface.set(surfaceId, { ...existing, [slot]: update.value });
+    }
+  }
+  return bySurface;
+}
 
 export function A2UIRenderer({ body }: A2UIRendererProps) {
   // Surfaces are rebuilt when a registration lands, not only when the payload
   // changes: a conversation already on screen must pick up an edition's blocks.
   const version = useSyncExternalStore(subscribeBlocks, getRegistryVersion, getRegistryVersion);
-  const surfaces = useMemo(() => buildSurfaces(body), [body, version]);
+  // Host-pushed updateDataModel messages (M2). Keyed to the payload: a new
+  // body is a new answer, and stale live data must not leak into it.
+  const [liveMessages, setLiveMessages] = useState<Record<string, unknown>[]>([]);
+  useEffect(() => {
+    setLiveMessages([]);
+  }, [body]);
+
+  // Start the edition's data host for every surface that declares refs. The
+  // effect keys on the body, not on liveMessages — refs are model-authored,
+  // and restarting the host on every push would be a feedback loop.
+  useEffect(() => {
+    const factory = getGenUIDataHost();
+    if (!factory) return;
+    const refsBySurface = collectDataRefs(body);
+    if (refsBySurface.size === 0) return;
+    const handles: { stop: () => void }[] = [];
+    for (const [surfaceId, refs] of refsBySurface) {
+      const handle = factory({
+        surfaceId,
+        refs,
+        push: (message) =>
+          setLiveMessages((previous) => [...previous, message]),
+      });
+      if (handle) handles.push(handle);
+    }
+    return () => {
+      for (const handle of handles) handle.stop();
+    };
+  }, [body, version]);
+
+  const surfaces = useMemo(
+    () => buildSurfaces(body, liveMessages),
+    [body, version, liveMessages],
+  );
   const index = useMemo(() => buildComponentIndex(body), [body]);
   if (!surfaces.length) return null;
 
@@ -392,10 +449,15 @@ function dropDuplicateCreateSurface(
 
 function buildSurfaces(
   body: string,
+  liveMessages: Record<string, unknown>[] = [],
 ): SurfaceModel<ReactComponentImplementation>[] {
-  const messages = dropDuplicateCreateSurface(
-    normalizeMessages(parseA2UIMessages(body)),
-  );
+  // Live messages are appended AFTER normalization on purpose: they are
+  // host-pushed updateDataModel messages, already well-formed, and the
+  // normalization pass is for model-authored payload quirks.
+  const messages = [
+    ...dropDuplicateCreateSurface(normalizeMessages(parseA2UIMessages(body))),
+    ...(liveMessages as never[]),
+  ];
   if (!messages.length) return [];
 
   const processor = new MessageProcessor<ReactComponentImplementation>(
