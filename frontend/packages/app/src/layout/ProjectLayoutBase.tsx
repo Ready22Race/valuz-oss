@@ -976,6 +976,17 @@ export function ProjectLayoutBase({
         }
         mainClassName={mainClassName}
         contentInnerClassName={contentInnerClassName}
+        // Degraded multi-target hint rides the shell's notice slot — pinned
+        // at the very top of the middle panel, above the header and outside
+        // the page's padded/scrolling content, so every page (headered,
+        // hidden-header, outer-scroll) shows it in the same place.
+        notice={
+          degradedLabels ? (
+            <div className="shrink-0 border-b border-warning-border bg-warning-light px-4 py-1.5 text-xs text-warning-text">
+              {t("system.execTargetUnreachable", { targets: degradedLabels })}
+            </div>
+          ) : null
+        }
         header={header}
         headerClassName={headerClassName}
         aside={
@@ -984,21 +995,14 @@ export function ProjectLayoutBase({
             : null
         }
       >
-        <div className="flex h-full min-h-0 flex-col">
-          {degradedLabels ? (
-            <div className="shrink-0 border-b border-warning-border bg-warning-light px-4 py-1.5 text-xs text-warning-text">
-              {t("system.execTargetUnreachable", { targets: degradedLabels })}
-            </div>
-          ) : null}
-          <div
-            // Keyed so a page change replays the enter animation — except
-            // within the conversation family, which transitions in place
-            // (see ``outletTransitionKey``).
-            key={outletTransitionKey(location.pathname)}
-            className="min-h-0 flex-1 animate-page-enter"
-          >
-            <Outlet context={outletContext} />
-          </div>
+        <div
+          // Keyed so a page change replays the enter animation — except
+          // within the conversation family, which transitions in place
+          // (see ``outletTransitionKey``).
+          key={outletTransitionKey(location.pathname)}
+          className="h-full min-h-0 animate-page-enter"
+        >
+          <Outlet context={outletContext} />
         </div>
       </AppShell>
       <AppToaster />
