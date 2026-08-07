@@ -6,6 +6,15 @@ from valuz_agent.adapters.system_prompt_builder import (
     CITATION_POLICY_REVISION,
     ensure_citation_system_policy,
 )
+from valuz_agent.integrations.skills_filesystem import _extract_frontmatter
+
+
+def _citation_skill() -> tuple[dict[str, object], str]:
+    skill_path = (
+        Path(__file__).resolve().parents[2]
+        / "valuz_agent/resources/builtin_skills/citation/SKILL.md"
+    )
+    return _extract_frontmatter(skill_path.read_text(encoding="utf-8"))
 
 
 def test_citation_policy_is_appended_without_changing_user_sections() -> None:
@@ -24,11 +33,8 @@ def test_citation_policy_is_appended_without_changing_user_sections() -> None:
 
 def test_citation_prompt_and_skill_do_not_plan_or_control_agent_execution() -> None:
     prompt = ensure_citation_system_policy("")
-    skill_path = (
-        Path(__file__).resolve().parents[2]
-        / "valuz_agent/resources/builtin_skills/citation/SKILL.md"
-    )
-    combined = prompt + "\n" + skill_path.read_text(encoding="utf-8")
+    _metadata, skill_body = _citation_skill()
+    combined = prompt + "\n" + skill_body
 
     for prohibited in (
         "Before answering",
@@ -41,6 +47,26 @@ def test_citation_prompt_and_skill_do_not_plan_or_control_agent_execution() -> N
         "later repair pass",
     ):
         assert prohibited not in combined
+
+
+def test_bundled_citation_skill_uses_the_runtime_evidence_protocol() -> None:
+    metadata, body = _citation_skill()
+
+    assert metadata["name"] == "citation"
+    assert "Evidence handles and Collection Addresses" in str(metadata["description"])
+    assert not body.lstrip().startswith("---")
+    assert "evidence://ev_policy_date" in body
+    assert "_valuz_evidence_hint" in body
+    assert "Collection Address" in body
+    assert "Never write a `citation://` link" in body
+
+    for legacy_instruction in (
+        "[UNSOURCED]",
+        "[UNVERIFIED]",
+        "[title](url)",
+        "do not produce numbered citations",
+    ):
+        assert legacy_instruction not in body
 
 
 def test_citation_policy_install_is_idempotent() -> None:
