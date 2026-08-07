@@ -37,6 +37,14 @@ export interface DataRef {
   source: string;
   params: Record<string, DataRefParamValue>;
   refresh?: DataRefRefresh;
+  /**
+   * Canonical shape the slot should be filled with (shape-system.md §5).
+   * Needed only when the source produces more than one shape (e.g. kline →
+   * ChartData or Collection<MetricItem>); a single-shape source resolves
+   * without it. The edition validates it against the source's declared
+   * `produces` — this module only carries it.
+   */
+  shape?: string;
 }
 
 export function isHostParam(value: DataRefParamValue): value is HostParamRef {
@@ -93,8 +101,13 @@ export function parseDataRef(value: unknown): DataRef | null {
     params[key] = raw;
   }
 
+  if (rec.shape !== undefined) {
+    if (typeof rec.shape !== "string" || rec.shape.length === 0) return null;
+  }
+  const shape = rec.shape as string | undefined;
+
   if (rec.refresh === undefined) {
-    return { source: rec.source, params };
+    return { source: rec.source, params, ...(shape ? { shape } : {}) };
   }
   if (typeof rec.refresh !== "object" || rec.refresh === null) return null;
   const refreshRec = rec.refresh as Record<string, unknown>;
@@ -106,7 +119,12 @@ export function parseDataRef(value: unknown): DataRef | null {
   ) {
     return null;
   }
-  return { source: rec.source, params, refresh: { interval } };
+  return {
+    source: rec.source,
+    params,
+    refresh: { interval },
+    ...(shape ? { shape } : {}),
+  };
 }
 
 export type ResolvedParamValue = string | number | boolean;

@@ -164,3 +164,50 @@ describe("parseDataRef", () => {
     expect(parseDataRef(42)).toBeNull();
   });
 });
+
+describe("parseDataRef — shape (multi-shape source disambiguation)", () => {
+  it("carries a valid shape through", () => {
+    expect(
+      parseDataRef({
+        source: "test.kline",
+        params: { symbol: "US:NVDA" },
+        shape: "ChartData",
+      }),
+    ).toEqual({
+      source: "test.kline",
+      params: { symbol: "US:NVDA" },
+      shape: "ChartData",
+    });
+  });
+
+  it("omits the field entirely when absent — not shape:undefined", () => {
+    const ref = parseDataRef({ source: "test.quote", params: {} });
+    expect(ref).not.toBeNull();
+    expect(ref && "shape" in ref).toBe(false);
+  });
+
+  it("rejects a non-string or empty shape instead of ignoring it", () => {
+    expect(
+      parseDataRef({ source: "test.quote", params: {}, shape: 3 }),
+    ).toBeNull();
+    expect(
+      parseDataRef({ source: "test.quote", params: {}, shape: "" }),
+    ).toBeNull();
+  });
+
+  it("keeps shape alongside refresh", () => {
+    expect(
+      parseDataRef({
+        source: "test.kline",
+        params: {},
+        shape: "ChartData",
+        refresh: { interval: 60 },
+      }),
+    ).toEqual({
+      source: "test.kline",
+      params: {},
+      refresh: { interval: 60 },
+      shape: "ChartData",
+    });
+  });
+});
