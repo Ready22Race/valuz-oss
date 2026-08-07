@@ -51,6 +51,13 @@ def _bundled(root: Path, slug: str) -> Path:
     return skill_dir
 
 
+@pytest.fixture(autouse=True)
+def _clean_cache():
+    capabilities.reset_bundled_paths_cache()
+    yield
+    capabilities.reset_bundled_paths_cache()
+
+
 @pytest.fixture
 def official_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     from valuz_agent.infra.fs_registry import fs_registry
@@ -154,3 +161,41 @@ async def test_missing_official_root_is_not_an_error(
     patched_kernel["session"] = _make_session(skills=[])
 
     assert await capabilities.refresh_bundled_skills_for_session("sess-1", "owner-1") is False
+
+
+@pytest.mark.asyncio
+async def test_the_package_listing_is_not_walked_on_every_turn(
+    official_root: Path, patched_kernel: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It is a network mount where it matters — 600 ms per walk on valuz-prod."""
+    a = _bundled(official_root, "skill-creator")
+    patched_kernel["session"] = _make_session(skills=[str(a.resolve())])
+
+    walks = {"n": 0}
+    real_iterdir = Path.iterdir
+
+    def _counted(self: Path):  # type: ignore[no-untyped-def]
+        if self == official_root:
+            walks["n"] += 1
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", _counted)
+
+    for _ in range(5):
+        await capabilities.refresh_bundled_skills_for_session("sess-1", "owner-1")
+
+    assert walks["n"] == 1, "the root was re-walked on a later turn"
+
+
+@pytest.mark.asyncio
+async def test_a_package_that_lands_mid_session_invalidates_the_listing(
+    official_root: Path, patched_kernel: dict[str, Any]
+) -> None:
+    a = _bundled(official_root, "skill-creator")
+    patched_kernel["session"] = _make_session(skills=[str(a.resolve())])
+    assert await capabilities.refresh_bundled_skills_for_session("sess-1", "owner-1") is False
+
+    landed = _bundled(official_root, "6-step-valuation-research")  # changes root mtime
+
+    assert await capabilities.refresh_bundled_skills_for_session("sess-1", "owner-1") is True
+    assert str(landed.resolve()) in patched_kernel["updates"][0].skills
