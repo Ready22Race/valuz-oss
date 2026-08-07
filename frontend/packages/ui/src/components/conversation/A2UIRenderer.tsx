@@ -28,6 +28,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   useSyncExternalStore,
 } from "react";
@@ -454,14 +455,42 @@ export function A2UIRenderer({ body, status }: A2UIRendererProps) {
     };
   }, [body, version]);
 
-  const surfaces = useMemo(
+  const built = useMemo(
     () => buildSurfaces(body, liveMessages),
     [body, version, liveMessages],
   );
+  // A page that has appeared must not disappear. Building can come up empty
+  // MID-RUN for reasons that have nothing to do with what the user should see:
+  // the A2UI state machine throws on some half-written shapes (the catch in
+  // ``buildSurfaces`` swallows it), and a byte or two later the same document
+  // builds fine again. Rendering that gap — as a blank before, as a full-page
+  // skeleton now — dissolves a finished-looking page and rebuilds it seconds
+  // later. Hold the last good build instead; only a run that ENDS empty is
+  // really empty.
+  //
+  // Held per DOCUMENT, not per component instance. The same renderer element
+  // is reused when a surface swaps payloads (the workbench toggles between its
+  // bound page and the live one at the same position in the tree), and a hold
+  // that survived that showed the OLD page — with a loading tail under it —
+  // where the new generation belonged. A body only inherits the hold when it
+  // continues the body that produced it.
+  const lastGood = useRef<{
+    body: string;
+    surfaces: SurfaceModel<ReactComponentImplementation>[];
+  }>({ body: "", surfaces: [] });
+  if (built.length) lastGood.current = { body, surfaces: built };
+  const inheritsHold =
+    lastGood.current.surfaces.length > 0 &&
+    body.startsWith(lastGood.current.body);
+  const surfaces =
+    built.length || status !== "running" || !inheritsHold
+      ? built
+      : lastGood.current.surfaces;
+
   const index = useMemo(() => buildComponentIndex(body), [body]);
-  // Nothing renders yet. While the run is live that is a WAIT, not an absence:
-  // the model may reason for a minute before writing its first byte, and the
-  // document that follows resolves component by component. Breathe a
+  // Nothing has ever rendered. While the run is live that is a WAIT, not an
+  // absence: the model may reason for a minute before writing its first byte,
+  // and the document that follows resolves component by component. Breathe a
   // page-shaped skeleton through both — the runtime's own answer in the second
   // half is the literal string ``[Loading root...]``. Once the run is over an
   // empty result is genuinely empty, so render nothing.
@@ -474,9 +503,65 @@ export function A2UIRenderer({ body, status }: A2UIRendererProps) {
         {surfaces.map((surface) => (
           <A2uiSurface key={surface.id} surface={surface} />
         ))}
+        {status === "running" ? <GenerationTail /> : null}
       </div>
     </A2UIComponentIndex.Provider>
   );
+}
+
+/**
+ * The page is still being written — shown under the last component that has
+ * landed, and kept in view as the page grows.
+ *
+ * Two jobs. It says the page is not finished (without it a page that has
+ * stopped growing for a few seconds looks done, and the user applies a half
+ * document). And it is the scroll anchor: the surface grows downward off the
+ * bottom of the viewport, so following it is what makes the generation
+ * watchable instead of something you have to chase with the scrollbar.
+ */
+function GenerationTail() {
+  const ref = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    // Only follow while the user is already near the bottom. Scrolling someone
+    // back down after they deliberately scrolled up to read is worse than not
+    // following at all.
+    const scroller = findScrollParent(el);
+    if (scroller) {
+      const distance =
+        scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+      if (distance > 240) return;
+    }
+    el.scrollIntoView({ block: "end", behavior: "smooth" });
+  });
+
+  return (
+    <div
+      ref={ref}
+      data-slot="a2ui-generation-tail"
+      className="flex items-center gap-2 px-1 py-3 text-xs text-ink-meta"
+    >
+      <span className="size-1.5 animate-pulse rounded-full bg-ink-meta" />
+      <Skeleton className="h-3 w-32" />
+    </div>
+  );
+}
+
+/** Nearest ancestor that actually scrolls, or null when the page itself does. */
+function findScrollParent(from: HTMLElement): HTMLElement | null {
+  let node: HTMLElement | null = from.parentElement;
+  while (node) {
+    const overflowY = getComputedStyle(node).overflowY;
+    if (
+      (overflowY === "auto" || overflowY === "scroll") &&
+      node.scrollHeight > node.clientHeight
+    ) {
+      return node;
+    }
+    node = node.parentElement;
+  }
+  return null;
 }
 
 function buildComponentIndex(

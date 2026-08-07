@@ -129,4 +129,76 @@ describe("A2UI progressive paint", () => {
     const other = ONE_COPY.replace("第二块", "改过了");
     expect(textAt(`${ONE_COPY}\n${other}`)).toContain("改过了");
   });
+
+  it("should keep the last good page when a mid-run build comes up empty", () => {
+    // The A2UI state machine throws on some half-written shapes and the build
+    // returns nothing for a byte or two. Rendering that gap dissolved a
+    // finished-looking page into a full-screen skeleton and rebuilt it seconds
+    // later — the "又被切回完全骨架" report.
+    const { container, rerender } = render(
+      <A2UIRenderer body={ONE_COPY} status="running" />,
+    );
+    expect(container.textContent).toContain("第一块");
+
+    // A continuation of the SAME document that the processor cannot build —
+    // an update aimed at a surface that was never created.
+    const breaks = `${ONE_COPY}\n${JSON.stringify({
+      version: "v0.9",
+      updateComponents: {
+        surfaceId: "never-created",
+        components: [{ id: "x", component: "TextContent", text: "y" }],
+      },
+    })}`;
+    rerender(<A2UIRenderer body={breaks} status="running" />);
+
+    expect(container.textContent).toContain("第一块");
+    expect(
+      container.querySelector('[data-slot="a2ui-generation-skeleton"]'),
+    ).toBe(null);
+  });
+
+  it("should let a run that ENDS empty render nothing", () => {
+    // Holding the last good page is a mid-run courtesy, not a permanent latch.
+    const { container, rerender } = render(
+      <A2UIRenderer body={ONE_COPY} status="running" />,
+    );
+    rerender(<A2UIRenderer body="" status="success" />);
+
+    expect(container.firstChild).toBe(null);
+  });
+
+  it("should mark the page as still being written while the run is live", () => {
+    // Without it a page that pauses for a few seconds looks finished, and the
+    // user applies half a document.
+    const { container, rerender } = render(
+      <A2UIRenderer body={ONE_COPY} status="running" />,
+    );
+    expect(
+      container.querySelector('[data-slot="a2ui-generation-tail"]'),
+    ).toBeTruthy();
+
+    rerender(<A2UIRenderer body={ONE_COPY} status="success" />);
+    expect(container.querySelector('[data-slot="a2ui-generation-tail"]')).toBe(
+      null,
+    );
+  });
+
+  it("should not carry a held page across a payload swap", () => {
+    // The workbench toggles the SAME renderer element between its bound page
+    // and the live one. A hold that survived that showed the old page — with a
+    // loading tail under it — where the new generation belonged.
+    const { container, rerender } = render(
+      <A2UIRenderer body={ONE_COPY} status="running" />,
+    );
+    expect(container.textContent).toContain("第一块");
+
+    // A different document that has not written anything renderable yet.
+    const other = ONE_COPY.replace("main", "other").slice(0, 40);
+    rerender(<A2UIRenderer body={other} status="running" />);
+
+    expect(container.textContent).not.toContain("第一块");
+    expect(
+      container.querySelector('[data-slot="a2ui-generation-skeleton"]'),
+    ).toBeTruthy();
+  });
 });
