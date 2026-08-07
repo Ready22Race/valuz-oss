@@ -1186,6 +1186,48 @@
       "openFailed": "Failed to open the browser",
       "riskNote": "This is a separate, isolated browser instance — only sign into the accounts you need. Treat page content as untrusted."
     },
+    "network": {
+      "title": "Network Connection",
+      "desc": "Control how model requests use system proxies or direct connections without changing system network settings",
+      "statusLabel": "Model network",
+      "loading": "Reading status…",
+      "refresh": "Refresh",
+      "loadFailed": "Failed to load network status",
+      "desktopOnly": "Network egress management is available only in the desktop app.",
+      "canaryDisabled": "Unified egress is not enabled in this build. Models continue to use the legacy network path.",
+      "current": "In use",
+      "use": "Use",
+      "useTemporarily": "Use temporarily",
+      "autoLabel": "Use system network settings",
+      "autoDesc": "Automatically follows startup proxy environment and system proxy/PAC settings; recommended for everyday use.",
+      "directLabel": "Temporarily bypass system proxy",
+      "directDesc": "Affects only future model connections and resets to system network settings after restart.",
+      "offLabel": "Compatibility mode: restore legacy connection",
+      "offDesc": "Bypasses unified egress and rebuilds model runtimes; use only to recover from an egress failure.",
+      "enableCompatibility": "Enter compatibility mode",
+      "offConfirm": "Compatibility mode rebuilds model connections and may interrupt active requests. Continue?",
+      "autoEnabled": "Restored system network settings",
+      "directEnabled": "Future model connections will temporarily bypass the system proxy",
+      "offEnabled": "Compatibility mode enabled and model connections rebuilt",
+      "changeFailed": "Failed to change the network connection mode",
+      "environmentLocked": "VALUZ_EGRESS_MODE=off was set at startup. Remove it and restart the app to leave compatibility mode.",
+      "advanced": "Advanced diagnostics",
+      "samples": "{snapshots} connection states · {events} redacted events",
+      "copyDiagnostics": "Copy redacted diagnostics",
+      "copied": "Copied redacted network diagnostics",
+      "copyFailed": "Failed to copy diagnostics",
+      "health": {
+        "unknown": "Not yet checked",
+        "healthy": "Network connection is healthy",
+        "degraded": "Network connection is unstable",
+        "failed": "Unable to establish a model connection"
+      },
+      "mode": {
+        "auto": "Using system network settings",
+        "direct": "Temporarily bypassing system proxy",
+        "off": "Compatibility mode"
+      }
+    },
     "memory": {
       "enabledLabel": "Enable memory",
       "enabledDesc": "Master switch: memory injection + background auto-generation",
@@ -1660,6 +1702,10 @@
       "systemLogs": {
         "desc": "Backend status & log stream",
         "label": "System Logs"
+      },
+      "network": {
+        "desc": "Model connections, recovery, diagnostics",
+        "label": "Network"
       },
       "backup": {
         "label": "Backup",

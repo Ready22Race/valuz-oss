@@ -121,6 +121,12 @@ from src.runtimes.claude_agent.approval_bridge import (
 )
 from src.runtimes.interruption import describe_exception, is_runtime_interruption
 from src.runtimes.mcp_env import resolve_stdio_env
+from src.runtimes.network_egress import (
+    ModelIngressDescriptor,
+    claude_api_key_credential_gate,
+    merge_loopback_no_proxy,
+    record_runtime_egress_phase,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -361,6 +367,7 @@ class ClaudeAgentRuntime:
         workspace_root: str = "",
         model_provider: ModelProvider | None = None,
         model_settings: ModelSettings | None = None,
+        egress_descriptor: ModelIngressDescriptor | None = None,
     ) -> None:
         self.config = config
         self.model = model
@@ -369,6 +376,7 @@ class ClaudeAgentRuntime:
         self.workspace_root = workspace_root
         self.model_provider = model_provider
         self.model_settings = model_settings
+        self.egress_descriptor = egress_descriptor
         self._client: ClaudeSDKClient | None = None
         self._active_client: ClaudeSDKClient | None = None
         # tool_use ids for TodoWrite calls in the current turn — used to
@@ -405,6 +413,9 @@ class ClaudeAgentRuntime:
         # Identity of the session currently being run — exposed to
         # custom-tool handlers through ExecContext.
         self._cur_session_id: str = ""
+        self._egress_turn_attempt_id: str | None = None
+        self._egress_enabled_for_spawn = False
+        self._egress_first_model_event_recorded = False
         # The task running ``run()``. Cancelled by ``interrupt()`` so the
         # iterator unblocks even when ``receive_response().__anext__`` is
         # waiting on the SDK subprocess for the next chunk.
@@ -566,6 +577,23 @@ class ClaudeAgentRuntime:
     async def _emit_turn_phase(self, phase: str, **fields: Any) -> None:
         """Persisted latency marker — see ``turn_phase`` in ``events.py``."""
         await self.event_sink.emit(Event(type="turn_phase", data={"phase": phase, **fields}))
+        await record_runtime_egress_phase(
+            getattr(self, "_cur_session_id", "") or None,
+            getattr(self, "_egress_turn_attempt_id", None),
+            phase,
+            enabled=getattr(self, "_egress_enabled_for_spawn", False),
+        )
+
+    async def _record_egress_model_first_event(self) -> None:
+        if getattr(self, "_egress_first_model_event_recorded", False):
+            return
+        self._egress_first_model_event_recorded = True
+        await record_runtime_egress_phase(
+            getattr(self, "_cur_session_id", "") or None,
+            getattr(self, "_egress_turn_attempt_id", None),
+            "model_first_event",
+            enabled=getattr(self, "_egress_enabled_for_spawn", False),
+        )
 
     async def run(self, session: Session, user_message: UserMessage) -> None:
         from datetime import datetime
@@ -585,6 +613,8 @@ class ClaudeAgentRuntime:
         self._citation_raw_documents = {}
         self._citation_document_metadata = {}
         self._cur_session_id = session.id
+        self._egress_turn_attempt_id = uuid.uuid4().hex
+        self._egress_first_model_event_recorded = False
         self._cancelled = False
         # Reset stderr buffer so any ``session_error`` from this turn
         # carries only this turn's CLI output, not noise from prior
@@ -777,6 +807,17 @@ class ClaudeAgentRuntime:
             # clean turn.
             if not self._cancelled and self._client is not None:
                 self._start_idle_drainer(session)
+            await record_runtime_egress_phase(
+                self._cur_session_id or None,
+                self._egress_turn_attempt_id,
+                (
+                    "interrupted"
+                    if getattr(session.stop_reason, "category", None)
+                    in {"user_interrupt", "interrupted"}
+                    else "turn_complete"
+                ),
+                enabled=self._egress_enabled_for_spawn,
+            )
 
     async def run_task_coverage(
         self,
@@ -1769,6 +1810,16 @@ class ClaudeAgentRuntime:
         if self.model_provider is not None:
             opts_kwargs["disallowed_tools"] = ["WebSearch"]
         opts = ClaudeAgentOptions(**opts_kwargs)
+        descriptor = getattr(self, "egress_descriptor", None)
+        self._egress_enabled_for_spawn = descriptor is not None and (
+            claude_api_key_credential_gate(
+                permission_mode=session.permission_mode,
+                session_mode=session.mode,
+            ).eligible
+        )
+        # Keep this a no-argument call: several runtime tests replace the
+        # builder at the instance seam, and the live session gate above is
+        # intentionally separate from env serialization.
         env = self._build_model_provider_env()
         if env is not None:
             opts.env = env
@@ -1844,7 +1895,7 @@ class ClaudeAgentRuntime:
                 settings["autoCompactWindow"] = min(window, 1_000_000)
         return json.dumps(settings) if settings else None
 
-    def _build_model_provider_env(self) -> dict[str, str] | None:
+    def _build_model_provider_env(self, session: Session | None = None) -> dict[str, str] | None:
         """Build the spawned SDK subprocess's env when (and only when)
         ``session.model_provider`` carries a per-session credential
         override. Returns ``None`` for the no-override path so the
@@ -1871,8 +1922,32 @@ class ClaudeAgentRuntime:
         if self.model_provider is None:
             return None
         merged: dict[str, str] = dict(os.environ)
-        if self.model_provider.base_url is not None:
-            merged["ANTHROPIC_BASE_URL"] = self.model_provider.base_url
+        egress_descriptor = getattr(self, "egress_descriptor", None)
+        if session is not None:
+            use_egress = (
+                egress_descriptor is not None
+                and claude_api_key_credential_gate(
+                    permission_mode=session.permission_mode,
+                    session_mode=session.mode,
+                ).eligible
+            )
+        else:
+            use_egress = bool(
+                getattr(self, "_egress_enabled_for_spawn", egress_descriptor is not None)
+            )
+        effective_base_url = (
+            egress_descriptor.base_url
+            if use_egress and egress_descriptor is not None
+            else self.model_provider.base_url
+        )
+        if effective_base_url is not None:
+            merged["ANTHROPIC_BASE_URL"] = effective_base_url
+            # A loopback model ingress must never be sent back through the
+            # user's upstream proxy. Preserve every existing bypass entry and
+            # merge the local hosts into both casing variants; some bundled
+            # HTTP stacks prefer lowercase while GUI launches often expose
+            # uppercase only.
+            merge_loopback_no_proxy(merged, effective_base_url)
             # The advisor is a server-executed, Anthropic-API-only tool. It
             # is not available on Bedrock/Vertex/Foundry, and through an LLM
             # gateway its availability depends on whether the gateway
@@ -1883,7 +1958,10 @@ class ClaudeAgentRuntime:
             # enhancement beats a recurring user-facing failure. Direct
             # first-party Anthropic (``base_url is None``) keeps it on.
             # https://code.claude.com/docs/en/advisor.md
-            merged["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"] = "1"
+            if self.model_provider.base_url is not None:
+                merged["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"] = "1"
+            else:
+                merged.pop("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", None)
         else:
             # If a previous env carried a stale base_url (e.g. parent
             # shell exported one for an unrelated workflow), wipe it so
@@ -1895,6 +1973,12 @@ class ClaudeAgentRuntime:
             # (advisor on) rather than silently honoring a parent export.
             merged.pop("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", None)
         merged["ANTHROPIC_AUTH_TOKEN"] = self.model_provider.api_key
+        if use_egress:
+            # The locked Claude CLI keeps this credential for its own model
+            # transport while removing Anthropic credentials from Bash and
+            # other tool subprocesses. The egress capability itself is never
+            # placed in the CLI environment.
+            merged["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] = "1"
         if "claude" not in self.model:
             merged["ANTHROPIC_MODEL"] = self.model
             merged["ANTHROPIC_DEFAULT_OPUS_MODEL"] = self.model
@@ -2661,6 +2745,12 @@ class ClaudeAgentRuntime:
             parent_extra = {"parent_tool_use_id": parent} if parent is not None else {}
             event = message.event
             event_type = event.get("type")
+            if not getattr(self, "_egress_first_model_event_recorded", False) and event_type in {
+                "message_start",
+                "content_block_start",
+                "content_block_delta",
+            }:
+                await self._record_egress_model_first_event()
             if event_type == "content_block_start":
                 block = event.get("content_block") or {}
                 if block.get("type") == "tool_use":
@@ -2804,6 +2894,8 @@ class ClaudeAgentRuntime:
                 await self.event_sink.emit(Event(type="compaction", data=dict(meta)))
 
         elif isinstance(message, AssistantMessage):
+            if not getattr(self, "_egress_first_model_event_recorded", False):
+                await self._record_egress_model_first_event()
             # ``parent_tool_use_id`` is set when this message was produced
             # INSIDE a subagent (Task/Agent tool run). Thread it onto every
             # emitted event so downstream consumers can tell out-of-band

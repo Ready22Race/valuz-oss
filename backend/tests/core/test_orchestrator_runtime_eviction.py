@@ -56,9 +56,19 @@ class FakeRuntime:
 
 def _patch_factory(monkeypatch) -> None:
     """Make ``_ensure_runtime`` mint a ``FakeRuntime`` instead of a real one."""
+    async def no_egress(*_args, **_kwargs):
+        return None
+
     monkeypatch.setattr(
         "src.runtimes.factory.create_runtime",
         lambda *a, **k: FakeRuntime(),
+    )
+    # These tests intentionally pass bare objects for agent/session because
+    # they exercise only cache eviction.  Keep the independent network-egress
+    # admission/registration boundary out of this unit-test fixture.
+    monkeypatch.setattr(
+        "src.runtimes.network_egress.prepare_runtime_egress",
+        no_egress,
     )
 
 

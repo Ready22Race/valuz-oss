@@ -258,6 +258,12 @@ execution logs, and notify you on completion.
   detected automatically; subscription channels come with a recommended list.
 - **Locked once a session starts** — a session's runtime, channel, and model are
   fixed after creation; the model can't be switched mid-session.
+- **Desktop network recovery (canary)** — when the local egress feature is
+  enabled, supported model clients share the desktop's system proxy/PAC routing
+  without changing agent tools or MCP traffic. Settings shows plain-language
+  automatic, temporary direct, and compatibility recovery actions plus local,
+  redacted health details. Unsupported authentication/protocol combinations
+  continue on their existing path until separately validated.
 
 Every tool an agent calls is visible in the tool-call log.
 
@@ -312,6 +318,10 @@ The open-source edition is free and covers the complete single-user workstation.
 - **Notifications** — when long-running or scheduled tasks complete.
 - **Window management** — closing the window minimizes to the tray (it keeps
   running); `⌘ + Q` truly quits.
+- **Local network diagnostics (canary)** — recent model connection route,
+  health, phase timings, and stable failure category can be inspected and
+  copied through an allowlisted, redacted export. Detailed events stay in
+  memory and no background provider probe or remote network telemetry is added.
 
 ---
 
@@ -337,4 +347,4 @@ right-hand Context Panel (project context, members, and file tree).
 | Knowledge Base | Private document management |
 | Skills | Reusable agent abilities |
 | Scheduled | Scheduled-task management |
-| Settings | Account, model channels, connectors, appearance, shortcuts, parsing |
+| Settings | Account, model channels, connectors, network recovery, appearance, shortcuts, parsing |

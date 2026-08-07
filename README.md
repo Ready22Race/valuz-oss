@@ -58,7 +58,13 @@ down both):
 ./scripts/dev.sh frontend         # frontend only
 VALUZ_BACKEND_PORT=18080 ./scripts/dev.sh
 VALUZ_RELOAD=1 ./scripts/dev.sh   # uvicorn --reload
+VALUZ_EGRESS_FRONTENDS=1 ./scripts/dev.sh  # default-off desktop egress canary
 ```
+
+The egress canary reverses desktop/backend startup so Electron can publish a
+private one-shot bootstrap before the backend starts; reload is disabled for
+that run. See [the unified network egress design](docs/design/unified-network-egress.md)
+for its admission matrix, recovery modes, and remaining rollout gates.
 
 ## Tech Stack
 

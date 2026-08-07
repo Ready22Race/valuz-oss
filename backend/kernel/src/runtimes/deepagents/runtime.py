@@ -41,6 +41,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Literal
 
+import httpx
 from deepagents import SubAgent, create_deep_agent
 from deepagents.backends import LocalShellBackend
 from deepagents.backends.protocol import FileData, ReadResult
@@ -83,6 +84,7 @@ from src.runtimes.deepagents.middleware import (
 )
 from src.runtimes.interruption import describe_exception, is_runtime_interruption
 from src.runtimes.mcp_env import resolve_stdio_env
+from src.runtimes.network_egress import ForwardProxyDescriptor, record_runtime_egress_phase
 
 logger = logging.getLogger(__name__)
 
@@ -489,6 +491,7 @@ class DeepAgentsRuntime:
         checkpoint_root: str | None = None,
         model_provider: ModelProvider | None = None,
         model_settings: ModelSettings | None = None,
+        egress_descriptor: ForwardProxyDescriptor | None = None,
     ) -> None:
         self.config = config
         self.model = model
@@ -501,6 +504,12 @@ class DeepAgentsRuntime:
         )
         self.model_provider = model_provider
         self.model_settings = model_settings
+        self.egress_descriptor = egress_descriptor
+        # Only the model client's HTTP transport receives this explicit
+        # proxy. Local shell, MCP and other process clients retain their
+        # existing environment and can never read the proxy capability.
+        self._egress_http_client: httpx.Client | None = None
+        self._egress_http_async_client: httpx.AsyncClient | None = None
         self._graph: Any | None = None
         self._checkpointer: Any | None = None
         self._checkpointer_cm: Any | None = None
@@ -514,6 +523,7 @@ class DeepAgentsRuntime:
         # Identity of the session currently being run — exposed to
         # custom-tool handlers through ExecContext.
         self._cur_session_id: str = ""
+        self._egress_turn_attempt_id: str | None = None
 
         # Approval bridge state (Phase 3 of the cross-runtime approval
         # contract). ``_pending_futures`` maps pending_id → future that
@@ -631,6 +641,11 @@ class DeepAgentsRuntime:
     async def _emit_turn_phase(self, phase: str, **fields: Any) -> None:
         """Persisted latency marker — see ``turn_phase`` in ``events.py``."""
         await self.event_sink.emit(Event(type="turn_phase", data={"phase": phase, **fields}))
+        await record_runtime_egress_phase(
+            getattr(self, "_cur_session_id", "") or None,
+            getattr(self, "_egress_turn_attempt_id", None),
+            phase,
+        )
 
     async def run(self, session: Session, user_message: UserMessage) -> None:
         from datetime import datetime
@@ -640,6 +655,7 @@ class DeepAgentsRuntime:
         session.status = "running"
         self._cancelled = False
         self._cur_session_id = session.id
+        self._egress_turn_attempt_id = uuid.uuid4().hex
         if not self._continuing_same_user_turn:
             self._turn_evidence_registry.reset()
 
@@ -722,6 +738,7 @@ class DeepAgentsRuntime:
             # suspenders safety net — a runaway graph that re-interrupts
             # forever should fail visibly, not loop forever.
             max_resume_iters = 32
+            saw_model_event = False
             for _resume_iter in range(max_resume_iters):
                 if self._cancelled:
                     break
@@ -744,11 +761,22 @@ class DeepAgentsRuntime:
                         chunk_obj = data.get("chunk")
                         internal_summarization = _is_internal_summarization_event(chunk)
                         text = _extract_chunk_text(chunk_obj)
+                        thinking_text = _extract_chunk_thinking(chunk_obj)
+                        if (
+                            not saw_model_event
+                            and not internal_summarization
+                            and (text or thinking_text)
+                        ):
+                            saw_model_event = True
+                            await record_runtime_egress_phase(
+                                self._cur_session_id or None,
+                                self._egress_turn_attempt_id,
+                                "model_first_event",
+                            )
                         if text and not internal_summarization:
                             await self.event_sink.emit(
                                 Event(type="text_delta", data={"text": text})
                             )
-                        thinking_text = _extract_chunk_thinking(chunk_obj)
                         if thinking_text and not internal_summarization:
                             await self.event_sink.emit(
                                 Event(type="thinking_delta", data={"text": thinking_text})
@@ -968,6 +996,16 @@ class DeepAgentsRuntime:
                     },
                 )
             )
+            await record_runtime_egress_phase(
+                self._cur_session_id or None,
+                self._egress_turn_attempt_id,
+                (
+                    "interrupted"
+                    if getattr(session.stop_reason, "category", None)
+                    in {"user_interrupt", "interrupted"}
+                    else "turn_complete"
+                ),
+            )
 
     async def run_task_coverage(
         self,
@@ -1072,6 +1110,14 @@ class DeepAgentsRuntime:
                 logger.debug("Error closing deepagents checkpointer", exc_info=True)
             self._checkpointer_cm = None
         self._active_task = None
+        if getattr(self, "_egress_http_client", None) is not None:
+            assert self._egress_http_client is not None
+            self._egress_http_client.close()
+            self._egress_http_client = None
+        if getattr(self, "_egress_http_async_client", None) is not None:
+            assert self._egress_http_async_client is not None
+            await self._egress_http_async_client.aclose()
+            self._egress_http_async_client = None
 
     # -- Approval bridge --
 
@@ -1593,6 +1639,12 @@ class DeepAgentsRuntime:
             )
             if self.model_provider.base_url is not None:
                 kwargs["base_url"] = self.model_provider.base_url
+            egress_descriptor = getattr(self, "egress_descriptor", None)
+            if egress_descriptor is not None:
+                # ChatAnthropic forwards this to both of its locked httpx
+                # transports. Unlike global proxy env, it is scoped to this
+                # model client and is not inherited by agent tools.
+                kwargs["anthropic_proxy"] = egress_descriptor.proxy_url
             if effort is not None:
                 kwargs["effort"] = effort
             if profile is not None:
@@ -1661,6 +1713,24 @@ class DeepAgentsRuntime:
             stream_usage=True,
             extra_body=extra_body,
         )
+        egress_descriptor = getattr(self, "egress_descriptor", None)
+        if egress_descriptor is not None:
+            if getattr(self, "_egress_http_client", None) is None:
+                self._egress_http_client = httpx.Client(
+                    proxy=egress_descriptor.proxy_url,
+                    # Preserve the OpenAI SDK's locked default budget while
+                    # replacing only its transport routing.
+                    timeout=httpx.Timeout(600.0, connect=5.0),
+                    trust_env=False,
+                )
+            if getattr(self, "_egress_http_async_client", None) is None:
+                self._egress_http_async_client = httpx.AsyncClient(
+                    proxy=egress_descriptor.proxy_url,
+                    timeout=httpx.Timeout(600.0, connect=5.0),
+                    trust_env=False,
+                )
+            openai_kwargs["http_client"] = self._egress_http_client
+            openai_kwargs["http_async_client"] = self._egress_http_async_client
         if self.model_provider.base_url is not None:
             openai_kwargs["base_url"] = self.model_provider.base_url
         if effort is not None:

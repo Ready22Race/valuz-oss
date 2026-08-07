@@ -49,6 +49,41 @@ Two runtime forms ship from the same backend:
 A Go control CLI (`valuz`) is the runtime control plane — it starts, stops, and
 diagnoses these processes but owns none of their implementation.
 
+### Desktop model network egress
+
+The packaged desktop may enable an Electron-main-process **Egress Manager** for
+model traffic. It is a desktop platform service, not part of Host or Kernel:
+
+```text
+Codex / Claude ── model base_url ──> loopback model ingress ─┐
+                                                            ├─ Resolver
+DeepAgents / provider test ─ explicit transport ─> forward ─┤  + Connector
+                                                            └─ env / system PAC / DIRECT ─> LLM provider
+```
+
+Both loopback frontends share one immutable proxy-environment snapshot, the
+Chromium `resolveProxy()` result, and the same DIRECT / HTTP CONNECT / SOCKS5
+connector. Codex and Claude use a registered model `base_url`, so Valuz does not
+redirect their tool shells, MCP servers, plugin traffic, browser traffic, or
+the whole sidecar by adding process-wide proxy variables. DeepAgents and
+provider tests use explicitly owned HTTP clients with environment proxy lookup
+disabled for those clients only.
+
+Electron sends a short-lived control capability to the backend once: over the
+sidecar's inherited stdin in packaged builds, or through a private one-shot
+rendezvous file in desktop development. The backend keeps it in memory, leases
+one capability per runtime, renews leases, and revokes them on cleanup. All
+listeners bind to random loopback ports; no local CA or HTTPS MITM is installed.
+Initialization failure keeps the UI/backend available but blocks admitted model
+traffic until the user selects compatibility mode, preventing an unnoticed
+direct-connect fallback.
+
+The feature is currently a default-off canary (`--enable-valuz-egress-frontends`
+or `VALUZ_EGRESS_FRONTENDS=1`). Standalone/headless servers receive no Electron
+capability and retain their existing explicit-proxy-environment/direct behavior.
+The canonical behavior, admission matrix, and rollout criteria live in
+[`docs/design/unified-network-egress.md`](design/unified-network-egress.md).
+
 ---
 
 ## 2. Backend: Host + Kernel

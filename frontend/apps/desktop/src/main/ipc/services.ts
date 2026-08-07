@@ -1,4 +1,11 @@
 import type { ServiceDescriptor } from '@valuz/core'
+import type {
+  EgressDiagnosticEvent,
+  EgressManagerStatus,
+  EgressMode,
+  EgressSnapshot,
+} from '../network/types'
+import type { RuntimePhaseRecord } from '../network/control-server'
 import { createServiceManager, type DesktopServiceManager } from '../services/mod'
 import { cleanStaleUpdateCache } from '../update-cache'
 
@@ -19,6 +26,12 @@ export interface DesktopRuntime {
   listServiceDescriptors(): ServiceDescriptor[]
   registerServiceDescriptor(descriptor: ServiceDescriptor): ServiceDescriptor
   unregisterServiceDescriptor(name: string): boolean
+  getEgressDiagnostics(): EgressDiagnosticEvent[]
+  getEgressSnapshots(): EgressSnapshot[]
+  getEgressMode(): EgressMode
+  getEgressStatus(): EgressManagerStatus
+  getEgressRuntimePhases(): RuntimePhaseRecord[]
+  setEgressMode(mode: EgressMode): Promise<EgressManagerStatus>
 }
 
 type DesktopEventEmitter = (eventName: string, payload: unknown) => void
@@ -78,6 +91,44 @@ export const createDesktopRuntime = (
     }
     return removed
   },
+  getEgressDiagnostics() {
+    return manager.getEgressDiagnostics()
+  },
+  getEgressSnapshots() {
+    return manager.getEgressSnapshots()
+  },
+  getEgressMode() {
+    return manager.getEgressMode()
+  },
+  getEgressStatus() {
+    return manager.getEgressStatus()
+  },
+  getEgressRuntimePhases() {
+    return manager.getEgressRuntimePhases()
+  },
+  async setEgressMode(mode) {
+    const previous = manager.getEgressMode()
+    let status: EgressManagerStatus
+    try {
+      status = await manager.setEgressMode(mode)
+    } catch (error) {
+      // Crossing from compatibility mode must rebuild the backend even when
+      // the new manager failed, so the replacement sidecar receives the
+      // non-secret fail-loud marker instead of continuing on the legacy path.
+      if (previous === 'off' && manager.getEgressMode() !== 'off') {
+        const snapshot = await manager.restartService('agent-server')
+        emitEvent('service-status-changed', snapshot)
+      }
+      emitEvent('egress-status-changed', manager.getEgressStatus())
+      throw error
+    }
+    if ((previous === 'off') !== (mode === 'off')) {
+      const snapshot = await manager.restartService('agent-server')
+      emitEvent('service-status-changed', snapshot)
+    }
+    emitEvent('egress-status-changed', status)
+    return status
+  },
 })
 
 export const createDesktopRuntimeForTest = () => createDesktopRuntime(createServiceManager())
@@ -97,4 +148,16 @@ export const serviceHandlers = (runtime: DesktopRuntime) => ({
     runtime.registerServiceDescriptor(payload?.descriptor as ServiceDescriptor),
   unregister_service_descriptor: (_: unknown, payload?: { name?: string }) =>
     runtime.unregisterServiceDescriptor(payload?.name ?? ''),
+  egress_get_diagnostics: () => runtime.getEgressDiagnostics(),
+  egress_get_snapshots: () => runtime.getEgressSnapshots(),
+  egress_get_mode: () => runtime.getEgressMode(),
+  egress_get_status: () => runtime.getEgressStatus(),
+  egress_get_runtime_phases: () => runtime.getEgressRuntimePhases(),
+  egress_set_mode: (_: unknown, payload?: { mode?: EgressMode }) => {
+    const mode = payload?.mode
+    if (mode !== 'auto' && mode !== 'direct' && mode !== 'off') {
+      throw new Error('invalid_egress_mode')
+    }
+    return runtime.setEgressMode(mode)
+  },
 })

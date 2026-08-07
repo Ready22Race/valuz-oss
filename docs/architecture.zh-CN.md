@@ -46,6 +46,23 @@ Valuz OSS 是本地优先（local-first）的应用。Agent loop 和全部用户
 Go 编写的控制 CLI（`valuz`）是运行时控制平面——负责启动、停止、诊断这些进程，
 但不拥有它们的任何实现。
 
+### 桌面模型网络出口
+
+打包桌面端可以在 Electron main process 中启用模型流量的 **Egress Manager**。它是桌面平台服务，既不属于宿主，也不属于内核：
+
+```text
+Codex / Claude ── 模型 base_url ──> loopback 薄模型入口 ─┐
+                                                         ├─ Resolver
+DeepAgents / Provider Test ─ 显式 transport ─> 正向出口 ─┤  + Connector
+                                                         └─ env / 系统 PAC / DIRECT ─> 模型 Provider
+```
+
+两个 loopback 前端共享同一份不可变代理环境快照、Chromium `resolveProxy()` 结果和 DIRECT / HTTP CONNECT / SOCKS5 连接器。Codex、Claude 通过预注册的模型 `base_url` 接入，因此 Valuz 不靠新增进程级代理变量改道它们的工具 shell、MCP、插件、浏览器或整个 sidecar。DeepAgents 与 Provider Test 使用自己持有的显式 HTTP client，并只对该 client 关闭环境代理自动发现。
+
+Electron 只向 backend 交付一次短期控制 capability：打包端走 sidecar 继承的 stdin，桌面开发端走私有、一次性的 rendezvous 文件。backend 仅在内存保存，按 runtime 租用 capability，定期续租并在清理时撤销。所有监听器使用随机 loopback 端口，不安装本地 CA，也不做 HTTPS MITM。若初始化失败，UI 与 backend 仍可使用，但已经准入的模型流量保持阻断，直到用户选择兼容模式，避免静默裸直连。
+
+该能力目前是默认关闭的 canary（`--enable-valuz-egress-frontends` 或 `VALUZ_EGRESS_FRONTENDS=1`）。独立/headless backend 收不到 Electron capability，继续沿用显式代理环境变量或直连的既有行为。权威行为、准入矩阵与上线标准见 [`docs/design/unified-network-egress.md`](design/unified-network-egress.md)。
+
 ---
 
 ## 2. 后端：宿主 + 内核

@@ -1186,6 +1186,48 @@
       "openFailed": "打开浏览器失败",
       "riskNote": "这是一个独立、隔离的浏览器实例;请只在其中登录必要的账户。页面内容应视为不可信。"
     },
+    "network": {
+      "title": "网络连接",
+      "desc": "统一管理模型请求如何使用系统代理或直连，不修改系统网络设置",
+      "statusLabel": "模型网络",
+      "loading": "正在读取状态…",
+      "refresh": "刷新",
+      "loadFailed": "读取网络状态失败",
+      "desktopOnly": "网络出口管理仅在桌面客户端中可用。",
+      "canaryDisabled": "当前构建尚未启用统一出口，模型继续使用旧版网络路径。",
+      "current": "当前使用",
+      "use": "使用",
+      "useTemporarily": "暂时使用",
+      "autoLabel": "使用系统网络设置",
+      "autoDesc": "自动遵循应用启动时的代理环境与系统代理/PAC；推荐日常使用。",
+      "directLabel": "暂时不使用系统代理",
+      "directDesc": "只影响后续模型连接，应用重启后自动恢复系统网络设置。",
+      "offLabel": "兼容模式：恢复旧版连接方式",
+      "offDesc": "绕过统一出口并重建模型运行时，仅用于统一出口自身发生故障时恢复。",
+      "enableCompatibility": "进入兼容模式",
+      "offConfirm": "进入兼容模式会重新建立模型连接，正在进行的请求可能中断。是否继续？",
+      "autoEnabled": "已恢复使用系统网络设置",
+      "directEnabled": "后续模型连接将暂时不使用系统代理",
+      "offEnabled": "已进入兼容模式并重建模型连接",
+      "changeFailed": "切换网络连接方式失败",
+      "environmentLocked": "启动环境设置了 VALUZ_EGRESS_MODE=off；移除该设置并重启应用后才能退出兼容模式。",
+      "advanced": "高级诊断",
+      "samples": "{snapshots} 个连接状态 · {events} 条脱敏事件",
+      "copyDiagnostics": "复制脱敏诊断",
+      "copied": "已复制脱敏网络诊断",
+      "copyFailed": "复制诊断失败",
+      "health": {
+        "unknown": "尚未检测",
+        "healthy": "网络连接正常",
+        "degraded": "网络连接不稳定",
+        "failed": "无法建立模型连接"
+      },
+      "mode": {
+        "auto": "使用系统网络设置",
+        "direct": "暂时不使用系统代理",
+        "off": "兼容模式"
+      }
+    },
     "memory": {
       "enabledLabel": "启用记忆",
       "enabledDesc": "总开关:控制记忆注入与后台自动生成",
@@ -1660,6 +1702,10 @@
       "systemLogs": {
         "desc": "后端状态与日志流",
         "label": "服务日志"
+      },
+      "network": {
+        "desc": "模型连接、恢复与诊断",
+        "label": "网络连接"
       },
       "backup": {
         "label": "备份",

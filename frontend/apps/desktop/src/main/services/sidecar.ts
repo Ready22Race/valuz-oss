@@ -3,6 +3,7 @@ import fs from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { EgressBootstrap } from "../network/control-server";
 
 // Vite bundles the Electron main process as ESM (vite.main.config.ts
 // formats:['es']), so the CommonJS ``__dirname`` global is undefined at
@@ -17,6 +18,10 @@ export interface SidecarOptions {
   port: number;
   onLog?: (line: string) => void;
   onExit?: (code: number | null, signal: string | null) => void;
+  /** One-shot delivery over stdin; never copied into the child environment. */
+  egressBootstrap?: EgressBootstrap | null;
+  /** Non-secret fail-loud marker used only if enabled egress failed to start. */
+  egressRequired?: boolean;
 }
 
 export interface DesktopSidecarResult {
@@ -28,6 +33,25 @@ export interface DesktopSidecarResult {
    *  callers like ``before-quit`` can await a clean teardown. */
   stop: () => Promise<void>;
 }
+
+export const configureSidecarEgressEnvironment = (
+  env: Record<string, string>,
+  egressBootstrap: EgressBootstrap | null | undefined,
+  egressRequired: boolean | undefined,
+): void => {
+  // Never inherit a stale/user-supplied bootstrap channel into the managed
+  // backend. Only these explicit spawn options may select stdin delivery or
+  // the non-secret fail-loud marker. The bootstrap capability itself is not
+  // serialized into this mapping.
+  delete env.VALUZ_EGRESS_BOOTSTRAP_FILE;
+  delete env.VALUZ_EGRESS_BOOTSTRAP_STDIN;
+  delete env.VALUZ_EGRESS_REQUIRED;
+  if (egressBootstrap) {
+    env.VALUZ_EGRESS_BOOTSTRAP_STDIN = "1";
+  } else if (egressRequired) {
+    env.VALUZ_EGRESS_REQUIRED = "1";
+  }
+};
 
 /** Grace period after SIGTERM before escalating to SIGKILL on POSIX. */
 const GRACEFUL_SHUTDOWN_MS = 5000;
@@ -375,7 +399,7 @@ export const startSidecar = async (
 ): Promise<DesktopSidecarResult> => {
   // ``appDataDir`` is kept in SidecarOptions for callers, but the env
   // override below uses a literal path; destructure only what we read.
-  const { name, port, onLog, onExit } = options;
+  const { name, port, onLog, onExit, egressBootstrap, egressRequired } = options;
 
   const serverBinary = resolveServerBinary();
 
@@ -392,7 +416,6 @@ export const startSidecar = async (
     ...(process.env as Record<string, string>),
     VALUZ_DATA_DIR: path.join(homedir(), ".valuz-oss"),
   };
-
   // The backend builds its public callback URLs (notably the connector OAuth
   // redirect_uri) from VALUZ_BACKEND_BASE_URL, which defaults to :8000. The
   // sidecar listens on ``port`` (19100 by default), so without this the OAuth
@@ -405,6 +428,7 @@ export const startSidecar = async (
   // while running), the backend notices and exits instead of living on as an
   // orphan that holds the writer lock + port (boot/parent_watchdog.py).
   env.VALUZ_PARENT_PID = String(process.pid);
+  configureSidecarEgressEnvironment(env, egressBootstrap, egressRequired);
 
   // Point the backend's docs_embedded._detect_rg() at the bundled binary.
   // It already honours VALUZ_RG_PATH ahead of bundled / PATH lookup.
@@ -440,13 +464,20 @@ export const startSidecar = async (
   const child: ChildProcess = spawn(cmd, args, {
     cwd,
     env,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: [egressBootstrap ? "pipe" : "ignore", "pipe", "pipe"],
     // POSIX: give the child its own process group (setsid) so stop() can signal
     // the WHOLE tree via process.kill(-pid, …) — the analog of taskkill /T on
     // Windows. Not on Windows (no POSIX groups; the tree is killed via taskkill
     // /T /F there). stdio stays piped, so this does not detach the log streams.
     detached: process.platform !== "win32",
   });
+
+  if (egressBootstrap && child.stdin) {
+    child.stdin.once("error", () => {
+      onLog?.("[warn] Egress bootstrap channel closed before delivery");
+    });
+    child.stdin.end(`${JSON.stringify(egressBootstrap)}\n`);
+  }
 
   // Capture stdout/stderr for logs
   const captureStream = (

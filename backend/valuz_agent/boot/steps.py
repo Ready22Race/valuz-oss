@@ -341,7 +341,34 @@ async def colocate_kernel_history() -> None:
         logging.getLogger(__name__).warning("kernel-history co-locate skipped", exc_info=True)
 
 
+def initialize_network_egress() -> None:
+    # Desktop egress bootstrap is delivered once over the sidecar's stdin.
+    # Consume it before the kernel creates any runtime or child process; the
+    # non-secret marker is removed from os.environ inside the helper.
+    # Import for its path-injection side effect before resolving ``src``.
+    __import__("kernel")
+
+    from src.runtimes.network_egress import (
+        configure_network_egress,
+        consume_network_egress_bootstrap,
+        get_network_egress_registry,
+    )
+
+    try:
+        consume_network_egress_bootstrap()
+    except RuntimeError:
+        # A malformed/stale one-shot payload is an egress failure, not a
+        # reason to take the renderer and non-model backend APIs down. Keep
+        # booting with the same fail-loud boundary as manager startup failure.
+        logger.error("desktop egress bootstrap rejected; admitted model traffic is blocked")
+        configure_network_egress(None, required_unavailable=True)
+    if registry := get_network_egress_registry():
+        registry.start_keepalive()
+
+
 async def init_kernel(app: FastAPI) -> None:
+    initialize_network_egress()
+
     # In-process kernel singletons (store + orchestrator) are NOT created
     # in http mode — the kernel runs as a separate process and the host
     # reaches it only through ``HttpKernelClient`` (B3). The host toolkit
@@ -1067,6 +1094,17 @@ async def stop_managed_browser() -> None:
 
 
 async def shutdown_kernel() -> None:
+    from src.runtimes.network_egress import (
+        configure_network_egress,
+        get_network_egress_registry,
+    )
+
     from valuz_agent.boot.kernel import shutdown_kernel_dependencies
 
     await shutdown_kernel_dependencies()
+    if registry := get_network_egress_registry():
+        await registry.close()
+    # Reset the fail-loud sentinel as well as a live registry.  Production
+    # exits after this hook, but tests and embedded hosts may initialize the
+    # backend again in the same interpreter.
+    configure_network_egress(None)

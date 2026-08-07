@@ -6,6 +6,14 @@ import {
   type ServiceStatusType,
 } from "@valuz/shared";
 import type { ServiceDescriptor } from "@valuz/core";
+import type { EgressManager } from "../network/egress-manager";
+import type { RuntimePhaseRecord } from "../network/control-server";
+import type {
+  EgressDiagnosticEvent,
+  EgressManagerStatus,
+  EgressMode,
+  EgressSnapshot,
+} from "../network/types";
 import { DescriptorRegistry, personalDescriptors } from "./descriptors";
 import {
   reclaimStaleSidecar,
@@ -38,6 +46,12 @@ export interface DesktopServiceManager {
   getAllStatus(): ServiceInfo[];
   registerDescriptor(descriptor: ServiceDescriptor): ServiceDescriptor;
   unregisterDescriptor(name: string): boolean;
+  getEgressDiagnostics(): EgressDiagnosticEvent[];
+  getEgressSnapshots(): EgressSnapshot[];
+  getEgressMode(): EgressMode;
+  getEgressStatus(): EgressManagerStatus;
+  getEgressRuntimePhases(): RuntimePhaseRecord[];
+  setEgressMode(mode: EgressMode): Promise<EgressManagerStatus>;
 }
 
 const formatLogLine = (line: string) => {
@@ -90,7 +104,27 @@ const waitForHealth = async (
 
 export const createServiceManager = (
   appDataDir = process.cwd(),
-  options?: { devMode?: boolean; devPort?: number },
+  options?: {
+    devMode?: boolean;
+    devPort?: number;
+    egressManager?: Pick<
+      EgressManager,
+      | "start"
+      | "quiesce"
+      | "stop"
+      | "setMode"
+      | "getDiagnostics"
+      | "getSnapshots"
+      | "getRuntimePhases"
+      | "getMode"
+      | "getStatus"
+      | "getBootstrap"
+    >;
+    onEgressModeChanged?: (mode: EgressMode) => void;
+    publishDevEgressBootstrap?: (
+      bootstrap: NonNullable<ReturnType<EgressManager["getBootstrap"]>>,
+    ) => void | Promise<void>;
+  },
 ): DesktopServiceManager => {
   const devMode = options?.devMode ?? false;
   // In dev mode, probe a backend at this port. Defaults to :8000 (matches
@@ -119,6 +153,7 @@ export const createServiceManager = (
 
   // Track running sidecars for cleanup
   const sidecars = new Map<string, DesktopSidecarResult>();
+  let devBootstrapPublished = false;
 
   const setStatus = (
     name: string,
@@ -145,11 +180,70 @@ export const createServiceManager = (
 
   return {
     descriptors,
+    getEgressDiagnostics: () => options?.egressManager?.getDiagnostics() ?? [],
+    getEgressSnapshots: () => options?.egressManager?.getSnapshots() ?? [],
+    getEgressMode: () => options?.egressManager?.getMode() ?? "off",
+    getEgressStatus: () =>
+      options?.egressManager?.getStatus() ?? {
+        mode: "off",
+        enabled: false,
+        started: false,
+        emergencyOverride: false,
+        snapshotCount: 0,
+        diagnosticEventCount: 0,
+      },
+    getEgressRuntimePhases: () =>
+      options?.egressManager?.getRuntimePhases() ?? [],
+    async setEgressMode(mode) {
+      await options?.egressManager?.setMode(mode);
+      try {
+        options?.onEgressModeChanged?.(mode);
+      } catch {
+        // The active in-memory recovery choice has already succeeded. A
+        // persistence failure must not prevent the caller from rebuilding the
+        // sidecar across the compatibility boundary.
+        addLog(
+          "agent-server",
+          "Network recovery mode changed but could not be saved for the next launch",
+        );
+      }
+      return (
+        options?.egressManager?.getStatus() ?? {
+          mode: "off",
+          enabled: false,
+          started: false,
+          emergencyOverride: false,
+          snapshotCount: 0,
+          diagnosticEventCount: 0,
+        }
+      );
+    },
     getAllStatus: () => [...services.values()],
     async startAllServices() {
+      // Start Electron's egress owner before any sidecar so an enabled canary
+      // can deliver its one-shot bootstrap before runtimes are constructed.
+      let egressStartFailed = false;
+      try {
+        await options?.egressManager?.start();
+      } catch {
+        egressStartFailed = true;
+      }
+      if (devMode && !egressStartFailed && !devBootstrapPublished) {
+        const bootstrap = options?.egressManager?.getBootstrap();
+        if (bootstrap && options?.publishDevEgressBootstrap) {
+          await options.publishDevEgressBootstrap(bootstrap);
+          devBootstrapPublished = true;
+        }
+      }
       for (const descriptor of descriptors.snapshot()) {
         setStatus(descriptor.name, "starting");
         addLog(descriptor.name, "Starting sidecar...");
+        if (egressStartFailed) {
+          addLog(
+            descriptor.name,
+            "Unified model network is unavailable; model requests will remain blocked until compatibility mode is enabled",
+          );
+        }
 
         // In dev mode, skip spawning a sidecar process. The user runs the
         // backend externally (``valuz start`` boots it on port 8000). Just
@@ -193,6 +287,8 @@ export const createServiceManager = (
           // backend process dies before it ever serves (vs. just being slow).
           let exited = false;
           let exitCode: number | null = null;
+          const egressStatus = options?.egressManager?.getStatus();
+          const egressBootstrap = options?.egressManager?.getBootstrap() ?? null;
           const result = await startSidecar({
             appDataDir,
             name: descriptor.name,
@@ -217,6 +313,12 @@ export const createServiceManager = (
               setStatus(descriptor.name, "stopped");
               sidecars.delete(descriptor.name);
             },
+            egressBootstrap,
+            egressRequired: Boolean(
+              !egressBootstrap &&
+                egressStatus?.enabled &&
+                egressStatus.mode !== "off",
+            ),
           });
 
           sidecars.set(descriptor.name, result);
@@ -261,6 +363,10 @@ export const createServiceManager = (
       return [...services.values()];
     },
     async stopAllServices() {
+      // Reject new registrations/capabilities first, then let sidecar-owned
+      // runtimes wind down before the bounded proxy teardown closes any
+      // remaining relay sockets.
+      await options?.egressManager?.quiesce();
       // Await each teardown so the process trees are actually gone before we
       // report stopped — on quit this runs under before-quit (see index.ts), so
       // children release their files before the app exits / the updater installs.
@@ -273,10 +379,18 @@ export const createServiceManager = (
         }),
       );
       sidecars.clear();
+      await options?.egressManager?.stop();
 
       return [...services.values()];
     },
     async restartService(name: string) {
+      if (devMode) {
+        addLog(
+          name,
+          "Dev mode uses an external backend — restart it from the development shell",
+        );
+        return [...services.values()];
+      }
       const sidecar = sidecars.get(name);
       if (sidecar) {
         addLog(name, "Restarting sidecar...");
@@ -293,6 +407,8 @@ export const createServiceManager = (
       setStatus(name, "starting");
 
       try {
+        const egressStatus = options?.egressManager?.getStatus();
+        const egressBootstrap = options?.egressManager?.getBootstrap() ?? null;
         const result = await startSidecar({
           appDataDir,
           name: descriptor.name,
@@ -306,6 +422,12 @@ export const createServiceManager = (
             setStatus(descriptor.name, "stopped");
             sidecars.delete(descriptor.name);
           },
+          egressBootstrap,
+          egressRequired: Boolean(
+            !egressBootstrap &&
+              egressStatus?.enabled &&
+              egressStatus.mode !== "off",
+          ),
         });
 
         sidecars.set(name, result);

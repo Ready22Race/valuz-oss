@@ -1414,13 +1414,64 @@ class SessionOrchestrator:
         # creation. Seed the workspace stub lazily (idempotent, one stat on
         # the hot path) — there is no project-creation moment to hook.
         bootstrap_session_workspace(session.cwd, agent.name or None)
-        runtime = await self._ensure_runtime(
-            session_id,
-            agent,
-            session,
-            observer,
-            session.cwd,
-        )
+        from src.runtimes.network_egress import EgressRegistrationError
+
+        try:
+            runtime = await self._ensure_runtime(
+                session_id,
+                agent,
+                session,
+                observer,
+                session.cwd,
+            )
+        except EgressRegistrationError as exc:
+            # The desktop and non-model APIs remain usable when the egress
+            # owner fails, but admitted model traffic must fail visibly rather
+            # than falling back to a different route. Finalize this turn like
+            # a runtime error so the UI does not retain a phantom spinner.
+            message_text = (
+                "Unified model networking is unavailable. Check Network settings "
+                "or enable compatibility mode."
+            )
+            session.status = "idle"
+            session.stop_reason = Error(
+                category="network_egress_unavailable",
+                retry_status="terminal",
+                message=message_text,
+            )
+            await observer.emit(
+                Event(
+                    type="user_message",
+                    data={
+                        "message": user_message.text,
+                        "attachments": [
+                            {"source_path": a.source_path, "parsed_path": a.parsed_path}
+                            for a in user_message.attachments
+                        ],
+                    },
+                )
+            )
+            await observer.emit(
+                Event(
+                    type="session_error",
+                    data={
+                        "category": "network_egress_unavailable",
+                        "message": message_text,
+                        "code": str(exc),
+                    },
+                )
+            )
+            self._finalize_message(message, session, observer)
+            await self._store.save_session(session)
+            await self._store.save_message(user_id, message)
+            await observer.emit(
+                Event(
+                    type="session_update",
+                    data={"status": session.status, "message_id": message.id},
+                )
+            )
+            self._active_message.pop(session_id, None)
+            return message
         self._active[session_id] = runtime
 
         try:
@@ -1634,6 +1685,11 @@ class SessionOrchestrator:
                 await runtime.close()
             except Exception:
                 logger.debug("Error closing runtime for session %s", session_id, exc_info=True)
+        from src.runtimes.network_egress import get_network_egress_registry
+
+        registry = get_network_egress_registry()
+        if registry is not None:
+            await registry.revoke(session_id)
 
     async def _load_session(self, user_id: str, session_id: str) -> tuple[Any, AgentConfig]:
         session = await self._store.load_session(user_id, session_id)
@@ -1652,6 +1708,10 @@ class SessionOrchestrator:
         workspace_root: str,
     ) -> RuntimePort:
         from src.runtimes.factory import create_runtime
+        from src.runtimes.network_egress import (
+            get_network_egress_registry,
+            prepare_runtime_egress,
+        )
 
         # Opportunistic eviction on every turn entry: close runtimes idle past
         # the TTL (skipping the one we're about to touch / any active turn).
@@ -1665,7 +1725,20 @@ class SessionOrchestrator:
             self._runtime_last_used[session_id] = time.monotonic()
             return cached
 
-        runtime = create_runtime(agent, session, sink, workspace_root=workspace_root)
+        egress_descriptor = await prepare_runtime_egress(session_id, session)
+        try:
+            runtime = create_runtime(
+                agent,
+                session,
+                sink,
+                workspace_root=workspace_root,
+                egress_descriptor=egress_descriptor,
+            )
+        except Exception:
+            registry = get_network_egress_registry()
+            if registry is not None:
+                await registry.revoke(session_id)
+            raise
         # Inject a session-rule finder so runtimes that wire
         # ``approve_for_session`` can consult the kernel-owned cache
         # before parking on the user. Implemented via duck-typed setter
@@ -1811,14 +1884,18 @@ class SessionOrchestrator:
         runtime = self._runtimes.pop(session_id, None)
         self._runtime_last_used.pop(session_id, None)
         self._session_approval_cache.clear(session_id)
-        if runtime is None:
-            return
-        try:
-            await runtime.close()
-        except Exception:  # noqa: BLE001
-            logger.debug("Error evicting runtime for session %s", session_id, exc_info=True)
-        else:
-            logger.info("Evicted warm runtime for idle/over-cap session %s", session_id)
+        if runtime is not None:
+            try:
+                await runtime.close()
+            except Exception:  # noqa: BLE001
+                logger.debug("Error evicting runtime for session %s", session_id, exc_info=True)
+            else:
+                logger.info("Evicted warm runtime for idle/over-cap session %s", session_id)
+        from src.runtimes.network_egress import get_network_egress_registry
+
+        registry = get_network_egress_registry()
+        if registry is not None:
+            await registry.revoke(session_id)
 
     def _build_session_rule_finder(
         self,

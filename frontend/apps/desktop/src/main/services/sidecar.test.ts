@@ -15,7 +15,41 @@ vi.mock("node:child_process", () => {
   return { ...mod, default: mod };
 });
 
-const { killWindowsProcessTree } = await import("./sidecar");
+const { configureSidecarEgressEnvironment, killWindowsProcessTree } =
+  await import("./sidecar");
+
+describe("configureSidecarEgressEnvironment", () => {
+  it("scrubs inherited channels and exposes only the stdin marker", () => {
+    const env = {
+      KEEP: "yes",
+      VALUZ_EGRESS_BOOTSTRAP_FILE: "/tmp/stale",
+      VALUZ_EGRESS_BOOTSTRAP_STDIN: "stale",
+      VALUZ_EGRESS_REQUIRED: "stale",
+    };
+    configureSidecarEgressEnvironment(
+      env,
+      {
+        mode: "auto",
+        controlEndpoint: "http://127.0.0.1:43123",
+        bootstrapToken: "memory-only-secret",
+        expiresAt: Date.now() + 60_000,
+      },
+      true,
+    );
+
+    expect(env).toEqual({ KEEP: "yes", VALUZ_EGRESS_BOOTSTRAP_STDIN: "1" });
+    expect(JSON.stringify(env)).not.toContain("memory-only-secret");
+  });
+
+  it("uses only the fail-loud marker when no bootstrap exists", () => {
+    const env = {
+      VALUZ_EGRESS_BOOTSTRAP_FILE: "/tmp/stale",
+      VALUZ_EGRESS_BOOTSTRAP_STDIN: "stale",
+    };
+    configureSidecarEgressEnvironment(env, null, true);
+    expect(env).toEqual({ VALUZ_EGRESS_REQUIRED: "1" });
+  });
+});
 
 describe("killWindowsProcessTree", () => {
   beforeEach(() => spawnSyncMock.mockReset());
