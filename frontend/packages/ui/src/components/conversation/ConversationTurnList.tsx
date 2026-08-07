@@ -56,11 +56,7 @@ import {
 } from "@valuz/shared";
 import { useI18n } from "../../hooks/use-i18n";
 import { t as _t } from "@valuz/shared/i18n";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "../ui/popover";
+import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -475,7 +471,7 @@ const SegmentDetails = ({
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
-        className="inline-flex items-center gap-1.5 py-1 text-left text-xs font-normal text-ink-body transition-colors hover:text-ink-heading"
+        className="inline-flex max-w-full items-center gap-1.5 py-1 text-left text-xs font-normal text-ink-body transition-colors hover:text-ink-heading"
         aria-expanded={open}
       >
         <Icon
@@ -484,10 +480,16 @@ const SegmentDetails = ({
           }`}
           aria-hidden="true"
         />
+        {/* Single line, always: this row is a fold affordance, not content.
+            At panel width the phrase used to wrap, leaving both icons
+            vertically centered against a two-line block (and CJK/latin
+            mixing breaks words mid-hyphen). The full phrase survives in
+            the hover title and the expanded body. */}
         <span
-          className={
-            inProgress ? "animate-[shimmer-text_2s_linear_infinite]" : undefined
-          }
+          title={phrase}
+          className={`min-w-0 truncate ${
+            inProgress ? "animate-[shimmer-text_2s_linear_infinite]" : ""
+          }`}
           // Stagger the text shimmer behind the icon by 300ms so the
           // highlight reads as "icon flashes → sweep enters text", not
           // a simultaneous peak. The icon's keyframe peaks at 0–25% of
@@ -1148,30 +1150,30 @@ const TurnRow = memo(
           <div className="flex items-start gap-2">
             {renderTurnLeading?.(turn, "user")}
             <div className="group flex min-w-0 flex-1 flex-col items-end gap-1">
-            {turn.userText ? (
-              <div className="max-w-[78%]">
-                <div className="whitespace-pre-wrap rounded-xl bg-surface-soft px-3.5 py-3 text-base leading-[1.6] text-ink-heading">
-                  <UserMessageBody
-                    text={turn.userText}
-                    skillsBySlug={skillsBySlug}
-                  />
+              {turn.userText ? (
+                <div className="max-w-[78%]">
+                  <div className="whitespace-pre-wrap rounded-xl bg-surface-soft px-3.5 py-3 text-base leading-[1.6] text-ink-heading">
+                    <UserMessageBody
+                      text={turn.userText}
+                      skillsBySlug={skillsBySlug}
+                    />
+                  </div>
                 </div>
-              </div>
-            ) : null}
-            {turn.attachments?.map((att, i) => (
-              <FileUploadMessage
-                key={`att-${turn.id}-${i}`}
-                fileName={att.name}
-                fileSize={att.size > 0 ? formatFileSize(att.size) : undefined}
-                status="ready"
-              />
-            ))}
-            {turn.userText ? (
-              <UserMessageActions
-                text={turn.userText}
-                timestamp={turn.userTimestamp}
-              />
-            ) : null}
+              ) : null}
+              {turn.attachments?.map((att, i) => (
+                <FileUploadMessage
+                  key={`att-${turn.id}-${i}`}
+                  fileName={att.name}
+                  fileSize={att.size > 0 ? formatFileSize(att.size) : undefined}
+                  status="ready"
+                />
+              ))}
+              {turn.userText ? (
+                <UserMessageActions
+                  text={turn.userText}
+                  timestamp={turn.userTimestamp}
+                />
+              ) : null}
             </div>
           </div>
         ) : null}
