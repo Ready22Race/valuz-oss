@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import time
 from typing import Any
 
 from src.core import ToolDef, ToolResult
@@ -24,6 +23,7 @@ from src.core.tools import ExecContext
 
 import valuz_agent.boot.kernel  # noqa: F401  (sets kernel import path)
 from valuz_agent.adapters import kernel_client
+from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.genui.ids import resolve_tool_use_id
 from valuz_agent.modules.genui.prompts import TOOL_DESCRIPTION
 from valuz_agent.modules.genui.protocol import (
@@ -285,10 +285,12 @@ async def _deliver_generated_ui(
             "slot": (target_host.slot or "main") if target_host else "main",
             "expected_revision_id": expected_revision_id,
             # When this generation happened, on the same clock as the
-            # binding's ``updated_at`` — what lets a client tell "the user
-            # moved the default AFTER seeing this" (a deliberate dismissal)
-            # from "this finished and nobody has acted on it yet".
-            "created_at": int(time.time()),
+            # binding's ``updated_at`` (epoch milliseconds) — what lets a
+            # client tell "the user moved the default AFTER seeing this" (a
+            # deliberate dismissal) from "this finished and nobody has acted
+            # on it yet". Receipts persisted before 2026-08 carry epoch
+            # SECONDS — consumers must normalize before comparing.
+            "created_at": now_ms(),
         },
         ensure_ascii=False,
         separators=(",", ":"),
