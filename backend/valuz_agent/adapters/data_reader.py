@@ -27,7 +27,7 @@ from app.schemas import SessionData  # noqa: E402
 
 
 class DataReader(Protocol):
-    """The read surface host code depends on (sessions + event history)."""
+    """The read surface host code depends on (sessions/messages/events)."""
 
     async def get_session(self, user_id: str, session_id: str) -> SessionData | None: ...
 
@@ -53,6 +53,15 @@ class DataReader(Protocol):
         resolution). Served from the durable store directly when a host reader is
         bound, so it never depends on any per-user kernel being alive."""
         ...
+
+    async def list_messages(
+        self,
+        user_id: str,
+        session_id: str,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[Any]: ...
 
     async def get_events(
         self,
@@ -151,6 +160,18 @@ class _KernelClientReader:
         return await kernel_client.get_events(
             user_id, session_id, limit=limit, offset=offset, after_seq=after_seq
         )
+
+    async def list_messages(
+        self,
+        user_id: str,
+        session_id: str,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[Any]:
+        from valuz_agent.adapters import kernel_client
+
+        return await kernel_client.list_messages(user_id, session_id, limit=limit, offset=offset)
 
     async def get_events_after_for_user(
         self,

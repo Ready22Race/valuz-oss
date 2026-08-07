@@ -506,6 +506,18 @@ export function ComposerPane({
           onManageSkills={() => navigate("/skills")}
           onManageConnectors={() => navigate("/connectors")}
         />
+        {selectedSession?.total_tokens ? (
+          <div className="mx-auto w-full max-w-[760px] px-5 pt-1 text-right text-2xs tabular-nums text-ink-muted">
+            {t(
+              "conversation.tokenUsage.sessionTotal" as Parameters<typeof t>[0],
+              {
+                count: new Intl.NumberFormat().format(
+                  selectedSession.total_tokens,
+                ),
+              },
+            )}
+          </div>
+        ) : null}
         <AttachmentParsingDialog
           open={parsingConfirmOpen}
           onConfirm={() => {

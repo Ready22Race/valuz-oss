@@ -56,6 +56,7 @@ import {
   type MemberWithAgent,
   type TaskDetail,
   type TaskEvent,
+  type TaskTokenUsage,
   recordEntityOrigin,
   useEntityOrigin,
 } from "@valuz/core";
@@ -68,6 +69,7 @@ import {
 } from "../components/TaskContextPanel";
 import { toFileTree } from "../lib/file-tree";
 import { TaskStatusLabel } from "../components/TaskStatusLabel";
+import { TaskTokenUsagePopover } from "../components/TaskTokenUsagePopover";
 import { NotificationCard } from "../components/NotificationInbox";
 import {
   useLeadFollowUpChat,
@@ -333,6 +335,7 @@ export const TaskDetailPage = () => {
   );
 
   const [detail, setDetail] = useState<TaskDetail | null>(null);
+  const [tokenUsage, setTokenUsage] = useState<TaskTokenUsage | null>(null);
   const [members, setMembers] = useState<MemberWithAgent[]>([]);
   const [fileTree, setFileTree] = useState<FileTreeNode[]>([]);
   const [rootPath, setRootPath] = useState<string>("");
@@ -377,6 +380,15 @@ export const TaskDetailPage = () => {
     void Promise.resolve().then(loadData);
   }, [loadData]);
 
+  const loadTokenUsage = useCallback(async () => {
+    try {
+      setTokenUsage(await tasksApi.getTaskUsage(taskId));
+    } catch {
+      // Usage is diagnostic metadata; a read failure must not obscure the task.
+      setTokenUsage(null);
+    }
+  }, [taskId]);
+
   useEffect(() => {
     // Task detail is self-titled (the goal card carries the task name +
     // status badge) — hide the project header strip entirely so the
@@ -396,6 +408,17 @@ export const TaskDetailPage = () => {
     const interval = setInterval(() => void loadData(), 3000);
     return () => clearInterval(interval);
   }, [status, loadData]);
+
+  const runCount = detail?.runs.length ?? 0;
+  useEffect(() => {
+    void Promise.resolve().then(loadTokenUsage);
+  }, [loadTokenUsage, status, runCount]);
+
+  useEffect(() => {
+    if (status !== "active") return;
+    const interval = setInterval(() => void loadTokenUsage(), 10_000);
+    return () => clearInterval(interval);
+  }, [status, loadTokenUsage]);
 
   // Pull project members so the right-rail Team panel can show each
   // agent's bound model alongside the slug.
@@ -1429,6 +1452,12 @@ export const TaskDetailPage = () => {
                 </span>
                 {leadAgentName ?? task.lead_agent_slug}
               </span>
+              {tokenUsage && (
+                <>
+                  <span className="mx-3 h-3 w-px bg-surface-border" />
+                  <TaskTokenUsagePopover usage={tokenUsage} />
+                </>
+              )}
             </div>
           </div>
         </div>

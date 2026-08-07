@@ -428,9 +428,11 @@ class CodexRuntime:
 
                     usage = extract_token_usage(notification)
                     if usage is not None:
-                        usage_payload = _usage_payload_from_token_usage(
+                        latest_usage_payload = _usage_payload_from_token_usage(
                             usage.token_usage, self.model
                         )
+                        if latest_usage_payload is not None:
+                            usage_payload = latest_usage_payload
 
                     if extract_goal_cleared(notification) and session.mode == "goal":
                         # Slice 6 of session-modes: codex-core fires
@@ -1610,27 +1612,35 @@ def _stop_reason_from_turn(turn_done: TurnCompletedNotification) -> StopReason:
     return BudgetExhausted(reason="max_turns")
 
 
-def _usage_payload_from_token_usage(usage: Any, model: str) -> dict[str, Any]:
-    """Project Codex's ``ThreadTokenUsage.total`` onto our four flat fields.
+def _usage_payload_from_token_usage(usage: Any, model: str) -> dict[str, Any] | None:
+    """Project Codex's latest-turn usage onto our four flat fields.
 
-    Codex's ``TokenUsageBreakdown`` exposes ``cached_input_tokens`` (read
-    cache) but no separate write-cache counter; cache_write is left at 0
-    (same shape as DeepAgents). ``reasoning_output_tokens`` is preserved
-    in ``model_usage`` for forward compatibility.
+    ``ThreadTokenUsage.total`` is a cumulative thread snapshot, whereas
+    ``last`` is the most recent turn's increment. Message rows are summed for
+    session/monthly reports, so persisting ``total`` on every message would
+    recount all earlier turns. Codex also reports cached input as a subset of
+    ``input_tokens`` and reasoning as a separate output bucket; normalize the
+    flat fields to the cross-runtime contract (uncached input, all output,
+    cache read, cache write) before they leave the runtime.
     """
-    total = usage.total
+    last = getattr(usage, "last", None)
+    if last is None:
+        return None
+    total_input = int(last.input_tokens or 0)
+    cache_read = int(last.cached_input_tokens or 0)
+    reasoning_output = int(last.reasoning_output_tokens or 0)
     flat = {
-        "input_tokens": int(total.input_tokens or 0),
-        "output_tokens": int(total.output_tokens or 0),
-        "cache_read_tokens": int(total.cached_input_tokens or 0),
+        "input_tokens": max(0, total_input - cache_read),
+        "output_tokens": int(last.output_tokens or 0) + reasoning_output,
+        "cache_read_tokens": cache_read,
         "cache_write_tokens": 0,
     }
     payload: dict[str, Any] = dict(flat)
     payload["model_usage"] = {
         model: {
             **flat,
-            "reasoning_output_tokens": int(total.reasoning_output_tokens or 0),
-            "total_tokens": int(total.total_tokens or 0),
+            "reasoning_output_tokens": reasoning_output,
+            "total_tokens": int(last.total_tokens or 0),
         }
     }
     return payload

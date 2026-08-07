@@ -78,6 +78,11 @@ export interface SessionListItem {
   /** Unix epoch milliseconds (UTC). Format via `new Date(ms)`. */
   updated_at: number;
   /**
+   * Aggregated token usage when the row originated from a session-detail
+   * response. List endpoints may omit it to avoid an extra message scan.
+   */
+  total_tokens?: number;
+  /**
    * A `run_in_background` task is still executing in this session. Same fact
    * and same source as `RunSummary.background` — both read the orchestrator's
    * live registry via `bg_busy_session_ids()` — so the conversation header,

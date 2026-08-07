@@ -14,6 +14,38 @@ const evt = (
 });
 
 describe("buildTurns — streaming deltas", () => {
+  it("should attach and accumulate normalized token usage on the turn", () => {
+    const turns = buildTurns([
+      evt(1, "message.user", { text: "hi", message_id: "m1" }),
+      evt(2, "runtime.engine.usage", {
+        input_tokens: "744",
+        output_tokens: "111",
+        cache_read_tokens: "59900",
+        cache_write_tokens: "0",
+        model_usage: JSON.stringify({ "gpt-5.6-luna": {} }),
+        message_id: "m1",
+      }),
+      evt(3, "runtime.engine.usage", {
+        input_tokens: "10",
+        output_tokens: "5",
+        cache_read_tokens: "0",
+        cache_write_tokens: "2",
+        model_usage: JSON.stringify({ "gpt-5.6-mini": {} }),
+        message_id: "m1",
+      }),
+    ]);
+
+    expect(turns[0]!.tokenUsage).toEqual({
+      inputTokens: 754,
+      outputTokens: 116,
+      cacheReadTokens: 59900,
+      cacheWriteTokens: 2,
+      totalTokens: 60772,
+      cacheHitRate: 59900 / (754 + 59900 + 2),
+      models: ["gpt-5.6-luna", "gpt-5.6-mini"],
+    });
+  });
+
   it("should accumulate text_delta into a live assistant block during streaming", () => {
     const turns = buildTurns([
       evt(1, "message.user", { text: "hi", message_id: "u1" }),

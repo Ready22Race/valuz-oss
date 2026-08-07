@@ -6,6 +6,7 @@ Endpoints:
   GET    /v1/projects/{id}/tasks            — list project tasks
   GET    /v1/tasks/{task_id}                  — task header + runs + events
   DELETE /v1/tasks/{task_id}                  — purge header + runs + events (409 if active)
+  GET    /v1/tasks/{task_id}/usage            — Token totals + per-run breakdown
   GET    /v1/tasks/{task_id}/events           — full event log (ACTIVITY)
   GET    /v1/tasks/{task_id}/events/stream    — SSE: live task events (cursor: ?after_seq=N;
                                                 terminal → ``stream_end`` unless ?keep_alive=1)
@@ -40,6 +41,7 @@ from valuz_agent.modules.tasks.orchestrator import task_orchestrator
 from valuz_agent.modules.tasks.purge import purge_tasks
 from valuz_agent.modules.tasks.service import TaskService
 from valuz_agent.modules.tasks.task_state import TERMINAL_STATUSES
+from valuz_agent.token_usage import TokenUsageBuckets, read_session_token_usage
 
 router = APIRouter(tags=["tasks"])
 
@@ -178,6 +180,28 @@ class TaskDetailResponse(BaseModel):
     task: TaskResponse
     runs: list[RunResponse]
     events: list[EventResponse]
+
+
+class TaskRunTokenUsageResponse(BaseModel):
+    session_id: str
+    agent_slug: str
+    kind: str
+    sequence: int
+    label: str | None
+    input_tokens: int
+    output_tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+    total_tokens: int
+
+
+class TaskTokenUsageResponse(BaseModel):
+    input_tokens: int
+    output_tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+    total_tokens: int
+    runs: list[TaskRunTokenUsageResponse]
 
 
 class InterveneRequest(BaseModel):
@@ -357,6 +381,47 @@ async def delete_task(
             detail="Task is still active — stop it before deleting.",
         )
     await purge_tasks(user_id, [task_id])
+
+
+@router.get("/v1/tasks/{task_id}/usage", response_model=TaskTokenUsageResponse)
+async def get_task_usage(
+    task_id: str,
+    db: AsyncSession = Depends(get_async_session),
+    user_id: str = Depends(get_current_user_id),
+) -> TaskTokenUsageResponse:
+    detail = await TaskService(db).get_detail(user_id, task_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
+
+    usages = await asyncio.gather(
+        *(read_session_token_usage(user_id, run.session_id) for run in detail.runs)
+    )
+    total = TokenUsageBuckets()
+    run_responses: list[TaskRunTokenUsageResponse] = []
+    for run, usage in zip(detail.runs, usages, strict=True):
+        total += usage
+        run_responses.append(
+            TaskRunTokenUsageResponse(
+                session_id=run.session_id,
+                agent_slug=run.agent_slug,
+                kind=run.kind,
+                sequence=run.sequence,
+                label=run.label,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cache_read_tokens=usage.cache_read_tokens,
+                cache_write_tokens=usage.cache_write_tokens,
+                total_tokens=usage.total_tokens,
+            )
+        )
+    return TaskTokenUsageResponse(
+        input_tokens=total.input_tokens,
+        output_tokens=total.output_tokens,
+        cache_read_tokens=total.cache_read_tokens,
+        cache_write_tokens=total.cache_write_tokens,
+        total_tokens=total.total_tokens,
+        runs=run_responses,
+    )
 
 
 @router.get("/v1/tasks/{task_id}/events", response_model=dict[str, list[EventResponse]])

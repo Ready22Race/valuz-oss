@@ -114,6 +114,7 @@ from valuz_agent.modules.sessions.run_orchestrator import (
 from valuz_agent.modules.sessions.schemas import SessionWorktreeSpec
 from valuz_agent.modules.skills.datastore import SkillDatastore
 from valuz_agent.ports.message_context import HostRef
+from valuz_agent.token_usage import read_session_token_usage
 
 if TYPE_CHECKING:
     from src.core.types import Session as KernelSessionT
@@ -419,6 +420,17 @@ class SessionService:
         if session is None:
             raise _kernel_session_not_found(session_id)
         detail = _session_to_detail(session)
+        # Include failed/cancelled turns: providers can consume tokens before
+        # either terminal state is known.
+        owner_id = user_id or str(session.user_id)
+        try:
+            usage = await read_session_token_usage(owner_id, session_id)
+            detail.total_tokens = usage.total_tokens
+        except Exception:  # noqa: BLE001
+            # A history/statistics seam failure must not make the conversation
+            # itself unreadable. Keep the contract's zero fallback and log the
+            # missing projection for diagnosis.
+            logger.debug("session detail: token roll-up failed", exc_info=True)
         # Liveness is computed on read (git/fs is the source of truth) — the
         # metadata snapshot only says where the session was created. The UI
         # uses this to grey out the worktree badge; sending a message will

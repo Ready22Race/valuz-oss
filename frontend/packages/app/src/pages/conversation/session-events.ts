@@ -33,6 +33,7 @@ export function sessionDetailToListItem(detail: SessionDetail): SessionListItem 
     // worktree badge greys out on it.
     worktree: detail.worktree ?? null,
     updated_at: detail.updated_at,
+    total_tokens: detail.total_tokens,
   };
 }
 
