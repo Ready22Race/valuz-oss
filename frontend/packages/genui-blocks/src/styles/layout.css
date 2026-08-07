@@ -129,12 +129,17 @@
   max-width: 100%;
 }
 
-/* A Cluster dropped into the slot must shrink-to-fit: its own `width: 100%`
-   (right for a standalone wrap run) is circular against the slot's auto
-   width — a percentage contributes nothing to the parent's intrinsic size,
-   so the pair resolved to zero and the badges spilled out of the header. */
+/* A Cluster dropped into the slot must shrink-to-fit, and two of its own
+   declarations fight that. `width: 100%` is circular against the slot's auto
+   width; worse, `container-type: inline-size` applies size containment,
+   which computes the cluster's intrinsic inline size as if it were empty —
+   zero — in any shrink-to-fit context, and no width value on the cluster or
+   its children can win against that. Inside a slot the cluster stops being
+   a query container (its children resolve @container against the page head,
+   which carries the same vgb name) and sizes to its content. */
 .vgb-page-head-slot > .vgb-cluster,
 .vgb-page-foot-slot > .vgb-cluster {
+  container-type: normal;
   width: auto;
 }
 
