@@ -32,6 +32,7 @@ from valuz_agent.ports.automation_runtime import (
 )
 from valuz_agent.ports.billing import BillingPort, NoopBillingProvider
 from valuz_agent.ports.cache import CachePort, FileCache
+from valuz_agent.ports.capability_policy import HostCapabilityPolicyPort
 from valuz_agent.ports.citation_documents import CitationDocumentResolverPort
 from valuz_agent.ports.citation_quality import (
     CitationQualityPolicyRegistry,
@@ -54,7 +55,6 @@ from valuz_agent.ports.instructions import (
 from valuz_agent.ports.llm_provider import LLMProvider, NoopLLMProvider
 from valuz_agent.ports.mcp_always_on import AlwaysOnMcpServerSpec
 from valuz_agent.ports.message_context import MessageContextProviderPort
-from valuz_agent.ports.ui_artifact import UiArtifactSinkPort
 from valuz_agent.ports.model_defaults import ModelDefaultsPort, SettingsModelDefaults
 from valuz_agent.ports.provider_policy import AllowAllProviderPolicy, ProviderPolicyPort
 from valuz_agent.ports.resource_list_hook import NoopResourceListHook, ResourceListHook
@@ -63,6 +63,7 @@ from valuz_agent.ports.sandbox_allocator import BootSingletonAllocator, SandboxA
 from valuz_agent.ports.sandbox_credential import SandboxCredentialVerifierPort
 from valuz_agent.ports.sandbox_policy import AllowAllSandboxPolicy, SandboxPolicyPort
 from valuz_agent.ports.skill_lifecycle import NoopSkillLifecycleHook, SkillLifecycleHook
+from valuz_agent.ports.ui_artifact import UiArtifactSinkPort
 
 
 class Extensions:
@@ -163,6 +164,12 @@ class Extensions:
         # after resolving it server-side. OSS registers none; a failing
         # provider is skipped so it can never block a turn.
         self.message_context_providers: list[MessageContextProviderPort] = []
+        # Host-scoped capability policies (list semantics — editions append).
+        # A hosted turn asks each policy for capability overrides (e.g. task
+        # coverage off on an edition's workbench conversations); the first
+        # non-None answer wins and is stamped on the session so host_ref-less
+        # turns (queue drains, resumes) keep the hosted decision.
+        self.host_capability_policies: list[HostCapabilityPolicyPort] = []
         # Edition-owned always-on internal MCP servers (list semantics —
         # editions append). The capability resolver appends them to every
         # session after the four built-ins, with the same internal credential

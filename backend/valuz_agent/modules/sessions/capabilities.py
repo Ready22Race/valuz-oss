@@ -19,6 +19,7 @@ from app.schemas import UpdateSessionRequest
 import valuz_agent.boot.kernel  # noqa: F401 — sys.path side-effect for app.schemas
 from valuz_agent.adapters import kernel_client
 from valuz_agent.infra.db import async_unit_of_work
+from valuz_agent.ports.message_context import HostRef
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +31,20 @@ async def refresh_citation_policy_for_session(
     citation_enabled_override: bool | None = None,
     verification_enabled_override: bool | None = None,
     task_coverage_enabled_override: bool | None = None,
+    host_ref: HostRef | None = None,
 ) -> bool:
     """Apply citation, verification and task-coverage preferences to a session.
 
     Existing conversations converge lazily before every turn. Internal
     document-summary runs may override citation/verification values so summaries
     keep inspectable citation indices without paying for claim-quality verification.
+
+    ``host_ref`` lets edition host-capability policies tune the session: a
+    hosted turn asks ``ext.host_capability_policies`` for a task-coverage
+    override, and a non-``None`` answer is stamped on the session so later
+    host_ref-less turns (queue drains, resumes) keep the hosted decision
+    instead of snapping back to the user's global preference. Precedence:
+    explicit override argument > host policy / stamp > global preference.
     """
 
     from valuz_agent.adapters.capability_resolver import citation_skill_dir
@@ -57,6 +66,28 @@ async def refresh_citation_policy_for_session(
     skill_dir = citation_skill_dir(session.user_id)
     skill_path = str(skill_dir.resolve(strict=False))
     current_skills = list(session.skills or ())
+
+    # Host-scoped task-coverage layer: a hosted turn asks the edition policies
+    # (first non-None wins); a host_ref-less turn falls back to the stamp a
+    # previous hosted turn left on the session.
+    session_valuz = dict((session.metadata or {}).get("valuz") or {})
+    stored_host_override = session_valuz.get("task_coverage_host_override")
+    host_override: bool | None = (
+        stored_host_override if isinstance(stored_host_override, bool) else None
+    )
+    if host_ref is not None:
+        from valuz_agent.ports.extensions import ext
+
+        for policy in list(ext.host_capability_policies):
+            try:
+                answer = policy.task_coverage_override(host_ref)
+            except Exception:  # noqa: BLE001 — a broken policy must never block a turn
+                logger.debug("host capability policy failed", exc_info=True)
+                continue
+            if answer is not None:
+                host_override = answer
+                break
+
     if (
         citation_enabled_override is None
         or verification_enabled_override is None
@@ -73,11 +104,14 @@ async def refresh_citation_policy_for_session(
                 if verification_enabled_override is None
                 else verification_enabled_override
             )
-            task_coverage_enabled = (
-                await get_conversation_task_coverage_enabled(db, user_id=user_id)
-                if task_coverage_enabled_override is None
-                else task_coverage_enabled_override
-            )
+            if task_coverage_enabled_override is not None:
+                task_coverage_enabled = task_coverage_enabled_override
+            elif host_override is not None:
+                task_coverage_enabled = host_override
+            else:
+                task_coverage_enabled = await get_conversation_task_coverage_enabled(
+                    db, user_id=user_id
+                )
     else:
         citation_enabled = citation_enabled_override
         verification_enabled = verification_enabled_override
@@ -99,6 +133,11 @@ async def refresh_citation_policy_for_session(
     old_citation_enabled = valuz.get("citation_enabled")
     old_verification_enabled = valuz.get("citation_verification_enabled")
     old_task_coverage_enabled = valuz.get("task_coverage_enabled")
+    old_task_coverage_host_override = valuz.get("task_coverage_host_override")
+    if host_override is not None:
+        # Sticky: only ever written, never dropped by a host_ref-less turn —
+        # the stamp IS what keeps queue drains on the hosted decision.
+        valuz["task_coverage_host_override"] = host_override
     if evidence_binding_enabled:
         valuz["citation_policy_revision"] = CITATION_POLICY_REVISION
     else:
@@ -167,6 +206,7 @@ async def refresh_citation_policy_for_session(
         and old_citation_enabled == bool(citation_enabled)
         and old_verification_enabled == verification_enabled
         and old_task_coverage_enabled == bool(task_coverage_enabled)
+        and old_task_coverage_host_override == valuz.get("task_coverage_host_override")
     ):
         return False
 

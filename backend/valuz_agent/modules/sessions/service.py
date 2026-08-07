@@ -1495,6 +1495,7 @@ class SessionService:
             user_id,
             citation_enabled_override=citation_enabled_override,
             verification_enabled_override=citation_verification_enabled_override,
+            host_ref=host_ref,
         )
 
         session = await data_reader().get_session(user_id, session_id)
