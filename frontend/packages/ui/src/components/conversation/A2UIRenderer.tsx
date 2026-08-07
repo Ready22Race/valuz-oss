@@ -43,6 +43,9 @@ export interface A2UIRendererProps {
    *  model may spend a while reasoning before any document appears, and an
    *  empty pane there reads as "nothing is happening". */
   status?: "running" | "success";
+  /** Host render-context values handed to the edition data host for `$host`
+   *  param resolution (e.g. a company page's canonical symbol). */
+  hostParams?: Record<string, string | number | boolean>;
 }
 
 type A2UIMessage = Record<string, unknown>;
@@ -415,7 +418,7 @@ function GenerationSkeleton() {
   );
 }
 
-export function A2UIRenderer({ body, status }: A2UIRendererProps) {
+export function A2UIRenderer({ body, status, hostParams }: A2UIRendererProps) {
   // Surfaces are rebuilt when a registration lands, not only when the payload
   // changes: a conversation already on screen must pick up an edition's blocks.
   const version = useSyncExternalStore(
@@ -434,7 +437,17 @@ export function A2UIRenderer({ body, status }: A2UIRendererProps) {
 
   // Start the edition's data host for every surface that declares refs. The
   // effect keys on the body, not on liveMessages — refs are model-authored,
-  // and restarting the host on every push would be a feedback loop.
+  // and restarting the host on every push would be a feedback loop. Host
+  // params participate via a canonical string key, not object identity: the
+  // caller almost never memoizes the record, and an identity dep would
+  // restart every poller on every parent render.
+  const hostParamsKey = hostParams
+    ? JSON.stringify(
+        Object.keys(hostParams)
+          .sort()
+          .map((key) => [key, hostParams[key]]),
+      )
+    : "";
   useEffect(() => {
     const factory = getGenUIDataHost();
     if (!factory) return;
@@ -447,13 +460,15 @@ export function A2UIRenderer({ body, status }: A2UIRendererProps) {
         refs,
         push: (message) =>
           setLiveMessages((previous) => [...previous, message]),
+        ...(hostParams ? { host: hostParams } : {}),
       });
       if (handle) handles.push(handle);
     }
     return () => {
       for (const handle of handles) handle.stop();
     };
-  }, [body, version]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [body, version, hostParamsKey]);
 
   const built = useMemo(
     () => buildSurfaces(body, liveMessages),

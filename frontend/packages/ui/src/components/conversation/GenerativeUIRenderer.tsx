@@ -21,6 +21,10 @@ export type GenerativeUIStatus = "running" | "success" | "error";
 export interface GenerativeUIRendererProps {
   payload: string | GenerativeUIPayload | undefined | null;
   status?: GenerativeUIStatus;
+  /** Host render-context values for `$host` data-ref params, forwarded to
+   *  the A2UI renderer's edition data host (e.g. {symbol: "US:NVDA"} on a
+   *  company workbench). */
+  hostParams?: Record<string, string | number | boolean>;
 }
 
 const OPENUI_SCOPE_SELECTOR = '[data-openui-scope="generative-ui"]';
@@ -268,6 +272,7 @@ const VALUZ_OPENUUI_THEME: OpenUiTheme = {
 export function GenerativeUIRenderer({
   payload,
   status,
+  hostParams,
 }: GenerativeUIRendererProps) {
   const parsed = parseGenerativeUIPayload(payload);
   // Nothing to draw rather than raw text on screen: a tool result that is not
@@ -282,10 +287,12 @@ export function GenerativeUIRenderer({
   // skeleton until something resolves, here and everywhere else.
   if (!parsed?.body) {
     if (status !== "running") return null;
-    return <A2UIBody body="" status={status} />;
+    return <A2UIBody body="" status={status} hostParams={hostParams} />;
   }
 
-  return <A2UIBody body={parsed.body} status={status} />;
+  return (
+    <A2UIBody body={parsed.body} status={status} hostParams={hostParams} />
+  );
 }
 
 function OpenUITheme({ children }: { children: ReactNode }) {
@@ -302,9 +309,11 @@ function OpenUITheme({ children }: { children: ReactNode }) {
 function A2UIBody({
   body,
   status,
+  hostParams,
 }: {
   body: string;
   status?: GenerativeUIStatus;
+  hostParams?: Record<string, string | number | boolean>;
 }) {
   return (
     <OpenUITheme>
@@ -319,6 +328,7 @@ function A2UIBody({
         <A2UIRenderer
           body={body}
           status={status === "running" ? "running" : "success"}
+          hostParams={hostParams}
         />
       </div>
     </OpenUITheme>

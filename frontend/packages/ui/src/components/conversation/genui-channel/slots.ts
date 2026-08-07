@@ -22,12 +22,17 @@ import type { ResolvedParams } from "./dataRef";
  * the path short and free of characters that would need JSON Pointer
  * escaping (`/`, `~`) if a param value happened to contain them.
  */
-function paramsDigest(params: ResolvedParams): string {
-  const canonical = JSON.stringify(
+function paramsDigest(params: ResolvedParams, shape?: string): string {
+  // The shape participates in the digest: one source+params can be mapped to
+  // more than one canonical shape (shape-system.md §5 disambiguation), and
+  // two refs asking for different shapes must not share a slot — the fetch
+  // result of one is the wrong value for the other.
+  const canonical = JSON.stringify([
+    shape ?? null,
     Object.keys(params)
       .sort()
       .map((key) => [key, params[key]]),
-  );
+  ]);
   let hash = 0x811c9dc5;
   for (let i = 0; i < canonical.length; i++) {
     hash ^= canonical.charCodeAt(i);
@@ -42,6 +47,10 @@ function paramsDigest(params: ResolvedParams): string {
  * different values) practically never collide within one surface's slot
  * set.
  */
-export function slotPath(source: string, params: ResolvedParams): string {
-  return `/data/${source}/${paramsDigest(params)}`;
+export function slotPath(
+  source: string,
+  params: ResolvedParams,
+  shape?: string,
+): string {
+  return `/data/${source}/${paramsDigest(params, shape)}`;
 }

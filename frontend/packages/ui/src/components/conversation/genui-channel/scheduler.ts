@@ -52,10 +52,11 @@ export interface SourceMeta {
 
 export type SourceRegistryLookup = (sourceId: string) => SourceMeta | undefined;
 
-/** Go fetch one source+params — the edition-boundary fetcher. */
+/** Go fetch one source+params(+shape) — the edition-boundary fetcher. */
 export type SlotFetcher = (
   sourceId: string,
   params: ResolvedParams,
+  shape?: string,
 ) => Promise<FetchResult<unknown>>;
 
 export interface RegisterRefInput {
@@ -66,6 +67,8 @@ export interface RegisterRefInput {
   params: ResolvedParams;
   /** Component-declared `refresh.interval` (seconds), if any; absent = poll at the source's TTL. */
   refreshIntervalSec?: number;
+  /** Canonical shape for a multi-shape source (dataRef.shape, already validated by the edition); part of the slot identity. */
+  shape?: string;
 }
 
 export interface SchedulerDeps {
@@ -81,6 +84,7 @@ export interface SchedulerDeps {
 interface SlotEntry {
   source: string;
   params: ResolvedParams;
+  shape?: string;
   refIds: Set<string>;
   intervalMs: number;
   nextPollAtMs: number;
@@ -129,7 +133,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
   const refToSlot = new Map<string, string>();
 
   function registerRef(input: RegisterRefInput): string {
-    const path = slotPath(input.source, input.params);
+    const path = slotPath(input.source, input.params, input.shape);
     const meta = deps.sourceRegistry(input.source);
     let entry = slots.get(path);
 
@@ -140,6 +144,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       entry = {
         source: input.source,
         params: input.params,
+        shape: input.shape,
         refIds: new Set(),
         intervalMs: meta
           ? effectiveIntervalMs(meta, input.refreshIntervalSec)
@@ -187,7 +192,11 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     nowMs: number,
   ): Promise<void> {
     entry.inFlight = true;
-    const result = await deps.fetchSlot(entry.source, entry.params);
+    const result = await deps.fetchSlot(
+      entry.source,
+      entry.params,
+      entry.shape,
+    );
     entry.inFlight = false;
 
     const value = classifyOutcome(result, entry.lastValue);

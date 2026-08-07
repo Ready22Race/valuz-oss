@@ -165,7 +165,17 @@ host never refreshes it. One slot per source; the slot path and the ref path
 share the trailing name. Never invent a source id: only the ids the edition
 notes list as pollable exist, and anything else leaves the slot permanently
 stale. refresh.interval is seconds and must respect the source's stated
-minimum."""
+minimum.
+
+When the edition notes list MORE THAN ONE shape for a source, the ref must
+say which one it wants with a "shape" key (e.g. {"source":"...","shape":
+"ChartData","params":{...}}); single-shape sources need no shape key.
+
+A param value may be written as {"$host":"<key>"} instead of a literal when
+the edition notes say the current page provides that key (e.g. a company
+page providing "symbol") — the page then re-binds when its subject changes.
+Only keys the notes name exist; on pages that provide none, always write
+literal params."""
 
 
 def _load_block_catalog() -> str:

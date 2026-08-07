@@ -90,8 +90,65 @@ describe("createScheduler", () => {
     // Two refs on the same slot → one poll for that slot; a different
     // params slot polls independently → two calls total, not three.
     expect(fetchSlot).toHaveBeenCalledTimes(2);
-    expect(fetchSlot).toHaveBeenCalledWith("test.source", { symbol: "NVDA" });
-    expect(fetchSlot).toHaveBeenCalledWith("test.source", { symbol: "AAPL" });
+    expect(fetchSlot).toHaveBeenCalledWith(
+      "test.source",
+      { symbol: "NVDA" },
+      undefined,
+    );
+    expect(fetchSlot).toHaveBeenCalledWith(
+      "test.source",
+      { symbol: "AAPL" },
+      undefined,
+    );
+  });
+
+  it("polls two shapes of one source+params separately and hands the fetcher the shape", async () => {
+    const { clock } = fakeClock();
+    const { visibility } = fakeVisibility(true);
+    const fetchSlot = vi.fn(async (): Promise<FetchResult<unknown>> => ({
+      ok: true,
+      data: 1,
+    }));
+    const sourceRegistry = registryOf({
+      "test.kline": { ttlMs: 60_000, minIntervalSec: 30 },
+    });
+    const scheduler = createScheduler({
+      clock,
+      visibility,
+      sourceRegistry,
+      fetchSlot,
+    });
+
+    const chartPath = scheduler.registerRef({
+      refId: "chart",
+      source: "test.kline",
+      params: { symbol: "NVDA" },
+      shape: "ChartData",
+    });
+    const metricPath = scheduler.registerRef({
+      refId: "metrics",
+      source: "test.kline",
+      params: { symbol: "NVDA" },
+      shape: "Collection<MetricItem>",
+    });
+
+    // Same source+params, different shape → different slot: the fetch result
+    // of one is the wrong value for the other.
+    expect(metricPath).not.toBe(chartPath);
+
+    await scheduler.tick();
+
+    expect(fetchSlot).toHaveBeenCalledTimes(2);
+    expect(fetchSlot).toHaveBeenCalledWith(
+      "test.kline",
+      { symbol: "NVDA" },
+      "ChartData",
+    );
+    expect(fetchSlot).toHaveBeenCalledWith(
+      "test.kline",
+      { symbol: "NVDA" },
+      "Collection<MetricItem>",
+    );
   });
 
   it("floors a ref's requested refresh.interval against the source's minIntervalSec", async () => {
