@@ -321,7 +321,6 @@
       "inputUncached": "Input (cache miss)",
       "models": "Models",
       "outputWithReasoning": "Output (including reasoning)",
-      "sessionTotal": "{count} Tokens in this conversation",
       "showDetails": "View usage details for this turn's {count} Tokens",
       "turnTotal": "Turn Tokens"
     },
