@@ -147,6 +147,10 @@ freshness genuinely matters (a quote line, a watchlist), you may bind instead:
 {"version":"v0.9","updateDataModel":{"surfaceId":"s","path":"/refs/quote","value":{"source":"<source id>","params":{"symbol":"US:NVDA"},"refresh":{"interval":60}}}}
 2. Bind the component property to the slot instead of inlining:
 {"id":"q","component":"MetricStrip","items":{"path":"/data/quote/items"},"source":"Valuz","asOf":"..."}
+The binding IS the refresh: a property written as {"path": ...} re-renders
+when the host updates the slot, an inlined copy of the same values never
+does. Seeding the slot and then inlining the values anyway produces a board
+that polls but visibly never moves — seed the SLOT, bind the PROPERTY.
 
 Always write the seed value — the binding must render correctly even if the
 host never refreshes it. One slot per source; the slot path and the ref path

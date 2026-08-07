@@ -1,9 +1,7 @@
 ---
-name: valuz-project-docs
-description: Search and reason over the project's bound knowledge base documents. Auto-loaded by the host for every project session. Use this when the user asks about facts or context that should already exist inside the project's knowledge base. The current per-turn KB scope (which knowledge bases / folders / documents are bound) is announced inside the user message's `<additional-context>` block — consult it before guessing what's available.
-origin-label: valuz · project knowledge base
-icon: 📚
-tags: [valuz, builtin, knowledge-base, docs]
+name: "valuz-project-docs"
+description: "Search and reason over the project's bound knowledge base documents. Auto-loaded by the host for every project session. Use this when the user asks about facts or context that should already exist inside the project's knowledge base. The current per-turn KB scope (which knowledge bases / folders / documents are bound) is announced inside the user message's `<additional-context>` block — consult it before guessing what's available."
+tags: ["valuz", "builtin", "knowledge-base", "docs"]
 ---
 
 # Project Knowledge Base
