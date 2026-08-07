@@ -7,6 +7,7 @@ import {
   parseActionResolved,
   useTranslation,
   type SessionEventDTO,
+  type SessionMessageHostRef,
   type WorkflowState,
   type useIncrementalTurns,
 } from "@valuz/core";
@@ -31,6 +32,7 @@ import {
   isToolNamed,
   parseAutomationCreateInput,
   renderChatplanStatusPill,
+  resolveGenUiHost,
 } from "./tool-card-helpers";
 import { useToolCallCardActions } from "./useToolCallCardActions";
 
@@ -52,6 +54,12 @@ type ToolCallCardsParams = {
   askUserQuestionSubmitRef: {
     current: (toolId: string, answers: Record<string, string>) => void;
   };
+  /** Host this conversation panel lives at, when it is a product surface's
+   *  panel rather than the system conversation page — the same value the
+   *  page threads onto ``sendMessage``'s ``host_ref``. See the
+   *  ``generate_ui`` branch of ``renderToolCall`` for why the tool argument
+   *  alone is not a sound answer. */
+  hostRef?: SessionMessageHostRef | null;
 };
 
 /**
@@ -74,6 +82,7 @@ export function useToolCallCards({
   workflowStates,
   askUserQuestionLocalAnswers,
   askUserQuestionSubmitRef,
+  hostRef,
 }: ToolCallCardsParams) {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -197,28 +206,21 @@ export function useToolCallCards({
         // run too, with the streaming body; OSS registers nothing there, so
         // the card is unchanged for OSS.
         const { receipt, body } = extractUiArtifactReceipt(tool.output);
-        // A generation DECLARED for a product host renders in that host (the
-        // edition slot mirrors it there); the conversation keeps only the
-        // slot's compact status/adopt card — the full inline card would
+        // A generation that belongs to a product host renders in that host
+        // (the edition slot mirrors it there); the conversation keeps only
+        // the slot's compact status/adopt card — the full inline card would
         // duplicate the same painting at panel width. Plain in-conversation
-        // visuals (no target_host) keep the inline card. OSS never sets
-        // target_host, so OSS behavior is unchanged.
-        const hostTargeted = (() => {
-          if (!tool.input) return false;
-          try {
-            const parsed: unknown = JSON.parse(tool.input);
-            return Boolean(
-              parsed &&
-              typeof parsed === "object" &&
-              (parsed as Record<string, unknown>).target_host,
-            );
-          } catch {
-            return false;
-          }
-        })();
+        // visuals keep the inline card. OSS declares neither signal, so OSS
+        // behavior is unchanged.
+        //
+        // ``resolveGenUiHost`` mirrors the server's own resolution order —
+        // the tool argument is an override, the panel's ``hostRef`` is the
+        // deterministic floor. See its docstring for why the argument alone
+        // is not a sound signal.
+        const resolvedHost = resolveGenUiHost(tool.input, hostRef);
         return (
           <>
-            {hostTargeted ? null : (
+            {resolvedHost ? null : (
               <GenerativeUICard
                 openui={tool.output === undefined ? undefined : body}
                 status={tool.status === "running" ? "running" : "success"}
@@ -233,6 +235,11 @@ export function useToolCallCards({
                 status: tool.status === "running" ? "running" : "success",
                 output: body,
                 input: tool.input,
+                // The host this generation belongs to, already resolved the
+                // same way the server resolves it — so the edition slot does
+                // not have to re-derive it from the tool argument and reach
+                // the wrong answer whenever the model omitted it.
+                hostRef: resolvedHost,
               }}
             />
           </>

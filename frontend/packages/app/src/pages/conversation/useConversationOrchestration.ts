@@ -839,6 +839,7 @@ export function useConversationOrchestration({
     workflowStates,
     askUserQuestionLocalAnswers,
     askUserQuestionSubmitRef,
+    hostRef,
   });
 
   const firstUserText = turns[0]?.userText;
