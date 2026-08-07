@@ -66,22 +66,35 @@ describe("A2UI progressive paint", () => {
     // The surface header has landed and its first component has not. A hole
     // reads as "nothing is happening"; the runtime's own answer is the literal
     // string ``[Loading root...]``.
-    const { container } = render(<A2UIRenderer body={ONE_COPY.slice(0, 40)} />);
+    const { container } = render(
+      <A2UIRenderer body={ONE_COPY.slice(0, 40)} status="running" />,
+    );
+    expect(
+      container.querySelector('[data-slot="a2ui-generation-skeleton"]'),
+    ).toBeTruthy();
+  });
+
+  it("should breathe a skeleton before the run writes its first byte", () => {
+    // The model can reason for a minute before any document appears. That is a
+    // wait, not an absence — the workbench must not sit blank through it.
+    const { container } = render(<A2UIRenderer body="" status="running" />);
     expect(
       container.querySelector('[data-slot="a2ui-generation-skeleton"]'),
     ).toBeTruthy();
   });
 
   it("should drop the skeleton as soon as a real component resolves", () => {
-    const { container } = render(<A2UIRenderer body={ONE_COPY} />);
+    const { container } = render(<A2UIRenderer body={ONE_COPY} status="running" />);
     expect(
       container.querySelector('[data-slot="a2ui-generation-skeleton"]'),
     ).toBe(null);
     expect(container.textContent).toContain("第一块");
   });
 
-  it("should render nothing at all for an empty payload", () => {
-    const { container } = render(<A2UIRenderer body="" />);
+  it("should render nothing at all for an empty payload once the run is over", () => {
+    // A finished run with nothing in it is genuinely empty; a skeleton there
+    // would promise a page that is never coming.
+    const { container } = render(<A2UIRenderer body="" status="success" />);
     expect(container.firstChild).toBe(null);
   });
 

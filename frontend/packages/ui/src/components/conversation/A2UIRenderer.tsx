@@ -37,6 +37,11 @@ import { completeJsonFragment } from "./partial-json";
 
 export interface A2UIRendererProps {
   body: string;
+  /** Whether the generation is still running. Drives the placeholder: a run
+   *  that has not written its first byte yet still deserves a skeleton — the
+   *  model may spend a while reasoning before any document appears, and an
+   *  empty pane there reads as "nothing is happening". */
+  status?: "running" | "success";
 }
 
 type A2UIMessage = Record<string, unknown>;
@@ -409,7 +414,7 @@ function GenerationSkeleton() {
   );
 }
 
-export function A2UIRenderer({ body }: A2UIRendererProps) {
+export function A2UIRenderer({ body, status }: A2UIRendererProps) {
   // Surfaces are rebuilt when a registration lands, not only when the payload
   // changes: a conversation already on screen must pick up an edition's blocks.
   const version = useSyncExternalStore(
@@ -454,11 +459,14 @@ export function A2UIRenderer({ body }: A2UIRendererProps) {
     [body, version, liveMessages],
   );
   const index = useMemo(() => buildComponentIndex(body), [body]);
-  // Content is arriving but nothing in it resolves yet — the surface header has
-  // landed, its first component has not. Breathe a page-shaped skeleton rather
-  // than leaving a hole: something IS happening, and the runtime's own answer
-  // here is the literal string ``[Loading root...]``.
-  if (!surfaces.length) return body.trim() ? <GenerationSkeleton /> : null;
+  // Nothing renders yet. While the run is live that is a WAIT, not an absence:
+  // the model may reason for a minute before writing its first byte, and the
+  // document that follows resolves component by component. Breathe a
+  // page-shaped skeleton through both — the runtime's own answer in the second
+  // half is the literal string ``[Loading root...]``. Once the run is over an
+  // empty result is genuinely empty, so render nothing.
+  if (!surfaces.length)
+    return status === "running" ? <GenerationSkeleton /> : null;
 
   return (
     <A2UIComponentIndex.Provider value={index}>
