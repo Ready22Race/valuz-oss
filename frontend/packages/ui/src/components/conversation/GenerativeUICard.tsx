@@ -34,7 +34,11 @@ export interface GenerativeUICardProps {
 
 const OPENUI_SCOPE_SELECTOR = '[data-openui-scope="generative-ui"]';
 
-const GENERATIVE_UI_LAYOUT_CSS = `
+/* Exported so a host page that renders GenUI blocks outside this card (an
+   edition's component gallery, a preview surface) can inject the same layout
+   rules instead of re-stating them — the scope selector's styles otherwise
+   exist nowhere but inside this card's <style>. */
+export const GENERATIVE_UI_LAYOUT_CSS = `
   ${OPENUI_SCOPE_SELECTOR} {
     min-width: 0;
     max-width: 100%;
