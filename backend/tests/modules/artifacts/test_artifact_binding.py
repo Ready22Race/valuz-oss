@@ -248,3 +248,16 @@ async def test_binding_response_is_null_when_the_file_is_gone(
         response = await _binding_response(ds, SCOPE.user_id, binding)
 
     assert response.content is None
+
+
+async def test_revision_content_reads_without_a_binding(session_factory, cwd) -> None:
+    """Browsing a version must not require binding it first."""
+    from valuz_agent.api.routes.artifacts import get_revision_content
+
+    revision_id = await _generate(session_factory, cwd, '{"version":"v0.9"}')
+
+    async with session_factory() as db:
+        response = await get_revision_content(revision_id, db=db, user_id=SCOPE.user_id)
+
+    assert response.content == '{"version":"v0.9"}'
+    assert response.version_no == 1

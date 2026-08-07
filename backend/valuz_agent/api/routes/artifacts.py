@@ -235,6 +235,39 @@ async def _binding_response(
     )
 
 
+class RevisionContent(BaseModel):
+    revision_id: str
+    version_no: int
+    #: The document, inline or read back from the revision's file — ``None``
+    #: only when the bytes are genuinely gone.
+    content: str | None = None
+
+
+@router.get("/revisions/{revision_id}/content")
+async def get_revision_content(
+    revision_id: str,
+    db: AsyncSession = Depends(get_async_session),
+    user_id: str = Depends(get_current_user_id),
+) -> RevisionContent:
+    """One version's document, without touching any binding.
+
+    This is what lets a host BROWSE a version — look at it before deciding to
+    use it. Reads exactly like the binding response: inline copy first, the
+    revision's file otherwise.
+    """
+    ds = ArtifactDatastore(db)
+    revision = await ds.get_revision(user_id, revision_id)
+    if revision is None:
+        raise HTTPException(status_code=404, detail=f"Revision {revision_id!r} not found")
+    content = await ds.get_content(user_id, revision.content_id)
+    inline = content.content_inline if content is not None else None
+    if inline is None and revision.abs_path:
+        inline = await asyncio.to_thread(_read_bound_document, revision.abs_path)
+    return RevisionContent(
+        revision_id=revision.id, version_no=revision.version_no, content=inline
+    )
+
+
 @router.get("/bindings")
 async def get_host_binding(
     host_type: str = Query(..., description="Host family, e.g. finance.company-research."),
