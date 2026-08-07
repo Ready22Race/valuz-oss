@@ -76,3 +76,53 @@ def receipt_to_payload(receipt: UiArtifactReceipt) -> dict[str, Any]:
         "slot": receipt.slot,
         "expected_revision_id": receipt.expected_revision_id,
     }
+
+
+#: Trailer markers for the receipt appended to a tool result. The frontend
+#: strips the trailer before rendering and parses the JSON between them.
+UI_ARTIFACT_RECEIPT_OPEN = "[[ui-artifact-receipt]]"
+UI_ARTIFACT_RECEIPT_CLOSE = "[[/ui-artifact-receipt]]"
+
+
+def ui_artifact_receipt_trailer(
+    *,
+    artifact_id: str,
+    revision_id: str,
+    version_no: int,
+    host_type: str | None,
+    host_id: str | None,
+    slot: str = "main",
+    expected_revision_id: str | None,
+) -> str:
+    """The ``[[ui-artifact-receipt]]`` trailer for a recorded page revision.
+
+    Shared by ``generate_ui`` AND ``deliver_artifacts``: a host document
+    revision is the same event to the client whichever tool recorded it — the
+    receipt riding in the tool result is what makes the adopt card and the
+    workbench mirror exist and survive history replay. A delivery path that
+    records a revision without this trailer leaves the client blind: versions
+    grow but no card, no live update, no refresh (exactly the direct-file-edit
+    hole this closes).
+
+    ``created_at`` is epoch milliseconds — the binding's ``updated_at`` clock.
+    """
+
+    import json as _json
+
+    from valuz_agent.infra.time_utils import now_ms
+
+    payload = _json.dumps(
+        {
+            "artifact_id": artifact_id,
+            "revision_id": revision_id,
+            "revision": version_no,
+            "host_type": host_type,
+            "host_id": host_id,
+            "slot": slot or "main",
+            "expected_revision_id": expected_revision_id,
+            "created_at": now_ms(),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return f"\n{UI_ARTIFACT_RECEIPT_OPEN}{payload}{UI_ARTIFACT_RECEIPT_CLOSE}"

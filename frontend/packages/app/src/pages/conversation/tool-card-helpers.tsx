@@ -317,3 +317,22 @@ export function automationTriggerSummary(
   }
   return t(tk("automation.triggerManual"));
 }
+
+const HOST_NAME_UNSAFE = /[^A-Za-z0-9._-]+/g;
+
+/**
+ * The stable document file name a host slot's pages are recorded under —
+ * mirrors the server's ``_document_file_name`` exactly (parts joined with
+ * ".", unsafe runs collapsed to "-", trimmed). A tool call whose input
+ * mentions this name is page work on the host the panel is showing, and the
+ * conversation mirrors it into the workbench like a generation.
+ */
+export function hostDocumentFileName(hostRef: SessionMessageHostRef): string {
+  const parts = [hostRef.host_type, hostRef.host_id, hostRef.slot || "main"];
+  const stem = parts
+    .filter(Boolean)
+    .join(".")
+    .replace(HOST_NAME_UNSAFE, "-")
+    .replace(/^-+|-+$/g, "");
+  return `${stem}.a2ui.jsonl`;
+}

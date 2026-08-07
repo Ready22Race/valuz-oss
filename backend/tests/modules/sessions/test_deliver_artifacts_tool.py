@@ -28,6 +28,7 @@ from valuz_agent.integrations.toolkit_mcp_server import HostExecContext
 from valuz_agent.infra.database import Base
 from valuz_agent.modules.artifacts.datastore import ArtifactDatastore, Scope
 from valuz_agent.modules.artifacts.models import (
+    ArtifactBindingRow,
     ArtifactKind,
     ArtifactContentRow,
     ArtifactHeadRow,
@@ -40,6 +41,7 @@ from valuz_agent.modules.sessions import artifacts_tool as tool_mod
 from valuz_agent.modules.sessions.artifacts_tool import _deliver_artifacts_handler
 
 _TABLES = [
+    ArtifactBindingRow.__table__,
     ArtifactRow.__table__,
     ArtifactKeyRow.__table__,
     ArtifactHeadRow.__table__,
@@ -539,3 +541,80 @@ async def test_the_two_escape_hatches_cannot_both_be_set(session_factory, cwd): 
     )
 
     assert payload["results"][0]["status"] == "invalid"
+
+
+# ── Receipt for bound page documents ─────────────────────────────────────────
+
+
+async def test_bound_page_delivery_carries_the_adopt_receipt(session_factory, cwd):  # type: ignore[no-untyped-def]
+    # An agent that edits the workbench's document file and delivers it has
+    # made a new page version — the client only learns that from the same
+    # receipt trailer generate_ui appends. Without it versions grow silently:
+    # no adopt card, no live mirror, no refresh.
+    from valuz_agent.modules.artifacts.datastore import ArtifactDatastore
+    from valuz_agent.ports.ui_artifact import (
+        UI_ARTIFACT_RECEIPT_CLOSE,
+        UI_ARTIFACT_RECEIPT_OPEN,
+    )
+
+    path = _write(cwd / "finance.research-desk.desk.main.a2ui.jsonl", '{"v":1}')
+    first, payload = await _deliver({"filePath": str(path)})
+    assert UI_ARTIFACT_RECEIPT_OPEN not in first.content  # unbound: plain deliverable
+    entry = payload["results"][0]
+
+    async with session_factory() as db:
+        await ArtifactDatastore(db).upsert_binding(
+            "u1",
+            host_type="finance.research-desk",
+            host_id="desk",
+            slot="main",
+            artifact_id=entry["artifactId"],
+            artifact_revision_id=entry["revisionId"],
+        )
+        await db.commit()
+
+    _write(path, '{"v":2}')
+    second = await _deliver_artifacts_handler(
+        {"attachments": [{"filePath": str(path)}]},
+        HostExecContext(session_id="s1", user_id="u1"),
+    )
+
+    assert UI_ARTIFACT_RECEIPT_OPEN in second.content
+    raw = second.content.split(UI_ARTIFACT_RECEIPT_OPEN)[1].split(
+        UI_ARTIFACT_RECEIPT_CLOSE
+    )[0]
+    receipt = json.loads(raw)
+    assert receipt["host_type"] == "finance.research-desk"
+    assert receipt["host_id"] == "desk"
+    assert receipt["artifact_id"] == entry["artifactId"]
+    assert receipt["revision"] == 2
+    # The concurrency token is what the host was showing BEFORE this delivery.
+    assert receipt["expected_revision_id"] == entry["revisionId"]
+    assert receipt["created_at"] > 1_000_000_000_000  # epoch ms, not seconds
+
+
+async def test_unchanged_bound_delivery_stays_quiet(session_factory, cwd):  # type: ignore[no-untyped-def]
+    # Re-delivering identical bytes returns the existing revision — nothing
+    # new to adopt, so no receipt (an announcement would nag on every replay).
+    from valuz_agent.modules.artifacts.datastore import ArtifactDatastore
+    from valuz_agent.ports.ui_artifact import UI_ARTIFACT_RECEIPT_OPEN
+
+    path = _write(cwd / "finance.research-desk.desk.main.a2ui.jsonl", '{"v":1}')
+    _first, payload = await _deliver({"filePath": str(path)})
+    entry = payload["results"][0]
+    async with session_factory() as db:
+        await ArtifactDatastore(db).upsert_binding(
+            "u1",
+            host_type="finance.research-desk",
+            host_id="desk",
+            slot="main",
+            artifact_id=entry["artifactId"],
+            artifact_revision_id=entry["revisionId"],
+        )
+        await db.commit()
+
+    second = await _deliver_artifacts_handler(
+        {"attachments": [{"filePath": str(path)}]},
+        HostExecContext(session_id="s1", user_id="u1"),
+    )
+    assert UI_ARTIFACT_RECEIPT_OPEN not in second.content

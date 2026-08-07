@@ -176,8 +176,11 @@ def _parse_target_host(args: dict[str, Any], session: Any = None) -> UiArtifactT
 # frontend extracts + strips it before handing the payload to the renderer;
 # it rides IN the persisted tool result so the adopt affordance survives
 # history replay (per the conversation-to-ui-artifact contract §7).
-UI_ARTIFACT_RECEIPT_OPEN = "[[ui-artifact-receipt]]"
-UI_ARTIFACT_RECEIPT_CLOSE = "[[/ui-artifact-receipt]]"
+from valuz_agent.ports.ui_artifact import (  # noqa: E402 — canonical home
+    UI_ARTIFACT_RECEIPT_CLOSE,
+    UI_ARTIFACT_RECEIPT_OPEN,
+    ui_artifact_receipt_trailer,
+)
 
 
 _HOST_NAME_SAFE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -319,28 +322,16 @@ async def _deliver_generated_ui(
         logger.exception("generate_ui: recording the document failed; skipping")
         return ""
 
-    payload = _json.dumps(
-        {
-            "artifact_id": result.artifact_id,
-            "revision_id": result.revision_id,
-            "revision": result.version_no,
-            "host_type": target_host.host_type if target_host else None,
-            "host_id": target_host.host_id if target_host else None,
-            "slot": (target_host.slot or "main") if target_host else "main",
-            "expected_revision_id": expected_revision_id,
-            # When this generation happened, on the same clock as the
-            # binding's ``updated_at`` (epoch milliseconds) — what lets a
-            # client tell "the user moved the default AFTER seeing this" (a
-            # deliberate dismissal) from "this finished and nobody has acted
-            # on it yet". Receipts persisted before 2026-08 carry epoch
-            # SECONDS — consumers must normalize before comparing.
-            "created_at": now_ms(),
-        },
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
     del tool_use_id, request  # audit context lives on the revision row itself
-    return f"\n{UI_ARTIFACT_RECEIPT_OPEN}{payload}{UI_ARTIFACT_RECEIPT_CLOSE}"
+    return ui_artifact_receipt_trailer(
+        artifact_id=result.artifact_id or "",
+        revision_id=result.revision_id,
+        version_no=result.version_no or 0,
+        host_type=target_host.host_type if target_host else None,
+        host_id=target_host.host_id if target_host else None,
+        slot=(target_host.slot or "main") if target_host else "main",
+        expected_revision_id=expected_revision_id,
+    )
 
 
 async def _complete_with_retries(
