@@ -173,3 +173,76 @@ def test_data_dir_controls_install_dir(tmp_path: Path, monkeypatch: pytest.Monke
     installed = bootstrap.sync_bundled_official_skills(USER)
     assert "skill-creator" in installed
     assert (data_dir / "official-skills" / "skill-creator" / "SKILL.md").is_file()
+
+
+def test_copy_never_deletes_before_it_writes(
+    _isolated_official_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The corruption this replaced: a concurrent writer's delete phase erased a
+    finished copy while the marker survived, certifying a package that was gone."""
+    bootstrap.sync_bundled_official_skills(USER)
+    landed = _isolated_official_dir / "skill-creator" / "SKILL.md"
+    assert landed.is_file()
+
+    observed: list[bool] = []
+    real_copytree = bootstrap.shutil.copytree
+
+    def _watch(*args: object, **kwargs: object) -> object:
+        observed.append(landed.is_file())
+        return real_copytree(*args, **kwargs)
+
+    marker = _isolated_official_dir / "skill-creator" / bootstrap.BUNDLED_VERSION_FILE
+    marker.write_text("stale", encoding="utf-8")
+    monkeypatch.setattr(bootstrap.shutil, "copytree", _watch)
+
+    bootstrap.sync_bundled_official_skills(USER)
+
+    assert observed and all(observed), "the package vanished while it was being replaced"
+    assert landed.is_file()
+
+
+def test_a_package_that_lost_its_manifest_is_re_landed(_isolated_official_dir: Path) -> None:
+    """A valid marker must not certify a damaged package forever."""
+    bootstrap.sync_bundled_official_skills(USER)
+    skill_dir = _isolated_official_dir / "skill-creator"
+    (skill_dir / "SKILL.md").unlink()
+    assert (skill_dir / bootstrap.BUNDLED_VERSION_FILE).is_file()  # marker still valid
+
+    second = bootstrap.sync_bundled_official_skills(USER)
+
+    assert "skill-creator" in second
+    assert (skill_dir / "SKILL.md").is_file()
+
+
+def test_a_file_the_package_dropped_is_removed(_isolated_official_dir: Path) -> None:
+    bootstrap.sync_bundled_official_skills(USER)
+    stray = _isolated_official_dir / "skill-creator" / "left-over.md"
+    stray.write_text("from an older version", encoding="utf-8")
+    (_isolated_official_dir / "skill-creator" / bootstrap.BUNDLED_VERSION_FILE).write_text(
+        "stale", encoding="utf-8"
+    )
+
+    bootstrap.sync_bundled_official_skills(USER)
+
+    assert not stray.exists()
+    assert (_isolated_official_dir / "skill-creator" / "SKILL.md").is_file()
+
+
+def test_copy_retries_a_transient_filesystem_error(
+    _isolated_official_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    attempts = {"n": 0}
+    real_copytree = bootstrap.shutil.copytree
+
+    def _flaky(*args: object, **kwargs: object) -> object:
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise OSError(5, "Input/output error")
+        return real_copytree(*args, **kwargs)
+
+    monkeypatch.setattr(bootstrap.shutil, "copytree", _flaky)
+
+    installed = bootstrap.sync_bundled_official_skills(USER)
+
+    assert "skill-creator" in installed
+    assert (_isolated_official_dir / "skill-creator" / "SKILL.md").is_file()
