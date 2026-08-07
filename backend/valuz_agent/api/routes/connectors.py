@@ -1016,6 +1016,29 @@ async def oauth_callback(
 
         # Persist the token onto the row (with its absolute expiry); the final
         # ds.update below commits it with the connected status.
+        from valuz_agent.modules.connectors.service import (
+            _before_managed_connector_mutation,
+            _managed_definition_etag,
+        )
+
+        authority = await _before_managed_connector_mutation(
+            user_id,
+            {
+                "operation": "oauth_authorized",
+                "resource_id": connector_id,
+                "slug": row.slug,
+                "enabled": True,
+                "status": "connected",
+            },
+            {
+                "oauth_patch": {
+                    "operation": "replace",
+                    "token": token.model_dump_json(),
+                    "expires_at": now_ms() + (token.expires_in * 1000 if token.expires_in else 0),
+                }
+            },
+            expected_definition_etag=_managed_definition_etag(row),
+        )
         persist_oauth_token(row, token, now_ms())
         await ext.cache.delete(_pkce_cache_key(state))
 
@@ -1040,7 +1063,9 @@ async def oauth_callback(
         await propagate_oauth_credentials(
             user_id, updated, ds, probe=_probe_oauth_tool_count, install_missing=True
         )
-        await after_connector_oauth_authorized_hook(db, user_id, updated)
+        await after_connector_oauth_authorized_hook(
+            db, user_id, updated, cloud_committed=authority.cloud_committed
+        )
 
         logger.info(
             "Connector %s (%s) OAuth connected, tool_count=%s",

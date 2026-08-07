@@ -45,6 +45,11 @@ from valuz_agent.modules.skills.contracts import (
     SkillManifest,
 )
 from valuz_agent.modules.skills.datastore import SkillDatastore
+from valuz_agent.ports.runtime_resource import (
+    RuntimeResourceContractError,
+    ensure_managed_root_containment,
+    validate_skill_reference,
+)
 
 
 class _SkillSource(Protocol):
@@ -556,6 +561,7 @@ async def resolve_skill_slugs_to_paths(
     import os
 
     from valuz_agent.infra.db import async_unit_of_work
+    from valuz_agent.infra.fs_registry import fs_registry
     from valuz_agent.modules.skills.datastore import SkillDatastore
 
     if user_id is None:
@@ -576,16 +582,80 @@ async def resolve_skill_slugs_to_paths(
                 by_slug.setdefault(row.slug, row.source_path)
 
     resolved: list[str] = []
+    managed_root = fs_registry.user_skill_root(user_id)
+
+    def _is_managed_or_project(path: str) -> bool:
+        roots: list[Path] = [managed_root]
+        if project_root:
+            roots.append(Path(project_root).expanduser())
+        for root in roots:
+            try:
+                ensure_managed_root_containment(root, path)
+                return True
+            except RuntimeResourceContractError:
+                continue
+        return False
+
+    def _is_system_skill(path: str, slug: str) -> bool:
+        system_path = fs_registry.find_system_skill(slug)
+        if system_path is None:
+            return False
+        try:
+            return Path(system_path).resolve(strict=False) == Path(path).resolve(strict=False)
+        except OSError:
+            return False
+
+    def _safe_skill_tree(path: str) -> bool:
+        """Reject symlink/reparse and special-file entries before execution."""
+        try:
+            root = Path(path)
+            for candidate in (root, *root.rglob("*")):
+                info = candidate.lstat()
+                if candidate.is_symlink() or not (candidate.is_dir() or candidate.is_file()):
+                    return False
+                if candidate.is_file() and info.st_nlink > 1:
+                    return False
+        except OSError:
+            return False
+        return True
+
+    def _eligible(path: str, slug: str) -> bool:
+        if not _safe_skill_tree(path):
+            return False
+        if _is_managed_or_project(path) or _is_system_skill(path, slug):
+            return True
+        from valuz_agent.ports.extensions import ext
+
+        result = ext.external_skill_discovery_policy.decide(
+            user_id=user_id,
+            source_path=path,
+            slug=slug,
+        )
+        if not result.execution_eligible:
+            logger.warning(
+                "resolve_skill_slugs: external Skill is not claimed, skipping: %s",
+                path,
+            )
+        return result.execution_eligible
+
     for entry in entries:
         s = entry if isinstance(entry, str) else getattr(entry, "name", str(entry))
         if os.path.isabs(s):  # already an absolute path
-            if os.path.isdir(s):
-                resolved.append(s)
+            if os.path.isdir(s) and _eligible(s, Path(s).name):
+                try:
+                    resolved.append(str(Path(s).resolve(strict=True)))
+                except OSError:
+                    logger.warning("resolve_skill_slugs: skill path cannot be resolved: %s", s)
             else:
                 logger.warning("resolve_skill_slugs: skill path missing, skipping: %s", s)
             continue
+        try:
+            validate_skill_reference(s)
+        except RuntimeResourceContractError:
+            logger.warning("resolve_skill_slugs: unsafe skill reference, skipping: %s", s)
+            continue
         absolute = _resolve_to_absolute(by_slug.get(s), project_root)
-        if absolute and os.path.isdir(absolute):
+        if absolute and os.path.isdir(absolute) and _eligible(absolute, s):
             resolved.append(absolute)
         else:
             logger.warning("resolve_skill_slugs: unresolved skill slug, skipping: %s", s)
