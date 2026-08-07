@@ -235,6 +235,12 @@ export function useToolCallCards({
                 status: tool.status === "running" ? "running" : "success",
                 output: body,
                 input: tool.input,
+                // The reasoning stream (``tool.call.thinking_delta``), which
+                // rides its own channel precisely so it never contaminates the
+                // document. A host-targeted run paints the page in the host, so
+                // the conversation's job is to show the WORK — and the thinking
+                // is the readable half of that; the document is machine text.
+                thinking: tool.thinking,
                 // The host this generation belongs to, already resolved the
                 // same way the server resolves it — so the edition slot does
                 // not have to re-derive it from the tool argument and reach

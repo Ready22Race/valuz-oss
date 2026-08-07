@@ -10,6 +10,7 @@ import {
   type SurfaceModel,
 } from "@a2ui/web_core/v0_9";
 import * as OpenUI from "@openuidev/react-ui";
+import { Skeleton } from "../ui/skeleton";
 import { Modal as OpenUIModal } from "@openuidev/react-ui/Modal";
 import {
   ROOT_COMPONENT_NAME,
@@ -20,7 +21,16 @@ import {
   subscribeBlocks,
 } from "@valuz/genui-blocks";
 import { ChevronLeft, ChevronRight } from "lucide-react";
-import { createContext, type CSSProperties, type ReactNode, useContext, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import {
+  createContext,
+  type CSSProperties,
+  type ReactNode,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { z } from "zod/v3";
 
 import { completeJsonFragment } from "./partial-json";
@@ -170,7 +180,8 @@ function a2uiComponentNames(): string[] {
   // root — and the retired aliases go with it, since each maps onto a built-in
   // block that is no longer there. Accepting a name the prompt no longer offers
   // would let a stale payload render a component the edition removed.
-  if (builtInBlocksSuppressed()) return [ROOT_COMPONENT_NAME, ...effectiveBlockNames()];
+  if (builtInBlocksSuppressed())
+    return [ROOT_COMPONENT_NAME, ...effectiveBlockNames()];
   return [
     ...OPENUI_COMPONENT_NAMES,
     ...effectiveBlockNames(),
@@ -259,34 +270,43 @@ function resolveBoundValue(
   }
   if (isRecord(value)) {
     const keys = Object.keys(value);
-    if (keys.length === 1 && keys[0] === "path" && typeof value.path === "string") {
+    if (
+      keys.length === 1 &&
+      keys[0] === "path" &&
+      typeof value.path === "string"
+    ) {
       try {
         return resolve(value as { path: string });
       } catch {
         return undefined;
       }
     }
-    return resolveBoundProps(value as Record<string, unknown>, resolve, depth + 1);
+    return resolveBoundProps(
+      value as Record<string, unknown>,
+      resolve,
+      depth + 1,
+    );
   }
   return value;
 }
 
-const createA2UIComponent = createBinderlessComponentImplementation as unknown as (
-  api: ComponentApi,
-  render: (props: {
-    context: {
-      componentModel: {
-        type: string;
-        properties: Record<string, unknown>;
+const createA2UIComponent =
+  createBinderlessComponentImplementation as unknown as (
+    api: ComponentApi,
+    render: (props: {
+      context: {
+        componentModel: {
+          type: string;
+          properties: Record<string, unknown>;
+        };
+        /** The scoped DataModel view; resolves `{path}` bindings (web_core ComponentContext). */
+        dataContext?: {
+          resolveDynamicValue: (value: unknown) => unknown;
+        };
       };
-      /** The scoped DataModel view; resolves `{path}` bindings (web_core ComponentContext). */
-      dataContext?: {
-        resolveDynamicValue: (value: unknown) => unknown;
-      };
-    };
-    buildChild: BuildChild;
-  }) => ReactNode,
-) => ReactComponentImplementation;
+      buildChild: BuildChild;
+    }) => ReactNode,
+  ) => ReactComponentImplementation;
 /**
  * The catalogs, rebuilt when the block registry changes.
  *
@@ -328,7 +348,6 @@ const A2UIComponentIndex = createContext<Map<string, Record<string, unknown>>>(
   new Map(),
 );
 
-
 /**
  * Collect `/refs` declarations per surface by scanning the payload messages —
  * no processor needed. The slot grammar writes one updateDataModel per slot
@@ -357,13 +376,52 @@ function collectDataRefs(body: string): Map<string, Record<string, unknown>> {
   return bySurface;
 }
 
+/**
+ * The shape a generated page is about to take: a title, a subtitle, and a row
+ * of cards. Deliberately generic — it stands in for a page nobody has seen yet,
+ * so it must not promise a layout the model may not produce. It is replaced the
+ * moment the first real component resolves.
+ */
+function GenerationSkeleton() {
+  return (
+    <div
+      data-slot="a2ui-generation-skeleton"
+      aria-hidden
+      className="min-w-0 space-y-4"
+    >
+      <div className="space-y-2">
+        <Skeleton className="h-6 w-56 max-w-full" />
+        <Skeleton className="h-3.5 w-36 max-w-full" />
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {[0, 1, 2].map((i) => (
+          <div
+            key={i}
+            className="space-y-2.5 rounded-xl border border-surface-border p-4"
+          >
+            <Skeleton className="h-4 w-24 max-w-full" />
+            <Skeleton className="h-3 w-full" />
+            <Skeleton className="h-3 w-4/5" />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function A2UIRenderer({ body }: A2UIRendererProps) {
   // Surfaces are rebuilt when a registration lands, not only when the payload
   // changes: a conversation already on screen must pick up an edition's blocks.
-  const version = useSyncExternalStore(subscribeBlocks, getRegistryVersion, getRegistryVersion);
+  const version = useSyncExternalStore(
+    subscribeBlocks,
+    getRegistryVersion,
+    getRegistryVersion,
+  );
   // Host-pushed updateDataModel messages (M2). Keyed to the payload: a new
   // body is a new answer, and stale live data must not leak into it.
-  const [liveMessages, setLiveMessages] = useState<Record<string, unknown>[]>([]);
+  const [liveMessages, setLiveMessages] = useState<Record<string, unknown>[]>(
+    [],
+  );
   useEffect(() => {
     setLiveMessages([]);
   }, [body]);
@@ -396,7 +454,11 @@ export function A2UIRenderer({ body }: A2UIRendererProps) {
     [body, version, liveMessages],
   );
   const index = useMemo(() => buildComponentIndex(body), [body]);
-  if (!surfaces.length) return null;
+  // Content is arriving but nothing in it resolves yet — the surface header has
+  // landed, its first component has not. Breathe a page-shaped skeleton rather
+  // than leaving a hole: something IS happening, and the runtime's own answer
+  // here is the literal string ``[Loading root...]``.
+  if (!surfaces.length) return body.trim() ? <GenerationSkeleton /> : null;
 
   return (
     <A2UIComponentIndex.Provider value={index}>
@@ -447,6 +509,144 @@ function dropDuplicateCreateSurface(
   });
 }
 
+/**
+ * Drop a document the payload emits a SECOND time.
+ *
+ * A turn can carry the same document twice — the canonical assistant text is
+ * the join of every model-end segment, and a run that produces the document in
+ * two segments yields two identical copies. Merging the repeat is not merely
+ * redundant, it is actively worse than useless WHILE STREAMING: the repeat
+ * arrives a character at a time, so each component it redefines regresses from
+ * its finished render to a half-parsed one and grows back — a completed page
+ * visibly dissolving and reassembling.
+ *
+ * The test is deliberately narrow. A repeat is only dropped when everything it
+ * has emitted so far is a PREFIX of the first copy — which covers both the
+ * mid-flight repeat (still arriving) and the finished one (exactly equal), and
+ * never touches a genuine restart that says something different. Those keep the
+ * old merge behaviour.
+ */
+function dropRepeatedDocument(body: string): string {
+  const text = body.trimEnd();
+  const firstLineEnd = text.indexOf("\n");
+  if (firstLineEnd < 0) return body;
+  const head = text.slice(0, firstLineEnd);
+  if (!head.trim()) return body;
+
+  // Candidate split points: every later line identical to the opening one. The
+  // repeat begins by re-announcing the same surface, so the document's first
+  // line is where a second copy starts.
+  let from = firstLineEnd;
+  for (;;) {
+    const at = text.indexOf(`\n${head}`, from);
+    if (at < 0) return body;
+    const first = text.slice(0, at);
+    const second = text.slice(at + 1);
+    // Equal → the finished repeat. Prefix → the repeat still arriving. Either
+    // way the first copy already says all of it, and says it completely.
+    if (first.startsWith(second)) return first;
+    from = at + 1;
+  }
+}
+
+/**
+ * Withhold components the payload has not finished writing.
+ *
+ * The A2UI runtime is not ours and it narrates its gaps: a component whose
+ * name is still half-written (``"PageHea``) renders as the literal text
+ * ``Unknown component: PageHea``, and a child id a parent has declared but
+ * whose definition has not arrived renders as ``[Loading card-brief...]``.
+ * Mid-stream that is most of the screen, and it is debug output — a half-typed
+ * identifier is not a thing to show anyone.
+ *
+ * So a component is handed over only once its name resolves, and a parent only
+ * lists the children that came with it. What is not ready simply is not there
+ * yet: the page grows by whole components instead of flickering through
+ * skeletons of them.
+ */
+function withoutUnreadyComponents(
+  messages: Record<string, unknown>[],
+  /** The payload's last line did not parse on its own, so the last message
+   *  came from the partial-JSON salvage and is still being written. A finished
+   *  document has none. */
+  trailingIsPartial: boolean,
+): Record<string, unknown>[] {
+  const known = new Set(a2uiComponentNames());
+  // Every id the payload has introduced, whatever its component name. Data
+  // carriers (``Series``, ``Point``, ``Group``…) are declared exactly like
+  // renderable components and referenced the same way, so a name-based test
+  // here would tear the chart data graph apart — membership is the only sound
+  // test for "has this id arrived".
+  //
+  // The one exception is the trailing message (see below): an id there counts
+  // only once its component name has finished arriving, otherwise a parent
+  // would keep pointing at a child this pass is about to withhold.
+  const lastMessageIndex = trailingIsPartial ? messages.length - 1 : -1;
+  const declared = new Set<string>();
+  messages.forEach((message, index) => {
+    const update = message.updateComponents;
+    if (!isRecord(update)) return;
+    for (const component of toArray(update.components)) {
+      if (!isRecord(component)) continue;
+      const id = readText(component.id);
+      if (!id) continue;
+      if (
+        index === lastMessageIndex &&
+        !known.has(readText(component.component) ?? "")
+      ) {
+        continue;
+      }
+      declared.add(id);
+    }
+  });
+  // The surface exists but nothing in it does — the runtime would narrate that
+  // as ``[Loading root...]``. Nothing at all is what "not started" looks like.
+  if (declared.size === 0) return [];
+
+  // Only the LAST message can be mid-write (the salvaged trailing fragment);
+  // everything before it came from a closed line and is final. A name that
+  // fails to resolve there is still being typed, not an unknown component —
+  // and typing it out on screen is what produced ``Unknown component: PageHea``.
+
+  return messages.map((message, index) => {
+    const update = message.updateComponents;
+    if (!isRecord(update)) return message;
+    const components = toArray(update.components)
+      .filter(
+        (component) =>
+          isRecord(component) &&
+          Boolean(readText(component.id)) &&
+          (index !== lastMessageIndex ||
+            known.has(readText(component.component) ?? "")),
+      )
+      .map((component) => {
+        const record = component as Record<string, unknown>;
+        if (!Array.isArray(record.children)) return record;
+        const children = record.children.filter(
+          (child) => typeof child !== "string" || declared.has(child),
+        );
+        return children.length === record.children.length
+          ? record
+          : { ...record, children };
+      });
+    return { ...message, updateComponents: { ...update, components } };
+  });
+}
+
+/** Did the payload stop mid-line? Only then is its last message provisional. */
+function hasPartialTrailingLine(body: string): boolean {
+  const trimmed = body.trimEnd();
+  if (!trimmed) return false;
+  const lastLine = trimmed.slice(trimmed.lastIndexOf("\n") + 1).trim();
+  if (!lastLine) return false;
+  try {
+    JSON.parse(lastLine);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 function buildSurfaces(
   body: string,
   liveMessages: Record<string, unknown>[] = [],
@@ -454,8 +654,12 @@ function buildSurfaces(
   // Live messages are appended AFTER normalization on purpose: they are
   // host-pushed updateDataModel messages, already well-formed, and the
   // normalization pass is for model-authored payload quirks.
+  const deduped = dropRepeatedDocument(body);
   const messages = [
-    ...dropDuplicateCreateSurface(normalizeMessages(parseA2UIMessages(body))),
+    ...withoutUnreadyComponents(
+      dropDuplicateCreateSurface(normalizeMessages(parseA2UIMessages(deduped))),
+      hasPartialTrailingLine(deduped),
+    ),
     ...(liveMessages as never[]),
   ];
   if (!messages.length) return [];
@@ -478,23 +682,23 @@ function buildSurfaces(
 
 function createOpenUIComponents(): ReactComponentImplementation[] {
   return a2uiComponentNames().map((name) => {
-    const api = { name, schema: looseComponentSchema } as unknown as ComponentApi;
-    return createA2UIComponent(
-      api,
-      ({ context, buildChild }) => (
-        <OpenUIComponent
-          name={normalizeOpenUIComponentName(context.componentModel.type)}
-          props={
-            context.dataContext
-              ? resolveBoundProps(context.componentModel.properties, (b) =>
-                  context.dataContext!.resolveDynamicValue(b),
-                )
-              : context.componentModel.properties
-          }
-          buildChild={buildChild}
-        />
-      ),
-    );
+    const api = {
+      name,
+      schema: looseComponentSchema,
+    } as unknown as ComponentApi;
+    return createA2UIComponent(api, ({ context, buildChild }) => (
+      <OpenUIComponent
+        name={normalizeOpenUIComponentName(context.componentModel.type)}
+        props={
+          context.dataContext
+            ? resolveBoundProps(context.componentModel.properties, (b) =>
+                context.dataContext!.resolveDynamicValue(b),
+              )
+            : context.componentModel.properties
+        }
+        buildChild={buildChild}
+      />
+    ));
   });
 }
 
@@ -1115,7 +1319,10 @@ function MappedSelect({
   buildChild: BuildChild;
 }) {
   const resolve = useRefResolver();
-  const items = readOptionItems(resolve(props.items ?? props.children), buildChild);
+  const items = readOptionItems(
+    resolve(props.items ?? props.children),
+    buildChild,
+  );
   return (
     <OpenUI.Select
       name={readString(props.name)}

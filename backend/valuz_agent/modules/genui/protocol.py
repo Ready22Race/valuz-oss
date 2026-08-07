@@ -441,4 +441,24 @@ def extract_a2ui_document(raw: str) -> str | None:
         kept.append(line)
     if not saw_components:
         return None
-    return "\n".join(kept)
+    return "\n".join(_without_repeated_document(kept))
+
+
+def _without_repeated_document(lines: list[str]) -> list[str]:
+    """Drop a second, identical copy of the document.
+
+    A turn's canonical assistant text is the join of every model-end segment,
+    so a run that emits the document in two segments hands back both — the same
+    page, twice, byte for byte. Storing that doubles every revision and makes
+    the stored document disagree with itself about how many surfaces it has.
+
+    Narrow on purpose: only an exact repeat of the whole line sequence is
+    dropped. A generation that legitimately restarts with DIFFERENT content is
+    left alone — that is a real second declaration, and deciding which of two
+    differing versions wins is not this function's call.
+    """
+    count = len(lines)
+    if count < 2 or count % 2 != 0:
+        return lines
+    half = count // 2
+    return lines[:half] if lines[:half] == lines[half:] else lines

@@ -9,6 +9,8 @@ regenerating a page appends a version to the page the host already shows.
 
 from __future__ import annotations
 
+import json
+
 from valuz_agent.modules.genui.protocol import extract_a2ui_document
 from valuz_agent.modules.genui.tools import _document_file_name, _parse_target_host
 from valuz_agent.ports.ui_artifact import UiArtifactTargetHost
@@ -151,3 +153,52 @@ def test_explicit_target_host_overrides_the_turn_host() -> None:
 def test_no_host_anywhere_is_still_none() -> None:
     assert _parse_target_host({}, _Session({})) is None
     assert _parse_target_host({}, _Session({"valuz": {"host_ref": {"host_type": "x"}}})) is None
+
+
+class TestRepeatedDocument:
+    """A turn's canonical text is the join of every model-end segment, so a run
+    that emits the document twice hands back both copies byte for byte."""
+
+    def test_stores_a_repeated_document_once(self) -> None:
+        doc = "\n".join(
+            [
+                json.dumps({"version": "v0.9", "createSurface": {"surfaceId": "main"}}),
+                json.dumps(
+                    {
+                        "version": "v0.9",
+                        "updateComponents": {
+                            "surfaceId": "main",
+                            "components": [{"id": "root", "component": "Stack"}],
+                        },
+                    }
+                ),
+            ]
+        )
+
+        assert extract_a2ui_document(f"{doc}\n{doc}") == doc
+
+    def test_keeps_a_second_declaration_that_differs(self) -> None:
+        # Only an exact repeat is dropped; two DIFFERENT versions are a real
+        # restart and picking a winner is not this function's call.
+        first = json.dumps({"version": "v0.9", "createSurface": {"surfaceId": "main"}})
+        components = json.dumps(
+            {
+                "version": "v0.9",
+                "updateComponents": {
+                    "surfaceId": "main",
+                    "components": [{"id": "root", "component": "Stack"}],
+                },
+            }
+        )
+        other = json.dumps(
+            {
+                "version": "v0.9",
+                "updateComponents": {
+                    "surfaceId": "main",
+                    "components": [{"id": "root", "component": "Card"}],
+                },
+            }
+        )
+        raw = "\n".join([first, components, first, other])
+
+        assert extract_a2ui_document(raw) == raw
