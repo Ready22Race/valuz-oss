@@ -10,6 +10,12 @@ regenerating a page appends a version to the page the host already shows.
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from valuz_agent.modules.genui.protocol import extract_a2ui_document
 from valuz_agent.modules.genui.tools import _document_file_name, _parse_target_host
@@ -202,3 +208,155 @@ class TestRepeatedDocument:
         raw = "\n".join([first, components, first, other])
 
         assert extract_a2ui_document(raw) == raw
+
+
+class _FakeArtifactDatastore:
+    """Test double: one binding to artifact art_A recorded from project-A."""
+
+    binding: object | None = None
+    artifact: object | None = None
+
+    def __init__(self, db: object) -> None:
+        del db
+
+    async def get_binding(self, *args: object) -> object | None:
+        return type(self).binding
+
+    async def get_artifact(self, *args: object) -> object | None:
+        return type(self).artifact
+
+
+@asynccontextmanager
+async def _fake_uow(commit: bool = False) -> AsyncIterator[None]:
+    yield None
+
+
+async def test_hosted_regeneration_appends_to_the_bound_lineage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The panel chat generating this page lives in its own project (scope B),
+    # while the host's bound artifact was recorded from another conversation
+    # (scope A). The delivery must land on the BOUND artifact in ITS scope —
+    # not fork a parallel v1 in scope B.
+    from valuz_agent.infra import db as infra_db
+    from valuz_agent.modules.artifacts import datastore as ds_mod
+    from valuz_agent.modules.artifacts import scope as scope_mod
+    from valuz_agent.modules.artifacts import service as artifacts_service
+    from valuz_agent.modules.artifacts.datastore import Scope
+    from valuz_agent.modules.artifacts.scope import DeliveryScope
+    from valuz_agent.modules.genui.tools import _deliver_generated_ui
+
+    session_scope = DeliveryScope(
+        scope=Scope(user_id="u1", project_id="chat-B"), cwd=Path("/tmp/scope-b")
+    )
+    lineage_scope = DeliveryScope(
+        scope=Scope(user_id="u1", project_id="proj-A"), cwd=Path("/tmp/scope-a")
+    )
+
+    async def fake_delivery_scope(user_id: str, session_id: str) -> DeliveryScope:
+        return session_scope
+
+    async def fake_artifact_scope(user_id: str, artifact: object) -> DeliveryScope:
+        return lineage_scope
+
+    _FakeArtifactDatastore.binding = SimpleNamespace(
+        artifact_id="art_A", artifact_revision_id="rev_11"
+    )
+    _FakeArtifactDatastore.artifact = SimpleNamespace(
+        id="art_A", project_id="proj-A", worktree="__shared__"
+    )
+
+    seen: dict[str, object] = {}
+
+    async def fake_deliver(db: object, **kwargs: object) -> object:
+        seen.update(kwargs)
+        return artifacts_service.DeliveryResult(
+            status=artifacts_service.DeliveryStatus.RECORDED,
+            artifact_id="art_A",
+            revision_id="rev_12",
+            version_no=12,
+        )
+
+    monkeypatch.setattr(scope_mod, "resolve_delivery_scope", fake_delivery_scope)
+    monkeypatch.setattr(scope_mod, "resolve_artifact_scope", fake_artifact_scope)
+    monkeypatch.setattr(ds_mod, "ArtifactDatastore", _FakeArtifactDatastore)
+    monkeypatch.setattr(infra_db, "async_unit_of_work", _fake_uow)
+    monkeypatch.setattr(artifacts_service, "deliver_artifact", fake_deliver)
+
+    trailer = await _deliver_generated_ui(
+        user_id="u1",
+        session_id="s1",
+        tool_use_id="t1",
+        target_host=UiArtifactTargetHost(
+            host_type="finance.research-desk", host_id="desk", slot="main"
+        ),
+        request="req",
+        document='{"version":"v0.9","updateComponents":{"surfaceId":"s","components":[{"id":"root"}]}}',
+    )
+
+    assert seen["scope"] == lineage_scope.scope
+    assert seen["scope_cwd"] == lineage_scope.cwd
+    request = seen["request"]
+    assert getattr(request, "artifact_id") == "art_A"
+    assert "rev_12" in trailer
+    assert '"expected_revision_id": "rev_11"' in trailer or "rev_11" in trailer
+
+
+async def test_unresolvable_lineage_scope_falls_back_to_the_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from valuz_agent.infra import db as infra_db
+    from valuz_agent.modules.artifacts import datastore as ds_mod
+    from valuz_agent.modules.artifacts import scope as scope_mod
+    from valuz_agent.modules.artifacts import service as artifacts_service
+    from valuz_agent.modules.artifacts.datastore import Scope
+    from valuz_agent.modules.artifacts.scope import DeliveryScope
+    from valuz_agent.modules.genui.tools import _deliver_generated_ui
+
+    session_scope = DeliveryScope(
+        scope=Scope(user_id="u1", project_id="chat-B"), cwd=Path("/tmp/scope-b")
+    )
+
+    async def fake_delivery_scope(user_id: str, session_id: str) -> DeliveryScope:
+        return session_scope
+
+    async def gone_artifact_scope(user_id: str, artifact: object) -> None:
+        return None
+
+    _FakeArtifactDatastore.binding = SimpleNamespace(
+        artifact_id="art_A", artifact_revision_id="rev_11"
+    )
+    _FakeArtifactDatastore.artifact = SimpleNamespace(
+        id="art_A", project_id="proj-gone", worktree="__shared__"
+    )
+
+    seen: dict[str, object] = {}
+
+    async def fake_deliver(db: object, **kwargs: object) -> object:
+        seen.update(kwargs)
+        return artifacts_service.DeliveryResult(
+            status=artifacts_service.DeliveryStatus.RECORDED,
+            artifact_id="art_B",
+            revision_id="rev_1",
+            version_no=1,
+        )
+
+    monkeypatch.setattr(scope_mod, "resolve_delivery_scope", fake_delivery_scope)
+    monkeypatch.setattr(scope_mod, "resolve_artifact_scope", gone_artifact_scope)
+    monkeypatch.setattr(ds_mod, "ArtifactDatastore", _FakeArtifactDatastore)
+    monkeypatch.setattr(infra_db, "async_unit_of_work", _fake_uow)
+    monkeypatch.setattr(artifacts_service, "deliver_artifact", fake_deliver)
+
+    await _deliver_generated_ui(
+        user_id="u1",
+        session_id="s1",
+        tool_use_id="t1",
+        target_host=UiArtifactTargetHost(
+            host_type="finance.research-desk", host_id="desk", slot="main"
+        ),
+        request="req",
+        document='{"version":"v0.9","updateComponents":{"surfaceId":"s","components":[{"id":"root"}]}}',
+    )
+
+    assert seen["scope"] == session_scope.scope
+    assert getattr(seen["request"], "artifact_id") is None

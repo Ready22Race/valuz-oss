@@ -101,3 +101,56 @@ async def resolve_delivery_scope(user_id: str, session_id: str) -> DeliveryScope
         scope=Scope(user_id=user_id, project_id=project_id, worktree=SHARED_CWD),
         cwd=Path(cwd),
     )
+
+
+async def resolve_artifact_scope(
+    user_id: str, artifact: object
+) -> DeliveryScope | None:
+    """Reconstruct the delivery scope ``artifact`` was recorded under.
+
+    A host-targeted regeneration must land on the lineage the host is already
+    showing, and that artifact may live in another conversation's scope — the
+    stable per-host file name was always meant to make "generate this page
+    again" append a version, but scope sits inside artifact identity, so a new
+    conversation quietly forked a parallel artifact instead. The sink resolves
+    the BOUND artifact's own scope with this and delivers there.
+
+    ``None`` — not an exception — when the artifact's project or worktree no
+    longer resolves: the caller falls back to its session's scope (a fork,
+    but a recorded page beats a refusal; the fallback is logged there).
+    """
+
+    from valuz_agent.infra.db import async_unit_of_work
+    from valuz_agent.modules.projects.datastore import ProjectDatastore
+    from valuz_agent.modules.projects.service import project_cwd_by_id
+
+    project_id = str(getattr(artifact, "project_id", "") or "")
+    worktree = str(getattr(artifact, "worktree", "") or SHARED_CWD)
+    if not project_id:
+        return None
+
+    async with async_unit_of_work(commit=False) as db:
+        project_row = await ProjectDatastore(db).get_by_id(user_id, project_id)
+    if project_row is None:
+        return None
+
+    if worktree != SHARED_CWD:
+        from valuz_agent.modules.worktrees.service import worktree_service
+
+        resolved = await worktree_service.resolve_session_cwd(
+            user_id, project_row, worktree
+        )
+        if not resolved:
+            return None
+        return DeliveryScope(
+            scope=Scope(user_id=user_id, project_id=project_id, worktree=worktree),
+            cwd=Path(resolved),
+        )
+
+    cwd = await project_cwd_by_id(user_id, project_id)
+    if not cwd:
+        return None
+    return DeliveryScope(
+        scope=Scope(user_id=user_id, project_id=project_id, worktree=SHARED_CWD),
+        cwd=Path(cwd),
+    )
