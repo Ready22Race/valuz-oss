@@ -36,7 +36,7 @@ from valuz_agent.modules.tasks.datastore import (
     TaskSessionDatastore,
 )
 from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
-from valuz_agent.modules.tasks.models import TaskRow
+from valuz_agent.modules.tasks.models import PLAN_SNAPSHOT_EVENT, TaskRow
 from valuz_agent.modules.tasks.outcome import Failure
 from valuz_agent.modules.tasks.plan import PlanError, TaskPlan
 from valuz_agent.modules.tasks.plan_render import render_plan_md
@@ -221,7 +221,7 @@ async def emit_plan_update(
         user_id,
         project_id=task_row.project_id,
         task_id=task_row.id,
-        type="task_plan_update",
+        type=PLAN_SNAPSHOT_EVENT,
         actor=actor,
         session_id=session_id,
         payload={

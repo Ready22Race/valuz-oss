@@ -22,14 +22,19 @@ import random
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
-from sqlalchemy import case, delete, func, select, update
+from sqlalchemy import case, delete, func, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from valuz_agent.infra.db import async_commit_with_retry
 from valuz_agent.infra.time_utils import now_ms
-from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionRow
+from valuz_agent.modules.tasks.models import (
+    PLAN_SNAPSHOT_EVENT,
+    TaskEventRow,
+    TaskRow,
+    TaskSessionRow,
+)
 from valuz_agent.modules.tasks.task_state import (
     RunStatus,
     TaskStateError,
@@ -394,22 +399,58 @@ class TaskEventDatastore:
 
     # -- Queries --
 
-    async def list_events(self, user_id: str, project_id: str, task_id: str) -> list[TaskEventRow]:
-        return list(
-            (
-                await self._db.execute(
-                    select(TaskEventRow)
-                    .where(
-                        TaskEventRow.project_id == project_id,
-                        TaskEventRow.task_id == task_id,
-                        TaskEventRow.user_id == user_id,
-                    )
-                    .order_by(TaskEventRow.sequence)
+    async def list_events(
+        self,
+        user_id: str,
+        project_id: str,
+        task_id: str,
+        *,
+        include_superseded_plan_snapshots: bool = False,
+    ) -> list[TaskEventRow]:
+        """A task's timeline, with SUPERSEDED plan snapshots dropped.
+
+        ``task_plan_update`` is a self-contained snapshot of the whole plan —
+        every node's full ``goal`` (the subtask brief), ``review_criteria`` and
+        ``review_feedback`` — and one is written on every node flip. A plan of
+        N subtasks therefore emits ~3N snapshots each carrying all N briefs:
+        quadratic bytes in the size of the plan, and 72% of all task-event
+        payload in a real install (1.31 MB of 1.80 MB across 25 tasks).
+
+        Only the newest one is ever read. The Todo panel takes
+        ``events.reverse().find(type === "task_plan_update")``; the transcript
+        skips the type entirely. Every older copy is written once and read
+        never — so this read returns just the newest, which stays complete and
+        self-contained. The log itself is untouched (append-only holds): this
+        is a projection, and ``include_superseded_plan_snapshots=True`` gets
+        the raw sequence back.
+
+        The live SSE path is deliberately unaffected — ``list_events_after``
+        delivers every snapshot, because a client tracking the plan needs each
+        update to advance it.
+        """
+        stmt = select(TaskEventRow).where(
+            TaskEventRow.project_id == project_id,
+            TaskEventRow.task_id == task_id,
+            TaskEventRow.user_id == user_id,
+        )
+        if not include_superseded_plan_snapshots:
+            newest = (
+                select(func.max(TaskEventRow.sequence))
+                .where(
+                    TaskEventRow.project_id == project_id,
+                    TaskEventRow.task_id == task_id,
+                    TaskEventRow.user_id == user_id,
+                    TaskEventRow.type == PLAN_SNAPSHOT_EVENT,
+                )
+                .scalar_subquery()
+            )
+            stmt = stmt.where(
+                or_(
+                    TaskEventRow.type != PLAN_SNAPSHOT_EVENT,
+                    TaskEventRow.sequence == newest,
                 )
             )
-            .scalars()
-            .all()
-        )
+        return list((await self._db.execute(stmt.order_by(TaskEventRow.sequence))).scalars().all())
 
     async def list_events_after(
         self,

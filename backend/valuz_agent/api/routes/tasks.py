@@ -435,6 +435,12 @@ async def _iter_task_events_sse(
     and exact (sequence is monotonic per task — no gaps possible).
     """
     cursor = after_seq
+    # A client that opens without a cursor gets the whole log replayed. That
+    # replay is the one read where superseded ``task_plan_update`` snapshots
+    # are pure waste — each carries the entire plan, and the client keeps only
+    # the newest — so it goes through the collapsing bulk read. Every later
+    # tick is incremental and must deliver each snapshot as it lands.
+    replaying_history = after_seq <= 0
     silent_for = 0.0
     terminal = not keep_alive and initial_status in TERMINAL_STATUSES
     terminal_silent = 0.0
@@ -445,13 +451,16 @@ async def _iter_task_events_sse(
         # ``shielded``: client disconnect cancels this generator; landing the
         # cancellation inside the in-flight DB read would tear the pooled
         # connection down mid-checkin (see ``infra.sse.shielded``).
-        async def _tick_read(after: int) -> list[TaskEventRow]:
+        async def _tick_read(after: int, *, history: bool) -> list[TaskEventRow]:
             async with async_unit_of_work(commit=False) as db:
-                return await TaskService(db).events_after(
-                    user_id, project_id, task_id, after
-                )
+                svc = TaskService(db)
+                if history:
+                    found = await svc.get_events(user_id, task_id)
+                    return list(found.events) if found is not None else []
+                return await svc.events_after(user_id, project_id, task_id, after)
 
-        rows = await shielded(_tick_read(cursor))
+        rows = await shielded(_tick_read(cursor, history=replaying_history))
+        replaying_history = False
         if rows:
             for row in rows:
                 event_payload = EventResponse.model_validate(row).model_dump(mode="json")
