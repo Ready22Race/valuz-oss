@@ -152,6 +152,14 @@ when the host updates the slot, an inlined copy of the same values never
 does. Seeding the slot and then inlining the values anyway produces a board
 that polls but visibly never moves — seed the SLOT, bind the PROPERTY.
 
+The slot's shape is NOT yours to design. After every refresh the host
+replaces the slot's whole value with the source's declared shape, exactly
+as the edition notes state it (e.g. a metric source refreshes to
+{"items":[{"label","value","delta?","trend?"}],"source","asOf"}). Seed
+that same shape and bind inside it — items:{"path":"/data/quote/items"} —
+never invent your own slot fields: a binding to an invented field renders
+once from your seed and goes blank on the first refresh.
+
 Always write the seed value — the binding must render correctly even if the
 host never refreshes it. One slot per source; the slot path and the ref path
 share the trailing name. Never invent a source id: only the ids the edition
