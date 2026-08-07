@@ -734,7 +734,6 @@ export type KnownI18nKey =
   | "conversation.tokenUsage.inputUncached"
   | "conversation.tokenUsage.models"
   | "conversation.tokenUsage.outputWithReasoning"
-  | "conversation.tokenUsage.sessionTotal"
   | "conversation.tokenUsage.showDetails"
   | "conversation.tokenUsage.turnTotal"
   | "conversation.updatedTodos"
