@@ -1,11 +1,20 @@
 "use client";
 
 import { defineComponent } from "@openuidev/react-lang";
+import {
+  CartesianGrid,
+  ResponsiveContainer,
+  Scatter,
+  ScatterChart,
+  Tooltip,
+  XAxis,
+  YAxis,
+  ZAxis,
+} from "recharts";
 
 import {
   extentOf,
   formatValue,
-  offsetPct,
   readItems,
   readLabel,
   toneTint,
@@ -13,6 +22,16 @@ import {
 import type { Span } from "../lib/chart";
 import { ChartFrame } from "../lib/chart-parts";
 import { readLooseNumber, readTextFromKeys } from "../lib/props";
+import {
+  AXIS_TICK,
+  CHART_INITIAL_DIMENSION,
+  CHART_MARGIN,
+  GRID_STROKE,
+  TOOLTIP_CONTENT_STYLE,
+  TOOLTIP_CURSOR,
+  TOOLTIP_ITEM_STYLE,
+  TOOLTIP_LABEL_STYLE,
+} from "../lib/recharts-chrome";
 import type { Tone } from "../lib/schema";
 import { ToneSchema } from "../lib/schema";
 import { toneText } from "../lib/tone";
@@ -20,28 +39,31 @@ import { BubbleChartSchema } from "./schema";
 
 export { BubbleChartSchema, BubblePointSchema } from "./schema";
 
-/*
- * Plot box, in user units.
- *
- * `preserveAspectRatio` is left at its default (`xMidYMid meet`) and the CSS
- * box is given the matching `aspect-ratio`, because a bubble has to stay round:
- * the `preserveAspectRatio="none"` trick the line charts in this family use
- * would squash every circle into an ellipse whose *area* — the one thing this
- * chart encodes — depends on the width of the column it landed in.
- */
-const VIEW_W = 160;
-const VIEW_H = 100;
-
 /**
- * Radius range, in the same user units.
+ * The area range the plot's bubbles are drawn in, in px².
  *
- * `R_MAX` is what the largest value gets; everything else is scaled down from
- * it by the square root of its share. `PAD` is `R_MAX` plus a little, so the
- * biggest bubble sitting on the domain's edge is still drawn inside the box.
+ * recharts' `ZAxis` maps a value to a marker's *area*, not its radius
+ * (`radius = sqrt(size / π)`) — exactly the "area, not radius" encoding this
+ * block exists to guarantee. The range floor has to be `0`, not a visible
+ * minimum: a range like `[60, 400]` is an *affine* map (`area = 60 + size *
+ * k`), and an affine map is not proportional — a 4× value would land at
+ * `60 + 4k`, nowhere near 4× the area of `60 + k`. Proportional means the
+ * range starts where the domain does. The floor that keeps a sizeless point
+ * visible as a dot lives in `MIN_BUBBLE_RADIUS` below, applied after the
+ * scale, the same way `R_MIN` is a floor and not part of the legend's
+ * encoding.
  */
+const AREA_RANGE: [number, number] = [0, 400];
+
+/** Below this a bubble is smaller than the stroke around it and stops being
+ * visible — a presentational floor, applied to the *rendered* radius, never
+ * to the value. */
+const MIN_BUBBLE_RADIUS = 3;
+
+/** Radius range for the size-key legend's two demonstration circles, in the
+ * legend's own fixed-geometry SVG (unrelated to the plot's coordinate space). */
 const R_MAX = 13;
 const R_MIN = 2.5;
-const PAD = R_MAX + 3;
 
 /** Beyond this the picture is a texture, not a chart. */
 const MAX_POINTS = 60;
@@ -58,18 +80,14 @@ interface Point {
 }
 
 /**
- * Radius from value, **through area**.
+ * Radius from value, **through area**, for the size-key legend only.
  *
- * This is the whole reason the block exists rather than being a ScatterChart
- * with a `size` channel bolted on. A reader compares two bubbles by the ink in
- * them, so the encoded quantity has to be πr² — mapping the value to `r`
- * directly overstates the large end by the square, which is the single most
- * common way a bubble chart lies (a 4× value drawn 4× wide looks 16× bigger).
- *
- * `R_MIN` is a floor, not part of the encoding: below it a bubble is smaller
- * than the stroke around it and stops being visible at all. It only ever
- * applies to values so far below the maximum that no comparison was legible
- * anyway, and the figure is printed in the key regardless.
+ * A reader compares two bubbles by the ink in them, so the encoded quantity
+ * has to be πr² — mapping the value to `r` directly overstates the large end
+ * by the square, which is the single most common way a bubble chart lies (a
+ * 4× value drawn 4× wide looks 16× bigger). `R_MIN` is a floor, not part of
+ * the encoding: below it a bubble is smaller than the stroke around it and
+ * stops being visible at all.
  */
 function radiusOf(size: number, maxSize: number): number {
   if (!(size > 0) || !(maxSize > 0)) return R_MIN;
@@ -77,20 +95,19 @@ function radiusOf(size: number, maxSize: number): number {
   return Math.round(Math.max(R_MIN, exact) * 100) / 100;
 }
 
-function round(value: number): number {
-  return Math.round(value * 100) / 100;
-}
-
 /**
- * Where a value sits in its domain, as a percentage.
+ * A usable axis domain from `extentOf`.
  *
- * `offsetPct` alone would pin an all-equal axis — one point, or five sharing an
- * x — to the far left, which reads as "lowest possible" rather than as "there
- * is no spread here". A domain with no width puts its marks down the middle,
- * the same answer `Sparkline` gives a flat series.
+ * A flat domain (one point, or several sharing a value) has zero width, and a
+ * linear scale divides by that width — so rather than pinning every mark to
+ * one edge, the domain is padded a unit either side. The point this produces
+ * still lands exactly in the middle of the plot, the same answer `Sparkline`
+ * gives a flat series.
  */
-function positionPct(value: number, span: Span): number {
-  return span.max === span.min ? 50 : offsetPct(value, span);
+function domainOf(span: Span): [number, number] {
+  return span.min === span.max
+    ? [span.min - 1, span.max + 1]
+    : [span.min, span.max];
 }
 
 export const BubbleChart = defineComponent({
@@ -100,19 +117,21 @@ export const BubbleChart = defineComponent({
     "A scatter whose third dimension is bubble size: each point carries an x, a y, and a magnitude drawn as area. " +
     "points is {x, y, size, label, tone} — size must be a positive magnitude in one unit (a revenue, a headcount, a market cap), never a percentage change or anything that can go negative. " +
     "Bubble area is proportional to size, so a bubble twice as wide is four times the value; name what size means in sizeLabel or the reader will guess. " +
-    "xLabel and yLabel name the two axes with their units (\"Revenue growth %\"), and every point must be the same kind of thing measured the same way. " +
+    'xLabel and yLabel name the two axes with their units ("Revenue growth %"), and every point must be the same kind of thing measured the same way. ' +
     "Use it for three-variable comparisons across a dozen or so subjects; use OpenUI's ScatterChart when there is no third variable, and MiniCardBlock when the reader needs the exact figures.",
   component: ({ props }) => {
     const raw = props as unknown as Record<string, unknown>;
-    const parsed = readItems(raw.points ?? raw.items ?? raw.data ?? raw.bubbles).map(
-      (record) => ({
-        x: readLooseNumber(record.x ?? record.xValue),
-        y: readLooseNumber(record.y ?? record.yValue),
-        size: readLooseNumber(record.size ?? record.value ?? record.weight ?? record.r),
-        label: readLabel(record),
-        tone: ToneSchema.safeParse(record.tone).data,
-      }),
-    );
+    const parsed = readItems(
+      raw.points ?? raw.items ?? raw.data ?? raw.bubbles,
+    ).map((record) => ({
+      x: readLooseNumber(record.x ?? record.xValue),
+      y: readLooseNumber(record.y ?? record.yValue),
+      size: readLooseNumber(
+        record.size ?? record.value ?? record.weight ?? record.r,
+      ),
+      label: readLabel(record),
+      tone: ToneSchema.safeParse(record.tone).data,
+    }));
 
     // A point with no position cannot be placed at all. A point with no size
     // still has a position, so it is kept and drawn at the floor — the footnote
@@ -142,7 +161,8 @@ export const BubbleChart = defineComponent({
     const xName = readTextFromKeys(raw, ["xLabel", "xAxis", "x_label"]) || "x";
     const yName = readTextFromKeys(raw, ["yLabel", "yAxis", "y_label"]) || "y";
     const sizeName =
-      readTextFromKeys(raw, ["sizeLabel", "sizeAxis", "size_label", "unit"]) || "size";
+      readTextFromKeys(raw, ["sizeLabel", "sizeAxis", "size_label", "unit"]) ||
+      "size";
 
     // Position is the data here, not length, so the domain covers the values and
     // nothing more: forcing zero in would push a cluster of 98–100 into a single
@@ -193,47 +213,119 @@ export const BubbleChart = defineComponent({
     );
 
     return (
-      <ChartFrame footnote={footnote} slot="bubble-chart" summary={summary} title={title}>
-        <div className="vgb-bubble">
-          {/* The y axis reads bottom-to-top as a column of three lines rather
-              than as rotated text: rotated labels are unreadable at this size,
-              and a CJK axis name rotated 90° is worse still. */}
-          <span className="vgb-bubble-axis vgb-bubble-axis-y">
-            <span className="vgb-chart-sub">{formatValue(ySpan.max)}</span>
-            <span className="vgb-bubble-axis-name">{yName}</span>
-            <span className="vgb-chart-sub">{formatValue(ySpan.min)}</span>
-          </span>
-          <svg aria-hidden="true" className="vgb-bubble-plot" viewBox={`0 0 ${VIEW_W} ${VIEW_H}`}>
-            {points.map((point, index) => {
-              const cx = round(
-                PAD + (positionPct(point.x, xSpan) / 100) * (VIEW_W - PAD * 2),
-              );
-              const cy = round(
-                VIEW_H - PAD - (positionPct(point.y, ySpan) / 100) * (VIEW_H - PAD * 2),
-              );
-              const positive = point.size > 0;
-              return (
-                <circle
-                  className="vgb-bubble-dot"
-                  cx={cx}
-                  cy={cy}
-                  data-bubble-size={point.size}
-                  fill={positive ? toneTint(point.tone, 38) : "none"}
-                  key={`${point.label}-${index}`}
-                  r={radiusOf(point.size, maxSize)}
-                  stroke={toneText(point.tone)}
-                  strokeDasharray={positive ? undefined : "2 2"}
-                  strokeWidth={1}
-                  vectorEffect="non-scaling-stroke"
-                />
-              );
-            })}
-          </svg>
-          <span className="vgb-bubble-axis vgb-bubble-axis-x">
-            <span className="vgb-chart-sub">{formatValue(xSpan.min)}</span>
-            <span className="vgb-bubble-axis-name">{xName}</span>
-            <span className="vgb-chart-sub">{formatValue(xSpan.max)}</span>
-          </span>
+      <ChartFrame
+        footnote={footnote}
+        slot="bubble-chart"
+        summary={summary}
+        title={title}
+      >
+        {/* The y axis name sits above the plot as plain text rather than
+            rotated inside the SVG: rotated labels are unreadable at this
+            size, and a CJK axis name rotated 90° is worse still. The x axis
+            name has room to sit horizontally inside the chart itself. */}
+        <span className="vgb-bubble-axis-name vgb-bubble-axis-name-y">
+          {yName}
+        </span>
+        <div className="vgb-recharts vgb-bubble-plot">
+          <ResponsiveContainer
+            width="100%"
+            height="100%"
+            minWidth={0}
+            minHeight={0}
+            initialDimension={CHART_INITIAL_DIMENSION}
+          >
+            <ScatterChart margin={CHART_MARGIN}>
+              <CartesianGrid
+                stroke={GRID_STROKE}
+                strokeOpacity={0.6}
+                vertical={false}
+              />
+              <XAxis
+                axisLine={false}
+                dataKey="x"
+                domain={domainOf(xSpan)}
+                label={{
+                  fill: AXIS_TICK.fill,
+                  fontSize: AXIS_TICK.fontSize,
+                  position: "insideBottom",
+                  offset: -2,
+                  value: xName,
+                }}
+                tick={AXIS_TICK}
+                tickFormatter={formatValue}
+                tickLine={false}
+                type="number"
+              />
+              <YAxis
+                axisLine={false}
+                dataKey="y"
+                domain={domainOf(ySpan)}
+                tick={AXIS_TICK}
+                tickFormatter={formatValue}
+                tickLine={false}
+                type="number"
+              />
+              <ZAxis
+                dataKey="size"
+                domain={[0, Math.max(1, maxSize)]}
+                range={AREA_RANGE}
+                type="number"
+              />
+              <Tooltip
+                content={({ active, payload }) => {
+                  if (!active || !payload?.length) return null;
+                  const point = payload[0]?.payload as Point | undefined;
+                  if (!point) return null;
+                  return (
+                    <div style={TOOLTIP_CONTENT_STYLE}>
+                      <div style={TOOLTIP_LABEL_STYLE}>
+                        {point.label || "—"}
+                      </div>
+                      <div style={TOOLTIP_ITEM_STYLE}>
+                        {`${formatValue(point.x)}, ${formatValue(point.y)} · ` +
+                          `${sizeName} ${formatValue(point.size)}`}
+                      </div>
+                    </div>
+                  );
+                }}
+                cursor={TOOLTIP_CURSOR}
+                isAnimationActive={false}
+              />
+              <Scatter
+                data={points}
+                isAnimationActive={false}
+                shape={(shapeProps) => {
+                  const { cx, cy, size, payload } = shapeProps as {
+                    cx?: number;
+                    cy?: number;
+                    size?: number;
+                    payload?: Point;
+                  };
+                  if (cx === undefined || cy === undefined || !payload)
+                    return <g />;
+                  const positive = payload.size > 0;
+                  const radius = Math.max(
+                    MIN_BUBBLE_RADIUS,
+                    Math.sqrt(Math.max(size ?? 0, 0) / Math.PI),
+                  );
+                  return (
+                    <circle
+                      className="vgb-bubble-dot"
+                      cx={cx}
+                      cy={cy}
+                      data-bubble-size={payload.size}
+                      fill={positive ? toneTint(payload.tone, 38) : "none"}
+                      r={radius}
+                      stroke={toneText(payload.tone)}
+                      strokeDasharray={positive ? undefined : "2 2"}
+                      strokeWidth={1}
+                      vectorEffect="non-scaling-stroke"
+                    />
+                  );
+                }}
+              />
+            </ScatterChart>
+          </ResponsiveContainer>
         </div>
         {/*
          * The size key: the smallest bubble and the largest, drawn at the size
@@ -245,7 +337,11 @@ export const BubbleChart = defineComponent({
          * of it side by side at their true relative size.
          */}
         <span className="vgb-bubble-size-key">
-          <svg aria-hidden="true" className="vgb-bubble-size-svg" viewBox="0 0 62 30">
+          <svg
+            aria-hidden="true"
+            className="vgb-bubble-size-svg"
+            viewBox="0 0 62 30"
+          >
             <circle
               className="vgb-bubble-legend-dot"
               cx={16}
@@ -279,7 +375,10 @@ export const BubbleChart = defineComponent({
           <ul className="vgb-bubble-key">
             {points.map((point, index) =>
               point.label ? (
-                <li className="vgb-bubble-key-item" key={`${point.label}-${index}`}>
+                <li
+                  className="vgb-bubble-key-item"
+                  key={`${point.label}-${index}`}
+                >
                   <span
                     aria-hidden="true"
                     className="vgb-chart-swatch"

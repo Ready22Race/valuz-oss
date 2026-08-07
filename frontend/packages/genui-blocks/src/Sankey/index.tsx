@@ -1,10 +1,23 @@
 "use client";
 
 import { defineComponent } from "@openuidev/react-lang";
+import {
+  ResponsiveContainer,
+  Sankey as RechartsSankey,
+  Tooltip,
+} from "recharts";
+import type { SankeyLinkProps, SankeyNodeProps } from "recharts";
 
-import { asPct, formatValue, readItems, seriesTone } from "../lib/chart";
+import { formatValue, readItems, seriesTone } from "../lib/chart";
 import { ChartFrame } from "../lib/chart-parts";
 import { readLooseNumber, readTextFromKeys } from "../lib/props";
+import {
+  CHART_INITIAL_DIMENSION,
+  TOOLTIP_CONTENT_STYLE,
+  TOOLTIP_CURSOR,
+  TOOLTIP_ITEM_STYLE,
+  TOOLTIP_LABEL_STYLE,
+} from "../lib/recharts-chrome";
 import type { Tone } from "../lib/schema";
 import { toneText } from "../lib/tone";
 import { SankeySchema } from "./schema";
@@ -23,12 +36,6 @@ const MAX_NODES = 12;
 const MAX_LINKS = 24;
 const MAX_COLUMNS = 4;
 
-/** Node bar width and vertical gap, in the SVG's 0–100 user units. */
-const NODE_W = 2.2;
-const GAP = 3;
-/** A node with no flow is still a node; it gets a stub rather than vanishing. */
-const MIN_NODE_H = 1.5;
-
 /**
  * Float tolerance for the conservation check.
  *
@@ -45,9 +52,6 @@ interface Node {
   inflow: number;
   outflow: number;
   throughput: number;
-  x: number;
-  y: number;
-  h: number;
   tone: Tone;
   /** Inflow and outflow disagree. Drawn as given, marked, never balanced. */
   mismatch: boolean;
@@ -59,15 +63,8 @@ interface Link {
   value: number;
 }
 
-interface Ribbon {
-  key: string;
-  d: string;
-  tone: Tone;
-}
-
 interface Diagram {
   nodes: Node[];
-  ribbons: Ribbon[];
   links: Link[];
   columns: number;
   unbalanced: Node[];
@@ -79,10 +76,6 @@ interface Diagram {
   total: number;
   /** There is at least one node nothing flows into, so `total` is what enters. */
   rooted: boolean;
-}
-
-function round(value: number): number {
-  return Math.round(value * 100) / 100;
 }
 
 /**
@@ -121,14 +114,18 @@ function depthsOf(ids: string[], links: Link[]): Map<string, number> {
 }
 
 /**
- * The diagram, laid out and reconciled.
+ * The diagram, reconciled.
  *
  * The invariant this block exists for: **what arrives at a node should equal
- * what leaves it.** Where it does not, the node is drawn at whichever side is
- * larger — so the shortfall shows as a bar edge with no ribbon on it — and both
- * figures are printed. Silently scaling one side to match the other would make
- * a broken flow statement look like a sound one, which is the failure this
- * shape invites.
+ * what leaves it.** Where it does not, both figures are printed and the node
+ * is flagged, never quietly balanced — silently scaling one side to match the
+ * other would make a broken flow statement look like a sound one, which is
+ * the failure this shape invites.
+ *
+ * Geometry (node position, ribbon curvature) is no longer computed here —
+ * `<Sankey>` lays that out itself from `nodes`/`links`. What stays is the
+ * business logic a layout engine cannot know: caps, validity, reconciliation,
+ * and which column a node's label reads from.
  */
 function buildDiagram(raw: Record<string, unknown>): Diagram | null {
   const declared = readItems(raw.nodes ?? raw.stages).map((record) => ({
@@ -141,7 +138,9 @@ function buildDiagram(raw: Record<string, unknown>): Diagram | null {
   for (const record of readItems(raw.links ?? raw.flows ?? raw.edges)) {
     const from = readTextFromKeys(record, ["from", "source", "start"]);
     const to = readTextFromKeys(record, ["to", "target", "end"]);
-    const value = readLooseNumber(record.value ?? record.amount ?? record.flow ?? record.weight);
+    const value = readLooseNumber(
+      record.value ?? record.amount ?? record.flow ?? record.weight,
+    );
     // A flow has no direction of its own, so a negative one has no drawable
     // width and a self-loop has nowhere to go. Both are counted and said.
     if (!from || !to || from === to || value === undefined || !(value > 0)) {
@@ -154,7 +153,9 @@ function buildDiagram(raw: Record<string, unknown>): Diagram | null {
   // its own. Nothing is drawn rather than an empty box holding its height.
   if (allLinks.length === 0) return null;
 
-  const labels = new Map(declared.map((node) => [node.id, node.label || node.id]));
+  const labels = new Map(
+    declared.map((node) => [node.id, node.label || node.id]),
+  );
   // A model routinely supplies links and forgets the node list. Every id a link
   // names is a node whether or not it was declared.
   for (const link of allLinks) {
@@ -163,8 +164,12 @@ function buildDiagram(raw: Record<string, unknown>): Diagram | null {
   }
 
   const throughputOf = (id: string, links: Link[]) => {
-    const inflow = links.filter((l) => l.to === id).reduce((sum, l) => sum + l.value, 0);
-    const outflow = links.filter((l) => l.from === id).reduce((sum, l) => sum + l.value, 0);
+    const inflow = links
+      .filter((l) => l.to === id)
+      .reduce((sum, l) => sum + l.value, 0);
+    const outflow = links
+      .filter((l) => l.from === id)
+      .reduce((sum, l) => sum + l.value, 0);
     return { inflow, outflow };
   };
 
@@ -172,20 +177,27 @@ function buildDiagram(raw: Record<string, unknown>): Diagram | null {
     const left = throughputOf(a, allLinks);
     const right = throughputOf(b, allLinks);
     return (
-      Math.max(right.inflow, right.outflow) - Math.max(left.inflow, left.outflow)
+      Math.max(right.inflow, right.outflow) -
+      Math.max(left.inflow, left.outflow)
     );
   });
   const keptIds = ranked.slice(0, MAX_NODES);
   const kept = new Set(keptIds);
   const droppedNodes = ranked.length - keptIds.length;
 
-  const reachable = allLinks.filter((link) => kept.has(link.from) && kept.has(link.to));
-  const links = [...reachable].sort((a, b) => b.value - a.value).slice(0, MAX_LINKS);
+  const reachable = allLinks.filter(
+    (link) => kept.has(link.from) && kept.has(link.to),
+  );
+  const links = [...reachable]
+    .sort((a, b) => b.value - a.value)
+    .slice(0, MAX_LINKS);
   const droppedLinks = reachable.length - links.length;
   if (links.length === 0) return null;
 
   const depth = depthsOf(keptIds, links);
-  const columnCount = Math.max(...keptIds.map((id) => (depth.get(id) ?? 0) + 1));
+  const columnCount = Math.max(
+    ...keptIds.map((id) => (depth.get(id) ?? 0) + 1),
+  );
 
   const nodes: Node[] = keptIds.map((id) => {
     const { inflow, outflow } = throughputOf(id, links);
@@ -199,87 +211,17 @@ function buildDiagram(raw: Record<string, unknown>): Diagram | null {
       // Whichever side is larger. Drawing the smaller one would hide the
       // discrepancy by construction.
       throughput: Math.max(inflow, outflow),
-      x: 0,
-      y: 0,
-      h: 0,
       tone: seriesTone(nodeDepth),
-      mismatch: inflow > 0 && outflow > 0 && Math.abs(inflow - outflow) > EPSILON,
+      mismatch:
+        inflow > 0 && outflow > 0 && Math.abs(inflow - outflow) > EPSILON,
     };
-  });
-
-  const columns: Node[][] = Array.from({ length: columnCount }, (_, index) =>
-    nodes
-      .filter((node) => node.depth === index)
-      .sort((a, b) => b.throughput - a.throughput),
-  );
-
-  /*
-   * One vertical scale for the whole diagram, set by the busiest column.
-   *
-   * Per-column scaling would make each column fill the height, which reads as
-   * every stage carrying the same amount — the exact claim a Sankey is drawn to
-   * refute. A lighter column simply ends higher up.
-   */
-  const columnTotals = columns.map((column) =>
-    column.reduce((sum, node) => sum + node.throughput, 0),
-  );
-  const busiest = Math.max(...columnTotals, 0);
-  const tallest = Math.max(...columns.map((column) => column.length), 1);
-  const usable = Math.max(20, 100 - GAP * (tallest - 1));
-  const scale = busiest > 0 ? usable / busiest : 0;
-  const step = columnCount > 1 ? (100 - NODE_W) / (columnCount - 1) : 0;
-
-  columns.forEach((column, index) => {
-    const heights = column.map((node) => Math.max(MIN_NODE_H, node.throughput * scale));
-    const stacked = heights.reduce((sum, h) => sum + h, 0) + GAP * (column.length - 1);
-    let cursor = Math.max(0, (100 - stacked) / 2);
-    column.forEach((node, position) => {
-      node.x = round(index * step);
-      node.y = round(cursor);
-      node.h = round(heights[position] ?? MIN_NODE_H);
-      cursor += (heights[position] ?? MIN_NODE_H) + GAP;
-    });
   });
 
   const sources = nodes.filter((node) => node.inflow === 0);
   const rooted = sources.length > 0;
 
-  const byId = new Map(nodes.map((node) => [node.id, node]));
-  // Ordered by where the ribbons leave and land, so bands cross as little as a
-  // layout this simple can manage.
-  const ordered = [...links].sort((a, b) => {
-    const from = (byId.get(a.from)?.y ?? 0) - (byId.get(b.from)?.y ?? 0);
-    return from !== 0 ? from : (byId.get(a.to)?.y ?? 0) - (byId.get(b.to)?.y ?? 0);
-  });
-  const outCursor = new Map<string, number>();
-  const inCursor = new Map<string, number>();
-  const ribbons: Ribbon[] = [];
-  ordered.forEach((link, index) => {
-    const source = byId.get(link.from);
-    const target = byId.get(link.to);
-    if (!source || !target) return;
-    const thickness = Math.max(0.4, link.value * scale);
-    const y0 = source.y + (outCursor.get(source.id) ?? 0);
-    const y1 = target.y + (inCursor.get(target.id) ?? 0);
-    outCursor.set(source.id, (outCursor.get(source.id) ?? 0) + thickness);
-    inCursor.set(target.id, (inCursor.get(target.id) ?? 0) + thickness);
-    const x0 = source.x + NODE_W;
-    const x1 = target.x;
-    const mid = round((x0 + x1) / 2);
-    ribbons.push({
-      key: `${link.from}-${link.to}-${index}`,
-      d:
-        `M ${round(x0)} ${round(y0)} C ${mid} ${round(y0)}, ${mid} ${round(y1)}, ` +
-        `${round(x1)} ${round(y1)} L ${round(x1)} ${round(y1 + thickness)} ` +
-        `C ${mid} ${round(y1 + thickness)}, ${mid} ${round(y0 + thickness)}, ` +
-        `${round(x0)} ${round(y0 + thickness)} Z`,
-      tone: source.tone,
-    });
-  });
-
   return {
     nodes,
-    ribbons,
     links,
     columns: columnCount,
     unbalanced: nodes.filter((node) => node.mismatch),
@@ -321,7 +263,8 @@ export const Sankey = defineComponent({
     const title = readTextFromKeys(raw, ["title", "label"]);
     const unit = readTextFromKeys(raw, ["unit", "units", "basis"]);
     const largest = [...diagram.links].sort((a, b) => b.value - a.value)[0];
-    const labelOf = (id: string) => diagram.nodes.find((node) => node.id === id)?.label ?? id;
+    const labelOf = (id: string) =>
+      diagram.nodes.find((node) => node.id === id)?.label ?? id;
 
     const summary =
       `Sankey diagram${title ? ` of ${title}` : ""}: ${diagram.nodes.length} nodes in ` +
@@ -353,7 +296,9 @@ export const Sankey = defineComponent({
                 `${node.label} (in ${formatValue(node.inflow)}, out ` +
                 `${formatValue(node.outflow)})`,
             )
-            .join(", ")}. Drawn exactly as given — the difference is not distributed.`
+            .join(
+              ", ",
+            )}. Drawn exactly as given — the difference is not distributed.`
         : "",
       diagram.invalidLinks > 0
         ? `${diagram.invalidLinks} flow${diagram.invalidLinks === 1 ? "" : "s"} without a ` +
@@ -371,11 +316,114 @@ export const Sankey = defineComponent({
         : "",
     ].filter(Boolean);
 
+    // Index into `diagram.nodes`/`diagram.links`, in the same order they are
+    // handed to `<Sankey data>` below — recharts keeps a node's `index` and a
+    // link's `index` stable to that input order, so this is the lookup both
+    // custom renderers use instead of trusting recharts' internal payload.
+    const idIndex = new Map(
+      diagram.nodes.map((node, index) => [node.id, index]),
+    );
+    const toneById = new Map(diagram.nodes.map((node) => [node.id, node.tone]));
+
+    const sankeyData = {
+      nodes: diagram.nodes.map((node) => ({ name: node.label })),
+      links: diagram.links.flatMap((link) => {
+        const source = idIndex.get(link.from);
+        const target = idIndex.get(link.to);
+        return source === undefined || target === undefined
+          ? []
+          : [{ source, target, value: link.value }];
+      }),
+    };
+
+    function renderNode(nodeProps: SankeyNodeProps) {
+      const { x, y, width, height, index } = nodeProps;
+      const info = diagram!.nodes[index];
+      if (!info) return null;
+      const last = info.depth === diagram!.columns - 1;
+      const labelX = last ? x - 6 : x + width + 6;
+      const midY = y + height / 2;
+      return (
+        <g key={`node-${info.id}`}>
+          <rect
+            fill={toneText(info.tone)}
+            height={height}
+            rx={1}
+            width={width}
+            x={x}
+            y={y}
+          />
+          <g
+            className="vgb-sankey-label"
+            data-chart-mismatch={info.mismatch ? "true" : undefined}
+            data-sankey-side={last ? "end" : "start"}
+          >
+            <text
+              className="vgb-sankey-name"
+              dominantBaseline="middle"
+              fill={toneText("neutral")}
+              fontSize={11}
+              textAnchor={last ? "end" : "start"}
+              x={labelX}
+              y={midY - 6}
+            >
+              {info.label}
+            </text>
+            <text
+              className="vgb-chart-sub"
+              dominantBaseline="middle"
+              fill={toneText("neutral")}
+              fontSize={10}
+              opacity={0.75}
+              textAnchor={last ? "end" : "start"}
+              x={labelX}
+              y={midY + 8}
+            >
+              {formatValue(info.throughput)}
+              {info.mismatch
+                ? ` (in ${formatValue(info.inflow)} / out ${formatValue(info.outflow)})`
+                : ""}
+            </text>
+          </g>
+        </g>
+      );
+    }
+
+    function renderLink(linkProps: SankeyLinkProps) {
+      const {
+        sourceX,
+        sourceY,
+        sourceControlX,
+        targetX,
+        targetY,
+        targetControlX,
+        linkWidth,
+        index,
+      } = linkProps;
+      const link = diagram!.links[index];
+      const tone = link ? toneById.get(link.from) : undefined;
+      return (
+        <path
+          className="vgb-sankey-ribbon"
+          d={`M${sourceX},${sourceY} C${sourceControlX},${sourceY} ${targetControlX},${targetY} ${targetX},${targetY}`}
+          fill="none"
+          key={`link-${index}`}
+          stroke={toneText(tone)}
+          strokeOpacity={0.5}
+          strokeWidth={Math.max(1, linkWidth)}
+        />
+      );
+    }
+
     return (
       <ChartFrame
         footnote={
           notes.length > 0 ? (
-            <span data-chart-mismatch={diagram.unbalanced.length > 0 ? "true" : undefined}>
+            <span
+              data-chart-mismatch={
+                diagram.unbalanced.length > 0 ? "true" : undefined
+              }
+            >
               {notes.join(" ")}
             </span>
           ) : null
@@ -386,73 +434,35 @@ export const Sankey = defineComponent({
         unit={unit}
       >
         <div
-          className="vgb-sankey"
+          className="vgb-sankey vgb-recharts"
           data-a2ui-sankey
-          data-sankey-balanced={diagram.unbalanced.length > 0 ? "false" : "true"}
+          data-sankey-balanced={
+            diagram.unbalanced.length > 0 ? "false" : "true"
+          }
         >
-          {/*
-           * Geometry only. `preserveAspectRatio="none"` means the 0–100 user
-           * units map straight onto percentages of the box, which is what lets
-           * the HTML labels above sit exactly on the bars below them — and a
-           * ribbon's thickness is vertical, so the uniform vertical scale keeps
-           * it proportional whatever width the column turns out to be.
-           */}
-          <svg
-            aria-hidden="true"
-            className="vgb-sankey-svg"
-            preserveAspectRatio="none"
-            viewBox="0 0 100 100"
+          <ResponsiveContainer
+            height="100%"
+            initialDimension={CHART_INITIAL_DIMENSION}
+            minHeight={0}
+            minWidth={0}
+            width="100%"
           >
-            {diagram.ribbons.map((ribbon) => (
-              <path
-                className="vgb-sankey-ribbon"
-                d={ribbon.d}
-                fill={toneText(ribbon.tone)}
-                key={ribbon.key}
+            <RechartsSankey
+              data={sankeyData}
+              link={renderLink}
+              node={renderNode}
+              nodePadding={16}
+              nodeWidth={10}
+            >
+              <Tooltip
+                contentStyle={TOOLTIP_CONTENT_STYLE}
+                cursor={TOOLTIP_CURSOR}
+                isAnimationActive={false}
+                itemStyle={TOOLTIP_ITEM_STYLE}
+                labelStyle={TOOLTIP_LABEL_STYLE}
               />
-            ))}
-            {diagram.nodes.map((node) => (
-              <rect
-                fill={toneText(node.tone)}
-                height={node.h}
-                key={node.id}
-                rx={0.6}
-                width={NODE_W}
-                x={node.x}
-                y={node.y}
-              />
-            ))}
-          </svg>
-          {/*
-           * Labels are HTML, never SVG `<text>`: an SVG label cannot wrap, and
-           * this family's rule is that labels wrap rather than truncate. They
-           * sit beside their bar — outside it on the last column so the text
-           * never runs off the right-hand edge.
-           */}
-          {diagram.nodes.map((node) => {
-            const last = node.depth === diagram.columns - 1;
-            return (
-              <span
-                className="vgb-sankey-label"
-                data-chart-mismatch={node.mismatch ? "true" : undefined}
-                data-sankey-side={last ? "end" : "start"}
-                key={node.id}
-                style={
-                  last
-                    ? { right: asPct(100 - node.x), top: asPct(node.y + node.h / 2) }
-                    : { left: asPct(node.x + NODE_W), top: asPct(node.y + node.h / 2) }
-                }
-              >
-                <span className="vgb-sankey-name">{node.label}</span>
-                <span className="vgb-chart-sub">
-                  {formatValue(node.throughput)}
-                  {node.mismatch
-                    ? ` (in ${formatValue(node.inflow)} / out ${formatValue(node.outflow)})`
-                    : ""}
-                </span>
-              </span>
-            );
-          })}
+            </RechartsSankey>
+          </ResponsiveContainer>
         </div>
       </ChartFrame>
     );
