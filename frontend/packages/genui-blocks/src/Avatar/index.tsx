@@ -27,30 +27,33 @@ export const Avatar = defineComponent({
     const src = safeHref(record.imageUrl ?? record.avatarUrl ?? record.image);
     const size = props.size ?? "medium";
 
-    if (src) {
-      /*
-       * `alt` carries the name rather than being empty: unlike a favicon in a
-       * source row, this block can stand on its own beside a byline, and there
-       * is no guarantee the name is repeated in text next to it.
-       * `no-referrer` stops the host's URL leaking to the image's origin.
-       */
-      return (
-        <img
-          className="vgb-avatar"
-          data-slot="vgb-avatar"
-          data-size={size}
-          src={src}
-          alt={name}
-          loading="lazy"
-          decoding="async"
-          referrerPolicy="no-referrer"
-        />
-      );
-    }
-
+    /*
+     * The initials circle is always drawn and the image sits on top of it:
+     * a URL that 404s paints nothing (empty alt suppresses the broken-image
+     * glyph), so a failed logo simply uncovers the fallback instead of
+     * leaving a broken-image artifact in the row. The name a screen reader
+     * hears lives in the sr span either way; the image is decorative.
+     * `no-referrer` stops the host's URL leaking to the image's origin.
+     */
     return (
-      <span className="vgb-avatar" data-slot="vgb-avatar" data-size={size} title={name}>
+      <span
+        className="vgb-avatar"
+        data-slot="vgb-avatar"
+        data-size={size}
+        title={name}
+      >
         <span aria-hidden="true">{initialsOf(name)}</span>
+        {src ? (
+          <img
+            className="vgb-avatar-img"
+            src={src}
+            alt=""
+            aria-hidden="true"
+            loading="lazy"
+            decoding="async"
+            referrerPolicy="no-referrer"
+          />
+        ) : null}
         {/* The initials are a drawing of the name; the name itself is what a
             screen reader should hear, and only when it is not already beside
             the circle in text — which is why it is the element's own content

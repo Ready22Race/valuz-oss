@@ -95,7 +95,8 @@ prose = RichText("The quarter turned on renewals.", "center", "large")`);
   });
 
   it("gives every block the DOM hook the host stylesheet and tests key on", () => {
-    const { container } = renderLang(`root = Stack([pairs, group, delta, who, notes, data, prose])
+    const { container } =
+      renderLang(`root = Stack([pairs, group, delta, who, notes, data, prose])
 pairs = KeyValueGroup([pairA])
 pairA = KeyValue("Revenue", "4.2", "bn")
 group = MetricGroup([{ label: "Margin", value: "38%" }])
@@ -117,7 +118,10 @@ prose = RichText("Text.")`);
       "vgb-json-view",
       "vgb-rich-text",
     ]) {
-      expect(container.querySelector(`[data-slot="${slot}"]`), `missing: ${slot}`).not.toBeNull();
+      expect(
+        container.querySelector(`[data-slot="${slot}"]`),
+        `missing: ${slot}`,
+      ).not.toBeNull();
     }
   });
 });
@@ -130,12 +134,18 @@ describe("KeyValue / KeyValueGroup", () => {
     expect(screen.getByText(LONG_CJK)).toBeTruthy();
     // No unit means no unit element — not an empty one taking up the gap.
     expect(container.querySelector(".vgb-kv-unit")).toBeNull();
-    expect(container.querySelectorAll('[data-slot="vgb-key-value"]').length).toBe(2);
+    expect(
+      container.querySelectorAll('[data-slot="vgb-key-value"]').length,
+    ).toBe(2);
   });
 
   it("renders nothing for an empty group", () => {
-    const { container } = renderLang(`root = Stack([g])\ng = KeyValueGroup([])`);
-    expect(container.querySelector('[data-slot="vgb-key-value-group"]')).toBeNull();
+    const { container } = renderLang(
+      `root = Stack([g])\ng = KeyValueGroup([])`,
+    );
+    expect(
+      container.querySelector('[data-slot="vgb-key-value-group"]'),
+    ).toBeNull();
   });
 });
 
@@ -162,7 +172,9 @@ describe("MetricGroup", () => {
     const { container } = renderLang(
       `root = Stack([g])\ng = MetricGroup([], "分部业绩", "FY2024")`,
     );
-    expect(container.querySelector('[data-slot="vgb-metric-group"]')).toBeNull();
+    expect(
+      container.querySelector('[data-slot="vgb-metric-group"]'),
+    ).toBeNull();
     expect(screen.queryByText("分部业绩")).toBeNull();
   });
 
@@ -172,7 +184,9 @@ describe("MetricGroup", () => {
       (_, i) => `{ label: "指标${i}", value: "${i}.0%" }`,
     ).join(", ");
     const { container } = renderLang(`root = MetricGroup([${items}])`);
-    expect(container.querySelectorAll(".vgb-metric-group-item").length).toBe(50);
+    expect(container.querySelectorAll(".vgb-metric-group-item").length).toBe(
+      50,
+    );
   });
 });
 
@@ -182,20 +196,26 @@ describe("StatDelta", () => {
     // is asserting that this block goes through it rather than around it.
     const up = renderLang(`root = StatDelta("+8.77%", "up")`);
     expect(
-      up.container.querySelector(".vgb-stat-delta-figure")?.getAttribute("style"),
+      up.container
+        .querySelector(".vgb-stat-delta-figure")
+        ?.getAttribute("style"),
     ).toContain("--openui-text-danger-primary");
 
     const down = renderLang(`root = StatDelta("-1.2pp", "down")`);
     expect(
-      down.container.querySelector(".vgb-stat-delta-figure")?.getAttribute("style"),
+      down.container
+        .querySelector(".vgb-stat-delta-figure")
+        ?.getAttribute("style"),
     ).toContain("--openui-text-success-primary");
   });
 
   it("infers the direction from the sign when trend is not stated", () => {
     const { container } = renderLang(`root = StatDelta("+8.77%")`);
-    expect(container.querySelector('[data-slot="vgb-stat-delta"]')?.getAttribute("data-trend")).toBe(
-      "up",
-    );
+    expect(
+      container
+        .querySelector('[data-slot="vgb-stat-delta"]')
+        ?.getAttribute("data-trend"),
+    ).toBe("up");
     // No basis passed — the block is the figure alone.
     expect(container.querySelector(".vgb-stat-delta-basis")).toBeNull();
   });
@@ -203,10 +223,12 @@ describe("StatDelta", () => {
   it("lets tone override the direction's colour", () => {
     // A fall in costs is a "down" that is good news, which is the only case
     // where stating both is right.
-    const { container } = renderLang(`root = StatDelta("-6.0%", "down", "vs Q3", "success")`);
-    expect(container.querySelector(".vgb-stat-delta-figure")?.getAttribute("style")).toContain(
-      "--openui-text-success-primary",
+    const { container } = renderLang(
+      `root = StatDelta("-6.0%", "down", "vs Q3", "success")`,
     );
+    expect(
+      container.querySelector(".vgb-stat-delta-figure")?.getAttribute("style"),
+    ).toContain("--openui-text-success-primary");
     expect(screen.getByText("vs Q3")).toBeTruthy();
   });
 });
@@ -226,18 +248,35 @@ describe("Avatar", () => {
   });
 
   it("never lets a non-http(s) URL become a src", () => {
-    for (const url of ["javascript:alert(1)", "data:text/html,<script>", "/relative/a.png"]) {
-      const { container } = renderLang(`root = Avatar("Grace Hopper", "${url}")`);
+    for (const url of [
+      "javascript:alert(1)",
+      "data:text/html,<script>",
+      "/relative/a.png",
+    ]) {
+      const { container } = renderLang(
+        `root = Avatar("Grace Hopper", "${url}")`,
+      );
       expect(container.querySelector("img"), `accepted: ${url}`).toBeNull();
-      expect(container.querySelector('[data-slot="vgb-avatar"]')).not.toBeNull();
+      expect(
+        container.querySelector('[data-slot="vgb-avatar"]'),
+      ).not.toBeNull();
     }
   });
 
   it("uses an http(s) image and names it for assistive technology", () => {
-    const { container } = renderLang(`root = Avatar("Ada Lovelace", "https://example.com/a.png")`);
+    const { container } = renderLang(
+      `root = Avatar("Ada Lovelace", "https://example.com/a.png")`,
+    );
     const img = container.querySelector("img");
     expect(img?.getAttribute("src")).toBe("https://example.com/a.png");
-    expect(img?.getAttribute("alt")).toBe("Ada Lovelace");
+    // The image is decorative (a failed load must paint nothing, which needs
+    // an empty alt); the name a screen reader hears lives in the sr span, and
+    // the initials stay underneath so a 404 uncovers them instead of leaving
+    // a broken-image artifact.
+    expect(img?.getAttribute("alt")).toBe("");
+    expect(container.querySelector(".vgb-avatar-sr")?.textContent).toBe(
+      "Ada Lovelace",
+    );
   });
 });
 
@@ -257,10 +296,11 @@ describe("Footnote / FootnoteList", () => {
 
   it("renders nothing for an empty list", () => {
     const { container } = renderLang(`root = Stack([l])\nl = FootnoteList([])`);
-    expect(container.querySelector('[data-slot="vgb-footnote-list"]')).toBeNull();
+    expect(
+      container.querySelector('[data-slot="vgb-footnote-list"]'),
+    ).toBeNull();
   });
 });
-
 
 describe("JsonView", () => {
   it("caps the depth and marks where it stopped", () => {
@@ -288,7 +328,9 @@ describe("JsonView", () => {
     // default rather than switching the cap off.
     const deep = { a: { b: { c: { d: 1 } } } };
     for (const bad of [undefined, null, "abc", -5, Number.NaN]) {
-      expect(formatJson(deep, bad), `depth: ${String(bad)}`).not.toContain('"d"');
+      expect(formatJson(deep, bad), `depth: ${String(bad)}`).not.toContain(
+        '"d"',
+      );
     }
 
     // An absurdly large depth is clamped to the ceiling rather than honoured,
@@ -309,7 +351,10 @@ describe("JsonView", () => {
   });
 
   it("survives a huge object without emitting an unbounded document", () => {
-    const huge = Array.from({ length: 5000 }, (_, i) => ({ i, nested: { a: [1, 2, 3] } }));
+    const huge = Array.from({ length: 5000 }, (_, i) => ({
+      i,
+      nested: { a: [1, 2, 3] },
+    }));
     const text = formatJson(huge);
     expect(text.split("\n").length).toBeLessThan(500);
   });
@@ -366,8 +411,12 @@ describe("RichText", () => {
   });
 
   it("applies alignment and size without any other prop", () => {
-    const { container } = renderLang(`root = RichText("${LONG_CJK}", "center")`);
-    const style = container.querySelector('[data-slot="vgb-rich-text"]')?.getAttribute("style");
+    const { container } = renderLang(
+      `root = RichText("${LONG_CJK}", "center")`,
+    );
+    const style = container
+      .querySelector('[data-slot="vgb-rich-text"]')
+      ?.getAttribute("style");
     expect(style).toContain("center");
     // No size passed: the medium step, not an empty font-size.
     expect(style).toContain("--openui-font-size-lg");
