@@ -51,6 +51,9 @@ export interface GeneratedUiArtifactReceipt {
   host_id: string | null;
   slot: string;
   expected_revision_id: string | null;
+  /** When the generation happened, same clock as the binding's updated_at.
+   *  Absent on receipts minted before it existed. */
+  created_at?: number;
 }
 
 const RECEIPT_RE =

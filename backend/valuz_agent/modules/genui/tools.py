@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from typing import Any
 
 from src.core import ToolDef, ToolResult
@@ -283,6 +284,11 @@ async def _deliver_generated_ui(
             "host_id": target_host.host_id if target_host else None,
             "slot": (target_host.slot or "main") if target_host else "main",
             "expected_revision_id": expected_revision_id,
+            # When this generation happened, on the same clock as the
+            # binding's ``updated_at`` — what lets a client tell "the user
+            # moved the default AFTER seeing this" (a deliberate dismissal)
+            # from "this finished and nobody has acted on it yet".
+            "created_at": int(time.time()),
         },
         ensure_ascii=False,
         separators=(",", ":"),
