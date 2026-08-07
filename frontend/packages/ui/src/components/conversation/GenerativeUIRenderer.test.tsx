@@ -6,8 +6,10 @@ vi.mock("@openuidev/react-ui", () => ({
   ThemeProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
 }));
 vi.mock("./A2UIRenderer", () => ({
-  A2UIRenderer: ({ body }: { body: string }) => (
-    <div data-testid="a2ui-renderer">{body}</div>
+  A2UIRenderer: ({ body, status }: { body: string; status?: string }) => (
+    <div data-testid="a2ui-renderer" data-status={status}>
+      {body}
+    </div>
   ),
 }));
 
@@ -74,5 +76,22 @@ describe("GenerativeUIRenderer", () => {
     );
 
     expect(screen.getByTestId("a2ui-renderer").textContent).toBe(messages);
+  });
+
+  it("should keep showing the surface while a live run has written nothing yet", () => {
+    // The model can reason for a minute before its first byte. Returning null
+    // through all of it leaves the workbench — the very surface that is
+    // supposed to be showing the generation — completely blank.
+    render(<GenerativeUIRenderer payload="" status="running" />);
+
+    expect(screen.getByTestId("a2ui-renderer").dataset.status).toBe("running");
+  });
+
+  it("should render nothing for an empty payload once the run is over", () => {
+    const { container } = render(
+      <GenerativeUIRenderer payload="" status="success" />,
+    );
+
+    expect(container.firstChild).toBe(null);
   });
 });

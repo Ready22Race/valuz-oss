@@ -1,0 +1,91 @@
+import { describe, expect, it } from "vitest";
+
+import { resolveGenUiHost } from "./tool-card-helpers";
+
+const PANEL = { host_type: "finance.research-desk", host_id: "desk" };
+
+describe("resolveGenUiHost", () => {
+  it("should return null when neither the tool nor the panel names a host", () => {
+    // Plain in-conversation visual: the inline card is the whole UX.
+    expect(resolveGenUiHost(JSON.stringify({ request: "a chart" }), null)).toBe(
+      null,
+    );
+  });
+
+  it("should use the panel host when the model omitted target_host", () => {
+    // The regression this function exists for. The model omits the argument
+    // far more often than not; the server binds to the turn's host anyway, so
+    // the card must agree or the generation paints in the wrong place.
+    expect(
+      resolveGenUiHost(JSON.stringify({ request: "the desk" }), PANEL),
+    ).toEqual({
+      host_type: "finance.research-desk",
+      host_id: "desk",
+      slot: "main",
+    });
+  });
+
+  it("should let an explicit target_host override the panel host", () => {
+    expect(
+      resolveGenUiHost(
+        JSON.stringify({
+          request: "NVDA",
+          target_host: {
+            host_type: "finance.company-research",
+            host_id: "US:NVDA",
+          },
+        }),
+        PANEL,
+      ),
+    ).toEqual({
+      host_type: "finance.company-research",
+      host_id: "US:NVDA",
+      slot: "main",
+    });
+  });
+
+  it("should keep an explicit slot from target_host", () => {
+    expect(
+      resolveGenUiHost(
+        JSON.stringify({
+          target_host: { host_type: "h", host_id: "i", slot: "sidebar" },
+        }),
+        null,
+      )?.slot,
+    ).toBe("sidebar");
+  });
+
+  it("should fall back to the panel when target_host is half-formed", () => {
+    // A host with no id cannot be addressed; treating it as an override would
+    // strand the generation between two hosts.
+    expect(
+      resolveGenUiHost(
+        JSON.stringify({ target_host: { host_type: "h" } }),
+        PANEL,
+      ),
+    ).toEqual({ ...PANEL, slot: "main" });
+  });
+
+  it("should fall back to the panel while the input is still streaming", () => {
+    // Tool input arrives token-by-token, so it is invalid JSON for most of the
+    // run — exactly the window the mirror needs to be live in.
+    expect(resolveGenUiHost('{"request": "the des', PANEL)).toEqual({
+      ...PANEL,
+      slot: "main",
+    });
+  });
+
+  it("should tolerate an absent input", () => {
+    expect(resolveGenUiHost(undefined, PANEL)).toEqual({
+      ...PANEL,
+      slot: "main",
+    });
+    expect(resolveGenUiHost(undefined, null)).toBe(null);
+  });
+
+  it("should ignore a panel host that is missing an id", () => {
+    expect(resolveGenUiHost(undefined, { host_type: "h", host_id: "" })).toBe(
+      null,
+    );
+  });
+});

@@ -273,7 +273,17 @@ export function GenerativeUIRenderer({
   // Nothing to draw rather than raw text on screen: a tool result that is not
   // an A2UI stream has no renderer, and printing its source where a rendered UI
   // belongs reads as a bug in the answer rather than in the payload.
-  if (!parsed?.body) return null;
+  //
+  // EXCEPT while the run is live. An empty payload there is a WAIT, not an
+  // absence — the model routinely reasons for a minute before writing its
+  // first byte, and returning null through all of it leaves the surface that
+  // is supposed to be showing the generation completely blank. Hand the empty
+  // body down so ``A2UIRenderer`` makes the call in ONE place: it breathes a
+  // skeleton until something resolves, here and everywhere else.
+  if (!parsed?.body) {
+    if (status !== "running") return null;
+    return <A2UIBody body="" status={status} />;
+  }
 
   return <A2UIBody body={parsed.body} status={status} />;
 }
@@ -306,7 +316,10 @@ function A2UIBody({
         className="vgb-root"
         data-a2ui-streaming={status === "running" ? "true" : undefined}
       >
-        <A2UIRenderer body={body} />
+        <A2UIRenderer
+          body={body}
+          status={status === "running" ? "running" : "success"}
+        />
       </div>
     </OpenUITheme>
   );

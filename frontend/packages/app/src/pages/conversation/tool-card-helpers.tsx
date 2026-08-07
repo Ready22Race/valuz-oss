@@ -1,8 +1,66 @@
 import type { ReactElement } from "react";
-import type { Trigger, useTranslation } from "@valuz/core";
+import type {
+  SessionMessageHostRef,
+  Trigger,
+  useTranslation,
+} from "@valuz/core";
 import type { PlanSubtask } from "@valuz/core";
 import type { I18nKey } from "@valuz/shared";
 import { extractToolOutputJson } from "../conversation-plan-anchors";
+
+/**
+ * Which product host a ``generate_ui`` run belongs to — or ``null`` for a
+ * plain in-conversation visual.
+ *
+ * This mirrors the server's ``modules/genui/tools.py::_parse_target_host``
+ * EXACTLY, and the order is the whole point: the ``target_host`` tool argument
+ * is an OVERRIDE, not the source of truth. Asking the model to copy the host
+ * out of its context into an argument is probabilistic — it forgets. The
+ * server then still binds the result to the turn's ``host_ref``, so a client
+ * that trusted the argument alone would paint the page inline for a user who
+ * is looking at that very workbench, and the edition's mirror slot would never
+ * fire. ``hostRef`` — this panel IS the host — is the deterministic floor.
+ */
+export function resolveGenUiHost(
+  input: string | undefined,
+  hostRef: SessionMessageHostRef | null | undefined,
+): SessionMessageHostRef | null {
+  if (input) {
+    try {
+      const parsed: unknown = JSON.parse(input);
+      if (parsed && typeof parsed === "object") {
+        const target = (parsed as Record<string, unknown>).target_host;
+        if (target && typeof target === "object") {
+          const record = target as Record<string, unknown>;
+          const hostType =
+            typeof record.host_type === "string" ? record.host_type : "";
+          const hostId =
+            typeof record.host_id === "string" ? record.host_id : "";
+          // A half-formed argument is not an override — fall through to the
+          // panel rather than mirroring into a host that cannot be addressed.
+          if (hostType && hostId) {
+            return {
+              host_type: hostType,
+              host_id: hostId,
+              slot:
+                typeof record.slot === "string" && record.slot
+                  ? record.slot
+                  : "main",
+            };
+          }
+        }
+      }
+    } catch {
+      // Streaming input is not valid JSON until it closes — fall through.
+    }
+  }
+  if (!hostRef?.host_type || !hostRef.host_id) return null;
+  return {
+    host_type: hostRef.host_type,
+    host_id: hostRef.host_id,
+    slot: hostRef.slot || "main",
+  };
+}
 
 /** True while a workflow snapshot's status denotes an in-flight run (vs a
  *  terminal ``completed`` / ``killed`` / ``failed`` verb). Used to decide
