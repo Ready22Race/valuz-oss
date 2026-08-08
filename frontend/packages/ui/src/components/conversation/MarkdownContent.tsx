@@ -61,6 +61,7 @@ import {
   projectCitationSidecarAnchors,
   projectEvidenceMarkdownLinks,
   rewriteCitationMarkdownLinks,
+  stripStreamingEvidenceLinkTail,
   type CitationQualityDisplayIssue,
 } from "./CitationInline";
 
@@ -997,7 +998,10 @@ export const MarkdownContent = memo(function MarkdownContent({
     stripDecorativeHeadingCitations(
       stripProtocolSourcePlaceholders(
         projectEvidenceMarkdownLinks(
-          projectCitationSidecarAnchors(content, citationBundle),
+          projectCitationSidecarAnchors(
+            stripStreamingEvidenceLinkTail(content),
+            citationBundle,
+          ),
           citationBundle,
         ),
       ),

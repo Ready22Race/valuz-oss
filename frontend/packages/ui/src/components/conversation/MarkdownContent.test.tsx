@@ -2,6 +2,7 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { MarkdownContent } from "./MarkdownContent";
+import { stripStreamingEvidenceLinkTail } from "./CitationInline";
 import type { CitationBundleV1 } from "@valuz/shared";
 
 const CITATIONS: CitationBundleV1 = {
@@ -181,6 +182,51 @@ describe("MarkdownContent local file links", () => {
       "file:///Users/ada/Downloads/ai-crm/index.html",
     );
     expect(screen.queryByText("[blocked]")).toBeNull();
+  });
+
+  it("never shows a blocked placeholder while an evidence link is still streaming", () => {
+    // Mid-stream the model has emitted only part of the binding. The complete
+    // form is dropped by projectEvidenceMarkdownLinks, but a half-written one
+    // used to reach Streamdown, which completes the link, rejects the unknown
+    // evidence: protocol and paints "[blocked]" until the sidecar lands.
+    render(
+      <MarkdownContent content="Revenue was 100 USD [source](evidence://ev_mcp_abc123" />,
+    );
+
+    expect(screen.queryByText(/\[blocked\]/)).toBeNull();
+    expect(document.body.textContent).toContain("Revenue was 100 USD");
+  });
+
+  it("drops a streaming binding tail at every stage of the protocol", () => {
+    for (const tail of [
+      "[source](evidence:",
+      "[source](evidence://",
+      "[source](evidence://ev_mcp_abc",
+      "[source](evidence://ev_mcp_abc#/data/items/9/market_cap",
+    ]) {
+      const { unmount } = render(
+        <MarkdownContent content={`Revenue was 100 USD ${tail}`} />,
+      );
+      expect(screen.queryByText(/\[blocked\]/)).toBeNull();
+      expect(document.body.textContent).toContain("Revenue was 100 USD");
+      unmount();
+    }
+  });
+
+  it("only strips a partial binding at the very end of the stream", () => {
+    // Exercised directly: through the renderer this would also measure how
+    // Streamdown treats malformed markdown, which is a separate concern.
+    expect(
+      stripStreamingEvidenceLinkTail("Revenue was 100 USD [source](evidence://ev_a"),
+    ).toBe("Revenue was 100 USD ");
+    // A completed binding is the other function's job and must survive here.
+    expect(
+      stripStreamingEvidenceLinkTail("Revenue was 100 USD [source](evidence://ev_a)"),
+    ).toBe("Revenue was 100 USD [source](evidence://ev_a)");
+    // Ordinary prose containing brackets is untouched.
+    expect(stripStreamingEvidenceLinkTail("See [note] for the method.")).toBe(
+      "See [note] for the method.",
+    );
   });
 
   it("leaves non-local hrefs on the normal markdown link path", () => {

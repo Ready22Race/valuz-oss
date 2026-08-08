@@ -28,6 +28,13 @@ const CITATION_HREF_PREFIX = "https://valuz.citation.invalid/";
 const CITATION_URI_PATTERN = /citation:\/\/([A-Za-z0-9._~:-]+)/g;
 const EVIDENCE_LINK_PATTERN =
   /\[([^\]\n]{0,240})\]\(evidence:\/\/([A-Za-z0-9_-]{1,160})(#[^\s)\n]{1,2048})?\)/g;
+// The tail of a binding the model is still writing. Streamdown completes a
+// half-written link while streaming, then rejects the unknown ``evidence:``
+// protocol and paints "[blocked]" in the middle of the sentence until the
+// sidecar arrives. A binding in flight is protocol noise the reader should
+// never see, so drop the partial exactly like the finished form is dropped.
+const PARTIAL_EVIDENCE_LINK_PATTERN =
+  /\[([^\]\n]{0,240})\]\(evidence:(?:\/(?:\/[A-Za-z0-9_-]{0,160}(?:#[^\s)\n]{0,2048})?)?)?$/;
 const HOVER_CLOSE_DELAY_MS = 150;
 const HOVER_CARD_GAP_PX = 8;
 const VIEWPORT_PADDING_PX = 16;
@@ -118,6 +125,11 @@ export function projectEvidenceMarkdownLinks(
         : label;
     },
   );
+}
+
+/** Remove a binding the model has only half-written at the end of the stream. */
+export function stripStreamingEvidenceLinkTail(content: string): string {
+  return content.replace(PARTIAL_EVIDENCE_LINK_PATTERN, "");
 }
 
 function codePointOffsetToCodeUnit(
