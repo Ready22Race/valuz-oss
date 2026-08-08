@@ -1314,7 +1314,7 @@ describe("MarkdownContent citations", () => {
     ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   });
 
-  it("does not add a scary marker to an uncited advisory claim", () => {
+  it("marks an uncited claim neutrally without a turn-level warning", () => {
     render(
       <MarkdownContent
         content="Revenue was 100 USD [source](citation://cit_first). Margin was 23.5%."
@@ -1354,15 +1354,88 @@ describe("MarkdownContent citations", () => {
       />,
     );
 
-    expect(
-      document.querySelector("[data-citation-claim-quality]"),
-    ).toBeNull();
+    // The statement itself is marked so a reader can tell it carries no
+    // source, but in the neutral tone reserved for coverage gaps.
+    const marker = document.querySelector("[data-citation-claim-quality]");
+    expect(marker).not.toBeNull();
+    expect(marker?.getAttribute("data-citation-claim-tone")).toBe("unsourced");
+    // No turn-level alarm: a missing source is not a defect claim.
     expect(
       document.querySelector("[data-citation-quality-warning]"),
     ).toBeNull();
     expect(
       document.querySelector("[data-citation-quality-summary]"),
     ).toBeNull();
+  });
+
+  it("marks an unsourced statement in place with a neutral tone", () => {
+    const content = "AI segment revenue reached 2.561 billion USD.";
+    const location = {
+      kind: "text" as const,
+      blockIndex: 0,
+      start: 0,
+      end: content.length,
+      sourceStart: 0,
+      sourceEnd: content.length,
+    };
+    render(
+      <MarkdownContent
+        content={content}
+        citationBundle={{
+          version: 1,
+          citations: [],
+          integrity: {
+            status: "passed",
+            unknownCitationIds: [],
+            unusedCitationIds: [],
+            missingLocatorCitationIds: [],
+            repairAttempts: 0,
+            policyRevision: "citation-v1",
+          },
+          quality: {
+            policyId: "finance",
+            policyRevision: "v1",
+            mode: "strict-domain",
+            status: "degraded",
+            publishStatus: "ready",
+            layers: { L4: "degraded" },
+            issues: [
+              {
+                code: "numeric_claim_without_citation",
+                layer: "L4",
+                severity: "unverified",
+                claimId: "clm_unsourced",
+                claim: { exact: content },
+                location,
+              },
+            ],
+            claims: [
+              {
+                claimId: "clm_unsourced",
+                exact: content,
+                segmentIndex: 0,
+                citationRequired: true,
+                citationIds: [],
+                status: "unsupported" as const,
+                issueCodes: ["numeric_claim_without_citation"],
+                location,
+              },
+            ],
+            metrics: {
+              citationCount: 0,
+              unsourcedClaimCount: 1,
+              unverifiedClaimCount: 0,
+              tierCounts: {},
+            },
+          },
+        }}
+      />,
+    );
+
+    const marker = document.querySelector("[data-citation-claim-quality]");
+    expect(marker).not.toBeNull();
+    // Neutral tone: a coverage gap must not borrow the conflict warning style.
+    expect(marker?.getAttribute("data-citation-claim-tone")).toBe("unsourced");
   });
 
   it("uses claim source offsets to mark repeated critical claims independently", () => {

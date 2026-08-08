@@ -40,7 +40,10 @@ export interface CitationQualityDisplayIssue {
   claimId?: string;
   label: string;
   severity: string;
-  tone: "advisory" | "critical";
+  /** ``unsourced`` marks a statement that carries no binding at all. It is a
+   * coverage gap, not evidence that the statement is wrong, so it renders in
+   * a neutral tone rather than the warning tone reserved for conflicts. */
+  tone: "advisory" | "critical" | "unsourced";
 }
 
 function comparableEvidenceText(value: string): string {
@@ -67,7 +70,9 @@ function redundantEvidenceSnippet(quote: string, snippet?: string): boolean {
   const snippetPrefix = comparableSnippet
     .replace(/(?:\.{3}|…)\s*$/u, "")
     .trim();
-  return snippetPrefix.length >= 40 && comparableQuote.startsWith(snippetPrefix);
+  return (
+    snippetPrefix.length >= 40 && comparableQuote.startsWith(snippetPrefix)
+  );
 }
 
 export function rewriteCitationMarkdownLinks(content: string): string {
@@ -115,7 +120,10 @@ export function projectEvidenceMarkdownLinks(
   );
 }
 
-function codePointOffsetToCodeUnit(content: string, sourceOffset: number): number {
+function codePointOffsetToCodeUnit(
+  content: string,
+  sourceOffset: number,
+): number {
   if (!Number.isInteger(sourceOffset) || sourceOffset < 0) return -1;
   const points = Array.from(content);
   if (sourceOffset > points.length) return -1;
@@ -141,7 +149,10 @@ export function projectCitationSidecarAnchors(
     // projected. Only de-duplicate a link already present at this exact raw
     // claim boundary. The same source can legitimately support two adjacent
     // claims, so a broad nearby-text check would silently drop the latter.
-    const escapedCitationId = citationId.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+    const escapedCitationId = citationId.replace(
+      /[.*+?^${}()|[\]\\]/gu,
+      "\\$&",
+    );
     const atBoundary = content.slice(offset, offset + 280);
     if (
       new RegExp(
@@ -201,9 +212,7 @@ export function citationOffsetFromHref(href?: string): number | null {
   }
 }
 
-export function citationOccurrences(
-  content: string,
-): Map<string, number[]> {
+export function citationOccurrences(content: string): Map<string, number[]> {
   const occurrences = new Map<string, number[]>();
   for (const match of content.matchAll(CITATION_URI_PATTERN)) {
     const citationId = match[1];
@@ -227,7 +236,11 @@ export function citationDisplayOrder(
   const order = new Map<string, number>();
   for (const match of content.matchAll(CITATION_URI_PATTERN)) {
     const citationId = match[1];
-    if (citationId && !derivationIds.has(citationId) && !order.has(citationId)) {
+    if (
+      citationId &&
+      !derivationIds.has(citationId) &&
+      !order.has(citationId)
+    ) {
       order.set(citationId, order.size + 1);
     }
   }
@@ -240,16 +253,17 @@ export function usedCitations(
   displayOrder?: ReadonlyMap<string, number>,
 ): Array<{ displayIndex: number; citation: CitationRefV1 }> {
   if (!bundle) return [];
-  const byId = new Map(bundle.citations.map((citation) => [citation.citationId, citation]));
+  const byId = new Map(
+    bundle.citations.map((citation) => [citation.citationId, citation]),
+  );
   const localOrder = citationDisplayOrder(content, bundle);
   return Array.from(localOrder, ([citationId, localDisplayIndex]) => {
     const citation = byId.get(citationId);
     const displayIndex = displayOrder?.get(citationId) ?? localDisplayIndex;
     return citation ? { displayIndex, citation } : null;
   }).filter(
-    (
-      item,
-    ): item is { displayIndex: number; citation: CitationRefV1 } => item !== null,
+    (item): item is { displayIndex: number; citation: CitationRefV1 } =>
+      item !== null,
   );
 }
 
@@ -407,7 +421,10 @@ function CitationTableRow({
   return (
     <tr
       {...props}
-      className={cn("border-b border-surface-border last:border-b-0", className)}
+      className={cn(
+        "border-b border-surface-border last:border-b-0",
+        className,
+      )}
     >
       {children}
     </tr>
@@ -550,7 +567,9 @@ function CitationHoverCard({
     t("ui.citation.documentCoverageComplete"),
   );
   const attribution =
-    citation.source.organization ?? citation.source.author ?? citation.source.providerId;
+    citation.source.organization ??
+    citation.source.author ??
+    citation.source.providerId;
   const quality = qualityBadge(citation);
   const qualityTone = qualityIssues?.some((issue) => issue.tone === "critical")
     ? "critical"
@@ -584,7 +603,8 @@ function CitationHoverCard({
       <span className="flex items-start gap-2">
         <span className="min-w-0 flex-1">
           <span className="block font-medium text-ink-heading">
-            {displayIndex ? `${displayIndex} ` : ""}{citation.source.title}
+            {displayIndex ? `${displayIndex} ` : ""}
+            {citation.source.title}
           </span>
           <span className="mt-0.5 block text-ink-meta">
             {[attribution, detail.time].filter(Boolean).join(" · ")}
@@ -635,10 +655,7 @@ function CitationHoverCard({
               : "bg-surface-muted/70",
           )}
         >
-          <span
-            className="flex h-5 shrink-0 items-center"
-            aria-hidden="true"
-          >
+          <span className="flex h-5 shrink-0 items-center" aria-hidden="true">
             {qualityTone === "critical" ? (
               <AlertTriangle className="h-3.5 w-3.5 text-warning-text" />
             ) : (
@@ -691,8 +708,7 @@ function CitationHoverCard({
                   <span className="text-ink-meta">
                     {" "}
                     · {String(input.value)}
-                    {input.unit ? ` ${input.unit}` : ""} ·{" "}
-                    {source.source.title}
+                    {input.unit ? ` ${input.unit}` : ""} · {source.source.title}
                   </span>
                 </button>
               );
@@ -804,7 +820,9 @@ export function CitationPill({
     const spaceAbove = triggerRect.top - VIEWPORT_PADDING_PX;
     const requiredSpace = cardHeight + HOVER_CARD_GAP_PX;
     const nextSide: CitationCardSide =
-      spaceBelow >= requiredSpace || spaceBelow >= spaceAbove ? "bottom" : "top";
+      spaceBelow >= requiredSpace || spaceBelow >= spaceAbove
+        ? "bottom"
+        : "top";
     setCardSide(nextSide);
 
     const preferredTop =
@@ -827,10 +845,7 @@ export function CitationPill({
         ),
         maxLeft,
       ),
-      top: Math.min(
-        Math.max(preferredTop, VIEWPORT_PADDING_PX),
-        maxTop,
-      ),
+      top: Math.min(Math.max(preferredTop, VIEWPORT_PADDING_PX), maxTop),
     });
   }, []);
 
@@ -853,11 +868,7 @@ export function CitationPill({
         variant === "source-row"
           ? "relative block w-full"
           : "relative -top-px inline-flex align-middle leading-none",
-        variant === "pill"
-          ? qualityStatus
-            ? "mx-1"
-            : "mx-0.5"
-          : undefined,
+        variant === "pill" ? (qualityStatus ? "mx-1" : "mx-0.5") : undefined,
       )}
       onMouseEnter={showCard}
       onMouseLeave={scheduleClose}
@@ -866,7 +877,8 @@ export function CitationPill({
         const next = event.relatedTarget;
         if (
           !(next instanceof Node) ||
-          (!event.currentTarget.contains(next) && !cardRef.current?.contains(next))
+          (!event.currentTarget.contains(next) &&
+            !cardRef.current?.contains(next))
         ) {
           scheduleClose();
         }
@@ -902,15 +914,15 @@ export function CitationPill({
             isCalculation
               ? t("ui.citation.calculationDetails", "Calculation details")
               : citation && displayIndex
-              ? [
-                  t("ui.citation.ariaLabel", "Citation {index}", {
-                    index: displayIndex,
-                  }),
-                  qualityStatus ? t("ui.citation.qualityNeedsReview") : null,
-                ]
-                  .filter(Boolean)
-                  .join(" · ")
-              : t("ui.citation.unavailable", "Citation unavailable")
+                ? [
+                    t("ui.citation.ariaLabel", "Citation {index}", {
+                      index: displayIndex,
+                    }),
+                    qualityStatus ? t("ui.citation.qualityNeedsReview") : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")
+                : t("ui.citation.unavailable", "Citation unavailable")
           }
           aria-disabled={!canOpen}
           data-citation-id={citationId}
@@ -948,7 +960,10 @@ export function CitationPill({
           )}
         </button>
       )}
-      {hovered && citation && (displayIndex || isCalculation) && typeof document !== "undefined"
+      {hovered &&
+      citation &&
+      (displayIndex || isCalculation) &&
+      typeof document !== "undefined"
         ? createPortal(
             <CitationHoverCard
               displayIndex={displayIndex}
@@ -1034,7 +1049,10 @@ export function CitationSourceCards({
               {citation.source.title}
               {quality ? (
                 <>
-                  <span aria-hidden="true" className="ml-1 text-2xs text-ink-meta">
+                  <span
+                    aria-hidden="true"
+                    className="ml-1 text-2xs text-ink-meta"
+                  >
                     ·
                   </span>
                   <span

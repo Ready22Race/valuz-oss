@@ -2469,6 +2469,7 @@ export type KnownI18nKey =
   | "ui.citation.qualityClaimSourceMissing"
   | "ui.citation.qualityClaimStructuredMismatch"
   | "ui.citation.qualityClaimTranslationReview"
+  | "ui.citation.qualityClaimUnsourcedTitle"
   | "ui.citation.qualityCoverageEnded"
   | "ui.citation.qualityDegraded"
   | "ui.citation.qualityIssueAmbiguous"
