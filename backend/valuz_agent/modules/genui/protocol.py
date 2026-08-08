@@ -441,7 +441,18 @@ def extract_a2ui_document(raw: str) -> str | None:
         try:
             message = json.loads(line)
         except json.JSONDecodeError:
-            return None
+            # A ``{``-opening line that will not parse is a TRUNCATED tail:
+            # A2UI is append-only JSONL, so a generation cut off by an output
+            # cap or an aborted stream leaves its last line half-written while
+            # every earlier line is complete. Reject-the-whole-document threw
+            # away a nearly-finished page (blank workbench, no version) for a
+            # single missing closing brace. Instead, stop at the break and
+            # keep the valid prefix — the page renders what completed, minus
+            # the final unfinished section. (A break, not skip-and-continue:
+            # nothing valid follows a truncation in an append-only stream, and
+            # skipping into later lines could stitch across a genuinely
+            # corrupt middle.)
+            break
         if not isinstance(message, dict):
             continue
         if not any(key in message for key in _A2UI_MESSAGE_KEYS):
@@ -449,6 +460,8 @@ def extract_a2ui_document(raw: str) -> str | None:
         if "updateComponents" in message:
             saw_components = True
         kept.append(line)
+    # Still require a real page: a run truncated BEFORE its first complete
+    # ``updateComponents`` has nothing to show and is rejected as before.
     if not saw_components:
         return None
     return "\n".join(_without_repeated_document(kept))

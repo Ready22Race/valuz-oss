@@ -45,9 +45,18 @@ def test_should_drop_the_closing_prose_models_add() -> None:
     assert extract_a2ui_document(raw) == DOC
 
 
-def test_should_refuse_a_document_cut_off_mid_json() -> None:
-    # An aborted generation. Recording it would produce a bindable version
-    # that renders as whatever stray component survived the truncation.
+def test_should_salvage_the_valid_prefix_when_the_tail_is_truncated() -> None:
+    # A generation cut off by an output cap: a complete first section, then a
+    # half-written second updateComponents line. Keep the complete prefix
+    # (the page renders what finished) instead of throwing the whole page
+    # away — A2UI is append-only, so the break is always the tail.
+    truncated = f"{DOC}\n{_COMPONENTS[:80]}"
+    assert extract_a2ui_document(truncated) == DOC
+
+
+def test_should_reject_a_run_truncated_before_its_first_component() -> None:
+    # Cut off before any complete updateComponents — nothing usable to show,
+    # so it is still refused (no blank bindable version).
     assert extract_a2ui_document(f"{_CREATE}\n{_COMPONENTS[:80]}") is None
 
 
