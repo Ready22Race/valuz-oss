@@ -18,6 +18,18 @@ from valuz_agent.ports.genui_blocks import GenUIBlockRegistry
 
 OUTPUT_FORMAT = "A2UI v0.9 JSON message stream"
 
+#: Follow-up prompt when the previous turn's A2UI document was cut off at the
+#: output-token cap. Sent in the SAME ephemeral session, so the model sees its
+#: own truncated output in history and continues it. It must not repeat what it
+#: already completed (components merge by id, so a repeat only bloats the doc)
+#: and must not add prose — only the remaining A2UI message lines.
+CONTINUATION_PROMPT = (
+    "你上一条 A2UI 文档在输出上限处被截断了,还没写完。"
+    "请从中断处继续,只补齐**尚未输出完整**的剩余消息——"
+    "每条消息一行完整 JSON,不要重复已经完整输出过的组件,"
+    "不要加任何解释文字,直接接着写。"
+)
+
 #: Which set of components one generation is offered.
 #:
 #: The split follows where a component comes from, not what it is made of:
@@ -409,6 +421,30 @@ _A2UI_MESSAGE_KEYS = (
     "updateDataModel",
     "deleteSurface",
 )
+
+
+def a2ui_message_lines(raw: str) -> tuple[list[str], bool]:
+    """The complete JSON message lines in ``raw`` and whether its tail is cut.
+
+    A2UI is append-only JSONL, so a generation stopped by an output cap leaves
+    every line complete except a half-written last one. This returns the
+    complete ``{``-opening lines in order and a ``truncated`` flag set when the
+    stream broke mid-line — the two facts a continuation loop needs: what has
+    arrived, and whether to ask the model to keep writing.
+    """
+    lines: list[str] = []
+    truncated = False
+    for raw_line in raw.split("\n"):
+        line = raw_line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            json.loads(line)
+        except json.JSONDecodeError:
+            truncated = True
+            break
+        lines.append(line)
+    return lines, truncated
 
 
 def extract_a2ui_document(raw: str) -> str | None:
