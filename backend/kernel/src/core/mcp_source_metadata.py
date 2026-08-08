@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -23,6 +24,8 @@ MCP_SOURCE_TRANSPORT_KEY = "_valuz_mcp_source_transport_v1"
 
 _MAX_DESCRIPTOR_CHARS = 256_000
 _MAX_RESOURCES = 64
+logger = logging.getLogger(__name__)
+
 _MAX_ITEMS = 2_000
 _MAX_QUOTE_CHARS = 32_000
 _MAX_STRING_CHARS = 4_096
@@ -206,12 +209,31 @@ def adapt_mcp_source_result(
                 return None
             envelopes.extend(summary_envelopes)
         elif kind == "document-discovery":
-            # Discovery rows select what to read next.  Even their title or
-            # doc_id cannot support a business claim, and exposing a generic
-            # metadata Collection lets models bind arbitrary prose to search
-            # result fields.  Keep the rows in Model Content and Task Coverage
-            # only; document_fetch/kb_search supplies citable chunks.
-            continue
+            # Discovery rows select what to read next.  Their title, doc id,
+            # url and relevance score cannot support a business claim, and
+            # exposing a generic metadata Collection would let models bind
+            # arbitrary prose to search result fields.  Those stay in Model
+            # Content and Task Coverage only.
+            #
+            # A row's declared ``mapping.summary`` is different in kind: it is
+            # provider-authored document text, the same material that the
+            # ``document-summary`` resource already registers as derived
+            # Evidence when it arrives from an opened document.  Refusing it
+            # here only because it travelled inside a search hit left research
+            # answers with no citable material at all, so the model wrote the
+            # summary's own figures with nothing attached.  Register it as
+            # derived text Evidence, ranked below real chunks by policy; a
+            # claim still has to match the summary deterministically, and
+            # ``document_fetch`` remains the way to reach original chunks.
+            summary_envelopes = _discovery_summary_envelopes(
+                target,
+                descriptor=descriptor,
+                resource=raw_resource,
+                captured_at=captured_at,
+            )
+            if summary_envelopes is None:
+                return None
+            envelopes.extend(summary_envelopes)
         elif kind == "structured-collection":
             collection = _structured_collection_envelope(
                 target,
@@ -241,6 +263,21 @@ def adapt_mcp_source_result(
                 "data": model_content,
                 "_valuz_evidence": _shift_root_envelopes(envelopes),
             }
+    if retrieval_mode is not None:
+        # Whether a search actually offered citable chunks is the single most
+        # useful diagnostic when an answer ends up unsourced, and the provider
+        # already tells us. It was being validated and then discarded, leaving
+        # no way to tell "the provider returned no chunks" apart from "we
+        # dropped them". Record the shape only — never the query text.
+        logger.info(
+            "mcp search retrieval: tool=%s mode=%s query_present=%s chunks=%s kinds=%s evidence=%d",
+            tool_name,
+            retrieval_mode,
+            query_present,
+            chunk_status,
+            ",".join(sorted(kinds)),
+            len(envelopes),
+        )
     return McpSourceAdaptation(
         model_content=model_content,
         resource_kinds=frozenset(kinds),
@@ -439,6 +476,95 @@ def _document_envelopes(
             }
         )
     return output
+
+
+_MAX_DISCOVERY_SUMMARY_ROWS = 24
+_MIN_DISCOVERY_SUMMARY_CHARS = 200
+
+
+def _discovery_summary_envelopes(
+    target: Any,
+    *,
+    descriptor: Mapping[str, Any],
+    resource: Mapping[str, Any],
+    captured_at: str,
+) -> list[dict[str, Any]] | None:
+    """Register substantive per-row search summaries as derived Evidence.
+
+    Only the producer-declared ``mapping.summary`` pointer is read; nothing is
+    inferred from arbitrary result JSON. Short blurbs stay non-citable because
+    a one-line teaser cannot carry a financial claim, and every accepted row
+    keeps an ``external`` locator so no page or bbox is ever invented.
+    """
+
+    mapping = resource.get("mapping")
+    if not isinstance(mapping, Mapping):
+        return []
+    summary_pointer = mapping.get("summary")
+    source_id_pointer = mapping.get("sourceId")
+    if not isinstance(summary_pointer, str) or not isinstance(source_id_pointer, str):
+        return []
+    root_pointer = _pointer(resource.get("rootPointer"))
+    items_pointer = _pointer(resource.get("itemsPointer"))
+    resource_id = _bounded_string(resource.get("resourceId"), 512)
+    if root_pointer is None or items_pointer is None or not resource_id:
+        return None
+    found, items = _resolve_pointer(target, items_pointer)
+    if not found or not isinstance(items, list):
+        return None
+
+    provider = descriptor.get("provider")
+    provider = provider if isinstance(provider, Mapping) else {}
+    envelopes: list[dict[str, Any]] = []
+    for item in items[:_MAX_DISCOVERY_SUMMARY_ROWS]:
+        if not isinstance(item, Mapping):
+            continue
+        summary = _mapped_value(item, summary_pointer)
+        source_id = _mapped_value(item, source_id_pointer)
+        if not isinstance(summary, str) or not source_id:
+            continue
+        quote = summary.strip()
+        if len(quote) < _MIN_DISCOVERY_SUMMARY_CHARS or len(quote) > _MAX_QUOTE_CHARS:
+            continue
+        url = _mapped_value(item, mapping.get("url"))
+        category = _mapped_value(item, mapping.get("providerCategory"))
+        published_at = _mapped_value(item, mapping.get("publishedAt"))
+        title = _mapped_value(item, mapping.get("title")) or _fallback_document_title(
+            url,
+            category=category,
+        )
+        source = _document_source(
+            descriptor,
+            source_id=str(source_id),
+            document_id=str(source_id),
+            title=str(title),
+            version=str(published_at or "") or None,
+            published_at=published_at,
+            url=url,
+            category=category or "document_summary",
+            captured_at=captured_at,
+        )
+        digest = hashlib.sha256(
+            (
+                f"{provider.get('id')}\0{resource_id}\0{source_id}\0"
+                f"{hashlib.sha256(quote.encode()).hexdigest()}"
+            ).encode()
+        ).hexdigest()[:24]
+        envelopes.append(
+            {
+                "evidenceHandle": f"ev_mcp_{digest}",
+                "source": source,
+                "evidence": {
+                    "kind": "text",
+                    "quote": quote,
+                    "snippet": quote[:4_000],
+                    "capturedAt": captured_at,
+                    "contentHash": (f"sha256:{hashlib.sha256(quote.encode()).hexdigest()}"),
+                },
+                "locator": {"kind": "external", "fragment": "provider-summary"},
+            }
+        )
+    return envelopes
 
 
 def _document_summary_envelopes(
