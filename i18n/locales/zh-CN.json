@@ -2062,6 +2062,7 @@
       "qualityIssueSource": "来源等级或可信度不足",
       "qualityClaimNoSource": "该内容没有可打开的对应来源，暂时无法自动核验。请结合原始资料核对，或重新生成并要求补充来源。",
       "qualityClaimSourceMissing": "这项表述没有找到对应来源，可能来自模型推测，暂时无法核验，请勿将其视为已证实事实。",
+      "qualityClaimUnsourcedTitle": "未标注来源",
       "qualityClaimMismatch": "当前表述与引用内容的对应关系不够明确，建议查看原文确认。",
       "qualityClaimStructuredMismatch": "引用字段“{field}”的值为 {value}，与当前表述可能不一致，请核对。",
       "qualityClaimPartial": "引用只能核对当前表述中的部分内容，其余内容可能缺少依据，请核对。",
