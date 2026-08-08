@@ -160,9 +160,7 @@ def test_structured_projection_accepts_dimension_implied_by_canonical_metric() -
                     "metrics": {
                         "parent_net_profit": {
                             "aliases": ["归母净利润"],
-                            "fields": [
-                                "net_profit_attributable_to_owners_of_the_parent"
-                            ],
+                            "fields": ["net_profit_attributable_to_owners_of_the_parent"],
                             "dimensions": {"basis": "attributable"},
                         }
                     }
@@ -181,9 +179,7 @@ def test_structured_projection_accepts_dimension_implied_by_canonical_metric() -
                         },
                     }
                 },
-                "dimensions": {
-                    "basis": {"attributable": ["归母", "attributable to parent"]}
-                },
+                "dimensions": {"basis": {"attributable": ["归母", "attributable to parent"]}},
             },
             "rules": {"factual_claim": {"citation_required": True}},
         },
@@ -797,6 +793,146 @@ def test_materialized_structured_period_prefers_fiscal_quarter_over_frequency() 
     assert result.bundle["citations"][0]["evidence"]["period"] == "2026 Q3"
 
 
+def test_native_collection_record_period_overrides_generic_common_frequency() -> None:
+    data = [
+        {
+            "symbol": "600519",
+            "fiscal_year": 2024,
+            "fiscal_quarter": "Q1",
+            "period": "quarterly",
+            "end_date": "2024-03-31",
+            "currency": "CNY",
+            "operating_revenue": 45_775_517_043,
+        }
+    ]
+    raw_hash = json.dumps(
+        data,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    handle = "evc_native_quarter_12345678"
+    raw = {
+        "data": data,
+        "_valuz_evidence": [
+            {
+                "version": 1,
+                "kind": "structured-evidence-collection",
+                "collectionHandle": handle,
+                "source": {
+                    "sourceId": "reportify.income_statement:600519",
+                    "providerId": "reportify",
+                    "sourceType": "dataset",
+                    "title": "Reportify · income_statement",
+                    "retrievedAt": "2026-08-08T00:00:00Z",
+                },
+                "common": {
+                    "datasetId": "reportify.income_statement",
+                    "toolName": "income_statement",
+                    "currency": "CNY",
+                    "period": "2024 quarterly",
+                    "capturedAt": "2026-08-08T00:00:00Z",
+                },
+                "addressing": {
+                    "mode": "json-pointer",
+                    "contentRoot": "/data",
+                    "identityFields": [
+                        "/symbol",
+                        "/fiscal_year",
+                        "/fiscal_quarter",
+                    ],
+                    "fieldSchemaRef": {
+                        "schemaId": "reportify.income_statement",
+                        "revision": "1",
+                    },
+                    "allowedPathRoots": ["/data"],
+                },
+                "semantics": {
+                    "entity": {"id": "/symbol"},
+                    "period": {
+                        "fiscalYear": "/fiscal_year",
+                        # Reportify exposes the dataset frequency through the
+                        # canonical period slot while keeping the concrete
+                        # quarter as a row identity field.
+                        "period": "/period",
+                        "asOf": "/end_date",
+                    },
+                    "unit": {"currency": "/currency"},
+                    "metric": {
+                        "mode": "field-name",
+                        "valueRoots": [""],
+                        "excludedFields": [
+                            "/symbol",
+                            "/fiscal_year",
+                            "/fiscal_quarter",
+                            "/end_date",
+                            "/currency",
+                        ],
+                    },
+                },
+                "contentHash": (f"sha256:{hashlib.sha256(raw_hash.encode('utf-8')).hexdigest()}"),
+                "sparseOverrides": [],
+            }
+        ],
+    }
+    visible = compact_citation_tool_content(raw)
+    private = private_citation_tool_content(raw)
+    assert visible is not None and private is not None
+    registry = EvidenceRegistry()
+    assert registry.register_tool_projection(visible, private, trusted_private=True) == 1
+
+    record = registry.materialize_reference(handle, "#/data/0/operating_revenue")
+
+    assert record is not None
+    assert record.evidence["period"] == "2024 Q1"
+    assert record.evidence["asOf"] == "2024-03-31"
+
+
+def test_native_collection_uses_currency_as_unit_for_monetary_equity_field() -> None:
+    item = _item("ev_equity_2024_12345678")
+    item["source"].update({"sourceType": "dataset"})
+    item["evidence"] = {
+        "kind": "structured-data",
+        "datasetId": "reportify.balance_sheet",
+        "toolName": "balance_sheet",
+        "recordKey": "600519|2024|FY",
+        "entityId": "600519",
+        "field": "equity_attributable_to_owners_of_the_parent",
+        "metric": "equity_attributable_to_owners_of_the_parent",
+        "value": 233_105_984_399,
+        "currency": "CNY",
+        "period": "2024 FY",
+        "capturedAt": "2026-08-08T00:00:00Z",
+    }
+    raw = {
+        "data": [
+            {
+                "symbol": "600519",
+                "fiscal_year": 2024,
+                "fiscal_quarter": "FY",
+                "currency": "CNY",
+                "equity_attributable_to_owners_of_the_parent": 233_105_984_399,
+            }
+        ],
+        "_valuz_evidence": [item],
+    }
+    visible = compact_citation_tool_content(raw)
+    private = private_citation_tool_content(raw)
+    assert visible is not None and private is not None
+    registry = EvidenceRegistry()
+    assert registry.register_tool_projection(visible, private, trusted_private=True) == 1
+    handle = visible["_valuz_evidence_hint"]["collectionHandle"]
+
+    record = registry.materialize_reference(
+        handle,
+        "#/data/0/equity_attributable_to_owners_of_the_parent",
+    )
+
+    assert record is not None
+    assert record.evidence["unit"] == "CNY"
+
+
 def test_multi_period_legacy_batch_collapses_repeated_fields_into_one_collection() -> None:
     source = {
         "sourceId": "financials:600519",
@@ -1004,6 +1140,92 @@ def test_calculation_citation_moves_from_period_cell_to_matching_result_cell() -
     assert "citation://" not in row[4]
     assert result.bundle is not None
     assert len(result.bundle["citations"]) == 3
+
+
+def test_standalone_calculation_citation_moves_to_preceding_latex_formula() -> None:
+    def structured(handle: str, field: str, value: int) -> dict:
+        item = _item(handle)
+        item["source"].update({"sourceType": "dataset"})
+        item["source"].pop("documentId")
+        item["source"].pop("documentVersion")
+        item["evidence"] = {
+            "kind": "structured-data",
+            "datasetId": "financials",
+            "toolName": "income_statement",
+            "recordKey": "600519|2024|FY",
+            "entityId": "600519",
+            "field": field,
+            "metric": field,
+            "value": value,
+            "unit": "CNY",
+            "period": "2024 FY",
+            "capturedAt": "2026-08-08T00:00:00Z",
+        }
+        return item
+
+    profit = structured(
+        "ev_parent_profit_12345678",
+        "net_profit_attributable_to_owners_of_the_parent",
+        86_228_146_422,
+    )
+    revenue = structured(
+        "ev_operating_revenue_12345678",
+        "operating_revenue",
+        170_899_152_276,
+    )
+    calculation = _item("ev_net_margin_12345678")
+    calculation["source"].update(
+        {
+            "sourceId": "runtime-net-margin",
+            "providerId": "runtime",
+            "sourceType": "tool-result",
+        }
+    )
+    calculation["source"].pop("documentId")
+    calculation["source"].pop("documentVersion")
+    calculation["evidence"] = {
+        "kind": "calculation",
+        "toolName": "citation_calculate",
+        "expression": "profit / revenue * 100",
+        "inputs": [
+            {
+                "name": "profit",
+                "citationId": profit["evidenceHandle"],
+                "value": 86_228_146_422,
+                "unit": "CNY",
+            },
+            {
+                "name": "revenue",
+                "citationId": revenue["evidenceHandle"],
+                "value": 170_899_152_276,
+                "unit": "CNY",
+            },
+        ],
+        "result": "50.46",
+        "unit": "%",
+        "rounding": "2dp",
+        "metric": "net_margin",
+        "period": "2024 FY",
+        "calculatedAt": "2026-08-08T00:00:00Z",
+    }
+    guard = CitationGuard(
+        _registry(profit, revenue, calculation),
+        message_id="msg-standalone-calc-link",
+        user_prompt="Calculate net margin",
+        policy_available=True,
+        verification_enabled=False,
+    )
+
+    result = guard.finalize(
+        "贵州茅台 2024 年归母净利率：\n\n"
+        r"$$\frac{86{,}228{,}146{,}422}{170{,}899{,}152{,}276} "
+        r"\times 100\% = \mathbf{50.46\%}$$"
+        "\n\n[source](evidence://ev_net_margin_12345678)"
+    )
+
+    formula_line = next(line for line in result.text.splitlines() if "\\frac" in line)
+    assert "citation://" in formula_line
+    assert not any(line.strip().startswith("[1]") for line in result.text.splitlines())
 
 
 def test_calculation_inputs_resolve_structured_collection_addresses() -> None:

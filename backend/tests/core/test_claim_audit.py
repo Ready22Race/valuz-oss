@@ -309,6 +309,35 @@ def test_calculation_metric_accepts_edition_alias() -> None:
     )
 
 
+def test_calculation_metric_accepts_unique_alias_inside_descriptive_label() -> None:
+    claim = extract_claims(
+        "2024 年营业收入为 1,708.99 亿元。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    evidence = {
+        "kind": "calculation",
+        "expression": "170899152276 / 100000000",
+        "inputs": [
+            {
+                "name": "营业收入_元",
+                "citationId": "cit_revenue_raw",
+                "value": "170899152276",
+                "unit": "CNY",
+            }
+        ],
+        "result": "1708.99",
+        "unit": "亿元",
+        "metric": "贵州茅台 2024 年营业收入",
+        "period": "FY2024",
+        "calculatedAt": "2026-08-08T00:00:00Z",
+    }
+
+    assert (
+        verify_evidence_support(claim, evidence, semantics=_FINANCE_SEMANTICS).status == "supported"
+    )
+
+
 def test_structured_metric_prefers_exact_mixed_language_alias_over_short_machine_tokens() -> None:
     semantics = {
         "metric_ontology": {
@@ -1215,9 +1244,7 @@ def test_parenthetical_reporting_context_stays_with_the_numeric_claim() -> None:
     )
 
     assert len(claims) == 1
-    assert claims[0].exact == (
-        "营业收入（2024年年报，报告期：2024-12-31）：1,708.99 亿元"
-    )
+    assert claims[0].exact == ("营业收入（2024年年报，报告期：2024-12-31）：1,708.99 亿元")
     assert claims[0].kind == "financial-fact"
     assert claims[0].normalized["metric"] == "operating_revenue"
     assert claims[0].normalized["period"] == "2024 FY"
@@ -1614,6 +1641,59 @@ def test_latex_formula_is_safely_recomputed_against_calculation_evidence() -> No
     )
 
 
+def test_latex_formula_with_rendered_result_matches_calculation_evidence() -> None:
+    evidence = {
+        "kind": "calculation",
+        "expression": "profit / revenue * 100",
+        "inputs": [
+            {"name": "profit", "value": 86_228_146_422, "unit": "CNY"},
+            {"name": "revenue", "value": 170_899_152_276, "unit": "CNY"},
+        ],
+        "result": "50.46",
+        "unit": "%",
+        "rounding": "2dp",
+    }
+    formula = (
+        r"$$\frac{86{,}228{,}146{,}422}{170{,}899{,}152{,}276} "
+        r"\times 100\% = \mathbf{50.46\%}$$"
+    )
+
+    assert calculation_formula_matches_evidence(formula, evidence) is True
+
+
+def test_formula_accepts_same_unit_inputs_rendered_at_one_common_scale() -> None:
+    evidence = {
+        "kind": "calculation",
+        "expression": "profit / revenue * 100",
+        "inputs": [
+            {"name": "profit", "value": 86_228_146_422, "unit": "CNY"},
+            {"name": "revenue", "value": 170_899_152_276, "unit": "CNY"},
+        ],
+        "result": "50.46",
+        "unit": "%",
+        "rounding": "2dp",
+    }
+
+    assert (
+        calculation_formula_matches_evidence(
+            "计算公式：归母净利率 = 归母净利润 ÷ 营业收入 = 862.28 ÷ 1,708.99",
+            evidence,
+        )
+        is True
+    )
+
+
+def test_dated_calculation_label_ending_in_colon_is_presentation_context() -> None:
+    claim = extract_claims(
+        "贵州茅台 2024 年归母净利率：",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+
+    assert claim.kind == "presentation"
+    assert claim.citation_required is False
+
+
 def test_markdown_sources_heading_stops_claim_audit() -> None:
     claims = extract_claims(
         "Revenue was 120 USD.\n\n## Sources\n\n- Publisher is Example Corp.",
@@ -1783,9 +1863,7 @@ class _BatchLocalSemanticVerifier:
         return {
             request.claim.claim_id: SemanticVerificationResult(
                 verdict="entailed",
-                evidence_handles=tuple(
-                    candidate.handle for candidate in request.candidates
-                ),
+                evidence_handles=tuple(candidate.handle for candidate in request.candidates),
                 confidence=0.98,
                 covered_parts=(request.claim.exact,),
                 verifier_revision="batch-local-test-v1",
