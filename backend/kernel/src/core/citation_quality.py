@@ -51,6 +51,7 @@ from src.core.claim_evidence_resolution import (
     prepare_semantic_verification_request,
     resolve_claim_evidence,
 )
+from src.core.claim_normalization import ClaimNormalizerPort
 
 _UNSOURCED_RE = re.compile(r"\[UNSOURCED\]", re.IGNORECASE)
 _UNVERIFIED_RE = re.compile(r"\[UNVERIFIED(?::[^\]]*)?\]", re.IGNORECASE)
@@ -102,6 +103,7 @@ def evaluate_citation_quality(
     entity_aliases: Mapping[str, Iterable[str]] | None = None,
     semantic_verifier: SemanticVerifierPort | None = None,
     semantic_verified_claim_citation_ids: Mapping[str, Iterable[str]] | None = None,
+    claim_normalizer: ClaimNormalizerPort | None = None,
 ) -> dict[str, Any]:
     """Return a copy of *bundle* decorated with quality annotations."""
 
@@ -435,9 +437,8 @@ def evaluate_citation_quality(
         semantics=semantics,
         entity_aliases=entity_aliases,
         semantic_verifier=semantic_verifier,
-        semantic_verified_claim_citation_ids=(
-            semantic_verified_claim_citation_ids or {}
-        ),
+        semantic_verified_claim_citation_ids=(semantic_verified_claim_citation_ids or {}),
+        claim_normalizer=claim_normalizer,
         claim_audit_rule=claim_audit_rule,
         projection_claim_ids=_verified_projection_cell_claim_ids(
             answer,
@@ -553,6 +554,7 @@ def _audit_claims(
     entity_aliases: Mapping[str, Iterable[str]] | None,
     semantic_verifier: SemanticVerifierPort | None,
     semantic_verified_claim_citation_ids: Mapping[str, Iterable[str]],
+    claim_normalizer: ClaimNormalizerPort | None = None,
     claim_audit_rule: Mapping[str, Any],
     projection_claim_ids: set[str],
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
@@ -633,6 +635,21 @@ def _audit_claims(
             if required
         },
     )
+    if claim_normalizer is not None:
+        from src.core.claim_normalization import apply_claim_normalizer
+
+        # Bound the model batch to the risk-selected critical claims; slot
+        # proposals are anchor-verified and only fill rule gaps.
+        audit_targets = [claim for claim in selected_claims if claim.audit_selected]
+        normalized_by_id = {
+            claim.claim_id: claim
+            for claim in apply_claim_normalizer(
+                audit_targets,
+                claim_normalizer,
+                semantics=semantics,
+            )
+        }
+        selected_claims = [normalized_by_id.get(claim.claim_id, claim) for claim in selected_claims]
     selected_by_id = {claim.claim_id: claim for claim in selected_claims}
     claim_rows = [
         (selected_by_id[claim.claim_id], required, citation_ids, adjacent)
@@ -780,10 +797,7 @@ def _audit_claims(
             if semantic_preverified_ids:
                 semantic_support = {
                     **semantic_support,
-                    **{
-                        citation_id: "supported"
-                        for citation_id in semantic_preverified_ids
-                    },
+                    **{citation_id: "supported" for citation_id in semantic_preverified_ids},
                 }
             if semantic_support:
                 support_rows = [

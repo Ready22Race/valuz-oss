@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from src.core.claim_audit import (
     LARGE_TABLE_MIN_DATA_CELLS,
     LARGE_TABLE_MIN_DATA_ROWS,
     MAX_CLAIMS_PER_ANSWER,
     ClaimCandidate,
     _claim_amounts,
+    _explicit_period_keys,
     auto_bind_composite_text_claims,
     auto_bind_unique_claims,
     bind_claims_to_evidence,
@@ -57,6 +60,11 @@ _FINANCE_SEMANTICS = {
                 "aliases": ["资本支出", "资本开支", "capex", "capital expenditure"],
                 "fields": ["capital_expenditure"],
                 "value_transform": "absolute",
+            },
+            "market_cap": {
+                "aliases": ["市值", "总市值", "market cap", "market capitalization"],
+                "fields": ["market_cap", "market_capitalization"],
+                "period_role": "as-of",
             },
         }
     },
@@ -1218,6 +1226,47 @@ def test_one_citation_in_value_cell_does_not_leak_across_the_same_table_row() ->
     assert claims[1].attached_citation_ids == ("cit_row",)
 
 
+def test_vertical_source_row_is_candidate_scope_not_a_business_claim() -> None:
+    handle = "ev_amazon_aws_q2_12345678"
+    answer = (
+        "## Amazon AWS\n\n"
+        "| Field | Detail |\n"
+        "|---|---|\n"
+        "| Latest Quarterly Revenue | $42.23B — Fiscal Q2 2026 |\n"
+        f"| Source | Amazon Q2 results [source](evidence://{handle}) |"
+    )
+    evidence = {
+        "evidenceHandle": handle,
+        "source": {
+            "sourceId": "amazon-q2-2026",
+            "title": "Amazon Q2 2026 quarterly results",
+        },
+        "evidence": {
+            "kind": "text",
+            "quote": "AWS net sales were $42.23 billion in fiscal Q2 2026.",
+        },
+    }
+
+    claims = extract_claims(
+        answer,
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+    assert [claim.exact for claim in claims] == [
+        "Latest Quarterly Revenue — Detail: $42.23B — Fiscal Q2 2026"
+    ]
+
+    result = bind_claims_to_evidence(
+        answer,
+        [evidence],
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert result.text.count(f"evidence://{handle}") == 2
+    assert len(result.auto_bound_claim_handles) == 1
+
+
 def test_cited_table_period_cell_remains_nonfactual_context() -> None:
     claims = extract_claims(
         "| 字段 | 数值 | 单位 | 报告期 |\n"
@@ -2019,6 +2068,293 @@ def test_equivalent_recap_claim_reuses_verified_period_binding() -> None:
 
     assert result.text.count(f"evidence://{handle}") == 2
     assert len(result.claim_handles) == 1
+
+
+def test_equivalent_recap_can_reuse_a_verified_prior_message_binding() -> None:
+    handle = "ev_google_cloud_q2_12345678"
+    seed_answer = (
+        "Google Cloud 2026 Q2 云收入为 $247.7亿 "
+        f"[source](evidence://{handle})。"
+    )
+    recap = (
+        "| 公司 | 最新季度云收入 | 财季 |\n"
+        "|---|---:|---|\n"
+        "| Google Cloud | $247.7亿 | 2026 Q2 |"
+    )
+    evidence = {
+        "evidenceHandle": handle,
+        "source": {
+            "sourceId": "google-cloud-q2",
+            "providerId": "valuz-search",
+            "sourceType": "document",
+            "title": "Cloud infrastructure providers on a surge",
+        },
+        "evidence": {
+            "kind": "text",
+            "quote": "Google Cloud 2026 Q2 云收入为 $247.7亿。",
+        },
+    }
+
+    result = propagate_equivalent_claim_bindings(
+        recap,
+        [evidence],
+        seed_answers=(seed_answer,),
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert result.text.count(f"evidence://{handle}") == 1
+    assert len(result.claim_handles) == 1
+
+
+def test_equivalent_recap_normalizes_usd_abbreviation_and_sibling_fiscal_quarter() -> None:
+    handle = "ev_google_cloud_q2_abbreviated_12345678"
+    seed_answer = (
+        "Google Cloud latest quarterly revenue was $24.77B in fiscal Q2 2026 "
+        f"[source](evidence://{handle})."
+    )
+    recap = (
+        "以下数据截至 2026-08-08。\n\n"
+        "| 公司 | 最新季度云收入 | 财季 |\n"
+        "|---|---:|---|\n"
+        "| Google Cloud | $247.7亿 | 2026 Q2 |"
+    )
+    evidence = {
+        "evidenceHandle": handle,
+        "source": {
+            "sourceId": "google-cloud-q2-abbreviated",
+            "providerId": "valuz-search",
+            "sourceType": "document",
+            "title": "Alphabet Q2 2026 quarterly results",
+        },
+        "evidence": {
+            "kind": "text",
+            "quote": "Google Cloud latest quarterly revenue was $24.77B in fiscal Q2 2026.",
+        },
+    }
+
+    recap_claims = extract_claims(
+        recap,
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+    revenue_claim = next(
+        claim for claim in recap_claims if "最新季度云收入" in claim.exact
+    )
+    assert revenue_claim.normalized["period"] == "2026 Q2"
+    assert _claim_amounts("$24.77B", _FINANCE_SEMANTICS)[0][2] == Decimal(
+        "24770000000"
+    )
+
+    result = propagate_equivalent_claim_bindings(
+        recap,
+        [evidence],
+        seed_answers=(seed_answer,),
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert result.text.count(f"evidence://{handle}") == 1
+    assert len(result.claim_handles) == 1
+
+
+def test_equivalent_recap_reuses_cross_language_market_cap_binding() -> None:
+    handle = "ev_google_market_cap_12345678"
+    seed_answer = (
+        "Google current market cap was $4.29T as of August 7, 2026 "
+        f"[source](evidence://{handle})."
+    )
+    recap = "| 公司 | 市值 |\n|---|---:|\n| Google | $4.29万亿 |"
+    evidence = {
+        "evidenceHandle": handle,
+        "source": {
+            "sourceId": "google-market-cap",
+            "providerId": "valuz-stock",
+            "sourceType": "dataset",
+            "title": "Reportify · stock_quote",
+        },
+        "evidence": {
+            "kind": "structured-data",
+            "datasetId": "reportify.stock_quote",
+            "toolName": "stock_quote",
+            "recordKey": "GOOGL|2026-08-07",
+            "entityId": "GOOGL",
+            "field": "market_cap",
+            "metric": "market_cap",
+            "value": 4_287_778_028_630,
+            "asOf": "2026-08-07",
+        },
+    }
+
+    seed_claim = extract_claims(
+        seed_answer,
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    support = verify_evidence_support(
+        seed_claim,
+        evidence,
+        semantics=_FINANCE_SEMANTICS,
+    )
+    assert support.status == "partially-supported"
+    assert support.reason == "unit-missing"
+
+    result = propagate_equivalent_claim_bindings(
+        recap,
+        [evidence],
+        seed_answers=(seed_answer,),
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert result.text.count(f"evidence://{handle}") == 1
+    assert len(result.claim_handles) == 1
+
+
+def test_point_in_time_metric_ignores_inherited_fiscal_period_during_verification() -> None:
+    claim = extract_claims(
+        "FY2027 estimates. Current market cap was $49.5 billion.",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[-1]
+    # A list/section scope may conservatively inherit the surrounding forecast
+    # year.  Point-in-time metrics must compare against their own as-of
+    # coordinate instead of treating that inherited fiscal year as a conflict.
+    claim = ClaimCandidate(
+        **{
+            **claim.__dict__,
+            "normalized": {**claim.normalized, "period": "2027 FY"},
+        }
+    )
+    evidence = {
+        "kind": "structured-data",
+        "metric": "market_cap",
+        "entityId": "CRWV",
+        "value": 49_466_867_080,
+        "asOf": "2026-08-07",
+    }
+
+    support = verify_evidence_support(
+        claim,
+        evidence,
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert support.status == "partially-supported"
+    assert support.reason == "unit-missing"
+
+
+def test_table_row_as_of_date_overrides_global_data_cutoff() -> None:
+    answer = (
+        "Data as of August 8, 2026.\n\n"
+        "| Field | Detail |\n"
+        "|---|---|\n"
+        "| Current Market Cap | ~$4.29T as of August 7, 2026 |"
+    )
+
+    claim = next(
+        item
+        for item in extract_claims(
+            answer,
+            mode="strict-domain",
+            semantics=_FINANCE_SEMANTICS,
+        )
+        if item.normalized.get("metric") == "market_cap"
+    )
+
+    assert claim.normalized["period"] == "2026-08-07"
+
+
+def test_point_in_time_table_metric_ignores_sibling_fiscal_quarter() -> None:
+    answer = (
+        "Data as of August 8, 2026.\n\n"
+        "| 公司 | 最新季度云收入 | 财季 | 市值 |\n"
+        "|---|---:|---|---:|\n"
+        "| Google Cloud | $247.7亿 | 2026 Q2 | $4.29万亿 |"
+    )
+    claims = extract_claims(
+        answer,
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+    revenue = next(item for item in claims if "最新季度云收入" in item.exact)
+    market_cap = next(item for item in claims if "市值" in item.exact)
+
+    assert revenue.normalized["period"] == "2026 Q2"
+    assert "period" not in market_cap.normalized
+
+
+def test_dollar_prefixed_chinese_scales_are_parsed_without_truncating_commas() -> None:
+    amounts = _claim_amounts(
+        "$247.7亿、~$1,870亿、$4.29万亿、$2,000–2,030亿",
+        _FINANCE_SEMANTICS,
+    )
+
+    assert [amount[0] for amount in amounts] == [
+        "247.7",
+        "1,870",
+        "4.29",
+        "2,000",
+        "2,030",
+    ]
+    assert [amount[2] for amount in amounts] == [
+        Decimal("24770000000"),
+        Decimal("187000000000"),
+        Decimal("4290000000000"),
+        Decimal("200000000000"),
+        Decimal("203000000000"),
+    ]
+    assert {amount[3] for amount in amounts} == {"USD"}
+
+
+def test_currency_range_cannot_match_same_surface_percentage_range() -> None:
+    claim = extract_claims(
+        "2027E Starlink connectivity revenue: ~$15–30B",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    evidence = {
+        "source": {"title": "M&A probability framework"},
+        "evidence": {
+            "kind": "text",
+            "quote": "Rank 2 represents a medium 15%-30% acquisition probability.",
+        },
+    }
+
+    support = verify_evidence_support(
+        claim,
+        evidence,
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert support.status == "not-found"
+
+
+def test_truncated_dollar_amount_cannot_bind_an_unrelated_numbered_passage() -> None:
+    answer = "Google Cloud 2027E 云收入约为 $1,870亿。"
+    evidence = {
+        "evidenceHandle": "ev_nebius_numbered_passage_12345678",
+        "source": {
+            "sourceId": "nebius-report",
+            "providerId": "valuz-search",
+            "sourceType": "document",
+            "title": "Nebius Group (NBIS) research report",
+        },
+        "evidence": {
+            "kind": "text",
+            "quote": "Key takeaways include: 1) demand remains strong; 2) capacity expands.",
+        },
+    }
+
+    result = bind_claims_to_evidence(
+        answer,
+        [evidence],
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert "evidence://" not in result.text
+    assert result.auto_bound_claim_handles == {}
 
 
 def test_equivalent_text_recap_reuses_verified_period_binding() -> None:
@@ -2944,6 +3280,120 @@ def test_text_table_inherited_million_krw_unit_supports_scaled_display_value() -
         ).status
         == "contradicted"
     )
+
+
+def test_text_amount_comparison_respects_coarser_evidence_precision() -> None:
+    claim = extract_claims(
+        "Microsoft Intelligent Cloud 2026 Q4 revenue was $39.31B.",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    evidence = {
+        "kind": "text",
+        "quote": (
+            "Microsoft 4Q26 results were led by Azure acceleration. "
+            "Intelligent Cloud revenue of $39.3B grew 32% year over year."
+        ),
+    }
+
+    assert (
+        verify_evidence_support(
+            claim,
+            evidence,
+            semantics=_FINANCE_SEMANTICS,
+        ).status
+        == "supported"
+    )
+
+
+def test_explicit_period_keys_recognize_forecast_table_year_headers() -> None:
+    assert "2027 FY" in _explicit_period_keys(
+        "| CY | 2025 | 2026e | 2027e | 2028e |"
+    )
+    assert "2027 FY" in _explicit_period_keys(
+        "| Revenue | 12/26E | 12/27E | 12/28E |"
+    )
+
+
+def test_text_table_missing_unit_caption_is_partial_not_unresolved() -> None:
+    claim = extract_claims(
+        "CoreWeave (CRWV) 2026 Q1 revenue was $2.08 billion.",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    evidence = {
+        "source": {"title": "CRWV: 1Q26 results teardown"},
+        "evidence": {
+            "kind": "text",
+            "quote": (
+                "|  | 1Q26 Results | Consensus |\n"
+                "| Revenue | 2,078 | 1,971 |\n"
+                "| Operating Income | 21 | 24 |"
+            ),
+        },
+    }
+
+    support = verify_evidence_support(
+        claim,
+        evidence,
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert support.status == "partially-supported"
+    assert support.reason == "unit-missing"
+
+
+def test_approximate_claim_keeps_more_precise_same_subject_source_as_partial() -> None:
+    claim = extract_claims(
+        "Google Cloud 2027 revenue is approximately $187 billion.",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    evidence = {
+        "source": {"title": "Alphabet cloud estimates"},
+        "evidence": {
+            "kind": "text",
+            "quote": (
+                "| Revenue (USDm) | 2026E | 2027E |\n"
+                "| Google Cloud | 108,797 | 187,471 |"
+            ),
+        },
+    }
+
+    support = verify_evidence_support(
+        claim,
+        evidence,
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert support.status == "supported"
+
+
+def test_synthesized_range_keeps_in_range_source_estimate_as_partial() -> None:
+    claim = extract_claims(
+        "AWS 2027 revenue estimate is $200–203 billion.",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    evidence = {
+        "source": {"title": "Cloud infrastructure estimates"},
+        "evidence": {
+            "kind": "text",
+            "quote": (
+                "| Revenue (USDm) | 2026E | 2027E |\n"
+                "| AWS | 161,654 | 203,007 |"
+            ),
+        },
+    }
+
+    support = verify_evidence_support(
+        claim,
+        evidence,
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert support.status == "partially-supported"
+    assert support.reason == "range-member"
 
 
 def test_text_table_cell_header_unit_matches_mixed_unit_filing_excerpt() -> None:

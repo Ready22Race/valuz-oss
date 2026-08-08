@@ -32,6 +32,7 @@ from src.core.citation import (
     private_citation_tool_content,
 )
 from src.core.claim_evidence_resolution import SemanticVerifierPort
+from src.core.claim_normalization import ClaimNormalizerPort
 from src.core.events import Event, EventSink, GlobalEventTap
 from src.core.prompt_builder import wrap_for_mode
 from src.core.runtime_port import RuntimePort
@@ -61,6 +62,10 @@ SessionRuleFinder = Callable[[str, str, dict[str, Any], dict[str, Any]], "Sessio
 SemanticVerifierFactory = Callable[
     [str, Session],
     Awaitable[SemanticVerifierPort | None],
+]
+ClaimNormalizerFactory = Callable[
+    [str, Session],
+    Awaitable[ClaimNormalizerPort | None],
 ]
 
 logger = logging.getLogger(__name__)
@@ -143,9 +148,7 @@ class _TaskCoverageProtocolSink:
         self._passthrough = False
 
     def _held_visible_len(self) -> int:
-        message_len = max(
-            (len(text) for text in self._held_message_texts), default=0
-        )
+        message_len = max((len(text) for text in self._held_message_texts), default=0)
         return max(self._held_delta_chars, message_len)
 
     async def _flush_held(self) -> None:
@@ -194,9 +197,11 @@ class _TaskCoverageProtocolSink:
             if event.type == "tool_use":
                 self.no_gap_declared = True
             return
-        if event.type in {"tool_result", "tool_output_delta"} and isinstance(
-            tool_id, str
-        ) and tool_id in self._private_tool_ids:
+        if (
+            event.type in {"tool_result", "tool_output_delta"}
+            and isinstance(tool_id, str)
+            and tool_id in self._private_tool_ids
+        ):
             return
         if event.type in {"text_delta", "assistant_message"} and not self._passthrough:
             self._held.append(event)
@@ -473,6 +478,7 @@ class _MessageObserverSink:
         citation_enabled: bool = True,
         citation_verification_enabled: bool = True,
         semantic_verifier: SemanticVerifierPort | None = None,
+        claim_normalizer: ClaimNormalizerPort | None = None,
         task_coverage_enabled: bool = True,
     ) -> None:
         self._inner = inner
@@ -483,6 +489,7 @@ class _MessageObserverSink:
         self._citation_enabled = citation_enabled
         self._citation_verification_enabled = citation_verification_enabled
         self._semantic_verifier = semantic_verifier
+        self._claim_normalizer = claim_normalizer
         self._task_coverage_enabled = task_coverage_enabled
         self._force_citation_required = force_citation_required or (
             isinstance(citation_quality_policy, dict)
@@ -491,9 +498,7 @@ class _MessageObserverSink:
 
         self._assistant_chunks: list[str] = []
         self._assistant_delta_chunks: list[str] = []
-        self._assistant_sidecar_inputs: list[
-            tuple[int, str, EvidenceRegistry, str | None]
-        ] = []
+        self._assistant_sidecar_inputs: list[tuple[int, str, EvidenceRegistry, str | None]] = []
         self._sidecars_finalized = False
         self._pending_idle_event: Event | None = None
         self._task_coverage_continuation_active = False
@@ -565,18 +570,14 @@ class _MessageObserverSink:
                     {
                         "status": "complete",
                         "supplemented": bool(self._task_coverage_segment_indices),
-                        "assistant_segment_indices": list(
-                            self._task_coverage_segment_indices
-                        ),
+                        "assistant_segment_indices": list(self._task_coverage_segment_indices),
                     }
                     if coverage_stop_type == "end_turn"
                     else {
                         "status": "failed",
                         "reason": coverage_stop_type,
                         "supplemented": bool(self._task_coverage_segment_indices),
-                        "assistant_segment_indices": list(
-                            self._task_coverage_segment_indices
-                        ),
+                        "assistant_segment_indices": list(self._task_coverage_segment_indices),
                     }
                 )
             self._task_coverage_continuation_active = False
@@ -596,20 +597,13 @@ class _MessageObserverSink:
             current = {
                 "input_tokens": int(event.data.get("input_tokens") or 0),
                 "output_tokens": int(event.data.get("output_tokens") or 0),
-                "cache_read_tokens": int(
-                    event.data.get("cache_read_tokens") or 0
-                ),
-                "cache_write_tokens": int(
-                    event.data.get("cache_write_tokens") or 0
-                ),
+                "cache_read_tokens": int(event.data.get("cache_read_tokens") or 0),
+                "cache_write_tokens": int(event.data.get("cache_write_tokens") or 0),
             }
             if self.usage is None:
                 self.usage = current
             else:
-                self.usage = {
-                    key: self.usage.get(key, 0) + value
-                    for key, value in current.items()
-                }
+                self.usage = {key: self.usage.get(key, 0) + value for key, value in current.items()}
             raw_model_usage = event.data.get("model_usage")
             if isinstance(raw_model_usage, dict):
                 self.model_usage = copy.deepcopy(raw_model_usage)
@@ -617,9 +611,7 @@ class _MessageObserverSink:
         elif event.type == "todo_update":
             raw_todos = event.data.get("todos")
             if isinstance(raw_todos, list):
-                self.last_todos = [
-                    dict(item) for item in raw_todos if isinstance(item, dict)
-                ]
+                self.last_todos = [dict(item) for item in raw_todos if isinstance(item, dict)]
 
         elif event.type == "mode_changed":
             if event.data.get("by") == "runtime":
@@ -644,11 +636,7 @@ class _MessageObserverSink:
 
     def _register_and_redact_tool_result(self, event: Event) -> Event:
         tool_use_id = event.data.get("id")
-        tool_name = (
-            self._tool_names.get(tool_use_id)
-            if isinstance(tool_use_id, str)
-            else None
-        )
+        tool_name = self._tool_names.get(tool_use_id) if isinstance(tool_use_id, str) else None
         citation_content = event.data.get("_citation_content")
         visible_content = event.data.get("content")
         compacted_content = compact_citation_tool_content(visible_content)
@@ -666,9 +654,7 @@ class _MessageObserverSink:
             compacted_content if compacted_content is not None else visible_content,
             private_projection,
             tool_name=tool_name,
-            trusted_private=(
-                private_projection is not None or compacted_content is not None
-            ),
+            trusted_private=(private_projection is not None or compacted_content is not None),
         )
         if "_citation_content" not in event.data and compacted_content is None:
             return event
@@ -738,9 +724,7 @@ class _MessageObserverSink:
             "status": "failed",
             "reason": reason,
             "supplemented": bool(self._task_coverage_segment_indices),
-            "assistant_segment_indices": list(
-                self._task_coverage_segment_indices
-            ),
+            "assistant_segment_indices": list(self._task_coverage_segment_indices),
         }
         self._pending_idle_event = Event(
             type="session_idle",
@@ -786,9 +770,12 @@ class _MessageObserverSink:
 
         if not (self._citation_enabled or self._citation_verification_enabled):
             if self.task_coverage is not None:
-                for segment_index, _text, _registry, parent_tool_use_id in (
-                    self._assistant_sidecar_inputs
-                ):
+                for (
+                    segment_index,
+                    _text,
+                    _registry,
+                    parent_tool_use_id,
+                ) in self._assistant_sidecar_inputs:
                     if segment_index not in coverage_targets:
                         continue
                     sidecar_data: dict[str, Any] = {
@@ -805,10 +792,23 @@ class _MessageObserverSink:
         aggregate_citations: list[dict[str, Any]] = []
         aggregate_projection: dict[str, str] = {}
         seen_citation_ids: set[str] = set()
+        equivalent_binding_seeds: list[str] = []
+        equivalent_binding_records: list[dict[str, Any]] = []
+        seen_binding_handles: set[str] = set()
 
-        for segment_index, text, registry, parent_tool_use_id in (
-            self._assistant_sidecar_inputs
-        ):
+        for segment_index, text, registry, parent_tool_use_id in self._assistant_sidecar_inputs:
+            if equivalent_binding_records:
+                # Each assistant segment owns an immutable Registry snapshot
+                # captured at publish time. Collection Addresses materialized
+                # while finalizing an earlier segment therefore do not exist
+                # in the next snapshot. Carry only the direct Evidence records
+                # that were actually cited and verified by the preceding
+                # sidecar; never copy whole Collections or tool payloads.
+                registry.register_tool_result(
+                    {"_valuz_evidence": copy.deepcopy(equivalent_binding_records)},
+                    tool_name="citation-sidecar-seed",
+                    trusted_private=True,
+                )
             guard = CitationGuard(
                 registry,
                 # All assistant messages in one user turn share a canonical
@@ -823,6 +823,8 @@ class _MessageObserverSink:
                 enabled=True,
                 verification_enabled=self._citation_verification_enabled,
                 semantic_verifier=self._semantic_verifier,
+                claim_normalizer=self._claim_normalizer,
+                equivalent_binding_seeds=equivalent_binding_seeds,
             )
             try:
                 result = (
@@ -842,10 +844,7 @@ class _MessageObserverSink:
                     segment_index,
                     exc_info=True,
                 )
-                if (
-                    self.task_coverage is not None
-                    and segment_index in coverage_targets
-                ):
+                if self.task_coverage is not None and segment_index in coverage_targets:
                     sidecar_data: dict[str, Any] = {
                         "assistant_segment_index": segment_index,
                         "task_coverage": copy.deepcopy(self.task_coverage),
@@ -858,11 +857,11 @@ class _MessageObserverSink:
                 continue
 
             bundle = result.bundle
+            binding_seed = getattr(result, "binding_seed", None)
+            if binding_seed:
+                equivalent_binding_seeds.append(binding_seed)
             if not isinstance(bundle, dict):
-                if (
-                    self.task_coverage is not None
-                    and segment_index in coverage_targets
-                ):
+                if self.task_coverage is not None and segment_index in coverage_targets:
                     sidecar_data = {
                         "assistant_segment_index": segment_index,
                         "task_coverage": copy.deepcopy(self.task_coverage),
@@ -874,6 +873,34 @@ class _MessageObserverSink:
                     )
                 continue
 
+            for citation in bundle.get("citations", []):
+                if not isinstance(citation, dict):
+                    continue
+                annotations = citation.get("annotations")
+                annotations = annotations if isinstance(annotations, dict) else {}
+                binding = annotations.get("binding")
+                binding = binding if isinstance(binding, dict) else {}
+                handle = binding.get("evidenceHandle")
+                source = citation.get("source")
+                evidence = citation.get("evidence")
+                if (
+                    not isinstance(handle, str)
+                    or handle in seen_binding_handles
+                    or not isinstance(source, dict)
+                    or not isinstance(evidence, dict)
+                ):
+                    continue
+                envelope: dict[str, Any] = {
+                    "evidenceHandle": handle,
+                    "source": copy.deepcopy(source),
+                    "evidence": copy.deepcopy(evidence),
+                }
+                locator = citation.get("locator")
+                if isinstance(locator, dict):
+                    envelope["locator"] = copy.deepcopy(locator)
+                equivalent_binding_records.append(envelope)
+                seen_binding_handles.add(handle)
+
             sidecar_data: dict[str, Any] = {
                 "assistant_segment_index": segment_index,
             }
@@ -881,13 +908,8 @@ class _MessageObserverSink:
                 sidecar_data["parent_tool_use_id"] = parent_tool_use_id
 
             has_payload = False
-            if (
-                self.task_coverage is not None
-                and segment_index in coverage_targets
-            ):
-                sidecar_data["task_coverage"] = copy.deepcopy(
-                    self.task_coverage
-                )
+            if self.task_coverage is not None and segment_index in coverage_targets:
+                sidecar_data["task_coverage"] = copy.deepcopy(self.task_coverage)
                 has_payload = True
             if self._citation_enabled:
                 sidecar_data["citation_bundle"] = bundle
@@ -932,13 +954,9 @@ class _MessageObserverSink:
                     has_payload = True
 
             if has_payload:
-                await self._inner.emit(
-                    Event(type="assistant_message_sidecar", data=sidecar_data)
-                )
+                await self._inner.emit(Event(type="assistant_message_sidecar", data=sidecar_data))
 
-        if self._citation_enabled and (
-            aggregate_citations or aggregate_projection
-        ):
+        if self._citation_enabled and (aggregate_citations or aggregate_projection):
             self.citation_bundle = {
                 "version": 1,
                 "citations": aggregate_citations,
@@ -997,6 +1015,7 @@ class SessionOrchestrator:
         sweep_interval_s: float | None = None,
         bg_busy_runtime_ttl_s: float | None = None,
         semantic_verifier_factory: SemanticVerifierFactory | None = None,
+        claim_normalizer_factory: ClaimNormalizerFactory | None = None,
     ) -> None:
         self._store = store
         self._runtimes: dict[str, RuntimePort] = {}
@@ -1044,6 +1063,8 @@ class SessionOrchestrator:
         # created both before and after the tap was added.
         self._global_taps: list[GlobalEventTap] = []
         self._semantic_verifier_factory = semantic_verifier_factory
+        self._claim_normalizer_factory = claim_normalizer_factory
+
     @property
     def active_sessions(self) -> set[str]:
         return set(self._active)
@@ -1064,6 +1085,14 @@ class SessionOrchestrator:
         """
 
         self._semantic_verifier_factory = factory
+
+    def set_claim_normalizer_factory(
+        self,
+        factory: ClaimNormalizerFactory | None,
+    ) -> None:
+        """Install an owner-scoped bounded claim slot normalizer factory."""
+
+        self._claim_normalizer_factory = factory
 
     def _get_or_create_bus(self, session_id: str) -> SessionEventBus:
         bus = self._buses.get(session_id)
@@ -1298,6 +1327,16 @@ class SessionOrchestrator:
                     session_id,
                     exc_info=True,
                 )
+        claim_normalizer: ClaimNormalizerPort | None = None
+        if citation_verification_enabled and self._claim_normalizer_factory is not None:
+            try:
+                claim_normalizer = await self._claim_normalizer_factory(user_id, session)
+            except Exception:  # noqa: BLE001 — optional sidecar must fail open
+                logger.warning(
+                    "claim normalizer provider unavailable for session %s",
+                    session_id,
+                    exc_info=True,
+                )
         observer = _MessageObserverSink(
             coalesced,
             message_id=message.id,
@@ -1309,6 +1348,7 @@ class SessionOrchestrator:
             citation_enabled=citation_enabled,
             citation_verification_enabled=citation_verification_enabled,
             semantic_verifier=semantic_verifier,
+            claim_normalizer=claim_normalizer,
             task_coverage_enabled=task_coverage_enabled,
         )
 
@@ -1352,13 +1392,8 @@ class SessionOrchestrator:
                 )
             )
             await runtime.run(session, user_message)
-            if (
-                task_coverage_enabled
-                and getattr(session.stop_reason, "type", None) == "end_turn"
-            ):
-                if not bool(
-                    getattr(runtime, "supports_native_continuation", False)
-                ):
+            if task_coverage_enabled and getattr(session.stop_reason, "type", None) == "end_turn":
+                if not bool(getattr(runtime, "supports_native_continuation", False)):
                     observer.mark_task_coverage_unavailable(
                         reason="runtime-native-continuation-unsupported"
                     )
@@ -1379,9 +1414,7 @@ class SessionOrchestrator:
                         await runtime.run_task_coverage(
                             session,
                             UserMessage(
-                                text=build_task_coverage_continuation_prompt(
-                                    task_coverage_policy
-                                )
+                                text=build_task_coverage_continuation_prompt(task_coverage_policy)
                             ),
                             no_op_tool=build_task_coverage_noop_tool(),
                         )
@@ -1394,9 +1427,7 @@ class SessionOrchestrator:
                         )
                         session.status = primary_status
                         session.stop_reason = primary_stop_reason
-                        await observer.abort_task_coverage_continuation(
-                            reason="runtime-exception"
-                        )
+                        await observer.abort_task_coverage_continuation(reason="runtime-exception")
                     else:
                         # Classify text still held back at pass end (a
                         # meta-refusal drops silently and counts as no-gap)

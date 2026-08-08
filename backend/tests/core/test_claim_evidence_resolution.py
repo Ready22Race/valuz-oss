@@ -15,6 +15,7 @@ from src.core.claim_evidence_resolution import (
     EvidenceCandidateIndex,
     SemanticVerificationRequest,
     SemanticVerificationResult,
+    evidence_entity_conflicts,
     resolve_claim_evidence,
 )
 
@@ -27,6 +28,31 @@ _OSS_POLICY_PATH = (
 )
 _OSS_POLICY = yaml.safe_load(_OSS_POLICY_PATH.read_text(encoding="utf-8"))
 _SEMANTICS = _OSS_POLICY["semantics"]
+_USD_SEMANTICS = {
+    "metric_ontology": {
+        "metrics": {
+            "operating_revenue": {
+                "aliases": ["revenue"],
+                "fields": ["operating_revenue"],
+            }
+        }
+    },
+    "unit_ontology": {
+        "units": {
+            "usd": {"canonical": "USD", "aliases": ["USD", "$"], "scale": 1},
+            "usd_million": {
+                "canonical": "USD",
+                "aliases": ["USD million", "USDm"],
+                "scale": 1_000_000,
+            },
+            "usd_billion": {
+                "canonical": "USD",
+                "aliases": ["USD billion", "USD bn"],
+                "scale": 1_000_000_000,
+            },
+        }
+    },
+}
 
 
 def _claim(case: dict[str, Any], index: int = 0) -> ClaimCandidate:
@@ -478,6 +504,65 @@ def test_unbound_unresolved_claim_has_no_user_visible_severity() -> None:
     assert resolution.user_visible_severity == "none"
 
 
+def test_unique_unit_missing_text_candidate_gets_normal_partial_binding() -> None:
+    semantics = {
+        "metric_ontology": {
+            "metrics": {
+                "operating_revenue": {
+                    "aliases": ["revenue"],
+                    "fields": ["operating_revenue"],
+                }
+            }
+        },
+        "unit_ontology": {
+            "units": {
+                "usd": {"canonical": "USD", "aliases": ["USD", "$"], "scale": 1},
+                "usd_million": {
+                    "canonical": "USD",
+                    "aliases": ["USD million", "USDm"],
+                    "scale": 1_000_000,
+                },
+                "usd_billion": {
+                    "canonical": "USD",
+                    "aliases": ["USD billion", "USDb"],
+                    "scale": 1_000_000_000,
+                },
+            }
+        },
+    }
+    claim = extract_claims(
+        "CoreWeave (CRWV) 2026 Q1 revenue was $2.08 billion.",
+        mode="strict-domain",
+        semantics=semantics,
+    )[0]
+    handle = "ev_crwv_unit_caption_missing"
+
+    resolution = resolve_claim_evidence(
+        claim,
+        [
+            {
+                "evidenceHandle": handle,
+                "source": {"title": "CRWV: 1Q26 results teardown"},
+                "evidence": {
+                    "kind": "text",
+                    "quote": (
+                        "|  | 1Q26 Results | Consensus |\n"
+                        "| Revenue | 2,078 | 1,971 |\n"
+                        "| Operating Income | 21 | 24 |"
+                    ),
+                },
+            }
+        ],
+        semantics=semantics,
+    )
+
+    assert resolution.status == "supported-with-limits"
+    assert resolution.binding_action == "auto-bind"
+    assert resolution.user_visible_severity == "none"
+    assert resolution.selected_handles == (handle,)
+    assert resolution.reason_codes == ("unique-safe-partial-candidate",)
+
+
 def test_turn_local_index_bounds_large_registry_verification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -540,6 +625,63 @@ def test_turn_local_index_bounds_large_registry_verification(
     # expensive signal evaluations in each pipeline pass.  The turn-local
     # prefilter caps the work before deterministic verification.
     assert signal_calls <= 40 * candidate_index.prefilter_limit
+
+
+def test_range_member_partial_evidence_auto_bind_as_supported_with_limits() -> None:
+    claim = extract_claims(
+        "NVIDIA revenue guidance is $20–30 billion.",
+        mode="strict-domain",
+        semantics=_USD_SEMANTICS,
+    )[0]
+    resolution = resolve_claim_evidence(
+        claim,
+        [
+            {
+                "evidenceHandle": "ev_nvidia_range_member",
+                "source": {"title": "NVIDIA 研报摘要"},
+                "evidence": {
+                    "kind": "text",
+                    "quote": "NVIDIA revenue guidance is estimated at $25 billion.",
+                },
+            }
+        ],
+        semantics=_USD_SEMANTICS,
+    )
+
+    assert resolution.status == "supported-with-limits"
+    assert resolution.binding_action == "auto-bind"
+    assert resolution.user_visible_severity == "none"
+    assert resolution.selected_handles == ("ev_nvidia_range_member",)
+    assert resolution.reason_codes == ("unique-safe-partial-candidate",)
+
+
+def test_explicit_safe_partial_binding_keeps_no_advisory_warning() -> None:
+    case = extract_claims(
+        "NVIDIA revenue guidance is $20–30 billion.",
+        mode="strict-domain",
+        semantics=_USD_SEMANTICS,
+    )[0]
+    explicit_handle = "ev_nvidia_range_member_explicit"
+    resolution = resolve_claim_evidence(
+        replace(case, attached_evidence_handles=(explicit_handle,)),
+        [
+            {
+                "evidenceHandle": explicit_handle,
+                "source": {"title": "NVIDIA 研报摘要"},
+                "evidence": {
+                    "kind": "text",
+                    "quote": "NVIDIA revenue guidance is estimated at $25 billion.",
+                },
+            }
+        ],
+        semantics=_USD_SEMANTICS,
+    )
+
+    assert resolution.status == "supported-with-limits"
+    assert resolution.binding_action == "keep"
+    assert resolution.user_visible_severity == "none"
+    assert resolution.selected_handles == (explicit_handle,)
+    assert resolution.reason_codes == ("explicit-binding-partially-supported-safe",)
 
 
 def test_turn_local_entity_aliases_rebind_cross_company_source() -> None:
@@ -757,6 +899,231 @@ def test_unique_structured_metric_can_bind_when_source_unit_is_unknown() -> None
     assert resolution.binding_action == "auto-bind"
     assert resolution.selected_handles == ("ev_ma20_missing_unit",)
     assert resolution.support_by_handle["ev_ma20_missing_unit"] == "supported"
+
+
+def test_leading_entity_marker_blocks_cross_company_text_auto_binding() -> None:
+    claim = ClaimCandidate(
+        claim_id="spacex-vs-nebius",
+        exact="Starlink connectivity revenue could reach $15-30B in 2027.",
+        segment_index=0,
+        kind="numeric-fact",
+        citation_required=True,
+        attached_citation_ids=(),
+        normalized={
+            "metric": "operating_revenue",
+            "period": "2027 FY",
+            "value": "15",
+            "valueBase": "15000000000",
+            "unit": "USD billion",
+            "unitBase": "USD",
+        },
+        location={"kind": "fixture", "blockIndex": 0, "start": 0, "end": 58},
+        semantic_text=(
+            "SpaceX / Starlink Revenue. "
+            "Starlink connectivity revenue could reach $15-30B in 2027."
+        ),
+        insertion_offset=58,
+        attached_evidence_handles=(),
+    )
+    evidence = {
+        "evidenceHandle": "ev_nebius_probability",
+        "source": {
+            "providerId": "reportify",
+            "title": "Nebius Group (NBIS): Capacity expansion plans",
+        },
+        "evidence": {
+            "kind": "text",
+            "quote": "An M&A rank of 2 represents a 15%-30% probability.",
+        },
+    }
+
+    resolution = resolve_claim_evidence(claim, [evidence], semantics=_SEMANTICS)
+
+    assert resolution.status == "unresolved"
+    assert evidence_entity_conflicts(
+        claim.semantic_text,
+        evidence["source"],
+        evidence["evidence"],
+    )
+
+
+def test_source_title_entity_does_not_conflict_when_quote_names_claim_entity() -> None:
+    claim = ClaimCandidate(
+        claim_id="google-in-msft-table",
+        exact="Google Cloud Q2 revenue was $24.77B.",
+        segment_index=0,
+        kind="numeric-fact",
+        citation_required=True,
+        attached_citation_ids=(),
+        normalized={"period": "2026 Q2", "value": "24.77", "unit": "USD billion"},
+        location={"kind": "fixture", "blockIndex": 0, "start": 0, "end": 39},
+        semantic_text="Google Cloud Q2 revenue was $24.77B.",
+        insertion_offset=39,
+        attached_evidence_handles=(),
+    )
+    evidence = {
+        "evidenceHandle": "ev_msft_cross_company_table",
+        "source": {
+            "providerId": "reportify",
+            "title": "Microsoft (MSFT): Cloud infrastructure comparison",
+        },
+        "evidence": {
+            "kind": "text",
+            "quote": "Google Cloud revenue in 2Q26 was USD 24.77 billion.",
+        },
+    }
+
+    resolution = resolve_claim_evidence(claim, [evidence], semantics=_SEMANTICS)
+
+    assert not evidence_entity_conflicts(
+        claim.semantic_text,
+        evidence["source"],
+        evidence["evidence"],
+    )
+    assert resolution.status != "contradicted"
+
+
+def test_candidate_index_retrieves_cross_scale_equivalent_amount() -> None:
+    claim = ClaimCandidate(
+        claim_id="cross-scale-retrieval",
+        exact="Microsoft Intelligent Cloud季度收入为$393.1亿。",
+        segment_index=0,
+        kind="numeric-fact",
+        citation_required=True,
+        attached_citation_ids=(),
+        normalized={
+            "metric": "operating_revenue",
+            "value": "393.1",
+            "valueBase": "39310000000",
+            "unit": "USD 100m",
+            "unitBase": "USD",
+        },
+        location={"kind": "fixture", "blockIndex": 0, "start": 0, "end": 38},
+        semantic_text="Microsoft Intelligent Cloud季度收入为$393.1亿。",
+        insertion_offset=38,
+        attached_evidence_handles=(),
+    )
+    distractors = [
+        {
+            "evidenceHandle": f"ev_distractor_{index}",
+            "source": {"title": f"Other Company {index}"},
+            "evidence": {"kind": "text", "quote": f"Revenue was ${index + 1}B."},
+        }
+        for index in range(80)
+    ]
+    correct = {
+        "evidenceHandle": "ev_msft_39_31b",
+        "source": {"title": "Microsoft FY2026 Q4 results"},
+        "evidence": {
+            "kind": "text",
+            "quote": "Intelligent Cloud revenue was $39.31B in FY2026 Q4.",
+        },
+    }
+    index = EvidenceCandidateIndex([*distractors, correct], semantics=_SEMANTICS)
+
+    candidates = index.candidate_records(claim, limit=8)
+    handles = {
+        item.get("evidenceHandle")
+        for item in candidates
+        if isinstance(item, dict)
+    }
+
+    assert "ev_msft_39_31b" in handles
+
+
+def test_localized_company_with_segment_name_does_not_invent_entity_conflict() -> None:
+    assert not evidence_entity_conflicts(
+        "微软（Intelligent Cloud）FY2026 Q4最新季度云收入为$393.1亿。",
+        {"title": "Microsoft FY2026 Q4 results"},
+        {
+            "kind": "text",
+            "quote": "Intelligent Cloud revenue was $39.31B in FY2026 Q4.",
+        },
+    )
+
+
+def test_sentence_initial_english_word_is_not_an_entity_marker() -> None:
+    # Latin prose capitalizes the first word of every sentence, so a leading
+    # ``Customer`` must never be treated as a company that conflicts with the
+    # source. Only interior-capital brands and tickers stay position-free.
+    assert not evidence_entity_conflicts(
+        "Customer demand exceeds supply.",
+        {"title": "Nebius Group (NBIS): capacity update"},
+        {
+            "kind": "text",
+            "quote": "Orders remain above available capacity.",
+        },
+    )
+
+
+def test_unit_and_indicator_vocabulary_never_marks_an_entity_conflict() -> None:
+    semantics = {
+        "metric_ontology": {
+            "metrics": {"moving_average_20": {"aliases": ["MA20"], "fields": ["ma20"]}}
+        },
+        "unit_ontology": {
+            "units": {"usd": {"canonical": "USD", "aliases": ["USD", "$"], "scale": 1}}
+        },
+    }
+    assert not evidence_entity_conflicts(
+        "The stop-loss threshold is 160 USD and MA20 is 203.69 USD.",
+        {"title": "MRVL factor snapshot"},
+        {
+            "kind": "structured-data",
+            "entityId": "MRVL",
+            "field": "ma20",
+            "value": 203.69,
+        },
+        semantics=semantics,
+    )
+
+
+def test_calculation_dependency_metric_pairing_is_not_a_hard_conflict() -> None:
+    # ``calculation_dependencies`` sanctions binding an input metric Claim to
+    # the declared derived-metric Calculation. The retrieval-layer metric
+    # conflict signal must not bypass the policy-aware deterministic verifier.
+    semantics = {
+        "metric_ontology": {
+            "metrics": {
+                "gross_margin": {"aliases": ["毛利率"], "fields": ["gross_margin"]},
+                "gross_profit": {"aliases": ["毛利润"], "fields": ["gross_profit"]},
+            }
+        },
+        "calculation_dependencies": {"gross_margin": ["gross_profit", "operating_revenue"]},
+    }
+    claim = ClaimCandidate(
+        claim_id="calc-dependency-input",
+        exact="毛利润同比增长率为 10%。",
+        segment_index=0,
+        kind="calculation",
+        citation_required=True,
+        attached_citation_ids=(),
+        normalized={"metric": "gross_profit", "period": "2024 FY", "value": "10", "unit": "%"},
+        location={"kind": "fixture", "blockIndex": 0, "start": 0, "end": 12},
+        semantic_text="毛利润同比增长率为 10%。",
+        insertion_offset=12,
+        attached_evidence_handles=(),
+    )
+    evidence = {
+        "evidenceHandle": "ev_gross_margin_calculation",
+        "source": {"providerId": "policy-generated"},
+        "evidence": {
+            "kind": "calculation",
+            "metric": "gross_margin",
+            "period": "2024 FY",
+            "result": 10,
+            "unit": "%",
+            "inputs": [
+                {"metric": "gross_profit", "value": 110},
+                {"metric": "gross_profit", "value": 100},
+            ],
+        },
+    }
+
+    resolution = resolve_claim_evidence(claim, [evidence], semantics=semantics)
+
+    assert resolution.status == "verified"
+    assert resolution.binding_action == "auto-bind"
 
 
 def test_missing_source_unit_never_guesses_a_scale_conversion() -> None:
