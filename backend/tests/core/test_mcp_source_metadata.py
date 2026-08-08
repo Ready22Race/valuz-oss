@@ -127,6 +127,70 @@ def test_discovery_metadata_stays_non_citable_retrieval_input() -> None:
     assert "_valuz_evidence" not in adapted.model_content
 
 
+def test_substantive_search_summary_becomes_derived_evidence() -> None:
+    """A search hit's own document text is citable; its metadata is not."""
+
+    long_summary = (
+        "Deutsche Bank initiates coverage with a Buy rating and a $255 price "
+        "target. Connectivity revenue is modelled at $18bn in 2026E rising to "
+        "$88bn by 2031E, with 17m year-end subscribers and 20 GW of compute "
+        "capacity planned by 2031E across the AI infrastructure segment."
+    )
+    payload = {
+        "docs": [
+            {
+                "doc_id": "doc-substantive",
+                "title": "SpaceX Initiation Debrief",
+                "summary": long_summary,
+                "url": "https://example.com/doc-substantive",
+            },
+            {
+                "doc_id": "doc-teaser",
+                "title": "Short news hit",
+                "summary": "Revenue rose.",
+                "url": "https://example.com/doc-teaser",
+            },
+        ]
+    }
+    descriptor = _descriptor(
+        payload,
+        tool_name="reports_search",
+        resources=[
+            {
+                "resourceId": "reports-search-results",
+                "kind": "document-discovery",
+                "authority": "discovery-only",
+                "rootPointer": "",
+                "itemsPointer": "/docs",
+                "mapping": {
+                    "sourceId": "/doc_id",
+                    "title": "/title",
+                    "summary": "/summary",
+                    "url": "/url",
+                },
+            }
+        ],
+    )
+
+    adapted = adapt_mcp_source_result(
+        "unused model block",
+        tool_name="reports_search",
+        descriptor=descriptor,
+        structured_content=payload,
+    )
+
+    assert adapted is not None
+    # Only the substantive row registers; a one-line teaser cannot carry a
+    # financial claim and stays pure discovery metadata.
+    assert adapted.evidence_count == 1
+    assert adapted.citable is True
+    (envelope,) = adapted.model_content["_valuz_evidence"]
+    assert envelope["evidence"]["quote"] == long_summary
+    # No invented chunk id, page or bbox — the summary is derived text only.
+    assert envelope["locator"] == {"kind": "external", "fragment": "provider-summary"}
+    assert envelope["source"]["documentId"] == "doc-substantive"
+
+
 def test_filter_only_retrieval_metadata_is_validated_and_preserved_for_diagnostics() -> None:
     payload = {"docs": [{"doc_id": "doc-1", "title": "Annual report"}]}
     descriptor = _descriptor(
