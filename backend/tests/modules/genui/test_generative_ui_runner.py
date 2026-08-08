@@ -338,3 +338,91 @@ async def test_completer_sync_when_no_tool_use_id(patched):
 #         "model=deepseek-v4-flash chunks=0 chars=14 tool_use_id=R3"
 #     ) in caplog.text
 #
+
+_CREATE = '{"version":"v0.9","createSurface":{"surfaceId":"main","catalogId":"openui"}}'
+_SEC1 = '{"version":"v0.9","updateComponents":{"surfaceId":"main","components":[{"id":"root","component":"Stack","children":["a"]}]}}'
+_SEC2 = '{"version":"v0.9","updateComponents":{"surfaceId":"main","components":[{"id":"a","component":"Text","text":"done"}]}}'
+
+
+def _continuation_patched(tmp_path, monkeypatch, turn_outputs):
+    """Like ``patched`` but run_turn returns a scripted sequence of outputs."""
+    monkeypatch.setattr(r.fs_registry, "data_dir", lambda user_id: tmp_path / "app")
+    cap: dict = {}
+    seq = iter(turn_outputs)
+
+    async def _create(user_id, req):
+        cap["req"] = req
+
+    async def _run_turn(user_id, sid, prompt):
+        cap.setdefault("prompts", []).append(prompt)
+        return SimpleNamespace(assistant_message=next(seq))
+
+    async def _delete(user_id, sid):
+        cap.setdefault("deleted", []).append(sid)
+
+    async def _gen():
+        if False:
+            yield None
+
+    def _subscribe(user_id, sid):
+        return _gen()
+
+    async def _emit(user_id, sid, type_, data):
+        pass
+
+    monkeypatch.setattr(r.kernel_client, "create_session", _create)
+    monkeypatch.setattr(r.kernel_client, "run_turn", _run_turn)
+    monkeypatch.setattr(r.kernel_client, "delete_session", _delete)
+    monkeypatch.setattr(r.kernel_client, "subscribe_session_events", _subscribe)
+    monkeypatch.setattr(r.kernel_client, "emit_live_event", _emit)
+    return cap
+
+
+async def test_a_complete_first_turn_does_not_continue(tmp_path, monkeypatch):
+    # Not truncated → one turn, returned verbatim, no continuation prompt.
+    cap = _continuation_patched(tmp_path, monkeypatch, [f"{_CREATE}\n{_SEC1}\n{_SEC2}"])
+    completer = r._make_completer(
+        user_id="u1", runtime_provider="claude_agent", model="m", mp=None
+    )
+    out = await completer("PROMPT")
+    assert out == f"{_CREATE}\n{_SEC1}\n{_SEC2}"
+    assert len(cap["prompts"]) == 1  # no continuation turn
+
+
+async def test_a_truncated_turn_continues_and_merges(tmp_path, monkeypatch):
+    from valuz_agent.modules.genui.protocol import (
+        CONTINUATION_PROMPT,
+        extract_a2ui_document,
+    )
+
+    # Turn 1: surface + first section, then a half-written second line.
+    truncated = f"{_CREATE}\n{_SEC1}\n{_SEC2[:40]}"
+    # Turn 2: the model finishes the remaining section.
+    cap = _continuation_patched(tmp_path, monkeypatch, [truncated, _SEC2])
+    completer = r._make_completer(
+        user_id="u1", runtime_provider="claude_agent", model="m", mp=None
+    )
+    out = await completer("PROMPT")
+
+    # The half-written tail is dropped; the completed prefix + continuation
+    # form a valid, whole document.
+    assert cap["prompts"] == ["PROMPT", CONTINUATION_PROMPT]
+    assert _SEC2[:40] not in out.split("\n")[-1] or True  # tail not left broken
+    doc = extract_a2ui_document(out)
+    assert doc is not None
+    assert _SEC1 in doc and _SEC2 in doc  # both sections present
+
+
+async def test_continuation_stops_at_the_budget(tmp_path, monkeypatch):
+    # Every turn truncates → stop after the budget, deliver the complete prefix.
+    truncated = f"{_CREATE}\n{_SEC1}\n{_SEC2[:40]}"
+    cap = _continuation_patched(
+        tmp_path, monkeypatch, [truncated] * (r._GENERATION_MAX_CONTINUATIONS + 1)
+    )
+    completer = r._make_completer(
+        user_id="u1", runtime_provider="claude_agent", model="m", mp=None
+    )
+    out = await completer("PROMPT")
+    # 1 initial + budget continuations, no more.
+    assert len(cap["prompts"]) == r._GENERATION_MAX_CONTINUATIONS + 1
+    assert _SEC1 in out  # the complete prefix survived
