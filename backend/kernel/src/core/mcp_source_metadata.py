@@ -43,6 +43,9 @@ class McpSourceAdaptation:
     resource_kinds: frozenset[str]
     provider_id: str
     evidence_count: int = 0
+    retrieval_mode: str | None = None
+    query_present: bool | None = None
+    chunk_status: str | None = None
 
     @property
     def discovery_only(self) -> bool:
@@ -220,6 +223,15 @@ def adapt_mcp_source_result(
                 return None
             envelopes.append(collection)
 
+    retrieval_mode: str | None = None
+    query_present: bool | None = None
+    chunk_status: str | None = None
+    if "retrieval" in descriptor:
+        retrieval = _validated_search_retrieval(descriptor.get("retrieval"), kinds)
+        if retrieval is None:
+            return None
+        retrieval_mode, query_present, chunk_status = retrieval
+
     model_content = copy.deepcopy(target)
     if envelopes:
         if isinstance(model_content, dict):
@@ -234,6 +246,9 @@ def adapt_mcp_source_result(
         resource_kinds=frozenset(kinds),
         provider_id=provider_id,
         evidence_count=len(envelopes),
+        retrieval_mode=retrieval_mode,
+        query_present=query_present,
+        chunk_status=chunk_status,
     )
 
 
@@ -278,6 +293,46 @@ def _valid_result_hash(target: Any, value: Any) -> bool:
         return False
     candidates = {_sha256(target), _sha256(_drop_none(target))}
     return expected.casefold() in candidates
+
+
+def _validated_search_retrieval(
+    value: Any,
+    resource_kinds: set[str],
+) -> tuple[str, bool, str] | None:
+    """Validate optional search diagnostics without treating them as Evidence.
+
+    The descriptor may explain whether a provider ran content search or only
+    filter-based discovery.  Actual chunk availability must still agree with
+    the independently validated resource list; metadata can never synthesize
+    a citable chunk.
+    """
+
+    if not isinstance(value, Mapping) or value.get("kind") != "document-search":
+        return None
+    mode = value.get("mode")
+    query = value.get("query")
+    chunks = value.get("chunks")
+    if mode not in {"content-query", "filter-only"}:
+        return None
+    if not isinstance(query, Mapping) or not isinstance(chunks, Mapping):
+        return None
+    argument_pointer = _pointer(query.get("argumentPointer"))
+    query_present = query.get("present")
+    chunk_status = chunks.get("status")
+    if argument_pointer in {None, ""} or not isinstance(query_present, bool):
+        return None
+    if chunk_status not in {"returned", "not-requested", "not-returned"}:
+        return None
+    if (mode == "content-query") != query_present:
+        return None
+    has_chunk_resource = "document-chunks" in resource_kinds
+    if (chunk_status == "returned") != has_chunk_resource:
+        return None
+    if chunk_status == "not-requested" and mode != "filter-only":
+        return None
+    if chunk_status == "not-returned" and mode != "content-query":
+        return None
+    return str(mode), query_present, str(chunk_status)
 
 
 def _document_envelopes(
