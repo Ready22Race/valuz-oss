@@ -17,6 +17,8 @@ from src.adapters.sqlalchemy_store.engine import create_engine, create_session_f
 from src.adapters.sqlalchemy_store.store import SQLAlchemyStore
 from src.core import NullTokenVerifier, StorePort, TokenVerifier
 from src.core.claim_evidence_resolution import SemanticVerifierPort
+from src.core.claim_normalization import ClaimNormalizerPort
+from src.core.claim_normalizer import build_session_claim_normalizer
 from src.core.orchestrator import SessionOrchestrator
 from src.core.semantic_verifier import build_session_semantic_verifier
 from src.core.types import Session
@@ -47,6 +49,15 @@ async def _session_semantic_verifier_factory(
     """Use the Session's explicit provider; unsupported providers return None."""
 
     return build_session_semantic_verifier(user_id, session)
+
+
+async def _session_claim_normalizer_factory(
+    user_id: str,
+    session: Session,
+) -> ClaimNormalizerPort | None:
+    """Use the Session's explicit provider; unsupported providers return None."""
+
+    return build_session_claim_normalizer(user_id, session)
 
 
 async def init_dependencies(config: AppConfig) -> None:
@@ -92,6 +103,7 @@ async def init_dependencies(config: AppConfig) -> None:
         runtime_idle_ttl_s=_env_float("VALUZ_RUNTIME_IDLE_TTL_S"),
         bg_busy_runtime_ttl_s=_env_float("VALUZ_BG_BUSY_RUNTIME_TTL_S"),
         semantic_verifier_factory=_session_semantic_verifier_factory,
+        claim_normalizer_factory=_session_claim_normalizer_factory,
     )
     # Start the warm-runtime idle sweeper (bounds leaked claude/codex
     # subprocesses; see SessionOrchestrator). Safe before the orphan scan's

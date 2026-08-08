@@ -40,6 +40,7 @@ from src.core.claim_audit import (
     structured_values_equivalent,
 )
 from src.core.claim_evidence_resolution import EvidenceCandidateIndex, SemanticVerifierPort
+from src.core.claim_normalization import ClaimNormalizerPort
 
 POLICY_REVISION = "citation-v1"
 EVIDENCE_ENVELOPE_KEY = "_valuz_evidence"
@@ -197,6 +198,10 @@ class GuardResult:
 
     text: str
     bundle: dict[str, Any] | None
+    # Private, Registry-backed form used only to carry already verified
+    # bindings into later assistant messages of the same turn. It is never
+    # persisted, broadcast, or rendered.
+    binding_seed: str | None = None
 
 
 class EvidenceRegistry:
@@ -628,6 +633,16 @@ class EvidenceRegistry:
         pointer = unquote(fragment[1:])
         if collection is not None:
             record = _materialize_collection_address(collection, pointer)
+            if record is None:
+                normalized_pointer = _normalize_collection_item_pointer(
+                    collection,
+                    pointer,
+                )
+                if normalized_pointer is not None:
+                    record = _materialize_collection_address(
+                        collection,
+                        normalized_pointer,
+                    )
         else:
             # A Runtime may copy a valid JSON Pointer while mistyping the
             # opaque Collection handle.  Do not fuzzy-match the handle.  The
@@ -1050,6 +1065,8 @@ class CitationGuard:
         enabled: bool = True,
         verification_enabled: bool = True,
         semantic_verifier: SemanticVerifierPort | None = None,
+        claim_normalizer: ClaimNormalizerPort | None = None,
+        equivalent_binding_seeds: Iterable[str] = (),
     ) -> None:
         self._registry = registry
         self._message_id = message_id
@@ -1064,6 +1081,8 @@ class CitationGuard:
         self._enabled = enabled
         self._verification_enabled = verification_enabled
         self._semantic_verifier = semantic_verifier
+        self._claim_normalizer = claim_normalizer
+        self._equivalent_binding_seeds = tuple(equivalent_binding_seeds)
 
     @property
     def requires_citation(self) -> bool:
@@ -1285,11 +1304,13 @@ class CitationGuard:
             semantics=semantics,
             entity_aliases=entity_aliases,
             semantic_verifier=self._semantic_verifier,
+            claim_normalizer=self._claim_normalizer,
         )
         normalized_text = binding_result.text
         propagated_bind_result = propagate_equivalent_claim_bindings(
             normalized_text,
             candidate_index,
+            seed_answers=self._equivalent_binding_seeds,
             mode=str(policy_mode or "required-on-evidence"),
             semantics=semantics,
         )
@@ -1571,9 +1592,14 @@ class CitationGuard:
                 entity_aliases=entity_aliases,
                 semantic_verifier=self._semantic_verifier,
                 semantic_verified_claim_citation_ids=(semantic_verified_claim_citation_ids),
+                claim_normalizer=self._claim_normalizer,
             )
             _focus_text_citation_snippets(bundle)
-        return GuardResult(text=canonical_text, bundle=bundle)
+        return GuardResult(
+            text=canonical_text,
+            bundle=bundle,
+            binding_seed=normalized_text,
+        )
 
     def _normalize_fallback_markers(self, text: str) -> str:
         def replace(match: re.Match[str]) -> str:
@@ -4212,6 +4238,37 @@ def _materialize_collection_address(
         locator=None,
         tool_name=collection.tool_name or str(collection.common.get("toolName") or "") or None,
     )
+
+
+def _normalize_collection_item_pointer(
+    collection: EvidenceCollectionRecord,
+    pointer: str,
+) -> str | None:
+    """Recover one deterministic Address that omits an ``items`` wrapper.
+
+    Some structured APIs expose ``data: {items: [...]}``.  The model-visible
+    Collection hint names both ``contentRoot=/data`` and
+    ``itemsPointer=/data/items``, but models occasionally copy the familiar
+    list form ``/data/9/market_cap``.  When the Collection handle is exact and
+    the first relative token is a row index, inserting the declared
+    ``itemsPointer`` is unambiguous.  No field, entity, value, or cross-
+    Collection guessing is involved; the normal allow-list and snapshot
+    validation still run on the normalized pointer.
+    """
+
+    content_root = str(collection.addressing.get("contentRoot") or "")
+    items_pointer = str(collection.addressing.get("itemsPointer") or content_root)
+    if not content_root or not items_pointer or items_pointer == content_root:
+        return None
+    prefix = f"{content_root.rstrip('/')}/"
+    if not pointer.startswith(prefix):
+        return None
+    relative = pointer[len(content_root) :]
+    tokens = _json_pointer_tokens(relative)
+    if not tokens or not tokens[0].isdigit():
+        return None
+    normalized = f"{items_pointer.rstrip('/')}{relative}"
+    return normalized if normalized != pointer else None
 
 
 def _collection_record_for_pointer(

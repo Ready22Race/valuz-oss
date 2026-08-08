@@ -626,6 +626,84 @@ def test_native_reportify_collection_materializes_only_addressed_field() -> None
     assert revenue.evidence["scale"] == "yuan"
 
 
+def test_collection_address_recovers_omitted_declared_items_wrapper() -> None:
+    data = {
+        "items": [
+            {
+                "symbol": "GOOGL",
+                "date": "2026-08-07",
+                "market_cap": 4_290_000_000_000,
+            }
+        ]
+    }
+    raw_hash = json.dumps(
+        data,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    collection_handle = "evc_mcp_stock_quote_12345678"
+    raw = {
+        "data": data,
+        "_valuz_evidence": [
+            {
+                "version": 1,
+                "kind": "structured-evidence-collection",
+                "collectionHandle": collection_handle,
+                "source": {
+                    "sourceId": "reportify-stock-quote:GOOGL",
+                    "providerId": "reportify",
+                    "sourceType": "dataset",
+                    "sourceCategory": "market_data",
+                    "title": "Reportify · stock_quote",
+                    "retrievedAt": "2026-08-08T00:00:00Z",
+                },
+                "common": {
+                    "datasetId": "reportify.stock_quote",
+                    "toolName": "stock_quote",
+                    "capturedAt": "2026-08-08T00:00:00Z",
+                },
+                "addressing": {
+                    "mode": "json-pointer",
+                    "contentRoot": "/data",
+                    "itemsPointer": "/data/items",
+                    "identityFields": ["/symbol", "/date"],
+                    "allowedPathRoots": ["/data"],
+                },
+                "semantics": {
+                    "entity": {"id": "/symbol"},
+                    "asOf": {"value": "/date"},
+                    "metric": {"mode": "field-name", "valueRoots": [""]},
+                },
+                "contentHash": (
+                    f"sha256:{hashlib.sha256(raw_hash.encode('utf-8')).hexdigest()}"
+                ),
+            }
+        ],
+    }
+    visible = compact_citation_tool_content(raw)
+    private = private_citation_tool_content(raw)
+    assert visible is not None and private is not None
+    registry = EvidenceRegistry()
+    assert registry.register_tool_projection(
+        visible,
+        private,
+        tool_name="stock_quote",
+        trusted_private=True,
+    ) == 1
+
+    record = registry.materialize_reference(
+        collection_handle,
+        "#/data/0/market_cap",
+    )
+
+    assert record is not None
+    assert record.evidence["entityId"] == "GOOGL"
+    assert record.evidence["metric"] == "market_cap"
+    assert record.evidence["value"] == 4_290_000_000_000
+
+
 def test_guard_recovers_unknown_collection_handle_only_from_unique_valid_pointer() -> None:
     data = [
         {
