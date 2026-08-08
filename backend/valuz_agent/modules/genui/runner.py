@@ -207,7 +207,12 @@ def _make_completer(
             )
 
     async def _complete(prompt: str) -> str:
-        from app.schemas import AgentConfigSchema, CreateSessionRequest, ModelProviderInputSchema
+        from app.schemas import (
+            AgentConfigSchema,
+            CreateSessionRequest,
+            ModelProviderInputSchema,
+            ModelSettingsSchema,
+        )
 
         # OAuth/subscription channels (Codex/Claude login) resolve to mp=None and
         # carry no static key — create the session with model_provider=None so the
@@ -234,6 +239,13 @@ def _make_completer(
                 runtime_provider=runtime_provider,
                 instructions=session_instructions,
                 metadata=marker,
+                # A full workbench page is a large document; without an
+                # explicit cap the runtime default truncates it mid-write,
+                # and a half-written A2UI doc is rejected at storage (no
+                # version, no card). Match the direct path's budget.
+                model_settings=ModelSettingsSchema(
+                    max_tokens=_DIRECT_GENUI_MAX_TOKENS
+                ),
             ),
             cwd=str(gen_cwd),
             runtime_provider=runtime_provider,
@@ -242,6 +254,9 @@ def _make_completer(
             instructions=session_instructions,
             permission_mode="default",
             metadata=marker,
+            model_settings=ModelSettingsSchema(
+                max_tokens=_DIRECT_GENUI_MAX_TOKENS
+            ),
         )
         await kernel_client.create_session(user_id, req)
         stream_task: asyncio.Task[None] | None = None
