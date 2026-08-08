@@ -423,7 +423,11 @@ if ! $SKIP_FRONTEND; then
   pnpm typecheck
 
   log "Building renderer..."
-  pnpm exec vite build --config vite.renderer.config.ts
+  # The renderer bundle outgrew Node's default heap on the 7 GB mac runners
+  # (v0.4.0: both mac jobs died in vite with "Ineffective mark-compacts near
+  # heap limit"). 6 GB fits the smallest runner; harmless where RAM is larger.
+  NODE_OPTIONS="--max-old-space-size=6144" \
+    pnpm exec vite build --config vite.renderer.config.ts
 
   log "Building main process..."
   pnpm exec vite build --config vite.main.config.ts
