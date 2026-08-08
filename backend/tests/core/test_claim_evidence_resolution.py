@@ -1042,6 +1042,82 @@ def test_localized_company_with_segment_name_does_not_invent_entity_conflict() -
     )
 
 
+def _search_text_record(handle: str, document_id: str, quote: str, locator: dict) -> dict:
+    return {
+        "evidenceHandle": handle,
+        "source": {
+            "providerId": "reportify",
+            "sourceType": "document",
+            "documentId": document_id,
+            "sourceId": document_id,
+            "title": "SpaceX Initiation Debrief",
+        },
+        "evidence": {"kind": "text", "quote": quote},
+        "locator": locator,
+    }
+
+
+def test_document_chunk_supersedes_its_own_provider_summary() -> None:
+    """One search hit can now carry both; they are not independent candidates."""
+
+    claim = extract_claims(
+        "Connectivity revenue is modelled at $18 billion in 2026.",
+        mode="strict-domain",
+        semantics=_USD_SEMANTICS,
+    )[0]
+    quote = "Connectivity revenue is modelled at $18 billion in 2026."
+    records = [
+        _search_text_record(
+            "ev_mcp_chunk",
+            "doc-spcx",
+            quote,
+            {"kind": "chunk", "chunkId": "chunk-7"},
+        ),
+        _search_text_record(
+            "ev_mcp_summary",
+            "doc-spcx",
+            quote,
+            {"kind": "external", "fragment": "provider-summary"},
+        ),
+    ]
+
+    resolution = resolve_claim_evidence(claim, records, semantics=_USD_SEMANTICS)
+
+    assert resolution.status == "verified"
+    assert resolution.binding_action == "auto-bind"
+    assert resolution.selected_handles == ("ev_mcp_chunk",)
+
+
+def test_summaries_of_different_documents_still_resolve_as_ambiguous() -> None:
+    """Superseding is per document; two sources disagreeing stays unbound."""
+
+    claim = extract_claims(
+        "Connectivity revenue is modelled at $18 billion in 2026.",
+        mode="strict-domain",
+        semantics=_USD_SEMANTICS,
+    )[0]
+    quote = "Connectivity revenue is modelled at $18 billion in 2026."
+    records = [
+        _search_text_record(
+            "ev_mcp_chunk_a",
+            "doc-a",
+            quote,
+            {"kind": "chunk", "chunkId": "chunk-1"},
+        ),
+        _search_text_record(
+            "ev_mcp_summary_b",
+            "doc-b",
+            quote,
+            {"kind": "external", "fragment": "provider-summary"},
+        ),
+    ]
+
+    resolution = resolve_claim_evidence(claim, records, semantics=_USD_SEMANTICS)
+
+    assert resolution.status == "ambiguous"
+    assert resolution.selected_handles == ()
+
+
 def test_sentence_initial_english_word_is_not_an_entity_marker() -> None:
     # Latin prose capitalizes the first word of every sentence, so a leading
     # ``Customer`` must never be treated as a company that conflicts with the
