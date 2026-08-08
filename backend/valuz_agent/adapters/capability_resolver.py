@@ -423,12 +423,31 @@ def _mint_internal_mcp_token(owner_user_id: str) -> str:
 
 # Tool-call timeout (ceiling) for the first-party harness MCP servers. Their
 # tools can block longer than a runtime client's default cap (codex aborts at
-# 120s): the ``harness`` toolkit's ``await_members`` parks up to one window unit.
-# Derive the ceiling from that window + a margin so a healthy long wait is never
-# mis-reported as a transport failure, while a genuinely hung tool still fails in
-# minutes (not the arbitrary 1h it used to be). Kept in sync with
+# 120s): the ``harness`` toolkit's ``await_members`` parks up to one window unit,
+# and generate_ui can stream a large page for minutes on a slow provider.
+# Derive the ceiling from the await window + a margin so a healthy long wait is
+# never mis-reported as a transport failure, while a genuinely hung tool still
+# fails in minutes (not the arbitrary 1h it used to be). Kept in sync with
 # ``coordination._MAX_AWAIT_WINDOW_S`` (600) — 600 + 120 margin = 720.
-_INTERNAL_MCP_TOOL_TIMEOUT_SEC = 720.0
+#
+# ``VALUZ_INTERNAL_MCP_TOOL_TIMEOUT_SEC`` overrides it (default unchanged) for
+# deployments whose provider gateway is genuinely slow — a finance workbench
+# page on a congested channel can legitimately take longer than the default.
+def _internal_mcp_tool_timeout_sec() -> float:
+    import os
+
+    raw = os.environ.get("VALUZ_INTERNAL_MCP_TOOL_TIMEOUT_SEC")
+    if raw:
+        try:
+            value = float(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+    return 720.0
+
+
+_INTERNAL_MCP_TOOL_TIMEOUT_SEC = _internal_mcp_tool_timeout_sec()
 
 
 async def always_on_http_mcp_servers(
