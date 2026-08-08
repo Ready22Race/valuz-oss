@@ -12,7 +12,7 @@ import math
 import re
 from collections import defaultdict
 from collections.abc import Iterable, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
 from src.core.claim_audit import (
@@ -83,6 +83,10 @@ class EvidenceCandidate:
     hard_conflicts: tuple[str, ...]
     source: Mapping[str, Any]
     evidence: Mapping[str, Any]
+    # Carried so provenance granularity can be compared. A chunk names an
+    # exact location inside the document; a provider summary only points at
+    # the document as a whole.
+    locator: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -429,6 +433,8 @@ def retrieve_evidence_candidates(
         handle, source, evidence = _evidence_parts(record)
         if not handle or not isinstance(evidence, Mapping):
             continue
+        locator = record.get("locator") if isinstance(record, Mapping) else None
+        locator = locator if isinstance(locator, Mapping) else {}
         signals, hard_conflicts = _candidate_signals(
             claim,
             handle,
@@ -451,6 +457,7 @@ def retrieve_evidence_candidates(
                 hard_conflicts=tuple(dict.fromkeys(hard_conflicts)),
                 source=source,
                 evidence=evidence,
+                locator=locator,
             )
         )
 
@@ -626,10 +633,13 @@ def resolve_claim_evidence(
             for handle in selected:
                 support_by_handle[handle] = mapped_status
 
-    supported = tuple(
-        candidate.handle
-        for candidate in candidates
-        if support_by_handle[candidate.handle] == "supported"
+    supported = _collapse_superseded_summaries(
+        tuple(
+            candidate.handle
+            for candidate in candidates
+            if support_by_handle[candidate.handle] == "supported"
+        ),
+        candidates,
     )
     partial = tuple(
         candidate.handle
@@ -1009,6 +1019,58 @@ def _deterministic_support(
     ):
         return EvidenceSupport("contradicted", 4)
     return EvidenceSupport("supported", 3)
+
+
+def _is_provider_summary(candidate: EvidenceCandidate) -> bool:
+    """Return whether this candidate is a whole-document provider summary."""
+
+    locator = candidate.locator
+    return (
+        locator.get("kind") == "external"
+        and str(locator.get("fragment") or "") == "provider-summary"
+    )
+
+
+def _candidate_document_id(candidate: EvidenceCandidate) -> str:
+    source = candidate.source
+    return str(source.get("documentId") or source.get("sourceId") or "")
+
+
+def _collapse_superseded_summaries(
+    supported: tuple[str, ...],
+    candidates: tuple[EvidenceCandidate, ...],
+) -> tuple[str, ...]:
+    """Drop a summary when a chunk of the same document also supports.
+
+    One search result can now carry both an authoritative chunk and the
+    provider summary of the same document, and the same figure often appears
+    in both. Left alone that reads as two independent candidates and the
+    uniqueness gate refuses to bind anything — a strictly worse outcome than
+    before the summary was citable. They are not independent: the chunk names
+    an exact location inside the document the summary merely describes, so
+    the chunk supersedes it. Genuine disagreement between two different
+    documents still resolves as ambiguous.
+    """
+
+    if len(supported) < 2:
+        return supported
+    by_handle = {candidate.handle: candidate for candidate in candidates}
+    chunk_documents = {
+        _candidate_document_id(candidate)
+        for handle in supported
+        if (candidate := by_handle.get(handle)) is not None
+        and not _is_provider_summary(candidate)
+        and _candidate_document_id(candidate)
+    }
+    if not chunk_documents:
+        return supported
+    return tuple(
+        handle
+        for handle in supported
+        if (candidate := by_handle.get(handle)) is None
+        or not _is_provider_summary(candidate)
+        or _candidate_document_id(candidate) not in chunk_documents
+    )
 
 
 def _candidate_signals(
