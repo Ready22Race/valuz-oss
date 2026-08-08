@@ -31,6 +31,7 @@ from src.core.citation_quality import evaluate_citation_quality
 from src.core.claim_audit import (
     ClaimCandidate,
     bind_claims_to_evidence,
+    calculation_formula_matches_evidence,
     canonical_evidence_metric,
     extract_claims,
     propagate_equivalent_claim_bindings,
@@ -1253,6 +1254,10 @@ class CitationGuard:
             self._registry,
             semantics=semantics,
         )
+        normalized_text = _move_standalone_calculation_citations_to_previous_formula(
+            normalized_text,
+            self._registry,
+        )
         # Keep the Runtime-authored coordinates before any deterministic
         # binding links are inserted. Claim ids intentionally ignore source
         # offsets, so later binding passes can still refer back to these
@@ -1565,9 +1570,7 @@ class CitationGuard:
                 user_prompt=self._user_prompt,
                 entity_aliases=entity_aliases,
                 semantic_verifier=self._semantic_verifier,
-                semantic_verified_claim_citation_ids=(
-                    semantic_verified_claim_citation_ids
-                ),
+                semantic_verified_claim_citation_ids=(semantic_verified_claim_citation_ids),
             )
             _focus_text_citation_snippets(bundle)
         return GuardResult(text=canonical_text, bundle=bundle)
@@ -4007,7 +4010,16 @@ def _materialize_collection_address(
         and currency
         and any(
             term in normalized_field
-            for term in ("revenue", "cost", "profit", "asset", "liabil", "cash", "income")
+            for term in (
+                "revenue",
+                "cost",
+                "profit",
+                "asset",
+                "liabil",
+                "cash",
+                "income",
+                "equity",
+            )
         )
     ):
         unit = currency
@@ -4084,15 +4096,24 @@ def _materialize_collection_address(
     )
 
     fiscal_year = semantic_fiscal_year or context.get("fiscal_year") or context.get("fiscalYear")
-    period_part = (
-        semantic_period
-        or context.get("fiscal_quarter")
+    concrete_period = (
+        context.get("fiscal_quarter")
         or context.get("fiscalQuarter")
         or context.get("fiscal_period")
         or context.get("fiscalPeriod")
-        or context.get("period")
     )
-    period = str(collection.common.get("period") or "")
+    period_part = concrete_period or semantic_period or context.get("period")
+    # A provider may map the canonical ``period`` slot to dataset frequency
+    # (``annual`` / ``quarterly``) while exposing the concrete row period as
+    # an identity field.  The row-local Q1/Q2/FY value is more specific and
+    # must win; otherwise every quarterly citation collapses to
+    # ``2024 quarterly`` and conflicts with an exact-quarter Claim.
+    if concrete_period not in (None, ""):
+        period = f"{fiscal_year or ''} {concrete_period}".strip()
+    elif semantic_period not in (None, ""):
+        period = f"{fiscal_year or ''} {semantic_period}".strip()
+    else:
+        period = str(collection.common.get("period") or "")
     if not period and fiscal_year is not None:
         period = f"{fiscal_year} {period_part or ''}".strip()
     elif not period and period_part is not None:
@@ -4708,6 +4729,49 @@ def _move_calculation_citations_to_value_cells(
         ).rstrip()
         cells[target_index] = f"{cells[target_index].rstrip()} {link} "
         lines[line_index] = "|".join(cells)
+    return "\n".join(lines)
+
+
+def _move_standalone_calculation_citations_to_previous_formula(
+    value: str,
+    registry: EvidenceRegistry,
+) -> str:
+    """Attach a calculation-only source line to its preceding formula block.
+
+    Markdown models sometimes render display math, add a blank line, and put
+    the trusted calculation link on a line by itself.  That presentation is
+    visually understandable but leaves the formula Claim uncited because the
+    link-only line has no Claim of its own.  Relocate only a single Registry-
+    backed calculation link whose Evidence deterministically proves the
+    immediately preceding non-empty block; document/source-list links and
+    ambiguous calculations remain untouched.
+    """
+
+    lines = value.splitlines()
+    for line_index, line in enumerate(lines):
+        stripped = line.strip()
+        matches = list(_MARKDOWN_LINK_RE.finditer(stripped))
+        if len(matches) != 1 or matches[0].span() != (0, len(stripped)):
+            continue
+        match = matches[0]
+        if match.group(2) != "evidence" or match.group(4) is not None:
+            continue
+        record = registry.resolve(match.group(3))
+        if record is None or record.evidence.get("kind") != "calculation":
+            continue
+        block_end = line_index - 1
+        while block_end >= 0 and not lines[block_end].strip():
+            block_end -= 1
+        if block_end < 0:
+            continue
+        block_start = block_end
+        while block_start > 0 and lines[block_start - 1].strip():
+            block_start -= 1
+        previous_block = "\n".join(lines[block_start : block_end + 1])
+        if not calculation_formula_matches_evidence(previous_block, record.evidence):
+            continue
+        lines[block_end] = f"{lines[block_end].rstrip()} {stripped}"
+        lines[line_index] = ""
     return "\n".join(lines)
 
 

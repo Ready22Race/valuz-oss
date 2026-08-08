@@ -1947,12 +1947,7 @@ def bind_claims_to_evidence(
                 semantics=semantics,
                 entity_aliases=entity_aliases,
             )
-        if (
-            not handles
-            and not attributed
-            and local_handles
-            and semantic_verifier is not None
-        ):
+        if not handles and not attributed and local_handles and semantic_verifier is not None:
             # A source marker at the end of one paragraph/list item is a
             # bounded candidate for every Claim in that same local scope. The
             # deterministic matcher remains the first gate; paraphrases that
@@ -2002,12 +1997,8 @@ def bind_claims_to_evidence(
                 handles = resolution.selected_handles if resolution.status == "verified" else ()
                 if not handles:
                     continue
-                replacement = " ".join(
-                    f"[source](evidence://{handle})" for handle in handles
-                )
-                edits.append(
-                    (claim.insertion_offset, claim.insertion_offset, f" {replacement}")
-                )
+                replacement = " ".join(f"[source](evidence://{handle})" for handle in handles)
+                edits.append((claim.insertion_offset, claim.insertion_offset, f" {replacement}"))
                 auto_bound[claim.claim_id] = handles
                 semantic_bound[claim.claim_id] = handles
 
@@ -3349,6 +3340,12 @@ def _classify_claim(text: str) -> str:
         text.strip()
     ):
         return "reasoning"
+    # A short label ending in a colon scopes the value/formula that follows.
+    # Classify it before the derived-value heuristic: a year plus a metric
+    # name such as ``贵州茅台 2024 年归母净利率：`` is presentation context, not
+    # an independently sourced calculation merely because it contains 2024.
+    if re.fullmatch(r"[^。！？!?；;\n]{1,80}[:：]", text.strip()):
+        return "presentation"
     if _looks_like_numeric_formula(text):
         return "calculation"
     if _DERIVED_RE.search(text) and _NUMBER_RE.search(text):
@@ -3374,12 +3371,6 @@ def _classify_claim(text: str) -> str:
     if _SCOPE_DESCRIPTOR_RE.fullmatch(text.strip()):
         return "presentation"
     if _looks_like_period_scope_title(text):
-        return "presentation"
-    # A short standalone label scopes the claims that follow; the date inside
-    # it is context, not an independently asserted fact.  Treat labels such as
-    # ``贵州茅台 2024 年全年：`` like presentation text so the cited values
-    # below do not trigger a false unsupported warning.
-    if re.fullmatch(r"[^。！？!?；;\n]{1,80}[:：]", text.strip()):
         return "presentation"
     if _REASONING_RE.search(text):
         return "reasoning"
@@ -3555,13 +3546,60 @@ def _normalize_claim(
         )
         if metric_tokens:
             result["metric"] = " ".join(metric_tokens)
+    dimension_text = _text_without_matched_metric_terms(
+        text,
+        metric_candidates,
+        semantics,
+    )
     for dimension in ("scope", "basis"):
-        candidates = _claim_dimension_candidates(text, semantics, dimension)
+        candidates = _claim_dimension_candidates(dimension_text, semantics, dimension)
         if len(candidates) == 1:
             result[dimension] = candidates[0]
         elif candidates:
             result[f"{dimension}Candidates"] = "|".join(candidates)
     return result
+
+
+def _text_without_matched_metric_terms(
+    text: str,
+    metric_candidates: tuple[str, ...],
+    semantics: Mapping[str, Any] | None,
+) -> str:
+    """Remove matched metric phrases before parsing independent dimensions.
+
+    A metric alias may legitimately contain a word that is also a scope or
+    basis alias.  For example, ``归属于母公司股东的净利润`` identifies the metric;
+    the embedded ``母公司`` does not independently request a parent-company
+    statement scope.  Consuming the longest matched metric phrase first keeps
+    a separately stated dimension (for example ``母公司口径的归母净利润``)
+    available while preventing the metric label from being interpreted twice.
+    """
+
+    if not metric_candidates:
+        return text
+    remaining = _normalize_prose(text.replace("_", " "))
+    matched_terms = sorted(
+        {
+            _normalize_prose(term.replace("_", " "))
+            for metric in metric_candidates
+            for term in _metric_terms(metric, _metric_ontology(semantics).get(metric))
+            if _term_in_text(term, text)
+        },
+        key=len,
+        reverse=True,
+    )
+    for term in matched_terms:
+        if not term:
+            continue
+        if re.search(r"[\u4e00-\u9fff]", term):
+            remaining = remaining.replace(term, " ")
+        else:
+            remaining = re.sub(
+                rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])",
+                " ",
+                remaining,
+            )
+    return remaining
 
 
 def _metric_is_context_dimension(
@@ -4424,6 +4462,15 @@ def _canonical_metric(
             return prose_matches[0]
         if len(set(machine_matches)) == 1:
             return machine_matches[0]
+        # Tool-authored calculation labels may carry entity/period context
+        # around a policy metric alias (for example ``贵州茅台 2024 年营业收入``).
+        # Do not apply this fuzzy path to machine identifiers: an unknown
+        # ``total_revenue`` field must not collapse to the broader ``revenue``
+        # alias merely because one token overlaps.
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", explicit):
+            descriptive_matches = _claim_metric_candidates(explicit, semantics)
+            if len(descriptive_matches) == 1:
+                return descriptive_matches[0]
         return normalized_explicit
     field = str(evidence.get("field") or "")
     normalized_field = _normalize_field(field)
@@ -5547,9 +5594,7 @@ def _dimension_support_status(
         claim_value = claim.normalized.get(dimension)
         if not claim_value:
             continue
-        evidence_raw = str(
-            evidence.get(dimension) or metric_dimensions.get(dimension) or ""
-        )
+        evidence_raw = str(evidence.get(dimension) or metric_dimensions.get(dimension) or "")
         if not evidence_raw:
             return "partial"
         claim_canonical = _canonical_dimension(str(claim_value), semantics, dimension)
@@ -5708,12 +5753,69 @@ def _calculation_inputs_present_in_claim(
     inputs = evidence.get("inputs")
     if not isinstance(inputs, list) or not inputs:
         return False
-    values = [
-        item.get("value")
-        for item in inputs
-        if isinstance(item, Mapping) and item.get("value") is not None
+    input_rows = [
+        item for item in inputs if isinstance(item, Mapping) and item.get("value") is not None
     ]
-    return len(values) == len(inputs) and all(_value_present(value, text) for value in values)
+    if len(input_rows) != len(inputs):
+        return False
+    values = [item.get("value") for item in input_rows]
+    if all(_value_present(value, text) for value in values):
+        return True
+
+    # Models often display same-unit financial inputs in a compact scale
+    # (for example raw CNY values as ``亿元``) before calculating a ratio.  A
+    # shared power-of-ten scale cancels out of that arithmetic and is still
+    # deterministic evidence of the declared inputs.  Accept only one common
+    # scale across every input, require compatible units, and respect the
+    # precision actually printed for each operand.  This deliberately rejects
+    # arbitrary proportional values and mixed-unit calculations.
+    units = {
+        str(item.get("unit") or "").strip().casefold()
+        for item in input_rows
+        if str(item.get("unit") or "").strip()
+    }
+    if len(units) != 1:
+        return False
+    numeric_values = [_as_decimal(value) for value in values]
+    if any(value is None for value in numeric_values):
+        return False
+    displayed: list[tuple[Decimal, Decimal]] = []
+    for match in _NUMBER_RE.finditer(text):
+        token = match.group(0).replace(",", "").replace("−", "-").replace("﹣", "-")
+        decimal = _as_decimal(token)
+        if decimal is None:
+            continue
+        fractional = token.lstrip("+-").partition(".")[2]
+        tolerance = Decimal("0.5") * (Decimal(10) ** -len(fractional))
+        displayed.append((decimal, tolerance))
+    if len(displayed) < len(numeric_values):
+        return False
+
+    def matches_all(scale: Decimal, remaining: tuple[int, ...], value_index: int = 0) -> bool:
+        if value_index >= len(numeric_values):
+            return True
+        expected = numeric_values[value_index]
+        if expected is None:  # Kept explicit for the type checker.
+            return False
+        scaled = expected / scale
+        for index in remaining:
+            candidate, tolerance = displayed[index]
+            if abs(candidate - scaled) > tolerance:
+                continue
+            if matches_all(
+                scale,
+                tuple(candidate_index for candidate_index in remaining if candidate_index != index),
+                value_index + 1,
+            ):
+                return True
+        return False
+
+    positions = tuple(range(len(displayed)))
+    return any(
+        matches_all(Decimal(10) ** exponent, positions)
+        for exponent in range(-12, 13)
+        if exponent != 0
+    )
 
 
 def calculation_formula_matches_evidence(
@@ -5766,6 +5868,20 @@ def _looks_like_numeric_formula(text: str) -> bool:
 def _normalize_display_formula(text: str) -> str:
     """Normalize bounded plain/LaTeX display arithmetic for the safe evaluator."""
     body = re.split(r"[:：]", text, maxsplit=1)[-1]
+    if "=" in body:
+        # Rendered equations commonly include a label and/or a final result:
+        # ``metric = inputs / base = result`` or ``\frac{...}{...}=\mathbf{...}``.
+        # Evaluate the first equality component that is itself arithmetic;
+        # otherwise stripping TeX commands would concatenate the result onto
+        # the expression and make a correct formula unparsable.
+        arithmetic_parts = [
+            part
+            for part in body.split("=")
+            if len(_NUMBER_RE.findall(part)) >= 2
+            and (_ARITHMETIC_OPERATOR_RE.search(part) or _LATEX_FORMULA_RE.search(part))
+        ]
+        if arithmetic_parts:
+            body = arithmetic_parts[0]
     # TeX thousands separators emitted by models, e.g. ``170{,}899``.
     body = re.sub(r"(?<=\d)\{,\}(?=\d)", "", body)
     body = body.replace(r"\,", "")
