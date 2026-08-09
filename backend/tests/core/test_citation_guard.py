@@ -706,6 +706,144 @@ def test_collection_address_recovers_omitted_declared_items_wrapper() -> None:
     assert record.evidence["value"] == 4_290_000_000_000
 
 
+def test_materialization_offsets_map_back_to_the_streamed_text() -> None:
+    """Offsets the guard measures must be replayable against what was streamed.
+
+    Materializing a Collection Address collapses a long pointer into a short
+    handle, so every offset after it is shifted. The client replays those
+    offsets against the text the model streamed; unmapped, a marker lands tens
+    of characters early — inside the next value or link.
+    """
+
+    item = _item("ev_legacy_revenue_12345678")
+    item["source"].update({"sourceType": "dataset"})
+    item["evidence"] = {
+        "kind": "structured-data",
+        "datasetId": "financials",
+        "toolName": "company_income_statement",
+        "recordKey": "600519|2024 FY",
+        "entityId": "600519",
+        "field": "data[0].operating_revenue",
+        "metric": "operating_revenue",
+        "value": 174_144_000_000,
+        "unit": "CNY",
+        "period": "2024 FY",
+        "capturedAt": "2026-08-01T08:00:00Z",
+    }
+    raw = {
+        "data": [
+            {
+                "symbol": "600519",
+                "fiscal_year": 2024,
+                "period": "FY",
+                "operating_revenue": 174_144_000_000,
+            }
+        ],
+        "_valuz_evidence": [item],
+    }
+    visible = compact_citation_tool_content(raw)
+    private = private_citation_tool_content(raw)
+    assert visible is not None and private is not None
+
+    registry = EvidenceRegistry()
+    registry.register_tool_projection(
+        visible,
+        private,
+        tool_name="company_income_statement",
+        trusted_private=True,
+    )
+
+    handle = visible["_valuz_evidence_hint"]["collectionHandle"]
+    marker = "毛利率 41.2%"
+    streamed = (
+        f"营业收入 [source](evidence://{handle}#/data/0/operating_revenue)。{marker}"
+    )
+    guard = CitationGuard(
+        registry,
+        message_id="msg-offset-map",
+        user_prompt="Cite operating revenue",
+        policy_available=True,
+        verification_enabled=False,
+    )
+    guard._address_handles = {}
+    guard._materialization_shifts = []
+    normalized = guard._materialize_collection_addresses(streamed)
+
+    # The address really did shrink, otherwise the mapping proves nothing.
+    assert len(normalized) < len(streamed)
+    assert guard._materialization_shifts
+
+    # A position measured in the normalised text maps back to the same
+    # character in the text the reader was streamed.
+    assert guard._to_streamed_offset(normalized.index(marker)) == streamed.index(marker)
+    # Text before the first address is unaffected.
+    assert guard._to_streamed_offset(2) == 2
+
+
+def test_projection_resolves_the_address_the_model_wrote() -> None:
+    """The client holds the streamed text, which names the Collection Address.
+
+    The guard normalises that address into a materialized handle for its own
+    analysis, but the reader's client never receives the normalised text. When
+    the projection only knew the handle, the client could not resolve the link
+    it actually had and dropped the marker — the value rendered with no
+    citation and no sign that one had been lost.
+    """
+
+    item = _item("ev_legacy_revenue_12345678")
+    item["source"].update({"sourceType": "dataset"})
+    item["evidence"] = {
+        "kind": "structured-data",
+        "datasetId": "financials",
+        "toolName": "company_income_statement",
+        "recordKey": "600519|2024 FY",
+        "entityId": "600519",
+        "field": "data[0].operating_revenue",
+        "metric": "operating_revenue",
+        "value": 174_144_000_000,
+        "unit": "CNY",
+        "period": "2024 FY",
+        "capturedAt": "2026-08-01T08:00:00Z",
+    }
+    raw = {
+        "data": [
+            {
+                "symbol": "600519",
+                "fiscal_year": 2024,
+                "period": "FY",
+                "operating_revenue": 174_144_000_000,
+            }
+        ],
+        "_valuz_evidence": [item],
+    }
+    visible = compact_citation_tool_content(raw)
+    private = private_citation_tool_content(raw)
+    assert visible is not None and private is not None
+
+    registry = EvidenceRegistry()
+    registry.register_tool_projection(
+        visible,
+        private,
+        tool_name="company_income_statement",
+        trusted_private=True,
+    )
+
+    pointer = "#/data/0/operating_revenue"
+    address = f"{visible['_valuz_evidence_hint']['collectionHandle']}{pointer}"
+    result = CitationGuard(
+        registry,
+        message_id="msg-address-projection",
+        user_prompt="Cite operating revenue",
+        policy_available=True,
+        verification_enabled=False,
+    ).finalize(f"Operating revenue was CNY 174144000000 [source](evidence://{address}).")
+
+    assert result.bundle is not None
+    projection = result.bundle["projection"]["evidenceHandleToCitationId"]
+    citation_id = result.bundle["citations"][0]["citationId"]
+    assert projection.get(address) == citation_id
+
+
 def test_address_pointer_may_contain_parentheses_and_a_space() -> None:
     """A pointer such as ``/datas/0/indicators/ma(close, 20)`` must still bind.
 

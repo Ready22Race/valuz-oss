@@ -26,8 +26,18 @@ import { useI18n } from "../../hooks/use-i18n";
 
 const CITATION_HREF_PREFIX = "https://valuz.citation.invalid/";
 const CITATION_URI_PATTERN = /citation:\/\/([A-Za-z0-9._~:-]+)/g;
-const EVIDENCE_LINK_PATTERN =
-  /\[([^\]\n]{0,240})\]\(evidence:\/\/([A-Za-z0-9_-]{1,160})(#[^\s)\n]{1,2048})?\)/g;
+// A Collection Address' JSON Pointer can carry balanced parentheses, and a
+// space inside them — Reportify names indicator keys after their call
+// signature, giving ``#/datas/0/indicators/ma(close, 20)``. Matching the
+// fragment as ``[^\s)]`` failed on the whole link, so it was never projected
+// and the reader saw the raw ``evidence://`` protocol in the answer. A space is
+// only accepted inside a parenthesised group, so the pattern still stops at the
+// link instead of running into the prose after it.
+const ADDRESS_FRAGMENT = String.raw`(?:[^\s()\[\]\n]|\([^()\n]{0,200}\)){1,2048}`;
+const EVIDENCE_LINK_PATTERN = new RegExp(
+  String.raw`\[([^\]\n]{0,240})\]\(evidence:\/\/([A-Za-z0-9_-]{1,160})(#${ADDRESS_FRAGMENT})?\)`,
+  "gu",
+);
 // The tail of a binding the model is still writing. Streamdown completes a
 // half-written link while streaming, then rejects the unknown ``evidence:``
 // protocol and paints "[blocked]" in the middle of the sentence until the
@@ -108,8 +118,14 @@ export function projectEvidenceMarkdownLinks(
   return content.replace(
     EVIDENCE_LINK_PATTERN,
     (_whole, label: string, handle: string, fragment?: string) => {
-      const citationId =
-        projection.get(`${handle}${fragment ?? ""}`) ?? projection.get(handle);
+      // An address names one field inside a collection. If that exact address
+      // is unknown, the collection's other citations are evidence for other
+      // fields — attaching one of them puts a confident, unrelated number
+      // behind the value, which is worse than showing no marker. Only a
+      // pointerless handle may resolve to the collection itself.
+      const citationId = fragment
+        ? projection.get(`${handle}${fragment}`)
+        : projection.get(handle);
       if (citationId) return `[${label}](citation://${citationId})`;
       const normalized = label.replace(/\s+/gu, "").toLocaleLowerCase();
       return [
@@ -140,6 +156,78 @@ function codePointOffsetToCodeUnit(
   const points = Array.from(content);
   if (sourceOffset > points.length) return -1;
   return points.slice(0, sourceOffset).join("").length;
+}
+
+// A whole markdown link, and a number or word — the spans a marker must never
+// be dropped into the middle of.
+const UNSPLITTABLE_SPAN = new RegExp(
+  [
+    String.raw`\[[^\]\n]{0,240}\]\((?:[^()\s\n]|\([^()\n]{0,200}\)){1,2100}\)`,
+    String.raw`[-+]?\$?\d[\d.,]*\d?%?`,
+    String.raw`[A-Za-z][A-Za-z0-9_-]*`,
+  ].join("|"),
+  "gu",
+);
+
+/** Move an offset forward to the end of the text it sits in.
+ *
+ * A marker belongs after the thing it marks. Offsets drift — they are measured
+ * against the text the guard normalised, not the text the reader was streamed —
+ * so a raw offset can land mid-phrase and the marker reads as if it annotates
+ * the words that follow it rather than the statement it belongs to. Snapping to
+ * the end of the enclosing cell or sentence puts it back behind the text.
+ */
+export function offsetAfterEnclosingText(
+  content: string,
+  offset: number,
+): number {
+  const newline = content.indexOf("\n", offset);
+  const lineEnd = newline < 0 ? content.length : newline;
+  const lineStart = content.lastIndexOf("\n", Math.max(0, offset - 1)) + 1;
+  let end: number;
+  if (/^\s*\|/u.test(content.slice(lineStart, offset + 1))) {
+    // A table row: stay inside the cell, otherwise the marker lands outside
+    // the row and breaks it apart.
+    const cellEnd = content.indexOf("|", offset);
+    end = cellEnd < 0 || cellEnd > lineEnd ? lineEnd : cellEnd;
+  } else {
+    // Prose and list items: after the statement but before its full stop,
+    // which is where a citation reads naturally and where the existing markers
+    // already sit.
+    // An ASCII full stop only ends a sentence when whitespace or the line end
+    // follows it — otherwise it is the decimal point in "18.5".
+    const stop = content
+      .slice(offset, lineEnd)
+      .search(/[。！？；]|[.!?;](?=\s|$)/u);
+    end = stop < 0 ? lineEnd : offset + stop;
+  }
+  while (end > offset && /\s/u.test(content[end - 1] ?? "")) end -= 1;
+  // Only ever move forward: a correct offset must survive this untouched.
+  return Math.max(offset, end);
+}
+
+/** Move an offset that fell inside a link, number or word to just past it. */
+export function offsetOutsideMarkdownLink(
+  content: string,
+  offset: number,
+): number {
+  // An anchor's offset is measured against the text the guard normalised, where
+  // a Collection Address has already shrunk to its materialized handle. The
+  // client still holds the text the model streamed, so every offset after the
+  // first address is shifted. Landing inside a link splits the URL and leaves
+  // the protocol on screen; landing inside a value renders "+$19.16" as
+  // "+$19. ③ 16", which reads as two different numbers.
+  UNSPLITTABLE_SPAN.lastIndex = 0;
+  for (
+    let match = UNSPLITTABLE_SPAN.exec(content);
+    match !== null;
+    match = UNSPLITTABLE_SPAN.exec(content)
+  ) {
+    if (match.index >= offset) break;
+    const end = match.index + match[0].length;
+    if (offset < end) return end;
+  }
+  return offset;
 }
 
 export function projectCitationSidecarAnchors(
@@ -196,7 +284,11 @@ export function projectCitationSidecarAnchors(
     const markdown = citationIds
       .map((citationId) => `[source](citation://${citationId})`)
       .join(" ");
-    projected = `${projected.slice(0, offset)} ${markdown}${projected.slice(offset)}`;
+    const at = offsetOutsideMarkdownLink(
+      projected,
+      offsetAfterEnclosingText(projected, offset),
+    );
+    projected = `${projected.slice(0, at)} ${markdown}${projected.slice(at)}`;
   }
   return projected;
 }
