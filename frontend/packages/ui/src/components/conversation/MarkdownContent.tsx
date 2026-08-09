@@ -54,6 +54,7 @@ import { useI18n } from "../../hooks/use-i18n";
 import {
   citationDisplayOrder,
   citationIdFromHref,
+  offsetAfterEnclosingText,
   citationOccurrences,
   citationOffsetFromHref,
   CitationPill,
@@ -371,21 +372,38 @@ function safeQualityMarkerInsertion(
   requestedOffset: number,
   targetId: string,
 ): { offset: number; marker: string } {
-  let offset = tokenBoundary(content, requestedOffset);
+  // Put the marker behind the text it marks, then make sure that landing
+  // spot is not inside a value or a link.
+  let offset = tokenBoundary(
+    content,
+    offsetAfterEnclosingText(content, requestedOffset),
+  );
   let movedOutsideBlock = false;
-  for (const pattern of [
-    /\$\$[\s\S]*?\$\$/g,
-    /\\\[[\s\S]*?\\\]/g,
-    /```[\s\S]*?```/g,
-  ]) {
+  // Leaving a block means the marker starts its own line; leaving an inline
+  // span only needs a space. A newline inside a table row would break the row
+  // apart, so the two cases must not share a separator.
+  for (const [pattern, isBlock] of [
+    [/\$\$[\s\S]*?\$\$/g, true],
+    [/\\\[[\s\S]*?\\\]/g, true],
+    [/```[\s\S]*?```/g, true],
+    // A whole markdown link. The offset is measured against the text the audit
+    // saw, but markers are injected after protocol links have been projected
+    // into shorter citation links, so it can land inside one — splitting a
+    // label into "[sourc ⊘ e]" or a URL into "citation:/ ⊘ /cit_…", which
+    // breaks the link outright. Balanced parentheses are matched because a
+    // Collection Address' pointer can contain them.
+    [/\[[^\]\n]{0,240}\]\((?:[^()\s\n]|\([^()\n]{0,200}\)){1,2100}\)/g, false],
+  ] as const) {
     for (const match of content.matchAll(pattern)) {
       const start = match.index;
       const end = start + match[0].length;
       if (start < offset && offset < end) {
         offset = end;
-        movedOutsideBlock = true;
-        const followingNewline = content.slice(offset).match(/^[ \t]*\r?\n/);
-        if (followingNewline) offset += followingNewline[0].length;
+        if (isBlock) {
+          movedOutsideBlock = true;
+          const followingNewline = content.slice(offset).match(/^[ \t]*\r?\n/);
+          if (followingNewline) offset += followingNewline[0].length;
+        }
         break;
       }
     }
@@ -404,7 +422,19 @@ function injectQualityClaimMarkers(
   let result = content;
   const positioned = entries
     .map((entry) => {
-      const requestedOffset = claimSourceEnd(entry.location);
+      // The claim's own text beats its offset. Offsets are measured against
+      // the text the audit judged, which has been normalised and has had its
+      // protocol links rewritten, so replaying one against the streamed text
+      // can land in a different paragraph — a sentence about FCF margin was
+      // marking a cell three sections further down. Locating the sentence is
+      // coordinate-independent and lands on the statement by construction.
+      // Table-cell claims read "row — column: value" and never appear
+      // verbatim, so those still fall back to the offset.
+      const found = entry.exact ? content.indexOf(entry.exact) : -1;
+      const requestedOffset =
+        found >= 0
+          ? found + entry.exact.length
+          : claimSourceEnd(entry.location);
       return {
         entry,
         insertion:

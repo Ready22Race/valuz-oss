@@ -1107,6 +1107,10 @@ class CitationGuard:
     ) -> None:
         self._registry = registry
         self._message_id = message_id
+        # Collection Address -> materialized handle, per turn, and how far
+        # each materialization moved the text after it.
+        self._address_handles: dict[str, str] = {}
+        self._materialization_shifts: list[tuple[int, int]] = []
         self._user_prompt = user_prompt or ""
         prompt_without_negated_citation = _NEGATED_CITATION_RE.sub("", user_prompt or "")
         self._explicitly_requested = bool(
@@ -1313,6 +1317,8 @@ class CitationGuard:
         # Runtime providers cannot mint or replay canonical ``citation://``
         # ids. Only Registry-backed ``evidence://`` handles and Collection
         # Addresses enter the projection boundary.
+        self._address_handles = {}
+        self._materialization_shifts = []
         normalized_text = self._normalize_fallback_markers(text)
         normalized_text = self._materialize_collection_addresses(normalized_text)
         normalized_text = _move_citation_after_split_number(normalized_text)
@@ -1505,6 +1511,8 @@ class CitationGuard:
 
         numbered_bindings = _numbered_evidence_bindings(normalized_text)
         canonical_text = _MARKDOWN_LINK_RE.sub(replace_link, normalized_text)
+        # Only meaningful once every link has been resolved into a citation.
+        self._project_address_aliases(handle_to_citation_id)
         if unknown_ids:
             # Removing an untrusted citation marker must not leave a visible
             # gap before the sentence punctuation (``fact [source](...) .``).
@@ -1567,6 +1575,13 @@ class CitationGuard:
             equivalent_claim_handles=propagated_bind_result.claim_handles,
             handle_to_citation_id=handle_to_citation_id,
         )
+        # These offsets are measured against the normalised text, but the client
+        # replays them against the text the model streamed. Materializing a
+        # Collection Address shortens the answer by tens of characters each
+        # time, so without this every marker after the first address lands too
+        # early — inside a value or a link.
+        for entry in (*projection_anchors, *provenance_regions):
+            entry["sourceOffset"] = self._to_streamed_offset(int(entry["sourceOffset"]))
 
         all_citation_ids = [self._citation_id(record.handle) for record in self._registry.values()]
         used_citation_ids = {self._citation_id(handle) for handle in cited_handles}
@@ -1669,7 +1684,21 @@ class CitationGuard:
         return _FALLBACK_MARKER_RE.sub(replace, text)
 
     def _materialize_collection_addresses(self, text: str) -> str:
-        """Replace valid provisional Collection Addresses with direct handles."""
+        """Replace valid provisional Collection Addresses with direct handles.
+
+        Records address -> handle as it goes, and how far each replacement
+        moves the text that follows it.
+
+        The guard normalises the text for its own analysis, but the reader's
+        client still holds the text the model streamed, which names the
+        Collection Address. Two things follow. Without the handle map the
+        projection only knows the materialized handle, so the client cannot
+        resolve what it actually received and drops the marker — the value
+        renders with no citation and no sign that one was lost. And because an
+        address is far longer than the handle it collapses to, every offset
+        after it is shifted; replayed against the client's text a marker lands
+        in the wrong place, splitting a value or a link.
+        """
 
         def replace_link(match: re.Match[str]) -> str:
             label, scheme, identifier, fragment = match.groups()
@@ -1678,8 +1707,12 @@ class CitationGuard:
             record = self._registry.materialize_reference(identifier, fragment)
             if record is None:
                 return f"[{label}](evidence://{identifier})"
-            return f"[{label}](evidence://{record.handle})"
+            self._address_handles[f"{identifier}{fragment}"] = record.handle
+            replaced = f"[{label}](evidence://{record.handle})"
+            shifts.append((match.start(), len(match.group(0)) - len(replaced)))
+            return replaced
 
+        shifts: list[tuple[int, int]] = []
         materialized = _MARKDOWN_LINK_RE.sub(replace_link, text)
 
         def replace_bare(match: re.Match[str]) -> str:
@@ -1688,11 +1721,35 @@ class CitationGuard:
             if fragment is None:
                 return match.group(0)
             record = self._registry.materialize_reference(identifier, fragment)
-            return (
-                f"evidence://{record.handle}" if record is not None else f"evidence://{identifier}"
-            )
+            if record is None:
+                return f"evidence://{identifier}"
+            self._address_handles[f"{identifier}{fragment}"] = record.handle
+            replaced = f"evidence://{record.handle}"
+            shifts.append((match.start(), len(match.group(0)) - len(replaced)))
+            return replaced
 
-        return _BARE_EVIDENCE_RE.sub(replace_bare, materialized)
+        result = _BARE_EVIDENCE_RE.sub(replace_bare, materialized)
+        # Offsets are recorded against ``text``; converting them to running
+        # positions in the materialized string is what makes them replayable.
+        running = 0
+        for start, delta in sorted(shifts):
+            self._materialization_shifts.append((start - running, delta))
+            running += delta
+        return result
+
+    def _to_streamed_offset(self, offset: int) -> int:
+        """Translate a normalised offset back into the text the client holds."""
+
+        shift = sum(delta for start, delta in self._materialization_shifts if start <= offset)
+        return offset + shift
+
+    def _project_address_aliases(self, handle_to_citation_id: dict[str, str]) -> None:
+        """Let the client resolve the address the model wrote, not just the handle."""
+
+        for address, handle in self._address_handles.items():
+            citation_id = handle_to_citation_id.get(handle)
+            if citation_id is not None:
+                handle_to_citation_id.setdefault(address, citation_id)
 
     def _citation_id(self, handle: str) -> str:
         digest = hashlib.sha256(f"{self._message_id}\0{handle}".encode()).hexdigest()[:20]
