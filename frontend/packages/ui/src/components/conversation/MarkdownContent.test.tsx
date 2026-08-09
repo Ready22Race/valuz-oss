@@ -1484,6 +1484,76 @@ describe("MarkdownContent citations", () => {
     expect(marker?.getAttribute("data-citation-claim-tone")).toBe("unsourced");
   });
 
+  it("keeps an unsourced marker out of the middle of a number", () => {
+    // A drifted source offset used to land inside the value, rendering
+    // "13.82%" as "1 [marker] 3.82%" — two numbers where the answer had one.
+    const content = "Gross margin 13.82% this quarter.";
+    const location = {
+      kind: "table-cell" as const,
+      blockIndex: 0,
+      rowIndex: 0,
+      columnIndex: 0,
+      sourceStart: 0,
+      sourceEnd: content.indexOf("13.82%") + 1,
+    };
+    render(
+      <MarkdownContent
+        content={content}
+        citationBundle={{
+          version: 1,
+          citations: [],
+          integrity: {
+            status: "passed",
+            unknownCitationIds: [],
+            unusedCitationIds: [],
+            missingLocatorCitationIds: [],
+            repairAttempts: 0,
+            policyRevision: "citation-v1",
+          },
+          quality: {
+            policyId: "finance",
+            policyRevision: "v1",
+            mode: "strict-domain",
+            status: "degraded",
+            publishStatus: "ready",
+            layers: { L4: "degraded" },
+            issues: [
+              {
+                code: "numeric_claim_without_citation",
+                layer: "L4",
+                severity: "unverified",
+                claimId: "clm_split",
+                claim: { exact: "13.82%" },
+                location,
+              },
+            ],
+            claims: [
+              {
+                claimId: "clm_split",
+                exact: "13.82%",
+                segmentIndex: 0,
+                citationRequired: true,
+                citationIds: [],
+                status: "unsupported" as const,
+                issueCodes: ["numeric_claim_without_citation"],
+                location,
+              },
+            ],
+            metrics: {
+              citationCount: 0,
+              unsourcedClaimCount: 1,
+              unverifiedClaimCount: 0,
+              tierCounts: {},
+            },
+          },
+        }}
+      />,
+    );
+
+    expect(document.querySelector("[data-citation-claim-quality]")).not.toBeNull();
+    expect(document.body.textContent).toContain("13.82%");
+  });
+
   it("uses claim source offsets to mark repeated critical claims independently", () => {
     const content = "Metric repeated. Metric repeated.";
     const locations = [
