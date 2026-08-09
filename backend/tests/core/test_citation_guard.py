@@ -7,6 +7,8 @@ import json
 import time
 
 from src.core.citation import (
+    _BARE_EVIDENCE_RE,
+    _MARKDOWN_LINK_RE,
     CitationGuard,
     EvidenceRegistry,
     _build_projection_anchors_and_regions,
@@ -702,6 +704,35 @@ def test_collection_address_recovers_omitted_declared_items_wrapper() -> None:
     assert record.evidence["entityId"] == "GOOGL"
     assert record.evidence["metric"] == "market_cap"
     assert record.evidence["value"] == 4_290_000_000_000
+
+
+def test_address_pointer_may_contain_parentheses_and_a_space() -> None:
+    """A pointer such as ``/datas/0/indicators/ma(close, 20)`` must still bind.
+
+    Reportify names indicator keys after their call signature, so the JSON
+    Pointer legitimately carries balanced parentheses and a space. Matching the
+    fragment as ``[^\\s)]`` made the whole link fail to match, so the guard
+    never rewrote it and the reader saw the raw ``evidence://`` protocol.
+    """
+
+    pointer = "#/datas/0/indicators/ma(close, 20)"
+    text = f"MA20 为 $199.56 [source](evidence://evc_mcp_ind_12345678{pointer})。"
+
+    link = _MARKDOWN_LINK_RE.search(text)
+    assert link is not None, "the link must match as a whole"
+    assert link.group(4) == pointer
+
+    bare = _BARE_EVIDENCE_RE.search(text)
+    assert bare is not None
+    assert bare.group(2) == pointer
+
+    # A bare address must still stop at the link, never swallow the prose that
+    # follows it.
+    trailing = _BARE_EVIDENCE_RE.search(
+        f"evidence://evc_mcp_ind_12345678{pointer} 后面还有正文"
+    )
+    assert trailing is not None
+    assert trailing.group(2) == pointer
 
 
 def test_guard_recovers_unknown_collection_handle_only_from_unique_valid_pointer() -> None:

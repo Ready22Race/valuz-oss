@@ -51,9 +51,18 @@ _PRIVATE_EVIDENCE_FORMAT_VERSION = 1
 
 _HANDLE_RE = re.compile(r"^ev_[A-Za-z0-9_-]{8,128}$")
 _COLLECTION_HANDLE_RE = re.compile(r"^evc_[A-Za-z0-9_-]{8,128}$")
+# A Collection Address' JSON Pointer can carry balanced parentheses, and a
+# space inside them: Reportify exposes indicator keys such as
+# ``ma(close, 20)``, giving ``#/datas/0/indicators/ma(close, 20)``. Matching
+# only ``[^\s)]`` made the whole link fail to match, so the guard never
+# rewrote it and the raw ``evidence://`` protocol leaked into the answer the
+# reader sees. Spaces are only ever accepted inside a parenthesised group, so
+# the pattern still cannot run past the link into the surrounding prose. The
+# two branches begin on disjoint characters, keeping the alternation linear.
+_ADDRESS_FRAGMENT = r"(?:[^\s()\[\]\n]|\([^()\n]{0,200}\)){1,2048}"
 _MARKDOWN_LINK_RE = re.compile(
     r"\[([^\]\n]{0,240})\]\((evidence|citation)://([A-Za-z0-9_-]{1,160})"
-    r"(#[^\s)\n]{1,2048})?\)"
+    rf"(#{_ADDRESS_FRAGMENT})?\)"
 )
 _MALFORMED_PROTOCOL_LINK_PREFIX_RE = re.compile(
     r"\[([^\]\n]{0,240})\]\((?:evidence|citation):(?!//)",
@@ -68,17 +77,21 @@ _REDUNDANT_VALUE_LIMITATION_RE = re.compile(
     r"(?:未披露|未提供|未列示)(?:该项|对应)?(?:的)?(?:具体)?(?:数字|数值|数据)?",
     re.IGNORECASE,
 )
-_BARE_EVIDENCE_RE = re.compile(r"(?<![\w/])evidence://([A-Za-z0-9_-]{1,160})(#[^\s)\]\n]{1,2048})?")
+_BARE_EVIDENCE_RE = re.compile(
+    rf"(?<![\w/])evidence://([A-Za-z0-9_-]{{1,160}})(#{_ADDRESS_FRAGMENT})?"
+)
 _INTRA_NUMBER_CITATION_RE = re.compile(
     r"(?P<prefix>(?<![\d,])\d{1,3}(?:,\d{3})*,\d{1,2})[ \t]*"
-    r"(?P<link>\[[^\]\n]{1,240}\]\((?:citation|evidence)://[A-Za-z0-9_-]{1,160}\))"
+    rf"(?P<link>\[[^\]\n]{{1,240}}\]\((?:citation|evidence)://[A-Za-z0-9_-]{{1,160}}"
+    rf"(?:#{_ADDRESS_FRAGMENT})?\))"
     r"(?P<suffix>\d(?:\.\d+)?)"
     r"(?P<unit>[ \t]*(?:%|bp|bps|百万元|亿元|万元|元|倍|CNY|USD|EUR|GBP|JPY|HKD))?",
     re.IGNORECASE,
 )
 _INTRA_DECIMAL_CITATION_RE = re.compile(
     r"(?P<prefix>(?<![\d,])[-+]?\d{1,3}(?:,\d{3})*\.)[ \t]*"
-    r"(?P<link>\[[^\]\n]{1,240}\]\((?:citation|evidence)://[A-Za-z0-9_-]{1,160}\))"
+    rf"(?P<link>\[[^\]\n]{{1,240}}\]\((?:citation|evidence)://[A-Za-z0-9_-]{{1,160}}"
+    rf"(?:#{_ADDRESS_FRAGMENT})?\))"
     r"[ \t]*(?P<suffix>\d+)"
     r"(?P<unit>[ \t]*(?:%|bp|bps|百万元|亿元|万元|元|倍|CNY|USD|EUR|GBP|JPY|HKD))?",
     re.IGNORECASE,
@@ -89,8 +102,8 @@ _FALLBACK_MARKER_RE = re.compile(
 )
 _NUMBERED_EVIDENCE_SOURCE_RE = re.compile(
     r"(?m)^[ \t]*(?:[-*][ \t]+)?\[(\d{1,3})\][ \t]+"
-    r"\[[^\]\n]{1,240}\]\(evidence://([A-Za-z0-9_-]{1,160})"
-    r"(?:#[^\s)\n]{1,2048})?\)"
+    rf"\[[^\]\n]{{1,240}}\]\(evidence://([A-Za-z0-9_-]{{1,160}})"
+    rf"(?:#{_ADDRESS_FRAGMENT})?\)"
 )
 _BARE_NUMBERED_MARKER_RE = re.compile(r"(?<![\\\w])\[(\d{1,3})\](?!\()")
 _SOURCE_SECTION_HEADING_RE = re.compile(

@@ -342,12 +342,36 @@ function stripDecorativeHeadingCitations(content: string): string {
     .join("\n");
 }
 
+// Numbers (``13.82%``, ``$1,234.5``, ``60``) and words, so a marker can be
+// kept out of the middle of one.
+const ATOMIC_TOKEN_RE = /\$?\d[\d.,]*\d?%?|[A-Za-z][A-Za-z0-9_-]*/g;
+
+/** Move an offset that fell inside a number or word to the end of it. */
+function tokenBoundary(content: string, offset: number): number {
+  // A claim's source offset is computed against the text the audit saw. When
+  // that text and the rendered text have drifted — an unrewritten protocol
+  // link is enough — the offset can land mid-token, and "13.82%" is shown as
+  // "1 ⊘ 3.82%", which reads as two different numbers. Snapping forward keeps
+  // the marker attached to the whole value.
+  ATOMIC_TOKEN_RE.lastIndex = 0;
+  for (
+    let match = ATOMIC_TOKEN_RE.exec(content);
+    match !== null;
+    match = ATOMIC_TOKEN_RE.exec(content)
+  ) {
+    const end = match.index + match[0].length;
+    if (match.index >= offset) break;
+    if (offset < end) return end;
+  }
+  return offset;
+}
+
 function safeQualityMarkerInsertion(
   content: string,
   requestedOffset: number,
   targetId: string,
 ): { offset: number; marker: string } {
-  let offset = requestedOffset;
+  let offset = tokenBoundary(content, requestedOffset);
   let movedOutsideBlock = false;
   for (const pattern of [
     /\$\$[\s\S]*?\$\$/g,
