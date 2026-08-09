@@ -365,7 +365,15 @@ def test_policy_detects_uncited_financial_number_without_requiring_snapshot_cove
     }
 
 
-def test_policy_requires_coverage_for_a_claimed_time_range() -> None:
+def test_undeclared_coverage_window_is_unknown_not_an_issue() -> None:
+    """No producer emits a coverage window, so absence cannot be a finding.
+
+    Sampling real runs found dated evidence everywhere and declared coverage
+    nowhere. Asserting a problem from that absence attached a "verify against
+    the original" note to essentially every dated citation, which is the
+    unknown-as-conflict collapse the design rules out.
+    """
+
     citation = _structured()
     citation["evidence"].pop("coverage")
 
@@ -380,7 +388,7 @@ def test_policy_requires_coverage_for_a_claimed_time_range() -> None:
     )
 
     codes = {issue["code"] for issue in result["quality"]["issues"]}
-    assert "evidence_coverage_missing" in codes
+    assert "evidence_coverage_missing" not in codes
 
 
 def test_point_in_time_indicator_interpretation_does_not_require_range_coverage() -> None:

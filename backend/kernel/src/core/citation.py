@@ -229,6 +229,7 @@ class EvidenceRegistry:
         self._collections: dict[str, EvidenceCollectionRecord] = {}
         self._pending_collection_snapshots: dict[str, tuple[Any, str, str]] = {}
         self._rejected_count = 0
+        self._tool_projection_count = 0
         self._address_requested_count = 0
         self._materialized_count = 0
         self._materialization_rejected_count = 0
@@ -253,6 +254,7 @@ class EvidenceRegistry:
         self._collections.clear()
         self._pending_collection_snapshots.clear()
         self._rejected_count = 0
+        self._tool_projection_count = 0
         self._address_requested_count = 0
         self._materialized_count = 0
         self._materialization_rejected_count = 0
@@ -389,6 +391,10 @@ class EvidenceRegistry:
         validation can bind the sidecar to that exact immutable snapshot.
         """
 
+        # Counted before extraction: a search that returns only discovery rows
+        # registers nothing, yet the model did consult a source. Only a turn
+        # that consults nothing at all is answering from stable knowledge.
+        self._tool_projection_count += 1
         self._capture_collection_hints(model_content, trusted_private=trusted_private)
         registration_content = private_content if private_content is not None else model_content
         if trusted_private and private_content is not None:
@@ -850,6 +856,24 @@ class EvidenceRegistry:
     def had_evidence_activity(self) -> bool:
         return bool(self._records) or bool(self._collections) or self._rejected_count > 0
 
+    @property
+    def has_locked_document_scope(self) -> bool:
+        """Whether the turn is pinned to a specific set of documents."""
+
+        return self._allowed_document_ids is not None
+
+    @property
+    def retrieval_attempted(self) -> bool:
+        """Whether this turn consulted a source-bearing tool at all.
+
+        Distinct from ``had_evidence_activity``: a search can return only
+        discovery rows and register nothing, which still means the model went
+        looking and should be held to sourcing its answer. Consulting nothing
+        whatsoever is what marks a question as stable knowledge.
+        """
+
+        return self._tool_projection_count > 0
+
     def _source_is_allowed(self, source: dict[str, Any]) -> bool:
         """Fail closed for a document-research session's locked source scope."""
 
@@ -1248,6 +1272,17 @@ class CitationGuard:
             and not self._registry.had_evidence_activity
             and not self._explicitly_requested
         ):
+            if (
+                not self._registry.retrieval_attempted
+                and not self._registry.has_locked_document_scope
+            ):
+                # Nothing was consulted, so there is no source this answer
+                # could have cited and no gap to report. A definition answered
+                # from stable knowledge otherwise had every illustrative
+                # number ("ROE = 15% means ...") counted as an unsourced
+                # claim, which a strict distribution switch turned into a
+                # wall of findings on a correct explanation.
+                return GuardResult(text=text, bundle=None)
             claims = extract_claims(
                 text,
                 mode=str(policy_mode or "required-on-evidence"),
@@ -1524,11 +1559,23 @@ class CitationGuard:
         used_citation_ids = {self._citation_id(handle) for handle in cited_handles}
         unused_ids = [item for item in all_citation_ids if item not in used_citation_ids]
 
+        # Integrity answers "is this citation data structurally sound" —
+        # unknown ids, malformed protocol, absent locators, no policy to judge
+        # against. How much of the answer is covered is a different question
+        # the claim audit already reports per claim, so folding "required but
+        # nothing cited" in here marked every interim assistant message
+        # degraded the moment it mentioned a number, long before evidence had
+        # been gathered. Document-scoped research is the exception: there the
+        # answer must come from the locked documents, so citing nothing is a
+        # structural failure rather than a turn still in progress. The test is
+        # the locked scope itself, not ``force_required`` — a strict-domain
+        # distribution sets that flag on every message, which is how interim
+        # narration kept being reported as degraded.
         degraded = (
             bool(unknown_ids)
             or malformed_protocol_count > 0
             or bool(missing_locator_ids)
-            or (required and not citations)
+            or (required and not citations and self._registry.has_locked_document_scope)
             or (required and not self._policy_available)
         )
         if degraded:

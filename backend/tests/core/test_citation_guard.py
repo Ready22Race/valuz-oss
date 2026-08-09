@@ -2346,6 +2346,82 @@ def test_guard_does_not_add_bundle_to_ordinary_chat() -> None:
     assert result.bundle is None
 
 
+def test_strict_domain_interim_message_is_not_an_integrity_failure() -> None:
+    """A turn still in progress has not failed its citation integrity.
+
+    ``force_required`` is set on every message by a strict-domain
+    distribution, so keying integrity on it reported each interim narration
+    ("now reading the filing... revenue looks like 100") as degraded before
+    any evidence could exist. Only a locked document scope makes an uncited
+    answer structurally wrong.
+    """
+
+    registry = EvidenceRegistry()
+    registry.register_tool_projection(
+        {"docs": [{"doc_id": "d1", "title": "FY2026 annual report"}]},
+        tool_name="filings_search",
+    )
+    guard = CitationGuard(
+        registry,
+        message_id="msg-interim",
+        user_prompt="查一下年报里的营业收入。",
+        policy_available=True,
+        force_required=True,
+    )
+
+    result = guard.finalize("找到了年报，正在读取第 92 页的营业收入。")
+
+    assert result.bundle is not None
+    assert result.bundle["integrity"]["status"] != "degraded"
+
+
+def test_strict_domain_leaves_a_no_lookup_knowledge_answer_alone() -> None:
+    """A definition answered without consulting anything has nothing to cite."""
+
+    guard = CitationGuard(
+        EvidenceRegistry(),
+        message_id="msg-knowledge",
+        user_prompt="ROE 是什么意思？不需要查询具体公司数据。",
+        policy_available=True,
+        force_required=True,
+    )
+
+    result = guard.finalize(
+        "ROE = 净利润 ÷ 股东权益。比如 ROE = 15%，意味着股东每投入 100 元，一年赚回 15 元。"
+    )
+
+    # Illustrative numbers in a definition are not a sourcing gap.
+    assert result.bundle is None
+
+
+def test_a_search_that_returned_nothing_still_demands_sources() -> None:
+    """Consulting a source and finding nothing is not stable knowledge."""
+
+    registry = EvidenceRegistry()
+    # A discovery-only search: the projection registers no evidence, but the
+    # model did go looking, so its figures must still be sourced.
+    registry.register_tool_projection(
+        {"docs": [{"doc_id": "d1", "title": "SpaceX Q2"}]},
+        tool_name="news_search",
+    )
+    assert registry.retrieval_attempted is True
+    assert registry.had_evidence_activity is False
+
+    guard = CitationGuard(
+        registry,
+        message_id="msg-search-empty",
+        user_prompt="SpaceX 云业务收入是多少？",
+        policy_available=True,
+        force_required=True,
+    )
+
+    result = guard.finalize("SpaceX AI 板块总收入为 25.61 亿美元，同比增长 247%。")
+
+    assert result.bundle is not None
+    quality = result.bundle.get("quality") or {}
+    assert (quality.get("metrics") or {}).get("unsourcedClaimCount", 0) >= 1
+
+
 def test_guard_requires_citations_for_locked_document_research_without_evidence() -> None:
     guard = CitationGuard(
         EvidenceRegistry(allowed_document_ids={"doc-1"}),

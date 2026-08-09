@@ -2162,9 +2162,15 @@ def _validate_calculation_input_semantics(
     for dimension in ("scope", "basis"):
         calculation_value = _clean_text(calculation.get(dimension), "")
         input_value = _clean_text(input_evidence.get(dimension), "")
-        if not calculation_value:
+        if not calculation_value or not input_value:
+            # An input that never declares the dimension is unknown, not in
+            # conflict. Most quote and statement fields carry no scope/basis at
+            # all, so failing them here raised a user-visible "needs review"
+            # warning on correct arithmetic — the exact three-valued rule the
+            # design forbids collapsing ("a missing value is unknown, not a
+            # conflict").
             continue
-        if not input_value or canonical_evidence_dimension(
+        if canonical_evidence_dimension(
             input_value,
             semantics,
             dimension,
@@ -2235,17 +2241,17 @@ def _validate_time_boundary(
     as_of = _date_prefix(evidence.get("asOf"))
     start = _date_prefix(coverage.get("start"))
     end = _date_prefix(coverage.get("end"))
-    if (
-        rule.get("require_coverage") is True
-        and as_of
-        and not (start or end)
-        and _claim_requires_range_coverage(claim_text)
-    ):
-        issue("evidence_coverage_missing", "L5", citation_ids=[citation_id])
-    if as_of and start and as_of < start:
-        issue("evidence_before_coverage", "L5", citation_ids=[citation_id])
-    if as_of and end and as_of > end:
-        issue("evidence_after_coverage", "L5", citation_ids=[citation_id])
+    # ``require_coverage`` enforces the boundary a producer declares; it cannot
+    # demand one that no producer emits. Sampling 270 real citations found 104
+    # with ``asOf`` and zero with any coverage window, so asserting a problem
+    # from its absence attached "please verify against the original" to
+    # essentially every dated citation. Absence is unknown; only a declared
+    # window that the evidence falls outside is a real boundary violation.
+    if rule.get("require_coverage") is True:
+        if as_of and start and as_of < start:
+            issue("evidence_before_coverage", "L5", citation_ids=[citation_id])
+        if as_of and end and as_of > end:
+            issue("evidence_after_coverage", "L5", citation_ids=[citation_id])
     semantic_options = evidence_semantic_options(evidence, semantics)
     claim_dates = (
         []
@@ -2266,35 +2272,6 @@ def _validate_time_boundary(
             citation_ids=[citation_id],
             severity="unverified",
         )
-
-
-def _claim_requires_range_coverage(claim_text: str) -> bool:
-    """Return whether a claim needs interval coverage rather than a snapshot.
-
-    ``asOf`` and ``period`` identify a point or reporting-period observation.
-    They are sufficient for claims about that observation.  A separate
-    coverage range is only required when the prose asserts a span, trend or
-    change over time.  Requiring ``coverage`` for every structured snapshot
-    made exact financial-statement fields look unverified to users.
-    """
-
-    if re.search(
-        r"(?:"
-        r"(?:从|自).{0,32}(?:至|到|截至)|"
-        r"(?:过去|近|最近|连续)\s*(?:\d+|一|两|三|四|五|六|七|八|九|十)?\s*"
-        r"(?:天|周|月|季|季度|年)|"
-        r"(?:区间|期间内|时间段|历史变化)|"
-        r"\b(?:from|between|since|through|over|during|history)\b"
-        r")",
-        claim_text,
-        re.IGNORECASE,
-    ):
-        return True
-
-    temporal_values = {
-        value for value in _ISO_DATE_RE.findall(claim_text) if isinstance(value, str) and value
-    }
-    return len(temporal_values) > 1
 
 
 def _safe_decimal_eval(expression: str, values: dict[str, Decimal]) -> Decimal:
