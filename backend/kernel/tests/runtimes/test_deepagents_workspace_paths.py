@@ -100,6 +100,30 @@ def test_virtual_writes_still_land_inside_the_workspace(tmp_path: Path) -> None:
     assert (tmp_path / "conversation_history" / "thread.md").read_text() == "summary"
 
 
+def test_summarization_appends_across_repeated_offloads(tmp_path: Path) -> None:
+    """The full offload path, not just ``write``.
+
+    ``SummarizationMiddleware._offload_to_backend`` reaches the backend three
+    ways: ``download_files`` to read the running log, ``write`` for the first
+    event of a thread, and ``edit`` for every event after it. All three share
+    ``_resolve_path``, so covering only ``write`` would leave the append path —
+    the common case on any long conversation — unguarded.
+    """
+
+    backend = _build_local_shell_backend(str(tmp_path))
+    path = "/conversation_history/thread.md"
+
+    assert backend.download_files([path])[0].error is not None  # not created yet
+    backend.write(path, "## first\n\n")
+
+    existing = backend.download_files([path])[0].content.decode("utf-8")
+    backend.edit(path, existing, existing + "## second\n\n")
+
+    assert (tmp_path / "conversation_history" / "thread.md").read_text() == (
+        "## first\n\n## second\n\n"
+    )
+
+
 def test_absolute_host_path_outside_the_workspace_stays_virtual(tmp_path: Path) -> None:
     """An out-of-workspace absolute path is re-rooted, never read from the host.
 
