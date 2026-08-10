@@ -103,7 +103,7 @@ async def test_post_tool_hook_compacts_model_output_and_keeps_private_sidecar() 
     assert "ev_msft_q1_12345678" in runtime._citation_tool_result_sidecars["tool-1"]
 
 
-async def test_post_tool_hook_bounds_filing_evidence_but_keeps_private_sidecar() -> None:
+async def test_post_tool_hook_keeps_all_filing_evidence_and_private_sidecar() -> None:
     runtime = ClaudeAgentRuntime(AgentConfig(id="a", name="a"), "", _RecordingSink())
     hook = runtime._map_hooks()["PostToolUse"][0].hooks[0]
 
@@ -126,8 +126,10 @@ async def test_post_tool_hook_bounds_filing_evidence_but_keeps_private_sidecar()
     }
     assert compacted["_valuz_evidence"][-1]["evidenceHandle"] == "ev_msft_q1_00000079"
     assert len(compacted["_valuz_evidence"][-1]["excerpt"]) == 700
-    assert "complete transcript" in json.dumps(compacted)
-    assert "ev_msft_q1_00000079" in runtime._citation_tool_result_sidecars["tool-long"]
+    assert compacted["content"] == _raw_long_document_result()["content"]
+    private_content = runtime._citation_tool_result_sidecars["tool-long"]
+    assert "complete transcript" not in private_content
+    assert "ev_msft_q1_00000079" in private_content
 
 
 async def test_post_tool_hook_standardizes_indexed_chunks_into_evidence() -> None:
@@ -470,7 +472,7 @@ async def test_post_tool_hook_keeps_provider_discovery_unchanged_and_non_citable
     assert registry.rejected_count == 0
 
 
-async def test_post_tool_hook_keeps_larger_transcript_window_visible() -> None:
+async def test_post_tool_hook_keeps_all_transcript_evidence_visible() -> None:
     runtime = ClaudeAgentRuntime(AgentConfig(id="a", name="a"), "", _RecordingSink())
     hook = runtime._map_hooks()["PostToolUse"][0].hooks[0]
     await hook(

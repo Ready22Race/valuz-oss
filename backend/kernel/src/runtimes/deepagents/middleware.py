@@ -636,10 +636,7 @@ class CitationEvidenceCompactionMiddleware(AgentMiddleware):
                     if discovery is not None:
                         model_projection = discovery[0]
                 model_projection = rebase_collection_projections(model_projection)
-                compacted = compact_citation_tool_content(
-                    model_projection,
-                    max_text_evidence_items=80,
-                )
+                compacted = compact_citation_tool_content(model_projection)
                 if compacted is None:
                     compacted = model_projection
                 private_content = private_citation_tool_content(
@@ -750,10 +747,7 @@ class CitationEvidenceCompactionMiddleware(AgentMiddleware):
                     citation_content=artifact[_CITATION_ARTIFACT_KEY],
                 )
             return result.model_copy(update={"content": compact_discovery, "artifact": artifact})
-        compacted = compact_citation_tool_content(
-            result.content,
-            max_text_evidence_items=80,
-        )
+        compacted = compact_citation_tool_content(result.content)
         if compacted is None:
             return result
         artifact = dict(result.artifact) if isinstance(result.artifact, dict) else {}

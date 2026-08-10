@@ -146,8 +146,6 @@ _STDERR_TAIL_LINES: int = 40
 # citation registration recover evidence envelopes from transcript/search
 # payloads without feeding those bytes back into the LLM context.
 _MAX_PERSISTED_CITATION_CONTENT_BYTES: int = 16_000_000
-_CITATION_FILING_MODEL_EVIDENCE_LIMIT: int = 24
-_CITATION_TRANSCRIPT_MODEL_EVIDENCE_LIMIT: int = 60
 _PERSISTED_OUTPUT_PATH_RE = re.compile(
     r"\A<persisted-output>\s*\n"
     r"Output too large \([^)]+\)\. Full output saved to: ([^\r\n]+)"
@@ -435,12 +433,12 @@ class ClaudeAgentRuntime:
         self._live_bg_tasks: dict[str, str] = {}
         # Raw source-bearing MCP outputs captured before Claude Code replaces
         # them with a compact model-visible view. The host still needs the
-        # immutable envelopes for CitationGuard registration; the model only
-        # needs bounded handle/excerpt rows. Entries are consumed by the
-        # matching ToolResultBlock and reset at each user turn.
+        # immutable envelopes for CitationGuard registration. Model Content
+        # keeps every Evidence handle aligned with the complete chunk window
+        # selected by the retrieval tool; entries are consumed by the matching
+        # ToolResultBlock and reset at each user turn.
         self._citation_tool_result_sidecars: dict[str, str] = {}
         self._citation_compaction_enabled: bool = True
-        self._citation_transcript_documents: set[str] = set()
         self._citation_raw_documents: dict[str, dict[str, Any]] = {}
         self._citation_document_metadata: dict[str, dict[str, Any]] = {}
 
@@ -584,7 +582,6 @@ class ClaudeAgentRuntime:
         self._workflow_pollers = []
         self._active_workflows = []
         self._citation_tool_result_sidecars = {}
-        self._citation_transcript_documents = set()
         self._citation_raw_documents = {}
         self._citation_document_metadata = {}
         self._cur_session_id = session.id
@@ -2139,7 +2136,6 @@ class ClaudeAgentRuntime:
                     if augmented_indexed_content is not None:
                         effective_tool_response = augmented_indexed_content
                 self._record_citation_discovery_documents(
-                    tool_name=tool_name,
                     tool_response=effective_tool_response,
                 )
                 if simple_name == "document_raw_content":
@@ -2201,24 +2197,12 @@ class ClaudeAgentRuntime:
                 # after the first dozen chunks, so preserve the complete
                 # selected chunk window instead of replacing it with evidence
                 # excerpts or forcing repeated small-page reads.
-                input_mapping = _tool_input_mapping(data.get("tool_input"))
-                document_id = str(
-                    input_mapping.get("doc_id") or input_mapping.get("document_id") or ""
-                )
-                evidence_limit = (
-                    _CITATION_TRANSCRIPT_MODEL_EVIDENCE_LIMIT
-                    if document_id in self._citation_transcript_documents
-                    else _CITATION_FILING_MODEL_EVIDENCE_LIMIT
-                )
                 # Citation capture must not select the Primary Agent's search
                 # candidates. Preserve provider row order, duplicates,
                 # summaries, and result cardinality exactly as returned.
                 model_projection = effective_tool_response
                 model_projection = rebase_collection_projections(model_projection)
-                compacted = compact_citation_tool_content(
-                    model_projection,
-                    max_text_evidence_items=evidence_limit,
-                )
+                compacted = compact_citation_tool_content(model_projection)
                 private_citation_content = private_citation_tool_content(
                     model_projection,
                     model_content=compacted if compacted is not None else model_projection,
@@ -2260,10 +2244,8 @@ class ClaudeAgentRuntime:
     def _record_citation_discovery_documents(
         self,
         *,
-        tool_name: str,
         tool_response: Any,
     ) -> None:
-        simple_name = tool_name.rsplit("__", 1)[-1]
         for payload in _iter_tool_response_mappings(tool_response):
             docs = payload.get("docs")
             if not isinstance(docs, list):
@@ -2278,8 +2260,6 @@ class ClaudeAgentRuntime:
                         for key in ("title", "url", "file_url", "category")
                         if doc.get(key)
                     }
-                    if simple_name in {"conferences_search", "minutes_search"}:
-                        self._citation_transcript_documents.add(doc_id)
 
     # -- Permission handler --
 

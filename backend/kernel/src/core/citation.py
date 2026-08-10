@@ -150,7 +150,6 @@ _MAX_STRUCTURED_STRING_CHARS = 4_096
 _MAX_CALCULATION_INPUTS = 128
 _MAX_COLLECTION_SPARSE_OVERRIDES = 256
 _MAX_RECTS = 128
-_MAX_MODEL_TEXT_EVIDENCE_ITEMS = 12
 _MAX_MODEL_TEXT_EXCERPT_CHARS = 700
 _BULK_TEXT_RESULT_KEYS = {
     "chunks",
@@ -2380,8 +2379,6 @@ def _decode_json_payload(content: Any, *, max_chars: int) -> Any | None:
 
 def compact_citation_tool_content(
     content: Any,
-    *,
-    max_text_evidence_items: int = _MAX_MODEL_TEXT_EVIDENCE_ITEMS,
 ) -> Any | None:
     """Return a model/history-safe view of source-bearing tool content.
 
@@ -2392,10 +2389,7 @@ def compact_citation_tool_content(
     no evidence envelope was found and callers should preserve the original.
     """
 
-    compacted, changed = _compact_citation_value(
-        content,
-        max_text_evidence_items=max(1, max_text_evidence_items),
-    )
+    compacted, changed = _compact_citation_value(content)
     return compacted if changed else None
 
 
@@ -3080,8 +3074,6 @@ def _attach_text_evidence_hints(
 
 def _compact_citation_value(
     value: Any,
-    *,
-    max_text_evidence_items: int,
 ) -> tuple[Any, bool]:
     if isinstance(value, str):
         if EVIDENCE_ENVELOPE_KEY not in value:
@@ -3090,10 +3082,7 @@ def _compact_citation_value(
             parsed = json.loads(value)
         except (json.JSONDecodeError, TypeError, ValueError):
             return value, False
-        compacted, changed = _compact_citation_value(
-            parsed,
-            max_text_evidence_items=max_text_evidence_items,
-        )
+        compacted, changed = _compact_citation_value(parsed)
         if not changed:
             return value, False
         return json.dumps(compacted, ensure_ascii=False, separators=(",", ":")), True
@@ -3101,10 +3090,7 @@ def _compact_citation_value(
         output: list[Any] = []
         changed = False
         for item in value:
-            compacted, item_changed = _compact_citation_value(
-                item,
-                max_text_evidence_items=max_text_evidence_items,
-            )
+            compacted, item_changed = _compact_citation_value(item)
             output.append(compacted)
             changed = changed or item_changed
         return output, changed
@@ -3197,10 +3183,7 @@ def _compact_citation_value(
     for key, item in list(output.items()):
         if key == EVIDENCE_ENVELOPE_KEY:
             continue
-        compacted, item_changed = _compact_citation_value(
-            item,
-            max_text_evidence_items=max_text_evidence_items,
-        )
+        compacted, item_changed = _compact_citation_value(item)
         if item_changed:
             output[key] = compacted
             changed = True

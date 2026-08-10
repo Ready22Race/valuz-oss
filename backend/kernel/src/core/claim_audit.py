@@ -1735,13 +1735,14 @@ def match_composite_text_evidence(
     records: Iterable[Any],
     *,
     semantics: Mapping[str, Any] | None = None,
+    prefer_precise_locators: bool = False,
 ) -> tuple[str, ...]:
     """Return a bounded set of excerpts that jointly covers every claim amount."""
 
     claim_amounts = _claim_amounts(_claim_assertion_text(claim, semantics), semantics)
     if len(claim_amounts) < 2:
         return ()
-    candidates: list[tuple[str, Mapping[str, Any], Mapping[str, Any], set[int], int]] = []
+    candidates: list[tuple[str, Mapping[str, Any], Mapping[str, Any], set[int], int, int]] = []
     for record in records:
         handle, source, evidence = _evidence_parts(record)
         if not handle or evidence.get("kind") != "text":
@@ -1766,7 +1767,16 @@ def match_composite_text_evidence(
         claim_tokens = _semantic_tokens(_normalize_prose(claim.exact))
         quote_tokens = _semantic_tokens(_normalize_prose(quote))
         overlap = len(claim_tokens & quote_tokens)
-        candidates.append((handle, source, evidence, covered, overlap))
+        candidates.append(
+            (
+                handle,
+                source,
+                evidence,
+                covered,
+                overlap,
+                _text_locator_precision(record),
+            )
+        )
     if not candidates:
         return ()
 
@@ -1774,13 +1784,14 @@ def match_composite_text_evidence(
     # strongest subject overlap.  Collapse duplicate chunks from one document
     # when an equally useful tighter excerpt has already been selected.
     uncovered = set(range(len(claim_amounts)))
-    selected: list[tuple[str, Mapping[str, Any], Mapping[str, Any], set[int], int]] = []
+    selected: list[tuple[str, Mapping[str, Any], Mapping[str, Any], set[int], int, int]] = []
     selected_sources: set[str] = set()
     remaining = list(candidates)
     while uncovered and remaining and len(selected) < 8:
         ranked = sorted(
             remaining,
             key=lambda row: (
+                row[5] if prefer_precise_locators else 0,
                 len(row[3] & uncovered),
                 len(row[3]),
                 row[4],
@@ -1838,10 +1849,78 @@ def match_composite_text_evidence(
     return tuple(row[0] for row in selected)
 
 
-def _format_corrected_display_value(value: Decimal, original: str) -> str:
-    normalized = original.translate(
-        str.maketrans({"−": "-", "﹣": "-", "－": "-", "＋": "+"})
+def _text_locator_precision(record: Any) -> int:
+    """Rank text provenance without treating a document summary as a chunk."""
+
+    locator = record.get("locator") if isinstance(record, Mapping) else None
+    if not isinstance(locator, Mapping):
+        return 1
+    if (
+        locator.get("kind") == "external"
+        and str(locator.get("fragment") or "") == "provider-summary"
+    ):
+        return 0
+    if locator.get("kind") in {"pdf", "chunk", "html"} or any(
+        locator.get(key) is not None for key in ("chunkId", "page", "bbox", "selector")
+    ):
+        return 2
+    return 1
+
+
+def _prefer_document_chunks_for_summary_claim(
+    claim: ClaimCandidate,
+    summary_handle: str,
+    records: Iterable[Any],
+    *,
+    semantics: Mapping[str, Any] | None,
+) -> tuple[str, ...]:
+    """Use same-document chunks first and retain a summary only for a gap."""
+
+    available = list(records)
+    summary_record = next(
+        (
+            record
+            for record in available
+            if _evidence_parts(record)[0] == summary_handle and _text_locator_precision(record) == 0
+        ),
+        None,
     )
+    if summary_record is None:
+        return ()
+    _handle, summary_source, _evidence = _evidence_parts(summary_record)
+    summary_source_id = _source_identity(summary_source)
+    if not summary_source_id:
+        return ()
+    precise_records = [
+        record
+        for record in available
+        if _text_locator_precision(record) == 2
+        and _source_identity(_evidence_parts(record)[1]) == summary_source_id
+    ]
+    if not precise_records:
+        return ()
+
+    precise_handles = match_composite_text_evidence(
+        claim,
+        precise_records,
+        semantics=semantics,
+    )
+    if precise_handles:
+        return precise_handles
+
+    supplemented = match_composite_text_evidence(
+        claim,
+        (*precise_records, summary_record),
+        semantics=semantics,
+        prefer_precise_locators=True,
+    )
+    if summary_handle not in supplemented or len(supplemented) < 2:
+        return ()
+    return supplemented
+
+
+def _format_corrected_display_value(value: Decimal, original: str) -> str:
+    normalized = original.translate(str.maketrans({"−": "-", "﹣": "-", "－": "-", "＋": "+"}))
     unsigned = normalized.lstrip("+-").replace(",", "")
     decimal_places = len(unsigned.rsplit(".", 1)[1]) if "." in unsigned else 0
     quantum = Decimal(1).scaleb(-decimal_places)
@@ -2121,14 +2200,16 @@ def bind_claims_to_evidence(
                     matching_record[1],
                 ):
                     continue
-            handles = (handle,)
+            handles = _prefer_document_chunks_for_summary_claim(
+                claim,
+                handle,
+                available,
+                semantics=semantics,
+            ) or (handle,)
         elif not attributed and match.status == "conflict" and len(match.handles) == 1:
             handle = match.handles[0]
             matching_record = records_by_handle.get(handle)
-            if (
-                matching_record is not None
-                and matching_record[1].get("kind") == "structured-data"
-            ):
+            if matching_record is not None and matching_record[1].get("kind") == "structured-data":
                 # Keep the source inspectable for a programmatically proven
                 # value conflict. Final quality evaluation marks this binding
                 # as conflicting; it is never presented as support.
