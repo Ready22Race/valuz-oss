@@ -21,6 +21,7 @@ from src.core.claim_normalization import ClaimNormalizerPort
 from src.core.claim_normalizer import build_session_claim_normalizer
 from src.core.orchestrator import SessionOrchestrator
 from src.core.semantic_verifier import build_session_semantic_verifier
+from src.core.tracing import init_tracing, shutdown_tracing
 from src.core.types import Session
 
 logger = logging.getLogger(__name__)
@@ -70,6 +71,10 @@ async def init_dependencies(config: AppConfig) -> None:
     """
     global _engine, _session_factory, _store, _orchestrator  # noqa: PLW0603
     global _durable_engine, _runtime_store  # noqa: PLW0603
+    # Langfuse tracing bootstrap — no-op unless the LANGFUSE_* env is set and
+    # the ``tracing`` extra is installed. Runs here for the STANDALONE kernel
+    # (cloud sandbox); the in-process host initializes it in its own lifespan.
+    init_tracing()
     # Model A: the LOCAL store ALWAYS exists (local-first). The kernel keeps its
     # own SQLite/PG via this engine; when a durable backend is configured
     # (remote DataService / central PG) every write is mirrored through it
@@ -142,6 +147,9 @@ async def shutdown_dependencies() -> None:
         await _engine.dispose()
     if _durable_engine:
         await _durable_engine.dispose()
+    # Flush buffered Langfuse spans AFTER the orchestrator (and thus every
+    # runtime subprocess) has stopped emitting. No-op when tracing is off.
+    shutdown_tracing()
     _engine = None
     _durable_engine = None
     _session_factory = None
