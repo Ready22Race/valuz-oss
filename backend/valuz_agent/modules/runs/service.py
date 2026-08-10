@@ -164,13 +164,26 @@ class RunsService:
         self._task_events = task_events
         self._automations = automations
 
-    async def list_runs(self, user_id: str, status: str = "running") -> list[RunSummary]:
+    async def list_runs(
+        self,
+        user_id: str,
+        status: str = "running",
+        project_id: str | None = None,
+        limit: int | None = None,
+    ) -> list[RunSummary]:
         # Recent sessions come from the host project↔session index; the
         # kernel rows are bulk-fetched by id (the kernel itself is
         # project-agnostic). The pool is generous (automation runs accrue
         # fast); the per-group ``_FINISHED_LIMIT`` budget below is what bounds
         # the response, not this fetch.
-        index_rows = await project_index.list_recent(limit=_INDEX_POOL, user_id=user_id)
+        #
+        # ``project_id`` scopes both the index window and the output budget to
+        # one project — the sidebar accordion's path. Without it a project whose
+        # conversations are older than the global window's tail can never appear
+        # under its own row, however few sessions it has.
+        index_rows = await project_index.list_recent(
+            limit=_INDEX_POOL, user_id=user_id, project_id=project_id
+        )
         proj_by_session = {r.session_id: r.project_id for r in index_rows}
         # Last-activity per session (index ``updated_at``, bumped each turn) — the
         # sort key that floats a chat with a new message to the top.
@@ -290,15 +303,16 @@ class RunsService:
         out: list[RunSummary] = [summary for summary in built if summary is not None]
 
         out.sort(key=lambda r: r.updated_at, reverse=True)
+        budget = limit if limit is not None else _FINISHED_LIMIT
         if status == "running":
-            return out
+            return out[:limit] if limit is not None else out
         # Separate budgets so a flood of automation runs can't crowd user
         # chats/tasks out of the recency-sorted window (and vice-versa). Each
-        # group keeps its own ``_FINISHED_LIMIT`` of most-recent runs; the
-        # client splits them across the 全部/对话/任务/自动化 tabs.
+        # group keeps its own budget of most-recent runs; the client splits them
+        # across the 全部/对话/任务/自动化 tabs.
         user_runs = [r for r in out if r.origin != "automation"]
         automation_runs = [r for r in out if r.origin == "automation"]
-        return user_runs[:_FINISHED_LIMIT] + automation_runs[:_FINISHED_LIMIT]
+        return user_runs[:budget] + automation_runs[:budget]
 
     @staticmethod
     def _effective_status(

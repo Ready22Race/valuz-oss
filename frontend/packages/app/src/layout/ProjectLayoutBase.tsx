@@ -117,6 +117,11 @@ export interface ProjectLayoutBaseProps {
   mascotSrc?: string | null;
 }
 
+// How many runs each project's own sidebar window asks for. The accordion
+// shows 5 before "show more", and every row costs one kernel enrichment read
+// server-side — a small window keeps N projects × one request cheap.
+const PROJECT_RUNS_LIMIT = 20;
+
 const NAV_ICON_MAP: Record<string, DesktopSidebarBottomItem["icon"]> = {
   assistant: "assistant",
   skills: "skills",
@@ -460,6 +465,46 @@ export function ProjectLayoutBase({
     };
   }, [refreshFinishedRuns]);
 
+  // Per-project runs for the sidebar accordion. The global finished-runs
+  // window above is ONE recency list shared with quick chats, so an install
+  // with a few hundred of those pushes every project conversation past its
+  // tail — projects then render with nothing nested under them and no
+  // expand affordance at all. Each project asks the same endpoint for its own
+  // window (``project_id`` filters in SQL), which is bounded and independent
+  // of how noisy the global list is.
+  const [projectRuns, setProjectRuns] = useState<Map<string, RunSummary[]>>(
+    () => new Map(),
+  );
+  const projectIdsKey = useMemo(
+    () => [...projectIdSet].sort().join(","),
+    [projectIdSet],
+  );
+  useEffect(() => {
+    const ids = projectIdsKey ? projectIdsKey.split(",") : [];
+    if (ids.length === 0) {
+      setProjectRuns((prev) => (prev.size === 0 ? prev : new Map()));
+      return;
+    }
+    let cancelled = false;
+    void Promise.all(
+      ids.map((id) =>
+        runsApi
+          .list({
+            status: "finished",
+            projectId: id,
+            limit: PROJECT_RUNS_LIMIT,
+          })
+          .then((res) => [id, res.runs] as const)
+          .catch(() => [id, [] as RunSummary[]] as const),
+      ),
+    ).then((entries) => {
+      if (!cancelled) setProjectRuns(new Map(entries));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectIdsKey, liveRunIds]);
+
   // Merge live + finished runs (dedupe by session), newest first, then split
   // into per-project buckets and a loose "Chats" list. Each project's chats +
   // tasks nest under it in the sidebar; everything project-less goes to Chats.
@@ -468,6 +513,14 @@ export function ProjectLayoutBase({
     for (const r of liveRuns) byId.set(r.session_id, r);
     for (const r of finishedRuns) {
       if (!byId.has(r.session_id)) byId.set(r.session_id, r);
+    }
+    // Project-scoped rows fill in what the global window dropped. Added after
+    // the global pass so a run already known there keeps that row (identical
+    // payload either way — this is a de-dupe, not a precedence rule).
+    for (const runs of projectRuns.values()) {
+      for (const r of runs) {
+        if (!byId.has(r.session_id)) byId.set(r.session_id, r);
+      }
     }
     const liveSet = new Set(liveRuns.map((r) => r.session_id));
     const toItem = (r: RunSummary): DesktopSidebarRecentItem => ({
@@ -508,7 +561,7 @@ export function ProjectLayoutBase({
       }
     }
     return { projectRunItems: byProject, chatItems: loose };
-  }, [liveRuns, finishedRuns, projectIdSet]);
+  }, [liveRuns, finishedRuns, projectRuns, projectIdSet]);
 
   const projectGroups: DesktopSidebarProjectGroup[] = useMemo(
     () =>
