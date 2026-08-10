@@ -185,6 +185,88 @@ it("projects a deterministic numeric correction before rendering its citation", 
   ).not.toBeNull();
 });
 
+it("projects a precise document correction before rendering its citation", () => {
+  const content = "2025 年云侧 AI 半导体 TAM 约 23,500 亿美元.";
+  const start = content.indexOf("23,500");
+  const bundle: CitationBundleV1 = {
+    ...CITATIONS,
+    citations: [
+      {
+        ...CITATIONS.citations[0]!,
+        citationId: "cit_ai_tam",
+        evidence: {
+          kind: "text",
+          quote: "cloud AI Semi TAM may grow to US$235bn in 2025e",
+          snippet: "cloud AI Semi TAM may grow to US$235bn in 2025e",
+          capturedAt: "2026-08-10T00:00:00Z",
+        },
+        locator: {
+          kind: "pdf",
+          page: 7,
+          chunkId: "chunk_ai_tam",
+        },
+        annotations: {
+          corrections: [
+            {
+              claimId: "clm_ai_tam",
+              originalText: "23,500",
+              replacementText: "2,350",
+              reason: "document-value-conflict",
+            },
+          ],
+        },
+      },
+    ],
+    projection: {
+      evidenceHandleToCitationId: {},
+      textCorrections: [
+        {
+          claimId: "clm_ai_tam",
+          citationId: "cit_ai_tam",
+          sourceStart: start,
+          sourceEnd: start + "23,500".length,
+          originalText: "23,500",
+          replacementText: "2,350",
+          reason: "document-value-conflict",
+        },
+      ],
+      anchors: [
+        {
+          citationId: "cit_ai_tam",
+          claimId: "clm_ai_tam",
+          origin: "auto-bound",
+          sourceOffset: content.indexOf("美元") + "美元".length,
+          location: {
+            kind: "text",
+            blockIndex: 0,
+            start: 0,
+            end: content.length,
+            sourceStart: 0,
+            sourceEnd: content.length,
+          },
+        },
+      ],
+    },
+  };
+
+  const { container } = render(
+    <MarkdownContent content={content} citationBundle={bundle} />,
+  );
+
+  expect(container.textContent).toContain("2,350 亿美元");
+  expect(container.textContent).not.toContain("23,500 亿美元");
+  expect(container.querySelector('[data-citation-id="cit_ai_tam"]')).not.toBeNull();
+
+  fireEvent.mouseEnter(
+    screen.getByRole("button", { name: /(?:citation|引用) 1/i }),
+  );
+  expect(
+    screen.getByText(
+      /(?:original source|原始来源).*23,500.*2,350/i,
+    ),
+  ).not.toBeNull();
+});
+
 it("fails closed when a correction no longer matches the immutable source span", () => {
   const content = "MU market cap is $992.";
   const bundle: CitationBundleV1 = {
@@ -786,6 +868,7 @@ describe("MarkdownContent citations", () => {
       quality: {
         policyId: "finance",
         policyRevision: "v1",
+        verifierRevision: "claim-verifier-local-v3",
         mode: "strict-domain",
         status: "unverified",
         publishStatus: "draft-only",
@@ -1311,6 +1394,250 @@ describe("MarkdownContent citations", () => {
     expect(document.querySelector("[data-citation-source-list]")).toBeNull();
     fireEvent.mouseEnter(calculationPill!);
     expect(screen.getAllByText(/revenue \/ 100 = 1\.18 x/i).length).toBeGreaterThan(0);
+  });
+
+  it("keeps a calculation quality issue on its calculator hover card", () => {
+    const content = "Growth was 1.18x [calc](citation://cit_calculation).";
+    const location = {
+      kind: "text" as const,
+      blockIndex: 0,
+      start: 0,
+      end: content.length,
+      sourceStart: 0,
+      sourceEnd: content.length,
+    };
+    const bundle: CitationBundleV1 = {
+      version: 1,
+      citations: [
+        CITATIONS.citations[0]!,
+        {
+          citationId: "cit_calculation",
+          source: {
+            sourceId: "calculation:1",
+            providerId: "runtime",
+            sourceType: "tool-result",
+            title: "Growth calculation",
+            retrievedAt: "2026-07-30T08:00:00Z",
+          },
+          evidence: {
+            kind: "calculation",
+            expression: "revenue / 100",
+            inputs: [
+              {
+                name: "revenue",
+                citationId: "cit_first",
+                value: 118,
+                unit: "USD million",
+              },
+            ],
+            result: 1.18,
+            unit: "x",
+            calculatedAt: "2026-07-30T08:00:00Z",
+          },
+        },
+      ],
+      quality: {
+        policyId: "finance",
+        policyRevision: "v1",
+        mode: "strict-domain",
+        status: "degraded",
+        publishStatus: "ready",
+        layers: { L4: "degraded" },
+        issues: [
+          {
+            code: "calculation_result_mismatch",
+            layer: "L4",
+            severity: "degraded",
+            claimId: "clm_growth",
+            citationIds: ["cit_calculation"],
+            claim: { exact: "Growth was 1.18x" },
+            location,
+          },
+        ],
+        claims: [
+          {
+            claimId: "clm_growth",
+            exact: "Growth was 1.18x",
+            segmentIndex: 0,
+            citationRequired: true,
+            citationIds: ["cit_calculation"],
+            status: "unverified",
+            issueCodes: ["calculation_result_mismatch"],
+            location,
+          },
+        ],
+        metrics: {
+          citationCount: 1,
+          unsourcedClaimCount: 0,
+          unverifiedClaimCount: 1,
+          tierCounts: {},
+        },
+      },
+    };
+
+    render(<MarkdownContent content={content} citationBundle={bundle} />);
+
+    const calculationPill = document.querySelector<HTMLElement>(
+      "[data-citation-derivation]",
+    );
+    expect(calculationPill?.getAttribute("data-citation-quality")).toBe(
+      "critical",
+    );
+    expect(
+      document.querySelector("[data-citation-claim-quality]"),
+    ).toBeNull();
+    fireEvent.mouseEnter(calculationPill!);
+    expect(
+      document.querySelector('[data-citation-quality-issues="critical"]'),
+    ).not.toBeNull();
+  });
+
+  it("keeps a claim-scoped warning local when its citation is reused elsewhere", async () => {
+    const content =
+      "HBM is a three-vendor market. CoWoS demand exceeds supply [source](citation://cit_first).";
+    const exact = "HBM is a three-vendor market.";
+    const location = {
+      kind: "text" as const,
+      blockIndex: 0,
+      start: 0,
+      end: exact.length,
+      sourceStart: 0,
+      sourceEnd: exact.length,
+    };
+    const bundle: CitationBundleV1 = {
+      ...CITATIONS,
+      citations: [CITATIONS.citations[0]!],
+      quality: {
+        policyId: "finance",
+        policyRevision: "v1",
+        verifierRevision: "claim-verifier-local-v3",
+        mode: "strict-domain",
+        status: "degraded",
+        publishStatus: "ready",
+        layers: { L4: "degraded" },
+        issues: [
+          {
+            code: "claim_source_entity_conflict",
+            layer: "L4",
+            severity: "degraded",
+            claimId: "clm_hbm",
+            citationIds: ["cit_first"],
+            claim: { exact },
+            location,
+          },
+        ],
+        claims: [
+          {
+            claimId: "clm_hbm",
+            exact,
+            segmentIndex: 0,
+            citationRequired: true,
+            citationIds: ["cit_first"],
+            status: "unverified",
+            issueCodes: ["claim_source_entity_conflict"],
+            location,
+          },
+        ],
+        metrics: {
+          citationCount: 1,
+          unsourcedClaimCount: 0,
+          unverifiedClaimCount: 1,
+          tierCounts: {},
+        },
+      },
+    };
+
+    render(<MarkdownContent content={content} citationBundle={bundle} />);
+
+    const citationPill = screen.getByRole("button", {
+      name: /(?:citation|引用) 1/i,
+    });
+    expect(citationPill.getAttribute("data-citation-quality")).toBeNull();
+    const marker = document.querySelector<HTMLElement>(
+      "[data-citation-claim-quality]",
+    );
+    expect(marker).not.toBeNull();
+    await act(async () => {
+      fireEvent.pointerEnter(marker!);
+    });
+    await vi.waitFor(() => {
+      expect(
+        document.querySelector('[data-citation-claim-evidence="cit_first"]'),
+      ).not.toBeNull();
+    });
+    expect(
+      document.querySelector('[data-citation-claim-evidence="cit_first"]')
+        ?.textContent,
+    ).toMatch(/Annual report/i);
+  });
+
+  it("does not turn a non-adjacent advisory into a standalone warning", () => {
+    const content =
+      "This sentence paraphrases the source. Another fact [source](citation://cit_first).";
+    const exact = "This sentence paraphrases the source.";
+    const location = {
+      kind: "text" as const,
+      blockIndex: 0,
+      start: 0,
+      end: exact.length,
+      sourceStart: 0,
+      sourceEnd: exact.length,
+    };
+    render(
+      <MarkdownContent
+        content={content}
+        citationBundle={{
+          ...CITATIONS,
+          citations: [CITATIONS.citations[0]!],
+          quality: {
+            policyId: "finance",
+            policyRevision: "v1",
+            mode: "strict-domain",
+            status: "unverified",
+            publishStatus: "ready",
+            layers: { L4: "unverified" },
+            issues: [
+              {
+                code: "claim_translation_not_verified",
+                layer: "L4",
+                severity: "unverified",
+                claimId: "clm_paraphrase",
+                citationIds: ["cit_first"],
+                claim: { exact },
+                location,
+              },
+            ],
+            claims: [
+              {
+                claimId: "clm_paraphrase",
+                exact,
+                segmentIndex: 0,
+                citationRequired: true,
+                citationIds: ["cit_first"],
+                status: "unverified",
+                issueCodes: ["claim_translation_not_verified"],
+                location,
+              },
+            ],
+            metrics: {
+              citationCount: 1,
+              unsourcedClaimCount: 0,
+              unverifiedClaimCount: 1,
+              tierCounts: {},
+            },
+          },
+        }}
+      />,
+    );
+
+    expect(
+      document.querySelector("[data-citation-claim-quality]"),
+    ).toBeNull();
+    expect(
+      screen
+        .getByRole("button", { name: /(?:citation|引用) 1/i })
+        .getAttribute("data-citation-quality"),
+    ).toBeNull();
   });
 
   it("opens a known citation and degrades an unknown citation", () => {

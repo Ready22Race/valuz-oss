@@ -1534,7 +1534,11 @@ def _citation_entity_conflicts(
     citation: dict[str, Any],
     aliases: dict[str, str],
 ) -> bool:
-    claim_identifiers = {identifier for _label, identifier in _entity_pairs(claim.semantic_text)}
+    # Inherited headings/presentation text are useful candidate context, but
+    # they are not strong enough to prove a user-visible cross-company error.
+    # Only the Claim's local text (table claims already include their row
+    # identity) may produce the deterministic entity-conflict warning.
+    claim_identifiers = {identifier for _label, identifier in _entity_pairs(claim.exact)}
     if claim_identifiers:
         evidence = citation.get("evidence")
         evidence = evidence if isinstance(evidence, dict) else {}
@@ -1556,7 +1560,7 @@ def _citation_entity_conflicts(
             # real 600519-vs-000858 mistakes severe while leaving a Chinese
             # company name versus an otherwise opaque SNDK identifier unknown.
             return True
-    claim_entities = _canonical_entities_in_text(claim.semantic_text, aliases)
+    claim_entities = _canonical_entities_in_text(claim.exact, aliases)
     if len(claim_entities) != 1:
         return False
     citation_entities = _citation_entities(citation, aliases)

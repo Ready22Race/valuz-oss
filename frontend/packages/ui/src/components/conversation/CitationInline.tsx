@@ -172,7 +172,10 @@ export function projectCitationTextCorrections(
   let followingStart = Number.POSITIVE_INFINITY;
   for (const correction of corrections) {
     if (
-      correction.reason !== "structured-value-conflict" ||
+      ![
+        "structured-value-conflict",
+        "document-value-conflict",
+      ].includes(correction.reason) ||
       !knownCitationIds.has(correction.citationId) ||
       correction.sourceEnd > followingStart
     ) {
@@ -534,19 +537,25 @@ function qualityBadge(
 
 function citationCorrections(
   citation: CitationRefV1,
-): Array<{ originalText: string; replacementText: string }> {
+): Array<{
+  originalText: string;
+  replacementText: string;
+  reason: "structured-value-conflict" | "document-value-conflict";
+}> {
   const value = citation.annotations?.corrections;
   if (!Array.isArray(value)) return [];
   return value.flatMap((item) => {
     if (!item || typeof item !== "object") return [];
     const record = item as Record<string, unknown>;
-    return record.reason === "structured-value-conflict" &&
+    return (record.reason === "structured-value-conflict" ||
+      record.reason === "document-value-conflict") &&
       typeof record.originalText === "string" &&
       typeof record.replacementText === "string"
       ? [
           {
             originalText: record.originalText,
             replacementText: record.replacementText,
+            reason: record.reason,
           },
         ]
       : [];
@@ -836,10 +845,15 @@ function CitationHoverCard({
               key={`${correction.originalText}:${correction.replacementText}`}
               className="block"
             >
-              {t("ui.citation.structuredValueCorrected", {
+              {t(
+                correction.reason === "document-value-conflict"
+                  ? "ui.citation.sourceValueCorrected"
+                  : "ui.citation.structuredValueCorrected",
+                {
                 original: correction.originalText,
                 replacement: correction.replacementText,
-              })}
+                },
+              )}
             </span>
           ))}
         </div>

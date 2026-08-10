@@ -19,6 +19,7 @@ import { math } from "@streamdown/math";
 import { cjk } from "@streamdown/cjk";
 import {
   AlertTriangle,
+  Calculator,
   Check,
   Copy,
   Download,
@@ -94,6 +95,7 @@ interface LocalizedClaimQualityEntry {
   claimId?: string;
   exact: string;
   location?: ClaimLocationV1;
+  citationIds: string[];
   issues: CitationQualityDisplayIssue[];
 }
 
@@ -125,10 +127,23 @@ const UNSOURCED_CITATION_ISSUE_CODES = new Set([
   "numeric_claim_without_citation",
   "date_claim_without_citation",
 ]);
+const LOCAL_CONFLICT_VERIFIER_REVISION = "claim-verifier-local-v3";
 
 function qualityIssueTone(
   issue: CitationQualityIssueV1,
+  verifierRevision?: string,
 ): CitationQualityDisplayIssue["tone"] {
+  if (
+    verifierRevision !== LOCAL_CONFLICT_VERIFIER_REVISION &&
+    ["claim_source_entity_conflict", "claim_source_period_conflict"].includes(
+      issue.code,
+    )
+  ) {
+    // v2 allowed remote inherited context and multi-period normalization to
+    // prove a hard conflict. Keep legacy results inspectable, but never retain
+    // their orange warning treatment after the verifier was corrected.
+    return "advisory";
+  }
   if (CRITICAL_CITATION_ISSUE_CODES.has(issue.code)) {
     return "critical";
   }
@@ -137,14 +152,53 @@ function qualityIssueTone(
     : "advisory";
 }
 
-function ClaimQualityMarker({ entry }: { entry: LocalizedClaimQualityEntry }) {
+function claimEvidenceSummary(
+  citation: CitationBundleV1["citations"][number],
+): string {
+  const evidence = citation.evidence;
+  if (evidence.kind === "text") {
+    const text = (evidence.quote || evidence.snippet).trim();
+    return text.length > 420 ? `${text.slice(0, 420).trimEnd()}…` : text;
+  }
+  if (evidence.kind === "structured-data") {
+    return `${readableEvidenceField(evidence.field)}: ${String(evidence.value)}${
+      evidence.unit ? ` ${evidence.unit}` : ""
+    }`;
+  }
+  return `${evidence.expression} = ${String(evidence.result)}${
+    evidence.unit ? ` ${evidence.unit}` : ""
+  }`;
+}
+
+function ClaimQualityMarker({
+  entry,
+  citationsById,
+  citationOrder,
+  messageId,
+  citationMessageIdByCitationId,
+  onCitationClick,
+}: {
+  entry: LocalizedClaimQualityEntry;
+  citationsById: ReadonlyMap<string, CitationBundleV1["citations"][number]>;
+  citationOrder: ReadonlyMap<string, number>;
+  messageId?: string;
+  citationMessageIdByCitationId?: ReadonlyMap<string, string | undefined>;
+  onCitationClick?: (input: OpenCitationInput) => void;
+}) {
   const { t } = useI18n();
   const label = entry.issues.map((issue) => issue.label).join("；");
+  const citations = entry.citationIds.flatMap((citationId) => {
+    const citation = citationsById.get(citationId);
+    return citation ? [{ citationId, citation }] : [];
+  });
   // A coverage gap is not a defect claim. Reserve the warning palette for
   // entries that carry a real conflict so an unsourced sentence reads as
   // "no source attached" rather than "this looks wrong".
   const unsourcedOnly = entry.issues.every(
     (issue) => issue.tone === "unsourced",
+  );
+  const hasCriticalIssue = entry.issues.some(
+    (issue) => issue.tone === "critical",
   );
 
   return (
@@ -153,7 +207,9 @@ function ClaimQualityMarker({ entry }: { entry: LocalizedClaimQualityEntry }) {
         <button
           type="button"
           data-citation-claim-quality
-          data-citation-claim-tone={unsourcedOnly ? "unsourced" : "critical"}
+          data-citation-claim-tone={
+            hasCriticalIssue ? "critical" : "unsourced"
+          }
           data-quality-claim-id={entry.targetId}
           aria-label={`${
             unsourcedOnly
@@ -161,15 +217,15 @@ function ClaimQualityMarker({ entry }: { entry: LocalizedClaimQualityEntry }) {
               : t("ui.citation.qualityNeedsReview")
           } · ${label}`}
           className={
-            unsourcedOnly
-              ? "relative -top-px mx-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full border border-surface-border bg-surface-soft align-middle text-ink-muted no-underline transition hover:bg-surface-soft/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/20"
-              : "relative -top-px mx-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full border border-warning/50 bg-warning-light/70 align-middle text-warning-text no-underline transition hover:bg-warning-light focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warning/20"
+            hasCriticalIssue
+              ? "relative -top-px mx-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full border border-warning/50 bg-warning-light/70 align-middle text-warning-text no-underline transition hover:bg-warning-light focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warning/20"
+              : "relative -top-px mx-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full border border-surface-border bg-surface-soft align-middle text-ink-muted no-underline transition hover:bg-surface-soft/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/20"
           }
         >
-          {unsourcedOnly ? (
-            <Link2Off className="h-2.5 w-2.5" aria-hidden="true" />
-          ) : (
+          {hasCriticalIssue ? (
             <AlertTriangle className="h-2.5 w-2.5" aria-hidden="true" />
+          ) : (
+            <Link2Off className="h-2.5 w-2.5" aria-hidden="true" />
           )}
         </button>
       </HoverCardTrigger>
@@ -177,22 +233,22 @@ function ClaimQualityMarker({ entry }: { entry: LocalizedClaimQualityEntry }) {
         data-citation-claim-quality-card
         side="bottom"
         sideOffset={8}
-        className="w-[min(380px,calc(100vw-32px))] rounded-lg border-surface-border bg-surface p-3 text-xs text-ink-body shadow-xl"
+        className="max-h-[min(420px,calc(100vh-32px))] w-[min(380px,calc(100vw-32px))] overflow-y-auto rounded-lg border-surface-border bg-surface p-3 text-xs text-ink-body shadow-xl"
       >
         <div
           className={
-            unsourcedOnly
-              ? "flex items-center gap-1.5 font-medium text-ink-heading"
-              : "flex items-center gap-1.5 font-medium text-warning-text"
+            hasCriticalIssue
+              ? "flex items-center gap-1.5 font-medium text-warning-text"
+              : "flex items-center gap-1.5 font-medium text-ink-heading"
           }
         >
-          {unsourcedOnly ? (
-            <Link2Off className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-          ) : (
+          {hasCriticalIssue ? (
             <AlertTriangle
               className="h-3.5 w-3.5 shrink-0"
               aria-hidden="true"
             />
+          ) : (
+            <Link2Off className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
           )}
           <span>
             {unsourcedOnly
@@ -202,9 +258,9 @@ function ClaimQualityMarker({ entry }: { entry: LocalizedClaimQualityEntry }) {
         </div>
         <div
           className={
-            unsourcedOnly
-              ? "mt-2 border-l-2 border-surface-border pl-2.5 leading-5 text-ink-heading"
-              : "mt-2 border-l-2 border-warning/40 pl-2.5 leading-5 text-ink-heading"
+            hasCriticalIssue
+              ? "mt-2 border-l-2 border-warning/40 pl-2.5 leading-5 text-ink-heading"
+              : "mt-2 border-l-2 border-surface-border pl-2.5 leading-5 text-ink-heading"
           }
         >
           {entry.exact}
@@ -216,6 +272,121 @@ function ClaimQualityMarker({ entry }: { entry: LocalizedClaimQualityEntry }) {
             </li>
           ))}
         </ul>
+        {citations.length ? (
+          <div className="mt-3 border-t border-surface-border pt-2">
+            <div className="text-2xs font-medium text-ink-meta">
+              {t("ui.citation.evidenceTitle")}
+            </div>
+            <div className="mt-1.5 divide-y divide-surface-border">
+              {citations.map(({ citationId, citation }) => {
+                const displayIndex = citationOrder.get(citationId);
+                const calculationEvidence =
+                  citation.evidence.kind === "calculation"
+                    ? citation.evidence
+                    : undefined;
+                const calculation = Boolean(calculationEvidence);
+                const canOpen =
+                  !calculation &&
+                  citation.resolutionStatus !== "forbidden" &&
+                  citation.resolutionStatus !== "missing" &&
+                  Boolean(onCitationClick);
+                return (
+                  <div
+                    key={citationId}
+                    data-citation-claim-evidence={citationId}
+                    className="py-2 first:pt-0 last:pb-0"
+                  >
+                    <div className="flex items-start gap-1.5">
+                      {calculation ? (
+                        <Calculator
+                          className="mt-0.5 h-3 w-3 shrink-0 text-ink-meta"
+                          aria-hidden="true"
+                        />
+                      ) : null}
+                      <div className="min-w-0 flex-1">
+                        <div className="font-medium text-ink-heading">
+                          {displayIndex ? `${displayIndex} ` : ""}
+                          {citation.source.title}
+                        </div>
+                        <div className="mt-1 line-clamp-4 whitespace-pre-wrap leading-5 text-ink-meta">
+                          {claimEvidenceSummary(citation)}
+                        </div>
+                      </div>
+                    </div>
+                    {calculationEvidence?.inputs.length ? (
+                      <div className="mt-1.5 space-y-1 border-t border-surface-border pt-1.5 text-2xs text-ink-meta">
+                        {calculationEvidence.inputs.map((input) => {
+                          const inputCitation = citationsById.get(
+                            input.citationId,
+                          );
+                          const inputCanOpen =
+                            Boolean(inputCitation) &&
+                            inputCitation?.evidence.kind !== "calculation" &&
+                            inputCitation?.resolutionStatus !== "forbidden" &&
+                            inputCitation?.resolutionStatus !== "missing" &&
+                            Boolean(onCitationClick);
+                          const inputLabel = `${input.name}: ${String(input.value)}${
+                            input.unit ? ` ${input.unit}` : ""
+                          }`;
+                          return inputCanOpen ? (
+                            <button
+                              key={`${input.name}:${input.citationId}`}
+                              type="button"
+                              className="block w-full rounded px-1 py-0.5 text-left hover:bg-surface-soft"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                onCitationClick?.({
+                                  messageId:
+                                    citationMessageIdByCitationId?.get(
+                                      input.citationId,
+                                    ) ?? messageId,
+                                  citationId: input.citationId,
+                                });
+                              }}
+                            >
+                              {inputLabel}
+                              {inputCitation
+                                ? ` · ${inputCitation.source.title}`
+                                : ""}
+                            </button>
+                          ) : (
+                            <div
+                              key={`${input.name}:${input.citationId}`}
+                              className="px-1 py-0.5"
+                            >
+                              {inputLabel}
+                              {inputCitation
+                                ? ` · ${inputCitation.source.title}`
+                                : ""}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+                    {canOpen ? (
+                      <button
+                        type="button"
+                        className="mt-1.5 inline-flex items-center gap-1 font-medium text-primary hover:underline"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onCitationClick?.({
+                            messageId:
+                              citationMessageIdByCitationId?.get(citationId) ??
+                              messageId,
+                            citationId,
+                          });
+                        }}
+                      >
+                        {t("ui.citation.viewEvidence", "View evidence")}
+                        <ExternalLink className="h-3 w-3" aria-hidden="true" />
+                      </button>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
       </HoverCardContent>
     </HoverCard>
   );
@@ -1258,16 +1429,22 @@ export const MarkdownContent = memo(function MarkdownContent({
       const auditedClaim = issue.claimId
         ? auditedClaimsById.get(issue.claimId)
         : undefined;
+      // Calculation Evidence intentionally has no numbered source index, but
+      // it is still a concrete Evidence object and can carry a quality issue.
+      // Do not erase that association merely because citationOrder excludes
+      // derivations from the numbered source list.
       const localIds = Array.from(new Set(issue.citationIds ?? [])).filter(
-        (citationId) =>
-          citationsById.has(citationId) && citationOrder.has(citationId),
+        (citationId) => citationsById.has(citationId),
       );
       const displayIssue = {
         code: issue.code,
         claimId: auditedClaim?.claimId ?? issue.claimId,
         label: qualityIssueLabel(issue),
         severity: issue.severity,
-        tone: qualityIssueTone(issue),
+        tone: qualityIssueTone(
+          issue,
+          citationBundle?.quality?.verifierRevision,
+        ),
       };
       if (!localIds.length) {
         // Weak support is not itself proof that a statement is wrong, and
@@ -1306,6 +1483,7 @@ export const MarkdownContent = memo(function MarkdownContent({
             claimId: auditedClaim?.claimId ?? issue.claimId,
             exact,
             location,
+            citationIds: [],
             issues: [],
           };
           if (
@@ -1323,13 +1501,14 @@ export const MarkdownContent = memo(function MarkdownContent({
         unlocalized.push(issue);
         continue;
       }
+      const location = issue.location ?? auditedClaim?.location;
+      const sourceStart =
+        location && location.kind !== "legacy"
+          ? location.sourceStart
+          : undefined;
+      const sourceEnd = claimSourceEnd(location);
+      let localizedToOccurrence = false;
       for (const citationId of localIds) {
-        const location = issue.location ?? auditedClaim?.location;
-        const sourceStart =
-          location && location.kind !== "legacy"
-            ? location.sourceStart
-            : undefined;
-        const sourceEnd = claimSourceEnd(location);
         const offsets = citationOccurrenceOffsets.get(citationId) ?? [];
         const scopedOffsets =
           Number.isInteger(sourceStart) && Number.isInteger(sourceEnd)
@@ -1338,6 +1517,7 @@ export const MarkdownContent = memo(function MarkdownContent({
               )
             : [];
         if (scopedOffsets.length > 0) {
+          localizedToOccurrence = true;
           for (const offset of scopedOffsets) {
             const key = citationOccurrenceKey(citationId, offset);
             const current = byCitationOccurrence.get(key) ?? [];
@@ -1352,8 +1532,65 @@ export const MarkdownContent = memo(function MarkdownContent({
             }
             byCitationOccurrence.set(key, current);
           }
-          continue;
         }
+      }
+      if (localizedToOccurrence) continue;
+
+      // A Claim-scoped issue must never fall back to every occurrence of a
+      // reused citation id. If its citation is not physically adjacent to the
+      // Claim (common after sidecar auto-binding), place one marker at the
+      // Claim and retain the concrete Evidence inside that marker.
+      const exact = (auditedClaim?.exact ?? issue.claim?.exact)?.trim();
+      const hasClaimScope = Boolean(auditedClaim?.claimId ?? issue.claimId);
+      const hasStableSourceLocation =
+        Number.isInteger(sourceEnd) &&
+        sourceEnd! >= 0 &&
+        sourceEnd! <= displayContent.length;
+      const canPlaceAtClaim = Boolean(
+        hasClaimScope &&
+          exact &&
+          (hasStableSourceLocation ||
+            (!exact.includes("\n") &&
+              !exact.includes("|") &&
+              displayContent.includes(exact))),
+      );
+      // Advisory support/translation uncertainty is useful inside an actual
+      // citation hover card, but must not create a standalone orange warning
+      // when the sidecar can place the issue only at the Claim.
+      if (
+        canPlaceAtClaim &&
+        displayIssue.tone !== "critical" &&
+        displayIssue.tone !== "unsourced"
+      ) {
+        unlocalized.push(issue);
+        continue;
+      }
+      if (canPlaceAtClaim && exact) {
+        const entryKey = auditedClaim?.claimId ?? issue.claimId!;
+        const entry = claimEntriesById.get(entryKey) ?? {
+          targetId: `quality-claim-${entryKey}`,
+          claimId: auditedClaim?.claimId ?? issue.claimId,
+          exact,
+          location,
+          citationIds: [],
+          issues: [],
+        };
+        entry.citationIds = Array.from(
+          new Set([...entry.citationIds, ...localIds]),
+        );
+        if (
+          !entry.issues.some(
+            (item) =>
+              item.label === displayIssue.label &&
+              item.severity === displayIssue.severity,
+          )
+        ) {
+          entry.issues.push(displayIssue);
+        }
+        claimEntriesById.set(entryKey, entry);
+        continue;
+      }
+      for (const citationId of localIds) {
         const current = byCitationId.get(citationId) ?? [];
         if (
           !current.some(
@@ -1459,7 +1696,18 @@ export const MarkdownContent = memo(function MarkdownContent({
         if (qualityClaimId) {
           const entry = claimQualityById.get(qualityClaimId);
           if (!entry) return null;
-          return <ClaimQualityMarker entry={entry} />;
+          return (
+            <ClaimQualityMarker
+              entry={entry}
+              citationsById={citationsById}
+              citationOrder={citationOrder}
+              messageId={messageId}
+              citationMessageIdByCitationId={
+                citationMessageIdByCitationIdOverride
+              }
+              onCitationClick={onCitationClick}
+            />
+          );
         }
         const citationId = citationIdFromHref(href);
         if (citationId) {
