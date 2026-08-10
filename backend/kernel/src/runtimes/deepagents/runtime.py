@@ -26,6 +26,7 @@ hard-400'd at the route layer because DeepAgents has no classifier.
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import logging
 import os
@@ -37,6 +38,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import asdict
 from datetime import timedelta
+from pathlib import Path
 from typing import Any, Literal
 
 from deepagents import SubAgent, create_deep_agent
@@ -298,13 +300,104 @@ def _logical_large_result_content(content: str) -> str:
     return content
 
 
+def _is_within(path: Path, root: Path) -> bool:
+    """Lexical containment — deliberately WITHOUT ``resolve()``.
+
+    Resolving first is what makes a materialized skill link (whose target lives
+    outside the workspace by design) read as an escape attempt.
+    """
+
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _raise_if_symlink_loop(path: Path) -> None:
+    """Raise ``OSError(ELOOP)`` if ``path`` is an unresolvable symlink loop.
+
+    Python 3.13+ made ``Path.resolve(strict=False)`` return the unresolved path
+    for a symlink loop instead of raising. Upstream restores the pre-3.13
+    contract with an equivalent probe; the lexical resolution below skips
+    ``resolve()`` entirely, so it carries its own copy rather than importing an
+    upstream private helper (a rename there would otherwise break app boot).
+    Windows reports NTFS reparse cycles as ``winerror=1921`` without a reliable
+    ``errno`` mapping, hence the explicit second check.
+    """
+
+    if not path.is_symlink():
+        return
+    try:
+        path.stat()
+    except OSError as exc:
+        if exc.errno == errno.ELOOP or getattr(exc, "winerror", None) == 1921:
+            raise
+
+
 class _WorkspaceLocalShellBackend(LocalShellBackend):
-    """Keep DeepAgents virtual artifacts readable by both file and shell tools."""
+    """Keep DeepAgents virtual artifacts readable by both file and shell tools.
+
+    Also makes ``virtual_mode`` compatible with how the harness materializes
+    skills. Upstream resolves every path with ``Path.resolve()`` and then
+    requires the result to sit under ``cwd``, which breaks two things this
+    runtime depends on:
+
+    1. ``_materialize_skills`` hands ``create_deep_agent(skills=[...])`` the
+       ABSOLUTE root ``<cwd>/.agents/skills``. Read back as a *virtual* path it
+       becomes ``<cwd>/<cwd>/.agents/skills`` — nonexistent, so skill discovery
+       silently finds zero packages and a direct read reports "not found" while
+       quoting the real path.
+    2. ``skills_materialize`` links each package (symlink / junction) at its
+       source outside the workspace, deliberately, so edits to the source are
+       live. ``resolve()`` lands on that source and the containment check then
+       rejects it, so even a correct virtual path lists nothing.
+
+    Both are fixed by judging containment **lexically** — before symlink
+    resolution — and by accepting an absolute path that is already inside the
+    workspace as-is. ``..`` and ``~`` stay rejected, so a virtual path still
+    cannot name anything outside ``cwd``; the only reach beyond it is through a
+    link the harness or the user deliberately placed inside the workspace.
+    That is not a boundary being weakened: upstream documents ``virtual_mode``
+    as path semantics and explicitly NOT a security control, ``execute()``
+    below runs with un-translated host paths anyway, and before ``virtual_mode``
+    was enabled every absolute path was accepted unconditionally.
+    """
 
     _VIRTUAL_ARTIFACT_PREFIXES = (
         "/large_tool_results/",
         "/conversation_history/",
     )
+
+    def _resolve_path(self, key: str) -> Path:
+        if not self.virtual_mode:
+            return super()._resolve_path(key)
+
+        if ".." in key or key.startswith("~"):
+            msg = "Path traversal not allowed"
+            raise ValueError(msg)
+
+        # Tested on the raw key, not a "/"-prefixed copy: on Windows an
+        # in-workspace absolute path is ``C:\...`` and prefixing would make it
+        # unrecognizable. A driveless POSIX-style key is not absolute there and
+        # falls through to the virtual mapping, as intended.
+        raw = Path(key)
+        candidate = (
+            raw if raw.is_absolute() and _is_within(raw, self.cwd) else self.cwd / key.lstrip("/")
+        )
+        if not _is_within(candidate, self.cwd):
+            msg = f"Path:{candidate} outside root directory: {self.cwd}"
+            raise ValueError(msg)
+        _raise_if_symlink_loop(candidate)
+        return candidate
+
+    def _to_virtual_path(self, path: Path) -> str:
+        # ``ls`` renders each child through here. Upstream resolves first, so a
+        # materialized skill link renders as its out-of-workspace source and is
+        # dropped as "outside root" — the reason a populated skills root listed
+        # as empty. Children come from ``iterdir()`` on an already-absolute
+        # parent, so a lexical relative path is both correct and stable.
+        return "/" + Path(path).relative_to(self.cwd).as_posix()
 
     def read(
         self,
