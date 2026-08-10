@@ -59,10 +59,26 @@ from valuz_agent.ports.model_defaults import ModelDefaultsPort, SettingsModelDef
 from valuz_agent.ports.provider_policy import AllowAllProviderPolicy, ProviderPolicyPort
 from valuz_agent.ports.resource_list_hook import NoopResourceListHook, ResourceListHook
 from valuz_agent.ports.runtime_availability import RuntimeAvailabilityPort
+from valuz_agent.ports.runtime_resource import (
+    LocalManagedAgentMutationPort,
+    LocalManagedConnectorMutationPort,
+    LocalRuntimeResourceApplyPort,
+    ManagedAgentMutationPort,
+    ManagedConnectorMutationPort,
+    RuntimeResourceApplyPort,
+)
 from valuz_agent.ports.sandbox_allocator import BootSingletonAllocator, SandboxAllocatorPort
 from valuz_agent.ports.sandbox_credential import SandboxCredentialVerifierPort
+from valuz_agent.ports.sandbox_maintenance import (
+    SandboxMaintenancePort,
+    UnsupportedSandboxMaintenancePort,
+)
 from valuz_agent.ports.sandbox_policy import AllowAllSandboxPolicy, SandboxPolicyPort
 from valuz_agent.ports.skill_lifecycle import NoopSkillLifecycleHook, SkillLifecycleHook
+from valuz_agent.ports.skill_runtime import (
+    DiscoverAndExecuteExternalSkills,
+    ExternalSkillDiscoveryPolicy,
+)
 from valuz_agent.ports.ui_artifact import UiArtifactSinkPort
 
 
@@ -107,6 +123,17 @@ class Extensions:
         self.skill_lifecycle: SkillLifecycleHook = NoopSkillLifecycleHook()
         self.agent_lifecycle: AgentLifecycleHook = NoopAgentLifecycleHook()
         self.connector_lifecycle: ConnectorLifecycleHook = NoopConnectorLifecycleHook()
+        # Runtime Resource Control v10 seams. OSS remains local/pass-through;
+        # commercial editions replace these attributes at startup.
+        self.managed_agent_mutation: ManagedAgentMutationPort = LocalManagedAgentMutationPort()
+        self.managed_connector_mutation: ManagedConnectorMutationPort = (
+            LocalManagedConnectorMutationPort()
+        )
+        self.runtime_resource_apply: RuntimeResourceApplyPort = LocalRuntimeResourceApplyPort()
+        self.external_skill_discovery_policy: ExternalSkillDiscoveryPolicy = (
+            DiscoverAndExecuteExternalSkills()
+        )
+        self.sandbox_maintenance: SandboxMaintenancePort = UnsupportedSandboxMaintenancePort()
         self.connector_oauth_refresh: ConnectorOAuthRefreshPort = (
             LocalConnectorOAuthRefreshProvider()
         )

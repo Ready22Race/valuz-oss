@@ -44,6 +44,7 @@ from valuz_agent.modules.agents.builtin import (
 from valuz_agent.modules.agents.models import AgentRow, ProjectMemberRow
 from valuz_agent.modules.connectors.service import ConnectorService
 from valuz_agent.ports.model_defaults import ModelDefaults
+from valuz_agent.ports.runtime_resource import ManagedMutationResult
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +139,25 @@ async def _before_agent_delete_hook(db: AsyncSession, user_id: str, row: AgentRo
     from valuz_agent.ports.extensions import ext
 
     await ext.agent_lifecycle.before_agent_delete(db=db, user_id=user_id, agent=row)
+
+
+async def _before_managed_agent_mutation(
+    user_id: str,
+    command: dict[str, Any],
+    *,
+    expected_etag: str | None = None,
+    idempotency_key: str | None = None,
+) -> ManagedMutationResult:
+    """Ask the bound authority before changing the local executable row."""
+
+    from valuz_agent.ports.extensions import ext
+
+    return await ext.managed_agent_mutation.mutate(
+        user_id,
+        command,
+        expected_etag=expected_etag,
+        idempotency_key=idempotency_key,
+    )
 
 
 class AgentService:
@@ -286,6 +306,15 @@ class AgentService:
                 effort=VALURION_DEFAULT_EFFORT,
                 **SYSTEM_MANAGED_FIELDS,
             )
+            authority = await _before_managed_agent_mutation(
+                user_id,
+                {
+                    "operation": "upsert",
+                    "slug": VALURION_SLUG,
+                    "source": "system",
+                    **SYSTEM_MANAGED_FIELDS,
+                },
+            )
             try:
                 created = await self._agents.create(user_id, row)
             except IntegrityError:
@@ -294,6 +323,9 @@ class AgentService:
                 if created is None:
                     raise
             else:
+                if authority.cloud_committed:
+                    existing = created
+                    return existing
                 await _after_agent_saved_hook(self._db, user_id, created, "created")
             existing = created
 
@@ -303,11 +335,16 @@ class AgentService:
             if getattr(existing, field) != value
         }
         if drift:
+            authority = await _before_managed_agent_mutation(
+                user_id,
+                {"operation": "upsert", "slug": VALURION_SLUG, "patch": drift},
+            )
             repaired = await self._agents.update_fields(user_id, VALURION_SLUG, drift)
             if repaired is None:
                 raise AgentNotFoundError(VALURION_SLUG)
             existing = repaired
-            await _after_agent_saved_hook(self._db, user_id, existing, "updated")
+            if not authority.cloud_committed:
+                await _after_agent_saved_hook(self._db, user_id, existing, "updated")
         return existing
 
     async def create_agent(self, user_id: str, payload: dict[str, Any]) -> AgentRow:
@@ -353,8 +390,46 @@ class AgentService:
         )
         # Live-reference: sessions snapshot the row at creation time, so a
         # fresh agent needs no extra materialization step.
+        authority = await _before_managed_agent_mutation(
+            user_id,
+            {"operation": "upsert", "slug": slug, **payload},
+            idempotency_key=payload.get("idempotency_key"),
+        )
+        if authority.resource_id:
+            row.id = authority.resource_id
         created = await self._agents.create(user_id, row)
-        await _after_agent_saved_hook(self._db, user_id, created, "created")
+        canonical = authority.normalized.get("patch")
+        if authority.cloud_committed and isinstance(canonical, dict):
+            canonical_fields = {
+                key: value
+                for key, value in canonical.items()
+                if key in {
+                    "name",
+                    "description",
+                    "instructions",
+                    "runtime",
+                    "model",
+                    "skills",
+                    "connector_types",
+                    "knowledge_scope",
+                    "provider_id",
+                    "effort",
+                    "resource_policy",
+                    "inherit_global_instructions",
+                    "permission_mode",
+                    "avatar",
+                }
+            }
+            if canonical_fields:
+                created = (
+                    await self._agents.update_fields(user_id, slug, canonical_fields)
+                    or created
+                )
+        # A cloud-first port already committed the mutation. Calling the old
+        # after-save hook in that case would create a reverse upload/dual
+        # writer. OSS local-pass-through keeps the legacy hook unchanged.
+        if not authority.cloud_committed:
+            await _after_agent_saved_hook(self._db, user_id, created, "created")
         return created
 
     async def update_agent(self, user_id: str, slug: str, patch: dict[str, Any]) -> AgentRow:
@@ -399,13 +474,22 @@ class AgentService:
         # avatar is nullable and clearable — None / "" unsets the avatar.
         if "avatar" in patch and "avatar" in allowed:
             fields["avatar"] = patch["avatar"] or None
+        authority = await _before_managed_agent_mutation(
+            user_id,
+            {"operation": "upsert", "slug": slug, "resource_id": existing.id, "patch": fields},
+            expected_etag=None,
+        )
+        normalized = authority.normalized.get("patch")
+        if isinstance(normalized, dict):
+            fields.update({key: value for key, value in normalized.items() if key in allowed})
         row = await self._agents.update_fields(user_id, slug, fields)
         if row is None:
             raise AgentNotFoundError(slug)
         # Live-reference semantics need no kernel cascade anymore: sessions
         # snapshot the row's fields at creation, so every NEW session (in any
         # project the agent is deployed to) picks the edit up automatically.
-        await _after_agent_saved_hook(self._db, user_id, row, "updated")
+        if not authority.cloud_committed:
+            await _after_agent_saved_hook(self._db, user_id, row, "updated")
         return row
 
     async def delete_agent(self, user_id: str, slug: str, *, cascade: bool = False) -> None:
@@ -425,12 +509,18 @@ class AgentService:
         #   cascade=True — the confirmed-delete path: 解除 every 派驻 first, then
         #     delete, so the user doesn't have to hunt down each project by hand.
         deployments = await self._members.list_by_source_agent_slug(user_id, existing.slug)
+        if deployments and not cascade:
+            raise AgentStillDeployedError(slug, len(deployments))
+        authority = await _before_managed_agent_mutation(
+            user_id,
+            {"operation": "delete", "slug": slug, "resource_id": existing.id},
+            expected_etag=None,
+        )
         if deployments:
-            if not cascade:
-                raise AgentStillDeployedError(slug, len(deployments))
             for m in deployments:
                 await self._members.delete(user_id, m.project_id, m.agent_slug)
-        await _before_agent_delete_hook(self._db, user_id, existing)
+        if not authority.cloud_committed:
+            await _before_agent_delete_hook(self._db, user_id, existing)
         if not await self._agents.delete(user_id, slug):
             raise AgentNotFoundError(slug)
         await self._cleanup_marketplace_install(user_id, slug)
