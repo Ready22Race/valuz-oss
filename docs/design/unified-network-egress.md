@@ -1,6 +1,6 @@
 # 统一网络出口管理 — 设计
 
-> 状态：**Implemented canary / Revision 3**（2026-08-07）。本文是 Valuz 统一网络出口能力的单一设计来源；实现仍受本地 feature gate 保护，尚未默认启用。
+> 状态：**Implemented canary / Revision 4**（2026-08-10）。本文是 Valuz 统一网络出口能力的单一设计来源；桌面能力与设置入口默认可用，但新安装默认由模型客户端管理，用户需在设置页主动启用 Valuz 管理。
 >
 > 取向一句话：**桌面端由 Electron 提供统一的路由解析与上游连接内核；Codex/Claude 通过各自的模型 `base_url` 接入仅监听 loopback 的薄模型入口，DeepAgents/Provider Test 通过显式 HTTP transport 接入正向出口，两类前端共享原始代理环境变量、系统代理/PAC 与直连决策，同时禁止把 Valuz 新增的标准代理变量扩散到 agent shell、MCP 或整个 sidecar。**
 
@@ -31,19 +31,21 @@ Valuz 当前支持多个 runtime 和第三方模型通道，但每个 runtime �
 
 ### 0.1 当前实现与准入状态
 
-Revision 3 已在代码中形成一条可运行、默认关闭的 canary 路径：Electron main process 持有 Resolver、Upstream Connector、薄模型入口、正向出口、控制面和本地诊断；backend 只消费一次性 bootstrap，并按 runtime instance 申请短期 descriptor。打包端通过 sidecar stdin 交付 bootstrap，开发端在权限为 `0700` 的临时目录中发布一次性 `0600` rendezvous 文件，backend 校验 owner/type/inode 后读取并立即删除。两种路径都不会把出口 secret 写进普通环境变量或日志。
+Revision 3 已在代码中形成一条可运行、用户选择后启用的 canary 路径：Electron main process 持有 Resolver、Upstream Connector、薄模型入口、正向出口、控制面和本地诊断；backend 只消费一次性 bootstrap，并按 runtime instance 申请短期 descriptor。打包版和开发 canary 都由 Electron 管理 backend 进程，并通过继承的 stdin 交付 bootstrap；开发版启动当前源码 backend，使用独立的 `~/.valuz-oss-dev` 数据目录。两条路径都不会把出口 secret 写进普通环境变量或日志。
 
-启用方式：
+使用方式：
 
 ```bash
-# 开发模式：desktop 先启动并发布 bootstrap，再启动 backend
-VALUZ_EGRESS_FRONTENDS=1 ./scripts/dev.sh
+# 正常开发启动；首次默认由模型客户端管理
+./scripts/dev.sh
 
-# 打包 Electron canary
-<desktop-executable> --enable-valuz-egress-frontends
+# 在设置页选择“由 Valuz 管理连接”后启用统一出口
 
-# 紧急恢复旧路径（最高优先级）
+# 紧急锁定为模型客户端管理（最高优先级）
 VALUZ_EGRESS_MODE=off
+
+# 开发期完全隐藏/禁用统一网络能力
+VALUZ_EGRESS_FRONTENDS=0 ./scripts/dev.sh
 ```
 
 当前 admission allowlist 有意小于产品已有 runtime/provider 矩阵：
@@ -51,20 +53,23 @@ VALUZ_EGRESS_MODE=off
 | Runtime / 认证 | 当前路径 | 状态与原因 |
 |---|---|---|
 | Codex + Responses-compatible API Key | synthetic `model_provider.base_url` → model ingress | 已接入；锁定 Codex `0.144.4` 的真实 `command/exec` 与 stdio MCP 测试确认专用模型 key 不进入工具子进程；adapter 会拒绝 MCP 对该专用 key 名称的显式请求，同时保留显式请求的普通用户 env |
-| Codex + OpenAI OAuth | 旧路径 | 尚未准入；HTTP/WSS、remote compaction 与登录态矩阵未完成 |
+| Codex + ChatGPT OAuth 订阅 | synthetic `model_provider.base_url` → model ingress | 已接入 canary；synthetic provider 使用 `name="OpenAI"`、`requires_openai_auth=true`，真实锁定 CLI 探针确认 `/models` 与 `/responses` 均携带原生 Bearer 登录态且不使用 `env_key`。代理 canary 当前固定 `supports_websockets=false`，避免 WSS 在 `response.completed` 前断开时等待 Codex 的五次重连再回退 HTTPS；remote compaction 仍由 OpenAI provider 身份保留，完整 WSS/平台矩阵通过后再灰度升级 |
 | Claude + Anthropic-compatible API Key + `default/full_access`（非首次 plan） | `ANTHROPIC_BASE_URL` → model ingress | 已接入；每次 spawn 重验 credential-isolation gate，锁定 Claude `2.1.220` 的真实 stdio MCP 测试确认模型凭证被剥离、普通用户 env 保留 |
-| Claude + OAuth，或 API Key + `auto_review`/首次 plan | 旧路径 | 尚未准入；锁定 CLI 的 scrub 与这些权限语义不等价 |
+| Claude + Claude.ai OAuth 订阅 | `ANTHROPIC_BASE_URL` → model ingress | 已接入 canary，覆盖所有 permission/session mode；真实锁定 CLI 探针确认仅设置 loopback base URL 时会从原生凭证库生成 Bearer `/v1/messages?beta=true` 请求，Valuz 不复制 OAuth token、不启用 API-key scrub；追加 settings 层会钉住 loopback base URL 与 `NO_PROXY`，防止项目 settings 优先级绕过入口 |
+| Claude + Anthropic-compatible API Key + `auto_review`/首次 plan | 旧路径 | 尚未准入；锁定 CLI 的 credential scrub 会把初始 permission mode 强制成 `default`，无法等价保持这些语义 |
 | DeepAgents + OpenAI-compatible / Anthropic-compatible | explicit SDK transport → forward proxy | 已接入；同步/异步 client 都显式 `trust_env=false`，shell/MCP env 不变 |
 | DeepAgents + Gemini | 旧路径 | 尚未准入；锁定 SDK 的显式 transport 隔离尚未完成 |
 | Provider discovery / connection test | owned `httpx`/SDK client → forward proxy | 已接入；操作结束即撤销 capability |
 
 “旧路径”只表示该组合不加入本 canary，不表示其已受统一出口监控。任何未通过 Phase 0 的组合都不能为了覆盖率而退回进程级 `HTTP_PROXY` 注入。
 
-已实现的恢复与监控闭环包括：`auto/direct/off`、启动失败 fail-loud、能力租约续期/撤销/过期、PAC 解析失败重试、连接失败后立即失效该 origin 的路由缓存、覆盖完整候选链与代理握手的 10 秒建连预算、候选短路与明确 fallback、按 `(runtime client, target origin)` 的健康快照、runtime phase 时间线、3 秒本地 UI 刷新及二次 schema allowlist 的脱敏复制。详细事件不落盘、不上传，也不主动探测任意 Provider。
+已实现的恢复与监控闭环包括：`auto/direct/off`、启动失败 fail-loud、能力租约续期/撤销/过期、PAC 解析失败重试、连接失败后立即失效该 origin 的路由缓存、覆盖完整候选链与代理握手的 10 秒建连预算、候选短路与明确 fallback、区分“socket 已连接 / 响应头 / 首字节 / 请求完成或中断”的请求级事件、按 `(runtime client, target origin)` 的健康快照、runtime phase 时间线、3 秒本地 UI 刷新及带匿名关联别名的二次 schema allowlist 脱敏复制。详细事件不落盘、不上传，也不主动探测任意 Provider。
 
-尚未完成默认开启所需的平台/真实 runtime 验收：macOS/Windows Finder/Dock 与睡眠唤醒矩阵、需要交互认证的系统代理、常见 PAC/Clash 组合、Codex OAuth/WSS/compaction、Claude OAuth/resume/subagent、Gemini 显式 transport，以及 §16 的性能基线。feature gate 必须保持默认关闭，直到这些项有可复现证据。
+尚未完成将“由 Valuz 管理”设为首次默认值所需的平台/真实 runtime 验收：macOS/Windows Finder/Dock 与睡眠唤醒矩阵、需要交互认证的系统代理、常见 PAC/Clash 组合、Codex OAuth 的 WSS/compaction 全矩阵、Claude OAuth 的 resume/subagent/长流全矩阵、Gemini 显式 transport，以及 §16 的性能基线。在这些项目有可复现证据前，能力可以在设置页使用，但新安装必须默认由模型客户端管理。
 
-2026-08-07 的实现验证快照：使用仓库支持的 bundled Node 24 执行 `make test-all`，backend 为 3672 passed / 4 skipped，frontend 为 181 files / 1314 tests passed；本次改动的 Ruff、desktop/app ESLint、desktop/frontend typecheck 与新增 backend 定向 Mypy 均无新增错误。全仓 `make typecheck` 仍被既有 65 个 backend 文件中的 277 条 Mypy 债务阻断，`make lint` 仍先被 8 条既有跨模块 datastore 边界违规阻断；frontend 全量 lint 的 design-audit 也存在与本功能文件无关的既有 baseline 增量。因此 §16.19 尚不是“全仓绿色”，不能据此解除 canary gate。
+2026-08-07 的实现验证快照：使用仓库支持的 bundled Node 24 执行 `make test-all`，backend 为 3672 passed / 4 skipped，frontend 为 181 files / 1314 tests passed；本次改动的 Ruff、desktop/app ESLint、desktop/frontend typecheck 与新增 backend 定向 Mypy 均无新增错误。全仓 `make typecheck` 仍被既有 65 个 backend 文件中的 277 条 Mypy 债务阻断，`make lint` 仍先被 8 条既有跨模块 datastore 边界违规阻断；frontend 全量 lint 的 design-audit 也存在与本功能文件无关的既有 baseline 增量。因此 §16.19 尚不是“全仓绿色”，不能把 Valuz 管理设为新安装默认值。
+
+2026-08-10 的订阅、请求级监控与设置页 UX 验证快照：在本机 Node 25 下用 `NODE_OPTIONS=--no-experimental-webstorage make test-all` 避开 Node 全局实验性 Web Storage 与 jsdom 的环境冲突，backend 为 3679 passed / 4 skipped，frontend 为 182 files / 1333 tests passed；变更 Python 文件的 Ruff、变更 frontend 文件的 ESLint、frontend 全量 typecheck 均通过。全仓 `make typecheck` 仍被同一批 65 个 backend 文件中的 277 条既有 Mypy 债务阻断，`make lint` 仍先被 8 条既有跨模块 datastore 边界违规阻断；frontend 的 ESLint 全部完成且无 error，但其 design-audit 仍被与本功能文件无关的既有 baseline 增量阻断。这些 baseline 与本次订阅/出口路径及设置页优化无关，因此首次默认仍保持模型客户端管理。
 
 ---
 
@@ -148,7 +153,7 @@ ModelProvider {
 7. **运行形态兼容**：打包桌面端完整支持；开发模式可重复；headless 不依赖 Electron。
 8. **安全默认值**：仅 loopback 监听、不安装本地 CA、不记录凭证或模型正文、不在需要代理时静默裸直连；对可接触明文的模型入口单独威胁建模。
 9. **作用域可证明**：统一出口只影响纳入范围的模型传输；agent shell、MCP、浏览器、更新器和其他 backend HTTP client 不因实现方式被隐式改道。
-10. **可恢复上线**：`off` 兼容模式与当前网络行为严格等价；网络切换、诊断闭环和恢复入口必须同阶段交付。
+10. **可恢复上线**：`off` 旧版恢复路径与当前网络行为严格等价；网络切换、诊断闭环和恢复入口必须同阶段交付。
 
 ### 2.2 非目标
 
@@ -180,7 +185,7 @@ ModelProvider {
 | 重试边界 | 仅在请求字节发送前切换连接候选 | 防止重复计费、重复工具调用和状态不一致 |
 | Headless | 显式 env → 直连；不要求 Electron | 保持服务器部署和现有 CLI 使用方式 |
 | Provider 模型 | 保持现有 Provider 数据和协议校验；仅 runtime 的有效 `base_url` 可临时指向模型入口 | 网络出口不承担模型选择、协议转换或持久化 Provider 改写 |
-| 恢复能力 | `auto` 默认、`direct` 临时恢复、`off` 兼容逃生 | 普通用户无需理解代理术语；新出口故障时仍能恢复当前行为 |
+| 恢复能力 | `auto` 默认、`direct` 内部诊断、`off` 兼容逃生 | 普通用户无需理解代理术语；新出口故障时仍能恢复当前行为 |
 | 上线门槛 | 诊断闭环与路径切换同时交付 | 任何默认网络行为变化都必须能定位、解释和撤回 |
 
 ### 3.1 学习 Cindy 的模型入口，但不复制完整模型网关
@@ -200,26 +205,26 @@ Cindy 已用 Codex `model_provider.base_url` 和 Claude `ANTHROPIC_BASE_URL` 把
 
 这是一套“薄模型入口 + 统一网络路由”，不是通用 LLM Gateway。若未来需要正文改写、跨协议转换或凭证注入，必须另立设计并升级威胁模型。
 
-### 3.2 内部网络模式与用户语言
+### 3.2 三个内部状态与两个用户模式
 
-内部需要三个首发模式，但不把技术枚举原样暴露给普通用户：
+内部保留 `auto/direct/off` 三个技术状态，但设置页只提供两个主模式。`direct` 仍属于 Valuz 管理，只供开发诊断或未来的自动化故障定位使用，不向普通用户暴露：
 
 | 内部模式 | 行为 | 用户入口 |
 |---|---|---|
-| `auto` | 原始 env → 系统代理/PAC → 系统明确的 DIRECT | 默认且通常不可见，设置页显示“自动检测网络（推荐）”即可 |
-| `direct` | 仍经过 Egress Manager，但强制直接连接目标 | 失败提示中的“暂时不使用系统代理”；默认仅对本次应用运行有效 |
-| `off` | 不启动/不接入 Egress Manager，不注入任何新描述符，保持当前版本网络行为 | 帮助 → 网络诊断 → 高级选项中的“兼容模式：恢复旧版网络连接方式”，以及 `VALUZ_EGRESS_MODE=off` |
+| `auto` | 原始 env → 系统代理/PAC → 系统明确的 DIRECT | 主模式“由 Valuz 管理连接（推荐）”；说明会沿用 Clash、企业代理或系统 PAC，未检测到代理时直连，并可展示连接状态与耗时 |
+| `direct` | 仍经过 Egress Manager，但强制直接连接目标 | 不出现在普通设置页；仅保留内部 IPC/开发诊断能力，未来若提供自动化故障定位需另行设计可理解的结果反馈 |
+| `off` | 不启动/不接入 Egress Manager，不注入任何新描述符，保持当前版本网络行为 | 主模式“由模型客户端管理连接”，以及 `VALUZ_EGRESS_MODE=off` |
 
 `off` 是工程逃生通道，不是日常网络偏好。优先级为：
 
 ```text
 VALUZ_EGRESS_MODE=off（紧急覆盖）
-  > 本机兼容模式设置
+  > 本机“由模型客户端管理连接”设置
   > 本次运行的临时 direct 选择
   > 默认 auto
 ```
 
-从 `auto/direct` 切换到 `off` 需要停止未开始发送的新模型请求并重建相关 runtime；不得重放已经发送的请求。界面使用“兼容模式”而不是“关闭 Egress”等内部术语，并明确说明会重新建立模型连接。
+从 `auto/direct` 切换到 `off` 需要重建 backend 和相关 runtime。设置页根据全局 running-runs 状态提示运行任务数量；用户点击切换时，若有前台 turn 或后台任务，必须明确确认“中断任务并继续”。确认后 Electron 主进程先调用各 session 的 interrupt 接口并等待它们完成 idle 收敛，再修改模式、落盘和重启 backend；用户取消则不得改变任何状态。主进程在修改前再次查询 backend：renderer 没有携带确认标记时以 `egress_mode_change_blocked_by_active_runs` 拒绝切换，避免多窗口和状态竞态绕过确认；中断失败时保持原模式并提示手动停止。若活动状态探测时 backend 已不可达则允许切换，以免阻断恢复路径。不得自动重放已经发送的请求。界面使用中性的“由 Valuz 管理连接 / 由模型客户端管理连接”，而不是 `auto/off`、“旧版”或“兼容模式”等带技术实现或价值判断的术语；说明只陈述线路选择方、监控能力和切换时会重建连接。
 
 ---
 
@@ -435,7 +440,7 @@ Electron ready
 
 `off` 模式不启动 Egress Manager、不交付描述符，也不改变 sidecar 现有 spawn env。它必须与本设计落地前的当前网络路径严格等价。
 
-若 Egress Manager 初始化失败，Electron 仍可启动 backend 和 renderer 以展示诊断，但 backend 必须把模型网络标记为 unavailable；不能在用户不知情时按旧路径发送模型请求。用户选择“兼容模式”后，才按 `off` 语义重建 runtime/sidecar。
+若 Egress Manager 初始化失败，Electron 仍可启动 backend 和 renderer 以展示诊断，但 backend 必须把模型网络标记为 unavailable；不能在用户不知情时按旧路径发送模型请求。用户选择“由模型客户端管理连接”后，才按 `off` 语义重建 runtime/sidecar。
 
 停止顺序：
 
@@ -451,17 +456,17 @@ Electron ready
 
 ### 7.2 开发模式
 
-当前 `scripts/dev.sh` 先启动外部 backend，再启动 Electron；backend 无法接收稍后才创建的随机出口描述符。开发模式不能把 `BACKEND_PORT + 1` 固化为架构约定，因为端口可能冲突。
+普通 `scripts/dev.sh` 现在直接启动 desktop，由 Electron 像打包版一样拥有 backend 进程；否则无法在网络管理方式切换时安全替换 backend 的内存状态。只有显式设置 `VALUZ_EGRESS_FRONTENDS=0` 的开发诊断场景才恢复外部 backend。开发模式也不能把 `BACKEND_PORT + 1` 固化为架构约定，因为端口可能冲突。
 
 `scripts/dev.sh all` 调整为：
 
-1. 创建本次 dev session 专用的临时 runtime 目录并校验权限。
-2. 启动 desktop dev shell；Egress Manager 默认绑定 `127.0.0.1:0`，让操作系统分配端口。只有开发者显式设置 `VALUZ_EGRESS_PROXY_PORT` 时才固定端口。
-3. Electron 通过受限权限的一次性 rendezvous 文件或本地控制 socket 发布 ready；凭证不得写 stdout/普通日志。文件方案必须为 `0600`，backend 成功读取后立即删除。
-4. launcher 等待 ready 后启动 backend，并通过与打包端相同的 bootstrap contract 交付描述符。
-5. 任一进程退出时清理 rendezvous 与临时目录。
+1. launcher 安装 backend/frontend 依赖后只启动 desktop dev shell，不再单独持有外部 backend。
+2. Egress Manager 默认绑定 `127.0.0.1:0`，让操作系统分配端口。只有开发者显式设置 `VALUZ_EGRESS_PROXY_PORT` 时才固定端口。
+3. Electron 从当前源码启动 backend，使用 `VALUZ_BACKEND_PORT`（默认 `8000`）和开发数据目录，并通过子进程 stdin 交付一次性 bootstrap。
+4. 在“由 Valuz 管理连接”和“由模型客户端管理连接”之间切换时，Electron 先查询运行任务；有任务则等待用户确认并逐个 interrupt，全部成功后才停止旧 backend、按新模式重新注入或移除 bootstrap，并等待健康检查成功后完成切换。取消或 interrupt 失败时不改变模式。
+5. 任一进程退出时，Electron 清理受管 backend、capability 和本地监听器。
 
-Electron 的 UI 本来就允许等待 backend，因此顺序反转不会改变产品语义。`backend` 单独模式不启动桌面出口，继续使用调用者显式提供的代理 env 或直连；`VALUZ_EGRESS_MODE=off` 也必须保持现有启动顺序可用。
+Electron 的 UI 本来就允许等待 backend，因此受管启动不会改变产品语义。`backend` 单独模式不启动桌面出口，继续使用调用者显式提供的代理 env 或直连。即使当前选择为 `off`，开发 backend 仍由 Electron 管理，保证后续切回 Valuz 管理时能够完整重建链路。
 
 ### 7.3 Headless
 
@@ -522,7 +527,7 @@ interface ModelIngressRegistration {
 }
 ```
 
-bootstrap capability 通过一次性 channel 交付给 backend，backend 消费后只保存在内存中；创建 runtime 时，DeepAgents/Provider Test 申请 `forward_proxy`，Codex/Claude 以真实上游注册后申请 `model_ingress`。真实上游只能经 control channel 注册，不能由模型入口的普通 HTTP 请求指定。首选继承 pipe/本地控制 socket；开发模式允许使用权限为 `0600`、读取后立即删除的 rendezvous 文件。禁止把 bootstrap 或 client descriptor 放进：
+bootstrap capability 通过一次性 channel 交付给 backend，backend 消费后只保存在内存中；创建 runtime 时，DeepAgents/Provider Test 申请 `forward_proxy`，Codex/Claude 以真实上游注册后申请 `model_ingress`。真实上游只能经 control channel 注册，不能由模型入口的普通 HTTP 请求指定。桌面打包版与开发 canary 均使用受管子进程继承的 stdin；受限权限、读取后立即删除的文件 channel 只保留为非桌面集成能力，不参与当前 dev launcher。禁止把 bootstrap 或 client descriptor 放进：
 
 - sidecar 的全局 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`。
 - 普通配置文件、数据库、stdout/stderr 或 crash metadata。
@@ -543,7 +548,7 @@ Backend 的 Egress client registry 按 runtime instance mint、持有并撤销 c
 
 Codex/Claude 的标准代理 env 路线已经由 §3.1 spike 判定不满足作用域要求，不再是待选 fallback。Codex 的 `respect_system_proxy` 只可作为独立兼容/诊断实验，不能宣称已接入 Valuz Egress Manager，也不能替代本设计的路由监控和 fail-loud 语义。
 
-这里允许保留用户原本提供的 proxy env：兼容模式和非纳入流量继续遵循当前行为。为确保本地 `baseUrl` 不被用户原代理错误捕获，adapter 可以在 runtime CLI 的既有 `NO_PROXY` 上合并 `127.0.0.1`、`::1`、`localhost`；该最小 bypass 不能覆盖用户条目，也不能被 Resolver 当作上游策略。禁止的是由 Valuz 新增 loopback `HTTP(S)_PROXY` 或正向出口凭证向无关子进程级联。
+这里允许保留用户原本提供的 proxy env：`off` 旧版恢复路径和非纳入流量继续遵循当前行为。为确保本地 `baseUrl` 不被用户原代理错误捕获，adapter 可以在 runtime CLI 的既有 `NO_PROXY` 上合并 `127.0.0.1`、`::1`、`localhost`；该最小 bypass 不能覆盖用户条目，也不能被 Resolver 当作上游策略。禁止的是由 Valuz 新增 loopback `HTTP(S)_PROXY` 或正向出口凭证向无关子进程级联。
 
 ### 8.3 凭证生命周期与清理
 
@@ -552,7 +557,7 @@ Codex/Claude 的标准代理 env 路线已经由 §3.1 spike 判定不满足作�
 - runtime 退出、切换 `off` 或应用退出时撤销 client capability；过期 capability 不能继续建立新 tunnel 或 model relay stream。
 - 若实现中短暂使用 bootstrap env，backend 必须在接受任何 session 和创建任何子进程前消费并从 `os.environ` 删除；该降级方案仍需单独审查 crash dump 暴露面。
 - sidecar/bootstrap 层先清除继承来的 `VALUZ_EGRESS_BOOTSTRAP_*` / `VALUZ_EGRESS_REQUIRED`，再按本次 spawn 的明确状态只写入一个无 secret 的 marker；正向出口 descriptor 永不进入子进程 env。Codex/Claude adapter 分别使用 CLI 支持的凭证隔离机制，不能删除用户原有的代理配置。
-- Codex 必须用 [`shell_environment_policy`](https://learn.chatgpt.com/docs/config-file/config-advanced#shell-environment-policy) 等受支持机制剥离 Valuz 注入的专用 API key；Claude 必须验证 `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` 或等价边界能剥离模型凭证且不破坏 Valuz 权限模式。该凭证隔离属于 Phase 0 安全前置条件，不因模型入口本身不注入凭证而省略。锁定 Codex `0.144.4` 不接受新版 `filters` 配置，但接受 `shell_environment_policy.ignore_default_excludes=false`；真实 app-server `command/exec` 与 stdio MCP 回归确认专用模型 key 被移除。由于 Codex 的 MCP `env_vars` 显式包含该 key 时会绕过 CLI 的默认过滤，Valuz adapter 还必须强制删除这个专用名称；真实回归同时确认其他显式用户 env 不受影响。锁定 Claude `2.1.220` 的 stdio MCP 回归确认 `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` 被移除，普通用户 env 保留。
+- API Key 路径必须隔离 Valuz 注入的模型凭证：Codex 使用 [`shell_environment_policy`](https://learn.chatgpt.com/docs/config-file/config-advanced#shell-environment-policy)，Claude 使用 `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` 或等价边界。该凭证隔离属于 Phase 0 安全前置条件。锁定 Codex `0.144.4` 不接受新版 `filters` 配置，但接受 `shell_environment_policy.ignore_default_excludes=false`；真实 app-server `command/exec` 与 stdio MCP 回归确认专用模型 key 被移除。由于 Codex 的 MCP `env_vars` 显式包含该 key 时会绕过 CLI 的默认过滤，Valuz adapter 还必须强制删除这个专用名称；真实回归同时确认其他显式用户 env 不受影响。锁定 Claude `2.1.220` 的 stdio MCP 回归确认 `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` 被移除，普通用户 env 保留。订阅路径不由 Valuz 注入模型凭证：Codex 用自身 `auth.json`，Claude 用自身原生凭证库；adapter 只注入非敏感 loopback base URL/`NO_PROXY`，因此不得为订阅路径额外打开 API-key scrub 或复制 OAuth token。
 
 ---
 
@@ -629,12 +634,12 @@ runtime 最终可能只能看到通用 HTTP/CONNECT 失败，但诊断面板和�
 | 诊断 | 用户提示 | 可用操作 |
 |---|---|---|
 | 系统代理解析失败 | “无法读取系统网络设置” | 重新检测、查看诊断 |
-| 系统代理不可达 | “检测到系统代理，但当前无法连接” | 重新检测、暂时不使用系统代理、查看诊断 |
-| Egress Manager 不可用 | “Valuz 网络组件未能启动” | 重试一次、启用兼容模式、查看诊断 |
+| 系统代理不可达 | “检测到代理，但当前无法连接” | 检查代理设置、查看诊断、必要时改由模型客户端管理连接 |
+| Egress Manager 不可用 | “Valuz 网络组件未能启动” | 重试一次、改由模型客户端管理连接、查看诊断 |
 | 出口建连正常但模型首事件慢 | “已连接，正在等待模型响应” | 继续等待、取消任务；不建议切换代理 |
 | 隧道/relay 中途断开 | “网络连接已中断，模型客户端正在恢复” | 显示 runtime 重连进度、允许取消 |
 
-“暂时不使用系统代理”只对后续新请求启用 `direct`，不能把正在进行或已发送的请求迁移到直连。“兼容模式”进入 `off` 并重建相关 runtime；需要明确提示模型连接会重启。任何恢复动作都必须由用户触发，监控状态本身不能静默改变网络策略。
+内部 `direct` 只对后续新请求生效，不能把正在进行或已发送的请求迁移到直连；普通设置页不提供该入口。“由模型客户端管理连接”进入 `off` 并重建相关 runtime；需要明确提示模型连接会重启。若存在运行任务，入口仍可点击，但必须把任务数量、立即中断和未完成内容可能丢失写入确认提示；确认后执行 interrupt → mode persist → backend restart，取消或 interrupt 失败保持原模式。任何用户恢复动作都必须由用户触发，监控状态本身不能静默改变网络策略。
 
 ---
 
@@ -654,19 +659,21 @@ runtime 最终可能只能看到通用 HTTP/CONNECT 失败，但诊断面板和�
 egress.attempt.started
 → egress.route.resolved
 → egress.candidate.started
-→ egress.stream.established | egress.connect.failed
-→ egress.stream.closed
+→ egress.connect.succeeded | egress.connect.failed
+→ egress.response.headers
+→ egress.stream.established
+→ egress.request.completed | egress.request.aborted | egress.request.failed | egress.request.cancelled
 ```
 
-当前 canary 已发出 `attempt.started`、`route.resolved`、`stream.established` 和 `connect.failed`，并在成功事件中记录实际候选序号/fallback 数、在失败后失效该 origin 的解析缓存。逐候选 `candidate.started` 与显式 `stream.closed` 事件尚未对外发出；它们与可靠的 runtime reconnect 分类仍是默认开启前的监控完善项，诊断不得用缺失字段伪造这些结论。
+当前 canary 已发出除逐候选 `candidate.started` 外的上述事件，并在建连成功事件中记录实际候选序号/fallback 数，在响应事件中记录响应状态、响应头/首字节/总耗时，在失败后失效该 origin 的解析缓存。`connect.succeeded` 只证明路由和 socket 可用，不再直接把健康状态标成绿色；HTTP 5xx、响应中断与请求失败会覆盖早期建连成功。可靠的 runtime reconnect 分类仍是默认开启前的监控完善项，诊断不得用缺失字段伪造该结论。
 
 脱敏事件示例：
 
 ```json
 {
   "event": "egress.stream.established",
-  "connection_attempt_id": "random-local-id",
-  "client_id": "random-runtime-id",
+  "attempt_ref": "attempt-1",
+  "runtime_ref": "runtime-1",
   "runtime": "codex",
   "frontend": "model_ingress",
   "target_origin": "https://chatgpt.com",
@@ -676,11 +683,12 @@ egress.attempt.started
   "proxy": "http://127.0.0.1:7890",
   "candidate_index": 0,
   "resolve_ms": 4,
-  "connect_ms": 23
+  "connect_ms": 23,
+  "first_byte_ms": 611
 }
 ```
 
-连接失败事件额外记录 `phase`、稳定错误分类、候选序号和该候选耗时。代理地址在本地诊断中只显示 scheme/host/port；用户名、密码和 URL path 必须移除。
+连接失败事件额外记录稳定错误分类和解析耗时；请求失败/中断事件记录稳定错误分类与从 attempt 开始计算的总耗时。代理地址在本地诊断中只显示 scheme/host/port；用户名、密码和 URL path 必须移除。内存事件保留随机 `client_id/connection_attempt_id` 用于本地关联，复制到剪贴板时只输出同一次导出内稳定的 `runtime-1/attempt-1/turn-1` 别名，不导出原始随机 ID。
 
 至少计算：
 
@@ -710,6 +718,10 @@ interface EgressSnapshot {
   redactedProxy?: string
   resolveMs?: number
   connectMs?: number
+  responseStatus?: number
+  responseMs?: number
+  firstByteMs?: number
+  totalMs?: number
   reconnectCount: number
   fallbackCount: number
   lastErrorCode?: string
@@ -720,10 +732,10 @@ interface EgressSnapshot {
 
 状态转换必须确定且可测试：
 
-- `unknown`：尚无真实连接样本，或解析结果不可判定。
-- `healthy`：最近一次候选在预算内成功建立，且没有异常 fallback/重连。
+- `unknown`：尚无真实上游响应样本、当前请求仍只完成建连，或解析结果不可判定。
+- `healthy`：最近一次真实请求已收到非 5xx 响应头、首字节或正常完成，且没有异常 fallback/重连。
 - `degraded`：候选 fallback 后成功、连接超过预算、短时间重复断开或 runtime 正在重连。
-- `failed`：候选耗尽、Egress Manager/adapter 不可用，或最近一次真实请求无法建立任何有效路径。
+- `failed`：候选耗尽、Egress Manager/adapter 不可用、最近一次真实请求收到 5xx，或 relay/tunnel 在完成前异常中断。
 
 阈值集中定义并带最小样本要求，不能散落在 UI 与代理实现中。健康状态按 `(runtime client, target origin)` 维护；不能用一个全局“代理正常”代表所有 Provider。
 
@@ -753,23 +765,24 @@ Python 与 Electron 的 monotonic clock 不共享时间原点，因此 Electron 
 
 - PAC/系统代理解析失败：清理该 origin 缓存并立即重解析一次。
 - 单个候选失败：仅在尚未发送业务字节时尝试 PAC/env 中的下一候选。
-- Egress Manager 启动失败：保留 renderer/诊断入口并给 sidecar 无 secret 的 fail-loud marker；只阻断已准入组合，用户切换兼容模式后恢复旧路径。监听器运行期异常后的“一次自动重启”尚未实现，是默认开启前的剩余门槛；无论是否重启都禁止自动重放模型请求。
+- Egress Manager 启动失败：保留 renderer/诊断入口并给 sidecar 无 secret 的 fail-loud marker；只阻断已准入组合，用户选择“由模型客户端管理连接”后回到旧路径。监听器运行期异常后的“一次自动重启”尚未实现，是默认开启前的剩余门槛；无论是否重启都禁止自动重放模型请求。
 - 重复失败候选：进入有上限的短期 circuit breaker，到期后允许真实请求重新验证。
 - 健康状态变化：更新本地诊断和用户提示，但不能单凭监控结果静默切换 `direct/off`。
 
-默认不对任意 Provider 做后台主动探测。PAC 是逐 URL 的，主动探测既可能泄露目标，也可能触发认证、限流或计费；健康状态主要来自真实请求。只有用户点击“重新检测/测试连接”时，才运行与该 Provider 已有 connection test 等价的显式探测。
+默认不对任意 Provider 做后台主动探测。PAC 是逐 URL 的，主动探测既可能泄露目标，也可能触发认证、限流或计费；健康状态来自真实模型请求。设置页每 3 秒读取内存快照并自动更新，因此不提供容易被误解为“主动测速”的手动刷新按钮。只有用户在 Provider 页面明确执行“测试连接”时，才运行与该 Provider 已有 connection test 等价的显式探测。
 
 ### 11.5 本地诊断、导出与远程遥测
 
 Egress Manager 在内存维护同时受“最大条数”和“最大时间窗口”限制的事件环；具体常量集中定义。第一阶段通过 Electron IPC 暴露当前快照和脱敏时间线，不进入公开 backend API，也不跨应用重启保存详细网络历史。
 
-诊断 UI 首屏只显示：
+设置页将“谁来管理模型连接”和“当前模型连接”分开：前者只在“由 Valuz 统一管理”和“由模型客户端自行连接”之间选择，普通用户不直接操作内部 `direct`；后者只展示当前仍在执行的真实模型请求所使用的线路、健康状态和分阶段耗时。runtime 可以在 turn 结束后继续留在预热缓存中，但 `turn_complete/interrupted` 到达后对应快照必须立即退出“当前连接”列表；脱敏诊断事件仍可在内存环中保留。监控区首屏只显示：
 
-- “网络连接正常 / 不稳定 / 无法连接 / 尚未检测”。
-- 当前使用“系统网络设置 / 暂时不使用系统代理 / 兼容模式”。
+- “连接正常 / 连接较慢或发生重试 / 连接失败 / 等待模型响应”。
+- 当前 runtime、目标 origin 和“直接连接 / HTTP 代理 / SOCKS5 代理”。
+- 选择线路、建立连接、收到响应、首个数据和请求总计等阶段耗时。
 - 最近一次失败的用户可理解原因和恢复操作。
 
-高级面板可以展示分阶段耗时、脱敏 origin、路由来源、重连次数和错误码，并支持“一键复制脱敏诊断”。复制内容再次经过 schema allowlist，而不是对原始日志做字符串替换。
+设置页不再展示独立或折叠的诊断区域。连接正常或尚未产生真实诊断时不显示任何诊断操作；只有健康状态为 degraded/failed 且存在本地诊断数据时，才在“当前模型连接”的状态旁出现“复制诊断信息”。复制内容再次经过 schema allowlist，而不是对原始日志做字符串替换；成功提示明确说明敏感信息已自动隐藏。
 
 首期不新增远程网络遥测。如果未来需要产品级成功率监控，必须复用产品现有遥测同意机制并另行评审；只允许上传版本、平台、runtime、阶段、耗时区间和稳定错误分类，禁止上传原始 origin、自定义 Provider URL、代理 host/IP、`client_id` 或任意凭证。
 
@@ -796,7 +809,7 @@ Egress Manager 在内存维护同时受“最大条数”和“最大时间窗�
 8. Egress Manager 关闭时停止接受新 tunnel/relay stream；应用退出有明确上限，不能无限阻塞更新或退出。
 9. agent shell、MCP 和普通子进程不能访问 Valuz 生成的正向出口凭证或 per-session 模型凭证；实现必须以真实 `env`、`curl`、Git、包管理器和 MCP 子进程测试证明隔离，而不是只依赖代码审查。模型入口 URL 若因 CLI 限制可见，也不得单独具备读取 host 凭证或访问任意上游的能力。
 10. 当前 Valuz 的 Codex/Claude Provider env 会进入模型 CLI；凭证子进程隔离必须作为独立安全修复验收，不能把它误归因于新网络入口，也不能因它是既有行为而忽略。
-11. `off` 兼容模式属于独立故障域：Egress Manager 代码、描述符解析或 adapter 初始化失败不能阻止用户进入该模式。
+11. `off` 旧版恢复路径属于独立故障域：Egress Manager 代码、描述符解析或 adapter 初始化失败不能阻止用户进入该模式。
 
 ---
 
@@ -807,14 +820,14 @@ Egress Manager 在内存维护同时受“最大条数”和“最大时间窗�
 | Electron bootstrap | `frontend/apps/desktop/src/main/ipc/desktop.ts` | app ready 后、sidecar 前解析 `auto/direct/off`；按模式启动/停止 Egress Manager |
 | Desktop service manager | `frontend/apps/desktop/src/main/services/mod.ts` | 持有 bootstrap capability 与 manager 健康；按模式编排 sidecar 生命周期 |
 | Sidecar spawn | `frontend/apps/desktop/src/main/services/sidecar.ts` | 建立一次性 bootstrap channel；禁止注入全局 `HTTP(S)_PROXY` |
-| Desktop IPC | `frontend/apps/desktop/src/main/ipc/` + preload channels | 暴露脱敏状态、刷新、临时 direct 与兼容模式操作 |
-| Desktop settings/diagnostics UI | 现有 desktop settings/help surface | 默认隐藏技术模式；失败时提供上下文恢复，高级区提供兼容模式和脱敏诊断 |
+| Desktop IPC | `frontend/apps/desktop/src/main/ipc/` + preload channels | 暴露脱敏状态、自动轮询、临时 direct 与 `off` 恢复操作；权威复核运行任务并按确认标记先 interrupt 后切换 |
+| Desktop settings/diagnostics UI | 现有 desktop settings/help surface | 主设置只展示“Valuz 管理 / 模型客户端自行连接”；不暴露 direct；运行任务时提供中断确认；监控区展示实时状态和脱敏诊断复制 |
 | Kernel egress registry | `backend/kernel/src/runtimes/network_egress.py` | 内存消费 bootstrap；按 runtime 注册真实上游并申请 `model_ingress`/`forward_proxy`；上报 allowlist runtime phase；清理普通子进程 env |
 | Codex runtime | `backend/kernel/src/runtimes/codex/runtime.py` | synthetic provider 的 `base_url` 指向模型入口；区分 `requires_openai_auth`/专用 `env_key`；验证 HTTP/WSS 与 shell/MCP 凭证隔离 |
 | Claude runtime | `backend/kernel/src/runtimes/claude_agent/runtime.py` | `ANTHROPIC_BASE_URL` 指向模型入口；保持现有认证通道；验证 SSE、resume、subagent 与 shell/MCP 凭证隔离 |
 | DeepAgents | `backend/kernel/src/runtimes/deepagents/runtime.py` | 给模型 client 显式配置 transport；本地 shell 保持当前 env 行为 |
 | Provider discovery | `backend/valuz_agent/modules/providers/discover.py` | connection test 使用与正式模型 client 相同的显式 transport |
-| Dev launcher | `scripts/dev.sh` | 动态端口、一次性 rendezvous、权限检查和退出清理 |
+| Dev launcher | `scripts/dev.sh` | canary 下由 Electron 管理源码 backend、动态端口、stdin bootstrap 和退出清理 |
 | Docs | `docs/product-overview*.md`、`docs/architecture*.md` | 说明“本机出口代理，不经过 Valuz 云端” |
 
 若引入新的 npm 包，必须在 `@valuz/desktop` 中声明直接依赖，不能依赖 lockfile 中偶然存在的 transitive package。
@@ -858,8 +871,8 @@ Egress Manager 在内存维护同时受“最大条数”和“最大时间窗�
 - Codex/Claude 内执行 `env`、`curl`、Git 和至少一个包管理器，确认看不到正向出口凭证和 per-session 模型凭证，且网络路径未被新增出口改变；模型入口 URL 即使可见也不能访问任意上游或替 runtime 注入凭证。
 - DeepAgents local shell `inherit_env` 保持当前行为，只有模型 client 使用显式 transport。
 - `off` 模式的 sidecar env、runtime env 和网络路径与当前版本基线等价。
-- Egress Manager 初始化失败时 renderer/诊断仍可用，模型请求被阻止；用户启用兼容模式后恢复旧路径。
-- 系统代理失败时只显示恢复操作，不自动切换 direct；用户选择临时 direct 后只影响新请求。
+- Egress Manager 初始化失败时 renderer/诊断仍可用，模型请求被阻止；用户选择“由模型客户端自行连接”后回到旧路径。
+- 系统代理失败时只显示可理解的原因和恢复操作，不自动切换 direct；内部诊断若显式使用 direct，也只能影响新请求。
 - 事件时间线能区分建连慢与 `dispatch_to_first_event` 慢；并发 runtime 不错误声明精确关联。
 - 日志中无凭证与正文。
 
@@ -894,7 +907,7 @@ Egress Manager 在内存维护同时受“最大条数”和“最大时间窗�
 - 保留现有 `turn_phase` 基线，建立首事件耗时对照。
 - 固化 §3.1 已确认结论：Codex/Claude 使用模型 `base_url` 入口，不通过 Valuz 新增的标准代理 env 接入。
 - 完成 Codex/Claude 现有 Provider 凭证对 shell/MCP 的隔离修复与回归测试；不得把 per-session API key 暴露给工具子进程。
-- 完成 §17 剩余的 OAuth、WSS、remote compaction、resume/subagent、显式 transport 与平台 PAC spike；未通过的 runtime/认证组合不进入默认接入清单。
+- Codex/Claude 订阅 base URL + 原生 Bearer 基础 spike 已完成并进入 canary；继续完成 §17 剩余的 WSS、remote compaction、resume/subagent、长流、显式 transport 与平台 PAC spike，未通过完整矩阵前不默认开启。
 
 ### Phase 1 — Shadow resolver + local observability（已实现）
 
@@ -903,18 +916,18 @@ Egress Manager 在内存维护同时受“最大条数”和“最大时间窗�
 - 对比 Electron 解析结果与当前 runtime 实际环境，验证判断正确性。
 - 记录当前 `runtime_init → dispatch → first_event` 基线；Shadow 数据只能留在本机。
 
-### Phase 2 — Safety-gated dual frontends（已实现，默认关闭 canary）
+### Phase 2 — Safety-gated dual frontends（已实现，设置页主动启用）
 
 - 实现共享 Upstream Connector、HTTP forward/CONNECT 前端和 Codex/Claude 薄模型入口。
 - 实现一次性 bootstrap、真实上游注册、loopback 约束、capability 撤销和退出清理；不向 sidecar 或模型 CLI 新增全局代理 env。
 - Codex/Claude 通过模型入口接入；DeepAgents/Provider discovery 通过显式 transport 接入。只启用通过认证/协议 spike 的组合。
-- 同时交付 `auto/direct/off`、上下文错误提示、临时 direct、兼容模式和脱敏诊断 UI。
-- 先通过本地 feature gate/canary 开启；默认切换前必须满足 §16 的性能、隔离、诊断和回退验收。
+- 同时交付 `auto/direct/off` 底层能力、上下文错误提示、两个用户主模式和脱敏诊断 UI；普通设置页不暴露 direct。
+- 能力与设置入口随桌面端提供，新安装默认由模型客户端管理；将 Valuz 管理设为首次默认值前必须满足 §16 的性能、隔离、诊断和回退验收。
 
 ### Phase 3 — Dev / Headless / UX polish（基础代码已实现，平台验收待完成）
 
-- 完成 `scripts/dev.sh` 的 desktop-first 启动、可配置 backend 端口、一次性 rendezvous 和启动等待。
-- 完善高级诊断、复制脱敏快照和本地状态刷新操作。
+- 完成 `scripts/dev.sh` 的 Electron 受管源码 backend、可配置 backend 端口、stdin bootstrap 和健康检查等待。
+- 完善连接状态自动更新、用户可读的阶段耗时，以及脱敏诊断复制。
 - 验证 headless 保持 env/direct 行为。
 
 ### Phase 4 — Policy controls
@@ -936,8 +949,8 @@ Egress Manager 在内存维护同时受“最大条数”和“最大时间窗�
 3. sidecar 自身、与模型入口无关的 localhost 服务、agent shell、MCP、浏览器、更新器及普通 backend client 不因 Valuz 新增的出口配置而改变网络路径。
 4. Codex/Claude/DeepAgents 的真实工具子进程看不到 Valuz 生成的正向出口用户名/secret 或 per-session 模型凭证；模型入口 URL 即使受 CLI 限制可见，也不能访问任意上游或替 runtime 注入凭证；用户原有 env 行为不被无意删除。
 5. `off` 不启动/不接入 Egress Manager，其 sidecar env、runtime env、Provider 路径和失败语义与当前版本基线等价。
-6. 代理失败不会自动裸直连；用户选择“暂时不使用系统代理”后，只有后续新请求进入 `direct`。
-7. Egress Manager 初始化/运行失败时 renderer 和诊断入口仍可用；用户可以启用兼容模式恢复旧路径，不依赖故障组件完成切换。
+6. 代理失败不会自动裸直连；普通设置页不暴露 `direct`。开发诊断显式启用时，也只有后续新请求进入 `direct`。
+7. Egress Manager 初始化/运行失败时 renderer 和诊断入口仍可用；用户可以选择“由模型客户端自行连接”回到旧路径，不依赖故障组件完成切换。
 8. 代理切换后最迟在缓存 TTL 内生效；连接失败会触发一次立即重解析。
 9. 代理不可用时在连接级时限内给出明确诊断，不出现无解释的分钟级等待。
 10. 本地时间线能区分 runtime 冷启动、模型入口/正向出口接入、解析、候选建连、上游 stream 建立、模型首事件和 runtime 重连；并发场景不把 runtime 归属误标成精确 turn 关联。
@@ -949,7 +962,8 @@ Egress Manager 在内存维护同时受“最大条数”和“最大时间窗�
 16. 首期不因本功能新增远程网络遥测或后台 Provider 主动探测。
 17. Headless 在无 Electron 时仍能通过标准代理 env 或直连运行。
 18. Codex、Claude、DeepAgents 与 Provider connection test 共享相同 Resolver/Upstream Connector；未通过认证或协议 spike 的 runtime 组合不得默认启用。
-19. 全部实现通过 `make test-all`、`make typecheck` 和 `make lint`。
+19. 运行任务期间切换模式时入口仍可操作，但必须先确认；确认后所有受影响 session 的 interrupt 完成才可持久化模式并重启 backend，取消或任一 interrupt 失败时原模式不变。
+20. 全部实现通过 `make test-all`、`make typecheck` 和 `make lint`。
 
 ---
 
@@ -957,9 +971,9 @@ Egress Manager 在内存维护同时受“最大条数”和“最大时间窗�
 
 §3.1 的接入方式 spike 已完成，结论为：Codex/Claude 的标准代理 env 不能满足模型级作用域；两者必须使用模型 `base_url` 指向薄模型入口。默认启用 Phase 2 前仍需用最小程序确认：
 
-1. Codex OpenAI OAuth 订阅通过 synthetic provider + `requires_openai_auth=true` 进入模型入口时，HTTP、WSS、remote compaction、请求压缩和 HTTP fallback 均与同版本直连语义一致。
+1. Codex OpenAI OAuth 订阅通过 synthetic provider + `requires_openai_auth=true` 进入模型入口时，HTTP、WSS、remote compaction、请求压缩和 HTTP fallback 均与同版本直连语义一致。**基础接入已于 2026-08-10 实测**：锁定 Codex `0.144.4` 接受 synthetic provider 配置；`GET /models` 与 `POST /responses` 通过 loopback 到达，均携带原生 Bearer 登录态，不需要/不生成 `env_key`。`name="OpenAI"` 保留 remote compaction 判定。首轮真实对照进一步观测到代理解析/CONNECT 仅为 1/221 ms，但 dispatch 到首事件仍有 35.8 秒，而同一 thread 后续采样约 10.9 秒；结合 Codex 的五次 WSS 重连后才回退 HTTPS 的行为，代理 canary 先固定 `supports_websockets=false`。第二轮真实探针发现 `ModelIngress` 虽已通过 Clash 建立 CONNECT/TLS socket，却因 `node:http` 的 `agent:false` 忽略预连接 socket，另行直连目标默认 80 端口，导致每约 76 秒返回一次本地 502；现已抽取 request-scoped single-socket Agent，由 `ModelIngress` 与 `ForwardProxy` 共同强制复用 `UpstreamConnector` 的连接。修复后约 100 KB JSON 的 zstd 请求经同一路径在 636 ms 内收到预期上游认证响应，两类 HTTP 前端均新增“目标 hostname 不可解析但 connector 已提供 socket”回归测试，防止再次出现隐式直连。WSS/compaction/fallback 的真实上游长会话矩阵仍待完成，通过前不得重新打开 upgrade。
 2. Codex Responses-compatible API Key 通过专用 `env_key` 进入模型入口时，Authorization 不丢失，插件、GitHub、MCP 和工具网络不改道。
-3. Claude OAuth 订阅和 Anthropic-compatible API Key 通过 `ANTHROPIC_BASE_URL` 进入模型入口时，SSE、取消、resume、subagent、后台任务与登录态均正常。
+3. Claude OAuth 订阅和 Anthropic-compatible API Key 通过 `ANTHROPIC_BASE_URL` 进入模型入口时，SSE、取消、resume、subagent、后台任务与登录态均正常。**订阅基础接入已于 2026-08-10 实测**：锁定 Claude Code `2.1.220` 在不注入 `ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN` 或 `CLAUDE_CODE_OAUTH_TOKEN` 时，仅凭原生登录态和 loopback `ANTHROPIC_BASE_URL` 即发送 Bearer `POST /v1/messages?beta=true`；项目 settings 的 `env.ANTHROPIC_BASE_URL` 确实会覆盖进程 env，故 runtime 同时在优先级更高的 additional settings 层重复非敏感 loopback URL 与 `NO_PROXY/no_proxy`。SSE/取消/resume/subagent/后台任务的长会话矩阵仍待完成。
 4. Codex `shell_environment_policy` 与 Claude `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` 或等价边界能剥离 per-session 模型凭证，并保持 Valuz 现有 permission mode、审批和 MCP 行为。**Codex `0.144.4` API Key 路径已实测**：锁定 binary 接受 `ignore_default_excludes=false`，真实 app-server `command/exec` 与 stdio MCP 中模型 key 均为 unset；进一步确认 MCP 的 `env_vars` 若显式索取该 key 会绕过 CLI 过滤，因此当前 adapter 会强制删除该名称，并保留同一列表中的普通用户变量。新版 `filters` map 在该版本会报未知字段，不能写入生成配置。**Claude `2.1.220` 实测部分完成**：不开 scrub 时 Bash 可读 `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY`；开启后 Bash 与真实 stdio MCP 中两者均为 unset，MCP 的普通用户 env 保留，但 CLI 会把初始 permission mode 强制为 `default`。在 SDK `can_use_tool` 回调下，Valuz 的 `default` 与 `full_access` 仍可保持审批/放行语义；`auto_review` 的 Claude classifier 和首次 `plan` 无法等价保持，因此 Claude API Key + `auto_review`/首次 `plan` 暂不进入默认接入清单。自定义 `VALUZ_EGRESS_*` 不会被 Claude scrub 自动移除，故出口 capability 仍禁止进入 Claude CLI env。
 5. 在 Codex/Claude agent 中运行 `env`、`curl`、Git、包管理器、stdio/HTTP MCP 和 WebFetch，验证它们不经过 Valuz 新模型入口/正向出口；不能只检查变量名。
 6. 模型入口对 content-encoding、chunked request、SSE、WSS upgrade、backpressure、半关闭、取消和大 body 能字节保持转发；不因不解析正文而缓存完整 body。
@@ -968,7 +982,7 @@ Egress Manager 在内存维护同时受“最大条数”和“最大时间窗�
 9. Electron `resolveProxy()` 在 macOS/Windows 对 PAC 候选的实际返回格式，以及系统代理残留但 direct 可用时的失败表现。
 10. 常见 Clash HTTP mixed port、SOCKS5 端口关闭/切换时的错误类型、重试行为和耗时。
 11. loopback 模型入口 URL、正向出口 auth、API Key/OAuth 是否会出现在 stderr、工具 env、进程检查或 crash report；任一真实凭证泄漏通道必须先关闭或脱敏。
-12. 一次性 bootstrap channel、真实上游注册、runtime capability 撤销与 `off` 路径在 macOS/Windows 的可实现性；Egress Manager 完全不可用时仍能进入兼容模式。
+12. 一次性 bootstrap channel、真实上游注册、runtime capability 撤销与 `off` 路径在 macOS/Windows 的可实现性；Egress Manager 完全不可用时仍能进入旧版恢复路径。
 13. `connection_attempt_id/client_id` 是否足以在并发 runtime 下提供诚实的关联置信度，且所有本地 client path prefix 都在转发前剥离。
 
 本轮探针还确认：用户/项目 Claude settings 可以覆盖进程传入的 `ANTHROPIC_BASE_URL`，测试必须用与 Valuz 一致的受限 `setting_sources`；loopback `base_url` 必须把 `127.0.0.1,localhost,::1` 合并进现有 `NO_PROXY/no_proxy`，否则部分代理环境会把本地模型入口再次送入上游代理。该合并只作用于 runtime CLI 的本地入口可达性，不参与上游路由策略。

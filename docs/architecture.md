@@ -69,19 +69,29 @@ the whole sidecar by adding process-wide proxy variables. DeepAgents and
 provider tests use explicitly owned HTTP clients with environment proxy lookup
 disabled for those clients only.
 
-Electron sends a short-lived control capability to the backend once: over the
-sidecar's inherited stdin in packaged builds, or through a private one-shot
-rendezvous file in desktop development. The backend keeps it in memory, leases
-one capability per runtime, renews leases, and revokes them on cleanup. All
-listeners bind to random loopback ports; no local CA or HTTPS MITM is installed.
+Electron sends a short-lived control capability to the backend once over the
+managed sidecar's inherited stdin. The unified-network development canary uses
+the same lifecycle: Electron owns the source backend and can restart it when
+the selected connection owner changes. The backend keeps the capability in
+memory, leases one capability per runtime, renews leases, and revokes it on
+cleanup. All listeners bind to random loopback ports; no local CA or HTTPS MITM
+is installed.
+Connection-owner changes are coordinated by Electron as a local transaction.
+It queries the backend's global running-runs view; if work is active, Settings
+requires explicit confirmation, Electron interrupts every affected session and
+waits for those calls to complete, and only then persists the new mode and
+restarts the backend. Cancellation or an interrupt failure leaves the previous
+mode intact.
 Initialization failure keeps the UI/backend available but blocks admitted model
-traffic until the user selects compatibility mode, preventing an unnoticed
-direct-connect fallback.
+traffic until the user selects model-client-managed connections, preventing an
+unnoticed direct-connect fallback.
 
-The feature is currently a default-off canary (`--enable-valuz-egress-frontends`
-or `VALUZ_EGRESS_FRONTENDS=1`). Standalone/headless servers receive no Electron
-capability and retain their existing explicit-proxy-environment/direct behavior.
-The canonical behavior, admission matrix, and rollout criteria live in
+The desktop capability is available without a launch flag, while new installs
+default to model-client-managed connections until the user opts into Valuz
+management in Settings. `VALUZ_EGRESS_FRONTENDS=0` is an emergency development
+disable. Standalone/headless servers receive no Electron capability and retain
+their existing explicit-proxy-environment/direct behavior. The canonical
+behavior, admission matrix, and rollout criteria live in
 [`docs/design/unified-network-egress.md`](design/unified-network-egress.md).
 
 ---

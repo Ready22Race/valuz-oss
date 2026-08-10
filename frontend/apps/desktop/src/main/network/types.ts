@@ -54,8 +54,14 @@ export type EgressDiagnosticEvent = {
     | "egress.attempt.started"
     | "egress.route.resolved"
     | "egress.resolve.failed"
+    | "egress.connect.succeeded"
     | "egress.stream.established"
-    | "egress.connect.failed";
+    | "egress.connect.failed"
+    | "egress.response.headers"
+    | "egress.request.completed"
+    | "egress.request.aborted"
+    | "egress.request.failed"
+    | "egress.request.cancelled";
   connectionAttemptId: string;
   clientId: string;
   runtime: EgressRuntime;
@@ -72,10 +78,42 @@ export type EgressDiagnosticEvent = {
   candidateIndex?: number;
   connectMs?: number;
   fallbackCount?: number;
+  statusCode?: number;
+  responseMs?: number;
+  firstByteMs?: number;
+  totalMs?: number;
 };
 
-export interface EgressSnapshot {
+export type EgressRequestPhase =
+  | "headers_received"
+  | "first_byte"
+  | "completed"
+  | "aborted"
+  | "failed"
+  | "cancelled";
+
+/** Request-level signal emitted after route resolution and socket setup. */
+export interface EgressRequestEvent {
+  connectionAttemptId: string;
+  startedAt: number;
   clientId: string;
+  runtime: EgressRuntime;
+  targetOrigin: string;
+  phase: EgressRequestPhase;
+  elapsedMs: number;
+  connectMs: number;
+  fallbackCount: number;
+  statusCode?: number;
+  errorCode?: string;
+}
+
+export interface EgressSnapshot {
+  connectionAttemptId: string;
+  clientId: string;
+  /** True only while the owning runtime is executing a model turn. */
+  activeTurn: boolean;
+  /** True only until this individual upstream request reaches a terminal phase. */
+  requestActive: boolean;
   runtime: EgressRuntime;
   frontend: EgressFrontend;
   targetOrigin: string;
@@ -86,6 +124,10 @@ export interface EgressSnapshot {
   redactedProxy?: string;
   resolveMs?: number;
   connectMs?: number;
+  responseStatus?: number;
+  responseMs?: number;
+  firstByteMs?: number;
+  totalMs?: number;
   reconnectCount: number;
   fallbackCount: number;
   lastErrorCode?: string;

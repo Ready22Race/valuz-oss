@@ -167,6 +167,7 @@ _RUNTIME_PHASES = frozenset(
 )
 
 _DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+_DEFAULT_CODEX_SUBSCRIPTION_BASE_URL = "https://chatgpt.com/backend-api/codex"
 _DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 _MAX_LEASE_TTL_MS = 24 * 60 * 60 * 1000
 _MAX_BOOTSTRAP_BYTES = 16 * 1024
@@ -490,28 +491,37 @@ async def prepare_runtime_egress(
     forward_runtime: Literal["deepagents"] | None = None
 
     if runtime == "codex":
-        # OAuth requires synthetic-provider HTTP/WSS/compaction validation.
-        # Until that matrix passes, only the explicit API-key provider path is
-        # admitted to the local model ingress.
-        if provider is None:
-            return None
         ingress_runtime = "codex"
-        upstream_base_url = provider.base_url or _DEFAULT_OPENAI_BASE_URL
-        supports_websocket = True
-    elif runtime == "claude_agent":
-        # OAuth and scrub-incompatible permission modes retain the existing
-        # path.  The latter is re-checked by the runtime on every client spawn
-        # because permission/session mode can change after construction.
-        if provider is None:
-            return None
-        gate = claude_api_key_credential_gate(
-            permission_mode=session.permission_mode,
-            session_mode=session.mode,
+        upstream_base_url = (
+            _DEFAULT_CODEX_SUBSCRIPTION_BASE_URL
+            if provider is None
+            else provider.base_url or _DEFAULT_OPENAI_BASE_URL
         )
-        if not gate.eligible:
-            return None
+        # Keep the proxy-oriented canary on HTTPS streaming.  Codex retries a
+        # WebSocket that closes before ``response.completed`` up to five times
+        # before falling back, which turns a marginal proxy path into a
+        # minute-long first response.  The model ingress remains capable of
+        # WebSocket relay, but a runtime must pass the long-stream/reconnect
+        # matrix before its registration is allowed to upgrade.
+        supports_websocket = False
+    elif runtime == "claude_agent":
+        # Subscription OAuth stays inside Claude Code's native credential
+        # store, so it needs no credential env scrub and is safe in every
+        # permission/session mode. Explicit API-key providers still need the
+        # locked CLI's scrub gate, re-checked on every client spawn below.
+        if provider is not None:
+            gate = claude_api_key_credential_gate(
+                permission_mode=session.permission_mode,
+                session_mode=session.mode,
+            )
+            if not gate.eligible:
+                return None
         ingress_runtime = "claude"
-        upstream_base_url = provider.base_url or _DEFAULT_ANTHROPIC_BASE_URL
+        upstream_base_url = (
+            _DEFAULT_ANTHROPIC_BASE_URL
+            if provider is None
+            else provider.base_url or _DEFAULT_ANTHROPIC_BASE_URL
+        )
     elif runtime == "deepagents":
         # OpenAI and Anthropic both expose an explicit proxy hook in the
         # locked SDK versions.  Gemini's transport surface still needs a

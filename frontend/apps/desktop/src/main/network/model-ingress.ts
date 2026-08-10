@@ -10,7 +10,8 @@ import {
 import type { Socket } from "node:net";
 import type { Duplex } from "node:stream";
 import type { OutboundResolver } from "./outbound-resolver";
-import type { EgressRuntime } from "./types";
+import { createPreconnectedHttpAgent } from "./preconnected-http";
+import type { EgressRequestEvent, EgressRuntime } from "./types";
 import {
   EgressConnectError,
   UpstreamConnector,
@@ -77,6 +78,13 @@ export interface ModelIngressOptions {
   mode?: "auto" | "direct";
   now?: () => number;
   onConnection?: (event: ModelIngressConnectionEvent) => void;
+  onRequest?: (event: EgressRequestEvent) => void;
+}
+
+interface ConnectedAttempt {
+  connectionAttemptId: string;
+  startedAt: number;
+  connection: UpstreamConnection;
 }
 
 const filteredHeaders = (
@@ -130,6 +138,7 @@ export class ModelIngress {
   private readonly connector: UpstreamConnector;
   private readonly now: () => number;
   private readonly onConnection?: ModelIngressOptions["onConnection"];
+  private readonly onRequest?: ModelIngressOptions["onRequest"];
   private mode: "auto" | "direct";
   private readonly registrations = new Map<string, StoredRegistration>();
   private readonly acceptedSockets = new Set<Socket>();
@@ -143,6 +152,7 @@ export class ModelIngress {
     this.mode = options.mode ?? "auto";
     this.now = options.now ?? Date.now;
     this.onConnection = options.onConnection;
+    this.onRequest = options.onRequest;
   }
 
   async start(): Promise<void> {
@@ -288,7 +298,7 @@ export class ModelIngress {
   private async connect(
     registration: StoredRegistration,
     target: URL,
-  ): Promise<UpstreamConnection> {
+  ): Promise<ConnectedAttempt> {
     const connectionAttemptId = randomUUID();
     const resolveStarted = this.now();
     try {
@@ -307,7 +317,7 @@ export class ModelIngress {
         resolutionMs,
         connection,
       });
-      return connection;
+      return { connectionAttemptId, startedAt: resolveStarted, connection };
     } catch (error) {
       // A failed proxy candidate often means the system proxy/PAC selection
       // just changed. Do not pin that stale resolution for the full cache TTL.
@@ -333,21 +343,72 @@ export class ModelIngress {
       response.writeHead(404).end();
       return;
     }
+    let downstreamCancelled = false;
+    let activeRequest: ReturnType<typeof httpRequest> | undefined;
+    const cancelDownstream = () => {
+      downstreamCancelled = true;
+      activeRequest?.destroy();
+    };
+    request.once("aborted", cancelDownstream);
+    response.once("close", () => {
+      if (!response.writableEnded) cancelDownstream();
+    });
     try {
-      const connection = await this.connect(resolved.registration, resolved.target);
+      const attempt = await this.connect(resolved.registration, resolved.target);
+      const { connection } = attempt;
+      let statusCode: number | undefined;
+      let terminal = false;
+      const emitRequest = (
+        phase: EgressRequestEvent["phase"],
+        errorCode?: string,
+      ) => {
+        this.onRequest?.({
+          connectionAttemptId: attempt.connectionAttemptId,
+          startedAt: attempt.startedAt,
+          clientId: resolved.registration.clientId,
+          runtime: resolved.registration.runtime,
+          targetOrigin: resolved.target.origin,
+          phase,
+          elapsedMs: Math.max(0, this.now() - attempt.startedAt),
+          connectMs: connection.connectMs,
+          fallbackCount: connection.fallbackCount,
+          statusCode,
+          errorCode,
+        });
+      };
+      const finish = (
+        phase: Extract<
+          EgressRequestEvent["phase"],
+          "completed" | "aborted" | "failed" | "cancelled"
+        >,
+        errorCode?: string,
+      ) => {
+        if (terminal) return;
+        terminal = true;
+        emitRequest(phase, errorCode);
+      };
+      if (downstreamCancelled) {
+        finish("cancelled", "downstream_cancelled");
+        connection.socket.destroy();
+        return;
+      }
       const headers = filteredHeaders(request.headers, resolved.target.host);
+      const agent = createPreconnectedHttpAgent(connection.socket);
       const upstreamRequest = httpRequest({
         method: request.method,
         host: resolved.target.hostname,
-        port: resolved.target.port || undefined,
+        port:
+          resolved.target.port ||
+          (resolved.target.protocol === "https:" ? 443 : 80),
         path: `${resolved.target.pathname}${resolved.target.search}`,
         headers,
-        agent: false,
-        createConnection: () => connection.socket,
+        agent,
       });
+      activeRequest = upstreamRequest;
       upstreamRequest.once("response", (upstreamResponse) => {
         const responseHeaders = filteredHeaders(upstreamResponse.headers, "");
         delete responseHeaders.host;
+        statusCode = upstreamResponse.statusCode ?? 502;
         const location = upstreamResponse.headers.location;
         if (
           location &&
@@ -358,9 +419,10 @@ export class ModelIngress {
           try {
             redirect = new URL(location, resolved.target);
           } catch {
+            finish("failed", "model_ingress_invalid_redirect");
             upstreamResponse.destroy();
             response.writeHead(502).end();
-            connection.socket.destroy();
+            agent.destroy();
             return;
           }
           if (
@@ -370,30 +432,52 @@ export class ModelIngress {
               resolved.registration.upstream.pathname,
             )
           ) {
+            finish("failed", "model_ingress_cross_origin_redirect");
             upstreamResponse.destroy();
             response.writeHead(502).end();
-            connection.socket.destroy();
+            agent.destroy();
             return;
           }
           responseHeaders.location = `${CLIENT_PREFIX}${resolved.registration.token}${redirect.pathname}${redirect.search}${redirect.hash}`;
         }
-        response.writeHead(upstreamResponse.statusCode ?? 502, responseHeaders);
+        emitRequest("headers_received");
+        upstreamResponse.once("data", () => emitRequest("first_byte"));
+        const abortResponse = (errorCode: string) => {
+          finish("aborted", errorCode);
+          agent.destroy();
+          if (!response.headersSent) response.writeHead(502).end();
+          else if (!response.destroyed) response.destroy();
+        };
+        upstreamResponse.once("aborted", () =>
+          abortResponse("upstream_response_aborted"),
+        );
+        upstreamResponse.once("error", (error) =>
+          abortResponse(stableErrorCode(error)),
+        );
+        response.writeHead(statusCode, responseHeaders);
         upstreamResponse.pipe(response);
-        upstreamResponse.once("end", () => connection.socket.destroy());
+        upstreamResponse.once("end", () => {
+          finish("completed");
+          agent.destroy();
+        });
       });
-      upstreamRequest.once("error", () => {
-        connection.socket.destroy();
-        if (!response.headersSent) response.writeHead(502);
-        response.end();
-      });
-      request.once("aborted", () => upstreamRequest.destroy());
-      response.once("close", () => {
-        if (!response.writableEnded) upstreamRequest.destroy();
+      upstreamRequest.once("error", (error) => {
+        finish(
+          downstreamCancelled ? "cancelled" : "failed",
+          downstreamCancelled ? "downstream_cancelled" : stableErrorCode(error),
+        );
+        agent.destroy();
+        if (!downstreamCancelled && !response.destroyed) {
+          if (!response.headersSent) response.writeHead(502);
+          response.end();
+        }
       });
       request.pipe(upstreamRequest);
     } catch {
-      if (!response.headersSent) response.writeHead(502);
-      response.end();
+      if (!downstreamCancelled && !response.destroyed) {
+        if (!response.headersSent) response.writeHead(502);
+        response.end();
+      }
     }
   }
 
@@ -407,8 +491,48 @@ export class ModelIngress {
       clientSocket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
       return;
     }
+    let clientCancelled = false;
+    clientSocket.once("close", () => {
+      clientCancelled = true;
+    });
     try {
-      const connection = await this.connect(resolved.registration, resolved.target);
+      const attempt = await this.connect(resolved.registration, resolved.target);
+      const { connection } = attempt;
+      let terminal = false;
+      let sawUpstreamData = false;
+      const emitRequest = (
+        phase: EgressRequestEvent["phase"],
+        errorCode?: string,
+      ) => {
+        this.onRequest?.({
+          connectionAttemptId: attempt.connectionAttemptId,
+          startedAt: attempt.startedAt,
+          clientId: resolved.registration.clientId,
+          runtime: resolved.registration.runtime,
+          targetOrigin: resolved.target.origin,
+          phase,
+          elapsedMs: Math.max(0, this.now() - attempt.startedAt),
+          connectMs: connection.connectMs,
+          fallbackCount: connection.fallbackCount,
+          errorCode,
+        });
+      };
+      const finish = (
+        phase: Extract<
+          EgressRequestEvent["phase"],
+          "completed" | "aborted" | "failed" | "cancelled"
+        >,
+        errorCode?: string,
+      ) => {
+        if (terminal) return;
+        terminal = true;
+        emitRequest(phase, errorCode);
+      };
+      if (clientCancelled || clientSocket.destroyed) {
+        finish("cancelled", "downstream_cancelled");
+        connection.socket.destroy();
+        return;
+      }
       const headers = filteredHeaders(request.headers, resolved.target.host, true);
       const lines = [
         `${request.method ?? "GET"} ${resolved.target.pathname}${resolved.target.search} HTTP/${request.httpVersion}`,
@@ -421,6 +545,10 @@ export class ModelIngress {
         "",
         "",
       ];
+      connection.socket.once("data", () => {
+        sawUpstreamData = true;
+        emitRequest("first_byte");
+      });
       connection.socket.write(lines.join("\r\n"));
       if (head.length > 0) connection.socket.write(head);
       clientSocket.pipe(connection.socket).pipe(clientSocket);
@@ -428,12 +556,29 @@ export class ModelIngress {
         clientSocket.destroy();
         connection.socket.destroy();
       };
-      clientSocket.once("error", destroyBoth);
-      connection.socket.once("error", destroyBoth);
-      clientSocket.once("close", () => connection.socket.destroy());
-      connection.socket.once("close", () => clientSocket.destroy());
+      clientSocket.once("error", (error) => {
+        finish("cancelled", stableErrorCode(error));
+        destroyBoth();
+      });
+      connection.socket.once("error", (error) => {
+        finish("aborted", stableErrorCode(error));
+        destroyBoth();
+      });
+      clientSocket.once("close", () => {
+        finish("cancelled", "downstream_cancelled");
+        connection.socket.destroy();
+      });
+      connection.socket.once("close", () => {
+        finish(
+          sawUpstreamData ? "completed" : "aborted",
+          sawUpstreamData ? undefined : "upstream_closed_before_response",
+        );
+        clientSocket.destroy();
+      });
     } catch {
-      clientSocket.end("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n");
+      if (!clientSocket.destroyed) {
+        clientSocket.end("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n");
+      }
     }
   }
 }

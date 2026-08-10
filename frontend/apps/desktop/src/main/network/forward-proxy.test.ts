@@ -3,6 +3,10 @@ import { connect, type Socket } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ForwardProxy } from "./forward-proxy";
 import { OutboundResolver } from "./outbound-resolver";
+import {
+  UpstreamConnector,
+  type UpstreamConnection,
+} from "./upstream-connector";
 
 const servers: Server[] = [];
 const proxies: ForwardProxy[] = [];
@@ -114,6 +118,89 @@ describe("ForwardProxy", () => {
     expect(result).toEqual({ status: 200, body: "provider-response" });
     expect(observedPath).toBe("/v1/models?q=opaque");
     expect(leakedProxyAuth).toBe(false);
+  });
+
+  it("uses the connector-owned socket instead of opening a direct HTTP connection", async () => {
+    let observedHost = "";
+    const upstreamPort = await listen(
+      createServer((incoming, response) => {
+        observedHost = String(incoming.headers.host ?? "");
+        response.end("via-egress-socket");
+      }),
+    );
+    class PreconnectedConnector extends UpstreamConnector {
+      override async connect(): Promise<UpstreamConnection> {
+        const socket = await new Promise<Socket>((resolve, reject) => {
+          const candidate = connect(upstreamPort, "127.0.0.1", () =>
+            resolve(candidate),
+          );
+          candidate.once("error", reject);
+        });
+        return {
+          socket,
+          route: {
+            kind: "http_proxy",
+            url: "http://127.0.0.1:7890",
+            source: "system",
+          },
+          candidateIndex: 0,
+          fallbackCount: 0,
+          connectMs: 1,
+        };
+      }
+    }
+    const proxy = new ForwardProxy({
+      resolver: {
+        resolve: async () => ({
+          targetOrigin: "https://unreachable.invalid",
+          candidates: [
+            {
+              kind: "http_proxy" as const,
+              url: "http://127.0.0.1:7890",
+              source: "system" as const,
+            },
+          ],
+          resolvedAt: Date.now(),
+          ttlMs: 30_000,
+          status: "resolved" as const,
+        }),
+      },
+      connector: new PreconnectedConnector(),
+    });
+    proxies.push(proxy);
+    await proxy.start();
+    const descriptor = proxy.register({
+      clientId: "provider-test-preconnected",
+      runtime: "provider_test",
+    });
+    const local = new URL(descriptor.proxyUrl);
+
+    const result = await new Promise<{ status: number; body: string }>(
+      (resolve, reject) => {
+        const req = request(
+          {
+            host: local.hostname,
+            port: local.port,
+            method: "GET",
+            path: "https://unreachable.invalid/v1/models",
+            headers: { "proxy-authorization": proxyAuth(descriptor.proxyUrl) },
+          },
+          (response) => {
+            let body = "";
+            response.setEncoding("utf8");
+            response.on("data", (chunk) => (body += chunk));
+            response.on("end", () =>
+              resolve({ status: response.statusCode ?? 0, body }),
+            );
+          },
+        );
+        req.once("error", reject);
+        req.end();
+      },
+    );
+
+    expect(result).toEqual({ status: 200, body: "via-egress-socket" });
+    expect(observedHost).toBe("unreachable.invalid");
   });
 
   it("establishes CONNECT only after authentication and upstream connect", async () => {

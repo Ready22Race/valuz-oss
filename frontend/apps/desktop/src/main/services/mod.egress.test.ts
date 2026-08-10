@@ -6,6 +6,8 @@ import { createServiceManager } from "./mod";
 const mocks = vi.hoisted(() => ({
   order: [] as string[],
   sidecarOptions: [] as Array<{
+    port?: number;
+    development?: boolean;
     egressBootstrap?: EgressBootstrap | null;
     egressRequired?: boolean;
   }>,
@@ -13,7 +15,10 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("./sidecar", () => ({
   reclaimStaleSidecar: vi.fn(async () => undefined),
+  resolveSidecarDataDir: vi.fn(() => "/tmp/valuz-managed-dev"),
   startSidecar: vi.fn(async (options: {
+    port?: number;
+    development?: boolean;
     egressBootstrap?: EgressBootstrap | null;
     egressRequired?: boolean;
   }) => {
@@ -150,5 +155,23 @@ describe("DesktopServiceManager egress lifecycle", () => {
     const logs = manager.getLogs("agent-server").join("\n");
     expect(logs).toContain("could not be saved");
     expect(logs).not.toContain("private filesystem detail");
+  });
+
+  it("owns and restarts the source backend in managed development mode", async () => {
+    const manager = createServiceManager("/tmp/valuz-managed-dev-test", {
+      managedDevMode: true,
+      devPort: 18080,
+    });
+
+    await manager.startAllServices();
+    await manager.restartService("agent-server");
+
+    expect(mocks.sidecarOptions).toHaveLength(2);
+    expect(mocks.sidecarOptions).toEqual([
+      expect.objectContaining({ port: 18080, development: true }),
+      expect.objectContaining({ port: 18080, development: true }),
+    ]);
+    expect(mocks.order).toEqual(["sidecar-stop"]);
+    expect(manager.getAgentServerInfo().port).toBe(18080);
   });
 });

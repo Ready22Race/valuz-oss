@@ -16,6 +16,8 @@ export interface SidecarOptions {
   appDataDir: string;
   name: string;
   port: number;
+  /** Source-run backend managed by Electron during development. */
+  development?: boolean;
   onLog?: (line: string) => void;
   onExit?: (code: number | null, signal: string | null) => void;
   /** One-shot delivery over stdin; never copied into the child environment. */
@@ -51,6 +53,17 @@ export const configureSidecarEgressEnvironment = (
   } else if (egressRequired) {
     env.VALUZ_EGRESS_REQUIRED = "1";
   }
+};
+
+export const resolveSidecarDataDir = (
+  development: boolean,
+  env: NodeJS.ProcessEnv = process.env,
+): string => {
+  if (!development) return path.join(homedir(), ".valuz-oss");
+  const configured = env.VALUZ_DATA_DIR?.trim();
+  return configured
+    ? path.resolve(configured)
+    : path.join(homedir(), ".valuz-oss-dev");
 };
 
 /** Grace period after SIGTERM before escalating to SIGKILL on POSIX. */
@@ -369,7 +382,6 @@ function buildDevSpawnArgs(port: number): {
     "..",
     "..",
     "..",
-    "..",
     "backend",
   );
   return {
@@ -399,9 +411,19 @@ export const startSidecar = async (
 ): Promise<DesktopSidecarResult> => {
   // ``appDataDir`` is kept in SidecarOptions for callers, but the env
   // override below uses a literal path; destructure only what we read.
-  const { name, port, onLog, onExit, egressBootstrap, egressRequired } = options;
+  const {
+    name,
+    port,
+    development = false,
+    onLog,
+    onExit,
+    egressBootstrap,
+    egressRequired,
+  } = options;
 
-  const serverBinary = resolveServerBinary();
+  // Managed development must run the current source tree even if a stale
+  // packaged binary happens to exist under resources/libexec.
+  const serverBinary = development ? null : resolveServerBinary();
 
   let cmd: string;
   let args: string[];
@@ -414,7 +436,7 @@ export const startSidecar = async (
   // _pyinstaller_entry" before the sidecar can even log a line.
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
-    VALUZ_DATA_DIR: path.join(homedir(), ".valuz-oss"),
+    VALUZ_DATA_DIR: resolveSidecarDataDir(development),
   };
   // The backend builds its public callback URLs (notably the connector OAuth
   // redirect_uri) from VALUZ_BACKEND_BASE_URL, which defaults to :8000. The

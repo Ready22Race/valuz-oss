@@ -74,8 +74,6 @@ pnpm_frontend() {
 
 # ── Trap teardown ──────────────────────────────────────────────────────────
 PIDS=()
-EGRESS_DEV_DIR=""
-EGRESS_DEV_BASE=""
 cleanup() {
     info "shutting down…"
     # ``${PIDS[@]+...}`` guards the expansion: under ``set -u`` (and macOS's
@@ -93,13 +91,6 @@ cleanup() {
     pkill -f "$FRONTEND_DIR/node_modules/.*[Ee]lectron" 2>/dev/null || true
     pkill -f "$FRONTEND_DIR/node_modules/.*(vite|concurrently)" 2>/dev/null || true
     wait 2>/dev/null || true
-    if [[ -n "$EGRESS_DEV_DIR" && -n "$EGRESS_DEV_BASE" && -d "$EGRESS_DEV_DIR" && ! -L "$EGRESS_DEV_DIR" && "$EGRESS_DEV_DIR" == "$EGRESS_DEV_BASE"/valuz-egress.* ]]; then
-        local bootstrap_file="$EGRESS_DEV_DIR/bootstrap.json"
-        if [[ -f "$bootstrap_file" && ! -L "$bootstrap_file" ]]; then
-            rm -f -- "$bootstrap_file"
-        fi
-        rmdir -- "$EGRESS_DEV_DIR" 2>/dev/null || true
-    fi
     ok "stopped"
 }
 trap cleanup EXIT INT TERM
@@ -161,49 +152,20 @@ start_frontend() {
     PIDS+=("$!")
 }
 
-prepare_egress_dev_rendezvous() {
-    EGRESS_DEV_BASE="${TMPDIR:-/tmp}"
-    EGRESS_DEV_BASE="${EGRESS_DEV_BASE%/}"
-    EGRESS_DEV_DIR="$(mktemp -d "$EGRESS_DEV_BASE/valuz-egress.XXXXXX")"
-    chmod 700 "$EGRESS_DEV_DIR"
-    export VALUZ_EGRESS_BOOTSTRAP_FILE="$EGRESS_DEV_DIR/bootstrap.json"
-}
-
-wait_for_egress_bootstrap() {
-    local bootstrap_file="$VALUZ_EGRESS_BOOTSTRAP_FILE"
-    for _ in $(seq 1 60); do
-        if [[ -f "$bootstrap_file" && ! -L "$bootstrap_file" ]]; then
-            return 0
-        fi
-        sleep 1
-    done
-    return 1
-}
-
 # ── Dispatch ───────────────────────────────────────────────────────────────
 TARGET="${1:-all}"
 case "$TARGET" in
     all)
         install_backend
         install_frontend
-        if [[ "${VALUZ_EGRESS_FRONTENDS:-0}" == "1" && "${VALUZ_EGRESS_MODE:-auto}" != "off" ]]; then
-            # The external dev backend cannot inherit Electron's later-created
-            # in-memory control capability. Start Electron first, publish the
-            # one-shot 0600 rendezvous, then boot the backend with the same
-            # contract used by the packaged stdin channel.
+        if [[ "${VALUZ_EGRESS_FRONTENDS:-1}" != "0" ]]; then
+            # In the unified-network canary Electron owns the source backend,
+            # matching the packaged lifecycle. Crossing the managed/client-
+            # managed boundary then rebuilds the backend with fresh state.
             if [[ -n "$RELOAD_FLAG" ]]; then
-                warn "VALUZ_RELOAD is disabled while the one-shot desktop egress bootstrap is active"
-                RELOAD_FLAG=""
+                warn "VALUZ_RELOAD is ignored while Electron manages the development backend"
             fi
-            prepare_egress_dev_rendezvous
             start_frontend
-            if wait_for_egress_bootstrap; then
-                start_backend
-            else
-                warn "desktop egress did not become ready — starting backend in fail-loud mode"
-                export VALUZ_EGRESS_REQUIRED=1
-                start_backend
-            fi
         else
             start_backend
             start_frontend

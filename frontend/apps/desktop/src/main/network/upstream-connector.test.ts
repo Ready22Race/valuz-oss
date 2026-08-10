@@ -109,6 +109,41 @@ describe("UpstreamConnector", () => {
     connection.socket.destroy();
   });
 
+  it("measures connect latency across the complete fallback chain", async () => {
+    let now = 100;
+    const targetPort = await listen((socket) => {
+      socket.on("error", () => undefined);
+      now = 200;
+      socket.on("data", (data) => socket.write(data));
+    });
+    const rejectingProxy = await listen((socket) => {
+      socket.on("error", () => undefined);
+      socket.once("data", () => {
+        now = 180;
+        socket.end("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n");
+      });
+    });
+    const connection = await new UpstreamConnector({ now: () => now }).connect(
+      new URL(`http://127.0.0.1:${targetPort}`),
+      resolved([
+        {
+          kind: "http_proxy",
+          url: `http://127.0.0.1:${rejectingProxy}`,
+          source: "system",
+        },
+        { kind: "direct", source: "system" },
+      ]),
+    );
+
+    const { candidateIndex, fallbackCount, connectMs } = connection;
+    connection.socket.destroy();
+    expect({ candidateIndex, fallbackCount }).toEqual({
+      candidateIndex: 1,
+      fallbackCount: 1,
+    });
+    expect(connectMs).toBeGreaterThanOrEqual(80);
+  });
+
   it("bounds a proxy that accepts TCP but never completes its handshake", async () => {
     let accepted: Socket | undefined;
     const proxyPort = await listen((socket) => {

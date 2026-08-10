@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   EgressControlServer,
   type EgressBootstrap,
+  type RuntimePhasePayload,
   type RuntimePhaseRecord,
 } from "./control-server";
 import { EgressDiagnostics, redactProxyUrl } from "./diagnostics";
@@ -11,7 +12,10 @@ import {
   type ForwardProxyRegistration,
   type ForwardProxyConnectionEvent,
 } from "./forward-proxy";
-import { applyConnectionOutcome } from "./health";
+import {
+  applyConnectionOutcome,
+  DEFAULT_CONNECT_DEGRADED_MS,
+} from "./health";
 import {
   ModelIngress,
   type ModelIngressConnectionEvent,
@@ -26,6 +30,7 @@ import type {
   EgressDiagnosticEvent,
   EgressMode,
   EgressManagerStatus,
+  EgressRequestEvent,
   EgressResolution,
   EgressRuntime,
   EgressSnapshot,
@@ -56,12 +61,19 @@ export const captureProxyEnvironment = (
 
 export const resolveInitialEgressMode = (
   env: NodeJS.ProcessEnv,
-  persistedMode: EgressMode = "auto",
+  persistedMode: EgressMode = "off",
 ): EgressMode =>
   env.VALUZ_EGRESS_MODE?.trim().toLowerCase() === "off" ||
   persistedMode === "off"
     ? "off"
     : "auto";
+
+export const resolveEgressFrontendsEnabled = (
+  env: NodeJS.ProcessEnv,
+  disabledBySwitch = false,
+): boolean =>
+  !disabledBySwitch &&
+  env.VALUZ_EGRESS_FRONTENDS?.trim().toLowerCase() !== "0";
 
 export interface EgressManagerOptions {
   mode: EgressMode;
@@ -95,6 +107,8 @@ export class EgressManager {
   private readonly forwardProxy: ForwardProxy;
   private readonly controlServer: EgressControlServer;
   private readonly runtimePhases: RuntimePhaseRecord[] = [];
+  private readonly activeTurns = new Map<string, string>();
+  private readonly lastTerminalAttemptIds = new Map<string, Set<string>>();
   private readonly snapshots = new Map<string, EgressSnapshot>();
   private started = false;
   private lastErrorCode: string | undefined;
@@ -119,6 +133,7 @@ export class EgressManager {
       now: this.now,
       onConnection: (event) =>
         this.recordFrontendConnection("model_ingress", event),
+      onRequest: (event) => this.recordFrontendRequest("model_ingress", event),
     });
     this.forwardProxy = new ForwardProxy({
       resolver: this.resolver,
@@ -127,6 +142,7 @@ export class EgressManager {
       now: this.now,
       onConnection: (event) =>
         this.recordFrontendConnection("forward_proxy", event),
+      onRequest: (event) => this.recordFrontendRequest("forward_proxy", event),
     });
     this.controlServer = new EgressControlServer({
       mode: this.mode === "direct" ? "direct" : "auto",
@@ -141,10 +157,7 @@ export class EgressManager {
           this.forwardProxy.renew(clientId, expiresAt);
         }
       },
-      recordRuntimePhase: (payload) => {
-        this.runtimePhases.push({ ...payload, observedAt: this.now() });
-        this.runtimePhases.splice(0, Math.max(0, this.runtimePhases.length - 500));
-      },
+      recordRuntimePhase: (payload) => this.recordRuntimePhase(payload),
       now: this.now,
     });
   }
@@ -189,6 +202,8 @@ export class EgressManager {
     this.snapshots.clear();
     this.diagnostics.clear();
     this.runtimePhases.splice(0);
+    this.activeTurns.clear();
+    this.lastTerminalAttemptIds.clear();
   }
 
   /** Stop registrations first while allowing already-established streams to drain. */
@@ -281,6 +296,53 @@ export class EgressManager {
   revokeClient(clientId: string): void {
     this.modelIngress.revoke(clientId);
     this.forwardProxy.revoke(clientId);
+    this.activeTurns.delete(clientId);
+    this.lastTerminalAttemptIds.delete(clientId);
+    for (const [key, snapshot] of this.snapshots) {
+      if (snapshot.clientId === clientId) this.snapshots.delete(key);
+    }
+    for (let index = this.runtimePhases.length - 1; index >= 0; index -= 1) {
+      if (this.runtimePhases[index]?.clientId === clientId) {
+        this.runtimePhases.splice(index, 1);
+      }
+    }
+  }
+
+  private recordRuntimePhase(payload: RuntimePhasePayload): void {
+    const observedAt = this.now();
+    this.runtimePhases.push({ ...payload, observedAt });
+    this.runtimePhases.splice(0, Math.max(0, this.runtimePhases.length - 500));
+
+    if (payload.phase === "dispatch") {
+      this.activeTurns.set(payload.clientId, payload.turnAttemptId);
+      const terminalAttempts = this.lastTerminalAttemptIds.get(payload.clientId);
+      for (const [key, snapshot] of this.snapshots) {
+        if (
+          snapshot.clientId === payload.clientId &&
+          !terminalAttempts?.has(snapshot.connectionAttemptId)
+        ) {
+          this.snapshots.set(key, { ...snapshot, activeTurn: true });
+        }
+      }
+      return;
+    }
+    if (payload.phase !== "turn_complete" && payload.phase !== "interrupted") {
+      return;
+    }
+    if (this.activeTurns.get(payload.clientId) !== payload.turnAttemptId) {
+      return;
+    }
+    this.activeTurns.delete(payload.clientId);
+    const terminalAttempts = new Set<string>();
+    for (const [key, snapshot] of this.snapshots) {
+      if (snapshot.clientId === payload.clientId) {
+        terminalAttempts.add(snapshot.connectionAttemptId);
+        if (snapshot.activeTurn) {
+          this.snapshots.set(key, { ...snapshot, activeTurn: false });
+        }
+      }
+    }
+    this.lastTerminalAttemptIds.set(payload.clientId, terminalAttempts);
   }
 
   async resolveShadow(request: ShadowResolveRequest): Promise<EgressResolution> {
@@ -335,7 +397,10 @@ export class EgressManager {
         candidateCount: result.candidates.length,
       });
       this.snapshots.set(key, {
+        connectionAttemptId,
         clientId: request.clientId,
+        activeTurn: false,
+        requestActive: false,
         runtime: request.runtime,
         frontend: "shadow",
         targetOrigin: result.targetOrigin,
@@ -368,7 +433,10 @@ export class EgressManager {
       errorCode,
     });
     this.snapshots.set(key, {
+      connectionAttemptId,
       clientId: request.clientId,
+      activeTurn: false,
+      requestActive: false,
       runtime: request.runtime,
       frontend: "shadow",
       targetOrigin: result.targetOrigin,
@@ -432,7 +500,7 @@ export class EgressManager {
         candidateIndex: event.connection.candidateIndex,
       });
       this.diagnostics.record({
-        event: "egress.stream.established",
+        event: "egress.connect.succeeded",
         connectionAttemptId: event.connectionAttemptId,
         clientId: event.registration.clientId,
         runtime: event.registration.runtime,
@@ -448,7 +516,10 @@ export class EgressManager {
         fallbackCount: event.connection.fallbackCount,
       });
       const base: EgressSnapshot = {
+        connectionAttemptId: event.connectionAttemptId,
         clientId: event.registration.clientId,
+        activeTurn: this.activeTurns.has(event.registration.clientId),
+        requestActive: true,
         runtime: event.registration.runtime,
         frontend,
         targetOrigin: event.targetOrigin,
@@ -458,23 +529,15 @@ export class EgressManager {
         source: event.connection.route.source,
         redactedProxy,
         resolveMs: event.resolutionMs,
-        reconnectCount: 0,
-        fallbackCount: 0,
+        connectMs: event.connection.connectMs,
+        reconnectCount: this.snapshots.get(key)?.reconnectCount ?? 0,
+        fallbackCount:
+          (this.snapshots.get(key)?.fallbackCount ?? 0) +
+          event.connection.fallbackCount,
         correlationConfidence: "exact_runtime",
         updatedAt: finishedAt,
       };
-      this.snapshots.set(
-        key,
-        applyConnectionOutcome(
-          this.snapshots.get(key) ?? base,
-          {
-            success: true,
-            connectMs: event.connection.connectMs,
-            fallbackCount: event.connection.fallbackCount,
-          },
-          { now: () => finishedAt },
-        ),
-      );
+      this.snapshots.set(key, base);
       return;
     }
 
@@ -492,7 +555,10 @@ export class EgressManager {
       errorCode,
     });
     const base: EgressSnapshot = {
+      connectionAttemptId: event.connectionAttemptId,
       clientId: event.registration.clientId,
+      activeTurn: this.activeTurns.has(event.registration.clientId),
+      requestActive: false,
       runtime: event.registration.runtime,
       frontend,
       targetOrigin: event.targetOrigin,
@@ -513,5 +579,122 @@ export class EgressManager {
         { now: () => finishedAt },
       ),
     );
+  }
+
+  private recordFrontendRequest(
+    frontend: "model_ingress" | "forward_proxy",
+    event: EgressRequestEvent,
+  ): void {
+    const activeMode = this.mode === "direct" ? "direct" : "auto";
+    const key = `${event.clientId}:${event.targetOrigin}`;
+    const snapshot = this.snapshots.get(key);
+    const matchingSnapshot =
+      snapshot?.connectionAttemptId === event.connectionAttemptId
+        ? snapshot
+        : undefined;
+    const timestamp = event.startedAt + event.elapsedMs;
+    const eventName: EgressDiagnosticEvent["event"] =
+      event.phase === "headers_received"
+        ? "egress.response.headers"
+        : event.phase === "first_byte"
+          ? "egress.stream.established"
+          : event.phase === "completed"
+            ? "egress.request.completed"
+            : event.phase === "aborted"
+              ? "egress.request.aborted"
+              : event.phase === "cancelled"
+                ? "egress.request.cancelled"
+                : "egress.request.failed";
+    this.diagnostics.record({
+      event: eventName,
+      connectionAttemptId: event.connectionAttemptId,
+      clientId: event.clientId,
+      runtime: event.runtime,
+      frontend,
+      targetOrigin: event.targetOrigin,
+      mode: activeMode,
+      timestamp,
+      route:
+        matchingSnapshot?.route === "unknown"
+          ? undefined
+          : matchingSnapshot?.route,
+      source: matchingSnapshot?.source,
+      redactedProxy: matchingSnapshot?.redactedProxy,
+      connectMs: event.connectMs,
+      fallbackCount: event.fallbackCount,
+      statusCode: event.statusCode,
+      responseMs:
+        event.phase === "headers_received" ? event.elapsedMs : undefined,
+      firstByteMs: event.phase === "first_byte" ? event.elapsedMs : undefined,
+      totalMs:
+        event.phase === "completed" ||
+        event.phase === "aborted" ||
+        event.phase === "failed" ||
+        event.phase === "cancelled"
+          ? event.elapsedMs
+          : undefined,
+      errorCode: event.errorCode,
+    });
+
+    if (!matchingSnapshot) return;
+    const upstreamFailed = (event.statusCode ?? 0) >= 500;
+    const requestFailed = event.phase === "aborted" || event.phase === "failed";
+    const successfulSignal =
+      event.phase === "headers_received" ||
+      event.phase === "first_byte" ||
+      event.phase === "completed";
+    const degraded =
+      matchingSnapshot.fallbackCount > 0 ||
+      matchingSnapshot.reconnectCount > 0 ||
+      event.connectMs > DEFAULT_CONNECT_DEGRADED_MS;
+    const health =
+      event.phase === "cancelled"
+        ? matchingSnapshot.health
+        : upstreamFailed || requestFailed
+          ? "failed"
+          : successfulSignal
+            ? degraded
+              ? "degraded"
+              : "healthy"
+            : matchingSnapshot.health;
+    const lastErrorCode =
+      event.phase === "cancelled"
+        ? matchingSnapshot.lastErrorCode
+        : upstreamFailed
+          ? `upstream_http_${event.statusCode}`
+          : requestFailed
+            ? event.errorCode ?? "egress_request_failed"
+            : successfulSignal
+              ? undefined
+              : matchingSnapshot.lastErrorCode;
+    const requestActive =
+      event.phase !== "completed" &&
+      event.phase !== "aborted" &&
+      event.phase !== "failed" &&
+      event.phase !== "cancelled";
+    this.snapshots.set(key, {
+      ...matchingSnapshot,
+      requestActive,
+      health,
+      connectMs: event.connectMs,
+      responseStatus: event.statusCode ?? matchingSnapshot.responseStatus,
+      responseMs:
+        event.phase === "headers_received"
+          ? event.elapsedMs
+          : matchingSnapshot.responseMs,
+      firstByteMs:
+        event.phase === "first_byte"
+          ? event.elapsedMs
+          : matchingSnapshot.firstByteMs,
+      totalMs:
+        event.phase === "completed" ||
+        event.phase === "aborted" ||
+        event.phase === "failed" ||
+        event.phase === "cancelled"
+          ? event.elapsedMs
+          : matchingSnapshot.totalMs,
+      lastErrorCode,
+      updatedAt: timestamp,
+    });
   }
 }

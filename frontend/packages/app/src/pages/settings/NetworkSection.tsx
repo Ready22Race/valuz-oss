@@ -1,17 +1,27 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Copy, RefreshCw } from "lucide-react";
+import { Activity, Copy } from "lucide-react";
 import { toast } from "sonner";
 import {
+  Badge,
   Button,
   Card,
   CardContent,
   SettingsRow,
   SettingsSection,
 } from "@valuz/ui";
-import { useTranslation } from "@valuz/core";
+import { useRunningRuns, useTranslation } from "@valuz/core";
 import { buildEgressDiagnosticsExport } from "./network-diagnostics";
+import {
+  currentNetworkSnapshots,
+  isManagedNetworkMode,
+  networkHealthDetailKey,
+  networkRouteKey,
+  networkRuntimeLabel,
+  shouldShowNetworkDiagnosticsAction,
+} from "./network-presentation";
 
 type EgressMode = "auto" | "direct" | "off";
+type SelectableEgressMode = Exclude<EgressMode, "direct">;
 type Health = "unknown" | "healthy" | "degraded" | "failed";
 
 interface EgressStatus {
@@ -25,6 +35,8 @@ interface EgressStatus {
 }
 
 interface EgressSnapshot {
+  activeTurn: boolean;
+  requestActive?: boolean;
   runtime: string;
   frontend: string;
   targetOrigin: string;
@@ -35,6 +47,11 @@ interface EgressSnapshot {
   redactedProxy?: string;
   resolveMs?: number;
   connectMs?: number;
+  responseStatus?: number;
+  responseMs?: number;
+  firstByteMs?: number;
+  totalMs?: number;
+  reconnectCount: number;
   fallbackCount: number;
   lastErrorCode?: string;
   updatedAt: number;
@@ -56,14 +73,25 @@ const overallHealth = (snapshots: EgressSnapshot[]): Health => {
   return "unknown";
 };
 
+const healthBadgeVariant: Record<
+  Health,
+  "metaNeutral" | "success" | "warning" | "error"
+> = {
+  unknown: "metaNeutral",
+  healthy: "success",
+  degraded: "warning",
+  failed: "error",
+};
+
 export const NetworkSection = () => {
   const { t } = useTranslation();
+  const { count: activeRunCount } = useRunningRuns();
   const [status, setStatus] = useState<EgressStatus | null>(null);
   const [snapshots, setSnapshots] = useState<EgressSnapshot[]>([]);
   const [diagnostics, setDiagnostics] = useState<unknown[]>([]);
   const [runtimePhases, setRuntimePhases] = useState<unknown[]>([]);
   const [loading, setLoading] = useState(true);
-  const [busyMode, setBusyMode] = useState<EgressMode | null>(null);
+  const [busyMode, setBusyMode] = useState<SelectableEgressMode | null>(null);
 
   const load = useCallback(async (silent = false) => {
     const desktop = bridge();
@@ -103,37 +131,71 @@ export const NetworkSection = () => {
     };
   }, [load]);
 
+  const activeSnapshots = useMemo(
+    () => currentNetworkSnapshots(snapshots),
+    [snapshots],
+  );
   const health = useMemo(
-    () => (status?.lastErrorCode ? "failed" : overallHealth(snapshots)),
-    [snapshots, status?.lastErrorCode],
+    () =>
+      status?.lastErrorCode ? "failed" : overallHealth(activeSnapshots),
+    [activeSnapshots, status?.lastErrorCode],
   );
   const healthLabel = t(`settings.network.health.${health}`);
+  const managedMode = isManagedNetworkMode(status?.mode);
+  const showDiagnosticsAction =
+    !loading &&
+    shouldShowNetworkDiagnosticsAction(
+      health,
+      snapshots.length > 0 ||
+      diagnostics.length > 0 ||
+      runtimePhases.length > 0 ||
+        Boolean(status?.lastErrorCode),
+    );
 
-  const changeMode = async (mode: EgressMode) => {
+  const changeMode = async (mode: SelectableEgressMode) => {
     const desktop = bridge();
     if (!desktop || !status || status.mode === mode) return;
-    if (mode === "off" && !window.confirm(t("settings.network.offConfirm"))) {
+    const interruptActiveRuns = activeRunCount > 0;
+    if (
+      interruptActiveRuns &&
+      !window.confirm(
+        t("settings.network.activeRunsConfirm", {
+          count: activeRunCount,
+        }),
+      )
+    ) {
+      return;
+    }
+    if (
+      !interruptActiveRuns &&
+      mode === "off" &&
+      !window.confirm(t("settings.network.offConfirm"))
+    ) {
       return;
     }
     setBusyMode(mode);
     try {
       const next = await desktop.invoke<EgressStatus>("egress_set_mode", {
         mode,
+        interruptActiveRuns,
       });
       setStatus(next);
       toast.success(
-        mode === "direct"
-          ? t("settings.network.directEnabled")
-          : mode === "off"
-            ? t("settings.network.offEnabled")
-            : t("settings.network.autoEnabled"),
+        mode === "off"
+          ? t("settings.network.offEnabled")
+          : t("settings.network.autoEnabled"),
       );
       await load();
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       toast.error(
-        error instanceof Error && error.message.includes("locked_by_environment")
-          ? t("settings.network.environmentLocked")
-          : t("settings.network.changeFailed"),
+        message.includes("blocked_by_active_runs")
+          ? t("settings.network.activeRunsBlocked")
+          : message.includes("interrupt_failed")
+            ? t("settings.network.activeRunsInterruptFailed")
+          : message.includes("locked_by_environment")
+            ? t("settings.network.environmentLocked")
+            : t("settings.network.changeFailed"),
       );
     } finally {
       setBusyMode(null);
@@ -177,30 +239,6 @@ export const NetworkSection = () => {
       title={t("settings.network.title")}
       desc={t("settings.network.desc")}
     >
-      <Card className="mb-5 rounded-xl shadow-xs">
-        <CardContent className="py-5">
-          <SettingsRow
-            className="px-0 py-0"
-            label={t("settings.network.statusLabel")}
-            desc={
-              loading
-                ? t("settings.network.loading")
-                : `${healthLabel} · ${t(`settings.network.mode.${status?.mode ?? "off"}`)}`
-            }
-          >
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={loading}
-              onClick={() => void load()}
-            >
-              <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
-              {t("settings.network.refresh")}
-            </Button>
-          </SettingsRow>
-        </CardContent>
-      </Card>
-
       {status && !status.enabled ? (
         <Card className="mb-5 rounded-xl shadow-xs">
           <CardContent className="py-4 text-sm text-ink-meta">
@@ -208,61 +246,76 @@ export const NetworkSection = () => {
           </CardContent>
         </Card>
       ) : (
-        <Card className="mb-5 rounded-xl shadow-xs">
-          <CardContent className="divide-y divide-surface-border py-1">
-            <SettingsRow
-              className="px-0"
-              label={t("settings.network.autoLabel")}
-              desc={t("settings.network.autoDesc")}
+        <section aria-labelledby="network-mode-heading" className="mb-6">
+          <div className="mb-3">
+            <h3
+              id="network-mode-heading"
+              className="text-sm font-semibold text-ink-heading"
             >
-              <Button
-                size="sm"
-                variant={status?.mode === "auto" ? "default" : "outline"}
-                disabled={status?.emergencyOverride || busyMode !== null}
-                loading={busyMode === "auto"}
-                onClick={() => void changeMode("auto")}
+              {t("settings.network.modeSectionTitle")}
+            </h3>
+            <p className="mt-1 text-xs leading-5 text-ink-meta">
+              {t("settings.network.modeSectionDesc")}
+            </p>
+          </div>
+          <Card className="rounded-xl shadow-xs">
+            <CardContent className="divide-y divide-surface-border py-1">
+              <SettingsRow
+                className="px-0"
+                label={t("settings.network.autoLabel")}
+                desc={t("settings.network.autoDesc")}
               >
-                {status?.mode === "auto"
-                  ? t("settings.network.current")
-                  : t("settings.network.use")}
-              </Button>
-            </SettingsRow>
-            <SettingsRow
-              className="px-0"
-              label={t("settings.network.directLabel")}
-              desc={t("settings.network.directDesc")}
-            >
-              <Button
-                size="sm"
-                variant={status?.mode === "direct" ? "default" : "outline"}
-                disabled={status?.emergencyOverride || busyMode !== null}
-                loading={busyMode === "direct"}
-                onClick={() => void changeMode("direct")}
+                {managedMode ? (
+                  <Badge variant="brand">
+                    {t("settings.network.current")}
+                  </Badge>
+                ) : (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={
+                      !status ||
+                      status.emergencyOverride ||
+                      busyMode !== null
+                    }
+                    loading={busyMode === "auto"}
+                    onClick={() => void changeMode("auto")}
+                  >
+                    {t("settings.network.useAuto")}
+                  </Button>
+                )}
+              </SettingsRow>
+              <SettingsRow
+                className="px-0"
+                label={t("settings.network.offLabel")}
+                desc={t("settings.network.offDesc")}
               >
-                {status?.mode === "direct"
-                  ? t("settings.network.current")
-                  : t("settings.network.useTemporarily")}
-              </Button>
-            </SettingsRow>
-            <SettingsRow
-              className="px-0"
-              label={t("settings.network.offLabel")}
-              desc={t("settings.network.offDesc")}
-            >
-              <Button
-                size="sm"
-                variant={status?.mode === "off" ? "default" : "outline"}
-                disabled={busyMode !== null}
-                loading={busyMode === "off"}
-                onClick={() => void changeMode("off")}
-              >
-                {status?.mode === "off"
-                  ? t("settings.network.current")
-                  : t("settings.network.enableCompatibility")}
-              </Button>
-            </SettingsRow>
-          </CardContent>
-        </Card>
+                {status?.mode === "off" ? (
+                  <Badge variant="warning">
+                    {t("settings.network.current")}
+                  </Badge>
+                ) : (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={!status || busyMode !== null}
+                    loading={busyMode === "off"}
+                    onClick={() => void changeMode("off")}
+                  >
+                    {t("settings.network.enableCompatibility")}
+                  </Button>
+                )}
+              </SettingsRow>
+            </CardContent>
+          </Card>
+          {activeRunCount > 0 && (
+            <p className="mt-2 text-xs leading-5 text-ink-meta" role="status">
+              {t("settings.network.activeRunsHint", {
+                count: activeRunCount,
+              })}
+            </p>
+          )}
+        </section>
       )}
 
       {status?.emergencyOverride && (
@@ -271,40 +324,168 @@ export const NetworkSection = () => {
         </p>
       )}
 
-      <details className="rounded-xl border border-surface-border bg-card px-4 py-3">
-        <summary className="cursor-pointer text-sm font-medium text-ink-heading">
-          {t("settings.network.advanced")}
-        </summary>
-        <div className="mt-3 space-y-3 text-xs text-ink-meta">
-          <p>
-            {t("settings.network.samples", {
-              snapshots: String(snapshots.length),
-              events: String(diagnostics.length),
-            })}
-          </p>
-          {snapshots.slice(-10).map((item, index) => (
-            <div
-              key={`${item.runtime}-${item.targetOrigin}-${index}`}
-              className="rounded-lg bg-surface-muted/50 px-3 py-2"
+      <section aria-labelledby="network-status-heading" className="mb-5">
+        <div className="mb-3 flex items-start justify-between gap-4">
+          <div>
+            <h3
+              id="network-status-heading"
+              className="text-sm font-semibold text-ink-heading"
             >
-              <div className="font-medium text-ink-heading">
-                {item.runtime} · {item.health} · {item.route}
-              </div>
-              <div className="mt-0.5 break-all">{item.targetOrigin}</div>
-              {(item.resolveMs !== undefined || item.connectMs !== undefined) && (
-                <div className="mt-0.5">
-                  resolve {item.resolveMs ?? "—"} ms · connect{" "}
-                  {item.connectMs ?? "—"} ms
-                </div>
+              {t("settings.network.statusLabel")}
+            </h3>
+            <p className="mt-1 text-xs leading-5 text-ink-meta">
+              {t("settings.network.statusDesc")}
+            </p>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            {!loading &&
+              (activeSnapshots.length > 0 || status?.lastErrorCode) && (
+                <Badge variant={healthBadgeVariant[health]}>
+                  {healthLabel}
+                </Badge>
               )}
-            </div>
-          ))}
-          <Button variant="outline" size="sm" onClick={() => void copyDiagnostics()}>
-            <Copy className="mr-1.5 h-3.5 w-3.5" />
-            {t("settings.network.copyDiagnostics")}
-          </Button>
+            {showDiagnosticsAction && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void copyDiagnostics()}
+              >
+                <Copy className="mr-1.5 h-3.5 w-3.5" />
+                {t("settings.network.copyDiagnostics")}
+              </Button>
+            )}
+          </div>
         </div>
-      </details>
+
+        <Card className="rounded-xl shadow-xs">
+          <CardContent className="p-0">
+            {loading ? (
+              <div className="px-5 py-8 text-center text-sm text-ink-meta">
+                {t("settings.network.loading")}
+              </div>
+            ) : status && !status.enabled ? (
+              <div className="flex flex-col items-center px-5 py-8 text-center">
+                <Activity
+                  aria-hidden="true"
+                  className="mb-3 h-5 w-5 text-ink-muted"
+                />
+                <p className="text-sm font-medium text-ink-heading">
+                  {t("settings.network.monitoringUnavailableTitle")}
+                </p>
+                <p className="mt-1 max-w-lg text-xs leading-5 text-ink-meta">
+                  {t("settings.network.monitoringUnavailableDesc")}
+                </p>
+              </div>
+            ) : status?.mode === "off" ? (
+              <div className="flex flex-col items-center px-5 py-8 text-center">
+                <Activity
+                  aria-hidden="true"
+                  className="mb-3 h-5 w-5 text-ink-muted"
+                />
+                <p className="text-sm font-medium text-ink-heading">
+                  {t("settings.network.legacyMonitoringTitle")}
+                </p>
+                <p className="mt-1 max-w-lg text-xs leading-5 text-ink-meta">
+                  {t("settings.network.legacyMonitoringDesc")}
+                </p>
+              </div>
+            ) : activeSnapshots.length === 0 ? (
+              <div className="flex flex-col items-center px-5 py-8 text-center">
+                <Activity
+                  aria-hidden="true"
+                  className="mb-3 h-5 w-5 text-ink-muted"
+                />
+                <p className="text-sm font-medium text-ink-heading">
+                  {t("settings.network.noConnectionsTitle")}
+                </p>
+                <p className="mt-1 max-w-lg text-xs leading-5 text-ink-meta">
+                  {t("settings.network.noConnectionsDesc")}
+                </p>
+              </div>
+            ) : (
+              <div className="divide-y divide-surface-border">
+                {activeSnapshots.slice(0, 10).map((item, index) => {
+                  const timings = [
+                    [t("settings.network.timing.resolve"), item.resolveMs],
+                    [t("settings.network.timing.connect"), item.connectMs],
+                    [t("settings.network.timing.response"), item.responseMs],
+                    [
+                      t("settings.network.timing.firstByte"),
+                      item.firstByteMs,
+                    ],
+                    [t("settings.network.timing.total"), item.totalMs],
+                  ].filter(
+                    (entry): entry is [string, number] =>
+                      entry[1] !== undefined,
+                  );
+                  return (
+                    <article
+                      key={`${item.runtime}-${item.targetOrigin}-${index}`}
+                      className="px-5 py-4"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <h4 className="font-medium text-ink-heading">
+                            {networkRuntimeLabel(item.runtime)}
+                          </h4>
+                          <Badge variant={healthBadgeVariant[item.health]}>
+                            {t(`settings.network.health.${item.health}`)}
+                          </Badge>
+                        </div>
+                        <span className="text-2xs text-ink-muted">
+                          {t("settings.network.updatedAt", {
+                            time: new Date(item.updatedAt).toLocaleTimeString(),
+                          })}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-xs text-ink-body">
+                        {t(networkRouteKey(item.route))}
+                        <span aria-hidden="true"> · </span>
+                        <span className="break-all text-ink-meta">
+                          {item.targetOrigin}
+                        </span>
+                      </p>
+                      <p className="mt-2 text-xs leading-5 text-ink-meta">
+                        {t(networkHealthDetailKey(item))}
+                      </p>
+                      {timings.length > 0 && (
+                        <dl className="mt-3 flex flex-wrap gap-x-5 gap-y-2">
+                          {timings.map(([label, value]) => (
+                            <div key={label} className="flex items-baseline gap-1">
+                              <dt className="text-2xs text-ink-muted">
+                                {label}
+                              </dt>
+                              <dd className="text-xs font-medium text-ink-body">
+                                {value} ms
+                              </dd>
+                            </div>
+                          ))}
+                        </dl>
+                      )}
+                      {(item.fallbackCount > 0 || item.reconnectCount > 0) && (
+                        <p className="mt-2 text-2xs text-warning-text">
+                          {item.fallbackCount > 0 &&
+                            t("settings.network.fallbackCount", {
+                              count: String(item.fallbackCount),
+                            })}
+                          {item.fallbackCount > 0 &&
+                            item.reconnectCount > 0 && (
+                              <span aria-hidden="true"> · </span>
+                            )}
+                          {item.reconnectCount > 0 &&
+                            t("settings.network.reconnectCount", {
+                              count: String(item.reconnectCount),
+                            })}
+                        </p>
+                      )}
+                    </article>
+                  );
+                })}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </section>
     </SettingsSection>
   );
 };

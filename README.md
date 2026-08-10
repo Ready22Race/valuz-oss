@@ -58,13 +58,16 @@ down both):
 ./scripts/dev.sh frontend         # frontend only
 VALUZ_BACKEND_PORT=18080 ./scripts/dev.sh
 VALUZ_RELOAD=1 ./scripts/dev.sh   # uvicorn --reload
-VALUZ_EGRESS_FRONTENDS=1 ./scripts/dev.sh  # default-off desktop egress canary
+VALUZ_EGRESS_FRONTENDS=0 ./scripts/dev.sh  # emergency: disable desktop network management
 ```
 
-The egress canary reverses desktop/backend startup so Electron can publish a
-private one-shot bootstrap before the backend starts; reload is disabled for
-that run. See [the unified network egress design](docs/design/unified-network-egress.md)
-for its admission matrix, recovery modes, and remaining rollout gates.
+The desktop makes both connection-management choices available without a launch
+flag. New installations start with model-client-managed connections; switching
+to Valuz management in Settings rebuilds the managed backend with a private
+one-shot bootstrap. If tasks are running, Settings asks before interrupting
+them; confirmed tasks are interrupted before the mode is saved and the backend
+is restarted. See [the unified network egress design](docs/design/unified-network-egress.md)
+for its admission matrix and remaining rollout gates.
 
 ## Tech Stack
 

@@ -243,7 +243,7 @@ async def test_egress_initialization_failure_finalizes_turn_without_runtime(
         "category": "network_egress_unavailable",
         "message": (
             "Unified model networking is unavailable. Check Network settings "
-            "or enable compatibility mode."
+            "or switch to model-client-managed connections."
         ),
     }
     assert store._session.status == "idle"

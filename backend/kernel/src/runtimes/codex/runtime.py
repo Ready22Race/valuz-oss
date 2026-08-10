@@ -1380,9 +1380,10 @@ def _build_config_overrides(
        expected a map"); see ``_toml_key``. ``env_vars`` is passed through
        verbatim so codex resolves it against its own process env at child-spawn
        time (token values therefore never appear in the overrides string).
-    2. ``Session.model_provider`` -> a synthetic ``[model_providers.harness]``
-       block plus ``model = "..."`` / ``model_provider = "harness"`` so the
-       codex subprocess routes through the user-supplied gateway.
+    2. Model transport -> a synthetic ``[model_providers.harness]`` block when
+       a user provider or an egress subscription descriptor is present. API
+       keys use a dedicated ``env_key``; ChatGPT subscriptions use Codex's
+       native ``requires_openai_auth`` path and keep credentials in auth.json.
     3. Harness ``ToolKit`` -> ``mcp_servers.harness_toolkit`` pointing at
        the FastAPI MCP-over-HTTP endpoint. Unauthenticated; the backend is
        expected to bind loopback / private network so the URL is only
@@ -1407,14 +1408,13 @@ def _build_config_overrides(
                     name
                     for name in cfg.env_vars
                     if not (
-                        egress_base_url is not None
+                        provider is not None
+                        and egress_base_url is not None
                         and name.upper() == _HARNESS_PROVIDER_ENV_KEY
                     )
                 )
                 if env_vars:
-                    overrides.append(
-                        f"mcp_servers.{cfg.name}.env_vars={_toml_array(env_vars)}"
-                    )
+                    overrides.append(f"mcp_servers.{cfg.name}.env_vars={_toml_array(env_vars)}")
             # ``env`` is a TOML map: emit one dotted key per var, NOT an inline
             # table — codex's ``-c`` parser rejects ``env={ … }`` as a string
             # (see ``_toml_key``).
@@ -1525,7 +1525,25 @@ def _build_config_overrides(
         overrides.append('web_search="disabled"')
 
     effective_base_url = egress_base_url or (provider.base_url if provider is not None else None)
-    if provider is not None and effective_base_url is not None:
+    if provider is None and egress_base_url is not None:
+        name = _HARNESS_PROVIDER_NAME
+        if model:
+            overrides.append(f"model={_toml_quote(model)}")
+        overrides.extend(
+            [
+                f"model_provider={_toml_quote(name)}",
+                # Codex keys remote-compaction support off this display name.
+                f"model_providers.{name}.name={_toml_quote('OpenAI')}",
+                f"model_providers.{name}.base_url={_toml_quote(egress_base_url)}",
+                f'model_providers.{name}.wire_api="responses"',
+                f"model_providers.{name}.requires_openai_auth=true",
+                # Prefer deterministic HTTPS streaming for the proxy canary.
+                # A broken WSS stream otherwise incurs Codex's five reconnect
+                # attempts before its own HTTPS fallback.
+                f"model_providers.{name}.supports_websockets=false",
+            ]
+        )
+    elif provider is not None and effective_base_url is not None:
         name = _HARNESS_PROVIDER_NAME
         env_key = _HARNESS_PROVIDER_ENV_KEY
         # Codex only supports ``wire_api = "responses"``; the harness-side
@@ -1591,7 +1609,14 @@ def _build_codex_env(
       it).
     """
     if provider is None:
-        return None
+        if egress_base_url is None:
+            return None
+        # The model transport keeps using Codex's native ChatGPT auth.json.
+        # We only provide an explicit environment so the loopback ingress is
+        # never captured by a user/system proxy inherited by the GUI process.
+        subscription_env = dict(os.environ)
+        merge_loopback_no_proxy(subscription_env, egress_base_url)
+        return subscription_env
     merged: dict[str, str] = dict(os.environ)
     if egress_base_url is not None or provider.base_url is not None:
         merged[_HARNESS_PROVIDER_ENV_KEY] = provider.api_key

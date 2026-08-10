@@ -1431,7 +1431,7 @@ class SessionOrchestrator:
             # a runtime error so the UI does not retain a phantom spinner.
             message_text = (
                 "Unified model networking is unavailable. Check Network settings "
-                "or enable compatibility mode."
+                "or switch to model-client-managed connections."
             )
             session.status = "idle"
             session.stop_reason = Error(

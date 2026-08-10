@@ -3,7 +3,10 @@ import { applyConnectionOutcome } from "./health";
 import type { EgressSnapshot } from "./types";
 
 const baseSnapshot = (): EgressSnapshot => ({
+  connectionAttemptId: "attempt-1",
   clientId: "client-1",
+  activeTurn: false,
+  requestActive: false,
   runtime: "codex",
   frontend: "shadow",
   targetOrigin: "https://api.example",

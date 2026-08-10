@@ -4,7 +4,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 import pytest
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
@@ -86,7 +86,7 @@ async def test_prepare_runtime_egress_uses_verified_frontend_only(
         "session",
         runtime="codex",
         upstream_base_url="https://gateway.example/v1",
-        supports_websocket=True,
+        supports_websocket=False,
     )
 
     deepagents = _session("deepagents", "openai_completion")
@@ -94,6 +94,52 @@ async def test_prepare_runtime_egress_uses_verified_frontend_only(
 
     gemini = _session("deepagents", "gemini")
     assert await prepare_runtime_egress(gemini.id, gemini) is None
+
+
+@pytest.mark.asyncio
+async def test_prepare_runtime_egress_admits_native_subscription_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    descriptor = ModelIngressDescriptor(
+        kind="model_ingress",
+        base_url="http://127.0.0.1:43123/capability",
+        client_id="random-client",
+        expires_at=2**62,
+        supports_websocket=True,
+    )
+    registry = type(
+        "Registry",
+        (),
+        {"register_model_ingress": AsyncMock(return_value=descriptor)},
+    )()
+    monkeypatch.setattr("src.runtimes.network_egress._registry", registry)
+
+    codex = _session("codex", "openai_response")
+    codex.model_provider = None
+    claude = _session(
+        "claude_agent",
+        "anthropic",
+        permission_mode="auto_review",
+        mode="plan",
+    )
+    claude.model_provider = None
+
+    assert await prepare_runtime_egress(codex.id, codex) is descriptor
+    assert await prepare_runtime_egress(claude.id, claude) is descriptor
+    assert registry.register_model_ingress.await_args_list == [
+        call(
+            "session",
+            runtime="codex",
+            upstream_base_url="https://chatgpt.com/backend-api/codex",
+            supports_websocket=False,
+        ),
+        call(
+            "session",
+            runtime="claude",
+            upstream_base_url="https://api.anthropic.com",
+            supports_websocket=False,
+        ),
+    ]
 
 
 @pytest.mark.asyncio
@@ -131,7 +177,13 @@ async def test_fail_loud_only_blocks_admitted_runtime_combinations(
 
     codex_oauth = _session("codex", "openai_response")
     codex_oauth.model_provider = None
-    assert await prepare_runtime_egress(codex_oauth.id, codex_oauth) is None
+    with pytest.raises(EgressRegistrationError, match="egress_manager_unavailable"):
+        await prepare_runtime_egress(codex_oauth.id, codex_oauth)
+
+    claude_oauth = _session("claude_agent", "anthropic")
+    claude_oauth.model_provider = None
+    with pytest.raises(EgressRegistrationError, match="egress_manager_unavailable"):
+        await prepare_runtime_egress(claude_oauth.id, claude_oauth)
 
     gemini = _session("deepagents", "gemini")
     assert await prepare_runtime_egress(gemini.id, gemini) is None
@@ -159,7 +211,7 @@ def test_codex_uses_local_ingress_without_exposing_real_upstream() -> None:
     assert f'model_providers.harness.base_url="{local}"' in overrides
     assert "shell_environment_policy.ignore_default_excludes=false" in overrides
     assert 'mcp_servers.env_probe.env_vars=["VALUZ_USER_PROXY"]' in overrides
-    assert not any("HARNESS_CODEX_PROVIDER_API_KEY\"]" in value for value in overrides)
+    assert not any('HARNESS_CODEX_PROVIDER_API_KEY"]' in value for value in overrides)
     assert not any("gateway.example" in value for value in overrides)
 
     with patch.dict("os.environ", {"NO_PROXY": "internal.example"}, clear=True):
@@ -168,6 +220,66 @@ def test_codex_uses_local_ingress_without_exposing_real_upstream() -> None:
     assert env["HARNESS_CODEX_PROVIDER_API_KEY"] == "model-secret"
     assert "127.0.0.1" in env["NO_PROXY"]
     assert not any("secret@" in value for value in env.values())
+
+
+def test_codex_subscription_uses_native_auth_through_local_ingress() -> None:
+    session = _session("codex", "openai_response")
+    session.model_provider = None
+    session.mcp_servers = (
+        McpStdioServerConfig(
+            name="env_probe",
+            command=sys.executable,
+            env_vars=("HARNESS_CODEX_PROVIDER_API_KEY",),
+        ),
+    )
+    local = "http://127.0.0.1:43123/capability/backend-api/codex"
+
+    overrides = _build_config_overrides(
+        session,
+        None,
+        session.model,
+        egress_base_url=local,
+    )
+    assert f'model_providers.harness.base_url="{local}"' in overrides
+    assert 'model_providers.harness.name="OpenAI"' in overrides
+    assert "model_providers.harness.requires_openai_auth=true" in overrides
+    assert "model_providers.harness.supports_websockets=false" in overrides
+    assert not any("model_providers.harness.env_key" in value for value in overrides)
+    assert "shell_environment_policy.ignore_default_excludes=false" not in overrides
+    # No Valuz credential is introduced on the subscription path, so an
+    # identically named user variable remains governed by Codex's own policy.
+    assert 'mcp_servers.env_probe.env_vars=["HARNESS_CODEX_PROVIDER_API_KEY"]' in overrides
+
+    with patch.dict("os.environ", {"NO_PROXY": "internal.example"}, clear=True):
+        env = _build_codex_env(None, egress_base_url=local)
+    assert env is not None
+    assert "HARNESS_CODEX_PROVIDER_API_KEY" not in env
+    assert "OPENAI_API_KEY" not in env
+    assert "127.0.0.1" in env["NO_PROXY"]
+
+
+def test_bundled_codex_accepts_subscription_ingress_config() -> None:
+    codex_bin = _resolve_codex_bin()
+    if codex_bin is None:
+        pytest.skip("bundled codex binary unavailable")
+    session = _session("codex", "openai_response")
+    session.model_provider = None
+    local = "http://127.0.0.1:43123/capability/backend-api/codex"
+    config = CodexConfig(
+        codex_bin=codex_bin,
+        config_overrides=_build_config_overrides(
+            session,
+            None,
+            session.model,
+            egress_base_url=local,
+        ),
+        env=_build_codex_env(None, egress_base_url=local),
+    )
+
+    # Initialization parses and validates every generated provider field. It
+    # does not start a model turn or contact the configured loopback endpoint.
+    with CodexClient(config) as client:
+        client.initialize()
 
 
 def test_bundled_codex_shell_policy_scrubs_model_key_but_preserves_other_env() -> None:
@@ -366,6 +478,51 @@ def test_claude_uses_local_ingress_and_scrubs_tool_credentials() -> None:
     assert env["ANTHROPIC_BASE_URL"] == descriptor.base_url
     assert env["ANTHROPIC_AUTH_TOKEN"] == "model-secret"
     assert env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] == "1"
+    assert "127.0.0.1" in env["NO_PROXY"]
+
+
+@pytest.mark.parametrize(
+    ("permission_mode", "mode"),
+    [("default", "default"), ("auto_review", "default"), ("default", "plan")],
+)
+def test_claude_subscription_uses_native_auth_in_every_permission_mode(
+    permission_mode: str,
+    mode: str,
+) -> None:
+    session = _session(
+        "claude_agent",
+        "anthropic",
+        permission_mode=permission_mode,
+        mode=mode,
+    )
+    session.model_provider = None
+    descriptor = ModelIngressDescriptor(
+        kind="model_ingress",
+        base_url="http://127.0.0.1:43123/capability",
+        client_id="random-client",
+        expires_at=2**62,
+        supports_websocket=False,
+    )
+    runtime = ClaudeAgentRuntime(
+        session.agent_config,
+        session.model,
+        event_sink=object(),  # type: ignore[arg-type]
+        model_provider=None,
+        egress_descriptor=descriptor,
+    )
+
+    with patch.dict("os.environ", {}, clear=True):
+        options = runtime._build_options(session)
+    env = options.env
+    settings = json.loads(options.settings or "{}")
+    assert env["ANTHROPIC_BASE_URL"] == descriptor.base_url
+    assert settings["env"]["ANTHROPIC_BASE_URL"] == descriptor.base_url
+    assert "127.0.0.1" in settings["env"]["NO_PROXY"]
+    assert "ANTHROPIC_AUTH_TOKEN" not in env
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+    assert "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB" not in env
+    assert "CLAUDE_CODE_DISABLE_ADVISOR_TOOL" not in env
     assert "127.0.0.1" in env["NO_PROXY"]
 
 

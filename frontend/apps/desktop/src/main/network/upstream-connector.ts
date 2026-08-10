@@ -484,9 +484,9 @@ export class UpstreamConnector {
     const deadline = performance.now() + this.timeoutMs;
     const remainingTimeout = (): number =>
       Math.max(1, Math.ceil(deadline - performance.now()));
+    const connectStartedAt = this.now();
     let lastError: EgressConnectError | undefined;
     for (const [candidateIndex, route] of resolution.candidates.entries()) {
-      const startedAt = this.now();
       const routeKey = this.routeKey(target, route);
       try {
         if (performance.now() >= deadline) {
@@ -527,7 +527,7 @@ export class UpstreamConnector {
           route,
           candidateIndex,
           fallbackCount: candidateIndex,
-          connectMs: Math.max(0, this.now() - startedAt),
+          connectMs: Math.max(0, this.now() - connectStartedAt),
         };
       } catch (error) {
         lastError = stableConnectError(error);

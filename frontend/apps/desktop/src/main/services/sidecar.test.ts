@@ -15,8 +15,32 @@ vi.mock("node:child_process", () => {
   return { ...mod, default: mod };
 });
 
-const { configureSidecarEgressEnvironment, killWindowsProcessTree } =
-  await import("./sidecar");
+const {
+  configureSidecarEgressEnvironment,
+  killWindowsProcessTree,
+  resolveSidecarDataDir,
+} = await import("./sidecar");
+
+describe("resolveSidecarDataDir", () => {
+  it("keeps managed source backends isolated from packaged app data", () => {
+    expect(resolveSidecarDataDir(true, { VALUZ_DATA_DIR: "" })).toMatch(
+      /\.valuz-oss-dev$/,
+    );
+    expect(
+      resolveSidecarDataDir(true, {
+        VALUZ_DATA_DIR: "/tmp/valuz-explicit-dev-data",
+      }),
+    ).toBe("/tmp/valuz-explicit-dev-data");
+  });
+
+  it("keeps packaged sidecars on packaged app data", () => {
+    expect(
+      resolveSidecarDataDir(false, {
+        VALUZ_DATA_DIR: "/tmp/must-not-override-packaged-data",
+      }),
+    ).toMatch(/\.valuz-oss$/);
+  });
+});
 
 describe("configureSidecarEgressEnvironment", () => {
   it("scrubs inherited channels and exposes only the stdin marker", () => {

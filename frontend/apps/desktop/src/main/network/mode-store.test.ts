@@ -8,9 +8,9 @@ import {
 } from "./mode-store";
 
 describe("egress mode persistence", () => {
-  it("persists only compatibility mode; direct is intentionally temporary", () => {
+  it("defaults to client management and persists the selected owner", () => {
     const root = mkdtempSync(join(tmpdir(), "valuz-egress-mode-"));
-    expect(readPersistedEgressMode(root)).toBe("auto");
+    expect(readPersistedEgressMode(root)).toBe("off");
 
     writePersistedEgressMode(root, "off");
     expect(readPersistedEgressMode(root)).toBe("off");

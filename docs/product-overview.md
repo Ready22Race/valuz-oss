@@ -261,9 +261,13 @@ execution logs, and notify you on completion.
 - **Desktop network recovery (canary)** — when the local egress feature is
   enabled, supported model clients share the desktop's system proxy/PAC routing
   without changing agent tools or MCP traffic. Settings shows plain-language
-  automatic, temporary direct, and compatibility recovery actions plus local,
-  redacted health details. Unsupported authentication/protocol combinations
-  continue on their existing path until separately validated.
+  choices between Valuz-managed and model-client-managed connections, plus
+  current local connection health and redacted diagnostics when Valuz manages
+  the route. Switching remains available while tasks are active, but requires
+  confirmation; when confirmed, Valuz interrupts those tasks before rebuilding
+  model connections. Cancelling or a failed interruption keeps the current
+  mode. Unsupported authentication/protocol combinations continue on their
+  existing path until separately validated.
 
 Every tool an agent calls is visible in the tool-call log.
 

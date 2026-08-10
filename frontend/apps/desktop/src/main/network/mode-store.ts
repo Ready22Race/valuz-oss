@@ -17,7 +17,9 @@ export const readPersistedEgressMode = (userDataDir: string): EgressMode => {
     ) as { compatibilityMode?: boolean };
     return value.compatibilityMode === true ? "off" : "auto";
   } catch {
-    return "auto";
+    // The capability is available without a launch flag, but new installs
+    // opt in from Settings after reviewing the two connection owners.
+    return "off";
   }
 };
 

@@ -17,53 +17,111 @@ export const buildEgressDiagnosticsExport = (
   snapshots: unknown[],
   diagnostics: unknown[],
   runtimePhases: unknown[],
-) => ({
-  status: allowlistedRecord(status, [
-    "mode",
-    "enabled",
-    "started",
-    "emergencyOverride",
-    "snapshotCount",
-    "diagnosticEventCount",
-    "lastErrorCode",
-  ]),
-  snapshots: snapshots.map((item) =>
-    allowlistedRecord(item, [
-      "runtime",
-      "frontend",
-      "targetOrigin",
+) => {
+  const aliases = (prefix: string) => {
+    const values = new Map<string, string>();
+    return (value: unknown): string | undefined => {
+      if (typeof value !== "string" || !value) return undefined;
+      let alias = values.get(value);
+      if (!alias) {
+        alias = `${prefix}-${values.size + 1}`;
+        values.set(value, alias);
+      }
+      return alias;
+    };
+  };
+  const runtimeRef = aliases("runtime");
+  const attemptRef = aliases("attempt");
+  const turnRef = aliases("turn");
+  const withAlias = (
+    item: unknown,
+    keys: readonly string[],
+    references: Record<string, string | undefined>,
+  ) => ({
+    ...allowlistedRecord(item, keys),
+    ...Object.fromEntries(
+      Object.entries(references).filter((entry) => entry[1] !== undefined),
+    ),
+  });
+  const source = (item: unknown): Record<string, unknown> =>
+    typeof item === "object" && item !== null && !Array.isArray(item)
+      ? (item as Record<string, unknown>)
+      : {};
+
+  return {
+    status: allowlistedRecord(status, [
       "mode",
-      "route",
-      "health",
-      "source",
-      "redactedProxy",
-      "resolveMs",
-      "connectMs",
-      "fallbackCount",
+      "enabled",
+      "started",
+      "emergencyOverride",
+      "snapshotCount",
+      "diagnosticEventCount",
       "lastErrorCode",
-      "updatedAt",
     ]),
-  ),
-  diagnostics: diagnostics.map((item) =>
-    allowlistedRecord(item, [
-      "event",
-      "runtime",
-      "frontend",
-      "targetOrigin",
-      "mode",
-      "timestamp",
-      "resolveMs",
-      "route",
-      "source",
-      "redactedProxy",
-      "candidateCount",
-      "errorCode",
-      "candidateIndex",
-      "connectMs",
-      "fallbackCount",
-    ]),
-  ),
-  runtimePhases: runtimePhases.map((item) =>
-    allowlistedRecord(item, ["phase", "monotonicMs", "observedAt"]),
-  ),
-});
+    snapshots: snapshots.map((item) => {
+      const raw = source(item);
+      return withAlias(
+        item,
+        [
+          "runtime",
+          "frontend",
+          "targetOrigin",
+          "mode",
+          "route",
+          "health",
+          "source",
+          "redactedProxy",
+          "resolveMs",
+          "connectMs",
+          "responseStatus",
+          "responseMs",
+          "firstByteMs",
+          "totalMs",
+          "reconnectCount",
+          "fallbackCount",
+          "lastErrorCode",
+          "updatedAt",
+        ],
+        { runtimeRef: runtimeRef(raw.clientId) },
+      );
+    }),
+    diagnostics: diagnostics.map((item) => {
+      const raw = source(item);
+      return withAlias(
+        item,
+        [
+          "event",
+          "runtime",
+          "frontend",
+          "targetOrigin",
+          "mode",
+          "timestamp",
+          "resolveMs",
+          "route",
+          "source",
+          "redactedProxy",
+          "candidateCount",
+          "errorCode",
+          "candidateIndex",
+          "connectMs",
+          "fallbackCount",
+          "statusCode",
+          "responseMs",
+          "firstByteMs",
+          "totalMs",
+        ],
+        {
+          runtimeRef: runtimeRef(raw.clientId),
+          attemptRef: attemptRef(raw.connectionAttemptId),
+        },
+      );
+    }),
+    runtimePhases: runtimePhases.map((item) => {
+      const raw = source(item);
+      return withAlias(item, ["phase", "monotonicMs", "observedAt"], {
+        runtimeRef: runtimeRef(raw.clientId),
+        turnRef: turnRef(raw.turnAttemptId),
+      });
+    }),
+  };
+};

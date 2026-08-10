@@ -10,7 +10,8 @@ import {
 import type { Socket } from "node:net";
 import type { Duplex } from "node:stream";
 import type { OutboundResolver } from "./outbound-resolver";
-import type { EgressRuntime } from "./types";
+import { createPreconnectedHttpAgent } from "./preconnected-http";
+import type { EgressRequestEvent, EgressRuntime } from "./types";
 import {
   EgressConnectError,
   UpstreamConnector,
@@ -72,6 +73,13 @@ export interface ForwardProxyOptions {
   mode?: "auto" | "direct";
   now?: () => number;
   onConnection?: (event: ForwardProxyConnectionEvent) => void;
+  onRequest?: (event: EgressRequestEvent) => void;
+}
+
+interface ConnectedAttempt {
+  connectionAttemptId: string;
+  startedAt: number;
+  connection: UpstreamConnection;
 }
 
 const filteredHeaders = (
@@ -136,6 +144,7 @@ export class ForwardProxy {
   private readonly connector: UpstreamConnector;
   private readonly now: () => number;
   private readonly onConnection?: ForwardProxyOptions["onConnection"];
+  private readonly onRequest?: ForwardProxyOptions["onRequest"];
   private readonly capabilities = new Map<string, StoredCapability>();
   private readonly acceptedSockets = new Set<Socket>();
   private readonly upstreamSockets = new Set<Socket>();
@@ -149,6 +158,7 @@ export class ForwardProxy {
     this.mode = options.mode ?? "auto";
     this.now = options.now ?? Date.now;
     this.onConnection = options.onConnection;
+    this.onRequest = options.onRequest;
   }
 
   async start(): Promise<void> {
@@ -267,7 +277,7 @@ export class ForwardProxy {
     capability: StoredCapability,
     target: URL,
     tlsToTarget?: boolean,
-  ): Promise<UpstreamConnection> {
+  ): Promise<ConnectedAttempt> {
     const connectionAttemptId = randomUUID();
     const resolveStarted = this.now();
     try {
@@ -288,7 +298,7 @@ export class ForwardProxy {
         resolutionMs,
         connection,
       });
-      return connection;
+      return { connectionAttemptId, startedAt: resolveStarted, connection };
     } catch (error) {
       // Re-evaluate PAC/system proxy state on the next attempt instead of
       // retaining a route that has just failed to connect.
@@ -327,40 +337,107 @@ export class ForwardProxy {
       response.writeHead(400).end();
       return;
     }
+    let downstreamCancelled = false;
+    let activeRequest: ReturnType<typeof httpRequest> | undefined;
+    const cancelDownstream = () => {
+      downstreamCancelled = true;
+      activeRequest?.destroy();
+    };
+    request.once("aborted", cancelDownstream);
+    response.once("close", () => {
+      if (!response.writableEnded) cancelDownstream();
+    });
     try {
-      const connection = await this.connect(capability, target);
+      const attempt = await this.connect(capability, target);
+      const { connection } = attempt;
+      let statusCode: number | undefined;
+      let terminal = false;
+      const emitRequest = (
+        phase: EgressRequestEvent["phase"],
+        errorCode?: string,
+      ) => {
+        this.onRequest?.({
+          connectionAttemptId: attempt.connectionAttemptId,
+          startedAt: attempt.startedAt,
+          clientId: capability.clientId,
+          runtime: capability.runtime,
+          targetOrigin: target.origin,
+          phase,
+          elapsedMs: Math.max(0, this.now() - attempt.startedAt),
+          connectMs: connection.connectMs,
+          fallbackCount: connection.fallbackCount,
+          statusCode,
+          errorCode,
+        });
+      };
+      const finish = (
+        phase: Extract<
+          EgressRequestEvent["phase"],
+          "completed" | "aborted" | "failed" | "cancelled"
+        >,
+        errorCode?: string,
+      ) => {
+        if (terminal) return;
+        terminal = true;
+        emitRequest(phase, errorCode);
+      };
+      if (downstreamCancelled) {
+        finish("cancelled", "downstream_cancelled");
+        connection.socket.destroy();
+        return;
+      }
+      const agent = createPreconnectedHttpAgent(connection.socket);
       const upstreamRequest = httpRequest({
         method: request.method,
         host: target.hostname,
-        port: target.port || undefined,
+        port: target.port || (target.protocol === "https:" ? 443 : 80),
         path: `${target.pathname}${target.search}`,
         headers: filteredHeaders(request.headers, target.host),
-        agent: false,
-        createConnection: () => connection.socket,
+        agent,
       });
+      activeRequest = upstreamRequest;
       upstreamRequest.once("response", (upstreamResponse) => {
         const headers = filteredHeaders(upstreamResponse.headers, "");
         delete headers.host;
-        response.writeHead(upstreamResponse.statusCode ?? 502, headers);
+        statusCode = upstreamResponse.statusCode ?? 502;
+        emitRequest("headers_received");
+        upstreamResponse.once("data", () => emitRequest("first_byte"));
+        const abortResponse = (errorCode: string) => {
+          finish("aborted", errorCode);
+          agent.destroy();
+          if (!response.headersSent) response.writeHead(502).end();
+          else if (!response.destroyed) response.destroy();
+        };
+        upstreamResponse.once("aborted", () =>
+          abortResponse("upstream_response_aborted"),
+        );
+        upstreamResponse.once("error", (error) =>
+          abortResponse(stableErrorCode(error)),
+        );
+        response.writeHead(statusCode, headers);
         upstreamResponse.pipe(response);
-        upstreamResponse.once("end", () => connection.socket.destroy());
+        upstreamResponse.once("end", () => {
+          finish("completed");
+          agent.destroy();
+        });
       });
-      upstreamRequest.once("error", () => {
-        connection.socket.destroy();
-        if (!response.headersSent) response.writeHead(502);
-        response.end();
-      });
-      request.once("aborted", () => upstreamRequest.destroy());
-      response.once("close", () => {
-        if (!response.writableEnded) {
-          upstreamRequest.destroy();
-          connection.socket.destroy();
+      upstreamRequest.once("error", (error) => {
+        finish(
+          downstreamCancelled ? "cancelled" : "failed",
+          downstreamCancelled ? "downstream_cancelled" : stableErrorCode(error),
+        );
+        agent.destroy();
+        if (!downstreamCancelled && !response.destroyed) {
+          if (!response.headersSent) response.writeHead(502);
+          response.end();
         }
       });
       request.pipe(upstreamRequest);
     } catch {
-      if (!response.headersSent) response.writeHead(502);
-      response.end();
+      if (!downstreamCancelled && !response.destroyed) {
+        if (!response.headersSent) response.writeHead(502);
+        response.end();
+      }
     }
   }
 
@@ -384,8 +461,52 @@ export class ForwardProxy {
       clientSocket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
       return;
     }
+    let clientCancelled = false;
+    clientSocket.once("close", () => {
+      clientCancelled = true;
+    });
     try {
-      const connection = await this.connect(capability, target, false);
+      const attempt = await this.connect(capability, target, false);
+      const { connection } = attempt;
+      let terminal = false;
+      let sawUpstreamData = false;
+      const emitRequest = (
+        phase: EgressRequestEvent["phase"],
+        errorCode?: string,
+      ) => {
+        this.onRequest?.({
+          connectionAttemptId: attempt.connectionAttemptId,
+          startedAt: attempt.startedAt,
+          clientId: capability.clientId,
+          runtime: capability.runtime,
+          targetOrigin: target.origin,
+          phase,
+          elapsedMs: Math.max(0, this.now() - attempt.startedAt),
+          connectMs: connection.connectMs,
+          fallbackCount: connection.fallbackCount,
+          errorCode,
+        });
+      };
+      const finish = (
+        phase: Extract<
+          EgressRequestEvent["phase"],
+          "completed" | "aborted" | "failed" | "cancelled"
+        >,
+        errorCode?: string,
+      ) => {
+        if (terminal) return;
+        terminal = true;
+        emitRequest(phase, errorCode);
+      };
+      if (clientCancelled || clientSocket.destroyed) {
+        finish("cancelled", "downstream_cancelled");
+        connection.socket.destroy();
+        return;
+      }
+      connection.socket.once("data", () => {
+        sawUpstreamData = true;
+        emitRequest("first_byte");
+      });
       clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
       if (head.length > 0) connection.socket.write(head);
       clientSocket.pipe(connection.socket).pipe(clientSocket);
@@ -393,12 +514,29 @@ export class ForwardProxy {
         clientSocket.destroy();
         connection.socket.destroy();
       };
-      clientSocket.once("error", destroyBoth);
-      connection.socket.once("error", destroyBoth);
-      clientSocket.once("close", () => connection.socket.destroy());
-      connection.socket.once("close", () => clientSocket.destroy());
+      clientSocket.once("error", (error) => {
+        finish("cancelled", stableErrorCode(error));
+        destroyBoth();
+      });
+      connection.socket.once("error", (error) => {
+        finish("aborted", stableErrorCode(error));
+        destroyBoth();
+      });
+      clientSocket.once("close", () => {
+        finish("cancelled", "downstream_cancelled");
+        connection.socket.destroy();
+      });
+      connection.socket.once("close", () => {
+        finish(
+          sawUpstreamData ? "completed" : "aborted",
+          sawUpstreamData ? undefined : "upstream_closed_before_response",
+        );
+        clientSocket.destroy();
+      });
     } catch {
-      clientSocket.end("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n");
+      if (!clientSocket.destroyed) {
+        clientSocket.end("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n");
+      }
     }
   }
 }
