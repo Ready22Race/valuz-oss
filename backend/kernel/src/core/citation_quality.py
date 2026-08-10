@@ -686,6 +686,37 @@ def _audit_claims(
         comparison_false = numeric_comparison_truth(claim, semantics=semantics) is False
         audit_explicit_binding = bool(citation_ids) and _bound_claim_is_auditable(claim)
         if not claim.audit_selected:
+            basic_conflict = _basic_unselected_structured_conflict(
+                claim,
+                citation_ids,
+                citation_by_id,
+                canonical_entity_aliases=canonical_entity_aliases,
+                comparison_false=comparison_false,
+                semantics=semantics,
+            )
+            if basic_conflict is not None:
+                code, conflict_ids, bindings = basic_conflict
+                metrics["mismatch"] += 1
+                metrics["unverified"] += 1
+                issue(
+                    code,
+                    "L4",
+                    citation_ids=conflict_ids,
+                    claim=claim.exact,
+                    claim_id=claim.claim_id,
+                    location=claim.location,
+                    severity="degraded",
+                )
+                audits.append(
+                    claim.to_bundle_dict(
+                        citation_ids=citation_ids,
+                        citation_required=required,
+                        bindings=bindings,
+                        status="unverified",
+                        issue_codes=(code,),
+                    )
+                )
+                continue
             audits.append(
                 claim.to_bundle_dict(
                     citation_ids=citation_ids,
@@ -833,7 +864,16 @@ def _audit_claims(
                 )
             )
             supported = [row for row in support_rows if row[1] == "supported"]
-            partial = [row for row in support_rows if row[1] == "partially-supported"]
+            safe_partial_reasons = {
+                "unit-missing",
+                "range-member",
+                "approximate-rounding",
+            }
+            partial = [
+                row
+                for row in support_rows
+                if row[1] == "partially-supported" and row[3] not in safe_partial_reasons
+            ]
             contradicted = [row for row in support_rows if row[1] == "contradicted"]
             period_conflicted = [row for row in contradicted if row[3] == "period-conflict"]
             confirmed_contradicted = [
@@ -1044,6 +1084,74 @@ def _audit_claims(
         else:
             metrics["critical_unresolved"] += 1
     return audits, metrics
+
+
+def _basic_unselected_structured_conflict(
+    claim: ClaimCandidate,
+    citation_ids: list[str],
+    citation_by_id: Mapping[str, Mapping[str, Any]],
+    *,
+    canonical_entity_aliases: Mapping[str, Iterable[str]],
+    comparison_false: bool,
+    semantics: Mapping[str, Any] | None,
+) -> tuple[str, list[str], list[dict[str, str]]] | None:
+    """Run deterministic hard-conflict checks outside the semantic budget.
+
+    ``audit_selected`` limits model-backed support review; it must not suppress
+    programmatically provable structured-data errors. Free-text entailment and
+    missing-source discovery remain outside this fast path so an ordinary
+    unselected sentence does not acquire a speculative warning.
+    """
+
+    rows: list[tuple[str, str, str]] = []
+    for citation_id in citation_ids:
+        citation = citation_by_id.get(citation_id)
+        if not isinstance(citation, Mapping):
+            continue
+        evidence = citation.get("evidence")
+        if not isinstance(evidence, Mapping) or evidence.get("kind") not in {
+            "structured-data",
+            "calculation",
+        }:
+            continue
+        if _citation_entity_conflicts(claim, citation, canonical_entity_aliases):
+            rows.append((citation_id, "entity-conflict", "entity-conflict"))
+            continue
+        support = verify_evidence_support(claim, citation, semantics=semantics)
+        rows.append((citation_id, support.status, support.reason))
+    if not rows:
+        return None
+
+    bindings = [
+        {
+            "citationId": citation_id,
+            "role": (
+                "conflicting"
+                if status in {"contradicted", "entity-conflict"}
+                else "primary"
+                if status == "supported"
+                else "component"
+            ),
+            "supportStatus": status,
+        }
+        for citation_id, status, _reason in rows
+    ]
+    if comparison_false:
+        return "numeric_comparison_false", [row[0] for row in rows], bindings
+    entity_conflicts = [row[0] for row in rows if row[1] == "entity-conflict"]
+    if entity_conflicts:
+        return "claim_source_entity_conflict", entity_conflicts, bindings
+    period_conflicts = [
+        row[0]
+        for row in rows
+        if row[1] == "contradicted" and row[2] == "period-conflict"
+    ]
+    if period_conflicts:
+        return "claim_source_period_conflict", period_conflicts, bindings
+    value_conflicts = [row[0] for row in rows if row[1] == "contradicted"]
+    if value_conflicts:
+        return "claim_evidence_conflict", value_conflicts, bindings
+    return None
 
 
 def _critical_audit_outcome(

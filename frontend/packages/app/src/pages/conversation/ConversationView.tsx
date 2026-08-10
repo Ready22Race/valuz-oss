@@ -231,6 +231,7 @@ function ConversationViewPage(props: ConversationViewProps) {
             conversationInstanceKey={core.conversationInstanceKey}
             effectiveTurns={core.effectiveTurns}
             displayBusy={core.displayBusy}
+            postRunVerificationActive={core.postRunVerificationActive}
             error={core.error}
             handleRetry={core.handleRetry}
             handleSwitchModel={core.handleSwitchModel}
@@ -397,6 +398,7 @@ function ConversationViewPanel(props: ConversationViewProps) {
         conversationInstanceKey={core.conversationInstanceKey}
         effectiveTurns={core.effectiveTurns}
         displayBusy={core.displayBusy}
+        postRunVerificationActive={core.postRunVerificationActive}
         error={core.error}
         handleRetry={core.handleRetry}
         handleSwitchModel={core.handleSwitchModel}

@@ -255,6 +255,9 @@ def _translate_kernel_event(
         status, keyed by the launch tool_use_id so the frontend attaches a
         progress card to the matching tool call)
       - ``session_idle`` / ``session_update`` → surfaced for status display
+      - ``turn_phase``       → ``session.turn_phase``; runtime-preparation
+        phases remain observability-only, while ``post_run_verification``
+        drives the transient Citation/Audit/Coverage status in conversation UI
       - Every translated payload also carries ``message_id`` when the
         kernel event was stamped with one (most events during a turn).
     """
@@ -662,11 +665,10 @@ def _translate_kernel_event(
         )
 
     if kernel_type == "turn_phase":
-        # Turn-phase latency marker (persisted observability; no dedicated
-        # UI — read the timestamps straight off the events API). ``phase`` ∈
-        # runtime_init | thread_init | dispatch; the remaining fields are
-        # per-runtime extras (duration_ms, mode, mcp_tools_ms, …) forwarded
-        # stringified so new fields flow without adapter changes.
+        # Turn-phase marker (persisted). Runtime preparation phases remain
+        # observability-only; ``post_run_verification`` is also consumed by
+        # the conversation UI as an ephemeral status. The remaining fields
+        # are forwarded stringified so new fields flow without adapter changes.
         return "session.turn_phase", _with_message_id(
             {
                 "phase": _stringify(data.get("phase") or ""),

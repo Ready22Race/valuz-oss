@@ -85,6 +85,7 @@ describe("useSessionSubscription terminal reconciliation", () => {
         >,
         setAutoApprovedNotices: vi.fn(),
         setSending: vi.fn(),
+        setPostRunVerificationActive: vi.fn(),
         setSessions: vi.fn() as Dispatch<SetStateAction<SessionListItem[]>>,
       }),
     );

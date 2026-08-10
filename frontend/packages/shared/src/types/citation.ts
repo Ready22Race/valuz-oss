@@ -15,9 +15,21 @@ export interface CitationBundleV1 {
     anchors?: CitationAnchorV1[];
     /** Rectangular table scopes derived from cell lineage. */
     provenanceRegions?: ProvenanceRegionV1[];
+    /** Render-only, fail-closed corrections against immutable source text. */
+    textCorrections?: CitationTextCorrectionV1[];
   };
   integrity?: CitationIntegrityV1;
   quality?: CitationQualityResultV1;
+}
+
+export interface CitationTextCorrectionV1 {
+  claimId: string;
+  citationId: string;
+  sourceStart: number;
+  sourceEnd: number;
+  originalText: string;
+  replacementText: string;
+  reason: "structured-value-conflict";
 }
 
 export interface CitationAnchorV1 {
@@ -285,6 +297,7 @@ export interface CitationClaimAuditV1 {
   status:
     | "passed"
     | "auto-bound"
+    | "corrected"
     | "repaired"
     | "degraded"
     | "unverified"
@@ -292,6 +305,12 @@ export interface CitationClaimAuditV1 {
     | "not-selected";
   issueCodes: string[];
   location?: ClaimLocationV1;
+  correction?: {
+    originalText: string;
+    replacementText: string;
+    reason: "structured-value-conflict";
+    citationId: string;
+  };
 }
 
 export interface CitationQualityResultV1 {
@@ -318,6 +337,7 @@ export interface CitationQualityResultV1 {
     claimUnsupportedCount?: number;
     claimSemanticMismatchCount?: number;
     claimAmbiguousCount?: number;
+    correctedClaimCount?: number;
     claimAuditTruncated?: boolean;
     criticalClaimSelectedCount?: number;
     criticalClaimSupportedCount?: number;

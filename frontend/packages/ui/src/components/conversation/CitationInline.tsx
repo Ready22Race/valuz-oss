@@ -158,6 +158,69 @@ function codePointOffsetToCodeUnit(
   return points.slice(0, sourceOffset).join("").length;
 }
 
+export function projectCitationTextCorrections(
+  content: string,
+  bundle?: CitationBundleV1,
+): string {
+  const knownCitationIds = new Set(
+    bundle?.citations.map((citation) => citation.citationId) ?? [],
+  );
+  const corrections = [...(bundle?.projection?.textCorrections ?? [])].sort(
+    (left, right) => right.sourceStart - left.sourceStart,
+  );
+  let projected = content;
+  let followingStart = Number.POSITIVE_INFINITY;
+  for (const correction of corrections) {
+    if (
+      correction.reason !== "structured-value-conflict" ||
+      !knownCitationIds.has(correction.citationId) ||
+      correction.sourceEnd > followingStart
+    ) {
+      continue;
+    }
+    const start = codePointOffsetToCodeUnit(content, correction.sourceStart);
+    const end = codePointOffsetToCodeUnit(content, correction.sourceEnd);
+    if (
+      start < 0 ||
+      end <= start ||
+      projected.slice(start, end) !== correction.originalText
+    ) {
+      continue;
+    }
+    projected = `${projected.slice(0, start)}${correction.replacementText}${projected.slice(end)}`;
+    followingStart = correction.sourceStart;
+  }
+  return projected;
+}
+
+function projectedSourceOffset(
+  content: string,
+  sourceOffset: number,
+  bundle?: CitationBundleV1,
+): number {
+  const points = Array.from(content);
+  let cumulativeDelta = 0;
+  let projectedOffset = sourceOffset;
+  const corrections = [...(bundle?.projection?.textCorrections ?? [])].sort(
+    (left, right) => left.sourceStart - right.sourceStart,
+  );
+  for (const correction of corrections) {
+    const replacement = Array.from(correction.replacementText);
+    const adjustedStart = correction.sourceStart + cumulativeDelta;
+    if (
+      points.slice(adjustedStart, adjustedStart + replacement.length).join("") !==
+      correction.replacementText
+    ) {
+      continue;
+    }
+    const delta =
+      replacement.length - Array.from(correction.originalText).length;
+    if (correction.sourceEnd <= sourceOffset) projectedOffset += delta;
+    cumulativeDelta += delta;
+  }
+  return projectedOffset;
+}
+
 // A whole markdown link, and a number or word — the spans a marker must never
 // be dropped into the middle of.
 const UNSPLITTABLE_SPAN = new RegExp(
@@ -241,7 +304,10 @@ export function projectCitationSidecarAnchors(
   const seen = new Set<string>();
   const append = (sourceOffset: number, citationId: string) => {
     if (!knownCitationIds.has(citationId)) return;
-    const offset = codePointOffsetToCodeUnit(content, sourceOffset);
+    const offset = codePointOffsetToCodeUnit(
+      content,
+      projectedSourceOffset(content, sourceOffset, bundle),
+    );
     if (offset < 0) return;
     const key = `${offset}\0${citationId}`;
     if (seen.has(key)) return;
@@ -466,6 +532,27 @@ function qualityBadge(
   return label ? { label, status } : null;
 }
 
+function citationCorrections(
+  citation: CitationRefV1,
+): Array<{ originalText: string; replacementText: string }> {
+  const value = citation.annotations?.corrections;
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const record = item as Record<string, unknown>;
+    return record.reason === "structured-value-conflict" &&
+      typeof record.originalText === "string" &&
+      typeof record.replacementText === "string"
+      ? [
+          {
+            originalText: record.originalText,
+            replacementText: record.replacementText,
+          },
+        ]
+      : [];
+  });
+}
+
 function containsMarkdownTable(content: string): boolean {
   return /(?:^|\n)\s*\|.+\|\s*\n\s*\|(?:\s*:?-+:?\s*\|)+/u.test(content);
 }
@@ -675,6 +762,7 @@ function CitationHoverCard({
     citation.source.author ??
     citation.source.providerId;
   const quality = qualityBadge(citation);
+  const corrections = citationCorrections(citation);
   const qualityTone = qualityIssues?.some((issue) => issue.tone === "critical")
     ? "critical"
     : qualityIssues?.length
@@ -738,6 +826,24 @@ function CitationHoverCard({
           ) : null}
         </span>
       </span>
+      {corrections.length ? (
+        <div
+          data-citation-corrections
+          className="mt-2 rounded-md bg-surface-muted/70 px-2.5 py-2 leading-5 text-ink-body"
+        >
+          {corrections.map((correction) => (
+            <span
+              key={`${correction.originalText}:${correction.replacementText}`}
+              className="block"
+            >
+              {t("ui.citation.structuredValueCorrected", {
+                original: correction.originalText,
+                replacement: correction.replacementText,
+              })}
+            </span>
+          ))}
+        </div>
+      ) : null}
       <div data-citation-evidence-section className="mt-3">
         <span className="block text-2xs font-medium text-ink-meta">
           {t("ui.citation.evidenceTitle")}

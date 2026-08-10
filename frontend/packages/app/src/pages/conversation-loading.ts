@@ -1,3 +1,5 @@
+import type { SessionEventDTO } from "@valuz/core";
+
 /**
  * Loading-state derivation for the conversation view
  * (docs/design/session-stream-lifetime.md §2.1).
@@ -108,3 +110,40 @@ export const shouldRefreshConversationHistory = ({
   promotedWithLiveStream: boolean;
 }): boolean =>
   !promotedWithLiveStream && hydratedSessionId !== sessionId;
+
+/**
+ * Derive the transient host-side Citation / Audit / Task Coverage window from
+ * persisted lifecycle events. Reading the event sequence instead of a timer
+ * keeps live delivery, reconnect backfill, and mid-pass page entry consistent.
+ * Any terminal event clears the state defensively if a failed pass never
+ * managed to emit its explicit ``completed`` marker.
+ */
+export const reducePostRunVerificationActive = (
+  active: boolean,
+  event: SessionEventDTO,
+): boolean => {
+  const eventType = event.event.event_type;
+  const payload = event.event.payload;
+  if (
+    eventType === "session.turn_phase" &&
+    payload.phase === "post_run_verification"
+  ) {
+    if (payload.state === "started") return true;
+    if (payload.state === "completed") return false;
+    return active;
+  }
+  if (
+    eventType === "message.user" ||
+    eventType === "session.idle" ||
+    eventType === "run.failed" ||
+    (eventType === "session.update" &&
+      isTerminalSessionStatus(payload.status))
+  ) {
+    return false;
+  }
+  return active;
+};
+
+export const derivePostRunVerificationActive = (
+  events: SessionEventDTO[],
+): boolean => events.reduce(reducePostRunVerificationActive, false);

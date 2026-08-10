@@ -70,6 +70,11 @@ _FINISHED_LIMIT = 50
 # range as automation runs accrue; the per-group _FINISHED_LIMIT bounds output.
 _INDEX_POOL = 500
 _OUTPUT_CHARS = 200
+# Per-session enrichment reads the shared kernel SQLite store.  Keep the
+# request comfortably below its 5 + 10 overflow connection budget so the
+# conversation, catalog, and stream endpoints retain headroom while a large
+# finished-runs overview is being assembled.
+_ENRICH_CONCURRENCY = 4
 
 
 def _truncate_output(text: str | None) -> str | None:
@@ -181,9 +186,7 @@ class RunsService:
         # continuously) — thousands of ORM rows per tick for a ≤500-row need.
         ts_map: dict[str, TaskSessionRow] = {
             r.session_id: r
-            for r in await self._task_sessions.list_by_session_ids(
-                user_id, list(proj_by_session)
-            )
+            for r in await self._task_sessions.list_by_session_ids(user_id, list(proj_by_session))
         }
         task_map: dict[str, TaskRow] = {
             str(r.id): r
@@ -253,29 +256,31 @@ class RunsService:
         async def _build_one(
             sess: Any, task_session: Any, effective: str, background: bool
         ) -> RunSummary | None:
-            # Isolate per-session enrichment: a single malformed session must
-            # not blank the entire overview. Skip the offender, keep the rest.
-            try:
-                return await self._build(
-                    user_id,
-                    sess,
-                    task_session,
-                    ws_map,
-                    task_map,
-                    effective,
-                    project_id=proj_by_session.get(sess.id, ""),
-                    last_activity=activity_by_session.get(sess.id, sess.created_at),
-                    automation_session_ids=automation_session_ids,
-                    latest_task_events=latest_task_events,
-                    background=background,
-                )
-            except Exception:
-                logger.exception(
-                    "runs overview: skipping session %s — failed to build summary",
-                    sess.id,
-                )
-                return None
+            async with enrich_slots:
+                # Isolate per-session enrichment: a single malformed session
+                # must not blank the entire overview. Skip it, keep the rest.
+                try:
+                    return await self._build(
+                        user_id,
+                        sess,
+                        task_session,
+                        ws_map,
+                        task_map,
+                        effective,
+                        project_id=proj_by_session.get(sess.id, ""),
+                        last_activity=activity_by_session.get(sess.id, sess.created_at),
+                        automation_session_ids=automation_session_ids,
+                        latest_task_events=latest_task_events,
+                        background=background,
+                    )
+                except Exception:
+                    logger.exception(
+                        "runs overview: skipping session %s — failed to build summary",
+                        sess.id,
+                    )
+                    return None
 
+        enrich_slots = asyncio.Semaphore(_ENRICH_CONCURRENCY)
         built = await asyncio.gather(
             *(
                 _build_one(sess, task_session, effective, background)
@@ -395,4 +400,3 @@ class RunsService:
             if message.assistant_message:
                 return str(message.assistant_message)
         return None
-

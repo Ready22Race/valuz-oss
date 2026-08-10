@@ -735,6 +735,31 @@ def resolve_claim_evidence(
             support_by_handle,
             ("explicit-binding-contradicted",),
         )
+    actionable_value_conflicts = tuple(
+        candidate.handle
+        for candidate in candidates
+        if candidate.handle in contradicted
+        and candidate.evidence.get("kind") == "structured-data"
+        and not candidate.hard_conflicts
+        and deterministic_support_by_handle[candidate.handle].reason == "value-conflict"
+        and any(signal.name == "metric-match" for signal in candidate.signals)
+        and any(signal.name == "entity-match" for signal in candidate.signals)
+    )
+    if not requested_explicit and len(actionable_value_conflicts) == 1:
+        # A unique structured row with the same trusted entity and metric but
+        # a different canonical value is inspectable proof of a conflict. It
+        # is safe to attach as the comparison source (never as supporting
+        # Evidence) so the quality sidecar and UI can show the original value.
+        return _resolution(
+            claim,
+            "contradicted",
+            actionable_value_conflicts,
+            candidates,
+            "auto-bind",
+            "warning",
+            support_by_handle,
+            ("unique-structured-value-conflict",),
+        )
     explicit_partial = tuple(handle for handle in explicit if handle in partial)
     if explicit_partial:
         explicit_safe_partial = tuple(
@@ -1199,6 +1224,27 @@ def _add_structured_identity_signals(
         conflicts.append("entity")
     elif entity_relation == "match":
         signals.append(CandidateSignal("entity-match", 20.0))
+    else:
+        trusted_entity_values = tuple(
+            str(evidence.get(key) or "").strip()
+            for key in ("entityId", "entityName")
+            if str(evidence.get(key) or "").strip()
+        )
+        if any(
+            _alias_is_present(claim.semantic_text, value)
+            for value in trusted_entity_values
+        ):
+            # Structured providers own their entity identifiers. Matching a
+            # trusted ticker/name at a Claim boundary is stronger than
+            # guessing that every uppercase answer token is a company.
+            signals.append(CandidateSignal("entity-match", 20.0))
+        elif _primary_entity_marker_conflicts(
+            claim.semantic_text,
+            source,
+            evidence,
+            semantics,
+        ):
+            conflicts.append("entity")
 
     claim_unit = claim.normalized.get("unit", "")
     evidence_unit = str(evidence.get("unit") or "")

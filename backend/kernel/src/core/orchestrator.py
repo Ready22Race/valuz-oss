@@ -504,6 +504,8 @@ class _MessageObserverSink:
         self._task_coverage_continuation_active = False
         self._task_coverage_continuation_attempts = 0
         self._task_coverage_segment_indices: list[int] = []
+        self._post_run_verification_started = False
+        self._post_run_verification_completed = False
 
         self._tool_names: dict[str, str] = {}
         self._evidence_registry = EvidenceRegistry(
@@ -714,8 +716,59 @@ class _MessageObserverSink:
             raise RuntimeError("Task Coverage continuation may run at most once")
         await self.ensure_partial_assistant_message()
         self._task_coverage_continuation_attempts = 1
+        await self._begin_post_run_verification()
         self._task_coverage_continuation_active = True
         self._assistant_delta_chunks.clear()
+
+    def _post_run_verification_features(self) -> list[str]:
+        features: list[str] = []
+        if self._task_coverage_continuation_attempts:
+            features.append("task_coverage")
+        if self._citation_enabled:
+            features.append("citation")
+        if self._citation_verification_enabled:
+            features.append("claim_audit")
+        return features
+
+    async def _begin_post_run_verification(self) -> None:
+        """Expose the real append-only post-run window to presentation layers.
+
+        The marker is lifecycle metadata, never assistant-authored content. A
+        single window intentionally spans Task Coverage and Citation/Audit so
+        clients do not flicker between adjacent host-side phases.
+        """
+
+        if self._post_run_verification_started:
+            return
+        features = self._post_run_verification_features()
+        if not features:
+            return
+        self._post_run_verification_started = True
+        await self._inner.emit(
+            Event(
+                type="turn_phase",
+                data={
+                    "phase": "post_run_verification",
+                    "state": "started",
+                    "features": features,
+                },
+            )
+        )
+
+    async def _complete_post_run_verification(self) -> None:
+        if not self._post_run_verification_started or self._post_run_verification_completed:
+            return
+        self._post_run_verification_completed = True
+        await self._inner.emit(
+            Event(
+                type="turn_phase",
+                data={
+                    "phase": "post_run_verification",
+                    "state": "completed",
+                    "features": self._post_run_verification_features(),
+                },
+            )
+        )
 
     async def abort_task_coverage_continuation(self, *, reason: str) -> None:
         await self.ensure_partial_assistant_message()
@@ -757,6 +810,10 @@ class _MessageObserverSink:
         if self._sidecars_finalized:
             return
         self._sidecars_finalized = True
+        if self._assistant_sidecar_inputs and (
+            self._citation_enabled or self._citation_verification_enabled
+        ):
+            await self._begin_post_run_verification()
         coverage_targets = set(self._task_coverage_segment_indices)
         if (
             self.task_coverage is not None
@@ -966,6 +1023,7 @@ class _MessageObserverSink:
             }
 
     async def release_session_idle(self) -> None:
+        await self._complete_post_run_verification()
         event = self._pending_idle_event
         self._pending_idle_event = None
         if event is not None:

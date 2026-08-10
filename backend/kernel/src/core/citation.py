@@ -1087,6 +1087,91 @@ def _build_projection_anchors_and_regions(
     return anchors, regions
 
 
+def _mark_deterministic_corrections(
+    bundle: dict[str, Any],
+    corrections: list[dict[str, Any]],
+    corrected_claims: Iterable[ClaimCandidate],
+) -> None:
+    """Decorate successfully re-audited claims without hiding other issues."""
+
+    quality = bundle.get("quality")
+    if not isinstance(quality, dict):
+        return
+    claims = quality.get("claims")
+    if not isinstance(claims, list):
+        return
+    corrected_candidates = tuple(corrected_claims)
+    corrected_count = 0
+    claimed_rows: set[int] = set()
+    for correction in corrections:
+        citation_id = correction.get("citationId")
+        replacement = correction.get("replacementText")
+        if not isinstance(citation_id, str) or not isinstance(replacement, str):
+            continue
+        candidates = [
+            (index, claim)
+            for index, claim in enumerate(claims)
+            if index not in claimed_rows
+            and isinstance(claim, dict)
+            and citation_id in claim.get("citationIds", [])
+        ]
+        matching = [
+            row
+            for row in candidates
+            if replacement in str(row[1].get("exact") or "")
+        ]
+        selected = matching[0] if len(matching) == 1 else None
+        if selected is not None:
+            index, claim = selected
+            claimed_rows.add(index)
+        else:
+            extracted = [
+                claim
+                for claim in corrected_candidates
+                if citation_id in claim.attached_citation_ids
+                and replacement in claim.exact
+            ]
+            if len(extracted) != 1:
+                continue
+            candidate = extracted[0]
+            claim = {
+                "claimId": candidate.claim_id,
+                "exact": candidate.exact,
+                "segmentIndex": candidate.segment_index,
+                "citationRequired": candidate.citation_required,
+                "citationIds": list(candidate.attached_citation_ids),
+                "auditPriority": "critical",
+                "auditSelected": True,
+                "selectionReasons": ["deterministic-correction"],
+                "status": "corrected",
+                "issueCodes": [],
+                "location": copy.deepcopy(candidate.location),
+                "bindings": [
+                    {
+                        "citationId": citation_id,
+                        "role": "primary",
+                        "supportStatus": "supported",
+                    }
+                ],
+            }
+            claims.append(claim)
+        claim["correction"] = {
+            "originalText": correction.get("originalText"),
+            "replacementText": replacement,
+            "reason": correction.get("reason"),
+            "citationId": citation_id,
+        }
+        # The corrected text has already passed the ordinary quality audit.
+        # Retain any independent policy issue instead of letting the
+        # correction badge overrule it.
+        if not claim.get("issueCodes"):
+            claim["status"] = "corrected"
+        corrected_count += 1
+    metrics = quality.get("metrics")
+    if corrected_count and isinstance(metrics, dict):
+        metrics["correctedClaimCount"] = corrected_count
+
+
 class CitationGuard:
     """Bind a final assistant body to evidence registered during this turn."""
 
@@ -1359,6 +1444,7 @@ class CitationGuard:
             entity_aliases=entity_aliases,
             semantic_verifier=self._semantic_verifier,
             claim_normalizer=self._claim_normalizer,
+            correct_structured_conflicts=self._verification_enabled,
         )
         normalized_text = binding_result.text
         propagated_bind_result = propagate_equivalent_claim_bindings(
@@ -1389,6 +1475,9 @@ class CitationGuard:
         auto_rebound_claims_by_handle: dict[str, list[str]] = {}
         for claim_id, handle in binding_result.rebound_claim_handles.items():
             auto_rebound_claims_by_handle.setdefault(handle, []).append(claim_id)
+        corrections_by_handle: dict[str, list[Any]] = {}
+        for correction in binding_result.corrections:
+            corrections_by_handle.setdefault(correction.evidence_handle, []).append(correction)
 
         citations: list[dict[str, Any]] = []
         cited_handles: list[str] = []
@@ -1465,6 +1554,7 @@ class CitationGuard:
             semantic_bound_claim_ids = semantic_bound_claims_by_handle.get(identifier)
             auto_rebound_claim_ids = auto_rebound_claims_by_handle.get(identifier)
             equivalent_claim_ids = equivalent_claims_by_handle.get(identifier)
+            handle_corrections = corrections_by_handle.get(identifier)
             if (
                 auto_bound_claim_ids
                 or auto_rebound_claim_ids
@@ -1484,6 +1574,16 @@ class CitationGuard:
                     binding["calculationInputAutoBindings"] = calculation_input_auto_bindings
                 annotations["binding"] = binding
             if annotations:
+                if handle_corrections:
+                    annotations["corrections"] = [
+                        {
+                            "claimId": correction.claim_id,
+                            "originalText": correction.original_text,
+                            "replacementText": correction.replacement_text,
+                            "reason": correction.reason,
+                        }
+                        for correction in handle_corrections
+                    ]
                 citation["annotations"] = annotations
             if record.locator is not None:
                 citation["locator"] = copy.deepcopy(record.locator)
@@ -1582,6 +1682,20 @@ class CitationGuard:
         # early — inside a value or a link.
         for entry in (*projection_anchors, *provenance_regions):
             entry["sourceOffset"] = self._to_streamed_offset(int(entry["sourceOffset"]))
+        text_corrections = [
+            {
+                "claimId": correction.claim_id,
+                "citationId": citation_id,
+                "sourceStart": self._to_streamed_offset(correction.source_start),
+                "sourceEnd": self._to_streamed_offset(correction.source_end),
+                "originalText": correction.original_text,
+                "replacementText": correction.replacement_text,
+                "reason": correction.reason,
+            }
+            for correction in binding_result.corrections
+            for citation_id in [handle_to_citation_id.get(correction.evidence_handle)]
+            if citation_id is not None
+        ]
 
         all_citation_ids = [self._citation_id(record.handle) for record in self._registry.values()]
         used_citation_ids = {self._citation_id(handle) for handle in cited_handles}
@@ -1620,6 +1734,7 @@ class CitationGuard:
                 "evidenceHandleToCitationId": handle_to_citation_id,
                 "anchors": projection_anchors,
                 "provenanceRegions": provenance_regions,
+                "textCorrections": text_corrections,
             },
             "integrity": {
                 "status": status,
@@ -1668,6 +1783,16 @@ class CitationGuard:
                 semantic_verifier=self._semantic_verifier,
                 semantic_verified_claim_citation_ids=(semantic_verified_claim_citation_ids),
                 claim_normalizer=self._claim_normalizer,
+            )
+            corrected_claims = extract_claims(
+                canonical_text,
+                mode=str(policy_mode or "required-on-evidence"),
+                semantics=semantics,
+            )
+            _mark_deterministic_corrections(
+                bundle,
+                text_corrections,
+                corrected_claims,
             )
             _focus_text_citation_snippets(bundle)
         return GuardResult(

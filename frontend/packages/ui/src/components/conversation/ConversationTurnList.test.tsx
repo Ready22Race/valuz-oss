@@ -91,6 +91,7 @@ function renderList(
     onRetry?: (turnId: string) => void;
     loading?: boolean;
     sending?: boolean;
+    postRunVerificationActive?: boolean;
   } = {},
 ) {
   const scrollContainerRef = createRef<HTMLDivElement>();
@@ -102,6 +103,7 @@ function renderList(
         turns={turns}
         scrollContainerRef={scrollContainerRef}
         sending={opts.sending ?? false}
+        postRunVerificationActive={opts.postRunVerificationActive ?? false}
         loading={opts.loading ?? false}
         error={null}
         onRetry={opts.onRetry}
@@ -491,6 +493,28 @@ describe("ConversationTurnList loading placeholder", () => {
   it("renders nothing for a loaded empty session without error", () => {
     const { container } = renderList([], { loading: false });
     expect(shimmer(container)).toBeNull();
+  });
+
+  it("shows the verification tag above the loading logo on the latest turn", () => {
+    virtualState.start = 0;
+    const { container } = renderList([buildTurn(0)], {
+      sending: true,
+      postRunVerificationActive: true,
+    });
+
+    const status = screen.getByRole("status");
+    expect(status.textContent).toBe("正在校验内容并生成引用…");
+    const logo = shimmer(container);
+    expect(logo).not.toBeNull();
+    expect(
+      status.compareDocumentPosition(logo as Node) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+  });
+
+  it("does not show the verification tag outside the post-run phase", () => {
+    virtualState.start = 0;
+    renderList([buildTurn(0)], { sending: true });
+    expect(screen.queryByRole("status")).toBeNull();
   });
 });
 

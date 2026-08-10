@@ -110,9 +110,7 @@ class _RecordingRuntime:
                         },
                     )
                 )
-            await self.sink.emit(
-                Event(type="assistant_message", data={"text": self.primary_text})
-            )
+            await self.sink.emit(Event(type="assistant_message", data={"text": self.primary_text}))
             if self.primary_stop_reason is not None:
                 session.stop_reason = self.primary_stop_reason
             else:
@@ -294,6 +292,24 @@ async def test_task_coverage_is_one_continuation_on_same_runtime_and_thread(
     assert store._session.runtime_session_id == "native-thread-1"
     assert [event.type for event in store.appended].count("assistant_message") == 2
     assert [event.type for event in store.appended].count("session_idle") == 1
+    post_run_events = [
+        event
+        for event in store.appended
+        if event.type == "turn_phase" and event.data.get("phase") == "post_run_verification"
+    ]
+    assert [event.data.get("state") for event in post_run_events] == [
+        "started",
+        "completed",
+    ]
+    event_types = [event.type for event in store.appended]
+    assert event_types.index("assistant_message") < event_types.index("turn_phase")
+    assert event_types.index("turn_phase") < event_types.index("assistant_message_sidecar")
+    assert event_types.index("assistant_message_sidecar") < max(
+        index for index, event_type in enumerate(event_types) if event_type == "turn_phase"
+    )
+    assert max(
+        index for index, event_type in enumerate(event_types) if event_type == "turn_phase"
+    ) < event_types.index("session_idle")
     assert message.assistant_message == "Primary answer.\nNo important omissions."
     assert message.metadata["task_coverage"] == {
         "status": "complete",
@@ -309,6 +325,41 @@ async def test_task_coverage_is_one_continuation_on_same_runtime_and_thread(
     assert len(coverage_sidecars) == 1
     assert coverage_sidecars[0].data["assistant_segment_index"] == 1
     assert coverage_sidecars[0].data["task_coverage"] == message.metadata["task_coverage"]
+
+
+async def test_citation_audit_emits_post_run_verification_lifecycle_without_coverage(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    session = _session(
+        tmp_path,
+        task_coverage_enabled=False,
+        citation_enabled=True,
+        verification_enabled=True,
+    )
+    store = _FakeStore(session)
+
+    def create_runtime(*args, **kwargs) -> _RecordingRuntime:  # noqa: ANN002, ANN003
+        return _RecordingRuntime(args[2])
+
+    monkeypatch.setattr("src.runtimes.factory.create_runtime", create_runtime)
+
+    await SessionOrchestrator(store).run_turn(
+        "owner-1",
+        session.id,
+        UserMessage(text="Answer with sources."),
+    )
+
+    post_run_events = [
+        event
+        for event in store.appended
+        if event.type == "turn_phase" and event.data.get("phase") == "post_run_verification"
+    ]
+    assert [event.data.get("state") for event in post_run_events] == [
+        "started",
+        "completed",
+    ]
+    assert post_run_events[0].data["features"] == ["citation", "claim_audit"]
 
 
 async def test_task_coverage_continuation_receives_static_layer_guidance_only(
@@ -475,9 +526,7 @@ async def test_task_coverage_no_gap_uses_private_runtime_noop_without_assistant_
 
     runtime = runtime_holder[0]
     assert len(runtime.prompts) == 2
-    assert [tool.name for tool in runtime.coverage_tools] == [
-        TASK_COVERAGE_NOOP_TOOL_NAME
-    ]
+    assert [tool.name for tool in runtime.coverage_tools] == [TASK_COVERAGE_NOOP_TOOL_NAME]
     assert TASK_COVERAGE_NOOP_TOOL_NAME in runtime.prompts[1].text
     assert message.assistant_message == "Primary answer."
     assert message.metadata["task_coverage"] == {
@@ -800,10 +849,7 @@ async def test_runtime_message_is_persisted_unchanged_before_citation_sidecar(
         verification_enabled=False,
     )
     store = _FakeStore(session)
-    original = (
-        "Revenue was 100 USD in 2026 Q2 "
-        "[source](evidence://ev_revenue_2026_q2)."
-    )
+    original = "Revenue was 100 USD in 2026 Q2 [source](evidence://ev_revenue_2026_q2)."
 
     def create_runtime(*args, **kwargs) -> _RecordingRuntime:  # noqa: ANN002, ANN003
         return _RecordingRuntime(
@@ -848,10 +894,7 @@ async def test_audit_only_registers_evidence_without_public_citation_projection(
         verification_enabled=True,
     )
     store = _FakeStore(session)
-    original = (
-        "Revenue was 100 USD in 2026 Q2 "
-        "[source](evidence://ev_revenue_2026_q2)."
-    )
+    original = "Revenue was 100 USD in 2026 Q2 [source](evidence://ev_revenue_2026_q2)."
 
     def create_runtime(*args, **kwargs) -> _RecordingRuntime:  # noqa: ANN002, ANN003
         return _RecordingRuntime(
@@ -868,9 +911,7 @@ async def test_audit_only_registers_evidence_without_public_citation_projection(
         UserMessage(text="What was revenue?"),
     )
 
-    sidecar = next(
-        event for event in store.appended if event.type == "assistant_message_sidecar"
-    )
+    sidecar = next(event for event in store.appended if event.type == "assistant_message_sidecar")
     assert "citation_bundle" not in sidecar.data
     assert sidecar.data["claim_audit"]["claims"]
     assert "citation_bundle" not in message.metadata
@@ -904,6 +945,4 @@ async def test_all_sidecars_disabled_publish_no_sidecar_event(
         UserMessage(text="Answer normally."),
     )
 
-    assert not any(
-        event.type == "assistant_message_sidecar" for event in store.appended
-    )
+    assert not any(event.type == "assistant_message_sidecar" for event in store.appended)

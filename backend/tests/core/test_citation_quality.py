@@ -636,6 +636,88 @@ def test_risk_bounded_audit_only_gates_selected_critical_claims() -> None:
     }.intersection(issue["code"] for issue in result["quality"]["issues"])
 
 
+def test_unselected_structured_claim_still_runs_basic_conflict_check() -> None:
+    policy = _policy()
+    policy["config"]["rules"]["claim_audit"] = {
+        "selection_enabled": True,
+        "max_selected_claims": 1,
+        "max_selected_claims_per_group": 1,
+        "minimum_supported_ratio": 0.6,
+        "critical_kinds": ["financial-fact", "numeric-fact"],
+        "prioritize_explicit_user_request": True,
+        "prioritize_existing_bindings": True,
+    }
+    revenue = _structured("cit_revenue")
+    profit = _structured("cit_profit")
+    profit["evidence"].update({"field": "profit", "metric": "profit", "value": 20})
+
+    result = evaluate_citation_quality(
+        (
+            "Revenue was 120 USDm [source](citation://cit_revenue).\n"
+            "Profit was 999 USDm [source](citation://cit_profit)."
+        ),
+        {
+            "version": 1,
+            "citations": [revenue, profit],
+            "integrity": _integrity(),
+        },
+        policy,
+        user_prompt="What was revenue?",
+    )
+
+    profit_claim = next(
+        claim for claim in result["quality"]["claims"] if claim["exact"].startswith("Profit")
+    )
+    assert profit_claim["auditSelected"] is False
+    assert profit_claim["status"] == "unverified"
+    assert profit_claim["issueCodes"] == ["claim_evidence_conflict"]
+    assert profit_claim["bindings"] == [
+        {
+            "citationId": "cit_profit",
+            "role": "conflicting",
+            "supportStatus": "contradicted",
+        }
+    ]
+    assert result["quality"]["metrics"]["criticalClaimSelectedCount"] == 1
+    assert result["quality"]["metrics"]["criticalConfirmedConflictCount"] == 0
+    conflict = next(
+        issue
+        for issue in result["quality"]["issues"]
+        if issue["code"] == "claim_evidence_conflict"
+    )
+    assert conflict["severity"] == "degraded"
+
+
+def test_unselected_unbound_comparison_does_not_run_basic_conflict_check() -> None:
+    policy = _policy()
+    policy["config"]["rules"]["claim_audit"] = {
+        "selection_enabled": True,
+        "max_selected_claims": 1,
+        "max_selected_claims_per_group": 1,
+        "minimum_supported_ratio": 0.6,
+        "critical_kinds": ["financial-fact", "numeric-fact"],
+        "prioritize_existing_bindings": True,
+    }
+
+    result = evaluate_citation_quality(
+        "Revenue was 120 USDm [source](citation://cit_revenue).\n"
+        "A separate estimate says 2 is greater than 3.",
+        {
+            "version": 1,
+            "citations": [_structured("cit_revenue")],
+            "integrity": _integrity(),
+        },
+        policy,
+    )
+
+    unselected = next(
+        claim for claim in result["quality"]["claims"] if "greater than" in claim["exact"]
+    )
+    assert unselected["auditSelected"] is False
+    assert unselected["status"] == "not-selected"
+    assert "numeric_comparison_false" not in unselected["issueCodes"]
+
+
 def test_unresolved_critical_claim_is_partial_without_gating_optional_claims() -> None:
     policy = _policy()
     policy["config"]["rules"]["claim_audit"] = {
@@ -776,6 +858,124 @@ def test_semantic_verifier_receives_only_selected_critical_claims() -> None:
 
     assert len(verifier.requests) == 1
     assert "Customer demand" in verifier.requests[0].claim.exact
+
+
+def test_semantic_verifier_keeps_one_batch_when_budget_doubles_to_48() -> None:
+    class RecordingVerifier:
+        def __init__(self) -> None:
+            self.calls: list[tuple[SemanticVerificationRequest, ...]] = []
+
+        def verify_batch(
+            self,
+            requests: tuple[SemanticVerificationRequest, ...],
+        ) -> dict[str, SemanticVerificationResult]:
+            self.calls.append(requests)
+            return {
+                request.claim.claim_id: SemanticVerificationResult(
+                    verdict="entailed",
+                    evidence_handles=tuple(candidate.handle for candidate in request.candidates),
+                    confidence=0.99,
+                    verifier_revision="test-budget-48",
+                )
+                for request in requests
+            }
+
+    citations: list[dict] = []
+    answer_parts: list[str] = []
+    for index in range(50):
+        citation_id = f"cit_fact_{index}"
+        citations.append(
+            {
+                "citationId": citation_id,
+                "source": {
+                    "sourceId": citation_id,
+                    "providerId": "documents",
+                    "sourceType": "document",
+                    "title": f"Document {index}",
+                    "retrievedAt": "2026-08-10T00:00:00Z",
+                },
+                "evidence": {
+                    "kind": "text",
+                    "quote": f"Underlying source statement {index}.",
+                    "capturedAt": "2026-08-10T00:00:00Z",
+                },
+            }
+        )
+        answer_parts.append(
+            f"Company fact {index} remains material [source](citation://{citation_id})."
+        )
+    policy = _policy()
+    policy["config"]["rules"]["claim_audit"] = {
+        "selection_enabled": True,
+        "max_selected_claims": 48,
+        "max_selected_claims_per_group": 12,
+        "critical_kinds": ["document-claim"],
+        "prioritize_existing_bindings": True,
+    }
+    verifier = RecordingVerifier()
+
+    result = evaluate_citation_quality(
+        "\n\n".join(answer_parts),
+        {
+            "version": 1,
+            "citations": citations,
+            "integrity": _integrity(),
+        },
+        policy,
+        semantic_verifier=verifier,
+    )
+
+    assert len(verifier.calls) == 1
+    assert len(verifier.calls[0]) == 48
+    assert result["quality"]["metrics"]["criticalClaimSelectedCount"] == 48
+
+
+def test_unique_safe_partial_binding_does_not_create_claim_support_warning() -> None:
+    citation = _structured("cit_market_cap")
+    citation["evidence"].update(
+        {
+            "field": "market_cap",
+            "metric": "market_cap",
+            "entityId": "NVDA",
+            "value": 5_424_535_160_000,
+            "unit": "",
+            "asOf": "2026-08-10",
+        }
+    )
+    citation["evidence"].pop("period", None)
+    citation["evidence"].pop("coverage", None)
+    policy = _policy()
+    policy["config"]["rules"]["numeric_claim"]["require_unit"] = False
+    policy["config"]["semantics"] = {
+        "metric_ontology": {
+            "metrics": {
+                "market_cap": {
+                    "aliases": ["市值", "market cap"],
+                    "fields": ["market_cap"],
+                    "period_role": "as-of",
+                }
+            }
+        },
+        "unit_ontology": {
+            "units": {
+                "usd": {"canonical": "USD", "aliases": ["USD", "$"], "scale": 1}
+            }
+        },
+    }
+
+    result = evaluate_citation_quality(
+        "NVDA 市值约为 ~$5.42万亿 [source](citation://cit_market_cap).",
+        {
+            "version": 1,
+            "citations": [citation],
+            "integrity": _integrity(),
+        },
+        policy,
+    )
+
+    claim = result["quality"]["claims"][0]
+    assert claim["status"] == "passed"
+    assert "claim_partially_supported" not in claim["issueCodes"]
 
 
 def test_extra_non_supporting_citation_does_not_degrade_supported_claim() -> None:

@@ -394,6 +394,49 @@ def test_verifier_splits_oversized_batches_by_claim_count() -> None:
     assert calls == 3
 
 
+def test_default_batches_keep_six_model_calls_for_48_claims() -> None:
+    batch_sizes: list[int] = []
+
+    def invoke(_system_prompt: str, request_json: str) -> str:
+        payload = json.loads(request_json)
+        batch_sizes.append(len(payload["requests"]))
+        return json.dumps(
+            {
+                "results": [
+                    {
+                        "claimId": request["claim"]["claimId"],
+                        "verdict": "entailed",
+                        "evidenceIds": [request["candidates"][0]["evidenceId"]],
+                        "confidence": 0.99,
+                    }
+                    for request in payload["requests"]
+                ]
+            }
+        )
+
+    verifier = SessionModelSemanticVerifier(
+        owner_id="owner-default-budget-48",
+        model_id="test-model",
+        invoke=invoke,
+    )
+    requests = tuple(
+        SemanticVerificationRequest(
+            claim=replace(
+                _claim(),
+                claim_id=f"claim-default-budget-{index}",
+                attached_evidence_handles=(f"ev_text_{index}",),
+            ),
+            candidates=(_candidate(index),),
+        )
+        for index in range(48)
+    )
+
+    results = verifier.verify_batch(requests)
+
+    assert len(results) == 48
+    assert batch_sizes == [8, 8, 8, 8, 8, 8]
+
+
 def test_verifier_splits_oversized_batches_by_total_evidence_count() -> None:
     batch_evidence_counts: list[int] = []
 
