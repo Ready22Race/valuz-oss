@@ -2211,6 +2211,74 @@ def test_equivalent_recap_reuses_cross_language_market_cap_binding() -> None:
     assert len(result.claim_handles) == 1
 
 
+def test_unique_unitless_market_cap_is_bound_for_user_inspection() -> None:
+    handle = "ev_nvda_market_cap_12345678"
+    answer = "| 公司 | 市值 |\n|---|---:|\n| NVDA | ~$5.42万亿 |"
+    evidence = {
+        "evidenceHandle": handle,
+        "source": {
+            "sourceId": "stock-quote:NVDA",
+            "providerId": "valuz-stock",
+            "sourceType": "dataset",
+            "title": "Stock quote · NVDA",
+        },
+        "evidence": {
+            "kind": "structured-data",
+            "datasetId": "reportify.stock_quote",
+            "toolName": "stock_quote",
+            "recordKey": "NVDA",
+            "entityId": "NVDA",
+            "field": "market_cap",
+            "metric": "market_cap",
+            "value": 5_424_535_160_000,
+        },
+    }
+
+    result = bind_claims_to_evidence(
+        answer,
+        [evidence],
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert result.text.count(f"evidence://{handle}") == 1
+    assert set(result.auto_bound_claim_handles.values()) == {(handle,)}
+
+
+def test_unique_structured_value_conflict_is_bound_for_user_inspection() -> None:
+    handle = "ev_mu_market_cap_12345678"
+    answer = "| 公司 | 市值 |\n|---|---:|\n| MU | ~$991亿 |"
+    evidence = {
+        "evidenceHandle": handle,
+        "source": {
+            "sourceId": "stock-quote:MU",
+            "providerId": "valuz-stock",
+            "sourceType": "dataset",
+            "title": "Stock quote · MU",
+        },
+        "evidence": {
+            "kind": "structured-data",
+            "datasetId": "reportify.stock_quote",
+            "toolName": "stock_quote",
+            "recordKey": "MU",
+            "entityId": "MU",
+            "field": "market_cap",
+            "metric": "market_cap",
+            "value": 991_118_782_300,
+        },
+    }
+
+    result = bind_claims_to_evidence(
+        answer,
+        [evidence],
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert result.text.count(f"evidence://{handle}") == 1
+    assert set(result.auto_bound_claim_handles.values()) == {(handle,)}
+
+
 def test_point_in_time_metric_ignores_inherited_fiscal_period_during_verification() -> None:
     claim = extract_claims(
         "FY2027 estimates. Current market cap was $49.5 billion.",

@@ -1098,6 +1098,15 @@ def match_available_evidence(
     )
     if resolution.status == "verified" and len(resolution.selected_handles) == 1:
         return finish(EvidenceMatch("exact", resolution.selected_handles))
+    if (
+        resolution.status == "supported-with-limits"
+        and resolution.binding_action == "auto-bind"
+        and len(resolution.selected_handles) == 1
+    ):
+        # The Resolver has already restricted this to one safe partial reason
+        # (unit missing, range member, or approximate rounding). Preserve its
+        # allowed auto-bind action through the legacy compatibility API.
+        return finish(EvidenceMatch("exact", resolution.selected_handles))
     if resolution.status == "ambiguous":
         supported = tuple(
             handle
@@ -1966,6 +1975,17 @@ def bind_claims_to_evidence(
                 ):
                     continue
             handles = (handle,)
+        elif not attributed and match.status == "conflict" and len(match.handles) == 1:
+            handle = match.handles[0]
+            matching_record = records_by_handle.get(handle)
+            if (
+                matching_record is not None
+                and matching_record[1].get("kind") == "structured-data"
+            ):
+                # Keep the source inspectable for a programmatically proven
+                # value conflict. Final quality evaluation marks this binding
+                # as conflicting; it is never presented as support.
+                handles = (handle,)
         elif not attributed and match.status == "ambiguous":
             agreeing: list[str] = []
             source_ids: set[str] = set()
