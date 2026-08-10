@@ -50,43 +50,70 @@ export interface RunSummary {
 
 const fetchJson = createFetchJson(() => _apiBase);
 
+type RunsResponse = { runs: RunSummary[] };
+
+// The shell, activity view, and lifecycle stream can all request the same
+// snapshot during startup/backfill. Share one request per target-set/status so
+// a historical run.finished burst cannot fan out into dozens of identical
+// local DB reads and falsely mark the local execution target unreachable.
+const inFlightLists = new Map<string, Promise<RunsResponse>>();
+
+const listRuns = async (params?: {
+  status?: "running" | "finished";
+}): Promise<RunsResponse> => {
+  const qs = new URLSearchParams();
+  if (params?.status) qs.set("status", params.status);
+  const suffix = qs.toString() ? `?${qs}` : "";
+  // Multi-target editions: fan out + tag ``exec_origin`` + feed the origin
+  // index (session / task / project ids all ride on a run row). Zero targets
+  // (OSS) keeps the single-backend path unchanged.
+  if (getListFanOutTargets().length === 0) {
+    return fetchJson(`/v1/runs${suffix}`);
+  }
+  const outcome = await fanOutTargets((target, signal) =>
+    fetchJson<RunsResponse>(`/v1/runs${suffix}`, {
+      baseUrl: target.baseUrl,
+      signal,
+    }),
+  );
+  const seen = new Set<string>();
+  const merged: RunSummary[] = [];
+  for (const { target, value } of outcome.values) {
+    const entries: Array<[string, string]> = [];
+    for (const run of value.runs) {
+      entries.push([run.session_id, target.id]);
+      if (run.task_id) entries.push([run.task_id, target.id]);
+      if (run.project_id) entries.push([run.project_id, target.id]);
+    }
+    recordEntityOrigins(entries);
+    for (const run of value.runs) {
+      if (seen.has(run.session_id)) continue;
+      seen.add(run.session_id);
+      merged.push({ ...run, exec_origin: target.id });
+    }
+  }
+  // Interleave both backends by recency instead of target order.
+  merged.sort((a, b) => b.updated_at - a.updated_at);
+  return { runs: merged };
+};
+
 export const runsApi = {
-  async list(params?: {
+  list(params?: {
     status?: "running" | "finished";
-  }): Promise<{ runs: RunSummary[] }> {
-    const qs = new URLSearchParams();
-    if (params?.status) qs.set("status", params.status);
-    const suffix = qs.toString() ? `?${qs}` : "";
-    // Multi-target editions: fan out + tag ``exec_origin`` + feed the origin
-    // index (session / task / project ids all ride on a run row). Zero
-    // targets (OSS) keeps the single-backend path unchanged.
-    if (getListFanOutTargets().length === 0) {
-      return fetchJson(`/v1/runs${suffix}`);
-    }
-    const outcome = await fanOutTargets((target, signal) =>
-      fetchJson<{ runs: RunSummary[] }>(`/v1/runs${suffix}`, {
-        baseUrl: target.baseUrl,
-        signal,
-      }),
-    );
-    const seen = new Set<string>();
-    const merged: RunSummary[] = [];
-    for (const { target, value } of outcome.values) {
-      const entries: Array<[string, string]> = [];
-      for (const run of value.runs) {
-        entries.push([run.session_id, target.id]);
-        if (run.task_id) entries.push([run.task_id, target.id]);
-        if (run.project_id) entries.push([run.project_id, target.id]);
-      }
-      recordEntityOrigins(entries);
-      for (const run of value.runs) {
-        if (seen.has(run.session_id)) continue;
-        seen.add(run.session_id);
-        merged.push({ ...run, exec_origin: target.id });
-      }
-    }
-    // Interleave both backends by recency instead of target order.
-    merged.sort((a, b) => b.updated_at - a.updated_at);
-    return { runs: merged };
+  }): Promise<RunsResponse> {
+    const targetsKey = getListFanOutTargets()
+      .map((target) => `${target.id}:${target.baseUrl}`)
+      .join("|");
+    const key = `${_apiBase}|${targetsKey}|${params?.status ?? "running"}`;
+    const current = inFlightLists.get(key);
+    if (current) return current;
+
+    const request = listRuns(params);
+    inFlightLists.set(key, request);
+    const clear = (): void => {
+      if (inFlightLists.get(key) === request) inFlightLists.delete(key);
+    };
+    request.then(clear, clear);
+    return request;
   },
 };
