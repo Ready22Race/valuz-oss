@@ -29,6 +29,8 @@ def test_citation_policy_is_appended_without_changing_user_sections() -> None:
     assert "Never write a `citation://` link\nyourself" in result
     assert "Never name, quote, list, explain" in result
     assert "progress updates, handoffs, status" in result
+    assert "prefer the finest returned chunk" in result
+    assert "Use a provider summary only as fallback evidence" in result
 
 
 def test_citation_prompt_and_skill_do_not_plan_or_control_agent_execution() -> None:

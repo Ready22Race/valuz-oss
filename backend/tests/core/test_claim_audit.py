@@ -2072,14 +2072,9 @@ def test_equivalent_recap_claim_reuses_verified_period_binding() -> None:
 
 def test_equivalent_recap_can_reuse_a_verified_prior_message_binding() -> None:
     handle = "ev_google_cloud_q2_12345678"
-    seed_answer = (
-        "Google Cloud 2026 Q2 云收入为 $247.7亿 "
-        f"[source](evidence://{handle})。"
-    )
+    seed_answer = f"Google Cloud 2026 Q2 云收入为 $247.7亿 [source](evidence://{handle})。"
     recap = (
-        "| 公司 | 最新季度云收入 | 财季 |\n"
-        "|---|---:|---|\n"
-        "| Google Cloud | $247.7亿 | 2026 Q2 |"
+        "| 公司 | 最新季度云收入 | 财季 |\n|---|---:|---|\n| Google Cloud | $247.7亿 | 2026 Q2 |"
     )
     evidence = {
         "evidenceHandle": handle,
@@ -2138,13 +2133,9 @@ def test_equivalent_recap_normalizes_usd_abbreviation_and_sibling_fiscal_quarter
         mode="strict-domain",
         semantics=_FINANCE_SEMANTICS,
     )
-    revenue_claim = next(
-        claim for claim in recap_claims if "最新季度云收入" in claim.exact
-    )
+    revenue_claim = next(claim for claim in recap_claims if "最新季度云收入" in claim.exact)
     assert revenue_claim.normalized["period"] == "2026 Q2"
-    assert _claim_amounts("$24.77B", _FINANCE_SEMANTICS)[0][2] == Decimal(
-        "24770000000"
-    )
+    assert _claim_amounts("$24.77B", _FINANCE_SEMANTICS)[0][2] == Decimal("24770000000")
 
     result = propagate_equivalent_claim_bindings(
         recap,
@@ -2161,8 +2152,7 @@ def test_equivalent_recap_normalizes_usd_abbreviation_and_sibling_fiscal_quarter
 def test_equivalent_recap_reuses_cross_language_market_cap_binding() -> None:
     handle = "ev_google_market_cap_12345678"
     seed_answer = (
-        "Google current market cap was $4.29T as of August 7, 2026 "
-        f"[source](evidence://{handle})."
+        f"Google current market cap was $4.29T as of August 7, 2026 [source](evidence://{handle})."
     )
     recap = "| 公司 | 市值 |\n|---|---:|\n| Google | $4.29万亿 |"
     evidence = {
@@ -3491,12 +3481,8 @@ def test_text_amount_comparison_respects_coarser_evidence_precision() -> None:
 
 
 def test_explicit_period_keys_recognize_forecast_table_year_headers() -> None:
-    assert "2027 FY" in _explicit_period_keys(
-        "| CY | 2025 | 2026e | 2027e | 2028e |"
-    )
-    assert "2027 FY" in _explicit_period_keys(
-        "| Revenue | 12/26E | 12/27E | 12/28E |"
-    )
+    assert "2027 FY" in _explicit_period_keys("| CY | 2025 | 2026e | 2027e | 2028e |")
+    assert "2027 FY" in _explicit_period_keys("| Revenue | 12/26E | 12/27E | 12/28E |")
 
 
 def test_text_table_missing_unit_caption_is_partial_not_unresolved() -> None:
@@ -3537,10 +3523,7 @@ def test_approximate_claim_keeps_more_precise_same_subject_source_as_partial() -
         "source": {"title": "Alphabet cloud estimates"},
         "evidence": {
             "kind": "text",
-            "quote": (
-                "| Revenue (USDm) | 2026E | 2027E |\n"
-                "| Google Cloud | 108,797 | 187,471 |"
-            ),
+            "quote": ("| Revenue (USDm) | 2026E | 2027E |\n| Google Cloud | 108,797 | 187,471 |"),
         },
     }
 
@@ -3563,10 +3546,7 @@ def test_synthesized_range_keeps_in_range_source_estimate_as_partial() -> None:
         "source": {"title": "Cloud infrastructure estimates"},
         "evidence": {
             "kind": "text",
-            "quote": (
-                "| Revenue (USDm) | 2026E | 2027E |\n"
-                "| AWS | 161,654 | 203,007 |"
-            ),
+            "quote": ("| Revenue (USDm) | 2026E | 2027E |\n| AWS | 161,654 | 203,007 |"),
         },
     }
 
@@ -3985,6 +3965,144 @@ def test_composite_text_auto_bind_requires_every_claim_amount() -> None:
 
     assert result.text == answer
     assert result.claim_handles == {}
+
+
+def test_binding_prefers_same_document_chunks_over_complete_provider_summary() -> None:
+    answer = (
+        "Connectivity revenue is modelled at USD 18 billion in 2026, while adjusted "
+        "EBITDA is USD 7 billion."
+    )
+    source = {
+        "sourceId": "doc-spcx",
+        "documentId": "doc-spcx",
+        "providerId": "reportify",
+        "sourceType": "document",
+        "title": "SpaceX Initiation Debrief",
+    }
+    records = [
+        {
+            "evidenceHandle": "ev_spcx_chunk_revenue_12345678",
+            "source": source,
+            "evidence": {
+                "kind": "text",
+                "quote": "Connectivity revenue is modelled at USD 18 billion in 2026.",
+            },
+            "locator": {"kind": "pdf", "page": 8, "chunkId": "chunk-revenue"},
+        },
+        {
+            "evidenceHandle": "ev_spcx_chunk_ebitda_12345678",
+            "source": source,
+            "evidence": {
+                "kind": "text",
+                "quote": "Adjusted EBITDA is modelled at USD 7 billion.",
+            },
+            "locator": {"kind": "pdf", "page": 9, "chunkId": "chunk-ebitda"},
+        },
+        {
+            "evidenceHandle": "ev_spcx_provider_summary_12345678",
+            "source": source,
+            "evidence": {"kind": "text", "quote": answer},
+            "locator": {"kind": "external", "fragment": "provider-summary"},
+        },
+    ]
+
+    result = bind_claims_to_evidence(
+        answer,
+        records,
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    handles = next(iter(result.auto_bound_claim_handles.values()))
+    assert set(handles) == {
+        "ev_spcx_chunk_revenue_12345678",
+        "ev_spcx_chunk_ebitda_12345678",
+    }
+    assert "ev_spcx_provider_summary_12345678" not in result.text
+
+
+def test_binding_uses_provider_summary_only_for_chunk_coverage_gap() -> None:
+    answer = (
+        "Connectivity revenue is modelled at USD 18 billion, adjusted EBITDA at "
+        "USD 7 billion, and free cash flow at USD 3 billion."
+    )
+    source = {
+        "sourceId": "doc-spcx",
+        "documentId": "doc-spcx",
+        "providerId": "reportify",
+        "sourceType": "document",
+        "title": "SpaceX Initiation Debrief",
+    }
+    records = [
+        {
+            "evidenceHandle": "ev_spcx_chunk_revenue_87654321",
+            "source": source,
+            "evidence": {
+                "kind": "text",
+                "quote": "Connectivity revenue is modelled at USD 18 billion.",
+            },
+            "locator": {"kind": "pdf", "page": 8, "chunkId": "chunk-revenue"},
+        },
+        {
+            "evidenceHandle": "ev_spcx_chunk_ebitda_87654321",
+            "source": source,
+            "evidence": {
+                "kind": "text",
+                "quote": "Adjusted EBITDA is modelled at USD 7 billion.",
+            },
+            "locator": {"kind": "pdf", "page": 9, "chunkId": "chunk-ebitda"},
+        },
+        {
+            "evidenceHandle": "ev_spcx_provider_summary_87654321",
+            "source": source,
+            "evidence": {"kind": "text", "quote": answer},
+            "locator": {"kind": "external", "fragment": "provider-summary"},
+        },
+    ]
+
+    result = bind_claims_to_evidence(
+        answer,
+        records,
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    handles = next(iter(result.auto_bound_claim_handles.values()))
+    assert set(handles) == {
+        "ev_spcx_chunk_revenue_87654321",
+        "ev_spcx_chunk_ebitda_87654321",
+        "ev_spcx_provider_summary_87654321",
+    }
+    assert handles[-1] == "ev_spcx_provider_summary_87654321"
+
+
+def test_binding_keeps_provider_summary_when_no_addressable_chunk_can_support() -> None:
+    answer = "Connectivity revenue is modelled at USD 18 billion."
+    records = [
+        {
+            "evidenceHandle": "ev_spcx_provider_summary_only_12345678",
+            "source": {
+                "sourceId": "doc-spcx",
+                "documentId": "doc-spcx",
+                "providerId": "reportify",
+                "sourceType": "document",
+                "title": "SpaceX Initiation Debrief",
+            },
+            "evidence": {"kind": "text", "quote": answer},
+            "locator": {"kind": "external", "fragment": "provider-summary"},
+        }
+    ]
+
+    result = bind_claims_to_evidence(
+        answer,
+        records,
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert next(iter(result.auto_bound_claim_handles.values())) == (
+        "ev_spcx_provider_summary_only_12345678",
+    )
 
 
 def test_single_page_number_never_supports_or_auto_binds_a_numeric_claim() -> None:

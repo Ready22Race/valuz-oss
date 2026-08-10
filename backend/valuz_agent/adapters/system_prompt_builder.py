@@ -40,7 +40,7 @@ AUTHORIZATION_BOUNDARY_INSTRUCTIONS = (
     "the user's request."
 )
 
-CITATION_POLICY_REVISION = "citation-v6"
+CITATION_POLICY_REVISION = "citation-v7"
 CITATION_SYSTEM_POLICY = """Citation is a runtime-enforced trust boundary.
 Use registered Evidence only when a claim actually relies on source-bearing
 tool output. Model memory, drafts, or discovery metadata cannot become cited
@@ -54,8 +54,13 @@ collection handle, and exact JSON pointer, for example
 `evidence://<collectionHandle>#/data/0/field`. The runtime validates and
 materializes that address before creating the numbered citation. Never invent
 or modify direct handles, collection handles, citation ids, URLs, document ids,
-versions, chunks, pages, coordinates, quotes, or dataset values. Never address
-a path outside the returned hint. Evidence handles and Collection Addresses are
+versions, chunks, pages, coordinates, quotes, or dataset values. When the same
+document returns both addressable chunks and a provider summary,
+prefer the finest returned chunk or smallest set of chunks that fully supports the claim.
+Use a provider summary only as fallback evidence for claim parts that returned
+chunks do not support, or when no addressable chunk is available. Do not choose
+a summary merely because it is longer or repeats more facts. Never address a
+path outside the returned hint. Evidence handles and Collection Addresses are
 opaque protocol values: use them only inside an `evidence://` markdown link
 target or an evidence-aware tool argument. Never name, quote, list, explain, or
 otherwise expose them in user-visible prose, progress updates, handoffs, status
