@@ -2048,6 +2048,37 @@ def test_company_source_mismatch_is_a_concrete_entity_conflict() -> None:
     assert "闪迪" in conflicts[0]["claim"]["exact"]
 
 
+def test_inherited_presentation_entity_cannot_create_a_hard_conflict() -> None:
+    citation = _structured("cit_nvidia")
+    citation["source"]["title"] = "NVIDIA (NVDA) FY2025 income statement"
+    citation["evidence"].update(
+        {
+            "entityId": "NVDA",
+            "entityName": "NVIDIA",
+            "period": "FY2025",
+        }
+    )
+    answer = (
+        "**Broadcom (AVGO) results follow**\n\n"
+        "Revenue was 120 USDm [source](citation://cit_nvidia)."
+    )
+
+    result = evaluate_citation_quality(
+        answer,
+        {
+            "version": 1,
+            "citations": [citation],
+            "integrity": _integrity(),
+        },
+        _policy(),
+    )
+
+    revenue_claim = next(
+        claim for claim in result["quality"]["claims"] if "Revenue" in claim["exact"]
+    )
+    assert "claim_source_entity_conflict" not in revenue_claim["issueCodes"]
+
+
 def test_opaque_structured_ticker_is_unknown_not_cross_company_conflict() -> None:
     citation = _structured("cit_sandisk")
     citation["source"]["title"] = "Company income statement · SNDK"

@@ -29,7 +29,7 @@ export interface CitationTextCorrectionV1 {
   sourceEnd: number;
   originalText: string;
   replacementText: string;
-  reason: "structured-value-conflict";
+  reason: "structured-value-conflict" | "document-value-conflict";
 }
 
 export interface CitationAnchorV1 {
@@ -308,7 +308,7 @@ export interface CitationClaimAuditV1 {
   correction?: {
     originalText: string;
     replacementText: string;
-    reason: "structured-value-conflict";
+    reason: "structured-value-conflict" | "document-value-conflict";
     citationId: string;
   };
 }

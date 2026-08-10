@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from types import SimpleNamespace
 
 from src.core.claim_audit import (
     LARGE_TABLE_MIN_DATA_CELLS,
@@ -1614,6 +1615,102 @@ def test_calculation_inherits_entity_and_period_from_presentation_preface() -> N
     )
 
 
+def test_inherited_presentation_period_cannot_create_a_hard_text_conflict() -> None:
+    claims = extract_claims(
+        "**放量期：2024 年至 2028 年**\n\nCoWoS 客户需求比供给高 15% 至 20%。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+    claim = claims[-1]
+    evidence = {
+        "source": {"title": "CoWoS tracker: 2026 Q2"},
+        "evidence": {
+            "kind": "text",
+            "quote": "Customer demand is still 15-20% higher than supply.",
+            "capturedAt": "2026-08-01T08:00:00Z",
+        },
+    }
+
+    support = verify_evidence_support(
+        claim,
+        evidence,
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    assert "2024" in claim.semantic_text
+    assert support.reason != "period-conflict"
+
+
+def test_fiscal_quarter_and_calendar_end_date_do_not_conflict_with_source() -> None:
+    claim = extract_claims(
+        "2026财年Q2（截至2025年7月）单季收入467亿美元，同比增长56%。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    evidence = {
+        "source": {"title": "NVIDIA Announces Financial Results for Second Quarter Fiscal 2026"},
+        "evidence": {
+            "kind": "text",
+            "quote": (
+                "NVIDIA reported revenue for the second quarter ended July 27, 2025, "
+                "of $46.7 billion, up 56% from a year ago."
+            ),
+        },
+    }
+
+    support = verify_evidence_support(claim, evidence, semantics=_FINANCE_SEMANTICS)
+
+    assert _explicit_period_keys(claim.exact) == {"2026 Q2"}
+    assert support.reason != "period-conflict"
+
+
+def test_multi_period_financial_summary_does_not_create_one_period_conflict() -> None:
+    claim = extract_claims(
+        "FY2026 Q2 AI收入108亿美元，FY2026全年AI收入指引超560亿美元，"
+        "FY2027 AI收入预测超1,350亿美元。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    evidence = {
+        "source": {"title": "Broadcom FQ2:26 research update"},
+        "evidence": {
+            "kind": "text",
+            "quote": (
+                "FQ2:26 AI revenue was $10.8bn. F2026 AI revenue guidance is above "
+                "$56bn and F2027 AI revenue is forecast above $135bn."
+            ),
+        },
+    }
+
+    support = verify_evidence_support(claim, evidence, semantics=_FINANCE_SEMANTICS)
+
+    assert len(_explicit_period_keys(claim.exact)) > 1
+    assert support.reason != "period-conflict"
+
+
+def test_multi_year_market_summary_does_not_compare_one_year_to_document_title() -> None:
+    claim = extract_claims(
+        "全球AI加速芯片市场从2021年的917亿美元扩张至2030年预计的7,300亿美元，"
+        "2025-2026年训练GPU出货量同比增长40-70%。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    evidence = {
+        "source": {"title": "2026年全球算力芯片行业研究"},
+        "evidence": {
+            "kind": "text",
+            "quote": (
+                "2021至2030年全球AI加速芯片规模从91.7亿增至7,300亿美元，"
+                "2025-26年训练GPU出货量同比增长40-70%。"
+            ),
+        },
+    }
+
+    support = verify_evidence_support(claim, evidence, semantics=_FINANCE_SEMANTICS)
+
+    assert support.reason != "period-conflict"
+
+
 def test_text_evidence_treats_q1_and_q1_ytd_as_the_same_reporting_period() -> None:
     claim = extract_claims(
         "青岛啤酒 2026 年一季度营业收入为 10,285,128,726 元。",
@@ -2316,6 +2413,169 @@ def test_explicit_structured_value_conflict_is_corrected_without_rewriting_bindi
     assert result.text.count(f"evidence://{handle}") == 1
     assert len(result.corrections) == 1
     assert result.auto_bound_claim_handles == {}
+
+
+def test_precise_document_range_value_conflict_is_corrected_locally() -> None:
+    handle = "ev_ai_accelerator_market_12345678"
+    answer = (
+        f"全球AI加速芯片市场从2021年的$917亿扩张至2030年的$7,300亿 [source](evidence://{handle})。"
+    )
+    record = SimpleNamespace(
+        handle=handle,
+        source={
+            "sourceId": "doc-ai-accelerator-market",
+            "documentId": "doc-ai-accelerator-market",
+            "providerId": "valuz-search",
+            "sourceType": "document",
+            "title": "全球算力芯片行业研究",
+        },
+        evidence={
+            "kind": "text",
+            "quote": ("全球AI加速芯片市场从2021年的91.7亿增长至2030年的7,300亿美元。"),
+        },
+        locator={"kind": "pdf", "page": 11, "chunkId": "chunk-market-size"},
+    )
+
+    result = bind_claims_to_evidence(
+        answer,
+        [record],
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+        correct_structured_conflicts=True,
+    )
+
+    assert "$91.7亿" in result.text
+    assert "$917亿" not in result.text
+    assert result.text.count(f"evidence://{handle}") == 1
+    assert len(result.corrections) == 1
+    correction = result.corrections[0]
+    assert correction.original_text == "917"
+    assert correction.replacement_text == "91.7"
+    assert correction.reason == "document-value-conflict"
+
+
+def test_precise_document_table_header_unit_conflict_is_corrected_locally() -> None:
+    handle = "ev_nvda_market_cap_document_12345678"
+    answer = f"NVIDIA 市值约为 $4,490亿 [source](evidence://{handle})。"
+    record = SimpleNamespace(
+        handle=handle,
+        source={
+            "sourceId": "doc-chip-comps",
+            "documentId": "doc-chip-comps",
+            "providerId": "valuz-search",
+            "sourceType": "document",
+            "title": "Global semiconductor valuation comps",
+        },
+        evidence={
+            "kind": "text",
+            "quote": ("| Company | Market Cap (US$ bn) |\n| --- | ---: |\n| NVIDIA | 4,490 |"),
+        },
+        locator={"kind": "pdf", "page": 47, "chunkId": "chunk-market-cap"},
+    )
+
+    result = bind_claims_to_evidence(
+        answer,
+        [record],
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+        correct_structured_conflicts=True,
+    )
+
+    assert "$44,900亿" in result.text
+    assert "$4,490亿" not in result.text
+    assert result.text.count(f"evidence://{handle}") == 1
+    assert len(result.corrections) == 1
+    assert result.corrections[0].reason == "document-value-conflict"
+
+
+def test_provider_summary_never_drives_document_value_correction() -> None:
+    handle = "ev_nvda_market_cap_summary_12345678"
+    answer = f"NVIDIA 市值约为 $4,490亿 [source](evidence://{handle})。"
+    record = SimpleNamespace(
+        handle=handle,
+        source={
+            "sourceId": "doc-chip-comps",
+            "documentId": "doc-chip-comps",
+            "providerId": "valuz-search",
+            "sourceType": "document",
+            "title": "Global semiconductor valuation comps",
+        },
+        evidence={"kind": "text", "quote": "NVIDIA market cap was 4,490亿美元。"},
+        locator={"kind": "external", "fragment": "provider-summary"},
+    )
+
+    result = bind_claims_to_evidence(
+        answer,
+        [record],
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+        correct_structured_conflicts=True,
+    )
+
+    assert result.text == answer
+    assert result.corrections == ()
+
+
+def test_document_text_without_precise_locator_never_drives_value_correction() -> None:
+    handle = "ev_nvda_market_cap_unlocated_12345678"
+    answer = f"NVIDIA 市值约为 $4,490亿 [source](evidence://{handle})。"
+    record = SimpleNamespace(
+        handle=handle,
+        source={
+            "sourceId": "doc-chip-comps",
+            "documentId": "doc-chip-comps",
+            "providerId": "valuz-search",
+            "sourceType": "document",
+            "title": "Global semiconductor valuation comps",
+        },
+        evidence={
+            "kind": "text",
+            "quote": "| Company | Market Cap (US$ bn) |\n| NVIDIA | 4,490 |",
+        },
+        locator=None,
+    )
+
+    result = bind_claims_to_evidence(
+        answer,
+        [record],
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+        correct_structured_conflicts=True,
+    )
+
+    assert result.text == answer
+    assert result.corrections == ()
+
+
+def test_equivalent_precise_document_value_is_not_rewritten() -> None:
+    handle = "ev_nvda_market_cap_equivalent_12345678"
+    answer = f"NVIDIA 市值约为 $44,900亿 [source](evidence://{handle})。"
+    record = SimpleNamespace(
+        handle=handle,
+        source={
+            "sourceId": "doc-chip-comps",
+            "documentId": "doc-chip-comps",
+            "providerId": "valuz-search",
+            "sourceType": "document",
+            "title": "Global semiconductor valuation comps",
+        },
+        evidence={
+            "kind": "text",
+            "quote": "| Company | Market Cap (US$ bn) |\n| NVIDIA | 4,490 |",
+        },
+        locator={"kind": "pdf", "page": 47, "chunkId": "chunk-market-cap"},
+    )
+
+    result = bind_claims_to_evidence(
+        answer,
+        [record],
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+        correct_structured_conflicts=True,
+    )
+
+    assert result.text == answer
+    assert result.corrections == ()
 
 
 def test_structured_value_conflict_is_not_corrected_when_audit_is_disabled() -> None:

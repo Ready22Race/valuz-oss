@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from src.core.claim_normalization import ClaimNormalizerPort
 
 CLAIM_EXTRACTOR_REVISION = "claim-extractor-v2"
-CLAIM_VERIFIER_REVISION = "claim-verifier-local-v2"
+CLAIM_VERIFIER_REVISION = "claim-verifier-local-v3"
 CLAIM_SELECTOR_REVISION = "claim-audit-selector-v1"
 MAX_CLAIMS_PER_ANSWER = 1_000
 # Large structured result tables are presentation artifacts, not a useful
@@ -756,7 +756,7 @@ class ClaimBindingResult:
 
 @dataclass(frozen=True)
 class DeterministicClaimCorrection:
-    """One fail-closed numeric correction backed by unique structured data.
+    """One fail-closed numeric correction backed by one authoritative fact.
 
     Offsets point into the immutable Runtime-authored answer.  The caller can
     therefore preserve the original message while projecting the corrected
@@ -769,7 +769,7 @@ class DeterministicClaimCorrection:
     source_end: int
     original_text: str
     replacement_text: str
-    reason: Literal["structured-value-conflict"]
+    reason: Literal["structured-value-conflict", "document-value-conflict"]
 
 
 @dataclass(frozen=True)
@@ -1852,7 +1852,9 @@ def match_composite_text_evidence(
 def _text_locator_precision(record: Any) -> int:
     """Rank text provenance without treating a document summary as a chunk."""
 
-    locator = record.get("locator") if isinstance(record, Mapping) else None
+    locator = (
+        record.get("locator") if isinstance(record, Mapping) else getattr(record, "locator", None)
+    )
     if not isinstance(locator, Mapping):
         return 1
     if (
@@ -1865,6 +1867,35 @@ def _text_locator_precision(record: Any) -> int:
     ):
         return 2
     return 1
+
+
+def _precise_document_locator(record: Any) -> Mapping[str, Any] | None:
+    """Return a locator that can reopen the exact document region.
+
+    Provider summaries are useful retrieval hints but are synthesized and only
+    identify a document as a whole.  They must never rewrite Runtime-authored
+    text.  Deterministic document corrections require a PDF page/box, an HTML
+    selector, or a stable chunk id so the user can inspect the original fact.
+    """
+
+    locator = (
+        record.get("locator") if isinstance(record, Mapping) else getattr(record, "locator", None)
+    )
+    if not isinstance(locator, Mapping):
+        return None
+    if (
+        locator.get("kind") == "external"
+        and str(locator.get("fragment") or "") == "provider-summary"
+    ):
+        return None
+    if locator.get("kind") not in {"pdf", "html", "chunk"}:
+        return None
+    if not any(
+        locator.get(key) not in (None, "", [])
+        for key in ("page", "bbox", "chunkId", "selector", "cssSelector", "fragment")
+    ):
+        return None
+    return locator
 
 
 def _prefer_document_chunks_for_summary_claim(
@@ -1929,6 +1960,268 @@ def _format_corrected_display_value(value: Decimal, original: str) -> str:
     if normalized.startswith("+") and rounded >= 0:
         replacement = f"+{replacement}"
     return replacement
+
+
+def _format_document_display_value(value: Decimal, original: str) -> str:
+    """Render the exact source value without inheriting a wrong precision.
+
+    Structured feeds may intentionally preserve the answer's display
+    precision.  A document correction is different: the source itself can
+    prove that ``917`` should be ``91.7``, so rounding back to zero decimal
+    places would retain a second error.  Keep at most six meaningful decimals
+    and preserve an explicit positive sign from the answer.
+    """
+
+    normalized = value.normalize()
+    if normalized == normalized.to_integral():
+        replacement = f"{normalized:,.0f}"
+    else:
+        replacement = f"{normalized:f}".rstrip("0").rstrip(".")
+        integer, dot, fraction = replacement.partition(".")
+        replacement = f"{Decimal(integer):,.0f}{dot}{fraction[:6]}"
+    if original.translate(str.maketrans({"＋": "+"})).startswith("+") and value >= 0:
+        replacement = f"+{replacement}"
+    return replacement
+
+
+def _document_numeric_amounts(
+    text: str,
+    semantics: Mapping[str, Any] | None,
+) -> list[tuple[str, str, Decimal | None, str]]:
+    """Materialize temporary canonical amounts from one original excerpt.
+
+    The Evidence record remains unchanged.  This view only adds units that are
+    explicit in the same table header or in the other endpoint of one range.
+    It never consults a provider summary and never persists synthetic handles.
+    """
+
+    amounts = _claim_amounts(text, semantics)
+    contextual_unit = _contextual_table_unit(text, semantics)
+    if contextual_unit is not None:
+        unit_label, canonical_unit, scale = contextual_unit
+        return [
+            _apply_contextual_amount_unit(
+                amount,
+                unit_label=unit_label,
+                canonical_unit=canonical_unit,
+                scale=scale,
+            )
+            for amount in amounts
+        ]
+
+    resolved_units = {
+        amount[3]
+        for amount in amounts
+        if amount[2] is not None and amount[3] in {"CNY", "USD", "HKD", "EUR", "GBP", "JPY", "KRW"}
+    }
+    if (
+        len(resolved_units) != 1
+        or len(amounts) < 2
+        or not re.search(
+            r"(?:从|由|至|到|增长|扩张|上升|下降|between|from|\bto\b|[-–—−])",
+            text,
+            re.IGNORECASE,
+        )
+    ):
+        return amounts
+
+    canonical_unit = next(iter(resolved_units))
+    scale_tokens = {
+        "万亿": Decimal("1000000000000"),
+        "亿": Decimal("100000000"),
+        "百万": Decimal("1000000"),
+    }
+    output: list[tuple[str, str, Decimal | None, str]] = []
+    search_from = 0
+    for amount in amounts:
+        if amount[1] or amount[2] is not None:
+            output.append(amount)
+            continue
+        raw_value = amount[0]
+        match = re.search(
+            rf"{re.escape(raw_value)}\s*(万亿|亿|百万)",
+            text[search_from:],
+        )
+        if match is None:
+            output.append(amount)
+            continue
+        search_from += match.end()
+        scale_token = match.group(1)
+        decimal_value = _as_decimal(raw_value)
+        output.append(
+            (
+                raw_value,
+                f"{canonical_unit} {scale_token}",
+                decimal_value * scale_tokens[scale_token] if decimal_value is not None else None,
+                canonical_unit,
+            )
+        )
+    return output
+
+
+def _document_fact_excerpt_candidates(
+    claim: ClaimCandidate,
+    evidence: Mapping[str, Any],
+    semantics: Mapping[str, Any] | None,
+) -> tuple[str, ...]:
+    """Return unique, locally scoped source excerpts for numeric comparison."""
+
+    support_text = "\n".join(
+        str(evidence.get(key) or "")
+        for key in ("prefix", "quote", "suffix", "snippet")
+        if str(evidence.get(key) or "").strip()
+    ).strip()
+    if not support_text:
+        return ()
+
+    lines = [line.strip() for line in support_text.splitlines() if line.strip()]
+    table_lines = [line for line in lines if "|" in line]
+    if table_lines:
+        header = next(
+            (line for line in table_lines if not re.fullmatch(r"[|:\-\s]+", line)),
+            "",
+        )
+        rows = [
+            line
+            for line in table_lines
+            if line != header
+            and not re.fullmatch(r"[|:\-\s]+", line)
+            and _generic_text_subject_overlap(claim.semantic_text, line)
+        ]
+        candidates = tuple(dict.fromkeys(f"{header}\n{row}" for row in rows if header))
+        if candidates:
+            return candidates
+
+    sentences = [
+        segment.strip()
+        for segment in re.split(r"(?<=[。！？!?;；])|\n+", support_text)
+        if segment.strip()
+    ]
+    candidates = tuple(
+        dict.fromkeys(
+            segment
+            for segment in sentences
+            if _generic_text_subject_overlap(claim.semantic_text, segment)
+            and _claim_amounts(segment, semantics)
+        )
+    )
+    if candidates:
+        return candidates
+    if _generic_text_subject_overlap(claim.semantic_text, support_text):
+        return (support_text,)
+    return ()
+
+
+def _document_value_corrections(
+    answer: str,
+    claim: ClaimCandidate,
+    *,
+    evidence_handle: str,
+    source: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+    raw_record: Any,
+    semantics: Mapping[str, Any] | None,
+) -> tuple[DeterministicClaimCorrection, ...]:
+    """Return local numeric patches proven by one precise original excerpt."""
+
+    if evidence.get("kind") != "text" or _precise_document_locator(raw_record) is None:
+        return ()
+    if _text_source_period_conflicts(claim, source, evidence, semantics):
+        return ()
+
+    claim_amounts = _document_numeric_amounts(
+        _claim_assertion_text(claim, semantics),
+        semantics,
+    )
+    if not claim_amounts or any(amount[2] is None or not amount[3] for amount in claim_amounts):
+        return ()
+
+    source_start = claim.location.get("sourceStart")
+    source_end = claim.location.get("sourceEnd")
+    if (
+        not isinstance(source_start, int)
+        or not isinstance(source_end, int)
+        or source_start < 0
+        or source_end <= source_start
+        or source_end > len(answer)
+    ):
+        return ()
+    source_slice = answer[source_start:source_end]
+
+    correction_sets: list[tuple[DeterministicClaimCorrection, ...]] = []
+    for excerpt in _document_fact_excerpt_candidates(claim, evidence, semantics):
+        evidence_amounts = _document_numeric_amounts(excerpt, semantics)
+        if len(evidence_amounts) != len(claim_amounts) or any(
+            amount[2] is None or not amount[3] for amount in evidence_amounts
+        ):
+            continue
+        if any(
+            left[3] != right[3] for left, right in zip(claim_amounts, evidence_amounts, strict=True)
+        ):
+            continue
+
+        equivalent = [
+            _amounts_equivalent(left, right, semantics)
+            for left, right in zip(claim_amounts, evidence_amounts, strict=True)
+        ]
+        if all(equivalent):
+            continue
+        # A multi-number statement needs at least one unchanged value to pin
+        # the sequence.  A single value instead needs the subject/metric match
+        # enforced by ``_document_fact_excerpt_candidates``.
+        if len(equivalent) > 1 and not any(equivalent):
+            continue
+
+        corrections: list[DeterministicClaimCorrection] = []
+        for claim_amount, evidence_amount, matches in zip(
+            claim_amounts,
+            evidence_amounts,
+            equivalent,
+            strict=True,
+        ):
+            if matches:
+                continue
+            original_value = _as_decimal(claim_amount[0])
+            evidence_base = evidence_amount[2]
+            resolved_claim_unit = _resolve_unit(claim_amount[1], semantics)
+            if original_value is None or evidence_base is None or resolved_claim_unit is None:
+                corrections = []
+                break
+            display_value = evidence_base / resolved_claim_unit[1]
+            matching_tokens = [
+                token
+                for token in _NUMBER_RE.finditer(source_slice)
+                if _as_decimal(token.group(0)) == original_value
+            ]
+            if len(matching_tokens) != 1:
+                corrections = []
+                break
+            token = matching_tokens[0]
+            replacement = _format_document_display_value(display_value, token.group(0))
+            if replacement == token.group(0):
+                corrections = []
+                break
+            corrections.append(
+                DeterministicClaimCorrection(
+                    claim_id=claim.claim_id,
+                    evidence_handle=evidence_handle,
+                    source_start=source_start + token.start(),
+                    source_end=source_start + token.end(),
+                    original_text=token.group(0),
+                    replacement_text=replacement,
+                    reason="document-value-conflict",
+                )
+            )
+        if corrections:
+            correction_sets.append(tuple(corrections))
+
+    unique_sets = {
+        tuple(
+            (item.source_start, item.source_end, item.replacement_text) for item in correction_set
+        ): correction_set
+        for correction_set in correction_sets
+    }
+    return next(iter(unique_sets.values())) if len(unique_sets) == 1 else ()
 
 
 def _structured_value_correction(
@@ -2125,6 +2418,27 @@ def bind_claims_to_evidence(
                             )
                         )
                         corrections.append(correction)
+                        continue
+                if correct_structured_conflicts and current[1].get("kind") == "text":
+                    document_corrections = _document_value_corrections(
+                        answer,
+                        claim,
+                        evidence_handle=current_handle,
+                        source=current[0],
+                        evidence=current[1],
+                        raw_record=raw_records_by_handle[current_handle],
+                        semantics=semantics,
+                    )
+                    if document_corrections:
+                        for correction in document_corrections:
+                            edits.append(
+                                (
+                                    correction.source_start,
+                                    correction.source_end,
+                                    correction.replacement_text,
+                                )
+                            )
+                        corrections.extend(document_corrections)
                         continue
             match = match_available_evidence(
                 claim,
@@ -2454,6 +2768,11 @@ def verify_evidence_support(
             )
         )
         claim_period = claim.normalized.get("period", "")
+        explicit_claim_period = _normalize_claim(
+            claim.exact,
+            semantics,
+            kind=claim.kind,
+        ).get("period", "")
         point_in_time_metric = semantic_options.get("period_role") == "as-of"
         inherited_fiscal_period = bool(
             re.fullmatch(r"(?:19|20)\d{2} (?:FY|Q[1-4]|H1|YTD)", claim_period)
@@ -2461,10 +2780,10 @@ def verify_evidence_support(
         if (
             semantic_options.get("date_role") != "publication"
             and not (point_in_time_metric and inherited_fiscal_period)
-            and claim_period
+            and explicit_claim_period
             and evidence_periods
             and not any(
-                _periods_compatible(claim_period, evidence_period)
+                _periods_compatible(explicit_claim_period, evidence_period)
                 for evidence_period in evidence_periods
             )
         ):
@@ -4723,7 +5042,17 @@ def _text_source_period_conflicts(
 ) -> bool:
     """Reject a document chunk whose explicit period contradicts the claim."""
 
-    claim_period = claim.normalized.get("period", "")
+    # A section heading can provide useful retrieval context, but a remote or
+    # stale inherited period cannot prove that the local Claim is wrong. Only
+    # a period expressed in the Claim itself may create a hard conflict.
+    claim_periods = _explicit_period_keys(claim.exact)
+    # A synthesized Claim can legitimately combine several fiscal periods or
+    # a forecast range. Reducing that set to one normalized year and comparing
+    # it with a document title creates a false hard conflict. Multi-period
+    # support belongs to the bounded semantic verifier instead.
+    if len(claim_periods) > 1:
+        return False
+    claim_period = next(iter(claim_periods), "")
     claim_quarter = _bare_quarter(claim.exact)
     if not claim_period and not claim_quarter:
         return False
@@ -4782,14 +5111,24 @@ def _text_source_period_conflicts(
 
 def _bare_quarter(value: str) -> str:
     match = re.search(
-        r"(?:\bQ\s*([1-4])\b|第?\s*([一二三四1-4])\s*季度)",
+        r"(?:(?<![A-Z0-9])F?Q\s*([1-4])(?!\d)|第?\s*([一二三四1-4])\s*季度|"
+        r"\b(first|second|third|fourth)\s+quarter\b)",
         value,
         re.IGNORECASE,
     )
     if match is None:
         return ""
-    raw = match.group(1) or match.group(2) or ""
-    return {"一": "Q1", "二": "Q2", "三": "Q3", "四": "Q4"}.get(raw, f"Q{raw}")
+    raw = match.group(1) or match.group(2) or match.group(3) or ""
+    return {
+        "一": "Q1",
+        "二": "Q2",
+        "三": "Q3",
+        "四": "Q4",
+        "first": "Q1",
+        "second": "Q2",
+        "third": "Q3",
+        "fourth": "Q4",
+    }.get(raw.casefold(), f"Q{raw}")
 
 
 def _text_source_period_matches(
@@ -4833,6 +5172,24 @@ def _explicit_period_keys(value: str) -> set[str]:
         periods.add(f"{match.group(1)} Q{match.group(2)}")
     for match in re.finditer(r"Q([1-4])((?:19|20)\d{2})", compact):
         periods.add(f"{match.group(2)} Q{match.group(1)}")
+    for match in re.finditer(r"(?:FY|F)((?:19|20)?\d{2})Q([1-4])", compact):
+        year = match.group(1)
+        periods.add(f"{year if len(year) == 4 else f'20{year}'} Q{match.group(2)}")
+    for match in re.finditer(r"FQ([1-4])[:'’]?(\d{2})(?!\d)", compact):
+        periods.add(f"20{match.group(2)} Q{match.group(1)}")
+    for match in re.finditer(r"((?:19|20)\d{2})财年Q([1-4])", compact):
+        periods.add(f"{match.group(1)} Q{match.group(2)}")
+    fiscal_quarter_words = {
+        "FIRST": "1",
+        "SECOND": "2",
+        "THIRD": "3",
+        "FOURTH": "4",
+    }
+    for match in re.finditer(
+        r"(FIRST|SECOND|THIRD|FOURTH)QUARTERFISCAL((?:19|20)\d{2})",
+        compact,
+    ):
+        periods.add(f"{match.group(2)} Q{fiscal_quarter_words[match.group(1)]}")
     for match in re.finditer(r"([1-4])Q(\d{2})(?!\d)", compact):
         periods.add(f"20{match.group(2)} Q{match.group(1)}")
     for match in re.finditer(r"Q([1-4])(\d{2})(?!\d)", compact):
@@ -4860,7 +5217,7 @@ def _explicit_period_keys(value: str) -> set[str]:
         compact,
     ):
         periods.add(f"{match.group(1)} FY")
-    for match in re.finditer(r"FY((?:19|20)\d{2})", compact):
+    for match in re.finditer(r"FY((?:19|20)\d{2})(?!Q[1-4])", compact):
         periods.add(f"{match.group(1)} FY")
     # Forecast tables frequently abbreviate annual columns as ``2027E`` or
     # ``12/27E``.  These are local period coordinates and must outrank a
@@ -5300,7 +5657,7 @@ def _claim_amounts_cached(
         rf"(?:-|–|—|−|至|到)\s*"
         rf"(?P<upper>{currency_value_pattern})\s*"
         rf"(?P<scale>{currency_scale_pattern})"
-        rf"(?![A-Za-z0-9_\u3400-\u9fff])",
+        rf"(?![A-Za-z0-9_])",
         re.IGNORECASE,
     )
     for match in currency_prefix_range_pattern.finditer(text):
@@ -5321,7 +5678,7 @@ def _claim_amounts_cached(
         rf"(?P<value>{currency_value_pattern})"
         rf"(?:\s*(?P<scale>{currency_scale_pattern}))?"
         rf"(?!\s*(?:{currency_scale_pattern})(?![A-Za-z0-9_\u3400-\u9fff]))"
-        rf"(?![A-Za-z0-9_\u3400-\u9fff])",
+        rf"(?![A-Za-z0-9_])",
         re.IGNORECASE,
     )
     for match in currency_prefix_pattern.finditer(text):
@@ -6197,7 +6554,7 @@ def _contextual_table_unit(
     resolved_candidates = [
         (raw_unit, resolved[0], resolved[1])
         for raw_unit in candidates
-        for resolved in [_resolve_unit(raw_unit, semantics)]
+        for resolved in [_resolve_contextual_header_unit(raw_unit, semantics)]
         if resolved is not None
     ]
     if not resolved_candidates:
@@ -6218,6 +6575,46 @@ def _contextual_table_unit(
     if len({(canonical, scale) for _raw, canonical, scale in resolved_candidates}) > 1:
         return None
     return resolved_candidates[0]
+
+
+def _resolve_contextual_header_unit(
+    raw_unit: str,
+    semantics: Mapping[str, Any] | None,
+) -> tuple[str, Decimal] | None:
+    """Resolve compact English table units such as ``US$ bn`` compositionally."""
+
+    resolved = _resolve_unit(raw_unit, semantics)
+    if resolved is not None:
+        return resolved
+    match = re.fullmatch(
+        r"\s*(US\$|\$|USD|RMB|CNY|HKD|EUR|GBP|JPY|KRW)\s*"
+        r"(k|thousand|m|mn|mm|million|b|bn|billion|t|tn|trn|trillion)\s*",
+        raw_unit,
+        re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    currency = {
+        "us$": "USD",
+        "$": "USD",
+        "rmb": "CNY",
+    }.get(match.group(1).casefold(), match.group(1).upper())
+    scale = {
+        "k": Decimal("1000"),
+        "thousand": Decimal("1000"),
+        "m": Decimal("1000000"),
+        "mn": Decimal("1000000"),
+        "mm": Decimal("1000000"),
+        "million": Decimal("1000000"),
+        "b": Decimal("1000000000"),
+        "bn": Decimal("1000000000"),
+        "billion": Decimal("1000000000"),
+        "t": Decimal("1000000000000"),
+        "tn": Decimal("1000000000000"),
+        "trn": Decimal("1000000000000"),
+        "trillion": Decimal("1000000000000"),
+    }[match.group(2).casefold()]
+    return currency, scale
 
 
 def _cjk_bigrams(value: str) -> set[str]:
@@ -6393,7 +6790,9 @@ def _entity_support_status(
     claim: ClaimCandidate,
     evidence: Mapping[str, Any],
 ) -> Literal["supported", "partial", "contradicted"]:
-    claim_ids = _claim_entity_ids(claim.semantic_text)
+    # As with policy-level entity conflicts, inherited discourse context is a
+    # matching hint, not deterministic proof of a cross-company error.
+    claim_ids = _claim_entity_ids(claim.exact)
     evidence_text = " ".join(
         str(evidence.get(key) or "") for key in ("entityId", "entityName", "recordKey")
     )
@@ -6534,7 +6933,13 @@ def _period_key(
     short_fiscal_year = re.search(r"FY(\d{2})(?!\d)", compact)
     if short_fiscal_year:
         return f"20{short_fiscal_year.group(1)} FY"
-    year_match = re.search(r"(?:19|20)\d{2}", compact)
+    # Preserve numeric token boundaries for the generic four-digit year.  A
+    # compacted string can otherwise join a six-digit entity id with the next
+    # year (``000019 2025`` -> ``0000192025``) and invent 1920 as the period.
+    year_match = re.search(
+        r"(?<!\d)(?:19|20)\d{2}(?!\d)",
+        unicodedata.normalize("NFKC", value).upper(),
+    )
     if not year_match:
         # Parse each shorthand shape explicitly. The previous combined branch
         # inferred group meaning from ``compact.startswith('FY')``; a table
