@@ -1192,7 +1192,7 @@
       "modeSectionTitle": "谁来管理模型连接",
       "modeSectionDesc": "选择由 Valuz 统一选择连接线路，或由 Codex、Claude Code 等模型客户端分别处理。切换时会重建模型连接；若有任务运行，会先询问是否中断。",
       "statusLabel": "当前模型连接",
-      "statusDesc": "只显示当前正在执行的模型请求及其线路、健康状态和分阶段耗时；会话结束后自动移除，每 3 秒更新。",
+      "statusDesc": "显示当前任务从模型客户端初始化、建立连接到等待响应的完整阶段；任务结束后自动移除，每 3 秒更新。",
       "loading": "正在读取状态…",
       "loadFailed": "读取网络状态失败",
       "desktopOnly": "网络出口管理仅在桌面客户端中可用。",
@@ -1225,6 +1225,15 @@
       "copyDiagnostics": "复制诊断信息",
       "copied": "已复制网络诊断，敏感信息已自动隐藏",
       "copyFailed": "复制诊断失败",
+      "activity": {
+        "runtimeInit": "正在启动模型客户端",
+        "threadInit": "正在加载会话与工具",
+        "modelConnecting": "正在连接模型服务",
+        "waitingResponse": "正在等待模型响应",
+        "streaming": "正在接收模型输出",
+        "elapsed": "已用时 {seconds} 秒",
+        "noRequestYet": "当前仍处于本地初始化阶段，尚未发起模型网络请求。"
+      },
       "health": {
         "unknown": "等待模型响应",
         "healthy": "连接正常",

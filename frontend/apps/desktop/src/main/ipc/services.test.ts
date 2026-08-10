@@ -23,6 +23,7 @@ describe('createDesktopRuntimeForTest', () => {
         status: 'running',
         token: 'test-token',
       }),
+      getDesktopControlToken: () => 'desktop-control-token',
       getShellStatus: () => ({ ready: true }),
       getAllStatus: () => [],
       registerDescriptor: (descriptor) => descriptor,
@@ -59,7 +60,7 @@ describe('createDesktopRuntimeForTest', () => {
     )
   })
 
-  it('restarts the sidecar only when crossing the compatibility-mode boundary', async () => {
+  it('reconfigures runtimes without restarting the sidecar across the ownership boundary', async () => {
     let mode: 'auto' | 'direct' | 'off' = 'off'
     const runningService = {
       name: 'agent-server',
@@ -69,9 +70,12 @@ describe('createDesktopRuntimeForTest', () => {
       detail: 'Ready',
     }
     const restartService = vi.fn(async () => [runningService])
+    const reconfigure = vi.fn(async () => undefined)
     const emitEvent = vi.fn()
     const status = () => ({
       mode,
+      // Mirrors EgressManagerStatus: the feature remains available while the
+      // selected ownership mode is `off`.
       enabled: true,
       started: mode !== 'off',
       emergencyOverride: false,
@@ -90,6 +94,7 @@ describe('createDesktopRuntimeForTest', () => {
           status: 'running',
           token: 'test-token',
         }),
+        getDesktopControlToken: () => 'desktop-control-token',
         getShellStatus: () => ({ ready: true }),
         getAllStatus: () => [runningService],
         registerDescriptor: (descriptor) => descriptor,
@@ -99,6 +104,15 @@ describe('createDesktopRuntimeForTest', () => {
         getEgressMode: () => mode,
         getEgressStatus: status,
         getEgressRuntimePhases: () => [],
+        getEgressBootstrap: () =>
+          mode === 'off'
+            ? null
+            : {
+                mode,
+                controlEndpoint: 'http://127.0.0.1:43123',
+                bootstrapToken: 'x'.repeat(43),
+                expiresAt: Date.now() + 60_000,
+              },
         setEgressMode: async (nextMode) => {
           mode = nextMode
           return status()
@@ -106,40 +120,33 @@ describe('createDesktopRuntimeForTest', () => {
       },
       emitEvent,
       async () => [],
+      undefined,
+      reconfigure,
     )
 
     await runtime.setEgressMode('auto')
     await runtime.setEgressMode('direct')
     await runtime.setEgressMode('off')
 
-    expect(restartService).toHaveBeenCalledTimes(2)
-    expect(restartService).toHaveBeenNthCalledWith(1, 'agent-server')
-    expect(restartService).toHaveBeenNthCalledWith(2, 'agent-server')
+    expect(restartService).not.toHaveBeenCalled()
+    expect(reconfigure).toHaveBeenCalledTimes(2)
+    expect(reconfigure).toHaveBeenNthCalledWith(
+      1,
+      19100,
+      'desktop-control-token',
+      expect.objectContaining({ mode: 'auto' }),
+      false,
+    )
+    expect(reconfigure).toHaveBeenNthCalledWith(
+      2,
+      19100,
+      'desktop-control-token',
+      null,
+      false,
+    )
     expect(emitEvent.mock.calls).toEqual([
-      [
-        'service-status-changed',
-        [
-          expect.objectContaining({
-            name: 'agent-server',
-            status: 'starting',
-            pid: null,
-          }),
-        ],
-      ],
-      ['service-status-changed', [runningService]],
       ['egress-status-changed', expect.objectContaining({ mode: 'auto' })],
       ['egress-status-changed', expect.objectContaining({ mode: 'direct' })],
-      [
-        'service-status-changed',
-        [
-          expect.objectContaining({
-            name: 'agent-server',
-            status: 'starting',
-            pid: null,
-          }),
-        ],
-      ],
-      ['service-status-changed', [runningService]],
       ['egress-status-changed', expect.objectContaining({ mode: 'off' })],
     ])
   })
@@ -173,6 +180,7 @@ describe('createDesktopRuntimeForTest', () => {
           status: 'running',
           token: 'test-token',
         }),
+        getDesktopControlToken: () => 'desktop-control-token',
         getShellStatus: () => ({ ready: true }),
         getAllStatus: () => [runningService],
         registerDescriptor: (descriptor) => descriptor,
@@ -213,6 +221,7 @@ describe('createDesktopRuntimeForTest', () => {
     }
     const restartService = vi.fn(async () => [runningService])
     const interrupt = vi.fn(async () => undefined)
+    const reconfigure = vi.fn(async () => undefined)
     const setEgressMode = vi.fn(async (nextMode: typeof mode) => {
       mode = nextMode
       return {
@@ -236,6 +245,7 @@ describe('createDesktopRuntimeForTest', () => {
           status: 'running',
           token: 'test-token',
         }),
+        getDesktopControlToken: () => 'desktop-control-token',
         getShellStatus: () => ({ ready: true }),
         getAllStatus: () => [runningService],
         registerDescriptor: (descriptor) => descriptor,
@@ -257,6 +267,7 @@ describe('createDesktopRuntimeForTest', () => {
       undefined,
       async () => ['session-a', 'session-b'],
       interrupt,
+      reconfigure,
     )
 
     await expect(
@@ -266,6 +277,12 @@ describe('createDesktopRuntimeForTest', () => {
     expect(interrupt.mock.invocationCallOrder[0]).toBeLessThan(
       setEgressMode.mock.invocationCallOrder[0],
     )
-    expect(restartService).toHaveBeenCalledWith('agent-server')
+    expect(reconfigure).toHaveBeenCalledWith(
+      19100,
+      'desktop-control-token',
+      null,
+      false,
+    )
+    expect(restartService).not.toHaveBeenCalled()
   })
 })

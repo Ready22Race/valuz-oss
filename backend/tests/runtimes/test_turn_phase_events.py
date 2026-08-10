@@ -9,9 +9,11 @@ during latency triage.
 # ruff: noqa: I001 — kernel bootstrap side-effect import must precede src.*
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 import valuz_agent.boot.kernel  # noqa: F401 — sys.path side-effect
 
 from src.core.agent_config import AgentConfig
@@ -76,19 +78,23 @@ async def test_codex_thread_init_marks_start_mode() -> None:
     rt = _codex_rt()
     await rt._ensure_thread(_session(runtime_session_id=None))
     phases = [e.data for e in rt.event_sink.events if e.type == "turn_phase"]
-    assert len(phases) == 1
-    assert phases[0]["phase"] == "thread_init"
-    assert phases[0]["mode"] == "start"
-    assert isinstance(phases[0]["duration_ms"], int)
+    assert [phase["phase"] for phase in phases] == [
+        "thread_init_started",
+        "thread_init",
+    ]
+    assert phases[-1]["mode"] == "start"
+    assert isinstance(phases[-1]["duration_ms"], int)
 
 
 async def test_codex_thread_init_marks_resume_mode() -> None:
     rt = _codex_rt()
     await rt._ensure_thread(_session(runtime_session_id="thread-old"))
     phases = [e.data for e in rt.event_sink.events if e.type == "turn_phase"]
-    assert len(phases) == 1
-    assert phases[0]["phase"] == "thread_init"
-    assert phases[0]["mode"] == "resume"
+    assert [phase["phase"] for phase in phases] == [
+        "thread_init_started",
+        "thread_init",
+    ]
+    assert phases[-1]["mode"] == "resume"
 
 
 async def test_codex_thread_ensure_is_idempotent_no_repeat_marker() -> None:
@@ -98,4 +104,50 @@ async def test_codex_thread_ensure_is_idempotent_no_repeat_marker() -> None:
     await rt._ensure_thread(session)
     await rt._ensure_thread(session)
     phases = [e for e in rt.event_sink.events if e.type == "turn_phase"]
-    assert len(phases) == 1
+    assert [event.data["phase"] for event in phases] == [
+        "thread_init_started",
+        "thread_init",
+    ]
+
+
+async def test_codex_prepare_failure_closes_monitoring_activity(monkeypatch: Any) -> None:
+    rt = CodexRuntime(
+        config=AgentConfig(id="a", name="a"),
+        model="gpt-5.5",
+        event_sink=_FakeSink(),
+    )
+
+    async def fail_prepare(session: Session, *, turn_attempt_id: str) -> None:
+        del session, turn_attempt_id
+        raise RuntimeError("cold start failed")
+
+    monkeypatch.setattr(rt, "_prepare", fail_prepare)
+    with pytest.raises(RuntimeError, match="cold start failed"):
+        await rt.prepare(_session())
+
+    assert rt.event_sink.events[-1].data["phase"] == "runtime_prepare_failed"
+    assert not rt._background_prepare_tasks
+
+
+async def test_codex_close_cancels_background_prepare(monkeypatch: Any) -> None:
+    rt = CodexRuntime(
+        config=AgentConfig(id="a", name="a"),
+        model="gpt-5.5",
+        event_sink=_FakeSink(),
+    )
+    started = asyncio.Event()
+
+    async def wait_forever(session: Session, *, turn_attempt_id: str) -> None:
+        del session, turn_attempt_id
+        started.set()
+        await asyncio.Future()
+
+    monkeypatch.setattr(rt, "_prepare", wait_forever)
+    task = asyncio.create_task(rt.prepare(_session()))
+    await started.wait()
+
+    await rt.close()
+
+    assert task.cancelled()
+    assert not rt._background_prepare_tasks
+    assert rt.event_sink.events[-1].data["phase"] == "runtime_prepare_failed"

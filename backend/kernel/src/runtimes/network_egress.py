@@ -148,19 +148,29 @@ class ForwardProxyDescriptor:
 
 EgressDescriptor = ModelIngressDescriptor | ForwardProxyDescriptor
 RuntimePhase = Literal[
+    "runtime_init_started",
     "runtime_init",
+    "thread_init_started",
     "thread_init",
+    "dispatch_started",
     "dispatch",
     "model_first_event",
+    "runtime_ready",
+    "runtime_prepare_failed",
     "turn_complete",
     "interrupted",
 ]
 _RUNTIME_PHASES = frozenset(
     {
+        "runtime_init_started",
         "runtime_init",
+        "thread_init_started",
         "thread_init",
+        "dispatch_started",
         "dispatch",
         "model_first_event",
+        "runtime_ready",
+        "runtime_prepare_failed",
         "turn_complete",
         "interrupted",
     }
@@ -466,10 +476,20 @@ class NetworkEgressRegistry:
 
 _registry: NetworkEgressRegistry | None = None
 _required_unavailable = False
+_desktop_control_token: str | None = None
 
 
 def get_network_egress_registry() -> NetworkEgressRegistry | None:
     return _registry
+
+
+def desktop_control_authorized(token: str | None) -> bool:
+    """Validate the memory-only capability delivered by the desktop shell."""
+    return (
+        isinstance(token, str)
+        and _desktop_control_token is not None
+        and secrets.compare_digest(token, _desktop_control_token)
+    )
 
 
 async def prepare_runtime_egress(
@@ -610,6 +630,25 @@ def configure_network_egress(
     _required_unavailable = payload is None and required_unavailable
 
 
+async def replace_network_egress(
+    payload: Mapping[str, Any] | None,
+    *,
+    required_unavailable: bool = False,
+) -> None:
+    """Replace the live desktop capability without restarting the backend.
+
+    Runtime processes using the old descriptor must be closed by the caller
+    before this function runs. The old registry is closed first so its lease
+    task and loopback client cannot survive a mode transition.
+    """
+    previous = get_network_egress_registry()
+    if previous is not None:
+        await previous.close()
+    configure_network_egress(payload, required_unavailable=required_unavailable)
+    if registry := get_network_egress_registry():
+        registry.start_keepalive()
+
+
 def _consume_bootstrap_file(raw_path: str) -> str:
     """Read and unlink one private, regular rendezvous file without following links."""
     if not os.path.isabs(raw_path):
@@ -675,10 +714,11 @@ def consume_network_egress_bootstrap(
     target_env = os.environ if environ is None else environ
     bootstrap_file = target_env.pop("VALUZ_EGRESS_BOOTSTRAP_FILE", None)
     marker = target_env.pop("VALUZ_EGRESS_BOOTSTRAP_STDIN", None)
+    desktop_marker = target_env.pop("VALUZ_DESKTOP_BOOTSTRAP_STDIN", None)
     required = target_env.pop("VALUZ_EGRESS_REQUIRED", None)
     if bootstrap_file:
         raw = _consume_bootstrap_file(bootstrap_file)
-    elif marker == "1":
+    elif marker == "1" or desktop_marker == "1":
         source = sys.stdin if stdin is None else stdin
         raw = source.readline(_MAX_BOOTSTRAP_BYTES + 1)
         if not raw or len(raw) > _MAX_BOOTSTRAP_BYTES:
@@ -692,7 +732,23 @@ def consume_network_egress_bootstrap(
         payload = json.loads(raw)
         if not isinstance(payload, dict):
             raise ValueError
-        configure_network_egress(payload)
+        if desktop_marker == "1":
+            token = payload.get("desktopControlToken")
+            if not isinstance(token, str) or len(token) < 32:
+                raise ValueError("invalid_desktop_control_token")
+            global _desktop_control_token
+            _desktop_control_token = token
+            egress_payload = payload.get("egressBootstrap")
+            if egress_payload is not None and not isinstance(egress_payload, dict):
+                raise ValueError("invalid_egress_bootstrap_payload")
+            configure_network_egress(
+                egress_payload,
+                required_unavailable=(
+                    egress_payload is None and payload.get("egressRequired") is True
+                ),
+            )
+        else:
+            configure_network_egress(payload)
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         raise RuntimeError("invalid_egress_bootstrap_payload") from exc
     return True

@@ -262,12 +262,15 @@ execution logs, and notify you on completion.
   enabled, supported model clients share the desktop's system proxy/PAC routing
   without changing agent tools or MCP traffic. Settings shows plain-language
   choices between Valuz-managed and model-client-managed connections, plus
-  current local connection health and redacted diagnostics when Valuz manages
-  the route. Switching remains available while tasks are active, but requires
-  confirmation; when confirmed, Valuz interrupts those tasks before rebuilding
-  model connections. Cancelling or a failed interruption keeps the current
-  mode. Unsupported authentication/protocol combinations continue on their
-  existing path until separately validated.
+  active initialization/request status and redacted diagnostics when Valuz
+  manages the route. Switching remains available while tasks are active, but
+  requires confirmation; when confirmed, Valuz interrupts those tasks and
+  rebuilds only affected model runtimes while the backend normally stays up.
+  Cancelling or a failed interruption keeps the current mode. Opening an
+  existing idle Codex session prepares its local runtime without sending model
+  content, reducing the first Send's cold-start wait. Unsupported
+  authentication/protocol combinations continue on their existing path until
+  separately validated.
 
 Every tool an agent calls is visible in the tool-call log.
 
@@ -322,10 +325,13 @@ The open-source edition is free and covers the complete single-user workstation.
 - **Notifications** — when long-running or scheduled tasks complete.
 - **Window management** — closing the window minimizes to the tray (it keeps
   running); `⌘ + Q` truly quits.
-- **Local network diagnostics (canary)** — recent model connection route,
-  health, phase timings, and stable failure category can be inspected and
-  copied through an allowlisted, redacted export. Detailed events stay in
-  memory and no background provider probe or remote network telemetry is added.
+- **Local network diagnostics (canary)** — Current Model Connections contains
+  only requests that are initializing or running: runtime/thread/dispatch
+  progress appears before network traffic, then gives way to the actual route,
+  health, and phase timings, and disappears on completion. A redacted,
+  allowlisted diagnostic copy is offered only when a degraded/failed connection
+  has useful local evidence. Detailed events stay in memory and no background
+  provider probe or remote network telemetry is added.
 
 ---
 

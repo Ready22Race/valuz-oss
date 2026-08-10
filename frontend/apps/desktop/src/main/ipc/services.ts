@@ -6,6 +6,7 @@ import type {
   EgressSnapshot,
 } from '../network/types'
 import type { RuntimePhaseRecord } from '../network/control-server'
+import type { EgressBootstrap } from '../network/control-server'
 import { createServiceManager, type DesktopServiceManager } from '../services/mod'
 import { cleanStaleUpdateCache } from '../update-cache'
 
@@ -41,6 +42,12 @@ type DesktopEventEmitter = (eventName: string, payload: unknown) => void
 
 type ActiveRunsProbe = (port: number) => Promise<string[]>
 type ActiveRunsInterrupt = (port: number, sessionIds: string[]) => Promise<void>
+type EgressRuntimeReconfigure = (
+  port: number,
+  token: string,
+  bootstrap: EgressBootstrap | null,
+  requiredUnavailable: boolean,
+) => Promise<void>
 
 const probeActiveRuns: ActiveRunsProbe = async (port) => {
   const controller = new AbortController()
@@ -90,17 +97,60 @@ const interruptActiveRuns: ActiveRunsInterrupt = async (port, sessionIds) => {
   )
 }
 
+const reconfigureRuntimeEgress: EgressRuntimeReconfigure = async (
+  port,
+  token,
+  bootstrap,
+  requiredUnavailable,
+) => {
+  const controller = new AbortController()
+  // Rebuilding the most-recent Codex runtime can include its one-time cold
+  // start. Keep the control request bounded but longer than a normal API call.
+  const timeout = setTimeout(() => controller.abort(), 120_000)
+  try {
+    const body = JSON.stringify({
+      bootstrap,
+      required_unavailable: requiredUnavailable,
+      prewarm_limit: 1,
+    })
+    const activeDrainDeadline = Date.now() + 5_000
+    while (true) {
+      const response = await fetch(
+        `http://127.0.0.1:${port}/v1/system/network-egress`,
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-valuz-desktop-token': token,
+          },
+          body,
+          signal: controller.signal,
+        },
+      )
+      if (response.ok) return
+      // The interrupt response can win a short race with the kernel turn's
+      // final cleanup. Let that task drain before falling back to a restart.
+      if (response.status === 409 && Date.now() < activeDrainDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 100))
+        continue
+      }
+      throw new Error(`egress_runtime_reconfigure_failed_${response.status}`)
+    }
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
 export const createDesktopRuntime = (
   manager: DesktopServiceManager,
   emitEvent: DesktopEventEmitter = () => undefined,
   activeRunsProbe: ActiveRunsProbe = probeActiveRuns,
   activeRunsInterrupt: ActiveRunsInterrupt = interruptActiveRuns,
+  egressRuntimeReconfigure: EgressRuntimeReconfigure = reconfigureRuntimeEgress,
 ): DesktopRuntime => {
   const restartService = async (serviceName: string) => {
-    // A network-mode boundary rebuilds the backend process so the replacement
-    // receives (or deliberately does not receive) the one-shot egress
-    // bootstrap. Tell the renderer *before* stopping it: otherwise the routed
-    // app remains interactive during the short restart window and a send can
+    // Tell the renderer *before* stopping a service: otherwise the routed app
+    // remains interactive during the short restart window and a send can
     // race the closed loopback port, surfacing a misleading permanent
     // "backend unavailable" turn even though the replacement is healthy a
     // moment later.
@@ -204,17 +254,44 @@ export const createDesktopRuntime = (
       try {
         status = await manager.setEgressMode(mode)
       } catch (error) {
-        // Crossing from model-client-managed mode must rebuild the backend even when
-        // the new manager failed, so the replacement sidecar receives the
-        // non-secret fail-loud marker instead of continuing on the legacy path.
         if (previous === 'off' && manager.getEgressMode() !== 'off') {
-          await restartService('agent-server')
+          const server = manager.getAgentServerInfo()
+          const desktopToken = manager.getDesktopControlToken()
+          if (server.status === 'running') {
+            try {
+              await egressRuntimeReconfigure(server.port, desktopToken, null, true)
+            } catch {
+              // Compatibility fallback for an older/unhealthy backend that
+              // does not expose the live runtime-control endpoint.
+              await restartService('agent-server')
+            }
+          }
         }
         emitEvent('egress-status-changed', manager.getEgressStatus())
         throw error
       }
       if (crossesOwnershipBoundary) {
-        await restartService('agent-server')
+        const server = manager.getAgentServerInfo()
+        const desktopToken = manager.getDesktopControlToken()
+        if (server.status === 'running') {
+          try {
+            await egressRuntimeReconfigure(
+              server.port,
+              desktopToken,
+              manager.getEgressBootstrap?.() ?? null,
+              // `enabled` means the desktop capability/frontends are
+              // available, not that Valuz currently owns model networking.
+              // In `off`, a null bootstrap is the intended independent-client
+              // configuration and must never become the fail-loud marker.
+              status.enabled && status.mode !== 'off' && !status.started,
+            )
+          } catch {
+            // Fail safe and preserve compatibility with a backend from before
+            // live reconfiguration. The normal same-version path never
+            // restarts the service.
+            await restartService('agent-server')
+          }
+        }
       }
       emitEvent('egress-status-changed', status)
       return status

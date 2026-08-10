@@ -24,6 +24,8 @@ export interface SidecarOptions {
   egressBootstrap?: EgressBootstrap | null;
   /** Non-secret fail-loud marker used only if enabled egress failed to start. */
   egressRequired?: boolean;
+  /** Memory-only capability used for desktop-to-backend runtime reconfiguration. */
+  desktopControlToken?: string;
 }
 
 export interface DesktopSidecarResult {
@@ -40,6 +42,7 @@ export const configureSidecarEgressEnvironment = (
   env: Record<string, string>,
   egressBootstrap: EgressBootstrap | null | undefined,
   egressRequired: boolean | undefined,
+  desktopControlToken?: string,
 ): void => {
   // Never inherit a stale/user-supplied bootstrap channel into the managed
   // backend. Only these explicit spawn options may select stdin delivery or
@@ -48,7 +51,10 @@ export const configureSidecarEgressEnvironment = (
   delete env.VALUZ_EGRESS_BOOTSTRAP_FILE;
   delete env.VALUZ_EGRESS_BOOTSTRAP_STDIN;
   delete env.VALUZ_EGRESS_REQUIRED;
-  if (egressBootstrap) {
+  delete env.VALUZ_DESKTOP_BOOTSTRAP_STDIN;
+  if (desktopControlToken) {
+    env.VALUZ_DESKTOP_BOOTSTRAP_STDIN = "1";
+  } else if (egressBootstrap) {
     env.VALUZ_EGRESS_BOOTSTRAP_STDIN = "1";
   } else if (egressRequired) {
     env.VALUZ_EGRESS_REQUIRED = "1";
@@ -419,6 +425,7 @@ export const startSidecar = async (
     onExit,
     egressBootstrap,
     egressRequired,
+    desktopControlToken,
   } = options;
 
   // Managed development must run the current source tree even if a stale
@@ -450,7 +457,12 @@ export const startSidecar = async (
   // while running), the backend notices and exits instead of living on as an
   // orphan that holds the writer lock + port (boot/parent_watchdog.py).
   env.VALUZ_PARENT_PID = String(process.pid);
-  configureSidecarEgressEnvironment(env, egressBootstrap, egressRequired);
+  configureSidecarEgressEnvironment(
+    env,
+    egressBootstrap,
+    egressRequired,
+    desktopControlToken,
+  );
 
   // Point the backend's docs_embedded._detect_rg() at the bundled binary.
   // It already honours VALUZ_RG_PATH ahead of bundled / PATH lookup.
@@ -486,7 +498,7 @@ export const startSidecar = async (
   const child: ChildProcess = spawn(cmd, args, {
     cwd,
     env,
-    stdio: [egressBootstrap ? "pipe" : "ignore", "pipe", "pipe"],
+    stdio: [desktopControlToken || egressBootstrap ? "pipe" : "ignore", "pipe", "pipe"],
     // POSIX: give the child its own process group (setsid) so stop() can signal
     // the WHOLE tree via process.kill(-pid, …) — the analog of taskkill /T on
     // Windows. Not on Windows (no POSIX groups; the tree is killed via taskkill
@@ -494,11 +506,19 @@ export const startSidecar = async (
     detached: process.platform !== "win32",
   });
 
-  if (egressBootstrap && child.stdin) {
+  if ((desktopControlToken || egressBootstrap) && child.stdin) {
     child.stdin.once("error", () => {
-      onLog?.("[warn] Egress bootstrap channel closed before delivery");
+      onLog?.("[warn] Desktop bootstrap channel closed before delivery");
     });
-    child.stdin.end(`${JSON.stringify(egressBootstrap)}\n`);
+    const payload = desktopControlToken
+      ? {
+          version: 1,
+          desktopControlToken,
+          egressBootstrap: egressBootstrap ?? null,
+          egressRequired: Boolean(egressRequired),
+        }
+      : egressBootstrap;
+    child.stdin.end(`${JSON.stringify(payload)}\n`);
   }
 
   // Capture stdout/stderr for logs

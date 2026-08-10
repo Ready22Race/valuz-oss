@@ -8,6 +8,7 @@ import {
 import type { ServiceDescriptor } from "@valuz/core";
 import type { EgressManager } from "../network/egress-manager";
 import type { RuntimePhaseRecord } from "../network/control-server";
+import type { EgressBootstrap } from "../network/control-server";
 import type {
   EgressDiagnosticEvent,
   EgressManagerStatus,
@@ -43,6 +44,7 @@ export interface DesktopServiceManager {
   restartService(name: string): Promise<ServiceInfo[]>;
   getLogs(name: string): string[];
   getAgentServerInfo(): CraftServerInfo;
+  getDesktopControlToken(): string;
   getShellStatus(): { ready: boolean };
   getAllStatus(): ServiceInfo[];
   registerDescriptor(descriptor: ServiceDescriptor): ServiceDescriptor;
@@ -52,6 +54,7 @@ export interface DesktopServiceManager {
   getEgressMode(): EgressMode;
   getEgressStatus(): EgressManagerStatus;
   getEgressRuntimePhases(): RuntimePhaseRecord[];
+  getEgressBootstrap?(): EgressBootstrap | null;
   setEgressMode(mode: EgressMode): Promise<EgressManagerStatus>;
 }
 
@@ -153,6 +156,9 @@ export const createServiceManager = (
   const logs = new Map<string, string[]>();
   const descriptors = new DescriptorRegistry(personalDescriptors());
   const agentServerToken = crypto.randomBytes(16).toString("hex");
+  // Separate from the renderer-visible agent server token. This capability
+  // only travels main-process -> managed backend stdin/loopback control API.
+  const desktopControlToken = crypto.randomBytes(32).toString("hex");
 
   // Track running sidecars for cleanup
   const sidecars = new Map<string, DesktopSidecarResult>();
@@ -196,6 +202,7 @@ export const createServiceManager = (
       },
     getEgressRuntimePhases: () =>
       options?.egressManager?.getRuntimePhases() ?? [],
+    getEgressBootstrap: () => options?.egressManager?.getBootstrap() ?? null,
     async setEgressMode(mode) {
       await options?.egressManager?.setMode(mode);
       try {
@@ -318,6 +325,7 @@ export const createServiceManager = (
                 egressStatus?.enabled &&
                 egressStatus.mode !== "off",
             ),
+            desktopControlToken,
           });
 
           sidecars.set(descriptor.name, result);
@@ -440,6 +448,7 @@ export const createServiceManager = (
               egressStatus?.enabled &&
               egressStatus.mode !== "off",
           ),
+          desktopControlToken,
         });
 
         sidecars.set(name, result);
@@ -486,6 +495,9 @@ export const createServiceManager = (
         status: services.get("agent-server")?.status ?? "stopped",
         token: agentServerToken,
       };
+    },
+    getDesktopControlToken() {
+      return desktopControlToken;
     },
     getShellStatus() {
       return { ready: true };

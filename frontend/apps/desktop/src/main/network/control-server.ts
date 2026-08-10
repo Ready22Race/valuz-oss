@@ -29,10 +29,15 @@ export interface RuntimePhasePayload {
   turnAttemptId: string;
   clientId: string;
   phase:
+    | "runtime_init_started"
     | "runtime_init"
+    | "thread_init_started"
     | "thread_init"
+    | "dispatch_started"
     | "dispatch"
     | "model_first_event"
+    | "runtime_ready"
+    | "runtime_prepare_failed"
     | "turn_complete"
     | "interrupted";
   monotonicMs: number;
@@ -46,6 +51,8 @@ export interface RuntimePhasePayload {
  */
 export interface RuntimePhaseRecord extends RuntimePhasePayload {
   observedAt: number;
+  runtime?: string;
+  targetOrigin?: string;
 }
 
 export interface EgressControlServerOptions {
@@ -240,10 +247,15 @@ export class EgressControlServer {
       if (request.method === "POST" && request.url === "/v1/runtime-phase") {
         const body = await readJson(request);
         const phases = new Set<RuntimePhasePayload["phase"]>([
+          "runtime_init_started",
           "runtime_init",
+          "thread_init_started",
           "thread_init",
+          "dispatch_started",
           "dispatch",
           "model_first_event",
+          "runtime_ready",
+          "runtime_prepare_failed",
           "turn_complete",
           "interrupted",
         ]);

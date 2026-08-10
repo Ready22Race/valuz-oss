@@ -13,6 +13,7 @@ import { useRunningRuns, useTranslation } from "@valuz/core";
 import { buildEgressDiagnosticsExport } from "./network-diagnostics";
 import {
   currentNetworkSnapshots,
+  currentRuntimeActivities,
   isManagedNetworkMode,
   networkHealthDetailKey,
   networkRouteKey,
@@ -57,6 +58,15 @@ interface EgressSnapshot {
   updatedAt: number;
 }
 
+interface RuntimePhase {
+  clientId?: string;
+  turnAttemptId?: string;
+  phase?: string;
+  observedAt?: number;
+  runtime?: string;
+  targetOrigin?: string;
+}
+
 interface DesktopBridge {
   invoke<T>(channel: string, payload?: Record<string, unknown>): Promise<T>;
   on(event: string, handler: (payload: unknown) => void): void;
@@ -89,7 +99,7 @@ export const NetworkSection = () => {
   const [status, setStatus] = useState<EgressStatus | null>(null);
   const [snapshots, setSnapshots] = useState<EgressSnapshot[]>([]);
   const [diagnostics, setDiagnostics] = useState<unknown[]>([]);
-  const [runtimePhases, setRuntimePhases] = useState<unknown[]>([]);
+  const [runtimePhases, setRuntimePhases] = useState<RuntimePhase[]>([]);
   const [loading, setLoading] = useState(true);
   const [busyMode, setBusyMode] = useState<SelectableEgressMode | null>(null);
 
@@ -105,7 +115,7 @@ export const NetworkSection = () => {
           desktop.invoke<EgressStatus>("egress_get_status"),
           desktop.invoke<EgressSnapshot[]>("egress_get_snapshots"),
           desktop.invoke<unknown[]>("egress_get_diagnostics"),
-          desktop.invoke<unknown[]>("egress_get_runtime_phases"),
+          desktop.invoke<RuntimePhase[]>("egress_get_runtime_phases"),
         ]);
       setStatus(nextStatus);
       setSnapshots(nextSnapshots);
@@ -139,6 +149,10 @@ export const NetworkSection = () => {
     () =>
       status?.lastErrorCode ? "failed" : overallHealth(activeSnapshots),
     [activeSnapshots, status?.lastErrorCode],
+  );
+  const runtimeActivities = useMemo(
+    () => currentRuntimeActivities(runtimePhases),
+    [runtimePhases],
   );
   const healthLabel = t(`settings.network.health.${health}`);
   const managedMode = isManagedNetworkMode(status?.mode);
@@ -388,6 +402,41 @@ export const NetworkSection = () => {
                 <p className="mt-1 max-w-lg text-xs leading-5 text-ink-meta">
                   {t("settings.network.legacyMonitoringDesc")}
                 </p>
+              </div>
+            ) : activeSnapshots.length === 0 && runtimeActivities.length > 0 ? (
+              <div className="divide-y divide-surface-border">
+                {runtimeActivities.slice(0, 10).map((activity) => (
+                  <article key={activity.id} className="px-5 py-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <h4 className="font-medium text-ink-heading">
+                          {networkRuntimeLabel(activity.runtime)}
+                        </h4>
+                        <Badge variant="metaNeutral">
+                          {t(`settings.network.activity.${activity.stage}`)}
+                        </Badge>
+                      </div>
+                      <span className="text-2xs text-ink-muted">
+                        {t("settings.network.activity.elapsed", {
+                          seconds: String(
+                            Math.max(
+                              0,
+                              Math.round((Date.now() - activity.startedAt) / 1000),
+                            ),
+                          ),
+                        })}
+                      </span>
+                    </div>
+                    <p className="mt-2 text-xs leading-5 text-ink-meta">
+                      {t("settings.network.activity.noRequestYet")}
+                    </p>
+                    {activity.targetOrigin && (
+                      <p className="mt-1 break-all text-2xs text-ink-muted">
+                        {activity.targetOrigin}
+                      </p>
+                    )}
+                  </article>
+                ))}
               </div>
             ) : activeSnapshots.length === 0 ? (
               <div className="flex flex-col items-center px-5 py-8 text-center">

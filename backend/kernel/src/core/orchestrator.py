@@ -71,6 +71,13 @@ ClaimNormalizerFactory = Callable[
 logger = logging.getLogger(__name__)
 
 
+class _DiscardEventSink:
+    """Sink used while a runtime is prepared before a user turn exists."""
+
+    async def emit(self, event: Event) -> None:
+        del event
+
+
 def _is_task_coverage_noop_tool_name(value: Any) -> bool:
     if not isinstance(value, str):
         return False
@@ -1077,6 +1084,11 @@ class SessionOrchestrator:
     ) -> None:
         self._store = store
         self._runtimes: dict[str, RuntimePort] = {}
+        # Owner is retained only while a runtime is warm. It lets a desktop
+        # network-mode transition rebuild the most-recent runtime without
+        # reading ambient request identity from a background task.
+        self._runtime_owners: dict[str, str] = {}
+        self._runtime_create_locks: dict[str, asyncio.Lock] = {}
         # session_id -> monotonic timestamp of the last turn START/END on that
         # cached runtime. Drives idle-TTL + LRU eviction. Mirrors the lifetime
         # of ``_runtimes`` exactly (added on create, dropped on evict/cleanup).
@@ -1129,6 +1141,50 @@ class SessionOrchestrator:
 
     def has_cached_runtime(self, session_id: str) -> bool:
         return session_id in self._runtimes
+
+    def warm_runtime_candidates(self, *, limit: int = 1) -> list[tuple[str, str]]:
+        """Return most-recent ``(owner, session)`` pairs eligible for rebuild."""
+        if limit <= 0:
+            return []
+        ordered = sorted(
+            (
+                (sid, used_at)
+                for sid, used_at in self._runtime_last_used.items()
+                if sid not in self._active and sid in self._runtime_owners
+            ),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        return [(self._runtime_owners[sid], sid) for sid, _ in ordered[:limit]]
+
+    async def evict_all_warm_runtimes(self) -> None:
+        """Close every idle cached runtime while keeping the backend alive."""
+        for session_id in list(self._runtimes):
+            if session_id not in self._active:
+                await self._evict_runtime(session_id)
+
+    async def prepare_runtime(self, user_id: str, session_id: str) -> None:
+        """Warm one session runtime without dispatching a model request."""
+        if session_id in self._active:
+            return
+        session, agent = await self._load_session(user_id, session_id)
+        bootstrap_session_workspace(session.cwd, agent.name or None)
+        runtime = await self._ensure_runtime(
+            session_id,
+            agent,
+            session,
+            _DiscardEventSink(),
+            session.cwd,
+            user_id=user_id,
+        )
+        try:
+            await runtime.prepare(session)
+        except Exception:
+            await self._evict_runtime(session_id)
+            raise
+        # Codex thread/start allocates ``runtime_session_id`` during prepare;
+        # persist it now so a later cache eviction resumes the same thread.
+        await self._store.save_session(session)
 
     def set_semantic_verifier_factory(
         self,
@@ -1423,6 +1479,7 @@ class SessionOrchestrator:
                 session,
                 observer,
                 session.cwd,
+                user_id=user_id,
             )
         except EgressRegistrationError as exc:
             # The desktop and non-model APIs remain usable when the egress
@@ -1680,6 +1737,8 @@ class SessionOrchestrator:
         self._session_approval_cache.clear(session_id)
         runtime = self._runtimes.pop(session_id, None)
         self._runtime_last_used.pop(session_id, None)
+        self._runtime_owners.pop(session_id, None)
+        self._runtime_create_locks.pop(session_id, None)
         if runtime is not None:
             try:
                 await runtime.close()
@@ -1706,6 +1765,8 @@ class SessionOrchestrator:
         session: Any,
         sink: EventSink,
         workspace_root: str,
+        *,
+        user_id: str | None = None,
     ) -> RuntimePort:
         from src.runtimes.factory import create_runtime
         from src.runtimes.network_egress import (
@@ -1719,44 +1780,43 @@ class SessionOrchestrator:
         # the zero-activity case; together they bound the live subprocess set.
         await self._sweep_idle_runtimes(exclude=session_id)
 
-        cached = self._runtimes.get(session_id)
-        if cached is not None:
-            cached.update_sink(sink)
-            self._runtime_last_used[session_id] = time.monotonic()
-            return cached
+        lock = self._runtime_create_locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            cached = self._runtimes.get(session_id)
+            if cached is not None:
+                cached.update_sink(sink)
+                self._runtime_last_used[session_id] = time.monotonic()
+                if user_id is not None:
+                    self._runtime_owners[session_id] = user_id
+                return cached
 
-        egress_descriptor = await prepare_runtime_egress(session_id, session)
-        try:
-            runtime = create_runtime(
-                agent,
-                session,
-                sink,
-                workspace_root=workspace_root,
-                egress_descriptor=egress_descriptor,
-            )
-        except Exception:
-            registry = get_network_egress_registry()
-            if registry is not None:
-                await registry.revoke(session_id)
-            raise
-        # Inject a session-rule finder so runtimes that wire
-        # ``approve_for_session`` can consult the kernel-owned cache
-        # before parking on the user. Implemented via duck-typed setter
-        # rather than a Protocol method so runtimes that haven't wired
-        # the verb yet (codex, claude in Phase 1) don't need a no-op
-        # implementation. Phase 2 / 3 will lift the setter onto
-        # ``RuntimePort`` once all three runtimes consume it.
-        setter = getattr(runtime, "set_session_rule_finder", None)
-        if callable(setter):
-            setter(self._build_session_rule_finder(session_id, runtime))
-        self._runtimes[session_id] = runtime
-        self._runtime_last_used[session_id] = time.monotonic()
-        # Enforce the hard LRU ceiling after admitting the new runtime. This is
-        # the guaranteed bound on concurrent warm subprocesses, independent of
-        # the TTL: no matter how many sessions are touched, at most
-        # ``_max_warm_runtimes`` claude/codex processes stay alive at once.
-        await self._enforce_runtime_cap(exclude=session_id)
-        return runtime
+            egress_descriptor = await prepare_runtime_egress(session_id, session)
+            try:
+                runtime = create_runtime(
+                    agent,
+                    session,
+                    sink,
+                    workspace_root=workspace_root,
+                    egress_descriptor=egress_descriptor,
+                )
+            except Exception:
+                registry = get_network_egress_registry()
+                if registry is not None:
+                    await registry.revoke(session_id)
+                raise
+            # Inject a session-rule finder so runtimes that wire
+            # ``approve_for_session`` can consult the kernel-owned cache
+            # before parking on the user.
+            setter = getattr(runtime, "set_session_rule_finder", None)
+            if callable(setter):
+                setter(self._build_session_rule_finder(session_id, runtime))
+            self._runtimes[session_id] = runtime
+            self._runtime_last_used[session_id] = time.monotonic()
+            if user_id is not None:
+                self._runtime_owners[session_id] = user_id
+            # Enforce the hard LRU ceiling after admitting the new runtime.
+            await self._enforce_runtime_cap(exclude=session_id)
+            return runtime
 
     # ── Warm-runtime eviction (idle TTL + LRU cap) ─────────────────────────
 
@@ -1883,6 +1943,8 @@ class SessionOrchestrator:
         this) when the session itself is going away."""
         runtime = self._runtimes.pop(session_id, None)
         self._runtime_last_used.pop(session_id, None)
+        self._runtime_owners.pop(session_id, None)
+        self._runtime_create_locks.pop(session_id, None)
         self._session_approval_cache.clear(session_id)
         if runtime is not None:
             try:

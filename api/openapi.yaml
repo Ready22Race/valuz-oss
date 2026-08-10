@@ -1483,6 +1483,39 @@ paths:
               schema:
                 $ref: "#/components/schemas/SystemStatusResponse"
 
+  /v1/system/network-egress:
+    post:
+      summary: Reconfigure desktop-managed model networking
+      operationId: reconfigureNetworkEgress
+      tags: [system]
+      description: |
+        Loopback desktop-control endpoint. Replaces the in-memory egress
+        capability, closes idle model runtimes, and prewarms the most recently
+        used runtime without restarting the backend process.
+      parameters:
+        - name: X-Valuz-Desktop-Token
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NetworkEgressReconfigureRequest"
+      responses:
+        "200":
+          description: Model networking reconfigured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NetworkEgressReconfigureResponse"
+        "401":
+          description: Desktop control capability missing or invalid
+        "409":
+          description: A model runtime is still active
+
   # ── Browser (managed chrome-devtools daemon; Settings panel) ──────────
 
   /v1/browser/status:
@@ -2835,6 +2868,34 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SessionDetail"
+
+  /v1/sessions/{session_id}/prepare:
+    post:
+      summary: Prepare a session model runtime
+      operationId: prepareSessionRuntime
+      tags: [sessions]
+      description: |
+        Initializes persistent model-client resources without dispatching user
+        content. Safe to call repeatedly; a later Send reuses the warm runtime.
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "202":
+          description: Runtime is ready
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ready]
+                properties:
+                  ready:
+                    type: boolean
+        "404":
+          description: Session not found
 
   /v1/sessions/{session_id}/queue:
     get:
@@ -6570,6 +6631,38 @@ components:
             Short, user-actionable explanation when ``available`` is
             ``false`` (e.g. ``"'codex' binary not found on PATH; install
             it first"``). ``null`` when available.
+
+    NetworkEgressReconfigureRequest:
+      type: object
+      properties:
+        bootstrap:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: Memory-only Electron egress bootstrap, or null for client-managed mode.
+        required_unavailable:
+          type: boolean
+          default: false
+        prewarm_limit:
+          type: integer
+          minimum: 0
+          maximum: 1
+          default: 1
+
+    NetworkEgressReconfigureResponse:
+      type: object
+      required: [configured, prewarmed_session_ids, prewarm_failed_session_ids]
+      properties:
+        configured:
+          type: boolean
+        prewarmed_session_ids:
+          type: array
+          items:
+            type: string
+        prewarm_failed_session_ids:
+          type: array
+          items:
+            type: string
 
     SystemStatusResponse:
       type: object

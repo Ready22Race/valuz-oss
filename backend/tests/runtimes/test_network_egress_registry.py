@@ -14,6 +14,7 @@ from src.runtimes.network_egress import (
     _parse_bootstrap,
     configure_network_egress,
     consume_network_egress_bootstrap,
+    desktop_control_authorized,
     get_network_egress_registry,
     provider_test_egress,
 )
@@ -40,6 +41,29 @@ def test_stdin_bootstrap_is_consumed_and_marker_removed() -> None:
     assert env == {"KEEP": "yes"}
     assert get_network_egress_registry() is not None
     configure_network_egress(None)
+
+
+def test_desktop_bootstrap_installs_control_capability_even_when_egress_is_off() -> None:
+    token = "desktop-control-" + "x" * 32
+    env = {"VALUZ_DESKTOP_BOOTSTRAP_STDIN": "1", "KEEP": "yes"}
+    assert consume_network_egress_bootstrap(
+        environ=env,
+        stdin=io.StringIO(
+            json.dumps(
+                {
+                    "version": 1,
+                    "desktopControlToken": token,
+                    "egressBootstrap": None,
+                    "egressRequired": False,
+                }
+            )
+            + "\n"
+        ),
+    )
+    assert env == {"KEEP": "yes"}
+    assert desktop_control_authorized(token)
+    assert not desktop_control_authorized("wrong-token")
+    assert get_network_egress_registry() is None
 
 
 def test_private_dev_bootstrap_file_is_consumed_and_deleted(tmp_path: Path) -> None:

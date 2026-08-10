@@ -175,6 +175,8 @@ class CodexRuntime:
         self._thread: AsyncThread | None = None
         self._active_turn: AsyncTurnHandle | None = None
         self._active_task: asyncio.Task[Any] | None = None
+        self._prepare_lock = asyncio.Lock()
+        self._background_prepare_tasks: set[asyncio.Task[Any]] = set()
         self._cancelled: bool = False
         # Tracks whether this runtime registered a toolkit endpoint so
         # ``close()`` can revoke it without needing the session reference.
@@ -264,6 +266,42 @@ class CodexRuntime:
     def update_sink(self, sink: EventSink) -> None:
         self.event_sink = sink
 
+    async def prepare(self, session: Session) -> None:
+        """Warm the Codex app-server and thread without dispatching a turn."""
+        task = asyncio.current_task()
+        turn_attempt_id = f"prepare-{uuid.uuid4().hex}"
+        if task is not None:
+            self._background_prepare_tasks.add(task)
+        try:
+            await self._prepare(
+                session,
+                turn_attempt_id=turn_attempt_id,
+            )
+        except BaseException:
+            # A best-effort prepare has no user turn whose normal ``run``
+            # finalizer could close the monitoring activity.
+            await self._emit_turn_phase(
+                "runtime_prepare_failed",
+                egress_runtime_key=session.id,
+                egress_turn_attempt_id=turn_attempt_id,
+            )
+            raise
+        finally:
+            if task is not None:
+                self._background_prepare_tasks.discard(task)
+
+    async def _prepare(self, session: Session, *, turn_attempt_id: str) -> None:
+        async with self._prepare_lock:
+            self._egress_runtime_key = session.id
+            self._egress_turn_attempt_id = turn_attempt_id
+            self._loop = asyncio.get_running_loop()
+            was_ready = self._codex is not None and self._thread is not None
+            self._materialize_skills(session)
+            await self._ensure_codex(session)
+            await self._ensure_thread(session)
+            if not was_ready:
+                await self._emit_turn_phase("runtime_ready")
+
     async def run(self, session: Session, user_message: UserMessage) -> None:
         from datetime import datetime
 
@@ -271,16 +309,12 @@ class CodexRuntime:
 
         session.status = "running"
         self._cancelled = False
-        self._egress_runtime_key = session.id
-        self._egress_turn_attempt_id = uuid.uuid4().hex
+        self._active_task = asyncio.current_task()
+        turn_attempt_id = uuid.uuid4().hex
 
         try:
-            self._loop = asyncio.get_running_loop()
-            self._materialize_skills(session)
-
-            await self._ensure_codex(session)
+            await self._prepare(session, turn_attempt_id=turn_attempt_id)
             assert self._codex is not None
-            await self._ensure_thread(session)
             assert self._thread is not None
 
             # ``/compact`` sent as a normal turn IS a real codex compaction:
@@ -348,7 +382,6 @@ class CodexRuntime:
                 now=datetime.now().astimezone(),
             )
 
-            self._active_task = asyncio.current_task()
             turn_kwargs = self._build_turn_kwargs(session)
             # Sync the live caches the sync approval handler reads from.
             # ``_cached_permission_mode`` is the only one that matters
@@ -370,6 +403,7 @@ class CodexRuntime:
             # just satisfies ``TurnStartParams``' required field.
             turn_input = UserInput(root=TextUserInput(type="text", text=prompt))
             t_dispatch = time.monotonic()
+            await self._emit_turn_phase("dispatch_started")
             turn_resp = await self._codex._client.turn_start(
                 self._thread.id,
                 prompt,
@@ -721,8 +755,21 @@ class CodexRuntime:
         task = self._active_task
         if task is not None and not task.done():
             task.cancel()
+        for prepare_task in tuple(self._background_prepare_tasks):
+            if not prepare_task.done():
+                prepare_task.cancel()
 
     async def close(self) -> None:
+        current = asyncio.current_task()
+        prepare_tasks = [
+            task
+            for task in self._background_prepare_tasks
+            if task is not current and not task.done()
+        ]
+        for task in prepare_tasks:
+            task.cancel()
+        if prepare_tasks:
+            await asyncio.gather(*prepare_tasks, return_exceptions=True)
         self._active_turn = None
         self._active_task = None
         self._thread = None
@@ -748,12 +795,23 @@ class CodexRuntime:
 
     # -- Lifecycle helpers --
 
-    async def _emit_turn_phase(self, phase: str, **fields: Any) -> None:
+    async def _emit_turn_phase(
+        self,
+        phase: str,
+        *,
+        egress_runtime_key: str | None = None,
+        egress_turn_attempt_id: str | None = None,
+        **fields: Any,
+    ) -> None:
         """Persisted latency marker — see ``turn_phase`` in ``events.py``."""
         await self.event_sink.emit(Event(type="turn_phase", data={"phase": phase, **fields}))
         await record_runtime_egress_phase(
-            getattr(self, "_egress_runtime_key", None),
-            getattr(self, "_egress_turn_attempt_id", None),
+            egress_runtime_key
+            if egress_runtime_key is not None
+            else getattr(self, "_egress_runtime_key", None),
+            egress_turn_attempt_id
+            if egress_turn_attempt_id is not None
+            else getattr(self, "_egress_turn_attempt_id", None),
             phase,
         )
 
@@ -761,6 +819,7 @@ class CodexRuntime:
         if self._codex is not None:
             return
         t0 = time.monotonic()
+        await self._emit_turn_phase("runtime_init_started")
         expose_toolkit = self._register_toolkit_if_eligible(session)
         cfg = CodexConfig(
             codex_bin=_resolve_codex_bin(),
@@ -868,6 +927,7 @@ class CodexRuntime:
         # consumption path is unchanged.
         common = self._build_thread_kwargs(session)
         t0 = time.monotonic()
+        await self._emit_turn_phase("thread_init_started")
         if session.runtime_session_id:
             # NB: ``ThreadResumeParams.model`` is documented as
             # "Configuration overrides for the resumed thread, if any."

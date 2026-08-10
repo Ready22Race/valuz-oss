@@ -63,11 +63,16 @@ VALUZ_EGRESS_FRONTENDS=0 ./scripts/dev.sh  # emergency: disable desktop network 
 
 The desktop makes both connection-management choices available without a launch
 flag. New installations start with model-client-managed connections; switching
-to Valuz management in Settings rebuilds the managed backend with a private
-one-shot bootstrap. If tasks are running, Settings asks before interrupting
-them; confirmed tasks are interrupted before the mode is saved and the backend
-is restarted. See [the unified network egress design](docs/design/unified-network-egress.md)
-for its admission matrix and remaining rollout gates.
+to Valuz management in Settings replaces the backend's in-memory network
+registry and rebuilds only affected model runtimes. The normal same-version
+path keeps the backend process running; restart is a compatibility fallback for
+an older or unhealthy backend. If tasks are active, Settings asks before
+interrupting them and leaves the current mode unchanged when the user cancels
+or an interrupt fails. Opening an existing idle Codex session prepares its
+local app-server/thread in the background without sending a model request, so a
+later Send can reuse it. See [the unified network egress design](docs/design/unified-network-egress.md)
+for the security boundary, admission matrix, monitoring semantics, and rollout
+gates.
 
 ## Tech Stack
 

@@ -1192,7 +1192,7 @@
       "modeSectionTitle": "Who manages model connections",
       "modeSectionDesc": "Choose whether Valuz selects connection routes centrally or Codex, Claude Code, and other model clients manage them individually. Switching rebuilds model connections; if tasks are running, Valuz asks before interrupting them.",
       "statusLabel": "Current model connections",
-      "statusDesc": "Shows routes, health, and stage timings only for model requests that are currently running. Entries disappear when the turn ends and update every 3 seconds.",
+      "statusDesc": "Shows the full active path from model-client initialization through connection and response. Entries disappear when the task ends and update every 3 seconds.",
       "loading": "Reading status…",
       "loadFailed": "Failed to load network status",
       "desktopOnly": "Network egress management is available only in the desktop app.",
@@ -1225,6 +1225,15 @@
       "copyDiagnostics": "Copy diagnostics",
       "copied": "Network diagnostics copied with sensitive information hidden",
       "copyFailed": "Failed to copy diagnostics",
+      "activity": {
+        "runtimeInit": "Starting model client",
+        "threadInit": "Loading session and tools",
+        "modelConnecting": "Connecting to model service",
+        "waitingResponse": "Waiting for model response",
+        "streaming": "Receiving model output",
+        "elapsed": "{seconds}s elapsed",
+        "noRequestYet": "The client is still initializing locally and has not sent a model network request yet."
+      },
       "health": {
         "unknown": "Waiting for model response",
         "healthy": "Connection healthy",

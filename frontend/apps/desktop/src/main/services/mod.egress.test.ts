@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
     development?: boolean;
     egressBootstrap?: EgressBootstrap | null;
     egressRequired?: boolean;
+    desktopControlToken?: string;
   }>,
 }));
 
@@ -21,6 +22,7 @@ vi.mock("./sidecar", () => ({
     development?: boolean;
     egressBootstrap?: EgressBootstrap | null;
     egressRequired?: boolean;
+    desktopControlToken?: string;
   }) => {
     mocks.sidecarOptions.push(options);
     return {
@@ -82,6 +84,10 @@ describe("DesktopServiceManager egress lifecycle", () => {
     await manager.startAllServices();
     expect(mocks.sidecarOptions[0].egressBootstrap?.bootstrapToken).toBe(
       "memory-only-token",
+    );
+    expect(mocks.sidecarOptions[0].desktopControlToken).toHaveLength(64);
+    expect(mocks.sidecarOptions[0].desktopControlToken).not.toBe(
+      manager.getAgentServerInfo().token,
     );
     await manager.stopAllServices();
 

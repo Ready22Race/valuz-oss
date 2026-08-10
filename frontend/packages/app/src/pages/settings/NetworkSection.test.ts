@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildEgressDiagnosticsExport } from "./network-diagnostics";
 import {
   currentNetworkSnapshots,
+  currentRuntimeActivities,
   isManagedNetworkMode,
   networkHealthDetailKey,
   networkRouteKey,
@@ -56,6 +57,56 @@ describe("network status presentation", () => {
     expect(isManagedNetworkMode("auto")).toBe(true);
     expect(isManagedNetworkMode("direct")).toBe(true);
     expect(isManagedNetworkMode("off")).toBe(false);
+  });
+
+  it("shows local runtime initialization before a model request exists", () => {
+    expect(
+      currentRuntimeActivities(
+        [
+          {
+            clientId: "client-1",
+            turnAttemptId: "turn-1",
+            phase: "runtime_init_started",
+            observedAt: 1_000,
+            runtime: "codex",
+            targetOrigin: "https://chatgpt.com",
+          },
+          {
+            clientId: "client-1",
+            turnAttemptId: "turn-1",
+            phase: "thread_init_started",
+            observedAt: 2_000,
+            runtime: "codex",
+          },
+        ],
+        3_000,
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        runtime: "codex",
+        stage: "threadInit",
+        startedAt: 1_000,
+      }),
+    ]);
+    expect(
+      currentRuntimeActivities(
+        [
+          {
+            clientId: "client-1",
+            turnAttemptId: "turn-1",
+            phase: "runtime_init_started",
+            observedAt: 1_000,
+          },
+          {
+            clientId: "client-1",
+            turnAttemptId: "turn-1",
+            phase: "runtime_ready",
+            observedAt: 2_000,
+          },
+        ],
+        3_000,
+      ),
+    ).toEqual([]);
   });
 
   it("offers diagnostic export only when a real connection has a problem", () => {

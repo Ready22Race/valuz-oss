@@ -592,6 +592,10 @@ class ClaudeAgentRuntime:
     def update_sink(self, sink: EventSink) -> None:
         self.event_sink = sink
 
+    async def prepare(self, session: Session) -> None:
+        """Claude prewarming is deferred until its client lifecycle is isolated."""
+        del session
+
     async def _emit_turn_phase(self, phase: str, **fields: Any) -> None:
         """Persisted latency marker — see ``turn_phase`` in ``events.py``."""
         await self.event_sink.emit(Event(type="turn_phase", data={"phase": phase, **fields}))

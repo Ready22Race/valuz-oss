@@ -2,7 +2,9 @@ export type EgressMode = "auto" | "direct" | "off";
 
 export interface EgressManagerStatus {
   mode: EgressMode;
+  /** Whether the desktop egress capability is available (not the active mode). */
   enabled: boolean;
+  /** Whether the local egress listeners are currently running. */
   started: boolean;
   emergencyOverride: boolean;
   snapshotCount: number;

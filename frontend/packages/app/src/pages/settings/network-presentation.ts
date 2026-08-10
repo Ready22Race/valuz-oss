@@ -25,6 +25,89 @@ export const currentNetworkSnapshots = <
     )
     .sort((left, right) => right.updatedAt - left.updatedAt);
 
+export interface RuntimeActivity {
+  id: string;
+  runtime: string;
+  targetOrigin?: string;
+  stage:
+    | "runtimeInit"
+    | "threadInit"
+    | "modelConnecting"
+    | "waitingResponse"
+    | "streaming";
+  startedAt: number;
+  updatedAt: number;
+}
+
+export const currentRuntimeActivities = (
+  phases: Array<{
+    clientId?: unknown;
+    turnAttemptId?: unknown;
+    phase?: unknown;
+    observedAt?: unknown;
+    runtime?: unknown;
+    targetOrigin?: unknown;
+  }>,
+  now = Date.now(),
+): RuntimeActivity[] => {
+  const grouped = new Map<string, RuntimeActivity & { terminal: boolean }>();
+  for (const phase of phases) {
+    if (
+      typeof phase.clientId !== "string" ||
+      typeof phase.turnAttemptId !== "string" ||
+      typeof phase.phase !== "string" ||
+      typeof phase.observedAt !== "number"
+    ) {
+      continue;
+    }
+    const id = `${phase.clientId}:${phase.turnAttemptId}`;
+    const previous = grouped.get(id);
+    const stage: RuntimeActivity["stage"] =
+      phase.phase === "runtime_init_started" || phase.phase === "runtime_init"
+        ? "runtimeInit"
+        : phase.phase === "thread_init_started" || phase.phase === "thread_init"
+          ? "threadInit"
+          : phase.phase === "dispatch_started"
+            ? "modelConnecting"
+            : phase.phase === "dispatch"
+              ? "waitingResponse"
+              : "streaming";
+    grouped.set(id, {
+      id,
+      runtime:
+        typeof phase.runtime === "string"
+          ? phase.runtime
+          : previous?.runtime ?? "model",
+      targetOrigin:
+        typeof phase.targetOrigin === "string"
+          ? phase.targetOrigin
+          : previous?.targetOrigin,
+      stage,
+      startedAt: previous?.startedAt ?? phase.observedAt,
+      updatedAt: phase.observedAt,
+      terminal: [
+        "runtime_ready",
+        "runtime_prepare_failed",
+        "turn_complete",
+        "interrupted",
+      ].includes(phase.phase),
+    });
+  }
+  return [...grouped.values()]
+    .filter((activity) => !activity.terminal && now - activity.updatedAt < 5 * 60_000)
+    .sort((left, right) => right.updatedAt - left.updatedAt)
+    .map(
+      (activity): RuntimeActivity => ({
+        id: activity.id,
+        runtime: activity.runtime,
+        targetOrigin: activity.targetOrigin,
+        stage: activity.stage,
+        startedAt: activity.startedAt,
+        updatedAt: activity.updatedAt,
+      }),
+    );
+};
+
 export const networkRuntimeLabel = (runtime: string): string =>
   ({
     codex: "Codex",

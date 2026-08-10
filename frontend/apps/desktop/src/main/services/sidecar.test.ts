@@ -73,6 +73,21 @@ describe("configureSidecarEgressEnvironment", () => {
     configureSidecarEgressEnvironment(env, null, true);
     expect(env).toEqual({ VALUZ_EGRESS_REQUIRED: "1" });
   });
+
+  it("always exposes the desktop stdin channel without copying its token", () => {
+    const env = {
+      VALUZ_EGRESS_BOOTSTRAP_STDIN: "stale",
+      VALUZ_DESKTOP_BOOTSTRAP_STDIN: "stale",
+    };
+    configureSidecarEgressEnvironment(
+      env,
+      null,
+      false,
+      "desktop-memory-only-token-that-is-long-enough",
+    );
+    expect(env).toEqual({ VALUZ_DESKTOP_BOOTSTRAP_STDIN: "1" });
+    expect(JSON.stringify(env)).not.toContain("desktop-memory-only-token");
+  });
 });
 
 describe("killWindowsProcessTree", () => {

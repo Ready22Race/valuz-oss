@@ -1,6 +1,6 @@
 # 统一网络出口管理 — 设计
 
-> 状态：**Implemented canary / Revision 4**（2026-08-10）。本文是 Valuz 统一网络出口能力的单一设计来源；桌面能力与设置入口默认可用，但新安装默认由模型客户端管理，用户需在设置页主动启用 Valuz 管理。
+> 状态：**Implemented canary / Revision 5**（2026-08-11）。本文是 Valuz 统一网络出口能力的单一设计来源；桌面能力与设置入口默认可用，但新安装默认由模型客户端管理，用户需在设置页主动启用 Valuz 管理。
 >
 > 取向一句话：**桌面端由 Electron 提供统一的路由解析与上游连接内核；Codex/Claude 通过各自的模型 `base_url` 接入仅监听 loopback 的薄模型入口，DeepAgents/Provider Test 通过显式 HTTP transport 接入正向出口，两类前端共享原始代理环境变量、系统代理/PAC 与直连决策，同时禁止把 Valuz 新增的标准代理变量扩散到 agent shell、MCP 或整个 sidecar。**
 
@@ -31,7 +31,7 @@ Valuz 当前支持多个 runtime 和第三方模型通道，但每个 runtime �
 
 ### 0.1 当前实现与准入状态
 
-Revision 3 已在代码中形成一条可运行、用户选择后启用的 canary 路径：Electron main process 持有 Resolver、Upstream Connector、薄模型入口、正向出口、控制面和本地诊断；backend 只消费一次性 bootstrap，并按 runtime instance 申请短期 descriptor。打包版和开发 canary 都由 Electron 管理 backend 进程，并通过继承的 stdin 交付 bootstrap；开发版启动当前源码 backend，使用独立的 `~/.valuz-oss-dev` 数据目录。两条路径都不会把出口 secret 写进普通环境变量或日志。
+Revision 5 已在代码中形成一条可运行、用户选择后启用的 canary 路径：Electron main process 持有 Resolver、Upstream Connector、薄模型入口、正向出口、控制面和本地诊断；backend 启动时从 stdin 消费一次桌面控制 envelope，并按 runtime instance 申请短期 descriptor。该 envelope 同时携带只用于 loopback 控制 API 的随机桌面令牌和当前 egress bootstrap；后续模式切换通过令牌鉴权的本地控制接口替换内存 bootstrap，无需重启整个 backend。打包版和开发 canary 都由 Electron 管理 backend 进程；开发版启动当前源码 backend，使用独立的 `~/.valuz-oss-dev` 数据目录。令牌、bootstrap 和出口 secret 都不会写进普通环境变量或日志。
 
 使用方式：
 
@@ -70,6 +70,8 @@ VALUZ_EGRESS_FRONTENDS=0 ./scripts/dev.sh
 2026-08-07 的实现验证快照：使用仓库支持的 bundled Node 24 执行 `make test-all`，backend 为 3672 passed / 4 skipped，frontend 为 181 files / 1314 tests passed；本次改动的 Ruff、desktop/app ESLint、desktop/frontend typecheck 与新增 backend 定向 Mypy 均无新增错误。全仓 `make typecheck` 仍被既有 65 个 backend 文件中的 277 条 Mypy 债务阻断，`make lint` 仍先被 8 条既有跨模块 datastore 边界违规阻断；frontend 全量 lint 的 design-audit 也存在与本功能文件无关的既有 baseline 增量。因此 §16.19 尚不是“全仓绿色”，不能把 Valuz 管理设为新安装默认值。
 
 2026-08-10 的订阅、请求级监控与设置页 UX 验证快照：在本机 Node 25 下用 `NODE_OPTIONS=--no-experimental-webstorage make test-all` 避开 Node 全局实验性 Web Storage 与 jsdom 的环境冲突，backend 为 3679 passed / 4 skipped，frontend 为 182 files / 1333 tests passed；变更 Python 文件的 Ruff、变更 frontend 文件的 ESLint、frontend 全量 typecheck 均通过。全仓 `make typecheck` 仍被同一批 65 个 backend 文件中的 277 条既有 Mypy 债务阻断，`make lint` 仍先被 8 条既有跨模块 datastore 边界违规阻断；frontend 的 ESLint 全部完成且无 error，但其 design-audit 仍被与本功能文件无关的既有 baseline 增量阻断。这些 baseline 与本次订阅/出口路径及设置页优化无关，因此首次默认仍保持模型客户端管理。
+
+2026-08-11 的动态切换与 Codex 预热验证快照：backend 全量为 3685 passed / 4 skipped；frontend 在默认高并发下有 5 个无关 UI 文件发生 5 秒超时，改用 `make test-frontend ARGS="--maxWorkers=1"` 后 182 files / 1335 tests 全部通过。新增动态控制、预热中断竞态、runtime 阶段和设置页定向回归共 70 项通过；变更 Python 文件的 Ruff、desktop/app/core/shared ESLint 与 frontend 9 个 package 的 typecheck 均无 error。全仓 `make typecheck` 仍被同一批 65 个 backend 文件中的 277 条既有 Mypy 债务阻断，`make lint` 仍先被 8 条既有跨模块 datastore 边界违规阻断。`make generate-types` 当前也指向 frontend 中不存在的 `generate-types` script；本次按 OpenAPI-first 更新了契约并使用显式客户端方法，但生成器入口需要作为独立仓库工具链修复。
 
 ---
 
@@ -153,7 +155,7 @@ ModelProvider {
 7. **运行形态兼容**：打包桌面端完整支持；开发模式可重复；headless 不依赖 Electron。
 8. **安全默认值**：仅 loopback 监听、不安装本地 CA、不记录凭证或模型正文、不在需要代理时静默裸直连；对可接触明文的模型入口单独威胁建模。
 9. **作用域可证明**：统一出口只影响纳入范围的模型传输；agent shell、MCP、浏览器、更新器和其他 backend HTTP client 不因实现方式被隐式改道。
-10. **可恢复上线**：`off` 旧版恢复路径与当前网络行为严格等价；网络切换、诊断闭环和恢复入口必须同阶段交付。
+10. **可恢复上线**：`off` 独立连接路径与当前网络行为严格等价；网络切换、诊断闭环和恢复入口必须同阶段交付。
 
 ### 2.2 非目标
 
@@ -224,7 +226,7 @@ VALUZ_EGRESS_MODE=off（紧急覆盖）
   > 默认 auto
 ```
 
-从 `auto/direct` 切换到 `off` 需要重建 backend 和相关 runtime。设置页根据全局 running-runs 状态提示运行任务数量；用户点击切换时，若有前台 turn 或后台任务，必须明确确认“中断任务并继续”。确认后 Electron 主进程先调用各 session 的 interrupt 接口并等待它们完成 idle 收敛，再修改模式、落盘和重启 backend；用户取消则不得改变任何状态。主进程在修改前再次查询 backend：renderer 没有携带确认标记时以 `egress_mode_change_blocked_by_active_runs` 拒绝切换，避免多窗口和状态竞态绕过确认；中断失败时保持原模式并提示手动停止。若活动状态探测时 backend 已不可达则允许切换，以免阻断恢复路径。不得自动重放已经发送的请求。界面使用中性的“由 Valuz 管理连接 / 由模型客户端管理连接”，而不是 `auto/off`、“旧版”或“兼容模式”等带技术实现或价值判断的术语；说明只陈述线路选择方、监控能力和切换时会重建连接。
+在 `auto/direct` 与 `off` 之间切换需要撤销并重建相关 runtime 的网络描述符，但同版本正常路径不重启 backend。设置页根据全局 running-runs 状态提示运行任务数量；用户点击切换时，若有前台 turn 或后台任务，必须明确确认“中断任务并继续”。确认后 Electron 主进程先调用各 session 的 interrupt 接口并等待它们完成 idle 收敛，再修改模式、落盘，并调用只监听 loopback、由随机桌面令牌鉴权的控制接口替换 backend 内存中的 egress registry；用户取消则不得改变任何状态。backend 会拒绝仍有活动 runtime 的替换请求，主进程允许短暂等待 turn 清理完成；只有旧版本或不健康的 backend 不支持动态控制时才回退为进程重启。不得自动重放已经发送的请求。界面使用中性的“由 Valuz 管理连接 / 由模型客户端管理连接”，而不是 `auto/off`、“旧版”或“兼容模式”等带技术实现或价值判断的术语；说明只陈述线路选择方、监控能力和切换会重建后续模型连接。
 
 ---
 
@@ -433,14 +435,15 @@ Electron ready
   → start Egress Manager
   → 得到内存中的 control capability
   → start valuz-server sidecar
-  → 通过一次性 bootstrap channel 交付 control capability
+  → 通过 stdin 一次性交付 desktop control envelope
+  → backend 在内存中消费 egress bootstrap
   → backend health ready
   → renderer 可用
 ```
 
-`off` 模式不启动 Egress Manager、不交付描述符，也不改变 sidecar 现有 spawn env。它必须与本设计落地前的当前网络路径严格等价。
+`off` 模式不启动 Egress Manager、不交付 egress descriptor，也不改变模型客户端现有网络 env。Electron 仍向自己管理的 backend 交付只用于本机动态模式切换的 desktop control token；该 token 不携带代理配置、不进入 runtime 或工具子进程，`off` 下模型流量必须与本设计落地前的网络路径严格等价。
 
-若 Egress Manager 初始化失败，Electron 仍可启动 backend 和 renderer 以展示诊断，但 backend 必须把模型网络标记为 unavailable；不能在用户不知情时按旧路径发送模型请求。用户选择“由模型客户端管理连接”后，才按 `off` 语义重建 runtime/sidecar。
+若 Egress Manager 初始化失败，Electron 仍可启动 backend 和 renderer 以展示诊断，但 backend 必须把模型网络标记为 unavailable；不能在用户不知情时按旧路径发送模型请求。用户选择“由模型客户端管理连接”后，才按 `off` 语义动态替换 registry 并重建受影响 runtime。
 
 停止顺序：
 
@@ -452,7 +455,7 @@ Electron ready
   → Electron 退出
 ```
 
-`frontend/apps/desktop/src/main/index.ts` 的 `bootstrap()` 负责在服务启动前确定模式并准备出口；`services/mod.ts` 持有出口描述符；`services/sidecar.ts` 只建立 bootstrap channel，不自行解析系统代理，也不向 sidecar 全局写入 `HTTP_PROXY` / `HTTPS_PROXY`。
+`frontend/apps/desktop/src/main/index.ts` 的 `bootstrap()` 负责在服务启动前确定模式并准备出口；`services/mod.ts` 持有出口描述符；`services/sidecar.ts` 只建立 desktop control envelope，不自行解析系统代理，也不向 sidecar 全局写入 `HTTP_PROXY` / `HTTPS_PROXY`。桌面控制 token 只存在于 Electron 与 backend 内存中；renderer 无法取得它。
 
 ### 7.2 开发模式
 
@@ -462,13 +465,25 @@ Electron ready
 
 1. launcher 安装 backend/frontend 依赖后只启动 desktop dev shell，不再单独持有外部 backend。
 2. Egress Manager 默认绑定 `127.0.0.1:0`，让操作系统分配端口。只有开发者显式设置 `VALUZ_EGRESS_PROXY_PORT` 时才固定端口。
-3. Electron 从当前源码启动 backend，使用 `VALUZ_BACKEND_PORT`（默认 `8000`）和开发数据目录，并通过子进程 stdin 交付一次性 bootstrap。
-4. 在“由 Valuz 管理连接”和“由模型客户端管理连接”之间切换时，Electron 先查询运行任务；有任务则等待用户确认并逐个 interrupt，全部成功后才停止旧 backend、按新模式重新注入或移除 bootstrap，并等待健康检查成功后完成切换。取消或 interrupt 失败时不改变模式。
+3. Electron 从当前源码启动 backend，使用 `VALUZ_BACKEND_PORT`（默认 `8000`）和开发数据目录，并通过子进程 stdin 交付一次性 desktop control envelope。
+4. 在“由 Valuz 管理连接”和“由模型客户端管理连接”之间切换时，Electron 先查询运行任务；有任务则等待用户确认并逐个 interrupt，全部成功后通过本机鉴权控制接口替换 egress registry、撤销旧 runtime descriptor，并预热最近使用的一个 Codex session。取消或 interrupt 失败时不改变模式；旧 backend 不支持控制接口或控制面异常时才回退为 backend restart。
 5. 任一进程退出时，Electron 清理受管 backend、capability 和本地监听器。
 
 Electron 的 UI 本来就允许等待 backend，因此受管启动不会改变产品语义。`backend` 单独模式不启动桌面出口，继续使用调用者显式提供的代理 env 或直连。即使当前选择为 `off`，开发 backend 仍由 Electron 管理，保证后续切回 Valuz 管理时能够完整重建链路。
 
-### 7.3 Headless
+### 7.3 Runtime 准备与模式切换
+
+Codex 的首轮等待包含两段性质不同的时间：本地 app-server/thread 初始化，以及模型请求发出后的上游首事件等待。不能通过增加代理超时或伪造网络状态掩盖前一段。桌面版采用以下生命周期：
+
+1. 用户打开一个已有且空闲的 session 时，前端异步调用 `prepare`；Codex runtime 创建 app-server 和 thread，但不发送 Prompt 或模型请求。
+2. 同一 session 真正发送消息时复用已准备的 runtime；每个 session 的创建由互斥锁串行化，避免打开页面和点击发送并发启动两个 Codex 进程。
+3. backend 只缓存有限数量的空闲 runtime。切换网络所有权时，先记录最近使用的候选，关闭全部旧 descriptor/runtime，替换 egress registry，再最多预热一个最近 session，避免切换后第一次发送重新承担完整冷启动。
+4. `prepare` 失败只清理该 runtime，不回滚已成功的网络模式切换；后续正常发送仍可重新创建并给出真实错误。
+5. 预热不得发起模型生成、自动重放旧请求或产生用户可见消息；Codex 分配出的 thread ID 需要保存，保证后续复用语义一致。
+
+Claude/DeepAgents 首期实现 `prepare` 契约但不主动创建远端会话；当前预热收益和实测问题都集中在 Codex。若后续为其他 runtime 增加预热，必须证明不会触发计费请求、认证副作用或权限提示。
+
+### 7.4 Headless
 
 无 Electron 时不创建本地出口：
 
@@ -481,7 +496,7 @@ Electron 的 UI 本来就允许等待 backend，因此受管启动不会改变�
 
 Headless 未来可以提供独立的 `valuz-egress` 进程，但不属于本期。
 
-### 7.4 Sandbox / Remote kernel
+### 7.5 Sandbox / Remote kernel
 
 出口必须属于执行 runtime 的那台主机：
 
@@ -493,7 +508,7 @@ Headless 未来可以提供独立的 `valuz-egress` 进程，但不属于本期�
 
 ## 8. 接入契约与环境隔离
 
-### 8.1 Electron → sidecar bootstrap
+### 8.1 Electron → sidecar desktop control envelope
 
 `auto/direct` 模式下，Electron 生成仅存于本次应用生命周期的 bootstrap capability：
 
@@ -503,6 +518,13 @@ interface EgressBootstrap {
   controlEndpoint: string
   bootstrapToken: string // 只允许注册/撤销 runtime client 与读取脱敏诊断
   expiresAt: number
+}
+
+interface DesktopControlEnvelope {
+  version: 1
+  desktopControlToken: string // 仅鉴权 backend loopback 动态控制 API
+  egressBootstrap: EgressBootstrap | null
+  egressRequired: boolean
 }
 
 type EgressClientDescriptor =
@@ -527,13 +549,13 @@ interface ModelIngressRegistration {
 }
 ```
 
-bootstrap capability 通过一次性 channel 交付给 backend，backend 消费后只保存在内存中；创建 runtime 时，DeepAgents/Provider Test 申请 `forward_proxy`，Codex/Claude 以真实上游注册后申请 `model_ingress`。真实上游只能经 control channel 注册，不能由模型入口的普通 HTTP 请求指定。桌面打包版与开发 canary 均使用受管子进程继承的 stdin；受限权限、读取后立即删除的文件 channel 只保留为非桌面集成能力，不参与当前 dev launcher。禁止把 bootstrap 或 client descriptor 放进：
+desktop control envelope 通过一次性 stdin channel 交付给 backend，backend 消费后只保存在内存中；后续所有权切换由 Electron 携带 `desktopControlToken` 调用 loopback API，替换的 bootstrap 仍不落盘。创建 runtime 时，DeepAgents/Provider Test 申请 `forward_proxy`，Codex/Claude 以真实上游注册后申请 `model_ingress`。真实上游只能经 control channel 注册，不能由模型入口的普通 HTTP 请求指定。受限权限、读取后立即删除的文件 channel 只保留为非桌面集成能力，不参与当前 dev launcher。禁止把 desktop control token、bootstrap 或 client descriptor 放进：
 
 - sidecar 的全局 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`。
 - 普通配置文件、数据库、stdout/stderr 或 crash metadata。
 - agent shell、MCP、浏览器和其他普通子进程环境。
 
-`off` 模式没有描述符，也不创建 bootstrap channel。Electron 启动时只读取 `VALUZ_EGRESS_MODE=off` 作为紧急覆盖；它不是传给模型工具的代理配置。
+`off` 模式没有 egress descriptor，envelope 中的 `egressBootstrap` 为 `null`；仍保留 desktop control token，才能在不重启 backend 的情况下从设置页切回 Valuz 管理。此时动态控制请求的 `required_unavailable` 必须为 `false`：`enabled` 只表示桌面出口能力可用，不能被误解为当前已选择 Valuz 管理，否则会把正常的独立连接模式错误写成 fail-loud 状态。Electron 启动时只读取 `VALUZ_EGRESS_MODE=off` 作为紧急覆盖；它不是传给模型工具的代理配置。
 
 ### 8.2 Runtime-scoped adapter
 
@@ -548,7 +570,7 @@ Backend 的 Egress client registry 按 runtime instance mint、持有并撤销 c
 
 Codex/Claude 的标准代理 env 路线已经由 §3.1 spike 判定不满足作用域要求，不再是待选 fallback。Codex 的 `respect_system_proxy` 只可作为独立兼容/诊断实验，不能宣称已接入 Valuz Egress Manager，也不能替代本设计的路由监控和 fail-loud 语义。
 
-这里允许保留用户原本提供的 proxy env：`off` 旧版恢复路径和非纳入流量继续遵循当前行为。为确保本地 `baseUrl` 不被用户原代理错误捕获，adapter 可以在 runtime CLI 的既有 `NO_PROXY` 上合并 `127.0.0.1`、`::1`、`localhost`；该最小 bypass 不能覆盖用户条目，也不能被 Resolver 当作上游策略。禁止的是由 Valuz 新增 loopback `HTTP(S)_PROXY` 或正向出口凭证向无关子进程级联。
+这里允许保留用户原本提供的 proxy env：`off` 独立连接路径和非纳入流量继续遵循当前行为。为确保本地 `baseUrl` 不被用户原代理错误捕获，adapter 可以在 runtime CLI 的既有 `NO_PROXY` 上合并 `127.0.0.1`、`::1`、`localhost`；该最小 bypass 不能覆盖用户条目，也不能被 Resolver 当作上游策略。禁止的是由 Valuz 新增 loopback `HTTP(S)_PROXY` 或正向出口凭证向无关子进程级联。
 
 ### 8.3 凭证生命周期与清理
 
@@ -639,7 +661,7 @@ runtime 最终可能只能看到通用 HTTP/CONNECT 失败，但诊断面板和�
 | 出口建连正常但模型首事件慢 | “已连接，正在等待模型响应” | 继续等待、取消任务；不建议切换代理 |
 | 隧道/relay 中途断开 | “网络连接已中断，模型客户端正在恢复” | 显示 runtime 重连进度、允许取消 |
 
-内部 `direct` 只对后续新请求生效，不能把正在进行或已发送的请求迁移到直连；普通设置页不提供该入口。“由模型客户端管理连接”进入 `off` 并重建相关 runtime；需要明确提示模型连接会重启。若存在运行任务，入口仍可点击，但必须把任务数量、立即中断和未完成内容可能丢失写入确认提示；确认后执行 interrupt → mode persist → backend restart，取消或 interrupt 失败保持原模式。任何用户恢复动作都必须由用户触发，监控状态本身不能静默改变网络策略。
+内部 `direct` 只对后续新请求生效，不能把正在进行或已发送的请求迁移到直连；普通设置页不提供该入口。“由模型客户端管理连接”进入 `off` 并重建相关 runtime；需要明确提示后续模型连接会重建。若存在运行任务，入口仍可点击，但必须把任务数量、立即中断和未完成内容可能丢失写入确认提示；确认后执行 interrupt → mode persist → live registry replace → affected runtime rebuild，取消或 interrupt 失败保持原模式。只有动态控制不可用时才回退为 backend restart。任何用户恢复动作都必须由用户触发，监控状态本身不能静默改变网络策略。
 
 ---
 
@@ -741,17 +763,20 @@ interface EgressSnapshot {
 
 ### 11.3 与 runtime 时间线关联
 
-Kernel 已有 `turn_phase`（例如 `runtime_init`、`thread_init`、`dispatch`）。诊断按以下顺序关联：
+Kernel 通过 `turn_phase` 同时上报阶段开始与完成。诊断按以下顺序关联：
 
 ```text
-runtime_init / thread_init
-→ dispatch
+runtime_init_started → runtime_init
+→ thread_init_started → thread_init → runtime_ready | runtime_prepare_failed
+→ dispatch_started → dispatch
 → route_resolve
 → candidate_connect
 → stream_established
 → model_first_event
 → turn_complete / interrupted
 ```
+
+`runtime_ready` 是仅准备 runtime 的成功终止阶段，不表示已经向模型发起请求；`runtime_prepare_failed` 用于关闭失败或被模式切换取消的后台准备活动。`dispatch_started` 之后仍未出现 egress attempt 时，监控应显示“正在准备模型请求”，不能显示“没有连接”或伪造代理健康。真实 egress snapshot 出现后，用它替换同一 runtime 的本地初始化卡片，避免把一次任务展示成两条连接。
 
 `client_id` 把连接精确归属到某个 runtime instance。模型入口的 client 是 control channel 预注册的，因此可以准确知道 runtime 与真实 upstream；正向 CONNECT 仍看不到 TLS 内部的具体模型请求。两类前端都默认用“runtime instance + target origin + 时间窗口”关联到 turn，并在快照中诚实标记 `correlationConfidence`；并发 session 不能因为入口知道 runtime 就伪装成精确 turn 关联。
 
@@ -775,7 +800,7 @@ Python 与 Electron 的 monotonic clock 不共享时间原点，因此 Electron 
 
 Egress Manager 在内存维护同时受“最大条数”和“最大时间窗口”限制的事件环；具体常量集中定义。第一阶段通过 Electron IPC 暴露当前快照和脱敏时间线，不进入公开 backend API，也不跨应用重启保存详细网络历史。
 
-设置页将“谁来管理模型连接”和“当前模型连接”分开：前者只在“由 Valuz 统一管理”和“由模型客户端自行连接”之间选择，普通用户不直接操作内部 `direct`；后者只展示当前仍在执行的真实模型请求所使用的线路、健康状态和分阶段耗时。runtime 可以在 turn 结束后继续留在预热缓存中，但 `turn_complete/interrupted` 到达后对应快照必须立即退出“当前连接”列表；脱敏诊断事件仍可在内存环中保留。监控区首屏只显示：
+设置页将“谁来管理模型连接”和“当前模型连接”分开：前者只在“由 Valuz 统一管理”和“由模型客户端自行连接”之间选择，普通用户不直接操作内部 `direct`；后者展示当前正在初始化或执行的模型请求。模型请求出现前显示本地 runtime/thread/dispatch 阶段与耗时，真实请求出现后显示线路、健康状态和网络/模型分阶段耗时。runtime 可以在 turn 结束后继续留在预热缓存中，但 `runtime_ready/runtime_prepare_failed/turn_complete/interrupted` 到达后对应活动必须立即退出“当前连接”列表；脱敏诊断事件仍可在内存环中保留。监控区首屏只显示：
 
 - “连接正常 / 连接较慢或发生重试 / 连接失败 / 等待模型响应”。
 - 当前 runtime、目标 origin 和“直接连接 / HTTP 代理 / SOCKS5 代理”。
@@ -809,7 +834,7 @@ Egress Manager 在内存维护同时受“最大条数”和“最大时间窗�
 8. Egress Manager 关闭时停止接受新 tunnel/relay stream；应用退出有明确上限，不能无限阻塞更新或退出。
 9. agent shell、MCP 和普通子进程不能访问 Valuz 生成的正向出口凭证或 per-session 模型凭证；实现必须以真实 `env`、`curl`、Git、包管理器和 MCP 子进程测试证明隔离，而不是只依赖代码审查。模型入口 URL 若因 CLI 限制可见，也不得单独具备读取 host 凭证或访问任意上游的能力。
 10. 当前 Valuz 的 Codex/Claude Provider env 会进入模型 CLI；凭证子进程隔离必须作为独立安全修复验收，不能把它误归因于新网络入口，也不能因它是既有行为而忽略。
-11. `off` 旧版恢复路径属于独立故障域：Egress Manager 代码、描述符解析或 adapter 初始化失败不能阻止用户进入该模式。
+11. `off` 独立连接路径属于独立故障域：Egress Manager 代码、描述符解析或 adapter 初始化失败不能阻止用户进入该模式。
 
 ---
 
@@ -818,12 +843,14 @@ Egress Manager 在内存维护同时受“最大条数”和“最大时间窗�
 | 层 | 文件/模块 | 变更 |
 |---|---|---|
 | Electron bootstrap | `frontend/apps/desktop/src/main/ipc/desktop.ts` | app ready 后、sidecar 前解析 `auto/direct/off`；按模式启动/停止 Egress Manager |
-| Desktop service manager | `frontend/apps/desktop/src/main/services/mod.ts` | 持有 bootstrap capability 与 manager 健康；按模式编排 sidecar 生命周期 |
-| Sidecar spawn | `frontend/apps/desktop/src/main/services/sidecar.ts` | 建立一次性 bootstrap channel；禁止注入全局 `HTTP(S)_PROXY` |
-| Desktop IPC | `frontend/apps/desktop/src/main/ipc/` + preload channels | 暴露脱敏状态、自动轮询、临时 direct 与 `off` 恢复操作；权威复核运行任务并按确认标记先 interrupt 后切换 |
+| Desktop service manager | `frontend/apps/desktop/src/main/services/mod.ts` | 持有 bootstrap capability、desktop control token 与 manager 健康；按模式编排 sidecar 生命周期 |
+| Sidecar spawn | `frontend/apps/desktop/src/main/services/sidecar.ts` | 通过 stdin 建立一次性 desktop control envelope；禁止把 secret 或全局 `HTTP(S)_PROXY` 写入 env |
+| Desktop IPC | `frontend/apps/desktop/src/main/ipc/` + preload channels | 暴露脱敏状态与自动轮询；权威复核运行任务并按确认标记先 interrupt，再通过 loopback 控制接口动态替换 egress；旧 backend 才回退重启 |
 | Desktop settings/diagnostics UI | 现有 desktop settings/help surface | 主设置只展示“Valuz 管理 / 模型客户端自行连接”；不暴露 direct；运行任务时提供中断确认；监控区展示实时状态和脱敏诊断复制 |
-| Kernel egress registry | `backend/kernel/src/runtimes/network_egress.py` | 内存消费 bootstrap；按 runtime 注册真实上游并申请 `model_ingress`/`forward_proxy`；上报 allowlist runtime phase；清理普通子进程 env |
-| Codex runtime | `backend/kernel/src/runtimes/codex/runtime.py` | synthetic provider 的 `base_url` 指向模型入口；区分 `requires_openai_auth`/专用 `env_key`；验证 HTTP/WSS 与 shell/MCP 凭证隔离 |
+| Backend desktop control | `backend/valuz_agent/api/routes/system.py` | token 鉴权、拒绝活动 runtime、替换 registry、最多预热一个最近 session；仅监听既有 loopback backend |
+| Kernel egress registry | `backend/kernel/src/runtimes/network_egress.py` | 内存消费/替换 bootstrap；按 runtime 注册真实上游并申请 `model_ingress`/`forward_proxy`；上报 allowlist runtime phase；清理普通子进程 env |
+| Runtime orchestrator | `backend/kernel/src/core/orchestrator.py` | 串行创建、跟踪 runtime owner、回收旧网络描述符、准备/复用最近 session |
+| Codex runtime | `backend/kernel/src/runtimes/codex/runtime.py` | synthetic provider 的 `base_url` 指向模型入口；区分 `requires_openai_auth`/专用 `env_key`；支持不发模型请求的 app-server/thread prepare；验证 HTTP/WSS 与 shell/MCP 凭证隔离 |
 | Claude runtime | `backend/kernel/src/runtimes/claude_agent/runtime.py` | `ANTHROPIC_BASE_URL` 指向模型入口；保持现有认证通道；验证 SSE、resume、subagent 与 shell/MCP 凭证隔离 |
 | DeepAgents | `backend/kernel/src/runtimes/deepagents/runtime.py` | 给模型 client 显式配置 transport；本地 shell 保持当前 env 行为 |
 | Provider discovery | `backend/valuz_agent/modules/providers/discover.py` | connection test 使用与正式模型 client 相同的显式 transport |
@@ -919,7 +946,7 @@ Egress Manager 在内存维护同时受“最大条数”和“最大时间窗�
 ### Phase 2 — Safety-gated dual frontends（已实现，设置页主动启用）
 
 - 实现共享 Upstream Connector、HTTP forward/CONNECT 前端和 Codex/Claude 薄模型入口。
-- 实现一次性 bootstrap、真实上游注册、loopback 约束、capability 撤销和退出清理；不向 sidecar 或模型 CLI 新增全局代理 env。
+- 实现一次性 desktop control envelope、内存 bootstrap 动态替换、真实上游注册、loopback 约束、capability 撤销和退出清理；不向 sidecar 或模型 CLI 新增全局代理 env。
 - Codex/Claude 通过模型入口接入；DeepAgents/Provider discovery 通过显式 transport 接入。只启用通过认证/协议 spike 的组合。
 - 同时交付 `auto/direct/off` 底层能力、上下文错误提示、两个用户主模式和脱敏诊断 UI；普通设置页不暴露 direct。
 - 能力与设置入口随桌面端提供，新安装默认由模型客户端管理；将 Valuz 管理设为首次默认值前必须满足 §16 的性能、隔离、诊断和回退验收。
@@ -927,6 +954,7 @@ Egress Manager 在内存维护同时受“最大条数”和“最大时间窗�
 ### Phase 3 — Dev / Headless / UX polish（基础代码已实现，平台验收待完成）
 
 - 完成 `scripts/dev.sh` 的 Electron 受管源码 backend、可配置 backend 端口、stdin bootstrap 和健康检查等待。
+- 完成不重启 backend 的模式切换、Codex runtime/thread prepare、有限预热缓存，以及初始化到真实网络请求的连续状态展示。
 - 完善连接状态自动更新、用户可读的阶段耗时，以及脱敏诊断复制。
 - 验证 headless 保持 env/direct 行为。
 
@@ -962,7 +990,7 @@ Egress Manager 在内存维护同时受“最大条数”和“最大时间窗�
 16. 首期不因本功能新增远程网络遥测或后台 Provider 主动探测。
 17. Headless 在无 Electron 时仍能通过标准代理 env 或直连运行。
 18. Codex、Claude、DeepAgents 与 Provider connection test 共享相同 Resolver/Upstream Connector；未通过认证或协议 spike 的 runtime 组合不得默认启用。
-19. 运行任务期间切换模式时入口仍可操作，但必须先确认；确认后所有受影响 session 的 interrupt 完成才可持久化模式并重启 backend，取消或任一 interrupt 失败时原模式不变。
+19. 运行任务期间切换模式时入口仍可操作，但必须先确认；确认后所有受影响 session 的 interrupt 完成才可持久化模式并动态替换 registry、重建受影响 runtime，取消或任一 interrupt 失败时原模式不变；同版本健康 backend 不得因正常模式切换而重启。
 20. 全部实现通过 `make test-all`、`make typecheck` 和 `make lint`。
 
 ---
@@ -982,7 +1010,7 @@ Egress Manager 在内存维护同时受“最大条数”和“最大时间窗�
 9. Electron `resolveProxy()` 在 macOS/Windows 对 PAC 候选的实际返回格式，以及系统代理残留但 direct 可用时的失败表现。
 10. 常见 Clash HTTP mixed port、SOCKS5 端口关闭/切换时的错误类型、重试行为和耗时。
 11. loopback 模型入口 URL、正向出口 auth、API Key/OAuth 是否会出现在 stderr、工具 env、进程检查或 crash report；任一真实凭证泄漏通道必须先关闭或脱敏。
-12. 一次性 bootstrap channel、真实上游注册、runtime capability 撤销与 `off` 路径在 macOS/Windows 的可实现性；Egress Manager 完全不可用时仍能进入旧版恢复路径。
+12. 一次性 desktop control envelope、bootstrap 动态替换、真实上游注册、runtime capability 撤销与 `off` 路径在 macOS/Windows 的可实现性；Egress Manager 完全不可用时仍能进入独立连接路径。
 13. `connection_attempt_id/client_id` 是否足以在并发 runtime 下提供诚实的关联置信度，且所有本地 client path prefix 都在转发前剥离。
 
 本轮探针还确认：用户/项目 Claude settings 可以覆盖进程传入的 `ANTHROPIC_BASE_URL`，测试必须用与 Valuz 一致的受限 `setting_sources`；loopback `base_url` 必须把 `127.0.0.1,localhost,::1` 合并进现有 `NO_PROXY/no_proxy`，否则部分代理环境会把本地模型入口再次送入上游代理。该合并只作用于 runtime CLI 的本地入口可达性，不参与上游路由策略。

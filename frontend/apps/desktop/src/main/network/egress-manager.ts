@@ -107,6 +107,10 @@ export class EgressManager {
   private readonly forwardProxy: ForwardProxy;
   private readonly controlServer: EgressControlServer;
   private readonly runtimePhases: RuntimePhaseRecord[] = [];
+  private readonly runtimeMetadata = new Map<
+    string,
+    { runtime: EgressRuntime; targetOrigin?: string }
+  >();
   private readonly activeTurns = new Map<string, string>();
   private readonly lastTerminalAttemptIds = new Map<string, Set<string>>();
   private readonly snapshots = new Map<string, EgressSnapshot>();
@@ -202,6 +206,7 @@ export class EgressManager {
     this.snapshots.clear();
     this.diagnostics.clear();
     this.runtimePhases.splice(0);
+    this.runtimeMetadata.clear();
     this.activeTurns.clear();
     this.lastTerminalAttemptIds.clear();
   }
@@ -281,7 +286,12 @@ export class EgressManager {
     if (!this.frontendsEnabled || !this.started || this.mode === "off") {
       throw new Error("egress_frontends_unavailable");
     }
-    return this.modelIngress.register(registration);
+    const descriptor = this.modelIngress.register(registration);
+    this.runtimeMetadata.set(registration.clientId, {
+      runtime: registration.runtime,
+      targetOrigin: this.targetOrigin(registration.upstreamBaseUrl),
+    });
+    return descriptor;
   }
 
   registerForwardProxy(
@@ -290,7 +300,11 @@ export class EgressManager {
     if (!this.frontendsEnabled || !this.started || this.mode === "off") {
       throw new Error("egress_frontends_unavailable");
     }
-    return this.forwardProxy.register(registration);
+    const descriptor = this.forwardProxy.register(registration);
+    this.runtimeMetadata.set(registration.clientId, {
+      runtime: registration.runtime,
+    });
+    return descriptor;
   }
 
   revokeClient(clientId: string): void {
@@ -298,6 +312,7 @@ export class EgressManager {
     this.forwardProxy.revoke(clientId);
     this.activeTurns.delete(clientId);
     this.lastTerminalAttemptIds.delete(clientId);
+    this.runtimeMetadata.delete(clientId);
     for (const [key, snapshot] of this.snapshots) {
       if (snapshot.clientId === clientId) this.snapshots.delete(key);
     }
@@ -310,10 +325,16 @@ export class EgressManager {
 
   private recordRuntimePhase(payload: RuntimePhasePayload): void {
     const observedAt = this.now();
-    this.runtimePhases.push({ ...payload, observedAt });
+    const metadata = this.runtimeMetadata.get(payload.clientId);
+    this.runtimePhases.push({ ...payload, ...metadata, observedAt });
     this.runtimePhases.splice(0, Math.max(0, this.runtimePhases.length - 500));
 
-    if (payload.phase === "dispatch") {
+    if (
+      payload.phase === "runtime_init_started" ||
+      payload.phase === "thread_init_started" ||
+      payload.phase === "dispatch_started" ||
+      payload.phase === "dispatch"
+    ) {
       this.activeTurns.set(payload.clientId, payload.turnAttemptId);
       const terminalAttempts = this.lastTerminalAttemptIds.get(payload.clientId);
       for (const [key, snapshot] of this.snapshots) {
@@ -326,7 +347,12 @@ export class EgressManager {
       }
       return;
     }
-    if (payload.phase !== "turn_complete" && payload.phase !== "interrupted") {
+    if (
+      payload.phase !== "runtime_ready" &&
+      payload.phase !== "runtime_prepare_failed" &&
+      payload.phase !== "turn_complete" &&
+      payload.phase !== "interrupted"
+    ) {
       return;
     }
     if (this.activeTurns.get(payload.clientId) !== payload.turnAttemptId) {
