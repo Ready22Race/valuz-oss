@@ -27,6 +27,8 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 
+from valuz_agent.ports.message_context import HostRef
+
 logger = logging.getLogger(__name__)
 
 # What ``kernel_client.run_turn`` accepts: a nullary awaitable closed over the
@@ -123,6 +125,7 @@ async def _refresh_citation_policy(
     *,
     citation_enabled_override: bool | None,
     verification_enabled_override: bool | None,
+    host_ref: HostRef | None = None,
 ) -> None:
     """Converge the citation / verification / task-coverage policy on the
     session (skill, system policy block, resolved quality policy).
@@ -142,6 +145,7 @@ async def _refresh_citation_policy(
             user_id,
             citation_enabled_override=citation_enabled_override,
             verification_enabled_override=verification_enabled_override,
+            host_ref=host_ref,
         )
     except Exception:  # noqa: BLE001 — the kernel guard still fails closed
         logger.warning("citation policy refresh failed for session %s", session_id, exc_info=True)
@@ -167,6 +171,7 @@ def chat_capability_hook(
     *,
     citation_enabled_override: bool | None = None,
     verification_enabled_override: bool | None = None,
+    host_ref: HostRef | None = None,
 ) -> PreTurnHook:
     """Full convergence — the chat turn path (send, queue drain, sync send).
 
@@ -186,6 +191,7 @@ def chat_capability_hook(
             user_id,
             citation_enabled_override=citation_enabled_override,
             verification_enabled_override=verification_enabled_override,
+            host_ref=host_ref,
         )
         await _refresh_bundled_skills(session_id, user_id)
         await _refresh_docs_capabilities(session_id, user_id)

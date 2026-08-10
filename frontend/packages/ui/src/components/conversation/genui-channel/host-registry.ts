@@ -21,6 +21,14 @@ export interface GenUIDataHostInput {
   refs: unknown;
   /** Push one A2UI message (typically updateDataModel) into the render stream. */
   push: (message: Record<string, unknown>) => void;
+  /**
+   * Host render-context values for `$host` param resolution
+   * (dataRef.RenderContext.host) — e.g. a company page passes its canonical
+   * symbol so a ref written as {"$host":"symbol"} follows the page. Absent
+   * when the rendering host provides no context; `$host` refs then reject
+   * at registration instead of fetching a wrong query.
+   */
+  host?: Record<string, string | number | boolean>;
 }
 
 export type GenUIDataHostFactory = (

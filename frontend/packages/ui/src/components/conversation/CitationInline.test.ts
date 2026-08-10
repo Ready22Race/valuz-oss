@@ -4,6 +4,7 @@ import type { CitationBundleV1 } from "@valuz/shared";
 import {
   citationDisplayOrder,
   projectCitationSidecarAnchors,
+  projectEvidenceMarkdownLinks,
 } from "./CitationInline";
 
 const source = {
@@ -15,6 +16,85 @@ const source = {
 };
 
 describe("citation sidecar projection", () => {
+  it("never resolves an address to a sibling field's citation", () => {
+    // A collection holds many fields. Falling back to the bare handle put
+    // MA250's value behind MA20's citation — a confident, unrelated number,
+    // which is worse than no marker at all.
+    const content =
+      "MA250 $125.83 [source](evidence://evc_mcp_ind_1234#/datas/3/factor_value)";
+    const bundle: CitationBundleV1 = {
+      version: 1,
+      citations: [
+        {
+          citationId: "cit_ma20",
+          source,
+          evidence: {
+            kind: "text",
+            quote: "factor value: 199.56",
+            snippet: "factor value: 199.56",
+            capturedAt: "2026-08-09T00:00:00Z",
+          },
+        },
+      ],
+      projection: {
+        // Only MA20's address and the bare collection handle are known.
+        evidenceHandleToCitationId: {
+          "evc_mcp_ind_1234#/datas/0/factor_value": "cit_ma20",
+          evc_mcp_ind_1234: "cit_ma20",
+        },
+        anchors: [],
+      },
+    };
+
+    expect(projectEvidenceMarkdownLinks(content, bundle).trimEnd()).toBe(
+      "MA250 $125.83",
+    );
+  });
+
+  it("puts a drifted anchor behind the statement, not inside it", () => {
+    // Offsets are measured against the guard's normalised text, so they arrive
+    // shifted. One landing mid-parenthetical used to render as
+    // "（ ⊘ 如 $X.XX）？" — the marker annotating the words after it instead of
+    // the statement it belongs to.
+    const content = "止损价格是多少（如 $X.XX）？";
+    const bundle: CitationBundleV1 = {
+      version: 1,
+      citations: [
+        {
+          citationId: "cit_stop",
+          source,
+          evidence: {
+            kind: "text",
+            quote: content,
+            snippet: content,
+            capturedAt: "2026-08-05T00:00:00Z",
+          },
+        },
+      ],
+      projection: {
+        evidenceHandleToCitationId: {},
+        anchors: [
+          {
+            citationId: "cit_stop",
+            claimId: "clm_stop",
+            origin: "auto-bound",
+            sourceOffset: content.indexOf("如"),
+            location: {
+              kind: "text",
+              blockIndex: 0,
+              start: 0,
+              end: content.length,
+            },
+          },
+        ],
+      },
+    };
+
+    expect(projectCitationSidecarAnchors(content, bundle)).toBe(
+      "止损价格是多少（如 $X.XX） [source](citation://cit_stop)？",
+    );
+  });
+
   it("inserts a trusted auto-bound anchor at the raw Markdown offset", () => {
     const content = "Revenue increased 18%.";
     const bundle: CitationBundleV1 = {

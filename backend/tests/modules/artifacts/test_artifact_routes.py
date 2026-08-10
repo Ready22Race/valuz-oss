@@ -408,3 +408,58 @@ async def test_the_workspace_view_shows_one_current_deliverable(session_factory)
     assert response.total == 1
     (item,) = response.items
     assert (item.display_name, item.version_no) == ("report.md", 2)
+
+
+# ── Host-scoped listing (cross-artifact) ─────────────────────────────────────
+
+
+async def test_host_history_spans_every_lineage(session_factory):  # type: ignore[no-untyped-def]
+    # The desk's document name is stable across scopes, but a regeneration
+    # from another conversation's scope forked a second artifact before
+    # deliveries followed the binding. Per-artifact listing hides that fork;
+    # the host listing shows the full chronology with artifact ids attached.
+    from valuz_agent.api.routes.artifacts import list_host_revisions
+    from valuz_agent.modules.genui.tools import host_document_file_name
+
+    name = host_document_file_name("finance.research-desk", "desk", "main")
+    chat_a = Scope(user_id="u1", project_id="chat-a")
+    chat_b = Scope(user_id="u1", project_id="chat-b")
+    art_a = await _record(session_factory, chat_a, name=name, digest="d1")
+    await _record(session_factory, chat_a, name=name, digest="d2")
+    art_b = await _record(session_factory, chat_b, name=name, digest="d3")
+    # Same user, different host — must not appear.
+    other = host_document_file_name("finance.company-research", "US:NVDA", "main")
+    await _record(session_factory, chat_a, name=other, digest="d4")
+
+    async with session_factory() as db:
+        response = await list_host_revisions(
+            host_type="finance.research-desk",
+            host_id="desk",
+            slot="main",
+            db=db,
+            user_id="u1",
+        )
+
+    assert [item.artifact_id for item in response.items] == [art_a, art_a, art_b]
+    assert [item.version_no for item in response.items] == [1, 2, 1]
+
+
+async def test_host_history_is_owner_scoped(session_factory):  # type: ignore[no-untyped-def]
+    from valuz_agent.api.routes.artifacts import list_host_revisions
+    from valuz_agent.modules.genui.tools import host_document_file_name
+
+    name = host_document_file_name("finance.research-desk", "desk", "main")
+    await _record(
+        session_factory, Scope(user_id="u2", project_id="p"), name=name, digest="d1"
+    )
+
+    async with session_factory() as db:
+        response = await list_host_revisions(
+            host_type="finance.research-desk",
+            host_id="desk",
+            slot="main",
+            db=db,
+            user_id="u1",
+        )
+
+    assert response.items == []

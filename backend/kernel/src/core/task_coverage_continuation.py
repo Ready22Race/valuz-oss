@@ -23,6 +23,9 @@ TASK_COVERAGE_CONTINUATION_PROMPT = (
     "protocol violations, not valid completion responses.\n\n"
     "Review the original user request and every visible assistant and tool message "
     "from this turn.\n"
+    "Preserve every explicit user constraint, prohibition, scope boundary, and requested "
+    "output shape. If filling an apparent omission would require an action or derivation "
+    "the user prohibited, you must not add it; treat the constrained answer as complete.\n"
     "Decide whether the user still needs an important omission filled, an unfinished "
     "requirement completed, or a material correction.\n\n"
     "If important user-facing content is missing, use the same available tools and "
@@ -102,9 +105,7 @@ def build_task_coverage_continuation_prompt(
         values = guidance.get(key)
         if isinstance(values, list):
             cleaned = [
-                value.strip()
-                for value in values
-                if isinstance(value, str) and value.strip()
+                value.strip() for value in values if isinstance(value, str) and value.strip()
             ]
             if cleaned:
                 sections.append(f"- {label}: " + "; ".join(cleaned))
@@ -113,8 +114,7 @@ def build_task_coverage_continuation_prompt(
     return (
         TASK_COVERAGE_CONTINUATION_PROMPT
         + "\n\nUse this static distribution guidance only while reviewing the completed turn; "
-        "it is not a plan or a required tool sequence:\n"
-        + "\n".join(sections)
+        "it is not a plan or a required tool sequence:\n" + "\n".join(sections)
     )
 
 

@@ -31,6 +31,7 @@ from src.core.citation_quality import evaluate_citation_quality
 from src.core.claim_audit import (
     ClaimCandidate,
     bind_claims_to_evidence,
+    calculation_formula_matches_evidence,
     canonical_evidence_metric,
     extract_claims,
     propagate_equivalent_claim_bindings,
@@ -39,6 +40,7 @@ from src.core.claim_audit import (
     structured_values_equivalent,
 )
 from src.core.claim_evidence_resolution import EvidenceCandidateIndex, SemanticVerifierPort
+from src.core.claim_normalization import ClaimNormalizerPort
 
 POLICY_REVISION = "citation-v1"
 EVIDENCE_ENVELOPE_KEY = "_valuz_evidence"
@@ -49,9 +51,18 @@ _PRIVATE_EVIDENCE_FORMAT_VERSION = 1
 
 _HANDLE_RE = re.compile(r"^ev_[A-Za-z0-9_-]{8,128}$")
 _COLLECTION_HANDLE_RE = re.compile(r"^evc_[A-Za-z0-9_-]{8,128}$")
+# A Collection Address' JSON Pointer can carry balanced parentheses, and a
+# space inside them: Reportify exposes indicator keys such as
+# ``ma(close, 20)``, giving ``#/datas/0/indicators/ma(close, 20)``. Matching
+# only ``[^\s)]`` made the whole link fail to match, so the guard never
+# rewrote it and the raw ``evidence://`` protocol leaked into the answer the
+# reader sees. Spaces are only ever accepted inside a parenthesised group, so
+# the pattern still cannot run past the link into the surrounding prose. The
+# two branches begin on disjoint characters, keeping the alternation linear.
+_ADDRESS_FRAGMENT = r"(?:[^\s()\[\]\n]|\([^()\n]{0,200}\)){1,2048}"
 _MARKDOWN_LINK_RE = re.compile(
     r"\[([^\]\n]{0,240})\]\((evidence|citation)://([A-Za-z0-9_-]{1,160})"
-    r"(#[^\s)\n]{1,2048})?\)"
+    rf"(#{_ADDRESS_FRAGMENT})?\)"
 )
 _MALFORMED_PROTOCOL_LINK_PREFIX_RE = re.compile(
     r"\[([^\]\n]{0,240})\]\((?:evidence|citation):(?!//)",
@@ -66,17 +77,21 @@ _REDUNDANT_VALUE_LIMITATION_RE = re.compile(
     r"(?:未披露|未提供|未列示)(?:该项|对应)?(?:的)?(?:具体)?(?:数字|数值|数据)?",
     re.IGNORECASE,
 )
-_BARE_EVIDENCE_RE = re.compile(r"(?<![\w/])evidence://([A-Za-z0-9_-]{1,160})(#[^\s)\]\n]{1,2048})?")
+_BARE_EVIDENCE_RE = re.compile(
+    rf"(?<![\w/])evidence://([A-Za-z0-9_-]{{1,160}})(#{_ADDRESS_FRAGMENT})?"
+)
 _INTRA_NUMBER_CITATION_RE = re.compile(
     r"(?P<prefix>(?<![\d,])\d{1,3}(?:,\d{3})*,\d{1,2})[ \t]*"
-    r"(?P<link>\[[^\]\n]{1,240}\]\((?:citation|evidence)://[A-Za-z0-9_-]{1,160}\))"
+    rf"(?P<link>\[[^\]\n]{{1,240}}\]\((?:citation|evidence)://[A-Za-z0-9_-]{{1,160}}"
+    rf"(?:#{_ADDRESS_FRAGMENT})?\))"
     r"(?P<suffix>\d(?:\.\d+)?)"
     r"(?P<unit>[ \t]*(?:%|bp|bps|百万元|亿元|万元|元|倍|CNY|USD|EUR|GBP|JPY|HKD))?",
     re.IGNORECASE,
 )
 _INTRA_DECIMAL_CITATION_RE = re.compile(
     r"(?P<prefix>(?<![\d,])[-+]?\d{1,3}(?:,\d{3})*\.)[ \t]*"
-    r"(?P<link>\[[^\]\n]{1,240}\]\((?:citation|evidence)://[A-Za-z0-9_-]{1,160}\))"
+    rf"(?P<link>\[[^\]\n]{{1,240}}\]\((?:citation|evidence)://[A-Za-z0-9_-]{{1,160}}"
+    rf"(?:#{_ADDRESS_FRAGMENT})?\))"
     r"[ \t]*(?P<suffix>\d+)"
     r"(?P<unit>[ \t]*(?:%|bp|bps|百万元|亿元|万元|元|倍|CNY|USD|EUR|GBP|JPY|HKD))?",
     re.IGNORECASE,
@@ -87,8 +102,8 @@ _FALLBACK_MARKER_RE = re.compile(
 )
 _NUMBERED_EVIDENCE_SOURCE_RE = re.compile(
     r"(?m)^[ \t]*(?:[-*][ \t]+)?\[(\d{1,3})\][ \t]+"
-    r"\[[^\]\n]{1,240}\]\(evidence://([A-Za-z0-9_-]{1,160})"
-    r"(?:#[^\s)\n]{1,2048})?\)"
+    rf"\[[^\]\n]{{1,240}}\]\(evidence://([A-Za-z0-9_-]{{1,160}})"
+    rf"(?:#{_ADDRESS_FRAGMENT})?\)"
 )
 _BARE_NUMBERED_MARKER_RE = re.compile(r"(?<![\\\w])\[(\d{1,3})\](?!\()")
 _SOURCE_SECTION_HEADING_RE = re.compile(
@@ -196,6 +211,10 @@ class GuardResult:
 
     text: str
     bundle: dict[str, Any] | None
+    # Private, Registry-backed form used only to carry already verified
+    # bindings into later assistant messages of the same turn. It is never
+    # persisted, broadcast, or rendered.
+    binding_seed: str | None = None
 
 
 class EvidenceRegistry:
@@ -223,6 +242,7 @@ class EvidenceRegistry:
         self._collections: dict[str, EvidenceCollectionRecord] = {}
         self._pending_collection_snapshots: dict[str, tuple[Any, str, str]] = {}
         self._rejected_count = 0
+        self._tool_projection_count = 0
         self._address_requested_count = 0
         self._materialized_count = 0
         self._materialization_rejected_count = 0
@@ -247,6 +267,7 @@ class EvidenceRegistry:
         self._collections.clear()
         self._pending_collection_snapshots.clear()
         self._rejected_count = 0
+        self._tool_projection_count = 0
         self._address_requested_count = 0
         self._materialized_count = 0
         self._materialization_rejected_count = 0
@@ -383,6 +404,10 @@ class EvidenceRegistry:
         validation can bind the sidecar to that exact immutable snapshot.
         """
 
+        # Counted before extraction: a search that returns only discovery rows
+        # registers nothing, yet the model did consult a source. Only a turn
+        # that consults nothing at all is answering from stable knowledge.
+        self._tool_projection_count += 1
         self._capture_collection_hints(model_content, trusted_private=trusted_private)
         registration_content = private_content if private_content is not None else model_content
         if trusted_private and private_content is not None:
@@ -627,6 +652,16 @@ class EvidenceRegistry:
         pointer = unquote(fragment[1:])
         if collection is not None:
             record = _materialize_collection_address(collection, pointer)
+            if record is None:
+                normalized_pointer = _normalize_collection_item_pointer(
+                    collection,
+                    pointer,
+                )
+                if normalized_pointer is not None:
+                    record = _materialize_collection_address(
+                        collection,
+                        normalized_pointer,
+                    )
         else:
             # A Runtime may copy a valid JSON Pointer while mistyping the
             # opaque Collection handle.  Do not fuzzy-match the handle.  The
@@ -833,6 +868,24 @@ class EvidenceRegistry:
     @property
     def had_evidence_activity(self) -> bool:
         return bool(self._records) or bool(self._collections) or self._rejected_count > 0
+
+    @property
+    def has_locked_document_scope(self) -> bool:
+        """Whether the turn is pinned to a specific set of documents."""
+
+        return self._allowed_document_ids is not None
+
+    @property
+    def retrieval_attempted(self) -> bool:
+        """Whether this turn consulted a source-bearing tool at all.
+
+        Distinct from ``had_evidence_activity``: a search can return only
+        discovery rows and register nothing, which still means the model went
+        looking and should be held to sourcing its answer. Consulting nothing
+        whatsoever is what marks a question as stable knowledge.
+        """
+
+        return self._tool_projection_count > 0
 
     def _source_is_allowed(self, source: dict[str, Any]) -> bool:
         """Fail closed for a document-research session's locked source scope."""
@@ -1049,9 +1102,15 @@ class CitationGuard:
         enabled: bool = True,
         verification_enabled: bool = True,
         semantic_verifier: SemanticVerifierPort | None = None,
+        claim_normalizer: ClaimNormalizerPort | None = None,
+        equivalent_binding_seeds: Iterable[str] = (),
     ) -> None:
         self._registry = registry
         self._message_id = message_id
+        # Collection Address -> materialized handle, per turn, and how far
+        # each materialization moved the text after it.
+        self._address_handles: dict[str, str] = {}
+        self._materialization_shifts: list[tuple[int, int]] = []
         self._user_prompt = user_prompt or ""
         prompt_without_negated_citation = _NEGATED_CITATION_RE.sub("", user_prompt or "")
         self._explicitly_requested = bool(
@@ -1063,6 +1122,8 @@ class CitationGuard:
         self._enabled = enabled
         self._verification_enabled = verification_enabled
         self._semantic_verifier = semantic_verifier
+        self._claim_normalizer = claim_normalizer
+        self._equivalent_binding_seeds = tuple(equivalent_binding_seeds)
 
     @property
     def requires_citation(self) -> bool:
@@ -1228,6 +1289,17 @@ class CitationGuard:
             and not self._registry.had_evidence_activity
             and not self._explicitly_requested
         ):
+            if (
+                not self._registry.retrieval_attempted
+                and not self._registry.has_locked_document_scope
+            ):
+                # Nothing was consulted, so there is no source this answer
+                # could have cited and no gap to report. A definition answered
+                # from stable knowledge otherwise had every illustrative
+                # number ("ROE = 15% means ...") counted as an unsourced
+                # claim, which a strict distribution switch turned into a
+                # wall of findings on a correct explanation.
+                return GuardResult(text=text, bundle=None)
             claims = extract_claims(
                 text,
                 mode=str(policy_mode or "required-on-evidence"),
@@ -1245,6 +1317,8 @@ class CitationGuard:
         # Runtime providers cannot mint or replay canonical ``citation://``
         # ids. Only Registry-backed ``evidence://`` handles and Collection
         # Addresses enter the projection boundary.
+        self._address_handles = {}
+        self._materialization_shifts = []
         normalized_text = self._normalize_fallback_markers(text)
         normalized_text = self._materialize_collection_addresses(normalized_text)
         normalized_text = _move_citation_after_split_number(normalized_text)
@@ -1252,6 +1326,10 @@ class CitationGuard:
             normalized_text,
             self._registry,
             semantics=semantics,
+        )
+        normalized_text = _move_standalone_calculation_citations_to_previous_formula(
+            normalized_text,
+            self._registry,
         )
         # Keep the Runtime-authored coordinates before any deterministic
         # binding links are inserted. Claim ids intentionally ignore source
@@ -1279,11 +1357,14 @@ class CitationGuard:
             user_prompt=self._user_prompt,
             semantics=semantics,
             entity_aliases=entity_aliases,
+            semantic_verifier=self._semantic_verifier,
+            claim_normalizer=self._claim_normalizer,
         )
         normalized_text = binding_result.text
         propagated_bind_result = propagate_equivalent_claim_bindings(
             normalized_text,
             candidate_index,
+            seed_answers=self._equivalent_binding_seeds,
             mode=str(policy_mode or "required-on-evidence"),
             semantics=semantics,
         )
@@ -1297,6 +1378,10 @@ class CitationGuard:
         for claim_id, handles in binding_result.auto_bound_claim_handles.items():
             for handle in handles:
                 auto_bound_claims_by_handle.setdefault(handle, []).append(claim_id)
+        semantic_bound_claims_by_handle: dict[str, list[str]] = {}
+        for claim_id, handles in binding_result.semantic_bound_claim_handles.items():
+            for handle in handles:
+                semantic_bound_claims_by_handle.setdefault(handle, []).append(claim_id)
         equivalent_claims_by_handle: dict[str, list[str]] = {}
         for claim_id, handles in propagated_bind_result.claim_handles.items():
             for handle in handles:
@@ -1377,6 +1462,7 @@ class CitationGuard:
             if record.tool_name:
                 annotations["provenance"] = {"toolName": record.tool_name}
             auto_bound_claim_ids = auto_bound_claims_by_handle.get(identifier)
+            semantic_bound_claim_ids = semantic_bound_claims_by_handle.get(identifier)
             auto_rebound_claim_ids = auto_rebound_claims_by_handle.get(identifier)
             equivalent_claim_ids = equivalent_claims_by_handle.get(identifier)
             if (
@@ -1388,6 +1474,8 @@ class CitationGuard:
                 binding = annotations["binding"]
                 if auto_bound_claim_ids:
                     binding["autoBoundClaimIds"] = list(auto_bound_claim_ids)
+                if semantic_bound_claim_ids:
+                    binding["semanticBoundClaimIds"] = list(semantic_bound_claim_ids)
                 if auto_rebound_claim_ids:
                     binding["autoReboundClaimIds"] = list(auto_rebound_claim_ids)
                 if equivalent_claim_ids:
@@ -1423,6 +1511,8 @@ class CitationGuard:
 
         numbered_bindings = _numbered_evidence_bindings(normalized_text)
         canonical_text = _MARKDOWN_LINK_RE.sub(replace_link, normalized_text)
+        # Only meaningful once every link has been resolved into a citation.
+        self._project_address_aliases(handle_to_citation_id)
         if unknown_ids:
             # Removing an untrusted citation marker must not leave a visible
             # gap before the sentence punctuation (``fact [source](...) .``).
@@ -1485,16 +1575,35 @@ class CitationGuard:
             equivalent_claim_handles=propagated_bind_result.claim_handles,
             handle_to_citation_id=handle_to_citation_id,
         )
+        # These offsets are measured against the normalised text, but the client
+        # replays them against the text the model streamed. Materializing a
+        # Collection Address shortens the answer by tens of characters each
+        # time, so without this every marker after the first address lands too
+        # early — inside a value or a link.
+        for entry in (*projection_anchors, *provenance_regions):
+            entry["sourceOffset"] = self._to_streamed_offset(int(entry["sourceOffset"]))
 
         all_citation_ids = [self._citation_id(record.handle) for record in self._registry.values()]
         used_citation_ids = {self._citation_id(handle) for handle in cited_handles}
         unused_ids = [item for item in all_citation_ids if item not in used_citation_ids]
 
+        # Integrity answers "is this citation data structurally sound" —
+        # unknown ids, malformed protocol, absent locators, no policy to judge
+        # against. How much of the answer is covered is a different question
+        # the claim audit already reports per claim, so folding "required but
+        # nothing cited" in here marked every interim assistant message
+        # degraded the moment it mentioned a number, long before evidence had
+        # been gathered. Document-scoped research is the exception: there the
+        # answer must come from the locked documents, so citing nothing is a
+        # structural failure rather than a turn still in progress. The test is
+        # the locked scope itself, not ``force_required`` — a strict-domain
+        # distribution sets that flag on every message, which is how interim
+        # narration kept being reported as degraded.
         degraded = (
             bool(unknown_ids)
             or malformed_protocol_count > 0
             or bool(missing_locator_ids)
-            or (required and not citations)
+            or (required and not citations and self._registry.has_locked_document_scope)
             or (required and not self._policy_available)
         )
         if degraded:
@@ -1538,6 +1647,17 @@ class CitationGuard:
             },
         }
         if self._verification_enabled:
+            semantic_verified_claim_citation_ids = {
+                claim_id: tuple(
+                    dict.fromkeys(
+                        citation_id
+                        for handle in handles
+                        for citation_id in [handle_to_citation_id.get(handle)]
+                        if citation_id is not None
+                    )
+                )
+                for claim_id, handles in binding_result.semantic_bound_claim_handles.items()
+            }
             bundle = evaluate_citation_quality(
                 canonical_text,
                 bundle,
@@ -1546,9 +1666,15 @@ class CitationGuard:
                 user_prompt=self._user_prompt,
                 entity_aliases=entity_aliases,
                 semantic_verifier=self._semantic_verifier,
+                semantic_verified_claim_citation_ids=(semantic_verified_claim_citation_ids),
+                claim_normalizer=self._claim_normalizer,
             )
             _focus_text_citation_snippets(bundle)
-        return GuardResult(text=canonical_text, bundle=bundle)
+        return GuardResult(
+            text=canonical_text,
+            bundle=bundle,
+            binding_seed=normalized_text,
+        )
 
     def _normalize_fallback_markers(self, text: str) -> str:
         def replace(match: re.Match[str]) -> str:
@@ -1558,7 +1684,21 @@ class CitationGuard:
         return _FALLBACK_MARKER_RE.sub(replace, text)
 
     def _materialize_collection_addresses(self, text: str) -> str:
-        """Replace valid provisional Collection Addresses with direct handles."""
+        """Replace valid provisional Collection Addresses with direct handles.
+
+        Records address -> handle as it goes, and how far each replacement
+        moves the text that follows it.
+
+        The guard normalises the text for its own analysis, but the reader's
+        client still holds the text the model streamed, which names the
+        Collection Address. Two things follow. Without the handle map the
+        projection only knows the materialized handle, so the client cannot
+        resolve what it actually received and drops the marker — the value
+        renders with no citation and no sign that one was lost. And because an
+        address is far longer than the handle it collapses to, every offset
+        after it is shifted; replayed against the client's text a marker lands
+        in the wrong place, splitting a value or a link.
+        """
 
         def replace_link(match: re.Match[str]) -> str:
             label, scheme, identifier, fragment = match.groups()
@@ -1567,8 +1707,12 @@ class CitationGuard:
             record = self._registry.materialize_reference(identifier, fragment)
             if record is None:
                 return f"[{label}](evidence://{identifier})"
-            return f"[{label}](evidence://{record.handle})"
+            self._address_handles[f"{identifier}{fragment}"] = record.handle
+            replaced = f"[{label}](evidence://{record.handle})"
+            shifts.append((match.start(), len(match.group(0)) - len(replaced)))
+            return replaced
 
+        shifts: list[tuple[int, int]] = []
         materialized = _MARKDOWN_LINK_RE.sub(replace_link, text)
 
         def replace_bare(match: re.Match[str]) -> str:
@@ -1577,11 +1721,35 @@ class CitationGuard:
             if fragment is None:
                 return match.group(0)
             record = self._registry.materialize_reference(identifier, fragment)
-            return (
-                f"evidence://{record.handle}" if record is not None else f"evidence://{identifier}"
-            )
+            if record is None:
+                return f"evidence://{identifier}"
+            self._address_handles[f"{identifier}{fragment}"] = record.handle
+            replaced = f"evidence://{record.handle}"
+            shifts.append((match.start(), len(match.group(0)) - len(replaced)))
+            return replaced
 
-        return _BARE_EVIDENCE_RE.sub(replace_bare, materialized)
+        result = _BARE_EVIDENCE_RE.sub(replace_bare, materialized)
+        # Offsets are recorded against ``text``; converting them to running
+        # positions in the materialized string is what makes them replayable.
+        running = 0
+        for start, delta in sorted(shifts):
+            self._materialization_shifts.append((start - running, delta))
+            running += delta
+        return result
+
+    def _to_streamed_offset(self, offset: int) -> int:
+        """Translate a normalised offset back into the text the client holds."""
+
+        shift = sum(delta for start, delta in self._materialization_shifts if start <= offset)
+        return offset + shift
+
+    def _project_address_aliases(self, handle_to_citation_id: dict[str, str]) -> None:
+        """Let the client resolve the address the model wrote, not just the handle."""
+
+        for address, handle in self._address_handles.items():
+            citation_id = handle_to_citation_id.get(handle)
+            if citation_id is not None:
+                handle_to_citation_id.setdefault(address, citation_id)
 
     def _citation_id(self, handle: str) -> str:
         digest = hashlib.sha256(f"{self._message_id}\0{handle}".encode()).hexdigest()[:20]
@@ -3985,7 +4153,16 @@ def _materialize_collection_address(
         and currency
         and any(
             term in normalized_field
-            for term in ("revenue", "cost", "profit", "asset", "liabil", "cash", "income")
+            for term in (
+                "revenue",
+                "cost",
+                "profit",
+                "asset",
+                "liabil",
+                "cash",
+                "income",
+                "equity",
+            )
         )
     ):
         unit = currency
@@ -4062,15 +4239,24 @@ def _materialize_collection_address(
     )
 
     fiscal_year = semantic_fiscal_year or context.get("fiscal_year") or context.get("fiscalYear")
-    period_part = (
-        semantic_period
-        or context.get("fiscal_quarter")
+    concrete_period = (
+        context.get("fiscal_quarter")
         or context.get("fiscalQuarter")
         or context.get("fiscal_period")
         or context.get("fiscalPeriod")
-        or context.get("period")
     )
-    period = str(collection.common.get("period") or "")
+    period_part = concrete_period or semantic_period or context.get("period")
+    # A provider may map the canonical ``period`` slot to dataset frequency
+    # (``annual`` / ``quarterly``) while exposing the concrete row period as
+    # an identity field.  The row-local Q1/Q2/FY value is more specific and
+    # must win; otherwise every quarterly citation collapses to
+    # ``2024 quarterly`` and conflicts with an exact-quarter Claim.
+    if concrete_period not in (None, ""):
+        period = f"{fiscal_year or ''} {concrete_period}".strip()
+    elif semantic_period not in (None, ""):
+        period = f"{fiscal_year or ''} {semantic_period}".strip()
+    else:
+        period = str(collection.common.get("period") or "")
     if not period and fiscal_year is not None:
         period = f"{fiscal_year} {period_part or ''}".strip()
     elif not period and period_part is not None:
@@ -4169,6 +4355,37 @@ def _materialize_collection_address(
         locator=None,
         tool_name=collection.tool_name or str(collection.common.get("toolName") or "") or None,
     )
+
+
+def _normalize_collection_item_pointer(
+    collection: EvidenceCollectionRecord,
+    pointer: str,
+) -> str | None:
+    """Recover one deterministic Address that omits an ``items`` wrapper.
+
+    Some structured APIs expose ``data: {items: [...]}``.  The model-visible
+    Collection hint names both ``contentRoot=/data`` and
+    ``itemsPointer=/data/items``, but models occasionally copy the familiar
+    list form ``/data/9/market_cap``.  When the Collection handle is exact and
+    the first relative token is a row index, inserting the declared
+    ``itemsPointer`` is unambiguous.  No field, entity, value, or cross-
+    Collection guessing is involved; the normal allow-list and snapshot
+    validation still run on the normalized pointer.
+    """
+
+    content_root = str(collection.addressing.get("contentRoot") or "")
+    items_pointer = str(collection.addressing.get("itemsPointer") or content_root)
+    if not content_root or not items_pointer or items_pointer == content_root:
+        return None
+    prefix = f"{content_root.rstrip('/')}/"
+    if not pointer.startswith(prefix):
+        return None
+    relative = pointer[len(content_root) :]
+    tokens = _json_pointer_tokens(relative)
+    if not tokens or not tokens[0].isdigit():
+        return None
+    normalized = f"{items_pointer.rstrip('/')}{relative}"
+    return normalized if normalized != pointer else None
 
 
 def _collection_record_for_pointer(
@@ -4686,6 +4903,49 @@ def _move_calculation_citations_to_value_cells(
         ).rstrip()
         cells[target_index] = f"{cells[target_index].rstrip()} {link} "
         lines[line_index] = "|".join(cells)
+    return "\n".join(lines)
+
+
+def _move_standalone_calculation_citations_to_previous_formula(
+    value: str,
+    registry: EvidenceRegistry,
+) -> str:
+    """Attach a calculation-only source line to its preceding formula block.
+
+    Markdown models sometimes render display math, add a blank line, and put
+    the trusted calculation link on a line by itself.  That presentation is
+    visually understandable but leaves the formula Claim uncited because the
+    link-only line has no Claim of its own.  Relocate only a single Registry-
+    backed calculation link whose Evidence deterministically proves the
+    immediately preceding non-empty block; document/source-list links and
+    ambiguous calculations remain untouched.
+    """
+
+    lines = value.splitlines()
+    for line_index, line in enumerate(lines):
+        stripped = line.strip()
+        matches = list(_MARKDOWN_LINK_RE.finditer(stripped))
+        if len(matches) != 1 or matches[0].span() != (0, len(stripped)):
+            continue
+        match = matches[0]
+        if match.group(2) != "evidence" or match.group(4) is not None:
+            continue
+        record = registry.resolve(match.group(3))
+        if record is None or record.evidence.get("kind") != "calculation":
+            continue
+        block_end = line_index - 1
+        while block_end >= 0 and not lines[block_end].strip():
+            block_end -= 1
+        if block_end < 0:
+            continue
+        block_start = block_end
+        while block_start > 0 and lines[block_start - 1].strip():
+            block_start -= 1
+        previous_block = "\n".join(lines[block_start : block_end + 1])
+        if not calculation_formula_matches_evidence(previous_block, record.evidence):
+            continue
+        lines[block_end] = f"{lines[block_end].rstrip()} {stripped}"
+        lines[line_index] = ""
     return "\n".join(lines)
 
 

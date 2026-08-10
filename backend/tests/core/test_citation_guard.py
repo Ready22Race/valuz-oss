@@ -7,6 +7,8 @@ import json
 import time
 
 from src.core.citation import (
+    _BARE_EVIDENCE_RE,
+    _MARKDOWN_LINK_RE,
     CitationGuard,
     EvidenceRegistry,
     _build_projection_anchors_and_regions,
@@ -160,9 +162,7 @@ def test_structured_projection_accepts_dimension_implied_by_canonical_metric() -
                     "metrics": {
                         "parent_net_profit": {
                             "aliases": ["归母净利润"],
-                            "fields": [
-                                "net_profit_attributable_to_owners_of_the_parent"
-                            ],
+                            "fields": ["net_profit_attributable_to_owners_of_the_parent"],
                             "dimensions": {"basis": "attributable"},
                         }
                     }
@@ -181,9 +181,7 @@ def test_structured_projection_accepts_dimension_implied_by_canonical_metric() -
                         },
                     }
                 },
-                "dimensions": {
-                    "basis": {"attributable": ["归母", "attributable to parent"]}
-                },
+                "dimensions": {"basis": {"attributable": ["归母", "attributable to parent"]}},
             },
             "rules": {"factual_claim": {"citation_required": True}},
         },
@@ -630,6 +628,251 @@ def test_native_reportify_collection_materializes_only_addressed_field() -> None
     assert revenue.evidence["scale"] == "yuan"
 
 
+def test_collection_address_recovers_omitted_declared_items_wrapper() -> None:
+    data = {
+        "items": [
+            {
+                "symbol": "GOOGL",
+                "date": "2026-08-07",
+                "market_cap": 4_290_000_000_000,
+            }
+        ]
+    }
+    raw_hash = json.dumps(
+        data,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    collection_handle = "evc_mcp_stock_quote_12345678"
+    raw = {
+        "data": data,
+        "_valuz_evidence": [
+            {
+                "version": 1,
+                "kind": "structured-evidence-collection",
+                "collectionHandle": collection_handle,
+                "source": {
+                    "sourceId": "reportify-stock-quote:GOOGL",
+                    "providerId": "reportify",
+                    "sourceType": "dataset",
+                    "sourceCategory": "market_data",
+                    "title": "Reportify · stock_quote",
+                    "retrievedAt": "2026-08-08T00:00:00Z",
+                },
+                "common": {
+                    "datasetId": "reportify.stock_quote",
+                    "toolName": "stock_quote",
+                    "capturedAt": "2026-08-08T00:00:00Z",
+                },
+                "addressing": {
+                    "mode": "json-pointer",
+                    "contentRoot": "/data",
+                    "itemsPointer": "/data/items",
+                    "identityFields": ["/symbol", "/date"],
+                    "allowedPathRoots": ["/data"],
+                },
+                "semantics": {
+                    "entity": {"id": "/symbol"},
+                    "asOf": {"value": "/date"},
+                    "metric": {"mode": "field-name", "valueRoots": [""]},
+                },
+                "contentHash": (
+                    f"sha256:{hashlib.sha256(raw_hash.encode('utf-8')).hexdigest()}"
+                ),
+            }
+        ],
+    }
+    visible = compact_citation_tool_content(raw)
+    private = private_citation_tool_content(raw)
+    assert visible is not None and private is not None
+    registry = EvidenceRegistry()
+    assert registry.register_tool_projection(
+        visible,
+        private,
+        tool_name="stock_quote",
+        trusted_private=True,
+    ) == 1
+
+    record = registry.materialize_reference(
+        collection_handle,
+        "#/data/0/market_cap",
+    )
+
+    assert record is not None
+    assert record.evidence["entityId"] == "GOOGL"
+    assert record.evidence["metric"] == "market_cap"
+    assert record.evidence["value"] == 4_290_000_000_000
+
+
+def test_materialization_offsets_map_back_to_the_streamed_text() -> None:
+    """Offsets the guard measures must be replayable against what was streamed.
+
+    Materializing a Collection Address collapses a long pointer into a short
+    handle, so every offset after it is shifted. The client replays those
+    offsets against the text the model streamed; unmapped, a marker lands tens
+    of characters early — inside the next value or link.
+    """
+
+    item = _item("ev_legacy_revenue_12345678")
+    item["source"].update({"sourceType": "dataset"})
+    item["evidence"] = {
+        "kind": "structured-data",
+        "datasetId": "financials",
+        "toolName": "company_income_statement",
+        "recordKey": "600519|2024 FY",
+        "entityId": "600519",
+        "field": "data[0].operating_revenue",
+        "metric": "operating_revenue",
+        "value": 174_144_000_000,
+        "unit": "CNY",
+        "period": "2024 FY",
+        "capturedAt": "2026-08-01T08:00:00Z",
+    }
+    raw = {
+        "data": [
+            {
+                "symbol": "600519",
+                "fiscal_year": 2024,
+                "period": "FY",
+                "operating_revenue": 174_144_000_000,
+            }
+        ],
+        "_valuz_evidence": [item],
+    }
+    visible = compact_citation_tool_content(raw)
+    private = private_citation_tool_content(raw)
+    assert visible is not None and private is not None
+
+    registry = EvidenceRegistry()
+    registry.register_tool_projection(
+        visible,
+        private,
+        tool_name="company_income_statement",
+        trusted_private=True,
+    )
+
+    handle = visible["_valuz_evidence_hint"]["collectionHandle"]
+    marker = "毛利率 41.2%"
+    streamed = (
+        f"营业收入 [source](evidence://{handle}#/data/0/operating_revenue)。{marker}"
+    )
+    guard = CitationGuard(
+        registry,
+        message_id="msg-offset-map",
+        user_prompt="Cite operating revenue",
+        policy_available=True,
+        verification_enabled=False,
+    )
+    guard._address_handles = {}
+    guard._materialization_shifts = []
+    normalized = guard._materialize_collection_addresses(streamed)
+
+    # The address really did shrink, otherwise the mapping proves nothing.
+    assert len(normalized) < len(streamed)
+    assert guard._materialization_shifts
+
+    # A position measured in the normalised text maps back to the same
+    # character in the text the reader was streamed.
+    assert guard._to_streamed_offset(normalized.index(marker)) == streamed.index(marker)
+    # Text before the first address is unaffected.
+    assert guard._to_streamed_offset(2) == 2
+
+
+def test_projection_resolves_the_address_the_model_wrote() -> None:
+    """The client holds the streamed text, which names the Collection Address.
+
+    The guard normalises that address into a materialized handle for its own
+    analysis, but the reader's client never receives the normalised text. When
+    the projection only knew the handle, the client could not resolve the link
+    it actually had and dropped the marker — the value rendered with no
+    citation and no sign that one had been lost.
+    """
+
+    item = _item("ev_legacy_revenue_12345678")
+    item["source"].update({"sourceType": "dataset"})
+    item["evidence"] = {
+        "kind": "structured-data",
+        "datasetId": "financials",
+        "toolName": "company_income_statement",
+        "recordKey": "600519|2024 FY",
+        "entityId": "600519",
+        "field": "data[0].operating_revenue",
+        "metric": "operating_revenue",
+        "value": 174_144_000_000,
+        "unit": "CNY",
+        "period": "2024 FY",
+        "capturedAt": "2026-08-01T08:00:00Z",
+    }
+    raw = {
+        "data": [
+            {
+                "symbol": "600519",
+                "fiscal_year": 2024,
+                "period": "FY",
+                "operating_revenue": 174_144_000_000,
+            }
+        ],
+        "_valuz_evidence": [item],
+    }
+    visible = compact_citation_tool_content(raw)
+    private = private_citation_tool_content(raw)
+    assert visible is not None and private is not None
+
+    registry = EvidenceRegistry()
+    registry.register_tool_projection(
+        visible,
+        private,
+        tool_name="company_income_statement",
+        trusted_private=True,
+    )
+
+    pointer = "#/data/0/operating_revenue"
+    address = f"{visible['_valuz_evidence_hint']['collectionHandle']}{pointer}"
+    result = CitationGuard(
+        registry,
+        message_id="msg-address-projection",
+        user_prompt="Cite operating revenue",
+        policy_available=True,
+        verification_enabled=False,
+    ).finalize(f"Operating revenue was CNY 174144000000 [source](evidence://{address}).")
+
+    assert result.bundle is not None
+    projection = result.bundle["projection"]["evidenceHandleToCitationId"]
+    citation_id = result.bundle["citations"][0]["citationId"]
+    assert projection.get(address) == citation_id
+
+
+def test_address_pointer_may_contain_parentheses_and_a_space() -> None:
+    """A pointer such as ``/datas/0/indicators/ma(close, 20)`` must still bind.
+
+    Reportify names indicator keys after their call signature, so the JSON
+    Pointer legitimately carries balanced parentheses and a space. Matching the
+    fragment as ``[^\\s)]`` made the whole link fail to match, so the guard
+    never rewrote it and the reader saw the raw ``evidence://`` protocol.
+    """
+
+    pointer = "#/datas/0/indicators/ma(close, 20)"
+    text = f"MA20 为 $199.56 [source](evidence://evc_mcp_ind_12345678{pointer})。"
+
+    link = _MARKDOWN_LINK_RE.search(text)
+    assert link is not None, "the link must match as a whole"
+    assert link.group(4) == pointer
+
+    bare = _BARE_EVIDENCE_RE.search(text)
+    assert bare is not None
+    assert bare.group(2) == pointer
+
+    # A bare address must still stop at the link, never swallow the prose that
+    # follows it.
+    trailing = _BARE_EVIDENCE_RE.search(
+        f"evidence://evc_mcp_ind_12345678{pointer} 后面还有正文"
+    )
+    assert trailing is not None
+    assert trailing.group(2) == pointer
+
+
 def test_guard_recovers_unknown_collection_handle_only_from_unique_valid_pointer() -> None:
     data = [
         {
@@ -795,6 +1038,146 @@ def test_materialized_structured_period_prefers_fiscal_quarter_over_frequency() 
 
     assert result.bundle is not None
     assert result.bundle["citations"][0]["evidence"]["period"] == "2026 Q3"
+
+
+def test_native_collection_record_period_overrides_generic_common_frequency() -> None:
+    data = [
+        {
+            "symbol": "600519",
+            "fiscal_year": 2024,
+            "fiscal_quarter": "Q1",
+            "period": "quarterly",
+            "end_date": "2024-03-31",
+            "currency": "CNY",
+            "operating_revenue": 45_775_517_043,
+        }
+    ]
+    raw_hash = json.dumps(
+        data,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    handle = "evc_native_quarter_12345678"
+    raw = {
+        "data": data,
+        "_valuz_evidence": [
+            {
+                "version": 1,
+                "kind": "structured-evidence-collection",
+                "collectionHandle": handle,
+                "source": {
+                    "sourceId": "reportify.income_statement:600519",
+                    "providerId": "reportify",
+                    "sourceType": "dataset",
+                    "title": "Reportify · income_statement",
+                    "retrievedAt": "2026-08-08T00:00:00Z",
+                },
+                "common": {
+                    "datasetId": "reportify.income_statement",
+                    "toolName": "income_statement",
+                    "currency": "CNY",
+                    "period": "2024 quarterly",
+                    "capturedAt": "2026-08-08T00:00:00Z",
+                },
+                "addressing": {
+                    "mode": "json-pointer",
+                    "contentRoot": "/data",
+                    "identityFields": [
+                        "/symbol",
+                        "/fiscal_year",
+                        "/fiscal_quarter",
+                    ],
+                    "fieldSchemaRef": {
+                        "schemaId": "reportify.income_statement",
+                        "revision": "1",
+                    },
+                    "allowedPathRoots": ["/data"],
+                },
+                "semantics": {
+                    "entity": {"id": "/symbol"},
+                    "period": {
+                        "fiscalYear": "/fiscal_year",
+                        # Reportify exposes the dataset frequency through the
+                        # canonical period slot while keeping the concrete
+                        # quarter as a row identity field.
+                        "period": "/period",
+                        "asOf": "/end_date",
+                    },
+                    "unit": {"currency": "/currency"},
+                    "metric": {
+                        "mode": "field-name",
+                        "valueRoots": [""],
+                        "excludedFields": [
+                            "/symbol",
+                            "/fiscal_year",
+                            "/fiscal_quarter",
+                            "/end_date",
+                            "/currency",
+                        ],
+                    },
+                },
+                "contentHash": (f"sha256:{hashlib.sha256(raw_hash.encode('utf-8')).hexdigest()}"),
+                "sparseOverrides": [],
+            }
+        ],
+    }
+    visible = compact_citation_tool_content(raw)
+    private = private_citation_tool_content(raw)
+    assert visible is not None and private is not None
+    registry = EvidenceRegistry()
+    assert registry.register_tool_projection(visible, private, trusted_private=True) == 1
+
+    record = registry.materialize_reference(handle, "#/data/0/operating_revenue")
+
+    assert record is not None
+    assert record.evidence["period"] == "2024 Q1"
+    assert record.evidence["asOf"] == "2024-03-31"
+
+
+def test_native_collection_uses_currency_as_unit_for_monetary_equity_field() -> None:
+    item = _item("ev_equity_2024_12345678")
+    item["source"].update({"sourceType": "dataset"})
+    item["evidence"] = {
+        "kind": "structured-data",
+        "datasetId": "reportify.balance_sheet",
+        "toolName": "balance_sheet",
+        "recordKey": "600519|2024|FY",
+        "entityId": "600519",
+        "field": "equity_attributable_to_owners_of_the_parent",
+        "metric": "equity_attributable_to_owners_of_the_parent",
+        "value": 233_105_984_399,
+        "currency": "CNY",
+        "period": "2024 FY",
+        "capturedAt": "2026-08-08T00:00:00Z",
+    }
+    raw = {
+        "data": [
+            {
+                "symbol": "600519",
+                "fiscal_year": 2024,
+                "fiscal_quarter": "FY",
+                "currency": "CNY",
+                "equity_attributable_to_owners_of_the_parent": 233_105_984_399,
+            }
+        ],
+        "_valuz_evidence": [item],
+    }
+    visible = compact_citation_tool_content(raw)
+    private = private_citation_tool_content(raw)
+    assert visible is not None and private is not None
+    registry = EvidenceRegistry()
+    assert registry.register_tool_projection(visible, private, trusted_private=True) == 1
+    handle = visible["_valuz_evidence_hint"]["collectionHandle"]
+
+    record = registry.materialize_reference(
+        handle,
+        "#/data/0/equity_attributable_to_owners_of_the_parent",
+    )
+
+    assert record is not None
+    assert record.evidence["unit"] == "CNY"
 
 
 def test_multi_period_legacy_batch_collapses_repeated_fields_into_one_collection() -> None:
@@ -1004,6 +1387,92 @@ def test_calculation_citation_moves_from_period_cell_to_matching_result_cell() -
     assert "citation://" not in row[4]
     assert result.bundle is not None
     assert len(result.bundle["citations"]) == 3
+
+
+def test_standalone_calculation_citation_moves_to_preceding_latex_formula() -> None:
+    def structured(handle: str, field: str, value: int) -> dict:
+        item = _item(handle)
+        item["source"].update({"sourceType": "dataset"})
+        item["source"].pop("documentId")
+        item["source"].pop("documentVersion")
+        item["evidence"] = {
+            "kind": "structured-data",
+            "datasetId": "financials",
+            "toolName": "income_statement",
+            "recordKey": "600519|2024|FY",
+            "entityId": "600519",
+            "field": field,
+            "metric": field,
+            "value": value,
+            "unit": "CNY",
+            "period": "2024 FY",
+            "capturedAt": "2026-08-08T00:00:00Z",
+        }
+        return item
+
+    profit = structured(
+        "ev_parent_profit_12345678",
+        "net_profit_attributable_to_owners_of_the_parent",
+        86_228_146_422,
+    )
+    revenue = structured(
+        "ev_operating_revenue_12345678",
+        "operating_revenue",
+        170_899_152_276,
+    )
+    calculation = _item("ev_net_margin_12345678")
+    calculation["source"].update(
+        {
+            "sourceId": "runtime-net-margin",
+            "providerId": "runtime",
+            "sourceType": "tool-result",
+        }
+    )
+    calculation["source"].pop("documentId")
+    calculation["source"].pop("documentVersion")
+    calculation["evidence"] = {
+        "kind": "calculation",
+        "toolName": "citation_calculate",
+        "expression": "profit / revenue * 100",
+        "inputs": [
+            {
+                "name": "profit",
+                "citationId": profit["evidenceHandle"],
+                "value": 86_228_146_422,
+                "unit": "CNY",
+            },
+            {
+                "name": "revenue",
+                "citationId": revenue["evidenceHandle"],
+                "value": 170_899_152_276,
+                "unit": "CNY",
+            },
+        ],
+        "result": "50.46",
+        "unit": "%",
+        "rounding": "2dp",
+        "metric": "net_margin",
+        "period": "2024 FY",
+        "calculatedAt": "2026-08-08T00:00:00Z",
+    }
+    guard = CitationGuard(
+        _registry(profit, revenue, calculation),
+        message_id="msg-standalone-calc-link",
+        user_prompt="Calculate net margin",
+        policy_available=True,
+        verification_enabled=False,
+    )
+
+    result = guard.finalize(
+        "贵州茅台 2024 年归母净利率：\n\n"
+        r"$$\frac{86{,}228{,}146{,}422}{170{,}899{,}152{,}276} "
+        r"\times 100\% = \mathbf{50.46\%}$$"
+        "\n\n[source](evidence://ev_net_margin_12345678)"
+    )
+
+    formula_line = next(line for line in result.text.splitlines() if "\\frac" in line)
+    assert "citation://" in formula_line
+    assert not any(line.strip().startswith("[1]") for line in result.text.splitlines())
 
 
 def test_calculation_inputs_resolve_structured_collection_addresses() -> None:
@@ -2046,6 +2515,82 @@ def test_guard_does_not_add_bundle_to_ordinary_chat() -> None:
     assert result.bundle is None
 
 
+def test_strict_domain_interim_message_is_not_an_integrity_failure() -> None:
+    """A turn still in progress has not failed its citation integrity.
+
+    ``force_required`` is set on every message by a strict-domain
+    distribution, so keying integrity on it reported each interim narration
+    ("now reading the filing... revenue looks like 100") as degraded before
+    any evidence could exist. Only a locked document scope makes an uncited
+    answer structurally wrong.
+    """
+
+    registry = EvidenceRegistry()
+    registry.register_tool_projection(
+        {"docs": [{"doc_id": "d1", "title": "FY2026 annual report"}]},
+        tool_name="filings_search",
+    )
+    guard = CitationGuard(
+        registry,
+        message_id="msg-interim",
+        user_prompt="查一下年报里的营业收入。",
+        policy_available=True,
+        force_required=True,
+    )
+
+    result = guard.finalize("找到了年报，正在读取第 92 页的营业收入。")
+
+    assert result.bundle is not None
+    assert result.bundle["integrity"]["status"] != "degraded"
+
+
+def test_strict_domain_leaves_a_no_lookup_knowledge_answer_alone() -> None:
+    """A definition answered without consulting anything has nothing to cite."""
+
+    guard = CitationGuard(
+        EvidenceRegistry(),
+        message_id="msg-knowledge",
+        user_prompt="ROE 是什么意思？不需要查询具体公司数据。",
+        policy_available=True,
+        force_required=True,
+    )
+
+    result = guard.finalize(
+        "ROE = 净利润 ÷ 股东权益。比如 ROE = 15%，意味着股东每投入 100 元，一年赚回 15 元。"
+    )
+
+    # Illustrative numbers in a definition are not a sourcing gap.
+    assert result.bundle is None
+
+
+def test_a_search_that_returned_nothing_still_demands_sources() -> None:
+    """Consulting a source and finding nothing is not stable knowledge."""
+
+    registry = EvidenceRegistry()
+    # A discovery-only search: the projection registers no evidence, but the
+    # model did go looking, so its figures must still be sourced.
+    registry.register_tool_projection(
+        {"docs": [{"doc_id": "d1", "title": "SpaceX Q2"}]},
+        tool_name="news_search",
+    )
+    assert registry.retrieval_attempted is True
+    assert registry.had_evidence_activity is False
+
+    guard = CitationGuard(
+        registry,
+        message_id="msg-search-empty",
+        user_prompt="SpaceX 云业务收入是多少？",
+        policy_available=True,
+        force_required=True,
+    )
+
+    result = guard.finalize("SpaceX AI 板块总收入为 25.61 亿美元，同比增长 247%。")
+
+    assert result.bundle is not None
+    quality = result.bundle.get("quality") or {}
+    assert (quality.get("metrics") or {}).get("unsourcedClaimCount", 0) >= 1
+
+
 def test_guard_requires_citations_for_locked_document_research_without_evidence() -> None:
     guard = CitationGuard(
         EvidenceRegistry(allowed_document_ids={"doc-1"}),
@@ -3050,5 +3595,33 @@ def test_guard_batches_all_message_semantic_claims_in_one_verifier_call() -> Non
 
     assert verifier.batch_calls == 1
     assert len(verifier.calls) == 2
+    assert result.bundle is not None
+    assert result.bundle["quality"]["metrics"]["unverifiedClaimCount"] == 0
+
+
+def test_guard_reuses_local_semantic_binding_without_a_second_model_call() -> None:
+    item = _item("ev_revenue_local_scope")
+    item["evidence"].update(
+        {
+            "quote": "Revenue increased by twelve percent. Demand remained stable.",
+            "snippet": "Revenue increased by twelve percent. Demand remained stable.",
+        }
+    )
+    verifier = _GuardSemanticVerifier()
+    guard = CitationGuard(
+        _registry(item),
+        message_id="msg-semantic-local-scope",
+        user_prompt="Summarize revenue growth and demand with citations.",
+        policy_available=True,
+        semantic_verifier=verifier,
+    )
+
+    result = guard.finalize(
+        "Revenue increased by 12%; Demand remained stable "
+        "[source](evidence://ev_revenue_local_scope)."
+    )
+
+    assert verifier.batch_calls == 1
+    assert result.text.count("citation://") == 2
     assert result.bundle is not None
     assert result.bundle["quality"]["metrics"]["unverifiedClaimCount"] == 0

@@ -12,15 +12,17 @@ import math
 import re
 from collections import defaultdict
 from collections.abc import Iterable, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
 from src.core.claim_audit import (
     ClaimCandidate,
     EvidenceSupport,
+    canonical_amount_keys,
     canonical_evidence_metric,
     canonical_evidence_period,
     evidence_periods_compatible,
+    is_ontology_vocabulary_term,
     match_composite_text_evidence,
     structured_units_compatible,
     structured_value_present,
@@ -81,6 +83,10 @@ class EvidenceCandidate:
     hard_conflicts: tuple[str, ...]
     source: Mapping[str, Any]
     evidence: Mapping[str, Any]
+    # Carried so provenance granularity can be compared. A chunk names an
+    # exact location inside the document; a provider summary only points at
+    # the document as a whole.
+    locator: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -104,7 +110,7 @@ class SemanticVerificationResult:
 
 @dataclass(frozen=True)
 class SemanticVerificationRequest:
-    """One isolated Claim plus only its already-bound text candidates."""
+    """One isolated Claim plus only its sealed, Claim-local text candidates."""
 
     claim: ClaimCandidate
     candidates: tuple[EvidenceCandidate, ...]
@@ -162,6 +168,7 @@ class EvidenceCandidateIndex:
         self._by_metric: dict[str, list[int]] = defaultdict(list)
         self._by_period: dict[str, list[int]] = defaultdict(list)
         self._by_entity_id: dict[str, list[int]] = defaultdict(list)
+        self._by_amount_key: dict[str, list[int]] = defaultdict(list)
         self._by_token: dict[str, list[int]] = defaultdict(list)
         self._candidate_cache: dict[str, tuple[Any, ...]] = {}
         self._support_cache: dict[tuple[str, str], EvidenceSupport] = {}
@@ -192,6 +199,14 @@ class EvidenceCandidateIndex:
 
             for number in set(_number_tokens(number_text)):
                 self._append(self._by_number, number, index)
+            amount_text = (
+                _text_evidence(evidence)
+                if kind == "text"
+                else f"{evidence.get('value') or evidence.get('result') or ''} "
+                f"{evidence.get('unit') or evidence.get('currency') or ''}"
+            )
+            for amount_key in canonical_amount_keys(amount_text, self.semantics):
+                self._append(self._by_amount_key, amount_key, index)
 
             entity_text = _evidence_entity_text(source, evidence)
             for entity_id in _entity_ids(entity_text):
@@ -326,6 +341,10 @@ class EvidenceCandidateIndex:
             for record_index in self._by_number.get(number, ()):
                 scores[record_index] += 40.0
 
+        for amount_key in canonical_amount_keys(claim.exact, self.semantics):
+            for record_index in self._by_amount_key.get(amount_key, ()):
+                scores[record_index] += 55.0
+
         metric_values = {
             value
             for value in (
@@ -414,6 +433,8 @@ def retrieve_evidence_candidates(
         handle, source, evidence = _evidence_parts(record)
         if not handle or not isinstance(evidence, Mapping):
             continue
+        locator = record.get("locator") if isinstance(record, Mapping) else None
+        locator = locator if isinstance(locator, Mapping) else {}
         signals, hard_conflicts = _candidate_signals(
             claim,
             handle,
@@ -436,6 +457,7 @@ def retrieve_evidence_candidates(
                 hard_conflicts=tuple(dict.fromkeys(hard_conflicts)),
                 source=source,
                 evidence=evidence,
+                locator=locator,
             )
         )
 
@@ -464,8 +486,9 @@ def prepare_semantic_verification_request(
     """Return the bounded semantic request after deterministic screening.
 
     This is the message-level batching seam. It never broadens the candidate
-    pool: only legal explicit bindings that point to text Evidence and remain
-    unresolved after deterministic checks are projected to the model.
+    pool: only legal explicit bindings or host-sealed local Citation candidates
+    that point to text Evidence and remain unresolved after deterministic
+    checks are projected to the model.
     """
 
     candidate_index = ensure_evidence_candidate_index(records, semantics=semantics)
@@ -526,13 +549,26 @@ def resolve_claim_evidence(
     )
     missing_explicit = tuple(handle for handle in requested_explicit if handle not in explicit)
     support_by_handle: dict[str, str] = {}
+    deterministic_support_by_handle: dict[str, EvidenceSupport] = {}
     for candidate in candidates:
-        support = _deterministic_support(
-            claim,
-            candidate,
-            semantics,
-            candidate_index=candidate_index,
+        support = (
+            # Marker-based entity conflicts exist only in the retrieval signal
+            # layer, so they must override a surface numeric match here.  The
+            # metric and period signal conflicts are re-checked inside the
+            # deterministic verifier with full policy context (for example
+            # ``calculation_dependencies`` sanctions a derived-metric pairing
+            # and ``date_role: publication`` excuses a period mismatch), so
+            # they never bypass it.
+            EvidenceSupport("contradicted", 4, "hard-dimension-conflict")
+            if "entity" in candidate.hard_conflicts
+            else _deterministic_support(
+                claim,
+                candidate,
+                semantics,
+                candidate_index=candidate_index,
+            )
         )
+        deterministic_support_by_handle[candidate.handle] = support
         support_by_handle[candidate.handle] = support.status
 
     semantic_candidates = tuple(
@@ -580,9 +616,7 @@ def resolve_claim_evidence(
             allowed = {candidate.handle for candidate in semantic_candidates}
             selected = tuple(
                 dict.fromkeys(
-                    handle
-                    for handle in semantic_result.evidence_handles
-                    if handle in allowed
+                    handle for handle in semantic_result.evidence_handles if handle in allowed
                 )
             )
             # A semantic model may establish support, but it is not a
@@ -599,10 +633,13 @@ def resolve_claim_evidence(
             for handle in selected:
                 support_by_handle[handle] = mapped_status
 
-    supported = tuple(
-        candidate.handle
-        for candidate in candidates
-        if support_by_handle[candidate.handle] == "supported"
+    supported = _collapse_superseded_summaries(
+        tuple(
+            candidate.handle
+            for candidate in candidates
+            if support_by_handle[candidate.handle] == "supported"
+        ),
+        candidates,
     )
     partial = tuple(
         candidate.handle
@@ -700,6 +737,23 @@ def resolve_claim_evidence(
         )
     explicit_partial = tuple(handle for handle in explicit if handle in partial)
     if explicit_partial:
+        explicit_safe_partial = tuple(
+            handle
+            for handle in explicit_partial
+            if deterministic_support_by_handle[handle].reason
+            in {"unit-missing", "range-member", "approximate-rounding"}
+        )
+        if len(explicit_safe_partial) == len(explicit_partial):
+            return _resolution(
+                claim,
+                "supported-with-limits",
+                explicit_partial,
+                candidates,
+                "keep",
+                "none",
+                support_by_handle,
+                ("explicit-binding-partially-supported-safe",),
+            )
         return _resolution(
             claim,
             "supported-with-limits",
@@ -731,6 +785,30 @@ def resolve_claim_evidence(
             "advisory",
             support_by_handle,
             ("explicit-binding-unresolved",),
+        )
+    _safe_partial_reasons = {"unit-missing", "range-member", "approximate-rounding"}
+    safe_partial = tuple(
+        candidate.handle
+        for candidate in candidates
+        if candidate.handle in partial
+        and deterministic_support_by_handle[candidate.handle].reason in _safe_partial_reasons
+    )
+    if len(safe_partial) == 1:
+        # Missing source-unit captions are common at PDF chunk boundaries.  A
+        # unique same-subject numeric candidate is still useful provenance,
+        # but remains explicitly classified as supported-with-limits rather
+        # than being promoted to verified evidence.  Range estimates and
+        # explicit approximations are also useful provenance when only one
+        # bounded numeric candidate matches.
+        return _resolution(
+            claim,
+            "supported-with-limits",
+            safe_partial,
+            candidates,
+            "auto-bind",
+            "none",
+            support_by_handle,
+            ("unique-safe-partial-candidate",),
         )
     if partial:
         return _resolution(
@@ -943,6 +1021,58 @@ def _deterministic_support(
     return EvidenceSupport("supported", 3)
 
 
+def _is_provider_summary(candidate: EvidenceCandidate) -> bool:
+    """Return whether this candidate is a whole-document provider summary."""
+
+    locator = candidate.locator
+    return (
+        locator.get("kind") == "external"
+        and str(locator.get("fragment") or "") == "provider-summary"
+    )
+
+
+def _candidate_document_id(candidate: EvidenceCandidate) -> str:
+    source = candidate.source
+    return str(source.get("documentId") or source.get("sourceId") or "")
+
+
+def _collapse_superseded_summaries(
+    supported: tuple[str, ...],
+    candidates: tuple[EvidenceCandidate, ...],
+) -> tuple[str, ...]:
+    """Drop a summary when a chunk of the same document also supports.
+
+    One search result can now carry both an authoritative chunk and the
+    provider summary of the same document, and the same figure often appears
+    in both. Left alone that reads as two independent candidates and the
+    uniqueness gate refuses to bind anything — a strictly worse outcome than
+    before the summary was citable. They are not independent: the chunk names
+    an exact location inside the document the summary merely describes, so
+    the chunk supersedes it. Genuine disagreement between two different
+    documents still resolves as ambiguous.
+    """
+
+    if len(supported) < 2:
+        return supported
+    by_handle = {candidate.handle: candidate for candidate in candidates}
+    chunk_documents = {
+        _candidate_document_id(candidate)
+        for handle in supported
+        if (candidate := by_handle.get(handle)) is not None
+        and not _is_provider_summary(candidate)
+        and _candidate_document_id(candidate)
+    }
+    if not chunk_documents:
+        return supported
+    return tuple(
+        handle
+        for handle in supported
+        if (candidate := by_handle.get(handle)) is None
+        or not _is_provider_summary(candidate)
+        or _candidate_document_id(candidate) not in chunk_documents
+    )
+
+
 def _candidate_signals(
     claim: ClaimCandidate,
     handle: str,
@@ -999,7 +1129,15 @@ def _candidate_signals(
             evidence,
             entity_aliases,
         )
-        if entity_relation == "conflict":
+        if entity_relation == "conflict" or (
+            entity_relation == "unknown"
+            and _primary_entity_marker_conflicts(
+                claim.semantic_text,
+                source,
+                evidence,
+                semantics,
+            )
+        ):
             conflicts.append("entity")
         elif entity_relation == "match":
             signals.append(CandidateSignal("entity-match", 20.0))
@@ -1235,7 +1373,191 @@ def evidence_entity_conflicts(
     source: Mapping[str, Any],
     evidence: Mapping[str, Any],
     entity_aliases: Mapping[str, Iterable[str]] | None = None,
+    semantics: Mapping[str, Any] | None = None,
 ) -> bool:
     """Return only turn-locally provable cross-entity conflicts."""
 
-    return _entity_relation(claim_text, source, evidence, entity_aliases) == "conflict"
+    relation = _entity_relation(claim_text, source, evidence, entity_aliases)
+    if relation != "unknown":
+        return relation == "conflict"
+    return _primary_entity_marker_conflicts(claim_text, source, evidence, semantics)
+
+
+_ENTITY_MARKER_STOP_WORDS = {
+    "analysis",
+    "annual",
+    "buy",
+    "cloud",
+    "company",
+    "confidence",
+    "consensus",
+    "current",
+    "data",
+    "detail",
+    "earnings",
+    "estimate",
+    "fiscal",
+    "global",
+    "group",
+    "latest",
+    "known",
+    "key",
+    "anchors",
+    "methodology",
+    "market",
+    "quarter",
+    "quarterly",
+    "report",
+    "research",
+    "result",
+    "results",
+    "revenue",
+    "review",
+    "segment",
+    "source",
+    "stock",
+    "the",
+    "this",
+    "later",
+    "historical",
+    "subscriber",
+    "value",
+    "valuation",
+}
+
+
+_ENTITY_MARKER_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9._-]{1,31}")
+
+
+def _measurement_position(value: str, start: int) -> bool:
+    """Return whether a token sits right after a number, like a unit caption."""
+
+    return bool(re.search(r"\d\s*$", value[:start]))
+
+
+def _sentence_initial_position(value: str, start: int) -> bool:
+    """Return whether a token starts the text or follows a sentence break."""
+
+    prefix = value[:start].rstrip()
+    return not prefix or prefix[-1] in ".!?。！？;；\n"
+
+
+def _leading_entity_markers(
+    value: str,
+    semantics: Mapping[str, Any] | None = None,
+    *,
+    prose: bool = False,
+) -> set[str]:
+    """Return conservative named Latin markers from the leading context.
+
+    ``prose`` marks Claim-side sentences, where English grammar capitalizes
+    the first word of every sentence.  A sentence-initial simple capitalized
+    word (``Customer demand ...``) is therefore not a usable entity marker,
+    while brand tokens with interior capitals (``SpaceX``, ``MiMo-V2.5``) and
+    all-caps tickers stay reliable at any position.  Source titles and
+    Evidence-local mention scans stay permissive: an extra marker there never
+    creates a conflict on its own.
+    """
+
+    output: set[str] = set()
+    # Grammar-driven capitalization only exists in Latin prose.  A CJK
+    # sentence that opens with a Latin token (``Microsoft AI 容量增长…``)
+    # names that brand deliberately.
+    latin_prose = prose and re.search(r"[㐀-鿿]", value) is None
+    for index, match in enumerate(_ENTITY_MARKER_TOKEN_RE.finditer(value)):
+        if index >= 16:
+            break
+        token = match.group(0)
+        normalized = token.strip("._-").casefold()
+        if (
+            len(normalized) < 2
+            or normalized in _ENTITY_MARKER_STOP_WORDS
+            or re.fullmatch(r"(?:fy|q)\d{1,4}", normalized)
+            or _measurement_position(value, match.start())
+        ):
+            continue
+        is_ticker = token.isupper() and len(token) <= 8
+        is_named = token[0].isupper() and not token.isupper()
+        if (
+            latin_prose
+            and is_named
+            and not any(character.isupper() for character in token[1:])
+            and _sentence_initial_position(value, match.start())
+        ):
+            continue
+        if (is_ticker or is_named) and not is_ontology_vocabulary_term(token, semantics):
+            output.add(normalized)
+    return output
+
+
+def _has_strong_latin_entity_marker(
+    value: str,
+    semantics: Mapping[str, Any] | None = None,
+) -> bool:
+    """Return whether a mixed-script Claim has an explicit ticker/brand token."""
+
+    for index, match in enumerate(_ENTITY_MARKER_TOKEN_RE.finditer(value)):
+        if index >= 16:
+            break
+        token = match.group(0)
+        stripped = token.strip("._-")
+        normalized = stripped.casefold()
+        if (
+            normalized in _ENTITY_MARKER_STOP_WORDS
+            or re.fullmatch(r"(?:fy|q)\d{1,4}", normalized)
+            or _measurement_position(value, match.start())
+            or is_ontology_vocabulary_term(token, semantics)
+        ):
+            continue
+        if stripped.isupper() and 2 <= len(stripped) <= 8:
+            return True
+        if any(character.isupper() for character in stripped[1:]):
+            return True
+    return False
+
+
+def _primary_entity_marker_conflicts(
+    claim_text: str,
+    source: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+    semantics: Mapping[str, Any] | None = None,
+) -> bool:
+    """Reject a source-owned entity when the Claim names another one.
+
+    This fallback is intentionally narrower than alias resolution.  It uses
+    only a leading named marker from the Claim context and source title, then
+    fails closed only when the Evidence text never mentions the Claim marker.
+    It therefore blocks ``SpaceX`` -> ``Nebius`` while still allowing a
+    Microsoft-titled cross-company table whose exact quote contains
+    ``Google`` or ``AWS``.
+    """
+
+    claim_markers = _leading_entity_markers(claim_text, semantics, prose=True)
+    title = str(source.get("title") or source.get("documentTitle") or "")
+    source_markers = _leading_entity_markers(title, semantics)
+    if re.search(r"[\u3400-\u9fff]", claim_text) and not _has_strong_latin_entity_marker(
+        claim_text,
+        semantics,
+    ):
+        # A localized Claim may name the company only in CJK while its first
+        # Latin phrase is a product/segment (for example ``微软（Intelligent
+        # Cloud）``). Without an explicit ticker or mixed-case brand, treating
+        # that product as the company would falsely conflict with a Microsoft
+        # source title. Alias-aware policy remains the authority here.
+        return False
+    if not claim_markers or not source_markers or not claim_markers.isdisjoint(source_markers):
+        return False
+    local_text = " ".join(
+        str(evidence.get(key) or "")
+        for key in ("prefix", "quote", "suffix", "snippet", "entityId", "entityName")
+    )
+    if any(_alias_is_present(local_text, marker) for marker in claim_markers):
+        return False
+    # ``_alias_is_present`` requires an exact alphanumeric word for short
+    # aliases, so a separator-carrying brand such as ``MiMo-V2.5`` inside the
+    # quote is not recognized by the word-boundary rule.  Extract markers from
+    # the Evidence-local text with the same normalization instead of loosening
+    # that rule for plain tickers.
+    if claim_markers & _leading_entity_markers(local_text, semantics):
+        return False
+    return True

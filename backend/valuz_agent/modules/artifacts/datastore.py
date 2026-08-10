@@ -549,6 +549,34 @@ class ArtifactDatastore:
         )
         return list((await self._db.execute(stmt)).scalars().all())
 
+    async def list_revisions_by_file_name(
+        self, user_id: str, file_name: str
+    ) -> list[ArtifactRevisionRow]:
+        """Every revision recorded under one file name, oldest first.
+
+        The per-host document name is stable across scopes (genui
+        ``host_document_file_name``), so this is a host's FULL version
+        history: the bound lineage plus any historical fork another
+        conversation's scope created before deliveries followed the binding.
+        Chronological order — version numbers restart per artifact and do not
+        order entries across lineages.
+        """
+        stmt = (
+            select(ArtifactRevisionRow)
+            .where(
+                ArtifactRevisionRow.user_id == user_id,
+                ArtifactRevisionRow.file_name == file_name,
+            )
+            # created_at can collide within a millisecond; the tiebreak keeps
+            # same-lineage neighbours together and in version order.
+            .order_by(
+                ArtifactRevisionRow.created_at,
+                ArtifactRevisionRow.artifact_id,
+                ArtifactRevisionRow.version_no,
+            )
+        )
+        return list((await self._db.execute(stmt)).scalars().all())
+
     async def list_session_revisions(
         self, user_id: str, session_id: str
     ) -> list[ArtifactRevisionRow]:
@@ -730,7 +758,24 @@ class ArtifactDatastore:
 
 
     # ── Host bindings ───────────────────────────────────────────────────
+    async def list_bindings_for_artifact(
+        self, user_id: str, artifact_id: str
+    ) -> list[ArtifactBindingRow]:
+        """Every host slot currently showing a revision of this artifact.
+
+        The deliver path uses it to tell "a page document the workbench is
+        showing" from an ordinary deliverable: a delivery that appends a
+        revision to a bound artifact must announce itself with the same
+        receipt a generation would, or the client never learns a new version
+        exists."""
+        stmt = select(ArtifactBindingRow).where(
+            ArtifactBindingRow.user_id == user_id,
+            ArtifactBindingRow.artifact_id == artifact_id,
+        )
+        return list((await self._db.execute(stmt)).scalars().all())
+
     async def get_binding(
+
         self, user_id: str, host_type: str, host_id: str, slot: str
     ) -> ArtifactBindingRow | None:
         return (

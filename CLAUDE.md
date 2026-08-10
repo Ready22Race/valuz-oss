@@ -69,7 +69,11 @@ Required GitHub secrets: `TENCENT_SECRET_ID`, `TENCENT_SECRET_KEY`,
 Cutting `vX.Y.Z`:
 
 1. **Pick the version** (SemVer, pre-1.0): bug-fix / small batch → patch (`0.1.x`);
-   feature batch → minor (`0.2.0`).
+   feature batch → minor (`0.2.0`). **Propose the number (with rationale) and get
+   the maintainer's confirmation BEFORE touching the CHANGELOG or creating the
+   tag** — the patch/minor rule informs the proposal; the maintainer makes the
+   call. A tag in flight (CI publishing to COS + GitHub) makes renumbering
+   expensive, so this confirmation is not skippable.
 2. **Update `CHANGELOG.md`** (Keep a Changelog: Added / Changed / Fixed / Docs & Chore).
    Credit every entry `(#PR @author)`; use the short SHA for commits pushed straight to
    main. **Write all CHANGELOG entries and release notes in English only** — no Chinese

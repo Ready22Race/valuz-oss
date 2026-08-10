@@ -321,7 +321,6 @@
       "inputUncached": "Input (cache miss)",
       "models": "Models",
       "outputWithReasoning": "Output (including reasoning)",
-      "sessionTotal": "{count} Tokens in this conversation",
       "showDetails": "View usage details for this turn's {count} Tokens",
       "turnTotal": "Turn Tokens"
     },
@@ -2063,6 +2062,7 @@
       "qualityIssueSource": "The source tier or authority is insufficient",
       "qualityClaimNoSource": "This content has no corresponding source that can be opened, so it cannot be verified automatically. Check it against the original material, or regenerate the answer and request supporting sources.",
       "qualityClaimSourceMissing": "No corresponding source was found. This statement may be model-generated and cannot currently be verified; do not treat it as confirmed fact.",
+      "qualityClaimUnsourcedTitle": "No source attached",
       "qualityClaimMismatch": "The connection between this statement and the cited evidence is unclear. Review the original source if needed.",
       "qualityClaimStructuredMismatch": "The cited field “{field}” has the value {value}, which may not match this statement. Please check it.",
       "qualityClaimPartial": "The citation supports only part of this statement. The remaining content may lack evidence.",

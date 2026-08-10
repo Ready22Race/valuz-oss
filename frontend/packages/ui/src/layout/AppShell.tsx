@@ -49,6 +49,12 @@ interface AppShellProps extends PropsWithChildren {
   activePath?: string;
   aside?: ReactNode;
   right?: ReactNode;
+  /** Shell-level notice strip pinned as the FIRST row of the main card —
+   * above the header and outside the page's padded/scrolling content, so it
+   * reads as panel chrome on every page (headered pages would otherwise
+   * inset it into their content padding, and outer-scroll pages would let
+   * it scroll away). */
+  notice?: ReactNode;
   header?: ReactNode;
   headerClassName?: string;
   hideHeader?: boolean;
@@ -87,6 +93,7 @@ export const AppShell = ({
   LinkComponent = DefaultNavLink,
   mainClassName,
   navItems = [],
+  notice,
   right,
   sidebar,
   shellClassName,
@@ -170,6 +177,7 @@ export const AppShell = ({
             mainClassName,
           )}
         >
+          {notice}
           {!hideHeader && header ? (
             <header
               className={cn(

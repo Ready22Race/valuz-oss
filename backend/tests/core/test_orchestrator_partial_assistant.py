@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import threading
 from typing import Any
@@ -28,6 +29,7 @@ def _observer(
     citation_enabled: bool = False,
     verification_enabled: bool = False,
     task_coverage_enabled: bool = False,
+    citation_quality_policy: dict[str, Any] | None = None,
 ) -> tuple[_RecordingSink, _MessageObserverSink]:
     sink = _RecordingSink()
     return sink, _MessageObserverSink(
@@ -35,6 +37,7 @@ def _observer(
         message_id="message-1",
         user_prompt="根据已有资料回答。",
         citation_policy_available=True,
+        citation_quality_policy=citation_quality_policy,
         citation_enabled=citation_enabled,
         citation_verification_enabled=verification_enabled,
         task_coverage_enabled=task_coverage_enabled,
@@ -165,6 +168,176 @@ async def test_auto_binding_stays_in_sidecar_and_never_rewrites_runtime_message(
     assert sidecar.data["citation_bundle"]["quality"]["claims"]
     assert "claim_audit" not in sidecar.data
     assert observer.claim_audits[0]["claims"]
+
+
+async def test_final_recap_reuses_verified_binding_from_prior_assistant_message() -> None:
+    sink, observer = _observer(citation_enabled=True, verification_enabled=True)
+    handle = "ev_msft_q3_throughput_12345678"
+    await observer.emit(
+        Event(
+            type="citation_evidence",
+            data={
+                "content": json.dumps(
+                    {
+                        "_valuz_evidence": {
+                            "evidenceHandle": handle,
+                            "source": {
+                                "sourceId": "msft-2026-q3",
+                                "providerId": "reportify",
+                                "documentId": "msft-2026-q3",
+                                "sourceType": "document",
+                                "title": "Microsoft FY2026 Q3 earnings call",
+                                "retrievedAt": "2026-08-08T00:00:00Z",
+                            },
+                            "evidence": {
+                                "kind": "text",
+                                "quote": (
+                                    "Fairwater 提前六周投产，推理吞吐量提升40%。"
+                                ),
+                                "snippet": (
+                                    "Fairwater 提前六周投产，推理吞吐量提升40%。"
+                                ),
+                                "capturedAt": "2026-08-08T00:00:00Z",
+                            },
+                            "locator": {
+                                "kind": "chunk",
+                                "chunkId": "chunk-throughput",
+                            },
+                        }
+                    }
+                ),
+                "tool_name": "document_fetch",
+            },
+        )
+    )
+    first = (
+        "### FY2026 Q3\n\n"
+        "Fairwater 提前六周投产，推理吞吐量提升40% "
+        f"[source](evidence://{handle})。"
+    )
+    recap = (
+        "### FY2026 Q3 汇总\n\n"
+        "| 维度 | 核心指标 |\n"
+        "|---|---|\n"
+        "| 核心优化指标 | 推理吞吐量（+40%） |"
+    )
+
+    await observer.emit(Event(type="assistant_message", data={"text": first}))
+    await observer.emit(Event(type="assistant_message", data={"text": recap}))
+    await observer.emit(Event(type="session_idle", data={"num_turns": 1}))
+
+    sidecars = [event for event in sink.events if event.type == "assistant_message_sidecar"]
+    assert len(sidecars) == 2
+    recap_bundle = sidecars[1].data["citation_bundle"]
+    assert len(recap_bundle["citations"]) == 1
+    assert recap_bundle["projection"]["provenanceRegions"]
+
+
+async def test_final_recap_reuses_materialized_collection_binding_from_prior_message() -> None:
+    policy = {
+        "mode": "strict-domain",
+        "config": {
+            "semantics": {
+                "metric_ontology": {
+                    "metrics": {
+                        "market_cap": {
+                            "aliases": ["market cap", "市值"],
+                            "fields": ["market_cap"],
+                        }
+                    }
+                }
+            }
+        },
+    }
+    sink, observer = _observer(
+        citation_enabled=True,
+        verification_enabled=True,
+        citation_quality_policy=policy,
+    )
+    data = {
+        "items": [
+            {
+                "symbol": "GOOGL",
+                "date": "2026-08-07",
+                "market_cap": 4_287_778_028_630,
+            }
+        ]
+    }
+    raw_hash = json.dumps(
+        data,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    collection_handle = "evc_mcp_stock_quote_12345678"
+    await observer.emit(
+        Event(
+            type="citation_evidence",
+            data={
+                "tool_name": "stock_quote",
+                "content": json.dumps({
+                    "data": data,
+                    "_valuz_evidence": [
+                        {
+                            "version": 1,
+                            "kind": "structured-evidence-collection",
+                            "collectionHandle": collection_handle,
+                            "source": {
+                                "sourceId": "reportify-stock-quote:GOOGL",
+                                "providerId": "reportify",
+                                "sourceType": "dataset",
+                                "sourceCategory": "market_data",
+                                "title": "Reportify · stock_quote",
+                                "retrievedAt": "2026-08-08T00:00:00Z",
+                            },
+                            "common": {
+                                "datasetId": "reportify.stock_quote",
+                                "toolName": "stock_quote",
+                                "capturedAt": "2026-08-08T00:00:00Z",
+                            },
+                            "addressing": {
+                                "mode": "json-pointer",
+                                "contentRoot": "/data",
+                                "itemsPointer": "/data/items",
+                                "identityFields": ["/symbol", "/date"],
+                                "allowedPathRoots": ["/data"],
+                            },
+                            "semantics": {
+                                "entity": {"symbol": "/symbol"},
+                                "asOf": {"date": "/date"},
+                                "metric": {
+                                    "mode": "field-name",
+                                    "valueRoots": [""],
+                                },
+                            },
+                            "contentHash": (
+                                "sha256:"
+                                + hashlib.sha256(raw_hash.encode()).hexdigest()
+                            ),
+                        }
+                    ],
+                }),
+            },
+        )
+    )
+    first = (
+        "Google current market cap was $4.29T as of August 7, 2026 "
+        f"[source](evidence://{collection_handle}#/data/0/market_cap)."
+    )
+    recap = "| 公司 | 市值 |\n|---|---:|\n| Google | $4.29万亿 |"
+
+    await observer.emit(Event(type="assistant_message", data={"text": first}))
+    await observer.emit(Event(type="assistant_message", data={"text": recap}))
+    await observer.emit(Event(type="session_idle", data={"num_turns": 1}))
+
+    sidecars = [event for event in sink.events if event.type == "assistant_message_sidecar"]
+    assert len(sidecars) == 2
+    first_bundle = sidecars[0].data["citation_bundle"]
+    recap_bundle = sidecars[1].data["citation_bundle"]
+    assert len(first_bundle["citations"]) == 1
+    assert len(recap_bundle["citations"]) == 1
+    assert recap_bundle["projection"]["provenanceRegions"]
 
 
 async def test_sidecar_failure_never_removes_or_replaces_runtime_message(

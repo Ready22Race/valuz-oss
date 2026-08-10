@@ -2,6 +2,7 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { MarkdownContent } from "./MarkdownContent";
+import { stripStreamingEvidenceLinkTail } from "./CitationInline";
 import type { CitationBundleV1 } from "@valuz/shared";
 
 const CITATIONS: CitationBundleV1 = {
@@ -181,6 +182,51 @@ describe("MarkdownContent local file links", () => {
       "file:///Users/ada/Downloads/ai-crm/index.html",
     );
     expect(screen.queryByText("[blocked]")).toBeNull();
+  });
+
+  it("never shows a blocked placeholder while an evidence link is still streaming", () => {
+    // Mid-stream the model has emitted only part of the binding. The complete
+    // form is dropped by projectEvidenceMarkdownLinks, but a half-written one
+    // used to reach Streamdown, which completes the link, rejects the unknown
+    // evidence: protocol and paints "[blocked]" until the sidecar lands.
+    render(
+      <MarkdownContent content="Revenue was 100 USD [source](evidence://ev_mcp_abc123" />,
+    );
+
+    expect(screen.queryByText(/\[blocked\]/)).toBeNull();
+    expect(document.body.textContent).toContain("Revenue was 100 USD");
+  });
+
+  it("drops a streaming binding tail at every stage of the protocol", () => {
+    for (const tail of [
+      "[source](evidence:",
+      "[source](evidence://",
+      "[source](evidence://ev_mcp_abc",
+      "[source](evidence://ev_mcp_abc#/data/items/9/market_cap",
+    ]) {
+      const { unmount } = render(
+        <MarkdownContent content={`Revenue was 100 USD ${tail}`} />,
+      );
+      expect(screen.queryByText(/\[blocked\]/)).toBeNull();
+      expect(document.body.textContent).toContain("Revenue was 100 USD");
+      unmount();
+    }
+  });
+
+  it("only strips a partial binding at the very end of the stream", () => {
+    // Exercised directly: through the renderer this would also measure how
+    // Streamdown treats malformed markdown, which is a separate concern.
+    expect(
+      stripStreamingEvidenceLinkTail("Revenue was 100 USD [source](evidence://ev_a"),
+    ).toBe("Revenue was 100 USD ");
+    // A completed binding is the other function's job and must survive here.
+    expect(
+      stripStreamingEvidenceLinkTail("Revenue was 100 USD [source](evidence://ev_a)"),
+    ).toBe("Revenue was 100 USD [source](evidence://ev_a)");
+    // Ordinary prose containing brackets is untouched.
+    expect(stripStreamingEvidenceLinkTail("See [note] for the method.")).toBe(
+      "See [note] for the method.",
+    );
   });
 
   it("leaves non-local hrefs on the normal markdown link path", () => {
@@ -1314,7 +1360,7 @@ describe("MarkdownContent citations", () => {
     ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   });
 
-  it("does not add a scary marker to an uncited advisory claim", () => {
+  it("marks an uncited claim neutrally without a turn-level warning", () => {
     render(
       <MarkdownContent
         content="Revenue was 100 USD [source](citation://cit_first). Margin was 23.5%."
@@ -1354,15 +1400,426 @@ describe("MarkdownContent citations", () => {
       />,
     );
 
-    expect(
-      document.querySelector("[data-citation-claim-quality]"),
-    ).toBeNull();
+    // The statement itself is marked so a reader can tell it carries no
+    // source, but in the neutral tone reserved for coverage gaps.
+    const marker = document.querySelector("[data-citation-claim-quality]");
+    expect(marker).not.toBeNull();
+    expect(marker?.getAttribute("data-citation-claim-tone")).toBe("unsourced");
+    // No turn-level alarm: a missing source is not a defect claim.
     expect(
       document.querySelector("[data-citation-quality-warning]"),
     ).toBeNull();
     expect(
       document.querySelector("[data-citation-quality-summary]"),
     ).toBeNull();
+  });
+
+  it("marks an unsourced statement in place with a neutral tone", () => {
+    const content = "AI segment revenue reached 2.561 billion USD.";
+    const location = {
+      kind: "text" as const,
+      blockIndex: 0,
+      start: 0,
+      end: content.length,
+      sourceStart: 0,
+      sourceEnd: content.length,
+    };
+    render(
+      <MarkdownContent
+        content={content}
+        citationBundle={{
+          version: 1,
+          citations: [],
+          integrity: {
+            status: "passed",
+            unknownCitationIds: [],
+            unusedCitationIds: [],
+            missingLocatorCitationIds: [],
+            repairAttempts: 0,
+            policyRevision: "citation-v1",
+          },
+          quality: {
+            policyId: "finance",
+            policyRevision: "v1",
+            mode: "strict-domain",
+            status: "degraded",
+            publishStatus: "ready",
+            layers: { L4: "degraded" },
+            issues: [
+              {
+                code: "numeric_claim_without_citation",
+                layer: "L4",
+                severity: "unverified",
+                claimId: "clm_unsourced",
+                claim: { exact: content },
+                location,
+              },
+            ],
+            claims: [
+              {
+                claimId: "clm_unsourced",
+                exact: content,
+                segmentIndex: 0,
+                citationRequired: true,
+                citationIds: [],
+                status: "unsupported" as const,
+                issueCodes: ["numeric_claim_without_citation"],
+                location,
+              },
+            ],
+            metrics: {
+              citationCount: 0,
+              unsourcedClaimCount: 1,
+              unverifiedClaimCount: 0,
+              tierCounts: {},
+            },
+          },
+        }}
+      />,
+    );
+
+    const marker = document.querySelector("[data-citation-claim-quality]");
+    expect(marker).not.toBeNull();
+    // Neutral tone: a coverage gap must not borrow the conflict warning style.
+    expect(marker?.getAttribute("data-citation-claim-tone")).toBe("unsourced");
+  });
+
+  it("projects an address whose pointer holds parentheses and a space", () => {
+    // Reportify names indicator keys after their call signature, so the
+    // pointer is "/datas/0/indicators/ma(close, 20)". The raw protocol used to
+    // reach the reader because the link never matched.
+    const address =
+      "evc_mcp_ind_12345678#/datas/0/indicators/ma(close, 20)";
+    const { container } = render(
+      <MarkdownContent
+        content={`MA20 为 $199.56 [source](evidence://${address})。`}
+        citationBundle={{
+          version: 1,
+          citations: [],
+          integrity: {
+            status: "passed",
+            unknownCitationIds: [],
+            unusedCitationIds: [],
+            missingLocatorCitationIds: [],
+            repairAttempts: 0,
+            policyRevision: "citation-v1",
+          },
+          projection: {
+            evidenceHandleToCitationId: { [address]: "cit_ma20" },
+            anchors: [],
+            provenanceRegions: [],
+          },
+        }}
+      />,
+    );
+
+    expect(container.textContent).not.toContain("evidence://");
+    expect(container.textContent).not.toContain("[source]");
+    expect(container.textContent).toContain("$199.56");
+  });
+
+  it("keeps an unsourced marker out of the middle of a citation link", () => {
+    // Markers are injected after protocol links are projected into shorter
+    // citation links, so a source-text offset can land inside one and split
+    // "[source](citation://cit_x)" into "[sourc ⊘ e](…)".
+    const content = "MA60 $231.76 [source](citation://cit_ma60) 收敛中。";
+    const location = {
+      kind: "text" as const,
+      blockIndex: 0,
+      start: 0,
+      end: content.length,
+      sourceStart: 0,
+      sourceEnd: content.indexOf("citation://") + 6,
+    };
+    const { container } = render(
+      <MarkdownContent
+        content={content}
+        citationBundle={{
+          version: 1,
+          citations: [],
+          integrity: {
+            status: "passed",
+            unknownCitationIds: [],
+            unusedCitationIds: [],
+            missingLocatorCitationIds: [],
+            repairAttempts: 0,
+            policyRevision: "citation-v1",
+          },
+          quality: {
+            policyId: "finance",
+            policyRevision: "v1",
+            mode: "strict-domain",
+            status: "degraded",
+            publishStatus: "ready",
+            layers: { L4: "degraded" },
+            issues: [
+              {
+                code: "numeric_claim_without_citation",
+                layer: "L4",
+                severity: "unverified",
+                claimId: "clm_link",
+                claim: { exact: "MA60 $231.76" },
+                location,
+              },
+            ],
+            claims: [
+              {
+                claimId: "clm_link",
+                exact: "MA60 $231.76",
+                segmentIndex: 0,
+                citationRequired: true,
+                citationIds: [],
+                status: "unsupported" as const,
+                issueCodes: ["numeric_claim_without_citation"],
+                location,
+              },
+            ],
+            metrics: {
+              citationCount: 0,
+              unsourcedClaimCount: 1,
+              unverifiedClaimCount: 0,
+              tierCounts: {},
+            },
+          },
+        }}
+      />,
+    );
+
+    // The link must survive intact: no fragment of the protocol may surface.
+    expect(container.textContent).not.toContain("citation:");
+    expect(container.textContent).not.toContain("sourc");
+    expect(container.textContent).toContain("$231.76");
+  });
+
+  it("keeps a sidecar anchor out of the middle of a collection address", () => {
+    // The anchor offset is measured against the text the guard normalised,
+    // where the address has already shrunk to its materialized handle. The
+    // client still holds what the model streamed, so the offset lands inside
+    // the URL, splits it, and the protocol is left on screen — the whole
+    // "$199.56 [source](evidence://evc_… ① …#/datas/0/indicators/ma(close,
+    // 20))" cell the reader was shown.
+    const address =
+      "evc_mcp_33727617f83d033bfcb54a3a#/datas/0/indicators/ma(close, 20)";
+    const content = `| MA20 | $199.56 [source](evidence://${address}) |`;
+    const { container } = render(
+      <MarkdownContent
+        content={content}
+        citationBundle={{
+          version: 1,
+          citations: [
+            {
+              citationId: "cit_ma20",
+              source: {
+                sourceId: "reportify.indicators",
+                title: "Reportify · indicators",
+                retrievedAt: "2026-08-09T00:00:00Z",
+                sourceType: "dataset",
+                providerId: "reportify",
+              },
+              evidence: {
+                kind: "structured-data",
+                datasetId: "reportify.indicators",
+                toolName: "indicators",
+                field: "/datas/0/indicators/ma(close, 20)",
+                value: 199.56,
+                capturedAt: "2026-08-09T00:00:00Z",
+              },
+              resolutionStatus: "ready",
+              annotations: { binding: { evidenceHandle: "ev_mat_ma20" } },
+            },
+          ],
+          integrity: {
+            status: "passed",
+            unknownCitationIds: [],
+            unusedCitationIds: [],
+            missingLocatorCitationIds: [],
+            repairAttempts: 0,
+            policyRevision: "citation-v1",
+          },
+          projection: {
+            evidenceHandleToCitationId: {
+              [address]: "cit_ma20",
+              ev_mat_ma20: "cit_ma20",
+            },
+            // Deliberately points into the middle of the URL.
+            anchors: [
+              {
+                citationId: "cit_ma20",
+                claimId: "clm_ma20",
+                origin: "auto-bound" as const,
+                sourceOffset: content.indexOf("evc_mcp_33727617") + 8,
+                location: {
+                  kind: "table-cell" as const,
+                  blockIndex: 0,
+                  rowIndex: 0,
+                  columnIndex: 1,
+                },
+              },
+            ],
+            provenanceRegions: [],
+          },
+        }}
+      />,
+    );
+
+    const shown = container.textContent ?? "";
+    expect(shown).not.toContain("evidence://");
+    expect(shown).not.toContain("[sourc");
+    expect(shown).toContain("$199.56");
+  });
+
+  it("marks the sentence the claim names, not where its offset points", () => {
+    // Quality offsets are measured against the text the audit judged, which has
+    // been normalised and had its protocol links rewritten. Replayed against
+    // the streamed text one landed in a table three sections below, so a
+    // sentence about FCF margin appeared to annotate an unrelated cell.
+    const claim = "微软当前FCF利润率（20%）远低于经营利润率（47%）。";
+    const content = [
+      claim,
+      "",
+      "| 评估维度 | 结论 |",
+      "|---|---|",
+      "| 利润代表性 | PE有参考意义 |",
+    ].join("\n");
+    const location = {
+      kind: "text" as const,
+      blockIndex: 0,
+      start: 0,
+      end: claim.length,
+      sourceStart: 0,
+      // Deliberately wrong: points into the table row far below.
+      sourceEnd: content.indexOf("PE有参考意义") + 4,
+    };
+    const { container } = render(
+      <MarkdownContent
+        content={content}
+        citationBundle={{
+          version: 1,
+          citations: [],
+          integrity: {
+            status: "passed",
+            unknownCitationIds: [],
+            unusedCitationIds: [],
+            missingLocatorCitationIds: [],
+            repairAttempts: 0,
+            policyRevision: "citation-v1",
+          },
+          quality: {
+            policyId: "finance",
+            policyRevision: "v1",
+            mode: "strict-domain",
+            status: "degraded",
+            publishStatus: "ready",
+            layers: { L4: "degraded" },
+            issues: [
+              {
+                code: "numeric_claim_without_citation",
+                layer: "L4",
+                severity: "unverified",
+                claimId: "clm_fcf",
+                claim: { exact: claim },
+                location,
+              },
+            ],
+            claims: [
+              {
+                claimId: "clm_fcf",
+                exact: claim,
+                segmentIndex: 0,
+                citationRequired: true,
+                citationIds: [],
+                status: "unsupported" as const,
+                issueCodes: ["numeric_claim_without_citation"],
+                location,
+              },
+            ],
+            metrics: {
+              citationCount: 0,
+              unsourcedClaimCount: 1,
+              unverifiedClaimCount: 0,
+              tierCounts: {},
+            },
+          },
+        }}
+      />,
+    );
+
+    // The marker belongs to the paragraph, so the table cell stays clean.
+    const cells = Array.from(container.querySelectorAll("td")).map(
+      (cell) => cell.textContent ?? "",
+    );
+    expect(cells).toContain("PE有参考意义");
+    expect(document.querySelector("[data-citation-claim-quality]")).not.toBeNull();
+  });
+
+  it("keeps an unsourced marker out of the middle of a number", () => {
+    // A drifted source offset used to land inside the value, rendering
+    // "13.82%" as "1 [marker] 3.82%" — two numbers where the answer had one.
+    const content = "Gross margin 13.82% this quarter.";
+    const location = {
+      kind: "table-cell" as const,
+      blockIndex: 0,
+      rowIndex: 0,
+      columnIndex: 0,
+      sourceStart: 0,
+      sourceEnd: content.indexOf("13.82%") + 1,
+    };
+    render(
+      <MarkdownContent
+        content={content}
+        citationBundle={{
+          version: 1,
+          citations: [],
+          integrity: {
+            status: "passed",
+            unknownCitationIds: [],
+            unusedCitationIds: [],
+            missingLocatorCitationIds: [],
+            repairAttempts: 0,
+            policyRevision: "citation-v1",
+          },
+          quality: {
+            policyId: "finance",
+            policyRevision: "v1",
+            mode: "strict-domain",
+            status: "degraded",
+            publishStatus: "ready",
+            layers: { L4: "degraded" },
+            issues: [
+              {
+                code: "numeric_claim_without_citation",
+                layer: "L4",
+                severity: "unverified",
+                claimId: "clm_split",
+                claim: { exact: "13.82%" },
+                location,
+              },
+            ],
+            claims: [
+              {
+                claimId: "clm_split",
+                exact: "13.82%",
+                segmentIndex: 0,
+                citationRequired: true,
+                citationIds: [],
+                status: "unsupported" as const,
+                issueCodes: ["numeric_claim_without_citation"],
+                location,
+              },
+            ],
+            metrics: {
+              citationCount: 0,
+              unsourcedClaimCount: 1,
+              unverifiedClaimCount: 0,
+              tierCounts: {},
+            },
+          },
+        }}
+      />,
+    );
+
+    expect(document.querySelector("[data-citation-claim-quality]")).not.toBeNull();
+    expect(document.body.textContent).toContain("13.82%");
   });
 
   it("uses claim source offsets to mark repeated critical claims independently", () => {

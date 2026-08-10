@@ -51,6 +51,7 @@ from src.core.claim_evidence_resolution import (
     prepare_semantic_verification_request,
     resolve_claim_evidence,
 )
+from src.core.claim_normalization import ClaimNormalizerPort
 
 _UNSOURCED_RE = re.compile(r"\[UNSOURCED\]", re.IGNORECASE)
 _UNVERIFIED_RE = re.compile(r"\[UNVERIFIED(?::[^\]]*)?\]", re.IGNORECASE)
@@ -101,6 +102,8 @@ def evaluate_citation_quality(
     user_prompt: str = "",
     entity_aliases: Mapping[str, Iterable[str]] | None = None,
     semantic_verifier: SemanticVerifierPort | None = None,
+    semantic_verified_claim_citation_ids: Mapping[str, Iterable[str]] | None = None,
+    claim_normalizer: ClaimNormalizerPort | None = None,
 ) -> dict[str, Any]:
     """Return a copy of *bundle* decorated with quality annotations."""
 
@@ -434,6 +437,8 @@ def evaluate_citation_quality(
         semantics=semantics,
         entity_aliases=entity_aliases,
         semantic_verifier=semantic_verifier,
+        semantic_verified_claim_citation_ids=(semantic_verified_claim_citation_ids or {}),
+        claim_normalizer=claim_normalizer,
         claim_audit_rule=claim_audit_rule,
         projection_claim_ids=_verified_projection_cell_claim_ids(
             answer,
@@ -548,6 +553,8 @@ def _audit_claims(
     semantics: dict[str, Any] | None,
     entity_aliases: Mapping[str, Iterable[str]] | None,
     semantic_verifier: SemanticVerifierPort | None,
+    semantic_verified_claim_citation_ids: Mapping[str, Iterable[str]],
+    claim_normalizer: ClaimNormalizerPort | None = None,
     claim_audit_rule: Mapping[str, Any],
     projection_claim_ids: set[str],
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
@@ -628,6 +635,21 @@ def _audit_claims(
             if required
         },
     )
+    if claim_normalizer is not None:
+        from src.core.claim_normalization import apply_claim_normalizer
+
+        # Bound the model batch to the risk-selected critical claims; slot
+        # proposals are anchor-verified and only fill rule gaps.
+        audit_targets = [claim for claim in selected_claims if claim.audit_selected]
+        normalized_by_id = {
+            claim.claim_id: claim
+            for claim in apply_claim_normalizer(
+                audit_targets,
+                claim_normalizer,
+                semantics=semantics,
+            )
+        }
+        selected_claims = [normalized_by_id.get(claim.claim_id, claim) for claim in selected_claims]
     selected_by_id = {claim.claim_id: claim for claim in selected_claims}
     claim_rows = [
         (selected_by_id[claim.claim_id], required, citation_ids, adjacent)
@@ -644,6 +666,7 @@ def _audit_claims(
         semantic_verifier=semantic_verifier,
         semantics=semantics,
         entity_aliases=entity_aliases,
+        semantic_verified_claim_citation_ids=semantic_verified_claim_citation_ids,
     )
 
     for claim, required, citation_ids, adjacent_calculation_bound in claim_rows:
@@ -763,6 +786,19 @@ def _audit_claims(
                 semantics=semantics,
                 entity_aliases=entity_aliases,
             )
+            semantic_preverified_ids = tuple(
+                citation_id
+                for citation_id in semantic_verified_claim_citation_ids.get(
+                    claim.claim_id,
+                    (),
+                )
+                if citation_id in citation_ids
+            )
+            if semantic_preverified_ids:
+                semantic_support = {
+                    **semantic_support,
+                    **{citation_id: "supported" for citation_id in semantic_preverified_ids},
+                }
             if semantic_support:
                 support_rows = [
                     (
@@ -1138,6 +1174,7 @@ def _batch_semantic_results_for_bound_claims(
     semantic_verifier: SemanticVerifierPort | None,
     semantics: Mapping[str, Any] | None,
     entity_aliases: Mapping[str, Iterable[str]] | None,
+    semantic_verified_claim_citation_ids: Mapping[str, Iterable[str]],
 ) -> Mapping[str, SemanticVerificationResult]:
     """Invoke the model once per bounded batch, never once per Claim."""
 
@@ -1148,6 +1185,17 @@ def _batch_semantic_results_for_bound_claims(
         if not claim.audit_selected:
             continue
         if not citation_ids or not _bound_claim_is_auditable(claim):
+            continue
+        if any(
+            citation_id in citation_ids
+            for citation_id in semantic_verified_claim_citation_ids.get(
+                claim.claim_id,
+                (),
+            )
+        ):
+            # This exact Claim/local-Evidence pair was already established by
+            # the binding-stage batch. Reusing that sealed result avoids a
+            # second model call after handles become canonical citation ids.
             continue
         records, bound_ids = _bound_citation_records(citation_ids, citation_by_id)
         if not bound_ids:
@@ -2114,9 +2162,15 @@ def _validate_calculation_input_semantics(
     for dimension in ("scope", "basis"):
         calculation_value = _clean_text(calculation.get(dimension), "")
         input_value = _clean_text(input_evidence.get(dimension), "")
-        if not calculation_value:
+        if not calculation_value or not input_value:
+            # An input that never declares the dimension is unknown, not in
+            # conflict. Most quote and statement fields carry no scope/basis at
+            # all, so failing them here raised a user-visible "needs review"
+            # warning on correct arithmetic — the exact three-valued rule the
+            # design forbids collapsing ("a missing value is unknown, not a
+            # conflict").
             continue
-        if not input_value or canonical_evidence_dimension(
+        if canonical_evidence_dimension(
             input_value,
             semantics,
             dimension,
@@ -2187,17 +2241,17 @@ def _validate_time_boundary(
     as_of = _date_prefix(evidence.get("asOf"))
     start = _date_prefix(coverage.get("start"))
     end = _date_prefix(coverage.get("end"))
-    if (
-        rule.get("require_coverage") is True
-        and as_of
-        and not (start or end)
-        and _claim_requires_range_coverage(claim_text)
-    ):
-        issue("evidence_coverage_missing", "L5", citation_ids=[citation_id])
-    if as_of and start and as_of < start:
-        issue("evidence_before_coverage", "L5", citation_ids=[citation_id])
-    if as_of and end and as_of > end:
-        issue("evidence_after_coverage", "L5", citation_ids=[citation_id])
+    # ``require_coverage`` enforces the boundary a producer declares; it cannot
+    # demand one that no producer emits. Sampling 270 real citations found 104
+    # with ``asOf`` and zero with any coverage window, so asserting a problem
+    # from its absence attached "please verify against the original" to
+    # essentially every dated citation. Absence is unknown; only a declared
+    # window that the evidence falls outside is a real boundary violation.
+    if rule.get("require_coverage") is True:
+        if as_of and start and as_of < start:
+            issue("evidence_before_coverage", "L5", citation_ids=[citation_id])
+        if as_of and end and as_of > end:
+            issue("evidence_after_coverage", "L5", citation_ids=[citation_id])
     semantic_options = evidence_semantic_options(evidence, semantics)
     claim_dates = (
         []
@@ -2218,35 +2272,6 @@ def _validate_time_boundary(
             citation_ids=[citation_id],
             severity="unverified",
         )
-
-
-def _claim_requires_range_coverage(claim_text: str) -> bool:
-    """Return whether a claim needs interval coverage rather than a snapshot.
-
-    ``asOf`` and ``period`` identify a point or reporting-period observation.
-    They are sufficient for claims about that observation.  A separate
-    coverage range is only required when the prose asserts a span, trend or
-    change over time.  Requiring ``coverage`` for every structured snapshot
-    made exact financial-statement fields look unverified to users.
-    """
-
-    if re.search(
-        r"(?:"
-        r"(?:从|自).{0,32}(?:至|到|截至)|"
-        r"(?:过去|近|最近|连续)\s*(?:\d+|一|两|三|四|五|六|七|八|九|十)?\s*"
-        r"(?:天|周|月|季|季度|年)|"
-        r"(?:区间|期间内|时间段|历史变化)|"
-        r"\b(?:from|between|since|through|over|during|history)\b"
-        r")",
-        claim_text,
-        re.IGNORECASE,
-    ):
-        return True
-
-    temporal_values = {
-        value for value in _ISO_DATE_RE.findall(claim_text) if isinstance(value, str) and value
-    }
-    return len(temporal_values) > 1
 
 
 def _safe_decimal_eval(expression: str, values: dict[str, Decimal]) -> Decimal:

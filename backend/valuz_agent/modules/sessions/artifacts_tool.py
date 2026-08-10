@@ -321,9 +321,61 @@ async def _deliver_artifacts_handler(args: dict[str, Any], ctx: ExecContext) -> 
     ok = {DeliveryStatus.RECORDED.value, DeliveryStatus.UNCHANGED.value}
     recorded = [r for r in results if r["status"] in ok]
     payload: dict[str, Any] = {"results": results, "delivered_count": len(recorded)}
-    # A call that delivered nothing is surfaced as an error so the model notices
-    # rather than assuming success.
-    return ToolResult(content=json.dumps(payload, ensure_ascii=False), is_error=not recorded)
+    # A delivered file the workbench is SHOWING is a new page version, and the
+    # client only learns that from the same receipt trailer generate_ui
+    # appends — without it versions grow silently: no adopt card, no live
+    # mirror, no refresh. Best-effort like the genui sink: a receipt failure
+    # must never fail the delivery itself.
+    trailer = ""
+    try:
+        trailer = await _host_binding_receipt(user_id, results)
+    except Exception:  # noqa: BLE001
+        logger.debug("deliver_artifacts: receipt lookup failed", exc_info=True)
+    return ToolResult(
+        content=json.dumps(payload, ensure_ascii=False) + trailer,
+        is_error=not recorded,
+    )
+
+
+async def _host_binding_receipt(user_id: str, results: list[dict[str, Any]]) -> str:
+    """Receipt trailer for the first delivered NEW version of a bound page.
+
+    Only a real new version announces (re-delivering unchanged bytes returns
+    the existing revision — nothing new to adopt), and only when some host
+    slot currently binds the artifact (an ordinary deliverable has no adopt
+    flow). One trailer at most: the client parses a single trailer at the end
+    of the result.
+    """
+    from valuz_agent.modules.artifacts.datastore import ArtifactDatastore
+    from valuz_agent.ports.ui_artifact import ui_artifact_receipt_trailer
+
+    candidates = [
+        r
+        for r in results
+        if r.get("status") == DeliveryStatus.RECORDED.value
+        and r.get("isNewVersion")
+        and r.get("artifactId")
+        and r.get("revisionId")
+    ]
+    if not candidates:
+        return ""
+    async with async_unit_of_work(commit=False) as db:
+        ds = ArtifactDatastore(db)
+        for entry in candidates:
+            bindings = await ds.list_bindings_for_artifact(user_id, str(entry["artifactId"]))
+            if not bindings:
+                continue
+            binding = bindings[0]
+            return ui_artifact_receipt_trailer(
+                artifact_id=str(entry["artifactId"]),
+                revision_id=str(entry["revisionId"]),
+                version_no=int(entry.get("versionNo") or 0),
+                host_type=binding.host_type,
+                host_id=binding.host_id,
+                slot=binding.slot or "main",
+                expected_revision_id=binding.artifact_revision_id,
+            )
+    return ""
 
 
 def build_deliver_artifacts_tool_defs() -> tuple[ToolDef, ...]:

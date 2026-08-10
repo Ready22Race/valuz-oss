@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { resolveGenUiHost } from "./tool-card-helpers";
+import { hostDocumentFileName, resolveGenUiHost } from "./tool-card-helpers";
 
 const PANEL = { host_type: "finance.research-desk", host_id: "desk" };
 
@@ -87,5 +87,27 @@ describe("resolveGenUiHost", () => {
     expect(resolveGenUiHost(undefined, { host_type: "h", host_id: "" })).toBe(
       null,
     );
+  });
+});
+
+describe("hostDocumentFileName", () => {
+  it("mirrors the server's per-host document naming exactly", () => {
+    expect(
+      hostDocumentFileName({
+        host_type: "finance.research-desk",
+        host_id: "desk",
+        slot: "main",
+      }),
+    ).toBe("finance.research-desk.desk.main.a2ui.jsonl");
+  });
+
+  it("collapses unsafe runs and defaults the slot", () => {
+    expect(
+      hostDocumentFileName({
+        host_type: "finance.company-research",
+        host_id: "US:NVDA",
+        slot: "",
+      }),
+    ).toBe("finance.company-research.US-NVDA.main.a2ui.jsonl");
   });
 });

@@ -33,8 +33,9 @@ def _descriptor(
     *,
     tool_name: str,
     resources: list[dict],
+    retrieval: dict | None = None,
 ) -> dict:
-    return {
+    descriptor = {
         "version": 1,
         "provider": {
             "id": "reportify",
@@ -49,6 +50,9 @@ def _descriptor(
         },
         "resources": resources,
     }
+    if retrieval is not None:
+        descriptor["retrieval"] = retrieval
+    return descriptor
 
 
 def test_transport_preserves_meta_and_restores_original_structured_content() -> None:
@@ -121,6 +125,141 @@ def test_discovery_metadata_stays_non_citable_retrieval_input() -> None:
     assert adapted.evidence_count == 0
     assert adapted.model_content == payload
     assert "_valuz_evidence" not in adapted.model_content
+
+
+def test_substantive_search_summary_becomes_derived_evidence() -> None:
+    """A search hit's own document text is citable; its metadata is not."""
+
+    long_summary = (
+        "Deutsche Bank initiates coverage with a Buy rating and a $255 price "
+        "target. Connectivity revenue is modelled at $18bn in 2026E rising to "
+        "$88bn by 2031E, with 17m year-end subscribers and 20 GW of compute "
+        "capacity planned by 2031E across the AI infrastructure segment."
+    )
+    payload = {
+        "docs": [
+            {
+                "doc_id": "doc-substantive",
+                "title": "SpaceX Initiation Debrief",
+                "summary": long_summary,
+                "url": "https://example.com/doc-substantive",
+            },
+            {
+                "doc_id": "doc-teaser",
+                "title": "Short news hit",
+                "summary": "Revenue rose.",
+                "url": "https://example.com/doc-teaser",
+            },
+        ]
+    }
+    descriptor = _descriptor(
+        payload,
+        tool_name="reports_search",
+        resources=[
+            {
+                "resourceId": "reports-search-results",
+                "kind": "document-discovery",
+                "authority": "discovery-only",
+                "rootPointer": "",
+                "itemsPointer": "/docs",
+                "mapping": {
+                    "sourceId": "/doc_id",
+                    "title": "/title",
+                    "summary": "/summary",
+                    "url": "/url",
+                },
+            }
+        ],
+    )
+
+    adapted = adapt_mcp_source_result(
+        "unused model block",
+        tool_name="reports_search",
+        descriptor=descriptor,
+        structured_content=payload,
+    )
+
+    assert adapted is not None
+    # Only the substantive row registers; a one-line teaser cannot carry a
+    # financial claim and stays pure discovery metadata.
+    assert adapted.evidence_count == 1
+    assert adapted.citable is True
+    (envelope,) = adapted.model_content["_valuz_evidence"]
+    assert envelope["evidence"]["quote"] == long_summary
+    # No invented chunk id, page or bbox — the summary is derived text only.
+    assert envelope["locator"] == {"kind": "external", "fragment": "provider-summary"}
+    assert envelope["source"]["documentId"] == "doc-substantive"
+
+
+def test_filter_only_retrieval_metadata_is_validated_and_preserved_for_diagnostics() -> None:
+    payload = {"docs": [{"doc_id": "doc-1", "title": "Annual report"}]}
+    descriptor = _descriptor(
+        payload,
+        tool_name="earnings_search",
+        resources=[
+            {
+                "resourceId": "earnings-search-results",
+                "kind": "document-discovery",
+                "authority": "discovery-only",
+                "rootPointer": "",
+                "itemsPointer": "/docs",
+                "mapping": {"sourceId": "/doc_id", "title": "/title"},
+            }
+        ],
+        retrieval={
+            "kind": "document-search",
+            "mode": "filter-only",
+            "query": {"argumentPointer": "/query", "present": False},
+            "chunks": {"status": "not-requested"},
+        },
+    )
+
+    adapted = adapt_mcp_source_result(
+        [],
+        tool_name="earnings_search",
+        descriptor=descriptor,
+        structured_content=payload,
+    )
+
+    assert adapted is not None
+    assert adapted.retrieval_mode == "filter-only"
+    assert adapted.query_present is False
+    assert adapted.chunk_status == "not-requested"
+    assert adapted.citable is False
+
+
+def test_retrieval_metadata_cannot_claim_chunks_without_chunk_resource() -> None:
+    payload = {"docs": [{"doc_id": "doc-1", "title": "Annual report"}]}
+    descriptor = _descriptor(
+        payload,
+        tool_name="earnings_search",
+        resources=[
+            {
+                "resourceId": "earnings-search-results",
+                "kind": "document-discovery",
+                "authority": "discovery-only",
+                "rootPointer": "",
+                "itemsPointer": "/docs",
+                "mapping": {"sourceId": "/doc_id", "title": "/title"},
+            }
+        ],
+        retrieval={
+            "kind": "document-search",
+            "mode": "content-query",
+            "query": {"argumentPointer": "/query", "present": True},
+            "chunks": {"status": "returned"},
+        },
+    )
+
+    assert (
+        adapt_mcp_source_result(
+            [],
+            tool_name="earnings_search",
+            descriptor=descriptor,
+            structured_content=payload,
+        )
+        is None
+    )
 
 
 def test_document_chunks_create_direct_evidence_with_pdf_locator() -> None:
@@ -280,8 +419,7 @@ def test_private_document_evidence_deduplicates_quote_and_shared_source() -> Non
     private_payload = json.loads(private)
     assert len(private_payload["_valuz_evidence_sources"]) == 1
     assert all(
-        "sourceRef" in item and "source" not in item
-        for item in private_payload["_valuz_evidence"]
+        "sourceRef" in item and "source" not in item for item in private_payload["_valuz_evidence"]
     )
     assert quote_a not in private
     assert quote_b not in private

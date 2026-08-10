@@ -12,11 +12,7 @@ import type {
   ClaimLocationV1,
   OpenCitationInput,
 } from "@valuz/shared";
-import {
-  Streamdown,
-  defaultUrlTransform,
-  type UrlTransform,
-} from "streamdown";
+import { Streamdown, defaultUrlTransform, type UrlTransform } from "streamdown";
 import { code } from "@streamdown/code";
 import { mermaid } from "@streamdown/mermaid";
 import { math } from "@streamdown/math";
@@ -27,6 +23,7 @@ import {
   Copy,
   Download,
   ExternalLink,
+  Link2Off,
   Loader2,
   Maximize,
   RotateCcw,
@@ -48,11 +45,16 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import { Button } from "../ui/button";
-import { HoverCard, HoverCardContent, HoverCardTrigger } from "../ui/hover-card";
+import {
+  HoverCard,
+  HoverCardContent,
+  HoverCardTrigger,
+} from "../ui/hover-card";
 import { useI18n } from "../../hooks/use-i18n";
 import {
   citationDisplayOrder,
   citationIdFromHref,
+  offsetAfterEnclosingText,
   citationOccurrences,
   citationOffsetFromHref,
   CitationPill,
@@ -60,6 +62,7 @@ import {
   projectCitationSidecarAnchors,
   projectEvidenceMarkdownLinks,
   rewriteCitationMarkdownLinks,
+  stripStreamingEvidenceLinkTail,
   type CitationQualityDisplayIssue,
 } from "./CitationInline";
 
@@ -112,17 +115,36 @@ const CRITICAL_CITATION_ISSUE_CODES = new Set([
   "claim_after_evidence_coverage",
 ]);
 
+/** Statements the audit found carrying no binding at all. They never have a
+ * citation card to hang off, so they are marked in place instead of being
+ * dropped — a reader otherwise cannot tell a fully sourced answer from one
+ * where every number is unsourced. */
+const UNSOURCED_CITATION_ISSUE_CODES = new Set([
+  "claim_without_citation",
+  "numeric_claim_without_citation",
+  "date_claim_without_citation",
+]);
+
 function qualityIssueTone(
   issue: CitationQualityIssueV1,
 ): CitationQualityDisplayIssue["tone"] {
-  return CRITICAL_CITATION_ISSUE_CODES.has(issue.code)
-    ? "critical"
+  if (CRITICAL_CITATION_ISSUE_CODES.has(issue.code)) {
+    return "critical";
+  }
+  return UNSOURCED_CITATION_ISSUE_CODES.has(issue.code)
+    ? "unsourced"
     : "advisory";
 }
 
 function ClaimQualityMarker({ entry }: { entry: LocalizedClaimQualityEntry }) {
   const { t } = useI18n();
   const label = entry.issues.map((issue) => issue.label).join("；");
+  // A coverage gap is not a defect claim. Reserve the warning palette for
+  // entries that carry a real conflict so an unsourced sentence reads as
+  // "no source attached" rather than "this looks wrong".
+  const unsourcedOnly = entry.issues.every(
+    (issue) => issue.tone === "unsourced",
+  );
 
   return (
     <HoverCard openDelay={0} closeDelay={180}>
@@ -130,11 +152,24 @@ function ClaimQualityMarker({ entry }: { entry: LocalizedClaimQualityEntry }) {
         <button
           type="button"
           data-citation-claim-quality
+          data-citation-claim-tone={unsourcedOnly ? "unsourced" : "critical"}
           data-quality-claim-id={entry.targetId}
-          aria-label={`${t("ui.citation.qualityNeedsReview")} · ${label}`}
-          className="relative -top-px mx-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full border border-warning/50 bg-warning-light/70 align-middle text-warning-text no-underline transition hover:bg-warning-light focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warning/20"
+          aria-label={`${
+            unsourcedOnly
+              ? t("ui.citation.qualityClaimUnsourcedTitle")
+              : t("ui.citation.qualityNeedsReview")
+          } · ${label}`}
+          className={
+            unsourcedOnly
+              ? "relative -top-px mx-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full border border-surface-border bg-surface-soft align-middle text-ink-muted no-underline transition hover:bg-surface-soft/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/20"
+              : "relative -top-px mx-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full border border-warning/50 bg-warning-light/70 align-middle text-warning-text no-underline transition hover:bg-warning-light focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warning/20"
+          }
         >
-          <AlertTriangle className="h-2.5 w-2.5" aria-hidden="true" />
+          {unsourcedOnly ? (
+            <Link2Off className="h-2.5 w-2.5" aria-hidden="true" />
+          ) : (
+            <AlertTriangle className="h-2.5 w-2.5" aria-hidden="true" />
+          )}
         </button>
       </HoverCardTrigger>
       <HoverCardContent
@@ -143,11 +178,34 @@ function ClaimQualityMarker({ entry }: { entry: LocalizedClaimQualityEntry }) {
         sideOffset={8}
         className="w-[min(380px,calc(100vw-32px))] rounded-lg border-surface-border bg-surface p-3 text-xs text-ink-body shadow-xl"
       >
-        <div className="flex items-center gap-1.5 font-medium text-warning-text">
-          <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-          <span>{t("ui.citation.qualityCheckTitle")}</span>
+        <div
+          className={
+            unsourcedOnly
+              ? "flex items-center gap-1.5 font-medium text-ink-heading"
+              : "flex items-center gap-1.5 font-medium text-warning-text"
+          }
+        >
+          {unsourcedOnly ? (
+            <Link2Off className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          ) : (
+            <AlertTriangle
+              className="h-3.5 w-3.5 shrink-0"
+              aria-hidden="true"
+            />
+          )}
+          <span>
+            {unsourcedOnly
+              ? t("ui.citation.qualityClaimUnsourcedTitle")
+              : t("ui.citation.qualityCheckTitle")}
+          </span>
         </div>
-        <div className="mt-2 border-l-2 border-warning/40 pl-2.5 leading-5 text-ink-heading">
+        <div
+          className={
+            unsourcedOnly
+              ? "mt-2 border-l-2 border-surface-border pl-2.5 leading-5 text-ink-heading"
+              : "mt-2 border-l-2 border-warning/40 pl-2.5 leading-5 text-ink-heading"
+          }
+        >
           {entry.exact}
         </div>
         <ul className="mt-2 space-y-1 pl-4 leading-5">
@@ -169,7 +227,9 @@ function readableEvidenceField(field: string): string {
     .trim();
 }
 
-function evidenceValueLabel(citation: CitationBundleV1["citations"][number]): string {
+function evidenceValueLabel(
+  citation: CitationBundleV1["citations"][number],
+): string {
   const evidence = citation.evidence;
   if (evidence.kind !== "structured-data") return "";
   const value = String(evidence.value ?? "");
@@ -222,10 +282,15 @@ function qualityClaimIdFromHref(href?: string): string | null {
 }
 
 function claimSourceEnd(location?: ClaimLocationV1): number | undefined {
-  return location && location.kind !== "legacy" ? location.sourceEnd : undefined;
+  return location && location.kind !== "legacy"
+    ? location.sourceEnd
+    : undefined;
 }
 
-function citationOccurrenceKey(citationId: string, sourceOffset: number): string {
+function citationOccurrenceKey(
+  citationId: string,
+  sourceOffset: number,
+): string {
   return `${citationId}\0${sourceOffset}`;
 }
 
@@ -278,22 +343,67 @@ function stripDecorativeHeadingCitations(content: string): string {
     .join("\n");
 }
 
+// Numbers (``13.82%``, ``$1,234.5``, ``60``) and words, so a marker can be
+// kept out of the middle of one.
+const ATOMIC_TOKEN_RE = /\$?\d[\d.,]*\d?%?|[A-Za-z][A-Za-z0-9_-]*/g;
+
+/** Move an offset that fell inside a number or word to the end of it. */
+function tokenBoundary(content: string, offset: number): number {
+  // A claim's source offset is computed against the text the audit saw. When
+  // that text and the rendered text have drifted — an unrewritten protocol
+  // link is enough — the offset can land mid-token, and "13.82%" is shown as
+  // "1 ⊘ 3.82%", which reads as two different numbers. Snapping forward keeps
+  // the marker attached to the whole value.
+  ATOMIC_TOKEN_RE.lastIndex = 0;
+  for (
+    let match = ATOMIC_TOKEN_RE.exec(content);
+    match !== null;
+    match = ATOMIC_TOKEN_RE.exec(content)
+  ) {
+    const end = match.index + match[0].length;
+    if (match.index >= offset) break;
+    if (offset < end) return end;
+  }
+  return offset;
+}
+
 function safeQualityMarkerInsertion(
   content: string,
   requestedOffset: number,
   targetId: string,
 ): { offset: number; marker: string } {
-  let offset = requestedOffset;
+  // Put the marker behind the text it marks, then make sure that landing
+  // spot is not inside a value or a link.
+  let offset = tokenBoundary(
+    content,
+    offsetAfterEnclosingText(content, requestedOffset),
+  );
   let movedOutsideBlock = false;
-  for (const pattern of [/\$\$[\s\S]*?\$\$/g, /\\\[[\s\S]*?\\\]/g, /```[\s\S]*?```/g]) {
+  // Leaving a block means the marker starts its own line; leaving an inline
+  // span only needs a space. A newline inside a table row would break the row
+  // apart, so the two cases must not share a separator.
+  for (const [pattern, isBlock] of [
+    [/\$\$[\s\S]*?\$\$/g, true],
+    [/\\\[[\s\S]*?\\\]/g, true],
+    [/```[\s\S]*?```/g, true],
+    // A whole markdown link. The offset is measured against the text the audit
+    // saw, but markers are injected after protocol links have been projected
+    // into shorter citation links, so it can land inside one — splitting a
+    // label into "[sourc ⊘ e]" or a URL into "citation:/ ⊘ /cit_…", which
+    // breaks the link outright. Balanced parentheses are matched because a
+    // Collection Address' pointer can contain them.
+    [/\[[^\]\n]{0,240}\]\((?:[^()\s\n]|\([^()\n]{0,200}\)){1,2100}\)/g, false],
+  ] as const) {
     for (const match of content.matchAll(pattern)) {
       const start = match.index;
       const end = start + match[0].length;
       if (start < offset && offset < end) {
         offset = end;
-        movedOutsideBlock = true;
-        const followingNewline = content.slice(offset).match(/^[ \t]*\r?\n/);
-        if (followingNewline) offset += followingNewline[0].length;
+        if (isBlock) {
+          movedOutsideBlock = true;
+          const followingNewline = content.slice(offset).match(/^[ \t]*\r?\n/);
+          if (followingNewline) offset += followingNewline[0].length;
+        }
         break;
       }
     }
@@ -312,13 +422,29 @@ function injectQualityClaimMarkers(
   let result = content;
   const positioned = entries
     .map((entry) => {
-      const requestedOffset = claimSourceEnd(entry.location);
+      // The claim's own text beats its offset. Offsets are measured against
+      // the text the audit judged, which has been normalised and has had its
+      // protocol links rewritten, so replaying one against the streamed text
+      // can land in a different paragraph — a sentence about FCF margin was
+      // marking a cell three sections further down. Locating the sentence is
+      // coordinate-independent and lands on the statement by construction.
+      // Table-cell claims read "row — column: value" and never appear
+      // verbatim, so those still fall back to the offset.
+      const found = entry.exact ? content.indexOf(entry.exact) : -1;
+      const requestedOffset =
+        found >= 0
+          ? found + entry.exact.length
+          : claimSourceEnd(entry.location);
       return {
         entry,
         insertion:
           requestedOffset === undefined
             ? undefined
-            : safeQualityMarkerInsertion(content, requestedOffset, entry.targetId),
+            : safeQualityMarkerInsertion(
+                content,
+                requestedOffset,
+                entry.targetId,
+              ),
       };
     })
     .filter(
@@ -926,7 +1052,10 @@ export const MarkdownContent = memo(function MarkdownContent({
     stripDecorativeHeadingCitations(
       stripProtocolSourcePlaceholders(
         projectEvidenceMarkdownLinks(
-          projectCitationSidecarAnchors(content, citationBundle),
+          projectCitationSidecarAnchors(
+            stripStreamingEvidenceLinkTail(content),
+            citationBundle,
+          ),
           citationBundle,
         ),
       ),
@@ -942,10 +1071,7 @@ export const MarkdownContent = memo(function MarkdownContent({
     [displayContent],
   );
   const citationsById = useMemo(() => {
-    const citations = new Map<
-      string,
-      CitationBundleV1["citations"][number]
-    >();
+    const citations = new Map<string, CitationBundleV1["citations"][number]>();
     // A single user turn can contain several durable assistant messages
     // (for example, an answer followed by a local repair). Citations are
     // numbered and listed across that whole trailing answer run, so inline
@@ -1140,10 +1266,16 @@ export const MarkdownContent = memo(function MarkdownContent({
         tone: qualityIssueTone(issue),
       };
       if (!localIds.length) {
-        // Missing or weak support is not itself proof that a statement is
-        // wrong. Without a citation card that can show evidence, suppress the
-        // advisory marker; only a concrete conflict remains prominent.
-        if (displayIssue.tone !== "critical") {
+        // Weak support is not itself proof that a statement is wrong, and
+        // without a citation card there is nothing for an advisory marker to
+        // show — keep those suppressed. A statement carrying no binding at
+        // all is different: it has no card by definition, and dropping it
+        // would leave a fully unsourced answer looking exactly like a fully
+        // sourced one. Mark those in place, in a neutral tone.
+        if (
+          displayIssue.tone !== "critical" &&
+          displayIssue.tone !== "unsourced"
+        ) {
           unlocalized.push(issue);
           continue;
         }
@@ -1162,7 +1294,9 @@ export const MarkdownContent = memo(function MarkdownContent({
               displayContent.includes(exact)))
         ) {
           const entryKey =
-            auditedClaim?.claimId ?? issue.claimId ?? `legacy-${issueIndex + 1}`;
+            auditedClaim?.claimId ??
+            issue.claimId ??
+            `legacy-${issueIndex + 1}`;
           const entry = claimEntriesById.get(entryKey) ?? {
             targetId: `quality-claim-${entryKey}`,
             claimId: auditedClaim?.claimId ?? issue.claimId,
@@ -1188,7 +1322,9 @@ export const MarkdownContent = memo(function MarkdownContent({
       for (const citationId of localIds) {
         const location = issue.location ?? auditedClaim?.location;
         const sourceStart =
-          location && location.kind !== "legacy" ? location.sourceStart : undefined;
+          location && location.kind !== "legacy"
+            ? location.sourceStart
+            : undefined;
         const sourceEnd = claimSourceEnd(location);
         const offsets = citationOccurrenceOffsets.get(citationId) ?? [];
         const scopedOffsets =

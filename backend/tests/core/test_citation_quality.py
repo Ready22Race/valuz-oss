@@ -365,7 +365,15 @@ def test_policy_detects_uncited_financial_number_without_requiring_snapshot_cove
     }
 
 
-def test_policy_requires_coverage_for_a_claimed_time_range() -> None:
+def test_undeclared_coverage_window_is_unknown_not_an_issue() -> None:
+    """No producer emits a coverage window, so absence cannot be a finding.
+
+    Sampling real runs found dated evidence everywhere and declared coverage
+    nowhere. Asserting a problem from that absence attached a "verify against
+    the original" note to essentially every dated citation, which is the
+    unknown-as-conflict collapse the design rules out.
+    """
+
     citation = _structured()
     citation["evidence"].pop("coverage")
 
@@ -380,7 +388,7 @@ def test_policy_requires_coverage_for_a_claimed_time_range() -> None:
     )
 
     codes = {issue["code"] for issue in result["quality"]["issues"]}
-    assert "evidence_coverage_missing" in codes
+    assert "evidence_coverage_missing" not in codes
 
 
 def test_point_in_time_indicator_interpretation_does_not_require_range_coverage() -> None:
@@ -1119,7 +1127,76 @@ def test_displayed_formula_inherits_the_adjacent_calculation_evidence() -> None:
         claim for claim in result["quality"]["claims"] if "Calculation formula" in claim["exact"]
     )
     assert formula["citationIds"] == ["cit_growth"]
-    assert formula["status"] == "auto-bound"
+    assert formula["status"] == "auto-bound", (formula, result["quality"]["issues"])
+    assert formula["issueCodes"] == []
+    assert result["quality"]["status"] == "passed", result["quality"]["issues"]
+
+
+def test_scaled_formula_inherits_adjacent_calculation_evidence() -> None:
+    """One shared display scale must not break formula/result grouping."""
+    policy = _policy()
+    policy["config"]["source_tiers"][0]["match"]["source_types"].append("tool-result")
+    policy["config"]["source_tiers"][0]["match"]["tools"].append("runtime.calculation")
+    profit = _structured("cit_profit")
+    profit["evidence"].update({"field": "net_profit", "value": 86_228_146_422, "unit": "CNY"})
+    revenue = _structured("cit_revenue")
+    revenue["evidence"].update(
+        {"field": "operating_revenue", "value": 170_899_152_276, "unit": "CNY"}
+    )
+    calculation = {
+        "citationId": "cit_margin",
+        "source": {
+            "sourceId": "calculation-margin",
+            "providerId": "runtime",
+            "sourceType": "tool-result",
+            "title": "Margin calculation",
+            "retrievedAt": "2026-08-08T01:07:14Z",
+        },
+        "evidence": {
+            "kind": "calculation",
+            "toolName": "runtime.calculation",
+            "expression": "profit / revenue * 100",
+            "inputs": [
+                {
+                    "name": "profit",
+                    "citationId": "cit_profit",
+                    "value": 86_228_146_422,
+                    "unit": "CNY",
+                },
+                {
+                    "name": "revenue",
+                    "citationId": "cit_revenue",
+                    "value": 170_899_152_276,
+                    "unit": "CNY",
+                },
+            ],
+            "result": "50.46",
+            "unit": "%",
+            "rounding": "2dp",
+            "calculatedAt": "2026-08-08T01:07:14Z",
+            "metric": "归母净利率",
+        },
+    }
+
+    result = evaluate_citation_quality(
+        "\n".join(
+            [
+                "计算公式：归母净利率 = 归母净利润 ÷ 营业收入 = 862.28 ÷ 1,708.99",
+                "",
+                "归母净利率 = 50.46% [calculation](citation://cit_margin)",
+            ]
+        ),
+        {
+            "version": 1,
+            "citations": [profit, revenue, calculation],
+            "integrity": _integrity(),
+        },
+        policy,
+    )
+
+    formula = next(claim for claim in result["quality"]["claims"] if "计算公式" in claim["exact"])
+    assert formula["citationIds"] == ["cit_margin"]
+    assert formula["status"] == "auto-bound", (formula, result["quality"]["issues"])
     assert formula["issueCodes"] == []
     assert result["quality"]["status"] == "passed", result["quality"]["issues"]
 

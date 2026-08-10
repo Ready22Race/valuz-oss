@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+from valuz_agent.ports.message_context import HostRef
 
 from valuz_agent.adapters.system_prompt_builder import (
     CITATION_POLICY_REVISION,
@@ -381,3 +385,142 @@ async def test_three_preferences_are_independent_for_every_truth_table_row(
     assert valuz["task_coverage_enabled"] is task_coverage_enabled
     assert ("citation_quality_policy" in valuz) is verification_enabled
     assert ("task_coverage_policy" in valuz) is task_coverage_enabled
+
+
+class _WorkbenchPolicy:
+    """Test double for an edition host-capability policy."""
+
+    def __init__(self, host_types: set[str]) -> None:
+        self.host_types = host_types
+
+    def task_coverage_override(self, host_ref: HostRef) -> bool | None:
+        return False if host_ref.host_type in self.host_types else None
+
+
+@pytest.fixture
+def workbench_policy() -> Iterator[_WorkbenchPolicy]:
+    policy = _WorkbenchPolicy({"finance.research-desk", "finance.company-research"})
+    ext.host_capability_policies.append(policy)
+    try:
+        yield policy
+    finally:
+        ext.host_capability_policies.remove(policy)
+
+
+@pytest.fixture
+def no_db(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The host-override paths must not need a preferences read."""
+
+    @asynccontextmanager
+    async def _uow(commit: bool = False) -> AsyncIterator[None]:
+        yield None
+
+    monkeypatch.setattr(capabilities, "async_unit_of_work", _uow)
+
+
+async def test_hosted_turn_policy_switches_task_coverage_off_and_stamps(
+    citation_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workbench_policy: _WorkbenchPolicy,
+    no_db: None,
+) -> None:
+    session = _session()
+    updates: list[object] = []
+
+    async def get_session(user_id: str, session_id: str) -> object:
+        return session
+
+    async def update_session(user_id: str, session_id: str, body: object) -> object:
+        updates.append(body)
+        return session
+
+    monkeypatch.setattr(capabilities.kernel_client, "get_session", get_session)
+    monkeypatch.setattr(capabilities.kernel_client, "update_session", update_session)
+
+    changed = await capabilities.refresh_citation_policy_for_session(
+        "session-1",
+        "owner-1",
+        citation_enabled_override=True,
+        verification_enabled_override=True,
+        host_ref=HostRef(host_type="finance.research-desk", host_id="desk"),
+    )
+
+    assert changed is True
+    valuz = updates[0].metadata["valuz"]
+    assert valuz["task_coverage_enabled"] is False
+    # The decision is stamped so host_ref-less turns keep it.
+    assert valuz["task_coverage_host_override"] is False
+
+
+async def test_stamp_keeps_hosted_decision_on_hostless_turns(
+    citation_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    no_db: None,
+) -> None:
+    # A previous hosted turn stamped the session; a queue-drain turn arrives
+    # with no host_ref and the global preference would say True — the stamp
+    # must win or the drain snaps coverage back on.
+    session = _session()
+    session.metadata["valuz"]["task_coverage_host_override"] = False
+    updates: list[object] = []
+
+    async def get_session(user_id: str, session_id: str) -> object:
+        return session
+
+    async def update_session(user_id: str, session_id: str, body: object) -> object:
+        updates.append(body)
+        return session
+
+    monkeypatch.setattr(capabilities.kernel_client, "get_session", get_session)
+    monkeypatch.setattr(capabilities.kernel_client, "update_session", update_session)
+
+    await capabilities.refresh_citation_policy_for_session(
+        "session-1",
+        "owner-1",
+        citation_enabled_override=True,
+        verification_enabled_override=True,
+        host_ref=None,
+    )
+
+    valuz = updates[0].metadata["valuz"]
+    assert valuz["task_coverage_enabled"] is False
+    assert valuz["task_coverage_host_override"] is False
+
+
+async def test_policy_without_opinion_defers_to_global_preference(
+    citation_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workbench_policy: _WorkbenchPolicy,
+    no_db: None,
+) -> None:
+    session = _session()
+    updates: list[object] = []
+
+    async def get_session(user_id: str, session_id: str) -> object:
+        return session
+
+    async def update_session(user_id: str, session_id: str, body: object) -> object:
+        updates.append(body)
+        return session
+
+    async def pref_true(db: object, user_id: str | None = None) -> bool:
+        return True
+
+    monkeypatch.setattr(capabilities.kernel_client, "get_session", get_session)
+    monkeypatch.setattr(capabilities.kernel_client, "update_session", update_session)
+    monkeypatch.setattr(
+        "valuz_agent.modules.settings.preferences.get_conversation_task_coverage_enabled",
+        pref_true,
+    )
+
+    await capabilities.refresh_citation_policy_for_session(
+        "session-1",
+        "owner-1",
+        citation_enabled_override=True,
+        verification_enabled_override=True,
+        host_ref=HostRef(host_type="some.other-surface", host_id="x"),
+    )
+
+    valuz = updates[0].metadata["valuz"]
+    assert valuz["task_coverage_enabled"] is True
+    assert "task_coverage_host_override" not in valuz

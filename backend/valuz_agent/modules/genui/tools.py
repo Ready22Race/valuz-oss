@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import time
 from typing import Any
 
 from src.core import ToolDef, ToolResult
@@ -24,6 +23,7 @@ from src.core.tools import ExecContext
 
 import valuz_agent.boot.kernel  # noqa: F401  (sets kernel import path)
 from valuz_agent.adapters import kernel_client
+from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.genui.ids import resolve_tool_use_id
 from valuz_agent.modules.genui.prompts import TOOL_DESCRIPTION
 from valuz_agent.modules.genui.protocol import (
@@ -176,8 +176,11 @@ def _parse_target_host(args: dict[str, Any], session: Any = None) -> UiArtifactT
 # frontend extracts + strips it before handing the payload to the renderer;
 # it rides IN the persisted tool result so the adopt affordance survives
 # history replay (per the conversation-to-ui-artifact contract §7).
-UI_ARTIFACT_RECEIPT_OPEN = "[[ui-artifact-receipt]]"
-UI_ARTIFACT_RECEIPT_CLOSE = "[[/ui-artifact-receipt]]"
+from valuz_agent.ports.ui_artifact import (  # noqa: E402 — canonical home
+    UI_ARTIFACT_RECEIPT_CLOSE,
+    UI_ARTIFACT_RECEIPT_OPEN,
+    ui_artifact_receipt_trailer,
+)
 
 
 _HOST_NAME_SAFE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -196,6 +199,21 @@ def _document_file_name(target_host: UiArtifactTargetHost | None) -> str:
     parts = (target_host.host_type, target_host.host_id, target_host.slot or "main")
     stem = _HOST_NAME_SAFE.sub("-", ".".join(p for p in parts if p)).strip("-")
     return f"{stem}.a2ui.jsonl"
+
+
+def host_document_file_name(host_type: str, host_id: str, slot: str = "main") -> str:
+    """The stable document name a host slot's generations are recorded under.
+
+    Public counterpart of ``_document_file_name`` for readers: the name is the
+    cross-scope identity of a host's pages (a regeneration from another
+    conversation may land in another scope but keeps this name), so listing a
+    host's FULL version history — bound lineage and historical forks alike —
+    means querying revisions by this name.
+    """
+
+    return _document_file_name(
+        UiArtifactTargetHost(host_type=host_type, host_id=host_id, slot=slot or "main")
+    )
 
 
 async def _deliver_generated_ui(
@@ -227,6 +245,7 @@ async def _deliver_generated_ui(
         from valuz_agent.modules.artifacts.models import ArtifactKind
         from valuz_agent.modules.artifacts.scope import (
             ScopeUnavailableError,
+            resolve_artifact_scope,
             resolve_delivery_scope,
         )
         from valuz_agent.modules.artifacts.service import DeliveryRequest, deliver_artifact
@@ -238,22 +257,49 @@ async def _deliver_generated_ui(
             return ""
 
         file_name = _document_file_name(target_host)
-        async with async_unit_of_work(commit=True) as db:
-            # Read the binding BEFORE writing: the receipt carries what the
-            # host was showing at generation time, which is the concurrency
-            # token the adopt click compares against.
-            expected_revision_id: str | None = None
-            if target_host is not None:
-                current = await ArtifactDatastore(db).get_binding(
+        # Read phase: the binding (its revision id is the concurrency token the
+        # adopt click compares against) and, when one exists, the artifact it
+        # points at — the host's version lineage.
+        expected_revision_id: str | None = None
+        bound_artifact = None
+        if target_host is not None:
+            async with async_unit_of_work(commit=False) as db:
+                ds = ArtifactDatastore(db)
+                current = await ds.get_binding(
                     user_id,
                     target_host.host_type,
                     target_host.host_id,
                     target_host.slot or "main",
                 )
-                expected_revision_id = (
-                    current.artifact_revision_id if current is not None else None
+                if current is not None:
+                    expected_revision_id = current.artifact_revision_id
+                    bound_artifact = await ds.get_artifact(
+                        user_id, current.artifact_id
+                    )
+
+        # A hosted regeneration appends to the lineage the host is showing —
+        # the binding names it, and it may live in ANOTHER conversation's
+        # scope (each panel chat is its own project). The stable per-host file
+        # name was always meant to make "generate this page again" append a
+        # version; identity is scoped, so without this the new conversation
+        # quietly forked a parallel artifact starting over at v1. Deliver in
+        # the bound artifact's own scope; if that scope no longer resolves,
+        # fall back to this session's (a fork, but a recorded page beats a
+        # refusal).
+        target_artifact_id: str | None = None
+        if bound_artifact is not None:
+            own_scope = await resolve_artifact_scope(user_id, bound_artifact)
+            if own_scope is not None:
+                delivery = own_scope
+                target_artifact_id = bound_artifact.id
+            else:
+                logger.warning(
+                    "generate_ui: bound artifact %s scope no longer resolves; "
+                    "recording a new lineage in the session's scope",
+                    bound_artifact.id,
                 )
 
+        async with async_unit_of_work(commit=True) as db:
             result = await deliver_artifact(
                 db,
                 scope=delivery.scope,
@@ -264,6 +310,7 @@ async def _deliver_generated_ui(
                     file_name=file_name,
                     display_name=file_name,
                     kind=ArtifactKind.UI,
+                    artifact_id=target_artifact_id,
                     as_new_artifact=target_host is None,
                 ),
                 source_session_id=session_id,
@@ -275,26 +322,16 @@ async def _deliver_generated_ui(
         logger.exception("generate_ui: recording the document failed; skipping")
         return ""
 
-    payload = _json.dumps(
-        {
-            "artifact_id": result.artifact_id,
-            "revision_id": result.revision_id,
-            "revision": result.version_no,
-            "host_type": target_host.host_type if target_host else None,
-            "host_id": target_host.host_id if target_host else None,
-            "slot": (target_host.slot or "main") if target_host else "main",
-            "expected_revision_id": expected_revision_id,
-            # When this generation happened, on the same clock as the
-            # binding's ``updated_at`` — what lets a client tell "the user
-            # moved the default AFTER seeing this" (a deliberate dismissal)
-            # from "this finished and nobody has acted on it yet".
-            "created_at": int(time.time()),
-        },
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
     del tool_use_id, request  # audit context lives on the revision row itself
-    return f"\n{UI_ARTIFACT_RECEIPT_OPEN}{payload}{UI_ARTIFACT_RECEIPT_CLOSE}"
+    return ui_artifact_receipt_trailer(
+        artifact_id=result.artifact_id or "",
+        revision_id=result.revision_id,
+        version_no=result.version_no or 0,
+        host_type=target_host.host_type if target_host else None,
+        host_id=target_host.host_id if target_host else None,
+        slot=(target_host.slot or "main") if target_host else "main",
+        expected_revision_id=expected_revision_id,
+    )
 
 
 async def _complete_with_retries(

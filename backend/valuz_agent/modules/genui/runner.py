@@ -36,6 +36,12 @@ Completer = Callable[[str], Awaitable[str]]
 _LOG_PREVIEW_CHARS = 240
 _DIRECT_GENUI_MAX_TOKENS = 16384
 
+# How many follow-up turns may continue a generation that stopped at the
+# output-token cap before we deliver whatever complete lines we have. A page
+# large enough to need more than this is pathological; the salvage path still
+# stores the complete prefix.
+_GENERATION_MAX_CONTINUATIONS = 3
+
 # Ephemeral event type → live event type emitted on the CALLING session.
 # ``text_delta`` is the generated A2UI stream (frontend concatenates it into the
 # tool card's output for progressive <Renderer> paint). ``thinking_delta``
@@ -207,7 +213,12 @@ def _make_completer(
             )
 
     async def _complete(prompt: str) -> str:
-        from app.schemas import AgentConfigSchema, CreateSessionRequest, ModelProviderInputSchema
+        from app.schemas import (
+            AgentConfigSchema,
+            CreateSessionRequest,
+            ModelProviderInputSchema,
+            ModelSettingsSchema,
+        )
 
         # OAuth/subscription channels (Codex/Claude login) resolve to mp=None and
         # carry no static key — create the session with model_provider=None so the
@@ -234,6 +245,13 @@ def _make_completer(
                 runtime_provider=runtime_provider,
                 instructions=session_instructions,
                 metadata=marker,
+                # A full workbench page is a large document; without an
+                # explicit cap the runtime default truncates it mid-write,
+                # and a half-written A2UI doc is rejected at storage (no
+                # version, no card). Match the direct path's budget.
+                model_settings=ModelSettingsSchema(
+                    max_tokens=_DIRECT_GENUI_MAX_TOKENS
+                ),
             ),
             cwd=str(gen_cwd),
             runtime_provider=runtime_provider,
@@ -242,6 +260,9 @@ def _make_completer(
             instructions=session_instructions,
             permission_mode="default",
             metadata=marker,
+            model_settings=ModelSettingsSchema(
+                max_tokens=_DIRECT_GENUI_MAX_TOKENS
+            ),
         )
         await kernel_client.create_session(user_id, req)
         stream_task: asyncio.Task[None] | None = None
@@ -258,8 +279,50 @@ def _make_completer(
             stream_task = asyncio.create_task(_forward_deltas(ephem_id))
             await asyncio.sleep(0)
         try:
-            msg = await kernel_client.run_turn(user_id, ephem_id, prompt)
-            return msg.assistant_message or ""
+            # Continuation loop: no output-token cap is large enough for every
+            # page, so a big generation can still stop mid-document. A2UI is
+            # append-only JSONL — the break is always the last line — so we
+            # keep the complete lines and ask the model (in this same session,
+            # which holds its own truncated output in history) to keep writing
+            # from where it stopped. Repeats until a turn ends WITHOUT a
+            # truncated tail, or the continuation budget is spent. Each
+            # continuation streams into the workbench like the first turn.
+            from valuz_agent.modules.genui.protocol import (
+                CONTINUATION_PROMPT,
+                a2ui_message_lines,
+            )
+
+            accumulated = ""
+            turn_prompt = prompt
+            for attempt in range(_GENERATION_MAX_CONTINUATIONS + 1):
+                msg = await kernel_client.run_turn(user_id, ephem_id, turn_prompt)
+                text = msg.assistant_message or ""
+                lines, truncated = a2ui_message_lines(text)
+                if not truncated:
+                    # Complete turn: append VERBATIM (so a non-truncated,
+                    # non-A2UI, or prose-tailed output is byte-identical to
+                    # the pre-continuation behaviour) and stop.
+                    accumulated = f"{accumulated}\n{text}" if accumulated else text
+                    break
+                # Truncated: keep only the complete lines (drop the half-
+                # written tail) so the next turn's continuation does not sit
+                # behind a broken line, then ask the model to keep writing.
+                trimmed = "\n".join(lines)
+                accumulated = f"{accumulated}\n{trimmed}" if accumulated else trimmed
+                if attempt < _GENERATION_MAX_CONTINUATIONS:
+                    logger.info(
+                        "generate_ui: output truncated; continuing (%d/%d)",
+                        attempt + 1,
+                        _GENERATION_MAX_CONTINUATIONS,
+                    )
+                    turn_prompt = CONTINUATION_PROMPT
+                else:
+                    logger.warning(
+                        "generate_ui: still truncated after %d continuations; "
+                        "delivering the complete prefix",
+                        _GENERATION_MAX_CONTINUATIONS,
+                    )
+            return accumulated
         finally:
             if stream_task is not None:
                 stream_task.cancel()

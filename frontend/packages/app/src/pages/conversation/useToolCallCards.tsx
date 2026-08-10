@@ -29,6 +29,7 @@ import { LiveTaskCard } from "../../components/LiveTaskCard";
 import type { computePlanAnchors } from "../conversation-plan-anchors";
 import {
   automationTriggerSummary,
+  hostDocumentFileName,
   isToolNamed,
   parseAutomationCreateInput,
   renderChatplanStatusPill,
@@ -250,6 +251,42 @@ export function useToolCallCards({
             />
           </>
         );
+      }
+
+      // Any OTHER tool whose input touches the host page's DOCUMENT FILE is
+      // page work too — an agent editing the a2ui.jsonl directly and
+      // delivering it via ``deliver_artifacts`` makes a new page version
+      // exactly like a generation, and without this branch the workbench
+      // never hears about it (versions grew silently: no card, no live
+      // state, no refresh). The edition slot gets the same contract as a
+      // generate_ui run: ``running`` mirrors 正在修改 into the host, and the
+      // receipt the deliver tool now appends drives the adopt card. Errors
+      // fall through to the generic card so the failure text stays visible.
+      if (
+        hostRef &&
+        typeof tool.input === "string" &&
+        tool.status !== "error"
+      ) {
+        const docName = hostDocumentFileName(hostRef);
+        if (docName && tool.input.includes(docName)) {
+          const { receipt } = extractUiArtifactReceipt(tool.output);
+          return (
+            <SlotRenderer
+              name="genui.artifact-binding"
+              context={{
+                receipt,
+                toolUseId: tool.id,
+                status: tool.status === "running" ? "running" : "success",
+                // The document is not in this tool's result — the edition
+                // slot fetches the recorded revision when it needs the body.
+                output: "",
+                input: tool.input,
+                thinking: tool.thinking,
+                hostRef,
+              }}
+            />
+          );
+        }
       }
 
       // Claude dynamic-workflow launch → WorkflowProgressCard. The kernel

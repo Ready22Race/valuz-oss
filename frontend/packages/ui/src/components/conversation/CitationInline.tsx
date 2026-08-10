@@ -26,8 +26,25 @@ import { useI18n } from "../../hooks/use-i18n";
 
 const CITATION_HREF_PREFIX = "https://valuz.citation.invalid/";
 const CITATION_URI_PATTERN = /citation:\/\/([A-Za-z0-9._~:-]+)/g;
-const EVIDENCE_LINK_PATTERN =
-  /\[([^\]\n]{0,240})\]\(evidence:\/\/([A-Za-z0-9_-]{1,160})(#[^\s)\n]{1,2048})?\)/g;
+// A Collection Address' JSON Pointer can carry balanced parentheses, and a
+// space inside them — Reportify names indicator keys after their call
+// signature, giving ``#/datas/0/indicators/ma(close, 20)``. Matching the
+// fragment as ``[^\s)]`` failed on the whole link, so it was never projected
+// and the reader saw the raw ``evidence://`` protocol in the answer. A space is
+// only accepted inside a parenthesised group, so the pattern still stops at the
+// link instead of running into the prose after it.
+const ADDRESS_FRAGMENT = String.raw`(?:[^\s()\[\]\n]|\([^()\n]{0,200}\)){1,2048}`;
+const EVIDENCE_LINK_PATTERN = new RegExp(
+  String.raw`\[([^\]\n]{0,240})\]\(evidence:\/\/([A-Za-z0-9_-]{1,160})(#${ADDRESS_FRAGMENT})?\)`,
+  "gu",
+);
+// The tail of a binding the model is still writing. Streamdown completes a
+// half-written link while streaming, then rejects the unknown ``evidence:``
+// protocol and paints "[blocked]" in the middle of the sentence until the
+// sidecar arrives. A binding in flight is protocol noise the reader should
+// never see, so drop the partial exactly like the finished form is dropped.
+const PARTIAL_EVIDENCE_LINK_PATTERN =
+  /\[([^\]\n]{0,240})\]\(evidence:(?:\/(?:\/[A-Za-z0-9_-]{0,160}(?:#[^\s)\n]{0,2048})?)?)?$/;
 const HOVER_CLOSE_DELAY_MS = 150;
 const HOVER_CARD_GAP_PX = 8;
 const VIEWPORT_PADDING_PX = 16;
@@ -40,7 +57,10 @@ export interface CitationQualityDisplayIssue {
   claimId?: string;
   label: string;
   severity: string;
-  tone: "advisory" | "critical";
+  /** ``unsourced`` marks a statement that carries no binding at all. It is a
+   * coverage gap, not evidence that the statement is wrong, so it renders in
+   * a neutral tone rather than the warning tone reserved for conflicts. */
+  tone: "advisory" | "critical" | "unsourced";
 }
 
 function comparableEvidenceText(value: string): string {
@@ -67,7 +87,9 @@ function redundantEvidenceSnippet(quote: string, snippet?: string): boolean {
   const snippetPrefix = comparableSnippet
     .replace(/(?:\.{3}|…)\s*$/u, "")
     .trim();
-  return snippetPrefix.length >= 40 && comparableQuote.startsWith(snippetPrefix);
+  return (
+    snippetPrefix.length >= 40 && comparableQuote.startsWith(snippetPrefix)
+  );
 }
 
 export function rewriteCitationMarkdownLinks(content: string): string {
@@ -96,8 +118,14 @@ export function projectEvidenceMarkdownLinks(
   return content.replace(
     EVIDENCE_LINK_PATTERN,
     (_whole, label: string, handle: string, fragment?: string) => {
-      const citationId =
-        projection.get(`${handle}${fragment ?? ""}`) ?? projection.get(handle);
+      // An address names one field inside a collection. If that exact address
+      // is unknown, the collection's other citations are evidence for other
+      // fields — attaching one of them puts a confident, unrelated number
+      // behind the value, which is worse than showing no marker. Only a
+      // pointerless handle may resolve to the collection itself.
+      const citationId = fragment
+        ? projection.get(`${handle}${fragment}`)
+        : projection.get(handle);
       if (citationId) return `[${label}](citation://${citationId})`;
       const normalized = label.replace(/\s+/gu, "").toLocaleLowerCase();
       return [
@@ -115,11 +143,91 @@ export function projectEvidenceMarkdownLinks(
   );
 }
 
-function codePointOffsetToCodeUnit(content: string, sourceOffset: number): number {
+/** Remove a binding the model has only half-written at the end of the stream. */
+export function stripStreamingEvidenceLinkTail(content: string): string {
+  return content.replace(PARTIAL_EVIDENCE_LINK_PATTERN, "");
+}
+
+function codePointOffsetToCodeUnit(
+  content: string,
+  sourceOffset: number,
+): number {
   if (!Number.isInteger(sourceOffset) || sourceOffset < 0) return -1;
   const points = Array.from(content);
   if (sourceOffset > points.length) return -1;
   return points.slice(0, sourceOffset).join("").length;
+}
+
+// A whole markdown link, and a number or word — the spans a marker must never
+// be dropped into the middle of.
+const UNSPLITTABLE_SPAN = new RegExp(
+  [
+    String.raw`\[[^\]\n]{0,240}\]\((?:[^()\s\n]|\([^()\n]{0,200}\)){1,2100}\)`,
+    String.raw`[-+]?\$?\d[\d.,]*\d?%?`,
+    String.raw`[A-Za-z][A-Za-z0-9_-]*`,
+  ].join("|"),
+  "gu",
+);
+
+/** Move an offset forward to the end of the text it sits in.
+ *
+ * A marker belongs after the thing it marks. Offsets drift — they are measured
+ * against the text the guard normalised, not the text the reader was streamed —
+ * so a raw offset can land mid-phrase and the marker reads as if it annotates
+ * the words that follow it rather than the statement it belongs to. Snapping to
+ * the end of the enclosing cell or sentence puts it back behind the text.
+ */
+export function offsetAfterEnclosingText(
+  content: string,
+  offset: number,
+): number {
+  const newline = content.indexOf("\n", offset);
+  const lineEnd = newline < 0 ? content.length : newline;
+  const lineStart = content.lastIndexOf("\n", Math.max(0, offset - 1)) + 1;
+  let end: number;
+  if (/^\s*\|/u.test(content.slice(lineStart, offset + 1))) {
+    // A table row: stay inside the cell, otherwise the marker lands outside
+    // the row and breaks it apart.
+    const cellEnd = content.indexOf("|", offset);
+    end = cellEnd < 0 || cellEnd > lineEnd ? lineEnd : cellEnd;
+  } else {
+    // Prose and list items: after the statement but before its full stop,
+    // which is where a citation reads naturally and where the existing markers
+    // already sit.
+    // An ASCII full stop only ends a sentence when whitespace or the line end
+    // follows it — otherwise it is the decimal point in "18.5".
+    const stop = content
+      .slice(offset, lineEnd)
+      .search(/[。！？；]|[.!?;](?=\s|$)/u);
+    end = stop < 0 ? lineEnd : offset + stop;
+  }
+  while (end > offset && /\s/u.test(content[end - 1] ?? "")) end -= 1;
+  // Only ever move forward: a correct offset must survive this untouched.
+  return Math.max(offset, end);
+}
+
+/** Move an offset that fell inside a link, number or word to just past it. */
+export function offsetOutsideMarkdownLink(
+  content: string,
+  offset: number,
+): number {
+  // An anchor's offset is measured against the text the guard normalised, where
+  // a Collection Address has already shrunk to its materialized handle. The
+  // client still holds the text the model streamed, so every offset after the
+  // first address is shifted. Landing inside a link splits the URL and leaves
+  // the protocol on screen; landing inside a value renders "+$19.16" as
+  // "+$19. ③ 16", which reads as two different numbers.
+  UNSPLITTABLE_SPAN.lastIndex = 0;
+  for (
+    let match = UNSPLITTABLE_SPAN.exec(content);
+    match !== null;
+    match = UNSPLITTABLE_SPAN.exec(content)
+  ) {
+    if (match.index >= offset) break;
+    const end = match.index + match[0].length;
+    if (offset < end) return end;
+  }
+  return offset;
 }
 
 export function projectCitationSidecarAnchors(
@@ -141,7 +249,10 @@ export function projectCitationSidecarAnchors(
     // projected. Only de-duplicate a link already present at this exact raw
     // claim boundary. The same source can legitimately support two adjacent
     // claims, so a broad nearby-text check would silently drop the latter.
-    const escapedCitationId = citationId.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+    const escapedCitationId = citationId.replace(
+      /[.*+?^${}()|[\]\\]/gu,
+      "\\$&",
+    );
     const atBoundary = content.slice(offset, offset + 280);
     if (
       new RegExp(
@@ -173,7 +284,11 @@ export function projectCitationSidecarAnchors(
     const markdown = citationIds
       .map((citationId) => `[source](citation://${citationId})`)
       .join(" ");
-    projected = `${projected.slice(0, offset)} ${markdown}${projected.slice(offset)}`;
+    const at = offsetOutsideMarkdownLink(
+      projected,
+      offsetAfterEnclosingText(projected, offset),
+    );
+    projected = `${projected.slice(0, at)} ${markdown}${projected.slice(at)}`;
   }
   return projected;
 }
@@ -201,9 +316,7 @@ export function citationOffsetFromHref(href?: string): number | null {
   }
 }
 
-export function citationOccurrences(
-  content: string,
-): Map<string, number[]> {
+export function citationOccurrences(content: string): Map<string, number[]> {
   const occurrences = new Map<string, number[]>();
   for (const match of content.matchAll(CITATION_URI_PATTERN)) {
     const citationId = match[1];
@@ -227,7 +340,11 @@ export function citationDisplayOrder(
   const order = new Map<string, number>();
   for (const match of content.matchAll(CITATION_URI_PATTERN)) {
     const citationId = match[1];
-    if (citationId && !derivationIds.has(citationId) && !order.has(citationId)) {
+    if (
+      citationId &&
+      !derivationIds.has(citationId) &&
+      !order.has(citationId)
+    ) {
       order.set(citationId, order.size + 1);
     }
   }
@@ -240,16 +357,17 @@ export function usedCitations(
   displayOrder?: ReadonlyMap<string, number>,
 ): Array<{ displayIndex: number; citation: CitationRefV1 }> {
   if (!bundle) return [];
-  const byId = new Map(bundle.citations.map((citation) => [citation.citationId, citation]));
+  const byId = new Map(
+    bundle.citations.map((citation) => [citation.citationId, citation]),
+  );
   const localOrder = citationDisplayOrder(content, bundle);
   return Array.from(localOrder, ([citationId, localDisplayIndex]) => {
     const citation = byId.get(citationId);
     const displayIndex = displayOrder?.get(citationId) ?? localDisplayIndex;
     return citation ? { displayIndex, citation } : null;
   }).filter(
-    (
-      item,
-    ): item is { displayIndex: number; citation: CitationRefV1 } => item !== null,
+    (item): item is { displayIndex: number; citation: CitationRefV1 } =>
+      item !== null,
   );
 }
 
@@ -407,7 +525,10 @@ function CitationTableRow({
   return (
     <tr
       {...props}
-      className={cn("border-b border-surface-border last:border-b-0", className)}
+      className={cn(
+        "border-b border-surface-border last:border-b-0",
+        className,
+      )}
     >
       {children}
     </tr>
@@ -550,7 +671,9 @@ function CitationHoverCard({
     t("ui.citation.documentCoverageComplete"),
   );
   const attribution =
-    citation.source.organization ?? citation.source.author ?? citation.source.providerId;
+    citation.source.organization ??
+    citation.source.author ??
+    citation.source.providerId;
   const quality = qualityBadge(citation);
   const qualityTone = qualityIssues?.some((issue) => issue.tone === "critical")
     ? "critical"
@@ -584,7 +707,8 @@ function CitationHoverCard({
       <span className="flex items-start gap-2">
         <span className="min-w-0 flex-1">
           <span className="block font-medium text-ink-heading">
-            {displayIndex ? `${displayIndex} ` : ""}{citation.source.title}
+            {displayIndex ? `${displayIndex} ` : ""}
+            {citation.source.title}
           </span>
           <span className="mt-0.5 block text-ink-meta">
             {[attribution, detail.time].filter(Boolean).join(" · ")}
@@ -635,10 +759,7 @@ function CitationHoverCard({
               : "bg-surface-muted/70",
           )}
         >
-          <span
-            className="flex h-5 shrink-0 items-center"
-            aria-hidden="true"
-          >
+          <span className="flex h-5 shrink-0 items-center" aria-hidden="true">
             {qualityTone === "critical" ? (
               <AlertTriangle className="h-3.5 w-3.5 text-warning-text" />
             ) : (
@@ -691,8 +812,7 @@ function CitationHoverCard({
                   <span className="text-ink-meta">
                     {" "}
                     · {String(input.value)}
-                    {input.unit ? ` ${input.unit}` : ""} ·{" "}
-                    {source.source.title}
+                    {input.unit ? ` ${input.unit}` : ""} · {source.source.title}
                   </span>
                 </button>
               );
@@ -804,7 +924,9 @@ export function CitationPill({
     const spaceAbove = triggerRect.top - VIEWPORT_PADDING_PX;
     const requiredSpace = cardHeight + HOVER_CARD_GAP_PX;
     const nextSide: CitationCardSide =
-      spaceBelow >= requiredSpace || spaceBelow >= spaceAbove ? "bottom" : "top";
+      spaceBelow >= requiredSpace || spaceBelow >= spaceAbove
+        ? "bottom"
+        : "top";
     setCardSide(nextSide);
 
     const preferredTop =
@@ -827,10 +949,7 @@ export function CitationPill({
         ),
         maxLeft,
       ),
-      top: Math.min(
-        Math.max(preferredTop, VIEWPORT_PADDING_PX),
-        maxTop,
-      ),
+      top: Math.min(Math.max(preferredTop, VIEWPORT_PADDING_PX), maxTop),
     });
   }, []);
 
@@ -853,11 +972,7 @@ export function CitationPill({
         variant === "source-row"
           ? "relative block w-full"
           : "relative -top-px inline-flex align-middle leading-none",
-        variant === "pill"
-          ? qualityStatus
-            ? "mx-1"
-            : "mx-0.5"
-          : undefined,
+        variant === "pill" ? (qualityStatus ? "mx-1" : "mx-0.5") : undefined,
       )}
       onMouseEnter={showCard}
       onMouseLeave={scheduleClose}
@@ -866,7 +981,8 @@ export function CitationPill({
         const next = event.relatedTarget;
         if (
           !(next instanceof Node) ||
-          (!event.currentTarget.contains(next) && !cardRef.current?.contains(next))
+          (!event.currentTarget.contains(next) &&
+            !cardRef.current?.contains(next))
         ) {
           scheduleClose();
         }
@@ -902,15 +1018,15 @@ export function CitationPill({
             isCalculation
               ? t("ui.citation.calculationDetails", "Calculation details")
               : citation && displayIndex
-              ? [
-                  t("ui.citation.ariaLabel", "Citation {index}", {
-                    index: displayIndex,
-                  }),
-                  qualityStatus ? t("ui.citation.qualityNeedsReview") : null,
-                ]
-                  .filter(Boolean)
-                  .join(" · ")
-              : t("ui.citation.unavailable", "Citation unavailable")
+                ? [
+                    t("ui.citation.ariaLabel", "Citation {index}", {
+                      index: displayIndex,
+                    }),
+                    qualityStatus ? t("ui.citation.qualityNeedsReview") : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")
+                : t("ui.citation.unavailable", "Citation unavailable")
           }
           aria-disabled={!canOpen}
           data-citation-id={citationId}
@@ -948,7 +1064,10 @@ export function CitationPill({
           )}
         </button>
       )}
-      {hovered && citation && (displayIndex || isCalculation) && typeof document !== "undefined"
+      {hovered &&
+      citation &&
+      (displayIndex || isCalculation) &&
+      typeof document !== "undefined"
         ? createPortal(
             <CitationHoverCard
               displayIndex={displayIndex}
@@ -1034,7 +1153,10 @@ export function CitationSourceCards({
               {citation.source.title}
               {quality ? (
                 <>
-                  <span aria-hidden="true" className="ml-1 text-2xs text-ink-meta">
+                  <span
+                    aria-hidden="true"
+                    className="ml-1 text-2xs text-ink-meta"
+                  >
                     ·
                   </span>
                   <span

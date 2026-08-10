@@ -18,6 +18,18 @@ from valuz_agent.ports.genui_blocks import GenUIBlockRegistry
 
 OUTPUT_FORMAT = "A2UI v0.9 JSON message stream"
 
+#: Follow-up prompt when the previous turn's A2UI document was cut off at the
+#: output-token cap. Sent in the SAME ephemeral session, so the model sees its
+#: own truncated output in history and continues it. It must not repeat what it
+#: already completed (components merge by id, so a repeat only bloats the doc)
+#: and must not add prose — only the remaining A2UI message lines.
+CONTINUATION_PROMPT = (
+    "你上一条 A2UI 文档在输出上限处被截断了,还没写完。"
+    "请从中断处继续,只补齐**尚未输出完整**的剩余消息——"
+    "每条消息一行完整 JSON,不要重复已经完整输出过的组件,"
+    "不要加任何解释文字,直接接着写。"
+)
+
 #: Which set of components one generation is offered.
 #:
 #: The split follows where a component comes from, not what it is made of:
@@ -165,7 +177,17 @@ host never refreshes it. One slot per source; the slot path and the ref path
 share the trailing name. Never invent a source id: only the ids the edition
 notes list as pollable exist, and anything else leaves the slot permanently
 stale. refresh.interval is seconds and must respect the source's stated
-minimum."""
+minimum.
+
+When the edition notes list MORE THAN ONE shape for a source, the ref must
+say which one it wants with a "shape" key (e.g. {"source":"...","shape":
+"ChartData","params":{...}}); single-shape sources need no shape key.
+
+A param value may be written as {"$host":"<key>"} instead of a literal when
+the edition notes say the current page provides that key (e.g. a company
+page providing "symbol") — the page then re-binds when its subject changes.
+Only keys the notes name exist; on pages that provide none, always write
+literal params."""
 
 
 def _load_block_catalog() -> str:
@@ -401,6 +423,30 @@ _A2UI_MESSAGE_KEYS = (
 )
 
 
+def a2ui_message_lines(raw: str) -> tuple[list[str], bool]:
+    """The complete JSON message lines in ``raw`` and whether its tail is cut.
+
+    A2UI is append-only JSONL, so a generation stopped by an output cap leaves
+    every line complete except a half-written last one. This returns the
+    complete ``{``-opening lines in order and a ``truncated`` flag set when the
+    stream broke mid-line — the two facts a continuation loop needs: what has
+    arrived, and whether to ask the model to keep writing.
+    """
+    lines: list[str] = []
+    truncated = False
+    for raw_line in raw.split("\n"):
+        line = raw_line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            json.loads(line)
+        except json.JSONDecodeError:
+            truncated = True
+            break
+        lines.append(line)
+    return lines, truncated
+
+
 def extract_a2ui_document(raw: str) -> str | None:
     """The document inside a model's raw output, or ``None`` if unusable.
 
@@ -431,7 +477,18 @@ def extract_a2ui_document(raw: str) -> str | None:
         try:
             message = json.loads(line)
         except json.JSONDecodeError:
-            return None
+            # A ``{``-opening line that will not parse is a TRUNCATED tail:
+            # A2UI is append-only JSONL, so a generation cut off by an output
+            # cap or an aborted stream leaves its last line half-written while
+            # every earlier line is complete. Reject-the-whole-document threw
+            # away a nearly-finished page (blank workbench, no version) for a
+            # single missing closing brace. Instead, stop at the break and
+            # keep the valid prefix — the page renders what completed, minus
+            # the final unfinished section. (A break, not skip-and-continue:
+            # nothing valid follows a truncation in an append-only stream, and
+            # skipping into later lines could stitch across a genuinely
+            # corrupt middle.)
+            break
         if not isinstance(message, dict):
             continue
         if not any(key in message for key in _A2UI_MESSAGE_KEYS):
@@ -439,6 +496,8 @@ def extract_a2ui_document(raw: str) -> str | None:
         if "updateComponents" in message:
             saw_components = True
         kept.append(line)
+    # Still require a real page: a run truncated BEFORE its first complete
+    # ``updateComponents`` has nothing to show and is rejected as before.
     if not saw_components:
         return None
     return "\n".join(_without_repeated_document(kept))

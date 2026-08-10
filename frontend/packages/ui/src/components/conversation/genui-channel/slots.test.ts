@@ -38,3 +38,27 @@ describe("slotPath", () => {
     expect(path).toMatch(/^\/data\/test\.source\/[0-9a-f]{8}$/);
   });
 });
+
+describe("slotPath — shape participates in slot identity", () => {
+  it("separates two shapes of the same source+params into different slots", () => {
+    const a = slotPath("test.kline", { symbol: "US:NVDA" }, "ChartData");
+    const b = slotPath(
+      "test.kline",
+      { symbol: "US:NVDA" },
+      "Collection<MetricItem>",
+    );
+    expect(a).not.toBe(b);
+  });
+
+  it("shapeless and shaped refs do not share a slot", () => {
+    const bare = slotPath("test.kline", { symbol: "US:NVDA" });
+    const shaped = slotPath("test.kline", { symbol: "US:NVDA" }, "ChartData");
+    expect(bare).not.toBe(shaped);
+  });
+
+  it("same shape stays deterministic", () => {
+    expect(slotPath("s", { a: 1 }, "ChartData")).toBe(
+      slotPath("s", { a: 1 }, "ChartData"),
+    );
+  });
+});

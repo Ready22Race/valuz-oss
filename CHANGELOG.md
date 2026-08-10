@@ -7,60 +7,171 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-08
+
+### Added
+
+- **Generative UI block system** — a dedicated block package wired into OpenUI
+  Lang and A2UI: 49+ blocks with edition injection and per-call scope, a
+  backend block registry port (`ext.genui_blocks`), typed vocabulary
+  signatures, the chart family migrated to recharts, and
+  `GENERATIVE_UI_LAYOUT_CSS` exported for out-of-card hosts
+  (#733, #745, #751, #771, #779, #782 @St0neWan9).
+- **Generative UI live data** — data-binding mode (channel, resolver, grammar),
+  the live-data host seam where refs start an edition host and pushes
+  re-render, and shape-disambiguated slots with `$host` pass-through
+  (#772, #773, #800 @St0neWan9).
+- **Artifacts as versioned deliverables** — delivered artifacts are versioned
+  instead of overwritten (#732, #740 @Ready22Race); generated UI is recorded
+  as a deliverable bound to a host, with host-scoped version history,
+  single-revision reads, timestamped generation receipts, hosted regeneration
+  appending to the host's lineage, and `deliver_artifacts` announcing
+  bound-page revisions like a generation
+  (#770, #790, #791, #795, #803, #804, #806 @St0neWan9).
+- **Citations & evidence quality** — a complete document research and quality
+  flow: claim audits before publication, layered quality policies, layered
+  evidence resolution with MCP source metadata, task-coverage enforcement, and
+  a risk-based audit sidecar (#690, #691, #692, #700, #724, #741 @St0neWan9).
+- **Valurion** — a built-in system agent contract, seeded portably and
+  guaranteed even for empty agent libraries
+  (#662, #663, fixes #664, #665 @St0neWan9).
+- **Document preview pane** — documents open in a resizable split pane with
+  tabs, on conversation, task and project surfaces alike
+  (#697, #698, #699 @St0neWan9).
+- **Notifications** — the drawer gained a History tab, a clear-all action and
+  instant (optimistic) dismiss (#725 @St0neWan9); completed tasks are notified,
+  and the `notification.created` extension event carries the unread count
+  (#714, #715 @zhourongyu).
+- **Token usage** — conversation and task token usage is surfaced in the UI
+  (#789 @zhourongyu).
+- **Auto-compaction at the model's real window** — runtimes compact against the
+  provider-declared `max_input_tokens` instead of a guess (#739 @jiaoqsh).
+- **Turn-phase latency markers** — `turn_phase` events across all three
+  runtimes (#764 @jiaoqsh), with the conversation header split into named
+  phase counters and one continuous turn timer (#674, #675 @Ready22Race).
+- **Bundled skills from system roots** — skill packages resolve from read-only,
+  explicitly declared system roots (#766 @Ready22Race).
+- **Host extension surface** — a resource copy menu slot (#680 @homeant), two
+  host action slots plus a session-scoped slot and a per-message leading slot
+  with its role (#744, #746, #747, #756, #757 @Ready22Race), research-workspace
+  extension points (#755 @St0neWan9), overlays can suppress a host surface
+  (#762 @Ready22Race), and a host-scoped capability policy decides task
+  coverage per surface (#801 @St0neWan9).
+- **Project composer parity** — sending from the project composer works the way
+  "New chat" does (#682 @Ready22Race).
+- **Cloud sessions** — SSE follows a session that moves to a different sandbox,
+  the host's `sandbox_status` lifecycle is translated onto the stream, and a
+  host-observation channel was trialled and dropped
+  (#652, #653, #655, #656 @Ready22Race).
+- **Codex runtime for deepseek-v4-flash** (#760 @jiaoqsh).
+- **Login-shell PATH** — the backend merges the user's login-shell PATH so
+  GUI-launched apps resolve user-installed tools (#687 @jiaoqsh).
+
 ### Changed
 
-- **Local document parsing now runs on anydoc instead of MarkItDown** — the
-  LightLocal parser's office backend was replaced wholesale. Local parsing now
-  reads legacy Office (`.doc` / `.ppt` / `.xls`), macro-enabled variants,
-  OpenDocument (`.odt` / `.ods` / `.odp`), RTF and EPUB, none of which were
-  supported before; spreadsheet output no longer carries pandas artifacts (a
-  revenue cell rendered as `8.630000e+10` and every empty cell as `NaN`); and
-  docx conversion is ~25× faster. Removing MarkItDown pruned 12 packages
-  including pandas and magika — whose eagerly-loaded ONNX model had broken all
-  office parsing in a frozen build once before. The knowledge base and the
-  parsing settings page were widened to match. Known trade-off: PowerPoint no
-  longer carries `<!-- Slide number: N -->` markers, so consecutive title-less
-  slides run together. See
-  [docs/design/local-parser-anydoc-migration.md](docs/design/local-parser-anydoc-migration.md).
+- **Local document parsing now runs on anydoc instead of MarkItDown** — legacy
+  Office (`.doc` / `.ppt` / `.xls`), macro-enabled variants, OpenDocument, RTF
+  and EPUB parse locally for the first time; spreadsheet output drops pandas
+  artifacts; docx conversion is ~25× faster; and the knowledge-base ingestion
+  gate now mirrors the parser (RTF no longer indexed as raw markup, `.htm` and
+  extension-less text files ingested, unsupported uploads rejected with a
+  reason). See
+  [docs/design/local-parser-anydoc-migration.md](docs/design/local-parser-anydoc-migration.md)
+  (#761 @Ready22Race).
+- **Performance** — the task plan snapshot is no longer quadratic and only the
+  last one is read (#769 @Ready22Race); turns stop walking the skills mount
+  (#793 @Ready22Race); session creation no longer content-hashes every skill
+  (#794 @Ready22Race).
+- **Citations internals** — the audit is decoupled from task coverage
+  (#730 @St0neWan9).
+- **Frontend structure** — `ConversationPage.tsx` split into `conversation/`
+  modules (#735 @St0neWan9).
 
 ### Fixed
 
-- **RTF files silently polluted the knowledge base** — `.rtf` had no parser,
-  but RTF source is ASCII, so it slipped past the unknown-extension guard and
-  was indexed as its own markup (`{\rtf1\ansi\deff3...}` stored as if it were
-  prose, with no error anywhere). RTF is now converted properly.
-- **`.htm` files were never ingested into the knowledge base** — they parsed
-  fine, but the extension was missing from the ingestion allow-list, so the
-  directory scan skipped them silently while `.html` worked.
-- **Text files without a known extension were skipped by the knowledge base** —
-  source files, config and logs (`.py`, `.go`, `.sh`, `.yaml`, extension-less
-  files) were dropped even though the parser reads any UTF-8 file as text. The
-  ingestion gate now mirrors the parser instead of using a fixed allow-list, so
-  they are indexed; only genuinely binary files are skipped.
-- **Uploading an unsupported file to a knowledge base silently did nothing** —
-  the file was written to disk, the scan skipped it, and no document row, error
-  or message ever appeared. Such uploads are now rejected with an explanation
-  naming the file, and the knowledge base page shows the server's reason
-  instead of a generic "import failed".
+- **Tasks** — the live task UI, model-facing text and actor loop are repaired
+  and tested end to end (#651); the lead's goal is no longer overwritten on
+  wake-up and agent playbooks are de-duplicated (#668); stale member
+  summaries, poisoned plan nodes and dropped activity rows are gone and the
+  per-poll queries are indexed (#753); a lost plan write no longer tells the
+  lead its subtask key vanished (#759); a task nobody is minding is now
+  surfaced (#768); a deleted session no longer leaves its run row and the tool
+  gates gained tests (#776) (all @Ready22Race).
+- **Project send handoff** — the composer no longer freezes while a cloud
+  session is created, the pending send releases when its echo arrives, the
+  handoff carries every composer option, waits for the project binding and
+  draft bootstrap, survives reloads without replaying, never flashes the
+  new-chat welcome, keeps the optimistic turn alive past the landing refresh,
+  and renders the header while the session is still being minted
+  (#676, #677, #679, #683, #684, #686, #688, #689, #694, #695, #696
+  @Ready22Race; attachment chips clear after the handoff #736 @St0neWan9).
+- **Conversation & stream** — runtime assistant messages are preserved on the
+  stream (#723 @St0neWan9); assistant output no longer merges into the user
+  bubble on turn-scoped message ids (#742 @St0neWan9); the bound agent owns
+  the session's brain (#731 @Ready22Race); session capabilities converge
+  inside `run_turn` (#710 @Ready22Race); bundled skills landing mid-session
+  converge too (#763 @Ready22Race); the session token total below the composer
+  is dropped (#805 @St0neWan9).
+- **Citations hardening** — collection snapshots replay and unpack correctly,
+  values resolve with temporal context, claim-local dimensions win, value
+  labels are not metrics, evidence coverage and discovery item paths are
+  bounded, chunk-level document evidence is restored, discovery results stay
+  non-citable, the bundled evidence protocol is restored, local claims bind
+  semantically in batch, and structured evidence audits are hardened
+  (#702, #704, #706, #707, #709, #717, #719, #721, #722, #796, #807, #808
+  @St0neWan9); task coverage accepts categorical value labels and enforces
+  silent no-op completion (#718, #743 @St0neWan9).
+- **Generative UI** — container-query breakpoints (#726 @hanjixin); adaptive
+  dashboard polish and responsive card widths restored
+  (#670, #672, #678 @yy83000812); the `components` argument is scoped on the
+  repo boundary and A2UI sub-item refs resolve (#749); the slot grammar says
+  the binding IS the refresh, the slot shape is the source's, and the
+  generation's host resolves from the turn (#774, #775, #778); block sizing
+  under containment is corrected (Waterfall bar cap, avatar fallback,
+  page-header Cluster, slot-cluster zeroing, root width)
+  (#780, #783, #785, #787, #788); one breathing element in the generation tail
+  (#784); segment summaries truncate instead of wrapping (#797)
+  (all @St0neWan9).
+- **Artifacts** — a file-stored bound document is served, not null
+  (#781 @St0neWan9).
+- **Skills** — CRLF `SKILL.md` frontmatter parses (#673 @St0neWan9);
+  filesystem-hostile characters are kept out of skill names and directories
+  (#703, #705 @Ready22Race); system skill roots must be declared, never
+  inferred (#767 @Ready22Race); the bundled copy no longer deletes before it
+  writes (#792 @Ready22Race); project skill catalogs route by origin
+  (#737 @Ready22Race).
+- **Notifications** — a completed task no longer announces itself as blocked ("Task blocked")
+  (#758 @Ready22Race); oversized bodies (multi-KB provider error dumps) are
+  clamped at every layer instead of breaking the toast, drawer and history
+  (#738 @St0neWan9).
+- **Desktop & packaging** — mac sidecar entitlements are re-applied explicitly
+  on re-sign (#681, #799 @jiaoqsh); packaged image OCR actually starts and a
+  broken rapidocr bundle surfaces instead of silently substituting
+  (#750, #752 @Ready22Race); the committed `backend/.venv` symlink that broke
+  `make dev` on fresh clones is removed (#754 @Ready22Race).
+- **Runtimes & MCP** — one broken MCP server no longer kills the whole turn
+  (#685 @jiaoqsh); a declared tool timeout is honoured in every runtime
+  (#765 @St0neWan9); a legacy kernel DB is recovered and MCP projections
+  serialize (#701 @St0neWan9).
+- **Files & channels** — `/v1/files/resolve` routes to the backend that owns
+  the entity (#654); vanishing-file batch failures, expired-address recovery
+  and chat-binding routing are fixed (#657) (both @Ready22Race).
+- **Providers** — cloud deployments skip `subscription_models.local.json`
+  (#786 @Ready22Race).
+- **App chrome** — the degraded-target banner pins to the top of the main
+  panel (#802 @St0neWan9); Agent export lives in the copy menu
+  (#693 @homeant); the artifact renderers are behind `t()`
+  (#660 @Ready22Race).
 
-- **Windows skill materialization** — a skill whose `SKILL.md` declares a
-  namespaced frontmatter name (e.g. `react:components`) crashed session start
-  with `[WinError 267] The directory name is invalid`, because Windows cannot
-  use `:` (and `<>"|?*`, device names, trailing dots/spaces) in a directory
-  name. Such names now fall back to the skill's source directory name on every
-  platform, and skill naming is sanitized at the source: creating, renaming,
-  copying or importing a skill scrubs those characters out of both the
-  directory slug and the `SKILL.md` name (a reserved device name like `con`
-  gets a suffix), and pack import does the same for embedded skill slugs.
-- **Turn timer** — the conversation header's elapsed counter ran twice per turn:
-  it re-anchored from the client's Send time onto the kernel's `message.user`
-  stamp (written once the runtime is up), so it fell back to zero mid-turn and
-  dropped again when the turn settled. It is now one continuous counter, and
-  while the runtime is still coming up the header names that (local or cloud)
-  instead of claiming to process (#674 @Ready22Race).
-- **Task follow-up chat** — the user's message stayed invisible until the kernel
-  echoed it back, with no in-flight indicator in between, because the send HTTP
-  call returns as soon as the run is scheduled (#674 @Ready22Race).
+### Docs & Chore
+
+- The file-address design doc is marked shipped and corrected against the code
+  (#659), three dead file symbols are deleted and project-path arithmetic
+  unified (#658), and the runtime test doubles the citation work outgrew are
+  refreshed (#708) (all @Ready22Race).
+- The log file path setting is unified (`VALUZ_LOG_FILE_PATH`)
+  (#727 @homeant).
+- The artifact schema correction ships as migration 0030 (#777 @St0neWan9).
 
 ## [0.3.6] - 2026-07-29
 

@@ -18,10 +18,14 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from markdown_it import MarkdownIt
 from src.core.calculation import evaluate_decimal_expression
+
+if TYPE_CHECKING:
+    from src.core.claim_evidence_resolution import SemanticVerifierPort
+    from src.core.claim_normalization import ClaimNormalizerPort
 
 CLAIM_EXTRACTOR_REVISION = "claim-extractor-v2"
 CLAIM_VERIFIER_REVISION = "claim-verifier-local-v2"
@@ -277,6 +281,14 @@ _TABLE_SOURCE_HEADER_RE = re.compile(
     r"数据来源|资料来源|关键数据来源)$",
     re.IGNORECASE,
 )
+_TABLE_KEY_VALUE_HEADER_RE = re.compile(
+    r"^(?:field|item|metric|dimension|key|字段|项目|指标|维度|键)$",
+    re.IGNORECASE,
+)
+_TABLE_DETAIL_VALUE_HEADER_RE = re.compile(
+    r"^(?:detail|value|result|description|详情|明细|数值|结果|说明)$",
+    re.IGNORECASE,
+)
 _TABLE_SCOPE_DESCRIPTOR_RE = re.compile(
     r"^.{1,180}\s+—\s+(?:单位|币种|期间|报告期|财年|"
     r"unit|currency|period|reporting period|fiscal year)\s*[:：]",
@@ -293,8 +305,13 @@ _TABLE_DECISION_DESCRIPTOR_RE = re.compile(
     re.IGNORECASE,
 )
 _TABLE_SCOPE_HEADER_RE = re.compile(
-    r"^(?:单位|币种|期间|报告期|财年|统计期|口径|范围|截至日期|"
-    r"unit|currency|period|reporting period|fiscal year|scope|as of)$",
+    r"^(?:单位|币种|期间|报告期|财年|财季|季度|统计期|口径|范围|截至日期|"
+    r"unit|currency|period|reporting period|fiscal year|fiscal quarter|quarter|scope|as of)$",
+    re.IGNORECASE,
+)
+_TABLE_REPORTING_PERIOD_HEADER_RE = re.compile(
+    r"^(?:期间|报告期|财年|财季|季度|统计期|"
+    r"period|reporting period|fiscal year|fiscal quarter|quarter)$",
     re.IGNORECASE,
 )
 _TABLE_RANK_HEADER_RE = re.compile(
@@ -733,6 +750,7 @@ class ClaimBindingResult:
     text: str
     auto_bound_claim_handles: dict[str, tuple[str, ...]]
     rebound_claim_handles: dict[str, str]
+    semantic_bound_claim_handles: dict[str, tuple[str, ...]]
 
 
 @dataclass(frozen=True)
@@ -1133,6 +1151,7 @@ def _legacy_match_available_evidence(
             source,
             evidence,
             entity_aliases,
+            semantics=semantics,
         ):
             continue
         support_for = getattr(support_index, "support_for", None)
@@ -1484,6 +1503,7 @@ def propagate_equivalent_claim_bindings(
     answer: str,
     records: Iterable[Any],
     *,
+    seed_answers: Iterable[str] = (),
     mode: str = "required-on-evidence",
     semantics: Mapping[str, Any] | None = None,
 ) -> CompositeAutoBindResult:
@@ -1510,8 +1530,14 @@ def propagate_equivalent_claim_bindings(
         if handle
     }
     claims = extract_claims(answer, mode=mode, semantics=semantics)
+    source_claims = [
+        claim
+        for seed_answer in seed_answers
+        for claim in extract_claims(seed_answer, mode=mode, semantics=semantics)
+    ]
+    source_claims.extend(claims)
     supported: list[tuple[ClaimCandidate, tuple[str, ...]]] = []
-    for claim in claims:
+    for claim in source_claims:
         direct_handles: list[str] = []
         for handle in claim.attached_evidence_handles:
             source_evidence = records_by_handle.get(handle)
@@ -1523,7 +1549,9 @@ def propagate_equivalent_claim_bindings(
                 {"source": source, "evidence": evidence},
                 semantics=semantics,
             )
-            if support.status == "supported":
+            if support.status == "supported" or (
+                support.status == "partially-supported" and support.reason == "unit-missing"
+            ):
                 direct_handles.append(handle)
         if direct_handles:
             supported.append((claim, tuple(dict.fromkeys(direct_handles))))
@@ -1576,9 +1604,7 @@ def _equivalent_claim_propagation_score(
 ) -> tuple[int, ...] | None:
     target_period = target.normalized.get("period", "")
     source_period = source.normalized.get("period", "")
-    if bool(target_period) != bool(source_period):
-        return None
-    if target_period and not _periods_compatible(target_period, source_period):
+    if target_period and source_period and not _periods_compatible(target_period, source_period):
         return None
 
     target_metric = target.normalized.get("metric", "")
@@ -1613,34 +1639,57 @@ def _equivalent_claim_propagation_score(
         bool(target_folded and source_folded)
         and (target_folded in source_folded or source_folded in target_folded)
     )
+    # ``_claim_label_body`` intentionally removes a table cell's row label and
+    # header so amount comparison considers only the asserted value.  Binding
+    # propagation still needs the row subject: without ``Google Cloud`` the
+    # localized cell body is only ``$247.7亿`` and cannot be related safely to
+    # an earlier English sentence.  Restore structural labels only for subject
+    # overlap scoring; they never become asserted values.
+    target_subject_text = (
+        target.exact if target.location.get("kind") == "table-cell" else target_body
+    )
+    source_subject_text = (
+        source.exact if source.location.get("kind") == "table-cell" else source_body
+    )
     latin_pattern = re.compile(r"[A-Za-z][A-Za-z0-9_-]{1,}")
     ignored = _METRIC_STOP_WORDS | {"data", "value", "report", "quarter"}
     target_latin = {
         token.casefold()
-        for token in latin_pattern.findall(target_body)
+        for token in latin_pattern.findall(target_subject_text)
         if token.casefold() not in ignored
     }
     source_latin = {
         token.casefold()
-        for token in latin_pattern.findall(source_body)
+        for token in latin_pattern.findall(source_subject_text)
         if token.casefold() not in ignored
     }
     latin_overlap = target_latin & source_latin
-    cjk_overlap = _cjk_bigrams(target_body) & _cjk_bigrams(source_body)
-    subject_overlap = _generic_text_subject_overlap(target_body, source_body)
+    cjk_overlap = _cjk_bigrams(target_subject_text) & _cjk_bigrams(source_subject_text)
+    subject_overlap = _generic_text_subject_overlap(target_subject_text, source_subject_text)
+    strong_latin_overlap = len(latin_overlap) >= 2 or any(
+        len(token) >= 5 for token in latin_overlap
+    )
 
     metric_equal = int(
         bool(target_canonical_metric and target_canonical_metric == source_canonical_metric)
     )
     if target_amounts:
-        if not (metric_equal or contains or subject_overlap):
+        # Localized recap tables often translate the metric label while
+        # retaining the company/product name (for example ``latest quarterly
+        # revenue`` -> ``最新季度云收入``). Equal canonical amounts plus a strong
+        # visible subject overlap is sufficient to reuse an already verified
+        # binding; the unique-best-handle gate below still prevents ambiguous
+        # cross-company propagation.
+        if not (metric_equal or contains or subject_overlap or strong_latin_overlap):
             return None
-    elif not (
-        contains
-        or len(cjk_overlap) >= 4
-        or len(latin_overlap) >= 2
-        or any(len(token) >= 5 for token in latin_overlap)
-    ):
+    elif not (contains or len(cjk_overlap) >= 4):
+        # A qualitative recap has no numeric fingerprint.  Loose token or
+        # CJK-bigram overlap is not enough to transfer provenance: generic
+        # English phrases such as "confirmed", "cloud" and "confidence" previously
+        # propagated a Nebius citation into SpaceX/Starlink claims.  Require
+        # one normalized statement to contain the other, or a distinctive CJK
+        # phrase of at least four bigrams; broader paraphrases remain the
+        # bounded semantic verifier's job.
         return None
 
     return (
@@ -1769,6 +1818,8 @@ def bind_claims_to_evidence(
     user_prompt: str = "",
     semantics: Mapping[str, Any] | None = None,
     entity_aliases: Mapping[str, Iterable[str]] | None = None,
+    semantic_verifier: SemanticVerifierPort | None = None,
+    claim_normalizer: ClaimNormalizerPort | None = None,
 ) -> ClaimBindingResult:
     """Apply safe rebind, unique-bind and composite-bind edits in one pass.
 
@@ -1780,7 +1831,13 @@ def bind_claims_to_evidence(
     Resolver/cache while preserving their conservative action gates.
     """
 
-    from src.core.claim_evidence_resolution import ensure_evidence_candidate_index
+    from src.core.claim_evidence_resolution import (
+        SemanticVerificationResult,
+        ensure_evidence_candidate_index,
+        evidence_entity_conflicts,
+        prepare_semantic_verification_request,
+        resolve_claim_evidence,
+    )
 
     candidate_index = ensure_evidence_candidate_index(records, semantics=semantics)
     available = list(candidate_index)
@@ -1800,8 +1857,17 @@ def bind_claims_to_evidence(
     edits: list[tuple[int, int, str]] = []
     auto_bound: dict[str, tuple[str, ...]] = {}
     rebound: dict[str, str] = {}
+    semantic_bound: dict[str, tuple[str, ...]] = {}
+    semantic_pending: list[tuple[ClaimCandidate, ClaimCandidate, tuple[Any, ...], Any]] = []
 
-    for claim in extract_claims(answer, mode=mode, semantics=semantics):
+    claims = extract_claims(answer, mode=mode, semantics=semantics)
+    if claim_normalizer is not None:
+        from src.core.claim_normalization import apply_claim_normalizer
+
+        # Anchor-verified slot proposals only fill rule gaps; binding still
+        # requires full deterministic support plus candidate uniqueness below.
+        claims = apply_claim_normalizer(claims, claim_normalizer, semantics=semantics)
+    for claim in claims:
         if not claim.citation_required:
             continue
         if claim.attached_citation_ids:
@@ -1853,6 +1919,7 @@ def bind_claims_to_evidence(
             continue
 
         attributed = bool(_EXPLICIT_ATTRIBUTION_RE.search(claim.exact))
+        local_handles: tuple[str, ...] = ()
         disclosure_handle = _unique_negative_disclosure_handle(claim, available)
         if disclosure_handle is not None:
             match = EvidenceMatch("exact", (disclosure_handle,))
@@ -1923,6 +1990,18 @@ def bind_claims_to_evidence(
                 candidate_index.candidate_records(claim),
                 semantics=semantics,
             )
+            handles = tuple(
+                handle
+                for handle in handles
+                if (record := records_by_handle.get(handle)) is not None
+                and not evidence_entity_conflicts(
+                    claim.semantic_text,
+                    record[0],
+                    record[1],
+                    entity_aliases,
+                    semantics=semantics,
+                )
+            )
             if len(handles) < 2:
                 handles = ()
         if not handles and not attributed:
@@ -1933,11 +2012,60 @@ def bind_claims_to_evidence(
                 semantics=semantics,
                 entity_aliases=entity_aliases,
             )
+        if not handles and not attributed and local_handles and semantic_verifier is not None:
+            # A source marker at the end of one paragraph/list item is a
+            # bounded candidate for every Claim in that same local scope. The
+            # deterministic matcher remains the first gate; paraphrases that
+            # it cannot prove are verified together in one semantic batch.
+            # No global Evidence search is allowed on this path.
+            local_records = tuple(raw_records_by_handle[handle] for handle in local_handles)
+            semantic_claim = replace(
+                claim,
+                attached_evidence_handles=local_handles,
+            )
+            request = prepare_semantic_verification_request(
+                semantic_claim,
+                local_records,
+                semantics=semantics,
+                entity_aliases=entity_aliases,
+                limit=len(local_records),
+            )
+            if request is not None:
+                semantic_pending.append((claim, semantic_claim, local_records, request))
+            continue
         if not handles:
             continue
         replacement = " ".join(f"[source](evidence://{handle})" for handle in handles)
         edits.append((claim.insertion_offset, claim.insertion_offset, f" {replacement}"))
         auto_bound[claim.claim_id] = handles
+
+    if semantic_pending and semantic_verifier is not None:
+        try:
+            semantic_results = semantic_verifier.verify_batch(
+                tuple(row[3] for row in semantic_pending)
+            )
+        except Exception:  # noqa: BLE001 - optional sidecar always fails open
+            semantic_results = {}
+        if isinstance(semantic_results, Mapping):
+            for claim, semantic_claim, local_records, _request in semantic_pending:
+                semantic_result = semantic_results.get(claim.claim_id)
+                if not isinstance(semantic_result, SemanticVerificationResult):
+                    continue
+                resolution = resolve_claim_evidence(
+                    semantic_claim,
+                    local_records,
+                    semantics=semantics,
+                    entity_aliases=entity_aliases,
+                    semantic_result=semantic_result,
+                    limit=len(local_records),
+                )
+                handles = resolution.selected_handles if resolution.status == "verified" else ()
+                if not handles:
+                    continue
+                replacement = " ".join(f"[source](evidence://{handle})" for handle in handles)
+                edits.append((claim.insertion_offset, claim.insertion_offset, f" {replacement}"))
+                auto_bound[claim.claim_id] = handles
+                semantic_bound[claim.claim_id] = handles
 
     text = answer
     for start, end, replacement in sorted(edits, reverse=True):
@@ -1946,6 +2074,7 @@ def bind_claims_to_evidence(
         text=text,
         auto_bound_claim_handles=auto_bound,
         rebound_claim_handles=rebound,
+        semantic_bound_claim_handles=semantic_bound,
     )
 
 
@@ -2055,8 +2184,13 @@ def verify_evidence_support(
             )
         )
         claim_period = claim.normalized.get("period", "")
+        point_in_time_metric = semantic_options.get("period_role") == "as-of"
+        inherited_fiscal_period = bool(
+            re.fullmatch(r"(?:19|20)\d{2} (?:FY|Q[1-4]|H1|YTD)", claim_period)
+        )
         if (
             semantic_options.get("date_role") != "publication"
+            and not (point_in_time_metric and inherited_fiscal_period)
             and claim_period
             and evidence_periods
             and not any(
@@ -2066,7 +2200,7 @@ def verify_evidence_support(
         ):
             return EvidenceSupport("contradicted", 2, "period-conflict")
         evidence_unit = _canonical_unit(
-            str(evidence_container.get("unit") or ""),
+            str(evidence_container.get("unit") or evidence_container.get("currency") or ""),
             semantics,
         )
         claim_unit = _canonical_unit(
@@ -2092,6 +2226,22 @@ def verify_evidence_support(
             if _claim_amounts(_claim_assertion_text(claim, semantics), semantics):
                 return EvidenceSupport("contradicted", 4, "value-conflict")
             return EvidenceSupport("not-found", 0)
+        if (
+            claim_unit
+            and not evidence_unit
+            and _unitless_value_used_claim_scale(
+                value,
+                claim,
+                semantics,
+            )
+        ):
+            # Some authoritative structured providers expose a large raw base
+            # value but omit the currency dimension.  Matching ``4.29T`` to
+            # ``4_287_...`` at display precision is useful provenance, yet it
+            # cannot prove the model-authored currency label.  Exact unscaled
+            # values retain the established behavior because no unit inference
+            # was needed to identify the field value.
+            return EvidenceSupport("partially-supported", 2, "unit-missing")
         if entity_status == "partial" or dimension_status == "partial":
             return EvidenceSupport("partially-supported", 2)
         if len(_claim_amounts(_claim_assertion_text(claim, semantics), semantics)) > 1:
@@ -2141,6 +2291,30 @@ def verify_evidence_support(
             ),
         ):
             return EvidenceSupport("supported", 3)
+        if _text_unitless_scaled_numeric_supports_claim(
+            claim,
+            support_text,
+            semantics,
+            metric_context=" ".join(
+                (
+                    str(source.get("title") or source.get("documentTitle") or ""),
+                    metric_context,
+                )
+            ),
+        ):
+            # Some extracted financial-table chunks preserve the row and raw
+            # value but lose the unit caption from a neighboring chunk.  A
+            # unique ontology scale can identify useful provenance, but the
+            # missing caption prevents a fully verified currency assertion.
+            return EvidenceSupport("partially-supported", 2, "unit-missing")
+        partial_numeric_reason = _text_partial_numeric_support_reason(
+            claim,
+            support_text,
+            semantics,
+            source_context=str(source.get("title") or source.get("documentTitle") or ""),
+        )
+        if partial_numeric_reason:
+            return EvidenceSupport("partially-supported", 2, partial_numeric_reason)
         if _text_numeric_conflicts_claim(
             claim,
             support_text,
@@ -2244,6 +2418,43 @@ def structured_value_present(
     return any(
         _structured_value_matches_claim(value, evidence, claim, semantics) for claim in claims
     ) or _value_present(value, text)
+
+
+def canonical_amount_keys(
+    text: str,
+    semantics: Mapping[str, Any] | None = None,
+) -> tuple[str, ...]:
+    """Return canonical base-value keys for cross-scale candidate retrieval.
+
+    This is a retrieval coordinate only, never a support verdict.  It lets a
+    Chinese recap such as ``$393.1亿`` retrieve a source table cell expressed
+    as ``$39.31B`` even though their surface number tokens differ.  The normal
+    deterministic verifier still checks entity, metric, period and every
+    asserted amount before binding.
+    """
+
+    amounts = list(_claim_amounts(text, semantics))
+    contextual_unit = _contextual_table_unit(text, semantics)
+    if contextual_unit is not None:
+        unit_label, canonical_unit, scale = contextual_unit
+        amounts.extend(
+            _apply_contextual_amount_unit(
+                amount,
+                unit_label=unit_label,
+                canonical_unit=canonical_unit,
+                scale=scale,
+            )
+            for amount in amounts
+            if not amount[1]
+        )
+    keys: list[str] = []
+    for _raw, _unit, base_value, base_unit in amounts:
+        if base_value is None or not base_unit:
+            continue
+        key = f"{base_unit}:{base_value.normalize()}"
+        if key not in keys:
+            keys.append(key)
+    return tuple(keys)
 
 
 def structured_values_equivalent(
@@ -2569,6 +2780,7 @@ def match_composite_structured_evidence(
             source,
             evidence,
             entity_aliases,
+            semantics=semantics,
         ):
             continue
         evidence_periods = tuple(
@@ -3017,6 +3229,13 @@ def _append_table_claims(
     row_label = _plain_text(cells[0].content)
     if not row_label:
         return
+    if _TABLE_SOURCE_HEADER_RE.fullmatch(row_label.strip()):
+        # In a vertical key/value table, ``Source | ...`` is provenance for
+        # neighboring facts, not another business Claim.  Keeping it as a
+        # claim wastes the bounded audit budget on document ids and makes the
+        # actual values appear less covered.  The raw row remains available to
+        # ``_local_evidence_handles`` as a bounded candidate scope.
+        return
     identity_column_indices: set[int] = set()
     identity_row_label = ""
     first_header = headers[0].strip() if headers else ""
@@ -3062,7 +3281,7 @@ def _append_table_claims(
                     -item[0],
                 ),
             )
-    row_scope_parts: list[str] = []
+    row_scope_parts: list[tuple[str, str]] = []
     for column_index, cell in enumerate(cells[1:], start=1):
         value = _plain_text(cell.content)
         header = headers[column_index] if column_index < len(headers) else ""
@@ -3073,10 +3292,7 @@ def _append_table_claims(
             value,
             re.IGNORECASE,
         ):
-            row_scope_parts.append(f"{header}: {value}" if header else value)
-    row_normalization_context = " ".join(
-        part for part in (normalization_context, *row_scope_parts) if part
-    )
+            row_scope_parts.append((header.strip(), f"{header}: {value}" if header else value))
     row_citations, row_handles = _binding_refs(cells[0].content)
     shared_citations: list[str] = list(row_citations)
     shared_handles: list[str] = list(row_handles)
@@ -3118,6 +3334,27 @@ def _append_table_claims(
             continue
         claim_row_label = identity_row_label or row_label
         exact = f"{claim_row_label} — {header}: {value}"
+        metric_candidates = _claim_metric_candidates(exact, semantics)
+        point_in_time_metric = any(
+            isinstance(definition := _metric_ontology(semantics).get(metric), Mapping)
+            and definition.get("period_role") == "as-of"
+            for metric in metric_candidates
+        )
+        cell_scope_parts = [
+            part
+            for scope_header, part in row_scope_parts
+            if not (
+                point_in_time_metric and _TABLE_REPORTING_PERIOD_HEADER_RE.fullmatch(scope_header)
+            )
+        ]
+        cell_normalization_context = " ".join(
+            part
+            for part in (
+                "" if point_in_time_metric else normalization_context,
+                *cell_scope_parts,
+            )
+            if part
+        )
         citation_ids, handles = _binding_refs(cell.content)
         location = {
             "kind": "table-cell",
@@ -3137,7 +3374,7 @@ def _append_table_claims(
             evidence_handles=tuple(dict.fromkeys((*row_handles, *handles))),
             mode=mode,
             semantics=semantics,
-            normalization_context=row_normalization_context,
+            normalization_context=cell_normalization_context,
             assertion_text=value,
         )
 
@@ -3201,7 +3438,7 @@ def _append_claim(
         kind != "date-fact"
         or re.search(
             r"(?:报告期|期间|财年|年度|季度|上半年|前三季度|\bFY\s*\d{2,4}\b|"
-            r"\bQ[1-4](?:\s*FY)?\s*\d{0,4}\b)",
+            r"\bQ[1-4](?:\s*FY)?\s*\d{0,4}\b|\bas\s+of\b|截至)",
             exact,
             re.IGNORECASE,
         )
@@ -3276,6 +3513,12 @@ def _classify_claim(text: str) -> str:
         text.strip()
     ):
         return "reasoning"
+    # A short label ending in a colon scopes the value/formula that follows.
+    # Classify it before the derived-value heuristic: a year plus a metric
+    # name such as ``贵州茅台 2024 年归母净利率：`` is presentation context, not
+    # an independently sourced calculation merely because it contains 2024.
+    if re.fullmatch(r"[^。！？!?；;\n]{1,80}[:：]", text.strip()):
+        return "presentation"
     if _looks_like_numeric_formula(text):
         return "calculation"
     if _DERIVED_RE.search(text) and _NUMBER_RE.search(text):
@@ -3301,12 +3544,6 @@ def _classify_claim(text: str) -> str:
     if _SCOPE_DESCRIPTOR_RE.fullmatch(text.strip()):
         return "presentation"
     if _looks_like_period_scope_title(text):
-        return "presentation"
-    # A short standalone label scopes the claims that follow; the date inside
-    # it is context, not an independently asserted fact.  Treat labels such as
-    # ``贵州茅台 2024 年全年：`` like presentation text so the cited values
-    # below do not trigger a false unsupported warning.
-    if re.fullmatch(r"[^。！？!?；;\n]{1,80}[:：]", text.strip()):
         return "presentation"
     if _REASONING_RE.search(text):
         return "reasoning"
@@ -3482,13 +3719,60 @@ def _normalize_claim(
         )
         if metric_tokens:
             result["metric"] = " ".join(metric_tokens)
+    dimension_text = _text_without_matched_metric_terms(
+        text,
+        metric_candidates,
+        semantics,
+    )
     for dimension in ("scope", "basis"):
-        candidates = _claim_dimension_candidates(text, semantics, dimension)
+        candidates = _claim_dimension_candidates(dimension_text, semantics, dimension)
         if len(candidates) == 1:
             result[dimension] = candidates[0]
         elif candidates:
             result[f"{dimension}Candidates"] = "|".join(candidates)
     return result
+
+
+def _text_without_matched_metric_terms(
+    text: str,
+    metric_candidates: tuple[str, ...],
+    semantics: Mapping[str, Any] | None,
+) -> str:
+    """Remove matched metric phrases before parsing independent dimensions.
+
+    A metric alias may legitimately contain a word that is also a scope or
+    basis alias.  For example, ``归属于母公司股东的净利润`` identifies the metric;
+    the embedded ``母公司`` does not independently request a parent-company
+    statement scope.  Consuming the longest matched metric phrase first keeps
+    a separately stated dimension (for example ``母公司口径的归母净利润``)
+    available while preventing the metric label from being interpreted twice.
+    """
+
+    if not metric_candidates:
+        return text
+    remaining = _normalize_prose(text.replace("_", " "))
+    matched_terms = sorted(
+        {
+            _normalize_prose(term.replace("_", " "))
+            for metric in metric_candidates
+            for term in _metric_terms(metric, _metric_ontology(semantics).get(metric))
+            if _term_in_text(term, text)
+        },
+        key=len,
+        reverse=True,
+    )
+    for term in matched_terms:
+        if not term:
+            continue
+        if re.search(r"[\u4e00-\u9fff]", term):
+            remaining = remaining.replace(term, " ")
+        else:
+            remaining = re.sub(
+                rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])",
+                " ",
+                remaining,
+            )
+    return remaining
 
 
 def _metric_is_context_dimension(
@@ -3598,8 +3882,12 @@ def _local_evidence_handles(answer: str, claim: ClaimCandidate) -> tuple[str, ..
     if scope_end < 0:
         scope_end = len(answer)
     local = _binding_refs(answer[scope_start:scope_end])[1]
-    if local or kind in {"list-item", "table-cell"}:
+    if local:
         return local
+    if kind == "table-cell":
+        return _vertical_table_source_handles(answer, start, end)
+    if kind == "list-item":
+        return ()
 
     # Exact-N research answers commonly use one numbered heading per result,
     # with source links in the recommendation paragraph and a separately
@@ -3610,6 +3898,76 @@ def _local_evidence_handles(answer: str, claim: ClaimCandidate) -> tuple[str, ..
     # prevents a source from one company/result spilling into a sibling.
     section = _numbered_heading_section(answer, start)
     return _binding_refs(section)[1] if section else ()
+
+
+def _vertical_table_source_handles(answer: str, start: int, end: int) -> tuple[str, ...]:
+    """Return explicit Source-row handles from one two-column key/value table.
+
+    Agents commonly render a compact research card as ``Field | Detail`` and
+    put one explicit ``Source`` row next to its factual rows.  The source row
+    is a useful *candidate constraint*, but never proof: callers still run the
+    ordinary deterministic or bounded semantic verifier for each Claim.  Do
+    not generalize this to arbitrary comparison tables, where a source in one
+    row or column must never spill into another entity/period.
+    """
+
+    line_start = answer.rfind("\n", 0, start) + 1
+    line_end = answer.find("\n", end)
+    if line_end < 0:
+        line_end = len(answer)
+
+    table_start = line_start
+    while table_start > 0:
+        previous_end = table_start - 1
+        previous_start = answer.rfind("\n", 0, previous_end) + 1
+        previous = answer[previous_start:previous_end].strip()
+        if not (previous.startswith("|") and previous.endswith("|")):
+            break
+        table_start = previous_start
+
+    table_end = line_end
+    while table_end < len(answer):
+        next_start = table_end + 1
+        next_end = answer.find("\n", next_start)
+        if next_end < 0:
+            next_end = len(answer)
+        following = answer[next_start:next_end].strip()
+        if not (following.startswith("|") and following.endswith("|")):
+            break
+        table_end = next_end
+
+    rows = [
+        _markdown_table_cells(line)
+        for line in answer[table_start:table_end].splitlines()
+        if line.strip().startswith("|") and line.strip().endswith("|")
+    ]
+    rows = [row for row in rows if len(row) == 2]
+    if len(rows) < 3:
+        return ()
+    header = tuple(_plain_text(cell).strip() for cell in rows[0])
+    if not (
+        _TABLE_KEY_VALUE_HEADER_RE.fullmatch(header[0])
+        and _TABLE_DETAIL_VALUE_HEADER_RE.fullmatch(header[1])
+    ):
+        return ()
+
+    handles: list[str] = []
+    for row in rows[2:]:
+        if not _TABLE_SOURCE_HEADER_RE.fullmatch(_plain_text(row[0]).strip()):
+            continue
+        for handle in _binding_refs(" ".join(row))[1]:
+            if handle not in handles:
+                handles.append(handle)
+    return tuple(handles)
+
+
+def _markdown_table_cells(line: str) -> list[str]:
+    """Split one Markdown table row while preserving escaped pipes."""
+
+    stripped = line.strip()
+    if not (stripped.startswith("|") and stripped.endswith("|")):
+        return []
+    return [cell.replace(r"\|", "|").strip() for cell in re.split(r"(?<!\\)\|", stripped[1:-1])]
 
 
 def _numbered_heading_section(answer: str, source_start: int) -> str:
@@ -4234,6 +4592,13 @@ def _explicit_period_keys(value: str) -> set[str]:
         periods.add(f"{match.group(1)} FY")
     for match in re.finditer(r"FY((?:19|20)\d{2})", compact):
         periods.add(f"{match.group(1)} FY")
+    # Forecast tables frequently abbreviate annual columns as ``2027E`` or
+    # ``12/27E``.  These are local period coordinates and must outrank a
+    # research document title such as ``Q2'26`` when verifying a 2027 claim.
+    for match in re.finditer(r"(?<=\|)((?:19|20)\d{2})(?:E|A)?(?=\|)", compact):
+        periods.add(f"{match.group(1)} FY")
+    for match in re.finditer(r"(?<=\|)(?:12/)?(\d{2})(?:E|A)(?=\|)", compact):
+        periods.add(f"20{match.group(1)} FY")
     for match in re.finditer(
         r"((?:19|20)\d{2})年(?:1|01)月(?:1|01)日?[—~至到-]+"
         r"(?:19|20)\d{2}年12月31日?",
@@ -4319,6 +4684,47 @@ def _claim_metric_candidates(
     return tuple(sorted({metric for length, metric in matches if length == longest}))
 
 
+def metric_ontology_ids(semantics: Mapping[str, Any] | None) -> tuple[str, ...]:
+    """Return the current policy's canonical metric ids in a stable order."""
+
+    return tuple(
+        metric_id
+        for metric_id in _metric_ontology(semantics)
+        if isinstance(metric_id, str) and metric_id
+    )
+
+
+def is_ontology_vocabulary_term(
+    value: str,
+    semantics: Mapping[str, Any] | None,
+) -> bool:
+    """Return whether one token is unit or metric vocabulary, not an entity.
+
+    Uppercase measurement units (``USD``, ``GW``) and indicator abbreviations
+    (``MA20``, ``EPS``) share the surface shape of stock tickers.  Entity
+    conflict fallbacks must never treat these policy-vocabulary tokens as a
+    company identity.
+    """
+
+    token = value.strip().strip("._-")
+    if not token:
+        return False
+    if _resolve_unit(token, semantics) is not None:
+        return True
+    folded = token.casefold()
+    for metric_id, definition in _metric_ontology(semantics).items():
+        if isinstance(metric_id, str) and metric_id.casefold() == folded:
+            return True
+        if not isinstance(definition, Mapping):
+            continue
+        aliases = definition.get("aliases")
+        if isinstance(aliases, (list, tuple)) and any(
+            isinstance(alias, str) and alias.casefold() == folded for alias in aliases
+        ):
+            return True
+    return False
+
+
 def _canonical_metric(
     evidence: Mapping[str, Any],
     semantics: Mapping[str, Any] | None,
@@ -4351,6 +4757,15 @@ def _canonical_metric(
             return prose_matches[0]
         if len(set(machine_matches)) == 1:
             return machine_matches[0]
+        # Tool-authored calculation labels may carry entity/period context
+        # around a policy metric alias (for example ``贵州茅台 2024 年营业收入``).
+        # Do not apply this fuzzy path to machine identifiers: an unknown
+        # ``total_revenue`` field must not collapse to the broader ``revenue``
+        # alias merely because one token overlaps.
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", explicit):
+            descriptive_matches = _claim_metric_candidates(explicit, semantics)
+            if len(descriptive_matches) == 1:
+                return descriptive_matches[0]
         return normalized_explicit
     field = str(evidence.get("field") or "")
     normalized_field = _normalize_field(field)
@@ -4565,40 +4980,88 @@ def _claim_amounts_cached(
     # ontology so deterministic matching compares base USD values rather than
     # the surface numbers 54 and 540. Keep this narrow to unambiguous US-dollar
     # symbols; ambiguous ``¥`` remains policy/tool data.
-    currency_prefix_pattern = re.compile(
-        r"(?P<currency>US\$|\$)\s*"
-        r"(?P<value>[-+−﹣－＋]?\d[\d,]*(?:\.\d+)?)\s*"
-        r"(?P<scale>billion|million|bn|mm|m)?\b",
-        re.IGNORECASE,
-    )
-    for match in currency_prefix_pattern.finditer(text):
-        scale_token = str(match.group("scale") or "").casefold()
-        scale_name = {
-            "billion": "billion",
-            "bn": "billion",
-            "million": "million",
-            "mm": "million",
-            "m": "million",
-        }.get(scale_token, "")
+    currency_scale_specs = {
+        "万亿": ("trillion", Decimal("1000000000000")),
+        "trillion": ("trillion", Decimal("1000000000000")),
+        "trn": ("trillion", Decimal("1000000000000")),
+        "tn": ("trillion", Decimal("1000000000000")),
+        "t": ("trillion", Decimal("1000000000000")),
+        "亿": ("100m", Decimal("100000000")),
+        "billion": ("billion", Decimal("1000000000")),
+        "bn": ("billion", Decimal("1000000000")),
+        "b": ("billion", Decimal("1000000000")),
+        "million": ("million", Decimal("1000000")),
+        "mn": ("million", Decimal("1000000")),
+        "mm": ("million", Decimal("1000000")),
+        "m": ("million", Decimal("1000000")),
+        "k": ("thousand", Decimal("1000")),
+        "": ("", Decimal(1)),
+    }
+    currency_value_pattern = r"[-+−﹣－＋]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
+    currency_scale_pattern = r"万亿|trillion|billion|million|trn|tn|bn|mn|mm|亿|t|b|m|k"
+
+    def append_currency_amount(
+        *,
+        raw_value: str,
+        scale_token: str,
+        offset: int,
+    ) -> None:
+        scale_name, fallback_scale = currency_scale_specs[scale_token.casefold()]
         raw_unit = f"USD {scale_name}".strip()
         resolved = _resolve_unit_from_definitions(raw_unit, unit_definitions)
-        raw_value = match.group("value")
+        canonical_unit = resolved[0] if resolved is not None else "USD"
+        unit_scale = resolved[1] if resolved is not None else fallback_scale
         decimal = _as_decimal(raw_value)
-        occupied.append(match.span())
         amounts.append(
             (
-                match.start(),
+                offset,
                 (
                     raw_value,
                     raw_unit,
-                    (
-                        decimal * resolved[1]
-                        if decimal is not None and resolved is not None
-                        else None
-                    ),
-                    resolved[0] if resolved is not None else "",
+                    decimal * unit_scale if decimal is not None else None,
+                    canonical_unit,
                 ),
             )
+        )
+
+    currency_prefix_range_pattern = re.compile(
+        rf"(?P<currency>US\$|\$)\s*"
+        rf"(?P<lower>{currency_value_pattern})\s*"
+        rf"(?:-|–|—|−|至|到)\s*"
+        rf"(?P<upper>{currency_value_pattern})\s*"
+        rf"(?P<scale>{currency_scale_pattern})"
+        rf"(?![A-Za-z0-9_\u3400-\u9fff])",
+        re.IGNORECASE,
+    )
+    for match in currency_prefix_range_pattern.finditer(text):
+        occupied.append(match.span())
+        append_currency_amount(
+            raw_value=match.group("lower"),
+            scale_token=match.group("scale"),
+            offset=match.start("lower"),
+        )
+        append_currency_amount(
+            raw_value=match.group("upper"),
+            scale_token=match.group("scale"),
+            offset=match.start("upper"),
+        )
+
+    currency_prefix_pattern = re.compile(
+        rf"(?P<currency>US\$|\$)\s*"
+        rf"(?P<value>{currency_value_pattern})"
+        rf"(?:\s*(?P<scale>{currency_scale_pattern}))?"
+        rf"(?!\s*(?:{currency_scale_pattern})(?![A-Za-z0-9_\u3400-\u9fff]))"
+        rf"(?![A-Za-z0-9_\u3400-\u9fff])",
+        re.IGNORECASE,
+    )
+    for match in currency_prefix_pattern.finditer(text):
+        if any(start <= match.start() < end for start, end in occupied):
+            continue
+        occupied.append(match.span())
+        append_currency_amount(
+            raw_value=match.group("value"),
+            scale_token=str(match.group("scale") or ""),
+            offset=match.start(),
         )
     for alias, unit_id, scale in unit_terms:
         pattern = re.compile(
@@ -4685,6 +5148,15 @@ def _claim_amounts_cached(
             re.IGNORECASE,
         )
     ]
+    temporal_spans.extend(
+        match.span()
+        for match in re.finditer(
+            r"(?:January|February|March|April|May|June|July|August|"
+            r"September|October|November|December)\s+\d{1,2},?\s+(?:19|20)\d{2}",
+            text,
+            re.IGNORECASE,
+        )
+    )
     for match in _NUMBER_RE.finditer(text):
         if any(start <= match.start() < end for start, end in occupied):
             continue
@@ -4723,6 +5195,11 @@ def _number_is_temporal_component(
 
     compact_value = raw_value.replace(",", "").lstrip("+-")
     if not re.fullmatch(r"(?:19|20)\d{2}", compact_value):
+        return False
+    # A four-digit table amount with an explicit thousands separator is not a
+    # calendar year.  Treating ``Revenue | 2,078`` as 2078 CE removed the only
+    # business value from otherwise valid financial-table Evidence.
+    if "," in raw_value:
         return False
     suffix = text[end : end + 20]
     if re.match(
@@ -4839,7 +5316,7 @@ def _structured_value_matches_claim(
             normalized_value,
             str(normalized_unit or ""),
             evidence_value,
-            str(evidence.get("unit") or ""),
+            str(evidence.get("unit") or evidence.get("currency") or ""),
             semantics=semantics,
         ):
             return True
@@ -4876,6 +5353,46 @@ def _structured_value_matches_claim(
     return _value_present(value, claim.exact)
 
 
+def _unitless_value_used_claim_scale(
+    value: Any,
+    claim: ClaimCandidate,
+    semantics: Mapping[str, Any] | None,
+) -> bool:
+    """Return whether a unitless raw value matched only after Claim scaling."""
+
+    evidence_decimal = _as_decimal(value)
+    if evidence_decimal is None:
+        return False
+    normalized_value = claim.normalized.get("value")
+    normalized_base = claim.normalized.get("valueBase")
+    if normalized_value in {None, ""} or normalized_base in {None, ""}:
+        return False
+    surface_decimal = _as_decimal(normalized_value)
+    base_decimal = _as_decimal(normalized_base)
+    if surface_decimal is None or base_decimal is None or surface_decimal == base_decimal:
+        return False
+    raw_amounts = _claim_amounts(_claim_assertion_text(claim, semantics), semantics)
+    scaled_amount = next(
+        (
+            amount
+            for amount in raw_amounts
+            if amount[2] is not None
+            and _as_decimal(amount[0]) == surface_decimal
+            and amount[2] == base_decimal
+        ),
+        None,
+    )
+    if scaled_amount is None:
+        return False
+    resolved_unit = _resolve_unit(scaled_amount[1], semantics)
+    scale = resolved_unit[1] if resolved_unit is not None else abs(base_decimal / surface_decimal)
+    return _decimal_close(
+        base_decimal,
+        evidence_decimal,
+        minimum_tolerance=_display_rounding_tolerance(scaled_amount[0], scale),
+    ) and not _decimal_close(surface_decimal, evidence_decimal)
+
+
 def _text_numeric_supports_claim(
     claim: ClaimCandidate,
     quote: str,
@@ -4905,14 +5422,24 @@ def _text_numeric_supports_claim(
     contextual_unit = _contextual_table_unit(quote, semantics)
     if contextual_unit is not None:
         unit_label, canonical_unit, scale = contextual_unit
+        # A table-wide ``单位：元`` caption describes the currency columns, yet
+        # percentage columns in the same extracted table keep their values
+        # bare.  Replacing every bare number with a currency variant made the
+        # strict dimension check reject ``+15.28%`` against the raw ``15.28``
+        # growth cell.  Keep the raw amount alongside its contextual variant;
+        # the dimension check still blocks cross-dimension base-unit matches.
         quote_amounts = [
-            _apply_contextual_amount_unit(
-                amount,
-                unit_label=unit_label,
-                canonical_unit=canonical_unit,
-                scale=scale,
-            )
-            for amount in quote_amounts
+            *quote_amounts,
+            *(
+                _apply_contextual_amount_unit(
+                    amount,
+                    unit_label=unit_label,
+                    canonical_unit=canonical_unit,
+                    scale=scale,
+                )
+                for amount in quote_amounts
+                if not amount[1]
+            ),
         ]
     else:
         # Extracted filing tables often declare one amount unit (for example
@@ -4994,6 +5521,171 @@ def _text_numeric_supports_claim(
     # Numeric equality alone is still too weak, so require distinctive lexical
     # overlap as a second independent condition.
     return _generic_text_subject_overlap(claim.semantic_text, context)
+
+
+def _text_unitless_scaled_numeric_supports_claim(
+    claim: ClaimCandidate,
+    quote: str,
+    semantics: Mapping[str, Any] | None,
+    *,
+    metric_context: str,
+) -> bool:
+    """Recognize one same-subject table value whose magnitude caption is absent.
+
+    This is deliberately partial support.  It never invents a currency or
+    upgrades the evidence to verified: the source must contain one unitless
+    raw number which, under a declared ontology scale for the Claim currency,
+    equals the displayed Claim value at its stated precision.
+    """
+
+    claim_amounts = _claim_amounts(_claim_assertion_text(claim, semantics), semantics)
+    if len(claim_amounts) != 1:
+        return False
+    claim_raw, claim_unit, claim_base, claim_base_unit = claim_amounts[0]
+    if claim_base is None or not claim_base_unit or not claim_unit:
+        return False
+    if claim_base_unit in {"percent", "basis-point", "multiple"}:
+        return False
+    if not _generic_text_subject_overlap(claim.semantic_text, metric_context):
+        return False
+
+    scales: set[Decimal] = set()
+    if isinstance(semantics, Mapping):
+        ontology = semantics.get("unit_ontology")
+        units = ontology.get("units") if isinstance(ontology, Mapping) else None
+        if isinstance(units, Mapping):
+            for definition in units.values():
+                if not isinstance(definition, Mapping):
+                    continue
+                if str(definition.get("canonical") or "") != claim_base_unit:
+                    continue
+                scale = _as_decimal(definition.get("scale"))
+                if scale is not None and scale > 1:
+                    scales.add(scale)
+    if not scales:
+        return False
+
+    resolved_claim_unit = _resolve_unit(claim_unit, semantics)
+    tolerance = _display_rounding_tolerance(
+        claim_raw,
+        resolved_claim_unit[1] if resolved_claim_unit is not None else Decimal(1),
+    )
+    unitless_values = [
+        _as_decimal(raw_value)
+        for raw_value, raw_unit, _base_value, _base_unit in _claim_amounts(quote, semantics)
+        if not raw_unit
+    ]
+    return any(
+        value is not None and _decimal_close(claim_base, value * scale, minimum_tolerance=tolerance)
+        for value in unitless_values
+        for scale in scales
+    )
+
+
+def _text_partial_numeric_support_reason(
+    claim: ClaimCandidate,
+    quote: str,
+    semantics: Mapping[str, Any] | None,
+    *,
+    source_context: str,
+) -> str:
+    """Return a bounded partial-support reason for approximate/range claims.
+
+    A document can directly support one estimate inside a model-authored range
+    or a more precise value behind an explicitly approximate display.  That is
+    useful Citation provenance, but it does not prove every endpoint or source
+    in the synthesized Claim, so callers keep the weaker status.
+    """
+
+    claim_text = _claim_assertion_text(claim, semantics)
+    claim_amounts = _claim_amounts(claim_text, semantics)
+    if not claim_amounts:
+        return ""
+    contextual_unit = _contextual_table_unit(quote, semantics)
+    lines = [line for line in quote.splitlines() if line.strip()] or [quote]
+
+    def line_amounts(line: str) -> list[tuple[str, str, Decimal | None, str]]:
+        amounts = _claim_amounts(line, semantics)
+        if contextual_unit is None:
+            return amounts
+        unit_label, canonical_unit, scale = contextual_unit
+        return [
+            _apply_contextual_amount_unit(
+                amount,
+                unit_label=unit_label,
+                canonical_unit=canonical_unit,
+                scale=scale,
+            )
+            for amount in amounts
+        ]
+
+    subject_lines = [
+        line
+        for line in lines
+        if _generic_text_subject_overlap(
+            claim.semantic_text,
+            f"{source_context} {line}",
+        )
+    ]
+    if not subject_lines:
+        return ""
+
+    if "~" in claim.exact or "约" in claim.exact or "approximately" in claim.exact.casefold():
+        for claim_amount in claim_amounts:
+            claim_base = claim_amount[2]
+            claim_base_unit = claim_amount[3]
+            if claim_base is None or not claim_base_unit:
+                continue
+            tolerance = max(
+                _display_rounding_tolerance(
+                    claim_amount[0],
+                    (_resolve_unit(claim_amount[1], semantics) or ("", Decimal(1)))[1],
+                ),
+                abs(claim_base) * Decimal("0.01"),
+            )
+            if any(
+                evidence_amount[2] is not None
+                and evidence_amount[3] == claim_base_unit
+                and _decimal_close(
+                    claim_base,
+                    evidence_amount[2],
+                    minimum_tolerance=tolerance,
+                )
+                for line in subject_lines
+                for evidence_amount in line_amounts(line)
+            ):
+                return "approximate-rounding"
+
+    if len(claim_amounts) >= 2 and re.search(r"(?:[-–—−]|至|到)", claim_text):
+        lower_amount, upper_amount = claim_amounts[:2]
+        lower_base, upper_base = lower_amount[2], upper_amount[2]
+        base_unit = lower_amount[3]
+        if (
+            lower_base is not None
+            and upper_base is not None
+            and base_unit
+            and base_unit == upper_amount[3]
+        ):
+            low, high = sorted((lower_base, upper_base))
+            lower_unit = _resolve_unit(lower_amount[1], semantics)
+            upper_unit = _resolve_unit(upper_amount[1], semantics)
+            tolerance = max(
+                _display_rounding_tolerance(
+                    lower_amount[0], lower_unit[1] if lower_unit else Decimal(1)
+                ),
+                _display_rounding_tolerance(
+                    upper_amount[0], upper_unit[1] if upper_unit else Decimal(1)
+                ),
+            )
+            if any(
+                evidence_amount[2] is not None
+                and evidence_amount[3] == base_unit
+                and low - tolerance <= evidence_amount[2] <= high + tolerance
+                for line in subject_lines
+                for evidence_amount in line_amounts(line)
+            ):
+                return "range-member"
+    return ""
 
 
 def _text_numeric_conflicts_claim(
@@ -5272,17 +5964,27 @@ def _amounts_equivalent(
 ) -> bool:
     left_raw, left_unit, left_base, left_base_unit = left
     right_raw, right_unit, right_base, right_base_unit = right
-    if (
-        left_base is not None
-        and right_base is not None
-        and left_base_unit
-        and left_base_unit == right_base_unit
-    ):
+    if left_base is not None and right_base is not None and left_base_unit and right_base_unit:
+        # Once both parsers resolved a canonical dimension, different
+        # dimensions can never be rescued by equal surface numbers.  The old
+        # fall-through compared only ``15`` and ``30`` and therefore treated
+        # a document's ``15%-30%`` probability band as support for a
+        # ``$15-30B`` revenue range.
+        if left_base_unit != right_base_unit:
+            return False
         resolved_left_unit = _resolve_unit(left_unit, semantics)
-        tolerance = (
+        resolved_right_unit = _resolve_unit(right_unit, semantics)
+        # Equivalent values may be printed at different precision.  Comparing
+        # only with the Claim-side tolerance rejected a faithful recap such as
+        # ``$39.31B`` backed by source text rounded to ``$39.3B``.  The less
+        # precise of the two displays defines what the pair can prove.
+        tolerance = max(
             _display_rounding_tolerance(left_raw, resolved_left_unit[1])
             if resolved_left_unit is not None
-            else Decimal(0)
+            else Decimal(0),
+            _display_rounding_tolerance(right_raw, resolved_right_unit[1])
+            if resolved_right_unit is not None
+            else Decimal(0),
         )
         return _decimal_close(left_base, right_base, minimum_tolerance=tolerance)
     left_decimal = _as_decimal(left_raw)
@@ -5332,7 +6034,10 @@ def _evidence_matches_amount(
         return False
     if evidence_semantic_options(evidence, semantics).get("value_transform") == "absolute":
         evidence_decimal = abs(evidence_decimal)
-    resolved = _resolve_unit(str(evidence.get("unit") or ""), semantics)
+    resolved = _resolve_unit(
+        str(evidence.get("unit") or evidence.get("currency") or ""),
+        semantics,
+    )
     if claim_base is not None and resolved:
         claim_unit = _resolve_unit(raw_unit, semantics)
         display_tolerance = (
@@ -5343,6 +6048,30 @@ def _evidence_matches_amount(
         return claim_base_unit == resolved[0] and _decimal_close(
             claim_base,
             evidence_decimal * resolved[1],
+            minimum_tolerance=display_tolerance,
+        )
+    if (
+        claim_base is not None
+        and not str(evidence.get("unit") or evidence.get("currency") or "").strip()
+    ):
+        # Unitless structured raw values are commonly already expressed in
+        # the dataset's base unit. Compare only the numeric base value using
+        # the Claim's displayed precision. The caller reports ``unit-missing``
+        # so this can never be upgraded into a verified currency assertion.
+        claim_unit = _resolve_unit(raw_unit, semantics)
+        raw_decimal = _as_decimal(raw_value)
+        inferred_scale = (
+            abs(claim_base / raw_decimal)
+            if claim_unit is None and raw_decimal not in {None, Decimal(0)}
+            else Decimal(1)
+        )
+        display_tolerance = _display_rounding_tolerance(
+            raw_value,
+            claim_unit[1] if claim_unit is not None else inferred_scale,
+        )
+        return _decimal_close(
+            claim_base,
+            evidence_decimal,
             minimum_tolerance=display_tolerance,
         )
     raw_decimal = _as_decimal(raw_value)
@@ -5474,9 +6203,7 @@ def _dimension_support_status(
         claim_value = claim.normalized.get(dimension)
         if not claim_value:
             continue
-        evidence_raw = str(
-            evidence.get(dimension) or metric_dimensions.get(dimension) or ""
-        )
+        evidence_raw = str(evidence.get(dimension) or metric_dimensions.get(dimension) or "")
         if not evidence_raw:
             return "partial"
         claim_canonical = _canonical_dimension(str(claim_value), semantics, dimension)
@@ -5598,6 +6325,30 @@ def _period_key(
     full_date = re.search(rf"{year}[-/](\d{{1,2}})[-/](\d{{1,2}})", compact)
     if full_date:
         return f"{year}-{int(full_date.group(1)):02d}-{int(full_date.group(2)):02d}"
+    english_date = re.search(
+        rf"(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|"
+        rf"SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)(\d{{1,2}}),?{year}",
+        compact,
+    )
+    if english_date:
+        month = {
+            "JANUARY": 1,
+            "FEBRUARY": 2,
+            "MARCH": 3,
+            "APRIL": 4,
+            "MAY": 5,
+            "JUNE": 6,
+            "JULY": 7,
+            "AUGUST": 8,
+            "SEPTEMBER": 9,
+            "OCTOBER": 10,
+            "NOVEMBER": 11,
+            "DECEMBER": 12,
+        }[english_date.group(1)]
+        return f"{year}-{month:02d}-{int(english_date.group(2)):02d}"
+    chinese_date = re.search(rf"{year}年(\d{{1,2}})月(\d{{1,2}})日?", compact)
+    if chinese_date:
+        return f"{year}-{int(chinese_date.group(1)):02d}-{int(chinese_date.group(2)):02d}"
     return f"{year} FY"
 
 
@@ -5635,12 +6386,69 @@ def _calculation_inputs_present_in_claim(
     inputs = evidence.get("inputs")
     if not isinstance(inputs, list) or not inputs:
         return False
-    values = [
-        item.get("value")
-        for item in inputs
-        if isinstance(item, Mapping) and item.get("value") is not None
+    input_rows = [
+        item for item in inputs if isinstance(item, Mapping) and item.get("value") is not None
     ]
-    return len(values) == len(inputs) and all(_value_present(value, text) for value in values)
+    if len(input_rows) != len(inputs):
+        return False
+    values = [item.get("value") for item in input_rows]
+    if all(_value_present(value, text) for value in values):
+        return True
+
+    # Models often display same-unit financial inputs in a compact scale
+    # (for example raw CNY values as ``亿元``) before calculating a ratio.  A
+    # shared power-of-ten scale cancels out of that arithmetic and is still
+    # deterministic evidence of the declared inputs.  Accept only one common
+    # scale across every input, require compatible units, and respect the
+    # precision actually printed for each operand.  This deliberately rejects
+    # arbitrary proportional values and mixed-unit calculations.
+    units = {
+        str(item.get("unit") or "").strip().casefold()
+        for item in input_rows
+        if str(item.get("unit") or "").strip()
+    }
+    if len(units) != 1:
+        return False
+    numeric_values = [_as_decimal(value) for value in values]
+    if any(value is None for value in numeric_values):
+        return False
+    displayed: list[tuple[Decimal, Decimal]] = []
+    for match in _NUMBER_RE.finditer(text):
+        token = match.group(0).replace(",", "").replace("−", "-").replace("﹣", "-")
+        decimal = _as_decimal(token)
+        if decimal is None:
+            continue
+        fractional = token.lstrip("+-").partition(".")[2]
+        tolerance = Decimal("0.5") * (Decimal(10) ** -len(fractional))
+        displayed.append((decimal, tolerance))
+    if len(displayed) < len(numeric_values):
+        return False
+
+    def matches_all(scale: Decimal, remaining: tuple[int, ...], value_index: int = 0) -> bool:
+        if value_index >= len(numeric_values):
+            return True
+        expected = numeric_values[value_index]
+        if expected is None:  # Kept explicit for the type checker.
+            return False
+        scaled = expected / scale
+        for index in remaining:
+            candidate, tolerance = displayed[index]
+            if abs(candidate - scaled) > tolerance:
+                continue
+            if matches_all(
+                scale,
+                tuple(candidate_index for candidate_index in remaining if candidate_index != index),
+                value_index + 1,
+            ):
+                return True
+        return False
+
+    positions = tuple(range(len(displayed)))
+    return any(
+        matches_all(Decimal(10) ** exponent, positions)
+        for exponent in range(-12, 13)
+        if exponent != 0
+    )
 
 
 def calculation_formula_matches_evidence(
@@ -5693,6 +6501,20 @@ def _looks_like_numeric_formula(text: str) -> bool:
 def _normalize_display_formula(text: str) -> str:
     """Normalize bounded plain/LaTeX display arithmetic for the safe evaluator."""
     body = re.split(r"[:：]", text, maxsplit=1)[-1]
+    if "=" in body:
+        # Rendered equations commonly include a label and/or a final result:
+        # ``metric = inputs / base = result`` or ``\frac{...}{...}=\mathbf{...}``.
+        # Evaluate the first equality component that is itself arithmetic;
+        # otherwise stripping TeX commands would concatenate the result onto
+        # the expression and make a correct formula unparsable.
+        arithmetic_parts = [
+            part
+            for part in body.split("=")
+            if len(_NUMBER_RE.findall(part)) >= 2
+            and (_ARITHMETIC_OPERATOR_RE.search(part) or _LATEX_FORMULA_RE.search(part))
+        ]
+        if arithmetic_parts:
+            body = arithmetic_parts[0]
     # TeX thousands separators emitted by models, e.g. ``170{,}899``.
     body = re.sub(r"(?<=\d)\{,\}(?=\d)", "", body)
     body = body.replace(r"\,", "")
@@ -5836,10 +6658,13 @@ __all__ = [
     "EvidenceMatch",
     "EvidenceSupport",
     "canonical_evidence_dimension",
+    "canonical_amount_keys",
     "canonical_evidence_metric",
     "canonical_evidence_period",
     "extract_claims",
     "extract_claims_with_status",
+    "is_ontology_vocabulary_term",
+    "metric_ontology_ids",
     "auto_bind_unique_claims",
     "auto_bind_composite_text_claims",
     "propagate_equivalent_claim_bindings",
