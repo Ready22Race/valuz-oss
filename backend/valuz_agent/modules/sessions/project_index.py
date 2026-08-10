@@ -231,18 +231,26 @@ async def remove_for_project(project_id: str, user_id: str | None) -> list[str]:
         return ids
 
 
-async def list_recent(limit: int = 200, user_id: str | None = None) -> list[ProjectSessionRow]:
-    """Most-recently-active index rows for the caller across all their projects —
-    the runs-overview / sidebar RECENTS pool. Ordered by ``updated_at`` (bumped
-    each turn by ``touch_activity``) so a chat with a new message is in the pool
-    and floats to the top, not pinned to when it was first created."""
+async def list_recent(
+    limit: int = 200,
+    user_id: str | None = None,
+    project_id: str | None = None,
+) -> list[ProjectSessionRow]:
+    """Most-recently-active index rows for the caller — the runs-overview /
+    sidebar RECENTS pool. Ordered by ``updated_at`` (bumped each turn by
+    ``touch_activity``) so a chat with a new message is in the pool and floats
+    to the top, not pinned to when it was first created.
+
+    ``project_id`` scopes the window to one project. The unscoped pool is a
+    single global recency window shared by every session, so an install with
+    hundreds of quick chats pushes project conversations out of it entirely —
+    the sidebar's per-project accordion asks for its own window instead of
+    fishing its rows out of the global one."""
     if user_id is None:
         raise ValueError("user_id is required")
     async with async_unit_of_work(commit=False) as db:
-        stmt = (
-            select(ProjectSessionRow)
-            .where(ProjectSessionRow.user_id == user_id)
-            .order_by(ProjectSessionRow.updated_at.desc())
-            .limit(limit)
-        )
+        stmt = select(ProjectSessionRow).where(ProjectSessionRow.user_id == user_id)
+        if project_id is not None:
+            stmt = stmt.where(ProjectSessionRow.project_id == project_id)
+        stmt = stmt.order_by(ProjectSessionRow.updated_at.desc()).limit(limit)
         return list((await db.execute(stmt)).scalars().all())
