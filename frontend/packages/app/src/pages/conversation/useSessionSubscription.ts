@@ -16,7 +16,11 @@ import {
   type WorkflowState,
 } from "@valuz/core";
 import type { ApprovalCardSubject, ApprovalResolvedDecision } from "@valuz/ui";
-import { shouldApplySessionStatus } from "../conversation-loading";
+import {
+  derivePostRunVerificationActive,
+  reducePostRunVerificationActive,
+  shouldApplySessionStatus,
+} from "../conversation-loading";
 import { isWorkflowRunning } from "./tool-card-helpers";
 import {
   TURN_PAGE_SIZE,
@@ -62,6 +66,7 @@ type SessionSubscriptionParams = {
   setPendingApprovals: Dispatch<SetStateAction<PendingApprovalEntry[]>>;
   setAutoApprovedNotices: Dispatch<SetStateAction<AutoApprovedNotice[]>>;
   setSending: Dispatch<SetStateAction<boolean>>;
+  setPostRunVerificationActive: Dispatch<SetStateAction<boolean>>;
   setSessions: Dispatch<SetStateAction<SessionListItem[]>>;
 };
 
@@ -92,6 +97,7 @@ export function useSessionSubscription({
   setPendingApprovals,
   setAutoApprovedNotices,
   setSending,
+  setPostRunVerificationActive,
   setSessions,
 }: SessionSubscriptionParams) {
   // SESSION-LIFETIME data-plane stream (docs/design/session-stream-lifetime.md).
@@ -137,6 +143,9 @@ export function useSessionSubscription({
             // genuinely-missing persisted rows at their seq position and keeps
             // live entries glued where they arrived.
             setEvents((prev) => mergeEventWindow(prev, resp.items));
+            setPostRunVerificationActive(
+              derivePostRunVerificationActive(resp.items),
+            );
             const top = resp.items[resp.items.length - 1].seq;
             if (top > historyCursorRef.current) historyCursorRef.current = top;
           })
@@ -197,6 +206,11 @@ export function useSessionSubscription({
           if (duplicate) return prev;
           return [...prev, event];
         });
+        if (!isReplayOfSeen) {
+          setPostRunVerificationActive((active) =>
+            reducePostRunVerificationActive(active, event),
+          );
+        }
         // Once the kernel echoes the user's message back as the
         // first ``message.user`` event of the turn, the optimistic
         // pending card has served its purpose — drop it so we don't

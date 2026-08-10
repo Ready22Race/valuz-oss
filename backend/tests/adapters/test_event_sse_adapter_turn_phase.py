@@ -51,3 +51,25 @@ def test_turn_phase_dispatch_minimal_payload():
     legacy_type, body = result
     assert legacy_type == "session.turn_phase"
     assert body["phase"] == "dispatch"
+
+
+def test_turn_phase_post_run_verification_carries_lifecycle_and_features():
+    result = _translate_kernel_event(
+        "turn_phase",
+        {
+            "phase": "post_run_verification",
+            "state": "started",
+            "features": ["task_coverage", "citation", "claim_audit"],
+            "message_id": "msg-post-run",
+        },
+    )
+
+    assert result is not None
+    legacy_type, body = result
+    assert legacy_type == "session.turn_phase"
+    assert body == {
+        "phase": "post_run_verification",
+        "state": "started",
+        "features": '["task_coverage", "citation", "claim_audit"]',
+        "message_id": "msg-post-run",
+    }

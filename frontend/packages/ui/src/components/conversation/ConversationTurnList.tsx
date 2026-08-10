@@ -16,6 +16,7 @@ import {
   FileText,
   Gauge,
   Globe,
+  LoaderCircle,
   Minimize2,
   RotateCw,
   Sparkles,
@@ -886,6 +887,7 @@ interface TurnRowProps {
   turn: ConversationTurn;
   isLatest: boolean;
   sending: boolean;
+  postRunVerificationActive: boolean;
   skillsBySlug?: Record<string, { name: string }>;
   onRetry?: (turnId: string) => void;
   onSwitchModel?: (turnId: string) => void;
@@ -935,6 +937,7 @@ const TurnRow = memo(
     turn,
     isLatest,
     sending,
+    postRunVerificationActive,
     skillsBySlug,
     onRetry,
     onSwitchModel,
@@ -1330,6 +1333,18 @@ const TurnRow = memo(
               onCitationClick={onCitationClick}
             />
 
+            {postRunVerificationActive ? (
+              <div className="flex items-center pt-0.5" role="status" aria-live="polite">
+                <div className="inline-flex items-center gap-1.5 rounded-full border border-surface-border bg-surface-soft/80 px-2.5 py-1 text-[12px] leading-5 text-ink-muted">
+                  <LoaderCircle
+                    className="h-3.5 w-3.5 shrink-0 animate-spin"
+                    aria-hidden="true"
+                  />
+                  <span>{t("conversation.verifyingAndGeneratingCitations")}</span>
+                </div>
+              </div>
+            ) : null}
+
             {showLoadingDots ? (
               <div className="flex items-center py-2.5">
                 <LogoShimmer />
@@ -1380,6 +1395,9 @@ interface ConversationTurnListProps {
   turns: ConversationTurn[];
   scrollContainerRef: RefObject<HTMLDivElement | null>;
   sending: boolean;
+  /** True only while the host is running post-answer Citation, Audit, or
+   *  Task Coverage work for the latest turn. */
+  postRunVerificationActive?: boolean;
   loading: boolean;
   error: string | null;
   onRetry?: (turnId: string) => void;
@@ -1442,6 +1460,7 @@ export function ConversationTurnList({
   turns,
   scrollContainerRef,
   sending,
+  postRunVerificationActive = false,
   loading,
   error,
   onRetry,
@@ -1612,6 +1631,10 @@ export function ConversationTurnList({
                     turn={turn}
                     isLatest={virtualRow.index === turns.length - 1}
                     sending={sending}
+                    postRunVerificationActive={
+                      virtualRow.index === turns.length - 1 &&
+                      postRunVerificationActive
+                    }
                     skillsBySlug={skillsBySlug}
                     onRetry={onRetry}
                     onSwitchModel={onSwitchModel}

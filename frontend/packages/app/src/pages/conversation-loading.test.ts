@@ -1,11 +1,69 @@
 import { describe, expect, it } from "vitest";
 import {
+  derivePostRunVerificationActive,
   deriveTurnActive,
   isTerminalSessionStatus,
   shouldApplySessionStatus,
   shouldRefreshConversationHistory,
   shouldShowNoModelEmptyState,
 } from "./conversation-loading";
+import type { SessionEventDTO } from "@valuz/core";
+
+const sessionEvent = (
+  seq: number,
+  eventType: string,
+  payload: Record<string, string> = {},
+): SessionEventDTO => ({
+  seq,
+  event: { event_type: eventType, payload },
+});
+
+describe("derivePostRunVerificationActive", () => {
+  it("tracks the real post-run lifecycle and clears on completion", () => {
+    const started = sessionEvent(1, "session.turn_phase", {
+      phase: "post_run_verification",
+      state: "started",
+    });
+    const completed = sessionEvent(2, "session.turn_phase", {
+      phase: "post_run_verification",
+      state: "completed",
+    });
+
+    expect(derivePostRunVerificationActive([started])).toBe(true);
+    expect(derivePostRunVerificationActive([started, completed])).toBe(false);
+  });
+
+  it("fails closed on a terminal event so a crashed pass cannot leave a stuck tag", () => {
+    const started = sessionEvent(1, "session.turn_phase", {
+      phase: "post_run_verification",
+      state: "started",
+    });
+
+    expect(
+      derivePostRunVerificationActive([
+        started,
+        sessionEvent(2, "session.idle"),
+      ]),
+    ).toBe(false);
+    expect(
+      derivePostRunVerificationActive([
+        started,
+        sessionEvent(2, "run.failed"),
+      ]),
+    ).toBe(false);
+  });
+
+  it("ignores unrelated runtime preparation phases", () => {
+    expect(
+      derivePostRunVerificationActive([
+        sessionEvent(1, "session.turn_phase", {
+          phase: "runtime_init",
+          state: "started",
+        }),
+      ]),
+    ).toBe(false);
+  });
+});
 
 describe("deriveTurnActive", () => {
   it("is not loading on a quiet session, whatever its terminal status", () => {

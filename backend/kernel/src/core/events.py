@@ -83,8 +83,13 @@ OutboundEventType = Literal[
     #                                                   thinking/text delta is
     #                                                   runtime prep + model
     #                                                   TTFT
+    #   {phase: "post_run_verification", state: started|completed,
+    #    features: [...]}                              host-side Citation /
+    #                                                   Claim Audit / Task
+    #                                                   Coverage window after
+    #                                                   visible primary output
     # A phase that did not run this turn emits nothing (a warm turn carries
-    # only ``dispatch``).
+    # only ``dispatch`` before any optional post-run phase).
     "turn_phase",
 ]
 

@@ -59,6 +59,7 @@ import {
   citationOffsetFromHref,
   CitationPill,
   CitationSourceCards,
+  projectCitationTextCorrections,
   projectCitationSidecarAnchors,
   projectEvidenceMarkdownLinks,
   rewriteCitationMarkdownLinks,
@@ -1053,7 +1054,10 @@ export const MarkdownContent = memo(function MarkdownContent({
       stripProtocolSourcePlaceholders(
         projectEvidenceMarkdownLinks(
           projectCitationSidecarAnchors(
-            stripStreamingEvidenceLinkTail(content),
+            projectCitationTextCorrections(
+              stripStreamingEvidenceLinkTail(content),
+              citationBundle,
+            ),
             citationBundle,
           ),
           citationBundle,

@@ -16,7 +16,7 @@ import re
 import unicodedata
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -751,6 +751,25 @@ class ClaimBindingResult:
     auto_bound_claim_handles: dict[str, tuple[str, ...]]
     rebound_claim_handles: dict[str, str]
     semantic_bound_claim_handles: dict[str, tuple[str, ...]]
+    corrections: tuple[DeterministicClaimCorrection, ...] = ()
+
+
+@dataclass(frozen=True)
+class DeterministicClaimCorrection:
+    """One fail-closed numeric correction backed by unique structured data.
+
+    Offsets point into the immutable Runtime-authored answer.  The caller can
+    therefore preserve the original message while projecting the corrected
+    value and retaining a complete audit record in the citation sidecar.
+    """
+
+    claim_id: str
+    evidence_handle: str
+    source_start: int
+    source_end: int
+    original_text: str
+    replacement_text: str
+    reason: Literal["structured-value-conflict"]
 
 
 @dataclass(frozen=True)
@@ -1819,6 +1838,108 @@ def match_composite_text_evidence(
     return tuple(row[0] for row in selected)
 
 
+def _format_corrected_display_value(value: Decimal, original: str) -> str:
+    normalized = original.translate(
+        str.maketrans({"−": "-", "﹣": "-", "－": "-", "＋": "+"})
+    )
+    unsigned = normalized.lstrip("+-").replace(",", "")
+    decimal_places = len(unsigned.rsplit(".", 1)[1]) if "." in unsigned else 0
+    quantum = Decimal(1).scaleb(-decimal_places)
+    rounded = value.quantize(quantum, rounding=ROUND_HALF_UP)
+    replacement = f"{rounded:,.{decimal_places}f}"
+    if normalized.startswith("+") and rounded >= 0:
+        replacement = f"+{replacement}"
+    return replacement
+
+
+def _structured_value_correction(
+    answer: str,
+    claim: ClaimCandidate,
+    *,
+    evidence_handle: str,
+    source: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+    semantics: Mapping[str, Any] | None,
+) -> DeterministicClaimCorrection | None:
+    """Return one exact numeric patch only when every hard dimension agrees.
+
+    A generic conflict is not enough: the existing verifier must identify a
+    structured ``value-conflict`` after metric, entity, period, unit, scope
+    and basis checks.  The Evidence must also declare its unit explicitly and
+    the Claim location must contain exactly one occurrence of the normalized
+    display value.  Every uncertainty fails closed to the normal warning path.
+    """
+
+    support = verify_evidence_support(
+        claim,
+        {"source": source, "evidence": evidence},
+        semantics=semantics,
+    )
+    if support.status != "contradicted" or support.reason != "value-conflict":
+        return None
+    if _entity_support_status(claim, evidence) != "supported":
+        return None
+    if _dimension_support_status(claim, evidence, semantics) != "supported":
+        return None
+    if len(_claim_amounts(_claim_assertion_text(claim, semantics), semantics)) != 1:
+        return None
+
+    evidence_unit_raw = str(evidence.get("unit") or evidence.get("currency") or "").strip()
+    claim_unit_raw = str(claim.normalized.get("unit") or "").strip()
+    if not evidence_unit_raw or not claim_unit_raw:
+        return None
+    evidence_unit = _resolve_unit(evidence_unit_raw, semantics)
+    claim_unit = _resolve_unit(claim_unit_raw, semantics)
+    if evidence_unit is None or claim_unit is None or evidence_unit[0] != claim_unit[0]:
+        return None
+
+    # ``unit`` already carries its ontology scale. An additional provider
+    # scale is safe here only when it is explicitly the identity; otherwise
+    # the Adapter must first normalize the value into the canonical schema.
+    raw_scale = evidence.get("scale")
+    if raw_scale is not None and raw_scale != "" and _as_decimal(raw_scale) != Decimal(1):
+        return None
+    evidence_value = _as_decimal(evidence.get("value"))
+    original_value = _as_decimal(claim.normalized.get("value"))
+    if evidence_value is None or original_value is None:
+        return None
+    if evidence_semantic_options(evidence, semantics).get("value_transform") == "absolute":
+        evidence_value = abs(evidence_value)
+    display_value = evidence_value * evidence_unit[1] / claim_unit[1]
+
+    source_start = claim.location.get("sourceStart")
+    source_end = claim.location.get("sourceEnd")
+    if (
+        not isinstance(source_start, int)
+        or not isinstance(source_end, int)
+        or source_start < 0
+        or source_end <= source_start
+        or source_end > len(answer)
+    ):
+        return None
+    source_slice = answer[source_start:source_end]
+    matching_tokens = [
+        match
+        for match in _NUMBER_RE.finditer(source_slice)
+        if _as_decimal(match.group(0)) == original_value
+    ]
+    if len(matching_tokens) != 1:
+        return None
+    token = matching_tokens[0]
+    replacement = _format_corrected_display_value(display_value, token.group(0))
+    if replacement == token.group(0):
+        return None
+    return DeterministicClaimCorrection(
+        claim_id=claim.claim_id,
+        evidence_handle=evidence_handle,
+        source_start=source_start + token.start(),
+        source_end=source_start + token.end(),
+        original_text=token.group(0),
+        replacement_text=replacement,
+        reason="structured-value-conflict",
+    )
+
+
 def bind_claims_to_evidence(
     answer: str,
     records: Iterable[Any],
@@ -1829,6 +1950,7 @@ def bind_claims_to_evidence(
     entity_aliases: Mapping[str, Iterable[str]] | None = None,
     semantic_verifier: SemanticVerifierPort | None = None,
     claim_normalizer: ClaimNormalizerPort | None = None,
+    correct_structured_conflicts: bool = False,
 ) -> ClaimBindingResult:
     """Apply safe rebind, unique-bind and composite-bind edits in one pass.
 
@@ -1867,6 +1989,7 @@ def bind_claims_to_evidence(
     auto_bound: dict[str, tuple[str, ...]] = {}
     rebound: dict[str, str] = {}
     semantic_bound: dict[str, tuple[str, ...]] = {}
+    corrections: list[DeterministicClaimCorrection] = []
     semantic_pending: list[tuple[ClaimCandidate, ClaimCandidate, tuple[Any, ...], Any]] = []
 
     claims = extract_claims(answer, mode=mode, semantics=semantics)
@@ -1900,6 +2023,30 @@ def bind_claims_to_evidence(
                 )
                 if support.status == "supported":
                     continue
+                if (
+                    correct_structured_conflicts
+                    and support.status == "contradicted"
+                    and support.reason == "value-conflict"
+                    and current[1].get("kind") == "structured-data"
+                ):
+                    correction = _structured_value_correction(
+                        answer,
+                        claim,
+                        evidence_handle=current_handle,
+                        source=current[0],
+                        evidence=current[1],
+                        semantics=semantics,
+                    )
+                    if correction is not None:
+                        edits.append(
+                            (
+                                correction.source_start,
+                                correction.source_end,
+                                correction.replacement_text,
+                            )
+                        )
+                        corrections.append(correction)
+                        continue
             match = match_available_evidence(
                 claim,
                 candidate_index,
@@ -1986,6 +2133,27 @@ def bind_claims_to_evidence(
                 # value conflict. Final quality evaluation marks this binding
                 # as conflicting; it is never presented as support.
                 handles = (handle,)
+                correction = (
+                    _structured_value_correction(
+                        answer,
+                        claim,
+                        evidence_handle=handle,
+                        source=matching_record[0],
+                        evidence=matching_record[1],
+                        semantics=semantics,
+                    )
+                    if correct_structured_conflicts
+                    else None
+                )
+                if correction is not None:
+                    edits.append(
+                        (
+                            correction.source_start,
+                            correction.source_end,
+                            correction.replacement_text,
+                        )
+                    )
+                    corrections.append(correction)
         elif not attributed and match.status == "ambiguous":
             agreeing: list[str] = []
             source_ids: set[str] = set()
@@ -2095,6 +2263,7 @@ def bind_claims_to_evidence(
         auto_bound_claim_handles=auto_bound,
         rebound_claim_handles=rebound,
         semantic_bound_claim_handles=semantic_bound,
+        corrections=tuple(corrections),
     )
 
 

@@ -2243,9 +2243,10 @@ def test_unique_unitless_market_cap_is_bound_for_user_inspection() -> None:
 
     assert result.text.count(f"evidence://{handle}") == 1
     assert set(result.auto_bound_claim_handles.values()) == {(handle,)}
+    assert result.corrections == ()
 
 
-def test_unique_structured_value_conflict_is_bound_for_user_inspection() -> None:
+def test_unique_structured_value_conflict_is_corrected_before_binding() -> None:
     handle = "ev_mu_market_cap_12345678"
     answer = "| 公司 | 市值 |\n|---|---:|\n| MU | ~$991亿 |"
     evidence = {
@@ -2265,6 +2266,81 @@ def test_unique_structured_value_conflict_is_bound_for_user_inspection() -> None
             "field": "market_cap",
             "metric": "market_cap",
             "value": 991_118_782_300,
+            "unit": "USD",
+        },
+    }
+
+    result = bind_claims_to_evidence(
+        answer,
+        [evidence],
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+        correct_structured_conflicts=True,
+    )
+
+    assert "~$9,911亿" in result.text
+    assert "~$991亿" not in result.text
+    assert result.text.count(f"evidence://{handle}") == 1
+    assert set(result.auto_bound_claim_handles.values()) == {(handle,)}
+    assert len(result.corrections) == 1
+    correction = result.corrections[0]
+    assert correction.evidence_handle == handle
+    assert correction.original_text == "991"
+    assert correction.replacement_text == "9,911"
+    assert correction.reason == "structured-value-conflict"
+
+
+def test_explicit_structured_value_conflict_is_corrected_without_rewriting_binding() -> None:
+    handle = "ev_mu_market_cap_explicit_12345678"
+    answer = f"MU 市值约为 ~$991亿 [source](evidence://{handle})。"
+    evidence = {
+        "evidenceHandle": handle,
+        "source": {
+            "sourceId": "stock-quote:MU",
+            "providerId": "valuz-stock",
+            "sourceType": "dataset",
+            "title": "Stock quote · MU",
+        },
+        "evidence": {
+            "kind": "structured-data",
+            "datasetId": "reportify.stock_quote",
+            "toolName": "stock_quote",
+            "recordKey": "MU",
+            "entityId": "MU",
+            "field": "market_cap",
+            "metric": "market_cap",
+            "value": 991_118_782_300,
+            "unit": "USD",
+        },
+    }
+
+    result = bind_claims_to_evidence(
+        answer,
+        [evidence],
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+        correct_structured_conflicts=True,
+    )
+
+    assert "~$9,911亿" in result.text
+    assert result.text.count(f"evidence://{handle}") == 1
+    assert len(result.corrections) == 1
+    assert result.auto_bound_claim_handles == {}
+
+
+def test_structured_value_conflict_is_not_corrected_when_audit_is_disabled() -> None:
+    handle = "ev_mu_market_cap_disabled_12345678"
+    answer = "| 公司 | 市值 |\n|---|---:|\n| MU | ~$991亿 |"
+    evidence = {
+        "evidenceHandle": handle,
+        "source": {"sourceId": "MU", "sourceType": "dataset"},
+        "evidence": {
+            "kind": "structured-data",
+            "metric": "market_cap",
+            "entityId": "MU",
+            "field": "market_cap",
+            "value": 991_118_782_300,
+            "unit": "USD",
         },
     }
 
@@ -2275,8 +2351,48 @@ def test_unique_structured_value_conflict_is_bound_for_user_inspection() -> None
         semantics=_FINANCE_SEMANTICS,
     )
 
-    assert result.text.count(f"evidence://{handle}") == 1
-    assert set(result.auto_bound_claim_handles.values()) == {(handle,)}
+    assert "~$991亿" in result.text
+    assert result.corrections == ()
+
+
+def test_structured_value_conflict_is_not_corrected_when_source_is_ambiguous() -> None:
+    answer = "| 公司 | 市值 |\n|---|---:|\n| MU | ~$991亿 |"
+
+    def evidence(handle: str, value: int) -> dict:
+        return {
+            "evidenceHandle": handle,
+            "source": {
+                "sourceId": handle,
+                "providerId": "valuz-stock",
+                "sourceType": "dataset",
+                "title": "Stock quote · MU",
+            },
+            "evidence": {
+                "kind": "structured-data",
+                "datasetId": "reportify.stock_quote",
+                "toolName": "stock_quote",
+                "recordKey": handle,
+                "entityId": "MU",
+                "field": "market_cap",
+                "metric": "market_cap",
+                "value": value,
+                "unit": "USD",
+            },
+        }
+
+    result = bind_claims_to_evidence(
+        answer,
+        [
+            evidence("ev_mu_market_cap_first_12345678", 991_118_782_300),
+            evidence("ev_mu_market_cap_second_12345678", 1_005_000_000_000),
+        ],
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+        correct_structured_conflicts=True,
+    )
+
+    assert result.text == answer
+    assert result.corrections == ()
 
 
 def test_point_in_time_metric_ignores_inherited_fiscal_period_during_verification() -> None:

@@ -37,6 +37,7 @@ type ConversationBodyProps = {
   conversationInstanceKey: string;
   effectiveTurns: ConversationTurn[];
   displayBusy: boolean;
+  postRunVerificationActive: boolean;
   error: string | null;
   handleRetry: ConversationSend["handleRetry"];
   handleSwitchModel: (turnId: string) => void;
@@ -86,6 +87,7 @@ export function ConversationBody({
   conversationInstanceKey,
   effectiveTurns,
   displayBusy,
+  postRunVerificationActive,
   error,
   handleRetry,
   handleSwitchModel,
@@ -196,6 +198,7 @@ export function ConversationBody({
               turns={effectiveTurns}
               scrollContainerRef={scrollContainerRef}
               sending={displayBusy}
+              postRunVerificationActive={postRunVerificationActive}
               loading={id === NEW_SESSION_ID ? false : loading}
               error={error}
               onRetry={handleRetry}

@@ -103,6 +103,117 @@ it("renders an auto-bound citation from a sidecar anchor without changing stored
   expect(content).toBe("Revenue increased 18%.");
 });
 
+it("projects a deterministic numeric correction before rendering its citation", () => {
+  const content = "| Company | Market cap |\n|---|---:|\n| MU | ~$991亿 |";
+  const start = content.indexOf("991");
+  const bundle: CitationBundleV1 = {
+    ...CITATIONS,
+    citations: [
+      {
+        ...CITATIONS.citations[0]!,
+        citationId: "cit_market_cap",
+        evidence: {
+          kind: "structured-data",
+          datasetId: "reportify.stock_quote",
+          toolName: "stock_quote",
+          entityId: "MU",
+          field: "market_cap",
+          metric: "market_cap",
+          value: 991_118_782_300,
+          unit: "USD",
+          capturedAt: "2026-08-10T00:00:00Z",
+        },
+        annotations: {
+          corrections: [
+            {
+              claimId: "clm_mu_market_cap",
+              originalText: "991",
+              replacementText: "9,911",
+              reason: "structured-value-conflict",
+            },
+          ],
+        },
+      },
+    ],
+    projection: {
+      evidenceHandleToCitationId: {},
+      textCorrections: [
+        {
+          claimId: "clm_mu_market_cap",
+          citationId: "cit_market_cap",
+          sourceStart: start,
+          sourceEnd: start + 3,
+          originalText: "991",
+          replacementText: "9,911",
+          reason: "structured-value-conflict",
+        },
+      ],
+      anchors: [
+        {
+          citationId: "cit_market_cap",
+          claimId: "clm_mu_market_cap",
+          origin: "auto-bound",
+          sourceOffset: content.indexOf("亿") + 1,
+          location: {
+            kind: "table-cell",
+            blockIndex: 0,
+            rowIndex: 0,
+            columnIndex: 1,
+            sourceStart: content.indexOf("~$991亿"),
+            sourceEnd: content.indexOf("~$991亿") + "~$991亿".length,
+          },
+        },
+      ],
+      provenanceRegions: [],
+    },
+  };
+
+  const { container } = render(
+    <MarkdownContent content={content} citationBundle={bundle} />,
+  );
+
+  expect(container.textContent).toContain("~$9,911亿");
+  expect(container.textContent).not.toContain("~$991亿");
+  expect(container.querySelector('[data-citation-id="cit_market_cap"]')).not.toBeNull();
+  expect(content).toContain("~$991亿");
+
+  fireEvent.mouseEnter(
+    screen.getByRole("button", { name: /(?:citation|引用) 1/i }),
+  );
+  expect(
+    screen.getByText(/(?:automatically corrected|已依据结构化数据自动修正).*991.*9,911/i),
+  ).not.toBeNull();
+});
+
+it("fails closed when a correction no longer matches the immutable source span", () => {
+  const content = "MU market cap is $992.";
+  const bundle: CitationBundleV1 = {
+    ...CITATIONS,
+    citations: [CITATIONS.citations[0]!],
+    projection: {
+      evidenceHandleToCitationId: {},
+      textCorrections: [
+        {
+          claimId: "clm_mu_market_cap",
+          citationId: "cit_first",
+          sourceStart: content.indexOf("992"),
+          sourceEnd: content.indexOf("992") + 3,
+          originalText: "991",
+          replacementText: "9,911",
+          reason: "structured-value-conflict",
+        },
+      ],
+    },
+  };
+
+  const { container } = render(
+    <MarkdownContent content={content} citationBundle={bundle} />,
+  );
+
+  expect(container.textContent).toContain("$992");
+  expect(container.textContent).not.toContain("9,911");
+});
+
 it("renders one terminal citation for a table provenance region", () => {
   const content =
     "| Company | 2024 | 2025 |\n" +

@@ -273,6 +273,8 @@ export function useConversationOrchestration({
     selectedSessionIdRef.current = selectedSessionId;
   }, [selectedSessionId]);
   const [events, setEvents] = useState<SessionEventDTO[]>([]);
+  const [postRunVerificationActive, setPostRunVerificationActive] =
+    useState(false);
   // Every ``event_uid`` this transcript has already consumed via the SSE
   // path. Reconnect gap-fills and the server's initial drain legitimately
   // redeliver frames (the history cursor only advances from REST reads; live
@@ -609,6 +611,7 @@ export function useConversationOrchestration({
     setSelectedComposerSkill(null);
     setRetryCounts({});
     setAutoApprovedNotices([]);
+    setPostRunVerificationActive(false);
     userScrolledRef.current = false;
   }, [conversationInstanceKey]);
 
@@ -1256,6 +1259,7 @@ export function useConversationOrchestration({
     setPendingApprovals,
     setAutoApprovedNotices,
     setSending,
+    setPostRunVerificationActive,
     setSessions,
   });
 
@@ -1495,6 +1499,7 @@ export function useConversationOrchestration({
     effectiveTurns,
     turns,
     runningBgTasks,
+    postRunVerificationActive,
     // busy / send
     isBusy,
     displayBusy,
