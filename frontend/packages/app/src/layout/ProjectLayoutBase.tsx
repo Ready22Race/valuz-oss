@@ -117,10 +117,11 @@ export interface ProjectLayoutBaseProps {
   mascotSrc?: string | null;
 }
 
-// How many runs each project's own sidebar window asks for. The accordion
-// shows 5 before "show more", and every row costs one kernel enrichment read
-// server-side — a small window keeps N projects × one request cheap.
-const PROJECT_RUNS_LIMIT = 20;
+// How many runs each project's own sidebar window asks for — exactly what the
+// accordion shows (``RUNS_COLLAPSED``), so no "show more" toggle appears and
+// every row is one the user can see. Each row costs a kernel enrichment read
+// server-side, so this also keeps N projects × one request cheap.
+const PROJECT_RUNS_LIMIT = 5;
 
 const NAV_ICON_MAP: Record<string, DesktopSidebarBottomItem["icon"]> = {
   assistant: "assistant",
