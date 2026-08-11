@@ -85,6 +85,8 @@
  * `clickable` is an affordance, not a behaviour: these cards carry no handler
  * and no navigation, so the hover shift is deliberately quiet and the cursor
  * is left alone — a pointer cursor would promise something that never happens.
+ * The same hover treatment mirrors onto `:focus-visible` so a card that a host
+ * makes keyboard-focusable gives the same feedback the mouse gets.
  */
 .vgb-card-clickable {
   transition:
@@ -92,9 +94,15 @@
     background-color 120ms ease;
 }
 
-.vgb-card-clickable:hover {
+.vgb-card-clickable:hover,
+.vgb-card-clickable:focus-visible {
   border-color: var(--openui-border-accent);
   background-color: var(--openui-highlight-subtle);
+}
+
+.vgb-card-clickable:focus-visible {
+  outline: 2px solid var(--openui-border-accent);
+  outline-offset: 2px;
 }
 
 /* ── StatsCard ───────────────────────────────────────────────────── */

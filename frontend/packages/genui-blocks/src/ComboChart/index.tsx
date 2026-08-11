@@ -257,6 +257,7 @@ export const ComboChart = defineComponent({
                 isAnimationActive={false}
                 maxBarSize={MAX_BAR_SIZE}
                 name={bars.name}
+                radius={2}
               />
               <Line
                 connectNulls={false}

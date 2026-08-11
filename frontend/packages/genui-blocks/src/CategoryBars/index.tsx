@@ -207,6 +207,7 @@ export const GroupedBar = defineComponent({
                   key={`${entry.name}-${seriesIndex}`}
                   maxBarSize={MAX_BAR_SIZE}
                   name={entry.name}
+                  radius={2}
                 />
               ))}
             </BarChart>

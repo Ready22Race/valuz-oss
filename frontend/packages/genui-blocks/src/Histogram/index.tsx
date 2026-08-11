@@ -165,6 +165,7 @@ export const Histogram = defineComponent({
                   fill={toneText(tone)}
                   isAnimationActive={false}
                   maxBarSize={MAX_BAR_SIZE}
+                  radius={2}
                 >
                   <LabelList
                     dataKey="countLabel"

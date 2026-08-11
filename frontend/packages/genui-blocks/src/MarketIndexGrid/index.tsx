@@ -79,7 +79,7 @@ function QuoteCard({ quote }: { quote: Quote }) {
       >
         <div className="vgb-market-card-heading" data-a2ui-market-index-heading>
           <span className="vgb-market-card-name" data-a2ui-market-index-name>
-            {quote.name || "指数"}
+            {quote.name}
           </span>
           {quote.code ? (
             <span className="vgb-market-card-code" data-a2ui-market-index-code>
@@ -172,7 +172,7 @@ export const MarketIndexCard = defineComponent({
   name: "MarketIndexCard",
   props: MarketIndexCardSchema,
   description:
-    "A single market quote as a card: name and code, the latest level set large, then the change — changePct signed (\"+0.56%\") with change as the absolute move — and turnover underneath. " +
+    'A single market quote as a card: name and code, the latest level set large, then the change — changePct signed ("+0.56%") with change as the absolute move — and turnover underneath. ' +
     "source and asOf print as the footnote that tells the reader how fresh the figure is; fill them in whenever the data came from a tool. " +
     "Put two or more quotes in a MarketIndexGrid instead of repeating this card.",
   component: ({ props }) => <QuoteCard quote={readQuote(props)} />,
