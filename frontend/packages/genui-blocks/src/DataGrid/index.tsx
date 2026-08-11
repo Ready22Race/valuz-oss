@@ -3,7 +3,13 @@
 import { defineComponent } from "@openuidev/react-lang";
 
 import { readItems } from "../lib/collections";
-import { formatCount, readRecord, readText, readTextFromKeys, toArray } from "../lib/props";
+import {
+  formatCount,
+  readRecord,
+  readText,
+  readTextFromKeys,
+  toArray,
+} from "../lib/props";
 import type { Align } from "../lib/schema";
 import { DataGridSchema } from "./schema";
 
@@ -48,7 +54,9 @@ interface GridColumn {
 const ALIGNMENTS = new Set(["left", "center", "right"]);
 
 function readColumn(record: Record<string, unknown>): GridColumn {
-  const align = readTextFromKeys(record, ["align", "alignment"]).trim().toLowerCase();
+  const align = readTextFromKeys(record, ["align", "alignment"])
+    .trim()
+    .toLowerCase();
   const emphasis = record.emphasis ?? record.highlight ?? record.primary;
   return {
     align: ALIGNMENTS.has(align) ? (align as Align) : undefined,
@@ -93,13 +101,14 @@ export const DataGrid = defineComponent({
   description:
     "A dense table for a wide result set — more columns than a Table reads well with, every cell already formatted. " +
     "columns is {label, unit?, align?, emphasis?} per column (align right for figures, emphasis for the one column the answer is about); rows is an array of arrays whose cells line up index-for-index with columns — pass an empty string for a cell you do not have rather than shifting the rest along. " +
-    "sortedBy and filteredBy are sentences describing how the result was already produced (\"revenue, descending\", \"US listings only\"): they are printed under the table as statements of fact, and nothing in the block sorts, filters or can be operated — never write a column label that invites the reader to click, drag or reorder. " +
+    'sortedBy and filteredBy are sentences describing how the result was already produced ("revenue, descending", "US listings only"): they are printed under the table as statements of fact, and nothing in the block sorts, filters or can be operated — never write a column label that invites the reader to click, drag or reorder. ' +
     "The first column sticks while the rest scroll sideways inside the block. Use ComparisonTable for a handful of subjects side by side, DataList for a ranking of name + figure + change.",
   component: ({ props }) => {
     const raw = props as unknown as Record<string, unknown>;
-    const columns = readItems(raw.columns ?? raw.headers ?? raw.fields, "label").map(
-      readColumn,
-    );
+    const columns = readItems(
+      raw.columns ?? raw.headers ?? raw.fields,
+      "label",
+    ).map(readColumn);
     const allRows = toArray(raw.rows ?? raw.data ?? raw.items)
       .map(readRow)
       .filter((row) => row.some((cell) => cell !== ""));
@@ -111,18 +120,33 @@ export const DataGrid = defineComponent({
     // A row carrying more cells than there are named columns still has to show
     // them — dropping a value is the one edit this block must never make — so
     // the surplus renders under a blank heading.
-    const columnCount = Math.max(columns.length, ...rows.map((row) => row.length));
+    const columnCount = Math.max(
+      columns.length,
+      ...rows.map((row) => row.length),
+    );
     const title = readTextFromKeys(raw, ["title", "label"]);
+    const sortedByLabel =
+      readTextFromKeys(raw, ["sortedByLabel", "sorted_by_label"]) ||
+      "Sorted by";
+    const filteredByLabel =
+      readTextFromKeys(raw, ["filteredByLabel", "filtered_by_label"]) ||
+      "Filtered to";
+    const showingLabel =
+      readTextFromKeys(raw, ["showingLabel", "showing_label"]) || "Showing";
 
     const facts = [
-      statedFact(readTextFromKeys(raw, ["sortedBy", "sorted_by", "sort"]), SORT_LEAD, "Sorted by"),
+      statedFact(
+        readTextFromKeys(raw, ["sortedBy", "sorted_by", "sort"]),
+        SORT_LEAD,
+        sortedByLabel,
+      ),
       statedFact(
         readTextFromKeys(raw, ["filteredBy", "filtered_by", "filter"]),
         FILTER_LEAD,
-        "Filtered to",
+        filteredByLabel,
       ),
       allRows.length > rows.length
-        ? `Showing ${formatCount(rows.length)} of ${formatCount(allRows.length)} rows`
+        ? `${showingLabel} ${formatCount(rows.length)} of ${formatCount(allRows.length)} rows`
         : "",
     ].filter(Boolean);
 

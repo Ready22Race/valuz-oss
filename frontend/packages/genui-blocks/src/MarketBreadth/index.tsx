@@ -32,7 +32,14 @@ export const MarketBreadth = defineComponent({
     const flat = readLooseNumber(raw.flat ?? raw.unchanged) ?? 0;
     const total = readLooseNumber(raw.total) ?? up + down + flat;
     const source = readTextFromKeys(raw, ["source"]);
-    const title = readTextFromKeys(raw, ["title", "label"]) || "涨跌分布";
+    const title = readTextFromKeys(raw, ["title", "label"]);
+    const upLabel = readTextFromKeys(raw, ["upLabel", "up_label"]) || "Up";
+    const downLabel =
+      readTextFromKeys(raw, ["downLabel", "down_label"]) || "Down";
+    const flatLabel =
+      readTextFromKeys(raw, ["flatLabel", "flat_label"]) || "Flat";
+    const totalLabel =
+      readTextFromKeys(raw, ["totalLabel", "total_label"]) || "Total";
     const upShare = total ? up / total : 0;
     const downShare = total ? down / total : 0;
     const flatShare = total ? flat / total : 0;
@@ -45,8 +52,10 @@ export const MarketBreadth = defineComponent({
           data-a2ui-component="market-breadth"
         >
           <div className="vgb-breadth-heading" data-a2ui-market-breadth-heading>
-            <span className="vgb-breadth-title">{title}</span>
-            <span className="vgb-breadth-total">合计 {formatCount(total)}</span>
+            {title ? <span className="vgb-breadth-title">{title}</span> : null}
+            <span className="vgb-breadth-total">
+              {totalLabel} {formatCount(total)}
+            </span>
           </div>
           {/*
            * The three shares are the data, so they are the one thing that has
@@ -71,13 +80,13 @@ export const MarketBreadth = defineComponent({
             />
           </div>
           <div className="vgb-breadth-stats" data-a2ui-market-breadth-stats>
-            <BreadthStat label="上涨" value={up} />
-            <BreadthStat label="下跌" value={down} />
-            <BreadthStat label="平盘" value={flat} />
+            <BreadthStat label={upLabel} value={up} />
+            <BreadthStat label={downLabel} value={down} />
+            <BreadthStat label={flatLabel} value={flat} />
           </div>
           {source ? (
             <div className="vgb-breadth-source" data-a2ui-market-breadth-source>
-              数据来源：{source}
+              {source}
             </div>
           ) : null}
         </article>

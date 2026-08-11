@@ -37,4 +37,8 @@ export const DataGridSchema = z.object({
   title: z.string().optional(),
   sortedBy: z.string().optional(),
   filteredBy: z.string().optional(),
+  /** 陈述句前缀,本地化用;缺省回退英文。 */
+  sortedByLabel: z.string().optional(),
+  filteredByLabel: z.string().optional(),
+  showingLabel: z.string().optional(),
 });

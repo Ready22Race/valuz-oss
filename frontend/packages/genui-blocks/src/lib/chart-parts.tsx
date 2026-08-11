@@ -2,7 +2,7 @@
 
 import type { ReactNode } from "react";
 
-import { seriesTone } from "./chart";
+import { seriesColor } from "./chart";
 import type { Tone } from "./schema";
 import { toneText } from "./tone";
 
@@ -75,7 +75,7 @@ export function ChartLegend({ names }: { names: string[] }) {
           <span
             aria-hidden="true"
             className="vgb-chart-swatch"
-            style={{ backgroundColor: toneText(seriesTone(index)) }}
+            style={{ backgroundColor: seriesColor(index) }}
           />
           <span className="vgb-chart-legend-name">{name}</span>
         </li>

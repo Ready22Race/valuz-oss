@@ -279,6 +279,7 @@ function WaterfallChart({
               dataKey="delta"
               isAnimationActive={false}
               maxBarSize={MAX_BAR_SIZE}
+              radius={2}
               stackId="bridge"
             >
               {rows.map((row, index) => (

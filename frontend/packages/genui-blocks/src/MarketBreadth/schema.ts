@@ -15,4 +15,9 @@ export const MarketBreadthSchema = z.object({
   title: z.string().optional(),
   total: z.number().optional(),
   source: z.string().optional(),
+  /** 本地化标签;缺省回退英文,不硬编码任何语言。 */
+  upLabel: z.string().optional(),
+  downLabel: z.string().optional(),
+  flatLabel: z.string().optional(),
+  totalLabel: z.string().optional(),
 });
