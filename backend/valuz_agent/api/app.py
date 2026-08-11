@@ -281,6 +281,20 @@ def create_app(
     _mount_internal("/_internal/mcp/toolkit/base", build_toolkit_mcp_asgi("base"))
     _mount_internal("/_internal/mcp/toolkit/lead", build_toolkit_mcp_asgi("lead"))
 
+    # Edition-registered always-on servers, through the same seam. The resolver
+    # advertises them as ``{backend_base_url}{path}/mcp`` — the identical shape
+    # it uses for the built-ins above — so they need the identical mounting, and
+    # an edition mounting by hand in ``register_api`` has to rediscover that.
+    # One that mounted at the bare path only shipped a spec whose advertised URL
+    # 404'd under every prefixed deployment. Specs registered before
+    # ``create_app`` (i.e. in ``register_capabilities``) are picked up here;
+    # a spec without a factory is an edition that still mounts its own.
+    from valuz_agent.ports.extensions import ext
+
+    for _spec in ext.always_on_mcp_specs:
+        if _spec.app_factory is not None:
+            _mount_internal(_spec.path, _spec.app_factory())
+
     # Startup/shutdown orchestration lives in ``boot/lifespan.py`` (bound via
     # ``lifespan=lifespan`` above). The startup order is load-bearing; see the
     # order table in the boot-refactor exec plan.
