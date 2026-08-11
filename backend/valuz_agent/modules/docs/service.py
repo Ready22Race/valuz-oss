@@ -5,7 +5,7 @@ import logging
 import mimetypes
 import os
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1311,8 +1311,40 @@ class DocumentLibraryService:
         document_ids: list[str] | None = None,
         knowledge_base_ids: list[str] | None = None,
         authorized_document_ids: list[str] | None = None,
+        authorized_documents: Sequence[tuple[str, str]] | None = None,
     ) -> list[DocSearchHit]:
-        if authorized_document_ids is not None:
+        """Search documents the caller is allowed to see.
+
+        Scope comes from exactly one of three sources, in precedence order:
+
+        1. ``authorized_documents`` — ``(owner_user_id, doc_id)`` pairs a host
+           pre-authorized server-side. Each id is re-authorized under **its own
+           owner**, which is what makes shared collections (documents another
+           user uploaded) reachable. The trust boundary is the calling host
+           code, which must have done its own membership check first; this
+           parameter is never populated from model or tool input.
+        2. ``authorized_document_ids`` — caller-owned ids (document-research
+           sessions). Re-authorized under ``user_id``.
+        3. project bindings (the default).
+
+        ``document_ids`` narrowing applies to all three. ``folder_ids``
+        narrowing resolves within the **caller's own** folders, so cross-owner
+        callers should narrow with ``document_ids`` instead.
+        """
+        # doc_id -> owning user id. Only populated for pre-authorized
+        # cross-owner scope; every other path is caller-owned.
+        owner_of: dict[str, str] = {}
+        if authorized_documents is not None:
+            # Pre-authorized cross-owner scope. Re-authorize every id through
+            # this datastore under the owner the host supplied — never accept
+            # model-supplied ids, and never widen to a whole owner.
+            scope_ids = []
+            for owner_id, doc_id in dict.fromkeys(authorized_documents):
+                row = await self._ds.get_by_id(owner_id, doc_id)
+                if row is not None and row.status == "ready":
+                    scope_ids.append(doc_id)
+                    owner_of[doc_id] = owner_id
+        elif authorized_document_ids is not None:
             # Document-research sessions carry an exact, owner-authorized
             # server-side scope. Re-authorize every id through this datastore;
             # do not depend on project bindings and never accept model-supplied
@@ -1345,13 +1377,16 @@ class DocumentLibraryService:
 
         doc_paths: dict[str, str] = {}
         doc_names: dict[str, str] = {}
-        uid = user_id
         for did in scope_ids:
-            row = await self._ds.get_by_id(uid, did)
+            # Cross-owner hits resolve under their own owner — both the row
+            # lookup and the preview path, whose containment check is scoped
+            # to that owner's data dir.
+            owner = owner_of.get(did, user_id)
+            row = await self._ds.get_by_id(owner, did)
             if row:
                 doc_names[did] = row.source_filename
                 if row.preview_text_path:
-                    local = _resolve_data_file_path(user_id, row.preview_text_path)
+                    local = _resolve_data_file_path(owner, row.preview_text_path)
                     if local:
                         doc_paths[did] = str(local)
 
