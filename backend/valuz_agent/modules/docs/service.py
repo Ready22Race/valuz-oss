@@ -975,7 +975,7 @@ class DocumentLibraryService:
                 total_items=len(queued_ids),
             )
             await self._ds.create_import_task(user_id, reindex_task)
-            self._schedule_background_reindex(queued_ids, reindex_task.id)
+            self._schedule_background_reindex(queued_ids, reindex_task.id, user_id)
 
         self._bus.publish("kb.rescanned", kb_id=kb_id)
         return _task_to_result(task)
@@ -1049,7 +1049,9 @@ class DocumentLibraryService:
 
         threading.Thread(target=_runner, name="docs-bg-rescan", daemon=True).start()
 
-    def _schedule_background_reindex(self, doc_ids: list[str], task_id: str) -> None:
+    def _schedule_background_reindex(
+        self, doc_ids: list[str], task_id: str, user_id: str
+    ) -> None:
         """Spawn a daemon thread that reindexes ``doc_ids`` using a
         fresh DB session (the request's session is closed when the
         HTTP handler returns).
@@ -1066,6 +1068,18 @@ class DocumentLibraryService:
         Owner is derived from the loaded task row — no ambient ContextVar is
         read or set here.
         """
+        from valuz_agent.ports.extensions import ext
+
+        # A deployment that parses elsewhere takes the documents here. It may
+        # decline (the OSS default always does), in which case we spawn the
+        # thread below exactly as before.
+        try:
+            if ext.docs_reindex_dispatcher.dispatch(user_id, doc_ids, task_id):
+                return
+        except Exception:  # noqa: BLE001 — a broken dispatcher must not strand
+            # the documents; fall through to the in-process path.
+            logger.exception("docs reindex dispatch failed; parsing in-process")
+
         import asyncio
         import threading
 
@@ -1172,7 +1186,7 @@ class DocumentLibraryService:
             total_items=len(document_ids),
         )
         await self._ds.create_import_task(user_id, task)
-        self._schedule_background_reindex(document_ids, task.id)
+        self._schedule_background_reindex(document_ids, task.id, user_id)
         return _task_to_result(task)
 
     async def _run_reindex_loop(self, document_ids: list[str], task: DocumentImportTaskRow) -> None:
@@ -1305,6 +1319,39 @@ class DocumentLibraryService:
 
     # ── Search ────────────────────────────────────────────────────────
 
+    async def _contribute_shared_scope(
+        self, user_id: str, scope_ids: list[str]
+    ) -> tuple[list[str], dict[str, str]]:
+        """Union in documents shared with ``user_id`` by the host.
+
+        Each contributed id is re-authorized under the owner the host named,
+        exactly like the pre-authorized branch — the host decides *who may
+        read*, this still decides *whether the row is readable* (it exists and
+        is ready). A contributor that fails is logged and ignored: a shared
+        library being briefly invisible is recoverable, a search that dies is
+        not.
+        """
+        from valuz_agent.ports.extensions import ext
+
+        try:
+            extra = await ext.docs_scope_contributor(user_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("docs scope contributor failed; using own scope only")
+            return scope_ids, {}
+
+        owner_of: dict[str, str] = {}
+        merged = list(scope_ids)
+        seen = set(scope_ids)
+        for owner_id, doc_id in extra:
+            if doc_id in seen:
+                continue
+            row = await self._ds.get_by_id(owner_id, doc_id)
+            if row is not None and row.status == "ready":
+                merged.append(doc_id)
+                seen.add(doc_id)
+                owner_of[doc_id] = owner_id
+        return merged, owner_of
+
     async def search_docs(
         self,
         user_id: str,
@@ -1364,6 +1411,15 @@ class DocumentLibraryService:
                 project_id,
                 knowledge_base_ids=knowledge_base_ids,
             )
+            # Documents shared with this caller by a deployment that has such a
+            # notion (team libraries, subscriptions). Additive: a member still
+            # sees their own project-bound documents. Not applied to either
+            # pre-authorized branch above — those scopes are exact by
+            # construction and widening one would defeat the point.
+            scope_ids, contributed_owners = await self._contribute_shared_scope(
+                user_id, scope_ids
+            )
+            owner_of.update(contributed_owners)
         if not scope_ids:
             return []
 
