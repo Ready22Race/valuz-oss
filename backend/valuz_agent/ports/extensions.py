@@ -45,6 +45,12 @@ from valuz_agent.ports.connector_oauth_refresh import (
     ConnectorOAuthRefreshPort,
     LocalConnectorOAuthRefreshProvider,
 )
+from valuz_agent.ports.docs_dispatch import (
+    DocsReindexDispatcher,
+    DocsScopeContributor,
+    NoopReindexDispatcher,
+    no_extra_documents,
+)
 from valuz_agent.ports.docs_runtime import DocsRuntimeFactory, default_docs_runtime
 from valuz_agent.ports.document_research import DocumentResearchProviderPort
 from valuz_agent.ports.file_address import FileAddressResolverPort, LocalFileAddressResolver
@@ -170,6 +176,14 @@ class Extensions:
         # Per-owner rather than a singleton because the OSS default is scoped
         # to the owner's preview directory.
         self.docs_runtime_factory: DocsRuntimeFactory = default_docs_runtime
+        # Who parses queued documents. OSS default declines, leaving the
+        # in-process daemon thread; a scaled deployment binds a dispatcher that
+        # hands them to a worker so the work survives a web restart.
+        self.docs_reindex_dispatcher: DocsReindexDispatcher = NoopReindexDispatcher()
+        # Documents a caller may read beyond their own — shared libraries.
+        # Additive, and skipped for document-research sessions whose scope is
+        # exact by construction.
+        self.docs_scope_contributor: DocsScopeContributor = no_extra_documents
         # Generic ephemeral cache (e.g. the connector OAuth PKCE handoff). OSS
         # default is a local file cache (single desktop process); the commercial
         # overlay swaps in a Redis-backed cache for the shared multi-process
