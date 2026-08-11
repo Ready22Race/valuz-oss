@@ -30,7 +30,17 @@ class DocsRuntimePort(Protocol):
         query: str,
         doc_scope_ids: list[str],
         top_k: int = 5,
-    ) -> list[SearchResult]: ...
+        doc_paths: dict[str, str] | None = None,
+    ) -> list[SearchResult]:
+        """Search the given documents.
+
+        ``doc_paths`` maps document id → resolved preview file path. The docs
+        service resolves these under the owner's data dir and passes them so
+        runtimes that read preview files (the embedded ripgrep baseline) do
+        not re-derive paths; index-backed runtimes may ignore it. Defaulted so
+        existing implementations remain valid.
+        """
+        ...
 
     async def health(self) -> DocsHealthSnapshot: ...
 

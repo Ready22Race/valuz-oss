@@ -1355,17 +1355,16 @@ class DocumentLibraryService:
                     if local:
                         doc_paths[did] = str(local)
 
-        from valuz_agent.integrations.docs_embedded import EmbeddedDocsRuntime
-
-        if isinstance(self._docs_rt, EmbeddedDocsRuntime):
-            results = self._docs_rt.search_sync(
-                query,
-                scope_ids,
-                top_k,
-                doc_paths=doc_paths or None,
-            )
-        else:
-            results = await self._docs_rt.search(query, scope_ids, top_k)
+        # Single path through the ``DocsRuntimePort`` contract — no
+        # runtime-class special-casing (valuz-oss#838). The embedded runtime
+        # wraps its blocking ripgrep search in ``asyncio.to_thread``
+        # internally; alternative runtimes receive the same arguments.
+        results = await self._docs_rt.search(
+            query,
+            scope_ids,
+            top_k,
+            doc_paths=doc_paths or None,
+        )
 
         return [
             DocSearchHit(

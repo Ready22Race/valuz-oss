@@ -46,10 +46,10 @@ class FakeDocsRuntime:
         self.preview_dir = None
         self.runtime_id = None
 
-    def search_sync(self, query, doc_scope_ids, top_k=5):
+    def search_sync(self, query, doc_scope_ids, top_k=5, doc_paths=None):
         return []
 
-    async def search(self, query, doc_scope_ids, top_k=5):
+    async def search(self, query, doc_scope_ids, top_k=5, doc_paths=None):
         return []
 
 
