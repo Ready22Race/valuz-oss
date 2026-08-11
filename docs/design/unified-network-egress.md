@@ -39,7 +39,7 @@ Revision 5 已在代码中形成一条可运行、用户选择后启用的 canar
 # 正常开发启动；首次默认由模型客户端管理
 ./scripts/dev.sh
 
-# 在设置页选择“由 Valuz 管理连接”后启用统一出口
+# 在设置页选择“Valuz 统一管理（推荐）”后启用统一出口
 
 # 紧急锁定为模型客户端管理（最高优先级）
 VALUZ_EGRESS_MODE=off
@@ -213,20 +213,20 @@ Cindy 已用 Codex `model_provider.base_url` 和 Claude `ANTHROPIC_BASE_URL` 把
 
 | 内部模式 | 行为 | 用户入口 |
 |---|---|---|
-| `auto` | 原始 env → 系统代理/PAC → 系统明确的 DIRECT | 主模式“由 Valuz 管理连接（推荐）”；说明会沿用 Clash、企业代理或系统 PAC，未检测到代理时直连，并可展示连接状态与耗时 |
+| `auto` | 原始 env → 系统代理/PAC → 系统明确的 DIRECT | 主模式“Valuz 统一管理（推荐）”；说明会沿用 Clash、企业代理或系统 PAC，未检测到代理时直连，并可展示连接状态与耗时 |
 | `direct` | 仍经过 Egress Manager，但强制直接连接目标 | 不出现在普通设置页；仅保留内部 IPC/开发诊断能力，未来若提供自动化故障定位需另行设计可理解的结果反馈 |
-| `off` | 不启动/不接入 Egress Manager，不注入任何新描述符，保持当前版本网络行为 | 主模式“由模型客户端管理连接”，以及 `VALUZ_EGRESS_MODE=off` |
+| `off` | 不启动/不接入 Egress Manager，不注入任何新描述符，保持当前版本网络行为 | 主模式“模型客户端自行管理”，以及 `VALUZ_EGRESS_MODE=off` |
 
 `off` 是工程逃生通道，不是日常网络偏好。优先级为：
 
 ```text
 VALUZ_EGRESS_MODE=off（紧急覆盖）
-  > 本机“由模型客户端管理连接”设置
+  > 本机“模型客户端自行管理”设置
   > 本次运行的临时 direct 选择
   > 默认 auto
 ```
 
-在 `auto/direct` 与 `off` 之间切换需要撤销并重建相关 runtime 的网络描述符，但同版本正常路径不重启 backend。设置页根据全局 running-runs 状态提示运行任务数量；用户点击切换时，若有前台 turn 或后台任务，必须明确确认“中断任务并继续”。确认后 Electron 主进程先调用各 session 的 interrupt 接口并等待它们完成 idle 收敛，再修改模式、落盘，并调用只监听 loopback、由随机桌面令牌鉴权的控制接口替换 backend 内存中的 egress registry；用户取消则不得改变任何状态。backend 会拒绝仍有活动 runtime 的替换请求，主进程允许短暂等待 turn 清理完成；只有旧版本或不健康的 backend 不支持动态控制时才回退为进程重启。不得自动重放已经发送的请求。界面使用中性的“由 Valuz 管理连接 / 由模型客户端管理连接”，而不是 `auto/off`、“旧版”或“兼容模式”等带技术实现或价值判断的术语；说明只陈述线路选择方、监控能力和切换会重建后续模型连接。
+在 `auto/direct` 与 `off` 之间切换需要撤销并重建相关 runtime 的网络描述符，但同版本正常路径不重启 backend。设置页根据全局 running-runs 状态提示运行任务数量；用户点击切换时，若有前台 turn 或后台任务，必须明确确认“中断任务并继续”。确认后 Electron 主进程先调用各 session 的 interrupt 接口并等待它们完成 idle 收敛，再修改模式、落盘，并调用只监听 loopback、由随机桌面令牌鉴权的控制接口替换 backend 内存中的 egress registry；用户取消则不得改变任何状态。backend 会拒绝仍有活动 runtime 的替换请求，主进程允许短暂等待 turn 清理完成；只有旧版本或不健康的 backend 不支持动态控制时才回退为进程重启。不得自动重放已经发送的请求。界面将设置分组命名为“连接方式”，只提供“Valuz 统一管理（推荐）/ 模型客户端自行管理”两个中性选项，不使用 `auto/off`、“旧版”或“兼容模式”等技术实现或价值判断术语；常驻文案只解释线路选择方和监控差异，重建连接及中断风险在真正切换时提示。
 
 ---
 
@@ -443,7 +443,7 @@ Electron ready
 
 `off` 模式不启动 Egress Manager、不交付 egress descriptor，也不改变模型客户端现有网络 env。Electron 仍向自己管理的 backend 交付只用于本机动态模式切换的 desktop control token；该 token 不携带代理配置、不进入 runtime 或工具子进程，`off` 下模型流量必须与本设计落地前的网络路径严格等价。
 
-若 Egress Manager 初始化失败，Electron 仍可启动 backend 和 renderer 以展示诊断，但 backend 必须把模型网络标记为 unavailable；不能在用户不知情时按旧路径发送模型请求。用户选择“由模型客户端管理连接”后，才按 `off` 语义动态替换 registry 并重建受影响 runtime。
+若 Egress Manager 初始化失败，Electron 仍可启动 backend 和 renderer 以展示诊断，但 backend 必须把模型网络标记为 unavailable；不能在用户不知情时按旧路径发送模型请求。用户选择“模型客户端自行管理”后，才按 `off` 语义动态替换 registry 并重建受影响 runtime。
 
 停止顺序：
 
@@ -466,7 +466,7 @@ Electron ready
 1. launcher 安装 backend/frontend 依赖后只启动 desktop dev shell，不再单独持有外部 backend。
 2. Egress Manager 默认绑定 `127.0.0.1:0`，让操作系统分配端口。只有开发者显式设置 `VALUZ_EGRESS_PROXY_PORT` 时才固定端口。
 3. Electron 从当前源码启动 backend，使用 `VALUZ_BACKEND_PORT`（默认 `8000`）和开发数据目录，并通过子进程 stdin 交付一次性 desktop control envelope。
-4. 在“由 Valuz 管理连接”和“由模型客户端管理连接”之间切换时，Electron 先查询运行任务；有任务则等待用户确认并逐个 interrupt，全部成功后通过本机鉴权控制接口替换 egress registry、撤销旧 runtime descriptor，并预热最近使用的一个 Codex session。取消或 interrupt 失败时不改变模式；旧 backend 不支持控制接口或控制面异常时才回退为 backend restart。
+4. 在“Valuz 统一管理”和“模型客户端自行管理”之间切换时，Electron 先查询运行任务；有任务则等待用户确认并逐个 interrupt，全部成功后通过本机鉴权控制接口替换 egress registry、撤销旧 runtime descriptor，并预热最近使用的一个 Codex session。取消或 interrupt 失败时不改变模式；旧 backend 不支持控制接口或控制面异常时才回退为 backend restart。
 5. 任一进程退出时，Electron 清理受管 backend、capability 和本地监听器。
 
 Electron 的 UI 本来就允许等待 backend，因此受管启动不会改变产品语义。`backend` 单独模式不启动桌面出口，继续使用调用者显式提供的代理 env 或直连。即使当前选择为 `off`，开发 backend 仍由 Electron 管理，保证后续切回 Valuz 管理时能够完整重建链路。
@@ -656,12 +656,12 @@ runtime 最终可能只能看到通用 HTTP/CONNECT 失败，但诊断面板和�
 | 诊断 | 用户提示 | 可用操作 |
 |---|---|---|
 | 系统代理解析失败 | “无法读取系统网络设置” | 重新检测、查看诊断 |
-| 系统代理不可达 | “检测到代理，但当前无法连接” | 检查代理设置、查看诊断、必要时改由模型客户端管理连接 |
-| Egress Manager 不可用 | “Valuz 网络组件未能启动” | 重试一次、改由模型客户端管理连接、查看诊断 |
+| 系统代理不可达 | “检测到代理，但当前无法连接” | 检查代理设置、查看诊断、必要时改用模型客户端自行管理 |
+| Egress Manager 不可用 | “Valuz 网络组件未能启动” | 重试一次、改用模型客户端自行管理、查看诊断 |
 | 出口建连正常但模型首事件慢 | “已连接，正在等待模型响应” | 继续等待、取消任务；不建议切换代理 |
 | 隧道/relay 中途断开 | “网络连接已中断，模型客户端正在恢复” | 显示 runtime 重连进度、允许取消 |
 
-内部 `direct` 只对后续新请求生效，不能把正在进行或已发送的请求迁移到直连；普通设置页不提供该入口。“由模型客户端管理连接”进入 `off` 并重建相关 runtime；需要明确提示后续模型连接会重建。若存在运行任务，入口仍可点击，但必须把任务数量、立即中断和未完成内容可能丢失写入确认提示；确认后执行 interrupt → mode persist → live registry replace → affected runtime rebuild，取消或 interrupt 失败保持原模式。只有动态控制不可用时才回退为 backend restart。任何用户恢复动作都必须由用户触发，监控状态本身不能静默改变网络策略。
+内部 `direct` 只对后续新请求生效，不能把正在进行或已发送的请求迁移到直连；普通设置页不提供该入口。“模型客户端自行管理”进入 `off` 并重建相关 runtime；需要明确提示后续模型连接会重建。若存在运行任务，入口仍可点击，但必须把任务数量、立即中断和未完成内容可能丢失写入确认提示；确认后执行 interrupt → mode persist → live registry replace → affected runtime rebuild，取消或 interrupt 失败保持原模式。只有动态控制不可用时才回退为 backend restart。任何用户恢复动作都必须由用户触发，监控状态本身不能静默改变网络策略。
 
 ---
 
@@ -790,7 +790,7 @@ Python 与 Electron 的 monotonic clock 不共享时间原点，因此 Electron 
 
 - PAC/系统代理解析失败：清理该 origin 缓存并立即重解析一次。
 - 单个候选失败：仅在尚未发送业务字节时尝试 PAC/env 中的下一候选。
-- Egress Manager 启动失败：保留 renderer/诊断入口并给 sidecar 无 secret 的 fail-loud marker；只阻断已准入组合，用户选择“由模型客户端管理连接”后回到旧路径。监听器运行期异常后的“一次自动重启”尚未实现，是默认开启前的剩余门槛；无论是否重启都禁止自动重放模型请求。
+- Egress Manager 启动失败：保留 renderer/诊断入口并给 sidecar 无 secret 的 fail-loud marker；只阻断已准入组合，用户选择“模型客户端自行管理”后回到旧路径。监听器运行期异常后的“一次自动重启”尚未实现，是默认开启前的剩余门槛；无论是否重启都禁止自动重放模型请求。
 - 重复失败候选：进入有上限的短期 circuit breaker，到期后允许真实请求重新验证。
 - 健康状态变化：更新本地诊断和用户提示，但不能单凭监控结果静默切换 `direct/off`。
 
@@ -800,7 +800,7 @@ Python 与 Electron 的 monotonic clock 不共享时间原点，因此 Electron 
 
 Egress Manager 在内存维护同时受“最大条数”和“最大时间窗口”限制的事件环；具体常量集中定义。第一阶段通过 Electron IPC 暴露当前快照和脱敏时间线，不进入公开 backend API，也不跨应用重启保存详细网络历史。
 
-设置页将“谁来管理模型连接”和“当前模型连接”分开：前者只在“由 Valuz 统一管理”和“由模型客户端自行连接”之间选择，普通用户不直接操作内部 `direct`；后者展示当前正在初始化或执行的模型请求。模型请求出现前显示本地 runtime/thread/dispatch 阶段与耗时，真实请求出现后显示线路、健康状态和网络/模型分阶段耗时。runtime 可以在 turn 结束后继续留在预热缓存中，但 `runtime_ready/runtime_prepare_failed/turn_complete/interrupted` 到达后对应活动必须立即退出“当前连接”列表；脱敏诊断事件仍可在内存环中保留。监控区首屏只显示：
+设置页将“连接方式”和“当前模型连接”分开：前者只在“Valuz 统一管理（推荐）”和“模型客户端自行管理”之间选择，普通用户不直接操作内部 `direct`，也不重复展示切换规则；后者展示当前正在初始化或执行的模型请求。模型请求出现前显示本地 runtime/thread/dispatch 阶段与耗时，真实请求出现后显示线路、健康状态和网络/模型分阶段耗时。runtime 可以在 turn 结束后继续留在预热缓存中，但 `runtime_ready/runtime_prepare_failed/turn_complete/interrupted` 到达后对应活动必须立即退出“当前连接”列表；脱敏诊断事件仍可在内存环中保留。监控区首屏只显示：
 
 - “连接正常 / 连接较慢或发生重试 / 连接失败 / 等待模型响应”。
 - 当前 runtime、目标 origin 和“直接连接 / HTTP 代理 / SOCKS5 代理”。
@@ -898,7 +898,7 @@ Egress Manager 在内存维护同时受“最大条数”和“最大时间窗�
 - Codex/Claude 内执行 `env`、`curl`、Git 和至少一个包管理器，确认看不到正向出口凭证和 per-session 模型凭证，且网络路径未被新增出口改变；模型入口 URL 即使可见也不能访问任意上游或替 runtime 注入凭证。
 - DeepAgents local shell `inherit_env` 保持当前行为，只有模型 client 使用显式 transport。
 - `off` 模式的 sidecar env、runtime env 和网络路径与当前版本基线等价。
-- Egress Manager 初始化失败时 renderer/诊断仍可用，模型请求被阻止；用户选择“由模型客户端自行连接”后回到旧路径。
+- Egress Manager 初始化失败时 renderer/诊断仍可用，模型请求被阻止；用户选择“模型客户端自行管理”后回到旧路径。
 - 系统代理失败时只显示可理解的原因和恢复操作，不自动切换 direct；内部诊断若显式使用 direct，也只能影响新请求。
 - 事件时间线能区分建连慢与 `dispatch_to_first_event` 慢；并发 runtime 不错误声明精确关联。
 - 日志中无凭证与正文。
@@ -978,7 +978,7 @@ Egress Manager 在内存维护同时受“最大条数”和“最大时间窗�
 4. Codex/Claude/DeepAgents 的真实工具子进程看不到 Valuz 生成的正向出口用户名/secret 或 per-session 模型凭证；模型入口 URL 即使受 CLI 限制可见，也不能访问任意上游或替 runtime 注入凭证；用户原有 env 行为不被无意删除。
 5. `off` 不启动/不接入 Egress Manager，其 sidecar env、runtime env、Provider 路径和失败语义与当前版本基线等价。
 6. 代理失败不会自动裸直连；普通设置页不暴露 `direct`。开发诊断显式启用时，也只有后续新请求进入 `direct`。
-7. Egress Manager 初始化/运行失败时 renderer 和诊断入口仍可用；用户可以选择“由模型客户端自行连接”回到旧路径，不依赖故障组件完成切换。
+7. Egress Manager 初始化/运行失败时 renderer 和诊断入口仍可用；用户可以选择“模型客户端自行管理”回到旧路径，不依赖故障组件完成切换。
 8. 代理切换后最迟在缓存 TTL 内生效；连接失败会触发一次立即重解析。
 9. 代理不可用时在连接级时限内给出明确诊断，不出现无解释的分钟级等待。
 10. 本地时间线能区分 runtime 冷启动、模型入口/正向出口接入、解析、候选建连、上游 stream 建立、模型首事件和 runtime 重连；并发场景不把 runtime 归属误标成精确 turn 关联。

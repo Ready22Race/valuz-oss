@@ -268,9 +268,6 @@ export const NetworkSection = () => {
             >
               {t("settings.network.modeSectionTitle")}
             </h3>
-            <p className="mt-1 text-xs leading-5 text-ink-meta">
-              {t("settings.network.modeSectionDesc")}
-            </p>
           </div>
           <Card className="rounded-xl shadow-xs">
             <CardContent className="divide-y divide-surface-border py-1">

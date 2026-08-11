@@ -59,7 +59,7 @@ DeepAgents / Provider Test ─ 显式 transport ─> 正向出口 ─┤  + Conn
 
 两个 loopback 前端共享同一份不可变代理环境快照、Chromium `resolveProxy()` 结果和 DIRECT / HTTP CONNECT / SOCKS5 连接器。Codex、Claude 通过预注册的模型 `base_url` 接入，因此 Valuz 不靠新增进程级代理变量改道它们的工具 shell、MCP、插件、浏览器或整个 sidecar。DeepAgents 与 Provider Test 使用自己持有的显式 HTTP client，并只对该 client 关闭环境代理自动发现。
 
-Electron 只通过受管理 backend 继承的 stdin 一次性交付桌面控制 envelope，其中包含随机、仅驻留内存的桌面控制 token 和当前 egress bootstrap。backend 只用该 token 鉴权 loopback 网络控制接口；renderer、模型 runtime、工具与 MCP 进程都无法获得它。runtime descriptor 仍为短期租约，使用中续租并在清理时撤销。所有监听器使用随机 loopback 端口，不安装本地 CA，也不做 HTTPS MITM。若初始化失败，UI 与 backend 仍可使用，但已经准入的模型流量保持阻断，直到用户选择“由模型客户端管理连接”，避免静默裸直连。
+Electron 只通过受管理 backend 继承的 stdin 一次性交付桌面控制 envelope，其中包含随机、仅驻留内存的桌面控制 token 和当前 egress bootstrap。backend 只用该 token 鉴权 loopback 网络控制接口；renderer、模型 runtime、工具与 MCP 进程都无法获得它。runtime descriptor 仍为短期租约，使用中续租并在清理时撤销。所有监听器使用随机 loopback 端口，不安装本地 CA，也不做 HTTPS MITM。若初始化失败，UI 与 backend 仍可使用，但已经准入的模型流量保持阻断，直到用户选择“模型客户端自行管理”，避免静默裸直连。
 
 连接管理方的切换由 Electron 按本地事务编排：先查询 backend 的全局 running-runs；存在运行任务时由设置页明确确认，确认后逐个中断受影响 session 并等待接口完成。随后切换本地前端，通过鉴权 loopback 接口替换 backend 的内存 egress registry，并重建受影响的模型 runtime。同版本正常路径不重启 backend；只有旧版或不健康的 backend 无法接受动态配置时才回退为重启。用户取消或任何任务未能安全中断时保持原模式，不进入半切换状态。
 
@@ -67,7 +67,7 @@ Electron 只通过受管理 backend 继承的 stdin 一次性交付桌面控制 
 
 设置页监控贯通本地初始化与真实网络请求：先展示经过字段白名单限制的 runtime/thread/dispatch 阶段，真实连接出现后再用线路、健康状态和分阶段耗时替换初始化占位。终止阶段会立即移除活动项，即使 runtime 仍留在有限的预热缓存中，也不会把一个任务展示成两条连接，或把已完成任务继续显示为活动连接。
 
-桌面端无需启动参数即可使用这项能力；新安装默认选择“由模型客户端管理连接”，用户可在设置页主动切换为 Valuz 管理。`VALUZ_EGRESS_FRONTENDS=0` 只保留为开发期紧急禁用开关。独立/headless backend 收不到 Electron capability，继续沿用显式代理环境变量或直连的既有行为。权威行为、准入矩阵与上线标准见 [`docs/design/unified-network-egress.md`](design/unified-network-egress.md)。
+桌面端无需启动参数即可使用这项能力；新安装默认选择“模型客户端自行管理”，用户可在设置页主动切换为“Valuz 统一管理”。`VALUZ_EGRESS_FRONTENDS=0` 只保留为开发期紧急禁用开关。独立/headless backend 收不到 Electron capability，继续沿用显式代理环境变量或直连的既有行为。权威行为、准入矩阵与上线标准见 [`docs/design/unified-network-egress.md`](design/unified-network-egress.md)。
 
 ---
 
