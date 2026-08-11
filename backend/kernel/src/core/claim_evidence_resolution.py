@@ -739,6 +739,11 @@ def resolve_claim_evidence(
         candidate.handle
         for candidate in candidates
         if candidate.handle in contradicted
+        # A raw structured input cannot prove that a derived result is wrong.
+        # For example, ``股票回购环比 5.6x`` must be checked against Calculation
+        # Evidence (or remain unresolved), never against the Q1 USD amount as
+        # though 5.6x were another directly reported currency value.
+        and claim.kind != "calculation"
         and candidate.evidence.get("kind") == "structured-data"
         and not candidate.hard_conflicts
         and deterministic_support_by_handle[candidate.handle].reason == "value-conflict"
@@ -1214,17 +1219,29 @@ def _add_structured_identity_signals(
         else:
             conflicts.append("period")
 
-    entity_relation = _entity_relation(
-        claim.semantic_text,
-        source,
-        evidence,
-        entity_aliases,
+    # A calculation record often has the neutral source title ``Calculation``
+    # and intentionally carries no company identity of its own.  Treating that
+    # title as an entity makes a correctly attached calculation look like a
+    # cross-company citation.  Only run entity checks for calculations when
+    # the calculation explicitly declares a trusted entity identity.
+    entity_check_available = evidence.get("kind") != "calculation" or any(
+        str(evidence.get(key) or "").strip() for key in ("entityId", "entityName")
     )
-    if entity_relation == "conflict":
+    entity_relation = (
+        _entity_relation(
+            claim.semantic_text,
+            source,
+            evidence,
+            entity_aliases,
+        )
+        if entity_check_available
+        else "unknown"
+    )
+    if entity_check_available and entity_relation == "conflict":
         conflicts.append("entity")
-    elif entity_relation == "match":
+    elif entity_check_available and entity_relation == "match":
         signals.append(CandidateSignal("entity-match", 20.0))
-    else:
+    elif entity_check_available:
         trusted_entity_values = tuple(
             str(evidence.get(key) or "").strip()
             for key in ("entityId", "entityName")
@@ -1423,6 +1440,11 @@ def evidence_entity_conflicts(
 ) -> bool:
     """Return only turn-locally provable cross-entity conflicts."""
 
+    if evidence.get("kind") == "calculation" and not any(
+        str(evidence.get(key) or "").strip() for key in ("entityId", "entityName")
+    ):
+        return False
+
     relation = _entity_relation(claim_text, source, evidence, entity_aliases)
     if relation != "unknown":
         return relation == "conflict"
@@ -1443,6 +1465,7 @@ _ENTITY_MARKER_STOP_WORDS = {
     "earnings",
     "estimate",
     "fiscal",
+    "gaap",
     "global",
     "group",
     "latest",

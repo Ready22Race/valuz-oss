@@ -587,6 +587,106 @@ function safeQualityMarkerInsertion(
   };
 }
 
+function normalizedMarkdownTableCell(value: string): string {
+  return value
+    .replace(/\[([^\]\n]+)\]\((?:[^()\s\n]|\([^()\n]*\))+\)/gu, "$1")
+    .replace(/[*_`~]/gu, "")
+    .replace(/\s+/gu, "")
+    .trim();
+}
+
+function markdownTableCellSpans(line: string): Array<{ start: number; end: number }> {
+  const pipes: number[] = [];
+  for (let index = 0; index < line.length; index += 1) {
+    if (line[index] === "|" && line[index - 1] !== "\\") pipes.push(index);
+  }
+  if (pipes.length < 2) return [];
+  if (pipes[pipes.length - 1] !== line.length - 1) pipes.push(line.length);
+  return pipes.slice(0, -1).map((start, index) => ({
+    start: start + 1,
+    end: pipes[index + 1]!,
+  }));
+}
+
+function isMarkdownTableDelimiter(line: string): boolean {
+  const spans = markdownTableCellSpans(line);
+  return (
+    spans.length > 0 &&
+    spans.every(({ start, end }) => /^:?-{3,}:?$/u.test(line.slice(start, end).trim()))
+  );
+}
+
+/** Resolve a table-cell Claim against table structure, never a stale offset.
+ *
+ * The Guard computes locations after normalising long Evidence Collection
+ * addresses. The renderer still starts from the streamed text, then projects
+ * those links to Citation ids. A raw source offset can consequently drift into
+ * a later table's delimiter row and injecting a marker there invalidates the
+ * entire Markdown table. Row/header/value coordinates survive that rewrite,
+ * so use them as the only authority for table-cell markers.
+ */
+function markdownTableCellClaimEnd(
+  content: string,
+  entry: LocalizedClaimQualityEntry,
+): number | undefined {
+  const location = entry.location;
+  if (location?.kind !== "table-cell") return undefined;
+  const match = entry.exact.match(/^(.+?)\s+—\s+(.+?)[:：]\s*([\s\S]+)$/u);
+  if (!match) return undefined;
+  const [, rowLabel = "", columnLabel = "", claimedValue = ""] = match;
+  const expectedRow = normalizedMarkdownTableCell(rowLabel);
+  const expectedColumn = normalizedMarkdownTableCell(columnLabel);
+  const expectedValue = claimedValue.trim();
+  const lines: Array<{ text: string; start: number }> = [];
+  let sourceStart = 0;
+  for (const text of content.split("\n")) {
+    lines.push({ text, start: sourceStart });
+    sourceStart += text.length + 1;
+  }
+
+  for (let headerIndex = 0; headerIndex + 2 < lines.length; headerIndex += 1) {
+    const header = lines[headerIndex]!;
+    const delimiter = lines[headerIndex + 1]!;
+    const headerSpans = markdownTableCellSpans(header.text);
+    if (
+      headerSpans.length === 0 ||
+      !isMarkdownTableDelimiter(delimiter.text) ||
+      location.columnIndex >= headerSpans.length
+    ) {
+      continue;
+    }
+    const headerCell = headerSpans[location.columnIndex]!;
+    if (
+      normalizedMarkdownTableCell(
+        header.text.slice(headerCell.start, headerCell.end),
+      ) !== expectedColumn
+    ) {
+      continue;
+    }
+    const row = lines[headerIndex + 2 + location.rowIndex];
+    if (!row) continue;
+    const rowSpans = markdownTableCellSpans(row.text);
+    if (rowSpans.length <= location.columnIndex) continue;
+    const rowCell = rowSpans[0]!;
+    if (
+      normalizedMarkdownTableCell(row.text.slice(rowCell.start, rowCell.end)) !==
+      expectedRow
+    ) {
+      continue;
+    }
+    const valueCell = rowSpans[location.columnIndex]!;
+    const rawValueCell = row.text.slice(valueCell.start, valueCell.end);
+    const valueOffset = rawValueCell.indexOf(expectedValue);
+    return (
+      row.start +
+      (valueOffset >= 0
+        ? valueCell.start + valueOffset + expectedValue.length
+        : valueCell.end)
+    );
+  }
+  return undefined;
+}
+
 function injectQualityClaimMarkers(
   content: string,
   entries: LocalizedClaimQualityEntry[],
@@ -602,9 +702,12 @@ function injectQualityClaimMarkers(
       // coordinate-independent and lands on the statement by construction.
       // Table-cell claims read "row — column: value" and never appear
       // verbatim, so those still fall back to the offset.
+      const tableCellEnd = markdownTableCellClaimEnd(content, entry);
       const found = entry.exact ? content.indexOf(entry.exact) : -1;
       const requestedOffset =
-        found >= 0
+        entry.location?.kind === "table-cell"
+          ? tableCellEnd
+          : found >= 0
           ? found + entry.exact.length
           : claimSourceEnd(entry.location);
       return {

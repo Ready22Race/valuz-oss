@@ -16,6 +16,7 @@ from src.core.claim_audit import (
     auto_bind_unique_claims,
     bind_claims_to_evidence,
     calculation_formula_matches_evidence,
+    canonical_evidence_metric,
     extract_claims,
     extract_claims_with_status,
     match_available_evidence,
@@ -893,6 +894,43 @@ def test_exact_metric_calculation_supports_a_plain_display_value() -> None:
     assert support.status == "supported"
 
 
+def test_calculation_support_accepts_a_less_precise_display_rounding() -> None:
+    claim = extract_claims(
+        "毛利率为 74.9%。",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )[0]
+    support = verify_evidence_support(
+        claim,
+        {
+            "kind": "calculation",
+            "metric": "gross_margin",
+            "expression": "gross_profit / revenue * 100",
+            "inputs": [
+                {"name": "gross_profit", "value": 611.57, "unit": "USD 100m"},
+                {"name": "revenue", "value": 816.15, "unit": "USD 100m"},
+            ],
+            "result": 74.93,
+            "unit": "%",
+            "period": "2027 Q1",
+        },
+        semantics={
+            **_FINANCE_SEMANTICS,
+            "metric_ontology": {
+                "metrics": {
+                    **_FINANCE_SEMANTICS["metric_ontology"]["metrics"],
+                    "gross_margin": {
+                        "aliases": ["毛利率", "gross margin"],
+                        "fields": ["gross_margin"],
+                    },
+                }
+            },
+        },
+    )
+
+    assert support.status == "supported"
+
+
 def test_presentation_preface_is_separate_from_the_following_factual_claim() -> None:
     claims = extract_claims(
         "本报告按产品品类横向呈现，三家公司在该品类下均是供给方。",
@@ -1046,6 +1084,95 @@ def test_each_comma_clause_keeps_its_explicit_period_and_infers_derived_metric()
     ]
 
 
+def test_uncited_financial_recap_splits_numeric_clauses_before_auto_binding() -> None:
+    semantics = {
+        **_FINANCE_SEMANTICS,
+        "metric_ontology": {
+            "metrics": {
+                **_FINANCE_SEMANTICS["metric_ontology"]["metrics"],
+                "operating_cash_flow": {
+                    "aliases": ["经营性现金流", "经营现金流"],
+                    "fields": ["operating_cash_flow"],
+                },
+                "free_cash_flow": {
+                    "aliases": ["自由现金流", "FCF"],
+                    "fields": ["free_cash_flow"],
+                },
+                "operating_cash_flow_growth": {
+                    "aliases": ["经营现金流环比增速"],
+                    "fields": ["operating_cash_flow_growth_rate"],
+                },
+                "free_cash_flow_growth": {
+                    "aliases": ["自由现金流环比增速"],
+                    "fields": ["free_cash_flow_growth_rate"],
+                },
+            }
+        },
+        "calculation_dependencies": {
+            "operating_cash_flow_growth": ["operating_cash_flow"],
+            "free_cash_flow_growth": ["free_cash_flow"],
+        },
+    }
+
+    claims = extract_claims(
+        (
+            "现金流创记录：经营性现金流 503 亿美元（+39.1%），"
+            "自由现金流 486 亿美元（+39.2%），"
+            "自由现金流转化率极高，印证盈利质量。"
+        ),
+        mode="strict-domain",
+        semantics=semantics,
+    )
+
+    assert [claim.exact for claim in claims] == [
+        "现金流创记录：经营性现金流 503 亿美元（+39.1%），",
+        "自由现金流 486 亿美元（+39.2%），",
+    ]
+    assert [claim.normalized.get("metric") for claim in claims] == [
+        "operating_cash_flow",
+        "free_cash_flow",
+    ]
+
+
+def test_contextual_growth_clause_selects_growth_from_multiple_derived_metrics() -> None:
+    semantics = {
+        **_FINANCE_SEMANTICS,
+        "metric_ontology": {
+            "metrics": {
+                **_FINANCE_SEMANTICS["metric_ontology"]["metrics"],
+                "net_margin": {
+                    "aliases": ["净利润率", "net margin"],
+                    "fields": ["net_margin"],
+                },
+                "roe": {
+                    "aliases": ["净资产收益率", "ROE"],
+                    "fields": ["roe"],
+                },
+                "net_profit_growth": {
+                    "aliases": ["净利润增长率", "净利润环比增速"],
+                    "fields": ["net_profit_growth_rate"],
+                },
+            }
+        },
+        "calculation_dependencies": {
+            "net_margin": ["net_profit", "operating_revenue"],
+            "roe": ["net_profit"],
+            "net_profit_growth": ["net_profit"],
+        },
+    }
+
+    claims = extract_claims(
+        "净利润 583 亿美元，环比 +35.8%。",
+        mode="strict-domain",
+        semantics=semantics,
+    )
+
+    assert [claim.normalized.get("metric") for claim in claims] == [
+        "net_profit",
+        "net_profit_growth",
+    ]
+
+
 def test_citation_clause_split_ignores_internal_commas_before_the_binding() -> None:
     claims = extract_claims(
         "2024 年营业收入为 170,899,152,276.34 元，较上年同期增长 15.71% "
@@ -1059,6 +1186,24 @@ def test_citation_clause_split_ignores_internal_commas_before_the_binding() -> N
         ("cit_table",),
     ]
     assert claims[0].exact == ("2024 年营业收入为 170,899,152,276.34 元，较上年同期增长 15.71%，")
+
+
+def test_terminal_citation_does_not_absorb_uncited_trailing_interpretation() -> None:
+    claims = extract_claims(
+        (
+            "> FY2027 Q1 税前利润大幅高于经营利润，系当期产生 163.67 亿美元其他净收益"
+            " [来源](citation://cit_other_income)，属非经常项目。"
+        ),
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+    cited_claim = next(claim for claim in claims if claim.attached_citation_ids)
+
+    assert cited_claim.exact == "系当期产生 163.67 亿美元其他净收益，"
+    assert cited_claim.attached_citation_ids == ("cit_other_income",)
+    assert "税前利润大幅高于经营利润" not in cited_claim.exact
+    assert "属非经常项目" not in cited_claim.exact
 
 
 def test_text_evidence_supports_scaled_financial_values_and_percentages() -> None:
@@ -1540,6 +1685,138 @@ def test_structured_cny_value_matches_markdown_table_header_unit() -> None:
         field="operating_revenue",
         semantics=_FINANCE_SEMANTICS,
     )
+
+
+def test_structured_usd_value_inherits_short_preface_unit_for_following_table() -> None:
+    answer = (
+        "> 财年截止日：FY2027 Q1 = 2026-04-26；金额单位：亿美元。\n\n"
+        "| 项目 | FY2027 Q1 |\n"
+        "|---|---:|\n"
+        "| 营业收入 | 816.15 [source](citation://cit_revenue) |"
+    )
+    claim = next(
+        claim
+        for claim in extract_claims(
+            answer,
+            mode="strict-domain",
+            semantics=_FINANCE_SEMANTICS,
+        )
+        if claim.location["kind"] == "table-cell"
+    )
+    revenue = _structured_record(
+        "ev_preface_revenue_12345678",
+        field="operating_revenue",
+        value=81_615_000_000,
+        period="2027 Q1",
+    )
+    revenue["evidence"]["unit"] = "USD"
+
+    assert claim.normalized["unit"] == "亿美元"
+    assert claim.normalized["valueBase"] == "81615000000"
+    assert (
+        verify_evidence_support(
+            claim,
+            revenue,
+            semantics=_FINANCE_SEMANTICS,
+        ).status
+        == "supported"
+    )
+
+
+def test_point_in_time_table_keeps_unit_but_not_preface_period() -> None:
+    answer = (
+        "> 比较期间：FY2027 Q1 与 FY2026 Q4；金额单位：亿美元。\n\n"
+        "| 项目 | FY2027 Q1 |\n"
+        "|---|---:|\n"
+        "| 市值 | 44,900 [source](citation://cit_market_cap) |"
+    )
+    claim = next(
+        claim
+        for claim in extract_claims(
+            answer,
+            mode="strict-domain",
+            semantics=_FINANCE_SEMANTICS,
+        )
+        if claim.location["kind"] == "table-cell"
+    )
+    market_cap = _structured_record(
+        "ev_preface_market_cap_12345678",
+        field="market_cap",
+        value=4_490_000_000_000,
+        period="2027 Q1",
+    )
+    market_cap["evidence"]["unit"] = "USD"
+
+    assert claim.normalized["period"] == "2027 Q1"
+    assert claim.normalized["unit"] == "亿美元"
+    assert claim.normalized["valueBase"] == "4490000000000"
+    assert (
+        verify_evidence_support(
+            claim,
+            market_cap,
+            semantics=_FINANCE_SEMANTICS,
+        ).status
+        == "supported"
+    )
+
+
+def test_structured_value_inherits_currency_from_sibling_comparison_amount() -> None:
+    claim = (
+        "税前利润跳升主因 Q1 产生 163.67 亿美元其他收益净额"
+        "（Q4 为 60.99 亿）。"
+    )
+
+    assert structured_value_present(
+        6_099_000_000,
+        "USD",
+        claim,
+        field="other_income_net",
+        metric="other_income_net",
+        semantics=_FINANCE_SEMANTICS,
+    )
+
+
+def test_table_comparison_header_resolves_the_row_derived_metric() -> None:
+    claims = extract_claims(
+        "| 项目 | 2024 FY | 同比 |\n"
+        "|---|---:|---:|\n"
+        "| 营业收入 | 1,708.99 亿元 | +15.71% |",
+        mode="strict-domain",
+        semantics=_FINANCE_SEMANTICS,
+    )
+    growth_claim = next(claim for claim in claims if "同比:" in claim.exact)
+
+    assert growth_claim.normalized["metric"] == "revenue_growth"
+
+
+def test_calculation_metric_composes_base_alias_with_growth_qualifier() -> None:
+    assert (
+        canonical_evidence_metric(
+            {"kind": "calculation", "metric": "营业收入环比增长率"},
+            _FINANCE_SEMANTICS,
+        )
+        == "revenue_growth"
+    )
+
+
+def test_period_named_business_field_is_not_dropped_as_temporal_metadata() -> None:
+    semantics = {
+        "metric_ontology": {
+            "metrics": {
+                "cash_at_end_of_period": {
+                    "aliases": ["期末现金"],
+                    "fields": ["cash_at_end_of_period"],
+                }
+            }
+        }
+    }
+    claim = extract_claims(
+        "期末现金 — FY2027 Q1: 132.37。",
+        mode="strict-domain",
+        semantics=semantics,
+    )[0]
+
+    assert claim.normalized["metric"] == "cash_at_end_of_period"
 
 
 def test_structured_value_inherits_unit_from_sibling_period_cell() -> None:
@@ -3008,7 +3285,6 @@ def test_one_same_period_currency_value_is_not_a_source_fingerprint() -> None:
 
 
 def test_outflow_metric_can_display_authoritative_negative_value_as_magnitude() -> None:
-    answer = "FY2026 Q1 资本支出为 193.94 亿美元。"
     evidence = {
         "evidenceHandle": "ev_msft_q1_capex_12345678",
         "source": {
@@ -3031,19 +3307,23 @@ def test_outflow_metric_can_display_authoritative_negative_value_as_magnitude() 
         },
     }
 
-    claim = extract_claims(
-        answer,
-        mode="strict-domain",
-        semantics=_FINANCE_SEMANTICS,
-    )[0]
-    assert (
-        verify_evidence_support(
-            claim,
-            evidence,
+    for answer in (
+        "FY2026 Q1 资本支出为 193.94 亿美元。",
+        "FY2026 Q1 资本支出为 -193.94 亿美元。",
+    ):
+        claim = extract_claims(
+            answer,
+            mode="strict-domain",
             semantics=_FINANCE_SEMANTICS,
-        ).status
-        == "supported"
-    )
+        )[0]
+        assert (
+            verify_evidence_support(
+                claim,
+                evidence,
+                semantics=_FINANCE_SEMANTICS,
+            ).status
+            == "supported"
+        )
 
 
 def test_auto_bind_negative_disclosure_with_unique_quoted_anchor() -> None:
@@ -3649,10 +3929,10 @@ def test_text_table_base_unit_values_support_rounded_display_only_claim() -> Non
         ),
     }
 
-    assert len(claims) == 1
-    assert (
-        verify_evidence_support(claims[0], evidence, semantics=_FINANCE_SEMANTICS).status
-        == "supported"
+    assert len(claims) == 2
+    assert all(
+        verify_evidence_support(claim, evidence, semantics=_FINANCE_SEMANTICS).status == "supported"
+        for claim in claims
     )
 
 

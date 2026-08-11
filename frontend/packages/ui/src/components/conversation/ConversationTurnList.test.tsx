@@ -393,10 +393,14 @@ describe("ConversationTurnList virtualization", () => {
       name: /(?:citation|引用) 1/i,
     });
     fireEvent.mouseEnter(pill);
-    expect(screen.getByRole("tooltip").textContent).toContain(
+    const hoverCard = document.querySelector<HTMLElement>(
+      "[data-citation-hover-card]",
+    );
+    expect(hoverCard).not.toBeNull();
+    expect(hoverCard?.textContent).toContain(
       "Late sidecar source",
     );
-    expect(screen.getByRole("tooltip").textContent).toContain(
+    expect(hoverCard?.textContent).toContain(
       "Late sidecar source evidence",
     );
   });

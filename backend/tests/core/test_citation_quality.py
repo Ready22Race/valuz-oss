@@ -571,6 +571,396 @@ def test_explicit_binding_is_verified_even_when_claim_came_from_user_prompt() ->
     ]
 
 
+def test_complete_component_evidence_does_not_degrade_one_compound_claim() -> None:
+    policy = _policy()
+    policy["config"]["semantics"] = {
+        "metric_ontology": {
+            "metrics": {
+                "operating_cash_flow": {
+                    "aliases": ["经营性现金流", "经营现金流"],
+                    "fields": ["operating_cash_flow"],
+                },
+                "free_cash_flow": {
+                    "aliases": ["自由现金流", "FCF"],
+                    "fields": ["free_cash_flow"],
+                },
+                "operating_cash_flow_growth": {
+                    "aliases": ["经营性现金流环比", "经营现金流环比增速"],
+                    "fields": ["operating_cash_flow_growth_rate"],
+                },
+                "free_cash_flow_growth": {
+                    "aliases": ["自由现金流环比", "自由现金流环比增速"],
+                    "fields": ["free_cash_flow_growth_rate"],
+                },
+            }
+        },
+        "unit_ontology": {
+            "units": {
+                "usd": {"canonical": "USD", "aliases": ["USD"], "scale": 1},
+                "usd_hundred_million": {
+                    "canonical": "USD",
+                    "aliases": ["亿美元"],
+                    "scale": 100_000_000,
+                },
+                "percentage": {
+                    "canonical": "percent",
+                    "aliases": ["%"],
+                    "scale": 1,
+                },
+            }
+        },
+        "calculation_dependencies": {
+            "operating_cash_flow_growth": ["operating_cash_flow"],
+            "free_cash_flow_growth": ["free_cash_flow"],
+        },
+    }
+
+    def structured(citation_id: str, metric: str, value: int, period: str) -> dict:
+        item = _structured(citation_id)
+        item["evidence"].update(
+            {
+                "field": metric,
+                "metric": metric,
+                "value": value,
+                "unit": "USD",
+                "period": period,
+            }
+        )
+        return item
+
+    current_ocf = structured("cit_ocf", "operating_cash_flow", 50_344_000_000, "2027 Q1")
+    prior_ocf = structured("cit_ocf_prior", "operating_cash_flow", 36_188_000_000, "2026 Q4")
+    current_fcf = structured("cit_fcf", "free_cash_flow", 48_587_000_000, "2027 Q1")
+    prior_fcf = structured("cit_fcf_prior", "free_cash_flow", 34_904_000_000, "2026 Q4")
+
+    def calculation(
+        citation_id: str,
+        metric: str,
+        result: str,
+        current: dict,
+        prior: dict,
+    ) -> dict:
+        return {
+            "citationId": citation_id,
+            "source": {
+                "sourceId": citation_id,
+                "providerId": "calculation",
+                "sourceType": "dataset",
+                "title": "Calculation",
+                "retrievedAt": "2026-08-10T00:00:00Z",
+            },
+            "evidence": {
+                "kind": "calculation",
+                "toolName": "stock.calculation",
+                "expression": "(q1 / q4 - 1) * 100",
+                "result": result,
+                "unit": "%",
+                "rounding": "1dp",
+                "metric": metric,
+                "period": "FY2027 Q1 vs FY2026 Q4",
+                "calculatedAt": "2026-08-10T00:00:00Z",
+                "inputs": [
+                    {
+                        "name": "q1",
+                        "citationId": current["citationId"],
+                        "value": current["evidence"]["value"],
+                        "unit": "USD",
+                    },
+                    {
+                        "name": "q4",
+                        "citationId": prior["citationId"],
+                        "value": prior["evidence"]["value"],
+                        "unit": "USD",
+                    },
+                ],
+            },
+        }
+
+    ocf_growth = calculation(
+        "cit_ocf_growth",
+        "operating_cash_flow_growth",
+        "39.1",
+        current_ocf,
+        prior_ocf,
+    )
+    fcf_growth = calculation(
+        "cit_fcf_growth",
+        "free_cash_flow_growth",
+        "39.2",
+        current_fcf,
+        prior_fcf,
+    )
+    result = evaluate_citation_quality(
+        (
+            "经营性现金流 503 亿美元（+39.1%）和自由现金流 486 亿美元（+39.2%）"
+            "[1](citation://cit_ocf)[2](citation://cit_ocf_growth)"
+            "[3](citation://cit_fcf)[4](citation://cit_fcf_growth)。"
+        ),
+        {
+            "version": 1,
+            "citations": [
+                current_ocf,
+                prior_ocf,
+                current_fcf,
+                prior_fcf,
+                ocf_growth,
+                fcf_growth,
+            ],
+            "integrity": _integrity(),
+        },
+        policy,
+    )
+
+    claim = result["quality"]["claims"][0]
+    assert claim["status"] == "passed", result["quality"]
+    assert "claim_evidence_conflict" not in claim["issueCodes"]
+    assert all(
+        citation["annotations"]["quality"]["status"] == "passed"
+        for citation in result["citations"]
+        if citation["citationId"]
+        in {
+            "cit_ocf",
+            "cit_ocf_growth",
+            "cit_fcf",
+            "cit_fcf_growth",
+        }
+    )
+
+    wrong = structured("cit_wrong", "free_cash_flow", 9_900_000_000, "2027 Q1")
+    contradicted = evaluate_citation_quality(
+        (
+            "经营性现金流 503 亿美元（+39.1%）和自由现金流 486 亿美元（+39.2%）"
+            "[1](citation://cit_ocf)[2](citation://cit_ocf_growth)"
+            "[3](citation://cit_fcf)[4](citation://cit_fcf_growth)"
+            "[5](citation://cit_wrong)。"
+        ),
+        {
+            "version": 1,
+            "citations": [
+                current_ocf,
+                prior_ocf,
+                current_fcf,
+                prior_fcf,
+                ocf_growth,
+                fcf_growth,
+                wrong,
+            ],
+            "integrity": _integrity(),
+        },
+        policy,
+    )
+
+    contradicted_claim = contradicted["quality"]["claims"][0]
+    assert contradicted_claim["status"] == "degraded"
+    assert "structured_source_conflict" in contradicted_claim["issueCodes"]
+    conflict = next(
+        issue
+        for issue in contradicted["quality"]["issues"]
+        if issue["code"] == "structured_source_conflict"
+    )
+    assert set(conflict["citationIds"]) == {"cit_fcf", "cit_wrong"}
+
+
+def test_unselected_compound_claim_does_not_treat_one_valid_component_as_conflict() -> None:
+    policy = _policy()
+    policy["config"]["rules"]["claim_audit"] = {
+        "selection_enabled": True,
+        "max_selected_claims": 0,
+        "max_selected_claims_per_group": 0,
+    }
+    policy["config"]["source_tiers"][0]["match"] = {"source_types": ["dataset"]}
+    policy["config"]["semantics"] = {
+        "metric_ontology": {
+            "metrics": {
+                "long_term_debt": {
+                    "aliases": ["长期债务"],
+                    "fields": ["long_term_debt"],
+                },
+                "total_liabilities": {
+                    "aliases": ["总负债"],
+                    "fields": ["total_liabilities"],
+                },
+                "total_assets": {
+                    "aliases": ["总资产"],
+                    "fields": ["total_assets"],
+                },
+                "debt_to_assets": {
+                    "aliases": ["资产负债率"],
+                    "fields": ["debt_to_assets"],
+                },
+            }
+        },
+        "unit_ontology": {
+            "units": {
+                "usd_hundred_million": {
+                    "canonical": "USD",
+                    "aliases": ["亿美元"],
+                    "scale": 100_000_000,
+                },
+                "percentage": {"canonical": "percent", "aliases": ["%"], "scale": 1},
+            }
+        },
+        "calculation_dependencies": {
+            "debt_to_assets": ["total_liabilities", "total_assets"],
+        },
+    }
+    liabilities = _structured("cit_liabilities")
+    liabilities["evidence"].update(
+        {"metric": "total_liabilities", "field": "total_liabilities", "value": 64_000}
+    )
+    assets = _structured("cit_assets")
+    assets["evidence"].update(
+        {"metric": "total_assets", "field": "total_assets", "value": 259_474}
+    )
+    ratio = {
+        "citationId": "cit_ratio",
+        "source": {
+            "sourceId": "calculation-ratio",
+            "providerId": "calculation",
+            "sourceType": "dataset",
+            "title": "Calculation",
+            "retrievedAt": "2026-08-11T00:00:00Z",
+        },
+        "evidence": {
+            "kind": "calculation",
+            "toolName": "runtime.calculation",
+            "expression": "(liabilities / assets) * 100",
+            "result": 24.7,
+            "unit": "%",
+            "rounding": "1dp",
+            "metric": "FY2027Q1 资产负债率",
+            "inputs": [
+                {"name": "liabilities", "citationId": "cit_liabilities", "value": 64_000},
+                {"name": "assets", "citationId": "cit_assets", "value": 259_474},
+            ],
+        },
+        "annotations": {"provenance": {"toolName": "stock.calculation"}},
+    }
+
+    result = evaluate_citation_quality(
+        "长期债务 74.7 亿美元几乎未变，资产负债率仅 24.7% [计算](citation://cit_ratio)。",
+        {
+            "version": 1,
+            "citations": [liabilities, assets, ratio],
+            "integrity": _integrity(),
+        },
+        policy,
+    )
+
+    codes = {issue["code"] for issue in result["quality"]["issues"]}
+    assert "claim_evidence_conflict" not in codes
+    assert next(
+        citation for citation in result["citations"] if citation["citationId"] == "cit_ratio"
+    )["annotations"]["quality"]["status"] == "passed", result["quality"]["issues"]
+
+
+def test_compound_base_value_and_growth_calculation_are_local_components() -> None:
+    policy = _policy()
+    policy["config"]["source_tiers"][0]["match"] = {"source_types": ["dataset"]}
+    policy["config"]["semantics"] = {
+        "metric_ontology": {
+            "metrics": {
+                "net_profit": {
+                    "aliases": ["净利润"],
+                    "fields": ["net_profit"],
+                },
+                "net_profit_growth": {
+                    "aliases": ["净利润环比增长率"],
+                    "fields": ["net_profit_growth"],
+                },
+            }
+        },
+        "unit_ontology": {
+            "units": {
+                "usd": {"canonical": "USD", "aliases": ["USD"], "scale": 1},
+                "usd_hundred_million": {
+                    "canonical": "USD",
+                    "aliases": ["亿美元"],
+                    "scale": 100_000_000,
+                },
+                "percentage": {"canonical": "percent", "aliases": ["%"], "scale": 1},
+            }
+        },
+        "calculation_dependencies": {"net_profit_growth": ["net_profit"]},
+    }
+    current = _structured("cit_net_profit")
+    current["evidence"].update(
+        {
+            "field": "net_profit",
+            "metric": "net_profit",
+            "value": 58_321_000_000,
+            "unit": "USD",
+            "period": "2027 Q1",
+        }
+    )
+    prior = _structured("cit_net_profit_prior")
+    prior["evidence"].update(
+        {
+            "field": "net_profit",
+            "metric": "net_profit",
+            "value": 42_960_000_000,
+            "unit": "USD",
+            "period": "2026 Q4",
+        }
+    )
+    growth = {
+        "citationId": "cit_net_profit_growth",
+        "source": {
+            "sourceId": "calculation-net-profit-growth",
+            "providerId": "calculation",
+            "sourceType": "dataset",
+            "title": "Calculation",
+            "retrievedAt": "2026-08-11T00:00:00Z",
+        },
+        "evidence": {
+            "kind": "calculation",
+            "toolName": "stock.calculation",
+            "expression": "(current / prior - 1) * 100",
+            "result": 35.8,
+            "unit": "%",
+            "rounding": "1dp",
+            "metric": "净利润环比增长率",
+            "inputs": [
+                {
+                    "name": "current",
+                    "citationId": "cit_net_profit",
+                    "value": 58_321_000_000,
+                    "unit": "USD",
+                },
+                {
+                    "name": "prior",
+                    "citationId": "cit_net_profit_prior",
+                    "value": 42_960_000_000,
+                    "unit": "USD",
+                },
+            ],
+        },
+    }
+
+    result = evaluate_citation_quality(
+        (
+            "推动净利润环比 +35.8% 至 583 亿美元"
+            "[增长](citation://cit_net_profit_growth)"
+            "[净利润](citation://cit_net_profit)。"
+        ),
+        {
+            "version": 1,
+            "citations": [current, prior, growth],
+            "integrity": _integrity(),
+        },
+        policy,
+    )
+
+    assert "claim_evidence_conflict" not in {
+        issue["code"] for issue in result["quality"]["issues"]
+    }
+    assert all(
+        citation["annotations"]["quality"]["status"] == "passed"
+        for citation in result["citations"]
+        if citation["citationId"] in {"cit_net_profit", "cit_net_profit_growth"}
+    ), result["quality"]["issues"]
+
+
 def test_policy_audits_non_numeric_external_facts_and_dates() -> None:
     result = evaluate_citation_quality(
         "The company was founded in 1999. Alice is the CEO.",
@@ -681,9 +1071,7 @@ def test_unselected_structured_claim_still_runs_basic_conflict_check() -> None:
     assert result["quality"]["metrics"]["criticalClaimSelectedCount"] == 1
     assert result["quality"]["metrics"]["criticalConfirmedConflictCount"] == 0
     conflict = next(
-        issue
-        for issue in result["quality"]["issues"]
-        if issue["code"] == "claim_evidence_conflict"
+        issue for issue in result["quality"]["issues"] if issue["code"] == "claim_evidence_conflict"
     )
     assert conflict["severity"] == "degraded"
 
@@ -957,9 +1345,7 @@ def test_unique_safe_partial_binding_does_not_create_claim_support_warning() -> 
             }
         },
         "unit_ontology": {
-            "units": {
-                "usd": {"canonical": "USD", "aliases": ["USD", "$"], "scale": 1}
-            }
+            "units": {"usd": {"canonical": "USD", "aliases": ["USD", "$"], "scale": 1}}
         },
     }
 
@@ -1888,6 +2274,57 @@ def test_structured_preflight_preserves_markdown_table_header_unit() -> None:
     assert result["quality"]["status"] == "passed"
 
 
+def test_structured_preflight_inherits_unit_from_short_table_preface() -> None:
+    policy = _policy()
+    policy["config"]["semantics"] = {
+        "metric_ontology": {
+            "metrics": {
+                "operating_revenue": {
+                    "aliases": ["营业收入", "营收"],
+                    "fields": ["revenue", "operating_revenue"],
+                }
+            }
+        },
+        "unit_ontology": {
+            "units": {
+                "usd": {"canonical": "USD", "aliases": ["USD", "美元"], "scale": 1},
+                "usd-hundred-million": {
+                    "canonical": "USD",
+                    "aliases": ["亿美元"],
+                    "scale": 100_000_000,
+                },
+            }
+        },
+    }
+    citation = _structured()
+    citation["evidence"].update(
+        {
+            "field": "revenue",
+            "metric": "operating_revenue",
+            "value": 81_615_000_000,
+            "unit": "USD",
+            "period": "2027 Q1",
+            "entityId": "NVDA",
+        }
+    )
+    result = evaluate_citation_quality(
+        "> 财年截止日：FY2027 Q1 = 2026-04-26；金额单位：亿美元。\n\n"
+        "| 项目 | FY2027 Q1 |\n"
+        "|---|---:|\n"
+        "| 营收 | 816.15 [1](citation://cit_revenue) |",
+        {
+            "version": 1,
+            "citations": [citation],
+            "integrity": _integrity(),
+        },
+        policy,
+    )
+
+    assert "structured_value_not_present_in_answer" not in {
+        issue["code"] for issue in result["quality"]["issues"]
+    }
+
+
 def test_structured_preflight_inherits_unit_from_sibling_period_cell() -> None:
     policy = _policy()
     policy["config"]["semantics"] = {
@@ -2169,6 +2606,53 @@ def test_metric_acronym_in_parentheses_is_not_a_company_identifier() -> None:
             "integrity": _integrity(),
         },
         _policy(),
+    )
+
+    assert "claim_source_entity_conflict" not in {
+        issue["code"] for issue in result["quality"]["issues"]
+    }
+
+
+def test_configured_metric_acronym_is_not_inferred_as_company_identifier() -> None:
+    citation = _structured("cit_fcf")
+    citation["source"]["title"] = "NVIDIA (NVDA) cash flow statement"
+    citation["evidence"].update(
+        {
+            "entityId": "NVDA",
+            "entityName": "NVIDIA",
+            "field": "free_cash_flow",
+            "metric": "free_cash_flow",
+            "value": 485.87,
+            "unit": "USDm",
+            "period": "FY2027 Q1",
+        }
+    )
+    policy = _policy()
+    policy["config"]["semantics"] = {
+        "metric_ontology": {
+            "metrics": {
+                "free_cash_flow": {
+                    "aliases": ["自由现金流", "free cash flow", "FCF"],
+                    "fields": ["free_cash_flow"],
+                }
+            }
+        }
+    }
+    answer = (
+        "NVIDIA（NVDA）\n\n"
+        "| 项目 | FY2027 Q1 |\n"
+        "|---|---:|\n"
+        "| 自由现金流（FCF） | 485.87 USDm [1](citation://cit_fcf) |"
+    )
+
+    result = evaluate_citation_quality(
+        answer,
+        {
+            "version": 1,
+            "citations": [citation],
+            "integrity": _integrity(),
+        },
+        policy,
     )
 
     assert "claim_source_entity_conflict" not in {
@@ -2526,6 +3010,62 @@ def test_negative_calculation_result_matches_unicode_minus_and_decline_wording()
         assert "calculation_result_not_present_in_answer" not in {
             issue["code"] for issue in result["quality"]["issues"]
         }
+
+
+def test_calculation_result_accepts_a_less_precise_display_rounding() -> None:
+    source = _structured("cit_margin_source")
+    source["evidence"].update(
+        {
+            "field": "gross_margin",
+            "metric": "gross_margin",
+            "value": 74.93,
+            "unit": "%",
+            "period": "FY2027 Q1",
+        }
+    )
+    calculation = {
+        "citationId": "cit_margin_calc",
+        "source": {
+            "sourceId": "calculation-margin",
+            "providerId": "runtime",
+            "sourceType": "tool-result",
+            "title": "Calculation",
+            "retrievedAt": "2026-08-11T10:00:00Z",
+        },
+        "evidence": {
+            "kind": "calculation",
+            "metric": "gross_margin",
+            "expression": "margin",
+            "inputs": [
+                {
+                    "name": "margin",
+                    "citationId": "cit_margin_source",
+                    "value": 74.93,
+                    "unit": "%",
+                }
+            ],
+            "result": 74.93,
+            "unit": "%",
+            "rounding": "2dp",
+            "calculatedAt": "2026-08-11T10:00:00Z",
+        },
+    }
+    policy = _policy()
+    policy["config"]["rules"]["derived_value"]["require_result_in_answer"] = True
+
+    result = evaluate_citation_quality(
+        "FY2027 Q1 毛利率为 74.9% [计算](citation://cit_margin_calc)。",
+        {
+            "version": 1,
+            "citations": [source, calculation],
+            "integrity": _integrity(),
+        },
+        policy,
+    )
+
+    assert "calculation_result_not_present_in_answer" not in {
+        issue["code"] for issue in result["quality"]["issues"]
+    }
 
 
 def test_document_category_tiers_fetched_chunk_not_generic_fetch_tool() -> None:
