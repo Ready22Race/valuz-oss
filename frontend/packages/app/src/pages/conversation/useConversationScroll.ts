@@ -76,6 +76,22 @@ export function useConversationScroll({
     [],
   );
 
+  // Bring a turn's top (its user message) to the top of the viewport.
+  //
+  // Exposed for host surfaces that put the page into a mode whose controls
+  // live at the turn's top — share selection is the case that needed it: the
+  // checkbox sits beside the user message, so entering selection from a reply
+  // footer far below it ticked something the owner could not see. Deferred a
+  // frame because the caller is typically mid-state-change (the mode's own
+  // chrome grows the rows); ``scrollToTurnTop`` then corrects iteratively.
+  const scrollToTurnIndex = useCallback((index: number) => {
+    if (index < 0) return;
+    keepCurrentTurnAtTopRef.current = false;
+    requestAnimationFrame(() => {
+      turnListVirtualApiRef.current?.scrollToTurnTop(index);
+    });
+  }, []);
+
   // Show the scroll-to-bottom affordance whenever there's overflow not
   // currently in view — either because the user scrolled up (scroll
   // listener) or because the content grew past the viewport without any
@@ -523,5 +539,6 @@ export function useConversationScroll({
     containerHeight,
     handleScrollToBottom,
     handleTurnListVirtualApiReady,
+    scrollToTurnIndex,
   };
 }

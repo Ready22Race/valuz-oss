@@ -54,6 +54,11 @@ type ConversationHeaderProps = {
   setTitleDeleting: Dispatch<SetStateAction<boolean>>;
   draftSendInFlight: boolean;
   effectiveTurns: ConversationTurn[];
+  /** Bring the loaded top of the conversation into view. Lent to the title
+   *  slot: an action there can switch the page into a mode whose per-turn
+   *  controls start at the first turn (share selection's checkboxes), and the
+   *  title is normally clicked from the bottom of a long transcript. */
+  scrollToTop: () => void;
   selectedProjectOrigin: ComposerConfig["selectedProjectOrigin"];
   headerAgentSlug: string | null;
   agentNameBySlug: ComposerConfig["agentNameBySlug"];
@@ -86,6 +91,7 @@ export function ConversationHeader({
   setTitleDeleting,
   draftSendInFlight,
   effectiveTurns,
+  scrollToTop,
   selectedProjectOrigin,
   headerAgentSlug,
   agentNameBySlug,
@@ -243,7 +249,11 @@ export function ConversationHeader({
                 ``@valuz/ui`` where the same need is served by a ReactNode prop. */}
             <SlotRenderer
               name="conversation.title.actions"
-              context={{ sessionId: selectedSessionId, session: selectedSession }}
+              context={{
+                sessionId: selectedSessionId,
+                session: selectedSession,
+                scrollToTop,
+              }}
             />
             <SessionStatusPill
               // ``created`` is exactly the state a not-yet-minted session is

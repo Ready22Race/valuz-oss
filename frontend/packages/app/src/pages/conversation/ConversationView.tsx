@@ -211,6 +211,7 @@ function ConversationViewPage(props: ConversationViewProps) {
             setTitleDeleting={setTitleDeleting}
             draftSendInFlight={core.draftSendInFlight}
             effectiveTurns={core.effectiveTurns}
+            scrollToTop={() => core.scrollToTurnIndex(0)}
             selectedProjectOrigin={core.selectedProjectOrigin}
             headerAgentSlug={core.headerAgentSlug}
             agentNameBySlug={core.agentNameBySlug}
@@ -239,6 +240,7 @@ function ConversationViewPage(props: ConversationViewProps) {
             containerHeight={core.containerHeight}
             skillsBySlug={core.skillsBySlug}
             handleTurnListVirtualApiReady={core.handleTurnListVirtualApiReady}
+            scrollToTurnIndex={core.scrollToTurnIndex}
             renderToolCall={core.renderToolCall}
             isToolCardFoldable={core.isToolCardFoldable}
             revealInFinder={core.revealInFinder}
@@ -406,6 +408,7 @@ function ConversationViewPanel(props: ConversationViewProps) {
         containerHeight={core.containerHeight}
         skillsBySlug={core.skillsBySlug}
         handleTurnListVirtualApiReady={core.handleTurnListVirtualApiReady}
+        scrollToTurnIndex={core.scrollToTurnIndex}
         renderToolCall={core.renderToolCall}
         isToolCardFoldable={core.isToolCardFoldable}
         revealInFinder={core.revealInFinder}

@@ -45,6 +45,7 @@ type ConversationBodyProps = {
   containerHeight: ConversationScroll["containerHeight"];
   skillsBySlug: ComposerConfig["skillsBySlug"];
   handleTurnListVirtualApiReady: ConversationScroll["handleTurnListVirtualApiReady"];
+  scrollToTurnIndex: ConversationScroll["scrollToTurnIndex"];
   renderToolCall: ToolCallCards["renderToolCall"];
   isToolCardFoldable: ToolCallCards["isToolCardFoldable"];
   revealInFinder: ReturnType<typeof usePlatform>["revealInFinder"];
@@ -95,6 +96,7 @@ export function ConversationBody({
   containerHeight,
   skillsBySlug,
   handleTurnListVirtualApiReady,
+  scrollToTurnIndex,
   renderToolCall,
   isToolCardFoldable,
   revealInFinder,
@@ -181,7 +183,19 @@ export function ConversationBody({
               renderTurnActions={(turn) => (
                 <SlotRenderer
                   name="conversation.turn.actions"
-                  context={{ turn }}
+                  context={{
+                    turn,
+                    // An action here may switch the page into a mode whose
+                    // per-turn control sits at the TOP of this turn (share
+                    // selection's checkbox lives beside the user message).
+                    // Clicked from the reply footer that control is off-screen
+                    // above, so the host lends the overlay the same scroll it
+                    // uses for a new turn.
+                    scrollToTurn: () =>
+                      scrollToTurnIndex(
+                        effectiveTurns.findIndex((x) => x.id === turn.id),
+                      ),
+                  }}
                 />
               )}
               renderTurnLeading={(turn, role) => (
