@@ -22,13 +22,19 @@
   width: 100%;
   min-width: 0;
   max-width: 100%;
+}
 
-  /* 图表专属系列色板,供 seriesColor() 解析。与文本语义色
-     (--openui-text-*) 解耦:图表第 N 系列读 --vgb-chart-N,不随
-     host 的 info→brand 语义映射而撞色。默认值遵循 OpenUI chart
-     palette(host 主题的 --accent-* 八色,GenerativeUIRenderer 也把
-     同一组色传给 OpenUI 的图表组件,所以 vgb 图表与 OpenUI 图表
-     视觉一致);host 未定义 --accent-* 时回退到 OpenUI 语义色。 */
+/* 图表专属系列色板,供 seriesColor() 解析。与文本语义色
+   (--openui-text-*) 解耦:图表第 N 系列读 --vgb-chart-N,不随 host
+   的 info→brand 语义映射而撞色。默认值遵循 OpenUI chart palette
+   (host 主题的 --accent-* 八色,GenerativeUIRenderer 也把同一组色
+   传给 OpenUI 的图表组件,所以 vgb 图表与 OpenUI 图表视觉一致);
+   host 未定义 --accent-* 时回退到 OpenUI 语义色。
+   定义在 :where(.vgb-root, .vgb-chart) 而不是单独 .vgb-root:图表
+   组件(ComboChart/CategoryBars/…)的根是 ChartFrame 的 .vgb-chart,
+   不是 .vgb-root——只挂在 .vgb-root 上会让 seriesColor 读不到变量,
+   回退成中性色,图表画成单色。 */
+:where(.vgb-root, .vgb-chart) {
   --vgb-chart-1: var(--accent-sky, var(--openui-text-info-primary));
   --vgb-chart-2: var(--accent-teal, var(--openui-text-success-primary));
   --vgb-chart-3: var(--accent-amber, var(--openui-text-alert-primary));
