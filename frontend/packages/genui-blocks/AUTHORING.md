@@ -100,7 +100,7 @@ Write rules in `src/styles/<family>.css` and add one `@import` line to
   `--openui-font-{body,heading,label,numbers,code}`,
   `--openui-font-weight-{regular,medium,bold,heavy}`,
   `--openui-text-neutral-{primary,secondary,tertiary}`,
-  `--openui-{background,foreground,highlight,highlight-subtle,border-default}`,
+  `--openui-{background,foreground,elevated,highlight,highlight-subtle,border-default}`,
   and the tone families wrapped by `lib/tone.ts`.
 - Responsive behaviour uses `@container vgb (max-width: …)`, never
   `@media`. Blocks live in a chat column whose width has nothing to do with
@@ -108,6 +108,40 @@ Write rules in `src/styles/<family>.css` and add one `@import` line to
   breakpoints are `48rem` (two-up) and `30rem` (one-up).
 - Wide content (tables, charts) scrolls inside its own box — reuse
   `.vgb-scroll-x`. The page body must never scroll sideways.
+
+### Surface semantics
+
+Pick the surface by **meaning**, not by how dark you want it. Four utility
+classes in `base.css` map one-to-one onto OpenUI's surface levels:
+
+| Class | Token | Use for |
+|-------|-------|---------|
+| `.vgb-surface-card` | `--openui-elevated` + `--openui-shadow-s` | Raised content containers — cards, panels |
+| `.vgb-surface-sunk` | `--openui-highlight-subtle` | Recessed fills — tiles, row washes, grouped data |
+| `.vgb-surface-clear` | transparent | Inline groups that need no frame |
+| `.vgb-surface-highlight` | `--openui-highlight` | Selected/active/emphasis states |
+
+`.vgb-card` is already an elevated surface (border + subtle shadow); `.vgb-tile`
+is already sunk. Prefer composing these classes over redeclaring
+`background-color` / `border` / `box-shadow`.
+
+### CSS classes vs inline styles
+
+Use **CSS classes** for static design — colours, spacing, radius, type, shadows,
+borders, hover/focus states, and container-query behaviour.
+
+Use **inline `style`** only for values that come from data: a bar's width, a
+tone chosen from a prop, a grid track size the model supplied. Resolve those
+through the helpers in `lib/tone.ts` (`toneText`, `toneSurface`, `toneBorder`,
+`trendTone`) so a literal colour never reaches the DOM.
+
+Never put a static token value inline, and never express a hover state inline.
+
+### Shadows
+
+`--openui-shadow-s` is for elevated cards and chart tooltips. Lists, rows, and
+inline content stay flat — they are content, not surfaces. Do not add shadow to
+a tile or a table row.
 
 - **Two components must never share one schema object.** The library keys
   registration off the schema, so a second `defineComponent` given the same
@@ -145,6 +179,63 @@ the id (`trending-up`) resolve; an unknown name renders nothing. Never accept
 an emoji as an icon, and say so in the description — a block without an `icon`
 prop is a block meant to have no icon.
 
+## Interaction
+
+Blocks render a **finished answer**, not an application. The test for any
+interaction is: does it help the user *read* the result, or does it turn the
+block into a *control surface*? Only the first is allowed.
+
+### Allowed (read aids)
+
+- **Row hover wash** — reuse `.vgb-row` (defined in `base.css`): a subtle
+  `--openui-highlight-subtle` background on `:hover` with a 120ms transition.
+  It anchors the eye while scanning; it is not a clickability cue, so no lift,
+  no shadow, no pointer cursor. For table/list rows that carry their own
+  padding, apply the wash directly to the row with the same timing.
+- **Link hover** — `text-decoration: underline` + brand text colour on title
+  links. Real navigation only; the block does not handle clicks itself.
+- **CSS-only tooltips** — `:hover` / `:focus-visible` revealing an absolutely
+  positioned card, as `Citation` does. No JS state.
+- **Native disclosure** — `<details>`/`<summary>` for collapsible sections
+  (`Collapsible`, `CondensedSources`). The browser owns open/closed and
+  keyboard behaviour.
+- **Scroll** — `.vgb-scroll-x` for wide content.
+- **Chart tooltips** — recharts' built-in tooltip, styled through the shared
+  `recharts-chrome.ts`.
+
+Every one of these is CSS-only or uses a native element. No `useState`, no
+reducers, no event handlers that change block state.
+
+### Forbidden
+
+- Sortable/filterable tables, pagination, "load more" — the result is already
+  computed; paginate in the generation, not the UI.
+- Drag and drop, reordering.
+- Editable fields, inline editing, form submission.
+- Action buttons inside blocks (save/export/regenerate live in host chrome).
+- Tabs/accordions/carousels driven by JS state — generate separate sections
+  instead.
+- A pointer cursor or lift/shadow on something that cannot be activated.
+
+### Focus & motion
+
+- Every interactive element (links, `<summary>`, anything a host makes
+  focusable) gets `:focus-visible` with
+  `outline: 2px solid var(--openui-border-accent); outline-offset: 2px;`.
+- All transitions must stop under `@media (prefers-reduced-motion: reduce)`.
+  Add the selector to the shared guard in `base.css`.
+
+### Accessibility
+
+- Screen-reader-only content uses the package-wide `.vgb-sr-only` utility in
+  `base.css` (`.vgb-cite-sr`, `.vgb-chart-sr`, `.vgb-avatar-sr` are aliases of
+  it — new code uses `.vgb-sr-only`).
+- Every chart carries a one-sentence `.vgb-chart-sr` summary describing what the
+  picture shows — an SVG and a row of numbers announce nothing on their own.
+- Trend/state must not be conveyed by colour alone: pair it with a glyph
+  (`trendGlyph`), a text label, or weight. Up/down is red/green by the Greater
+  China convention decided once in `trendTone`.
+
 ## Constraints
 
 - **No `@valuz/*` imports.** This package sits below `@valuz/ui`; importing
@@ -156,6 +247,61 @@ prop is a block meant to have no icon.
   `useEffect` that touches anything outside the component.
 - Prefer one component with a variant prop over near-duplicate components. If
   two layouts differ only in density or alignment, that is a prop.
+
+## Composition vs a new block
+
+Before writing a new block, check whether the shape already exists. Editions
+compose freely with `renderBlock` (see `lib/compose`): a finance `SecurityList`
+is a list of `MiniCard`-shaped rows plus an OSS `Sparkline`, not a new card
+system.
+
+- **Compose** when the new component is a specific *arrangement* of existing
+  blocks — "X of Y with Z added". The shape is the same, only the data and
+  layout differ.
+- **Build new** when the shape has no base equivalent — a candlestick chart
+  (no base chart draws candles), a ranked progress breakdown, a structure no
+  existing block can produce.
+
+If two blocks would share a new visual primitive, add the primitive here and
+have both compose it, rather than duplicating it in each.
+
+## Charts
+
+- Recharts blocks read the shared chrome from `lib/recharts-chrome.ts`
+  (`CHART_MARGIN`, `AXIS_TICK`, `GRID_STROKE`, `TOOLTIP_*`, `MAX_BAR_SIZE`).
+  Do not restyle these per block.
+- Series colours come from the `--vgb-chart-1` … `--vgb-chart-8` palette tokens
+  on `.vgb-chart`, never from semantic text tones — a multi-series chart must
+  keep distinct hues regardless of how the host maps `info` to `brand`.
+  Hosts/editions override these variables to retune the palette in one place.
+- Chart heights read from the tokens on `.vgb-chart`:
+  `--vgb-chart-h-default` / `--vgb-chart-h-narrow` (full charts) and
+  `--vgb-chart-h-small` / `--vgb-chart-h-small-narrow` (small multiples), so a
+  host can retune the whole family's vertical rhythm.
+
+## Pre-flight checklist
+
+Before opening a PR, confirm the block:
+
+- [ ] lives in `src/<ComponentName>/{schema.ts,index.tsx}` with a test beside it
+- [ ] uses `defineComponent` from `@openuidev/react-lang` and `z` from `zod/v4`
+- [ ] has a `description` written as instructions to the model
+- [ ] is registered in `src/blocks.ts` (central assembly) and grouped
+- [ ] has every class prefixed `.vgb-` and a `data-slot="vgb-<kebab>"` root
+- [ ] uses only `--openui-*` tokens (no hex/rgb/Tailwind)
+- [ ] uses `@container vgb`, never `@media` viewport queries
+- [ ] keeps figures unbreakable (`white-space: nowrap` + tabular-nums)
+- [ ] wraps wide content in `.vgb-scroll-x`
+- [ ] degrades gracefully: missing arrays render nothing, missing scalars drop
+      the slot rather than leaving an empty frame
+- [ ] has no data fetching, timers, or internal state; interactions are read
+      aids only (hover/tooltip/scroll/`<details>`)
+- [ ] has `:focus-visible` on anything interactive and a `prefers-reduced-motion`
+      guard on every transition
+- [ ] is screen-reader accessible (`.vgb-sr-only` summary for charts, aria-label
+      where colour alone carries meaning)
+- [ ] regenerated the catalog (`pnpm --filter @valuz/ui gen:genui-catalog`)
+- [ ] passes `tsc --noEmit` and the block's render tests
 
 ## Registering blocks from an edition
 

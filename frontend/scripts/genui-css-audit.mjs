@@ -8,17 +8,40 @@
  *   5. Unprefixed class names (no .vgb- or .vfb- prefix)
  *   6. Class name count per file
  *
- * Usage: node scripts/genui-css-audit.mjs [--json]
+ * Usage:
+ *   node scripts/genui-css-audit.mjs           # print report, always exit 0
+ *   node scripts/genui-css-audit.mjs --json    # machine-readable JSON
+ *   node scripts/genui-css-audit.mjs --check   # exit 1 on real violations
+ *
+ * A "real violation" is a hardcoded colour/spacing, viewport @media, or
+ * unprefixed class that is NOT:
+ *   - a custom-property default (--vgb-chart-1: #0ea5e9)
+ *   - the structural keywords transparent / currentColor
+ *   - geometry (chart heights, widths, bar radii) rather than spacing
  */
 
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const OSS_DIR = "packages/genui-blocks/src/styles";
-const FINANCE_DIR =
-  "../../../editions/finance/frontend/src/genui-blocks/styles";
+// Resolve from this script's own location so the audit works regardless of
+// the working directory it is invoked from. The script lives at
+// <oss>/frontend/scripts/, OSS styles under frontend/packages/..., and the
+// finance edition four levels up at the monorepo root (vendor/valuz-oss →
+// valuz-oss → vendor → <commercial root>).
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const FRONTEND_DIR = path.resolve(__dirname, "..");
+const OSS_DIR = path.join(
+  FRONTEND_DIR,
+  "packages/genui-blocks/src/styles",
+);
+const FINANCE_DIR = path.resolve(
+  FRONTEND_DIR,
+  "../../../editions/finance/frontend/src/genui-blocks/styles",
+);
 
 const asJson = process.argv.includes("--json");
+const asCheck = process.argv.includes("--check");
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -60,6 +83,10 @@ function tokenFamily(token) {
 const HEX_RE = /#([0-9a-fA-F]{3,8})\b/g;
 const RGB_RE = /\brgb(a?)\s*\(/g;
 const HSL_RE = /\bhsl(a?)\s*\(/g;
+// Named colours that are legitimate in a token-driven stylesheet:
+// `transparent` and `currentColor` are structural keywords, not palette picks.
+// Every other named colour is a hardcoded value the host cannot retune.
+const LEGAL_NAMED_COLORS = new Set(["transparent", "currentcolor"]);
 const NAMED_COLORS = new Set([
   "transparent", "currentcolor", "black", "white", "red", "blue",
   "green", "yellow", "gray", "grey", "purple", "orange", "pink",
@@ -69,11 +96,11 @@ const NAMED_COLORS = new Set([
 
 function findHardcodedColors(css, filePath) {
   const hits = [];
-  // Skip var() and custom property declarations — those aren't hardcoded
   const lines = css.split("\n");
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    // Skip lines that only declare custom properties or use var() exclusively
+    // Skip lines that only declare custom properties (token defaults) or are
+    // comments / at-rules — those aren't hardcoded component colours.
     if (/^\s*--/.test(line)) continue;
     if (/^\s*\/\*/.test(line)) continue;
     if (/^\s*\*/.test(line)) continue;
@@ -89,7 +116,11 @@ function findHardcodedColors(css, filePath) {
     for (const m of cleaned.matchAll(HSL_RE)) found.add(`${m[1]}()`);
     // named colours — be conservative, only match value context (after ":")
     const valMatch = cleaned.match(/:\s*([a-z]+)\s*[;}]/i);
-    if (valMatch && NAMED_COLORS.has(valMatch[1].toLowerCase())) {
+    if (
+      valMatch &&
+      NAMED_COLORS.has(valMatch[1].toLowerCase()) &&
+      !LEGAL_NAMED_COLORS.has(valMatch[1].toLowerCase())
+    ) {
       found.add(valMatch[1].toLowerCase());
     }
 
@@ -347,6 +378,47 @@ if (oss.unprefixedClasses.length || finance?.unprefixedClasses.length) {
       console.log(`  [fin/${h.file}:${h.line}] ${h.selector}`);
     }
   }
+}
+
+// ── check mode: fail on real violations ──────────────────────────────────────
+
+if (asCheck) {
+  // Spacing hits on width/height/top/etc are GEOMETRY (chart heights, bar
+  // radii, track sizes), not design spacing — those stay in px deliberately.
+  // Only padding/margin/gap/border-radius px values are real violations.
+  const SPACING_PROPS = new Set([
+    "padding", "padding-top", "padding-right", "padding-bottom", "padding-left",
+    "margin", "margin-top", "margin-right", "margin-bottom", "margin-left",
+    "gap", "row-gap", "column-gap",
+  ]);
+  const isRealSpacingHit = (h) => SPACING_PROPS.has(h.prop);
+
+  const violations = [];
+  for (const [label, data] of [["oss", oss], ["fin", finance]]) {
+    if (!data) continue;
+    for (const h of data.colorHits) {
+      violations.push(`${label}/${h.file}:${h.line} hardcoded colour ${h.values.join(", ")}`);
+    }
+    for (const h of data.spacingHits.filter(isRealSpacingHit)) {
+      violations.push(`${label}/${h.file}:${h.line} spacing px on ${h.prop} (${h.values.join(", ")})`);
+    }
+    for (const h of data.mediaHits) {
+      violations.push(`${label}/${h.file}:${h.line} viewport @media — use @container`);
+    }
+    for (const h of data.unprefixedClasses) {
+      violations.push(`${label}/${h.file}:${h.line} unprefixed class ${h.selector}`);
+    }
+  }
+
+  if (violations.length) {
+    printSection("GenUI CSS audit FAILED");
+    for (const v of violations) console.log(`  ✗ ${v}`);
+    console.log(`\n  ${violations.length} violation(s). Use --openui-* tokens; see AUTHORING.md.`);
+    process.exit(1);
+  }
+
+  console.log("\n✓ GenUI CSS audit passed — no hardcoded colours/spacing, no viewport @media, all classes prefixed.");
+  process.exit(0);
 }
 
 console.log("\n");
