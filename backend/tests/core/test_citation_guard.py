@@ -539,6 +539,9 @@ def test_native_reportify_collection_materializes_only_addressed_field() -> None
             "scale": "yuan",
             "operating_revenue": 170_899_152_276,
             "net_profit": 86_228_146_422,
+            "diluted_earnings_per_share": 2.39,
+            "capital_expenditure": -1_757_000_000,
+            "weighted_average_shares": 24_400_000_000,
         }
     ]
     raw_hash = json.dumps(
@@ -617,15 +620,305 @@ def test_native_reportify_collection_materializes_only_addressed_field() -> None
         collection_handle,
         "#/data/0/operating_revenue",
     )
+    diluted_eps = registry.materialize_reference(
+        collection_handle,
+        "#/data/0/diluted_earnings_per_share",
+    )
+    capital_expenditure = registry.materialize_reference(
+        collection_handle,
+        "#/data/0/capital_expenditure",
+    )
+    weighted_average_shares = registry.materialize_reference(
+        collection_handle,
+        "#/data/0/weighted_average_shares",
+    )
 
     assert revenue is not None
-    assert len(registry) == 1
+    assert diluted_eps is not None
+    assert capital_expenditure is not None
+    assert weighted_average_shares is not None
+    assert len(registry) == 4
     assert revenue.evidence["entityId"] == "600519"
     assert revenue.evidence["period"] == "2024 FY"
     assert revenue.evidence["metric"] == "operating_revenue"
     assert revenue.evidence["value"] == 170_899_152_276
     assert revenue.evidence["unit"] == "CNY yuan"
     assert revenue.evidence["scale"] == "yuan"
+    assert diluted_eps.evidence["unit"] == "CNY"
+    assert capital_expenditure.evidence["unit"] == "CNY"
+    assert "unit" not in weighted_average_shares.evidence
+
+
+def test_claim_audit_materializes_cross_scale_multi_period_table_values() -> None:
+    data = [
+        {
+            "symbol": "NVDA",
+            "fiscal_year": 2027,
+            "fiscal_quarter": "Q1",
+            "currency": "USD",
+            "revenue": 81_615_000_000,
+        },
+        {
+            "symbol": "NVDA",
+            "fiscal_year": 2026,
+            "fiscal_quarter": "Q4",
+            "currency": "USD",
+            "revenue": 68_127_000_000,
+        },
+    ]
+    raw_hash = json.dumps(
+        data,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    collection_handle = "evc_nvda_income_statement_12345678"
+    raw = {
+        "data": data,
+        "_valuz_evidence": [
+            {
+                "version": 1,
+                "kind": "structured-evidence-collection",
+                "collectionHandle": collection_handle,
+                "source": {
+                    "sourceId": "reportify-income-statement:NVDA",
+                    "providerId": "valuz-stock",
+                    "sourceType": "dataset",
+                    "title": "Company income statement · NVDA",
+                    "retrievedAt": "2026-08-10T00:00:00Z",
+                },
+                "common": {
+                    "datasetId": "reportify-financial-income-statement",
+                    "toolName": "company_income_statement",
+                    "capturedAt": "2026-08-10T00:00:00Z",
+                },
+                "addressing": {
+                    "mode": "json-pointer",
+                    "contentRoot": "/data",
+                    "itemsPointer": "/data",
+                    "identityFields": ["/symbol", "/fiscal_year", "/fiscal_quarter"],
+                    "allowedPathRoots": ["/data"],
+                },
+                "semantics": {
+                    "entity": {"id": "/symbol"},
+                    "period": {
+                        "fiscalYear": "/fiscal_year",
+                        "fiscalQuarter": "/fiscal_quarter",
+                    },
+                    "currency": {"currency": "/currency"},
+                    "metric": {"mode": "field-name", "valueRoots": [""]},
+                },
+                "contentHash": (f"sha256:{hashlib.sha256(raw_hash.encode('utf-8')).hexdigest()}"),
+            }
+        ],
+    }
+    visible = compact_citation_tool_content(raw)
+    private = private_citation_tool_content(raw)
+    assert visible is not None and private is not None
+    registry = EvidenceRegistry()
+    assert (
+        registry.register_tool_projection(
+            visible,
+            private,
+            tool_name="company_income_statement",
+            trusted_private=True,
+        )
+        == 1
+    )
+    quality_policy = {
+        "policy_id": "test-finance",
+        "revision": "test-finance-v1",
+        "mode": "strict-domain",
+        "config": {
+            "rules": {"factual_claim": {"citation_required": True}},
+            "semantics": {
+                "metric_ontology": {
+                    "metrics": {
+                        "operating_revenue": {
+                            "aliases": ["营收", "revenue"],
+                            "fields": ["revenue", "operating_revenue"],
+                        }
+                    }
+                },
+                "unit_ontology": {
+                    "units": {
+                        "usd": {"canonical": "USD", "aliases": ["USD"], "scale": 1},
+                        "usd_hundred_million": {
+                            "canonical": "USD",
+                            "aliases": ["亿美元"],
+                            "scale": 100_000_000,
+                        },
+                    }
+                },
+            },
+        },
+    }
+
+    result = CitationGuard(
+        registry,
+        message_id="msg-cross-scale-period-table",
+        user_prompt="对比 NVIDIA 两个季度的营收",
+        policy_available=True,
+        quality_policy=quality_policy,
+    ).finalize(
+        "| 项目 | FY2027 Q1（亿美元） | FY2026 Q4（亿美元） |\n"
+        "|---|---:|---:|\n"
+        "| 营收 | 816.15 | 681.27 |"
+    )
+
+    assert result.bundle is not None
+    assert result.text.count("citation://") == 2
+    assert len(result.bundle["citations"]) == 2
+    assert {citation["evidence"]["period"] for citation in result.bundle["citations"]} == {
+        "2027 Q1",
+        "2026 Q4",
+    }
+    assert {citation["evidence"]["value"] for citation in result.bundle["citations"]} == {
+        81_615_000_000,
+        68_127_000_000,
+    }
+    assert not any(
+        claim["status"] in {"unsupported", "unverified", "contradicted"}
+        for claim in result.bundle["quality"]["claims"]
+        if claim["citationRequired"]
+    )
+
+
+def test_guard_auto_binds_each_atomic_financial_recap_clause() -> None:
+    operating_cash_flow = _structured_item(
+        "ev_operating_cash_flow_12345678",
+        entity_id="NVDA",
+        field="operating_cash_flow",
+        value=50_344_000_000,
+        unit="USD",
+    )
+    free_cash_flow = _structured_item(
+        "ev_free_cash_flow_12345678",
+        entity_id="NVDA",
+        field="free_cash_flow",
+        value=48_587_000_000,
+        unit="USD",
+    )
+    policy = {
+        "policy_id": "test-finance-recap",
+        "revision": "test-finance-recap-v1",
+        "mode": "strict-domain",
+        "config": {
+            "rules": {"factual_claim": {"citation_required": True}},
+            "semantics": {
+                "metric_ontology": {
+                    "metrics": {
+                        "operating_cash_flow": {
+                            "aliases": ["经营性现金流", "经营现金流"],
+                            "fields": ["operating_cash_flow"],
+                        },
+                        "free_cash_flow": {
+                            "aliases": ["自由现金流"],
+                            "fields": ["free_cash_flow"],
+                        },
+                    }
+                },
+                "unit_ontology": {
+                    "units": {
+                        "usd": {"canonical": "USD", "aliases": ["USD"], "scale": 1},
+                        "usd_hundred_million": {
+                            "canonical": "USD",
+                            "aliases": ["亿美元"],
+                            "scale": 100_000_000,
+                        },
+                    }
+                },
+            },
+        },
+    }
+
+    result = CitationGuard(
+        _registry(operating_cash_flow, free_cash_flow),
+        message_id="msg-atomic-financial-recap",
+        user_prompt="总结现金流亮点",
+        policy_available=True,
+        quality_policy=policy,
+    ).finalize("现金流创记录：经营性现金流 503 亿美元，自由现金流 486 亿美元，印证盈利质量。")
+
+    assert result.bundle is not None
+    assert result.text.count("citation://") == 2
+    required_claims = [
+        claim for claim in result.bundle["quality"]["claims"] if claim["citationRequired"]
+    ]
+    assert [claim["exact"] for claim in required_claims] == [
+        "现金流创记录：经营性现金流 503 亿美元，",
+        "自由现金流 486 亿美元，",
+    ]
+    assert all(claim["status"] in {"passed", "auto-bound"} for claim in required_claims)
+    assert not any(
+        issue["code"] == "claim_evidence_conflict" for issue in result.bundle["quality"]["issues"]
+    )
+
+
+def test_collection_infers_currency_unit_only_for_monetary_field_names() -> None:
+    data = [
+        {
+            "symbol": "NVDA",
+            "currency": "USD",
+            "common_stock_repurchased": -21_441_000_000,
+            "shares_outstanding": 24_300_000_000,
+        }
+    ]
+    raw_hash = json.dumps(data, sort_keys=True, separators=(",", ":"))
+    collection_handle = "evc_nvda_cashflow_units_12345678"
+    raw = {
+        "data": data,
+        "_valuz_evidence": [
+            {
+                "version": 1,
+                "kind": "structured-evidence-collection",
+                "collectionHandle": collection_handle,
+                "source": {
+                    "sourceId": "reportify-cashflow:NVDA",
+                    "providerId": "valuz-stock",
+                    "sourceType": "dataset",
+                    "title": "Cash-flow statement · NVDA",
+                    "retrievedAt": "2026-08-10T00:00:00Z",
+                },
+                "common": {
+                    "datasetId": "reportify-financial-cashflow",
+                    "toolName": "cashflow_statement",
+                    "capturedAt": "2026-08-10T00:00:00Z",
+                },
+                "addressing": {
+                    "mode": "json-pointer",
+                    "contentRoot": "/data",
+                    "itemsPointer": "/data",
+                    "identityFields": ["/symbol"],
+                    "allowedPathRoots": ["/data"],
+                },
+                "semantics": {
+                    "entity": {"id": "/symbol"},
+                    "currency": {"currency": "/currency"},
+                    "metric": {"mode": "field-name", "valueRoots": [""]},
+                },
+                "contentHash": (f"sha256:{hashlib.sha256(raw_hash.encode('utf-8')).hexdigest()}"),
+            }
+        ],
+    }
+    visible = compact_citation_tool_content(raw)
+    private = private_citation_tool_content(raw)
+    assert visible is not None and private is not None
+    registry = EvidenceRegistry()
+    assert registry.register_tool_projection(visible, private, trusted_private=True) == 1
+
+    repurchase = registry.materialize_reference(
+        collection_handle,
+        "#/data/0/common_stock_repurchased",
+    )
+    shares = registry.materialize_reference(
+        collection_handle,
+        "#/data/0/shares_outstanding",
+    )
+
+    assert repurchase is not None and repurchase.evidence["unit"] == "USD"
+    assert shares is not None and "unit" not in shares.evidence
 
 
 def test_collection_address_recovers_omitted_declared_items_wrapper() -> None:
@@ -678,9 +971,7 @@ def test_collection_address_recovers_omitted_declared_items_wrapper() -> None:
                     "asOf": {"value": "/date"},
                     "metric": {"mode": "field-name", "valueRoots": [""]},
                 },
-                "contentHash": (
-                    f"sha256:{hashlib.sha256(raw_hash.encode('utf-8')).hexdigest()}"
-                ),
+                "contentHash": (f"sha256:{hashlib.sha256(raw_hash.encode('utf-8')).hexdigest()}"),
             }
         ],
     }
@@ -688,12 +979,15 @@ def test_collection_address_recovers_omitted_declared_items_wrapper() -> None:
     private = private_citation_tool_content(raw)
     assert visible is not None and private is not None
     registry = EvidenceRegistry()
-    assert registry.register_tool_projection(
-        visible,
-        private,
-        tool_name="stock_quote",
-        trusted_private=True,
-    ) == 1
+    assert (
+        registry.register_tool_projection(
+            visible,
+            private,
+            tool_name="stock_quote",
+            trusted_private=True,
+        )
+        == 1
+    )
 
     record = registry.materialize_reference(
         collection_handle,
@@ -755,9 +1049,7 @@ def test_materialization_offsets_map_back_to_the_streamed_text() -> None:
 
     handle = visible["_valuz_evidence_hint"]["collectionHandle"]
     marker = "毛利率 41.2%"
-    streamed = (
-        f"营业收入 [source](evidence://{handle}#/data/0/operating_revenue)。{marker}"
-    )
+    streamed = f"营业收入 [source](evidence://{handle}#/data/0/operating_revenue)。{marker}"
     guard = CitationGuard(
         registry,
         message_id="msg-offset-map",
@@ -866,9 +1158,7 @@ def test_address_pointer_may_contain_parentheses_and_a_space() -> None:
 
     # A bare address must still stop at the link, never swallow the prose that
     # follows it.
-    trailing = _BARE_EVIDENCE_RE.search(
-        f"evidence://evc_mcp_ind_12345678{pointer} 后面还有正文"
-    )
+    trailing = _BARE_EVIDENCE_RE.search(f"evidence://evc_mcp_ind_12345678{pointer} 后面还有正文")
     assert trailing is not None
     assert trailing.group(2) == pointer
 

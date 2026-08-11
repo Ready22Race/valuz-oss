@@ -4,16 +4,24 @@ import {
   isValidElement,
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type ComponentPropsWithoutRef,
+  type MouseEvent as ReactMouseEvent,
   type ReactElement,
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
-import { AlertTriangle, Calculator, ExternalLink, Info } from "lucide-react";
+import {
+  AlertTriangle,
+  Calculator,
+  ChevronDown,
+  ExternalLink,
+  Info,
+} from "lucide-react";
 import { Streamdown, type Components } from "streamdown";
 import type {
   CitationBundleV1,
@@ -535,6 +543,111 @@ function qualityBadge(
   return label ? { label, status } : null;
 }
 
+const SOURCE_TIER_IDS = ["T1", "T2", "T3", "T4", "T5"] as const;
+type SourceTierId = (typeof SOURCE_TIER_IDS)[number];
+
+function sourceTierId(label: string): SourceTierId | null {
+  return SOURCE_TIER_IDS.includes(label as SourceTierId)
+    ? (label as SourceTierId)
+    : null;
+}
+
+function SourceTierLegendTooltip({
+  tooltipId,
+  activeTier,
+  align = "right",
+}: {
+  tooltipId: string;
+  activeTier?: SourceTierId;
+  align?: "left" | "right";
+}) {
+  const { t } = useI18n();
+  const legend = [
+    { id: "T1", description: t("ui.citation.sourceTierT1") },
+    { id: "T2", description: t("ui.citation.sourceTierT2") },
+    { id: "T3", description: t("ui.citation.sourceTierT3") },
+    { id: "T4", description: t("ui.citation.sourceTierT4") },
+    { id: "T5", description: t("ui.citation.sourceTierT5") },
+  ] satisfies Array<{ id: SourceTierId; description: string }>;
+
+  return (
+    <span
+      id={tooltipId}
+      role="tooltip"
+      data-citation-source-tier-tooltip
+      className={cn(
+        "invisible absolute top-full z-50 w-72 rounded-lg border border-surface-border bg-surface p-2.5 text-left text-2xs font-normal text-ink-body opacity-0 shadow-lg transition-opacity group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100",
+        align === "left" ? "left-0" : "right-0",
+      )}
+    >
+      <span className="block font-medium text-ink-heading">
+        {t("ui.citation.sourceTierTitle")}
+      </span>
+      <span className="mt-1.5 flex flex-col gap-1">
+        {legend.map((item) => (
+          <span
+            key={item.id}
+            data-citation-source-tier-row={item.id}
+            data-active={item.id === activeTier || undefined}
+            className={cn(
+              "flex gap-2 rounded px-1.5 py-1 leading-4",
+              item.id === activeTier && "bg-surface-muted text-ink-heading",
+            )}
+          >
+            <span className="w-5 shrink-0 font-semibold">{item.id}</span>
+            <span>{item.description}</span>
+          </span>
+        ))}
+      </span>
+      <span className="mt-1.5 block border-t border-surface-border pt-1.5 leading-4 text-ink-meta">
+        {t("ui.citation.sourceTierCaveat")}
+      </span>
+    </span>
+  );
+}
+
+function SourceTierBadge({
+  quality,
+  instanceId,
+  focusable = true,
+  triggerClassName,
+  labelClassName,
+}: {
+  quality: { label: string; status?: string };
+  instanceId: string;
+  focusable?: boolean;
+  triggerClassName?: string;
+  labelClassName?: string;
+}) {
+  const sourceTier = sourceTierId(quality.label);
+  if (!sourceTier) return null;
+
+  const tooltipId = `citation-source-tier-${instanceId.replace(/[^a-zA-Z0-9_-]/gu, "-")}`;
+
+  return (
+    <span
+      data-citation-source-tier-trigger={sourceTier}
+      className={cn(
+        "group relative inline-flex cursor-help rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30",
+        triggerClassName,
+      )}
+      tabIndex={focusable ? 0 : undefined}
+      aria-describedby={focusable ? tooltipId : undefined}
+    >
+      <span
+        data-citation-quality={quality.status}
+        className={labelClassName}
+      >
+        {quality.label}
+      </span>
+      <SourceTierLegendTooltip
+        tooltipId={tooltipId}
+        activeTier={sourceTier}
+      />
+    </span>
+  );
+}
+
 function citationCorrections(
   citation: CitationRefV1,
 ): Array<{
@@ -703,7 +816,7 @@ function CitationEvidenceMarkdown({ content }: { content: string }) {
       data-citation-evidence-text
       data-citation-evidence-table={hasTable || undefined}
       className={cn(
-        "mt-1.5 max-h-64 overflow-auto text-ink-heading",
+        "mt-1.5 text-ink-heading",
         hasTable
           ? cn(
               "rounded-md border border-surface-border",
@@ -762,6 +875,8 @@ function CitationHoverCard({
   onMouseLeave: () => void;
 }) {
   const { t } = useI18n();
+  const [showFullEvidence, setShowFullEvidence] = useState(false);
+  const evidenceScrollRef = useRef<HTMLDivElement>(null);
   const detail = evidenceText(
     citation,
     t("ui.citation.documentCoverageComplete"),
@@ -771,6 +886,7 @@ function CitationHoverCard({
     citation.source.author ??
     citation.source.providerId;
   const quality = qualityBadge(citation);
+  const sourceTier = quality ? sourceTierId(quality.label) : null;
   const corrections = citationCorrections(citation);
   const qualityTone = qualityIssues?.some((issue) => issue.tone === "critical")
     ? "critical"
@@ -785,15 +901,45 @@ function CitationHoverCard({
           return source ? [{ input, source }] : [];
         })
       : [];
+  const hasFocusedExcerpt = Boolean(detail.snippet);
+  const primaryEvidence = detail.snippet ?? detail.quote;
+  const isSearchSummary = citation.source.sourceCategory === "search_summary";
+  const evidenceTitle =
+    citation.evidence.kind === "structured-data"
+      ? t("ui.citation.dataTitle")
+      : citation.evidence.kind === "calculation"
+        ? t("ui.citation.calculationTitle")
+        : isSearchSummary
+          ? t("ui.citation.searchSummaryTitle")
+          : hasFocusedExcerpt
+            ? t("ui.citation.relatedExcerptTitle")
+            : t("ui.citation.evidenceTitle");
+  const displayedEvidence =
+    hasFocusedExcerpt && showFullEvidence ? detail.quote : primaryEvidence;
+  const displayedEvidenceTitle =
+    hasFocusedExcerpt && showFullEvidence
+      ? t("ui.citation.fullEvidenceTitle")
+      : evidenceTitle;
+  const openActionLabel =
+    citation.evidence.kind === "structured-data"
+      ? t("ui.citation.viewData", "View data")
+      : citation.evidence.kind === "calculation"
+        ? t("ui.citation.calculationDetails", "View calculation")
+        : t("ui.citation.openSource", "View original");
+  const openSource = (event: ReactMouseEvent<HTMLElement>) => {
+    event.stopPropagation();
+    onOpen();
+  };
 
   return (
     <div
       ref={cardRef}
       role="tooltip"
+      data-citation-hover-card
       data-side={side}
       style={{ left: position.left, top: position.top }}
       className={cn(
-        "fixed z-50 max-h-[min(440px,calc(100vh-32px))] overflow-y-auto rounded-lg border border-surface-border bg-surface p-3 text-left text-xs font-normal text-ink-body shadow-xl",
+        "fixed z-50 flex max-h-[min(440px,calc(100vh-32px))] flex-col overflow-visible rounded-lg border border-surface-border bg-surface text-left text-xs font-normal text-ink-body shadow-xl",
         hasTable
           ? "w-[min(680px,calc(100vw-32px))]"
           : "w-[min(420px,calc(100vw-32px))]",
@@ -801,31 +947,61 @@ function CitationHoverCard({
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
     >
-      <span className="flex items-start gap-2">
+      <span
+        data-citation-card-header
+        className="flex shrink-0 items-start gap-2 border-b border-surface-border px-3 py-2.5"
+      >
         <span className="min-w-0 flex-1">
-          <span className="block font-medium text-ink-heading">
-            {displayIndex ? `${displayIndex} ` : ""}
-            {citation.source.title}
-          </span>
+          {canOpen ? (
+            <button
+              type="button"
+              data-citation-title-link
+              className="block w-full rounded-sm text-left font-medium text-ink-heading transition-colors hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
+              onClick={openSource}
+            >
+              {displayIndex ? `${displayIndex} ` : ""}
+              {citation.source.title}
+            </button>
+          ) : (
+            <span className="block font-medium text-ink-heading">
+              {displayIndex ? `${displayIndex} ` : ""}
+              {citation.source.title}
+            </span>
+          )}
           <span className="mt-0.5 block text-ink-meta">
             {[attribution, detail.time].filter(Boolean).join(" · ")}
           </span>
         </span>
         <span className="flex shrink-0 items-center gap-1">
           {quality ? (
-            <span
-              data-citation-quality={quality.status}
-              className={cn(
-                "rounded px-1.5 py-0.5 text-2xs",
-                quality.status === "passed"
-                  ? "bg-success-light text-success"
-                  : qualityTone === "critical"
-                    ? "bg-warning-light text-warning-text"
-                    : "bg-surface-muted text-ink-meta",
-              )}
-            >
-              {quality.label}
-            </span>
+            sourceTier ? (
+              <SourceTierBadge
+                quality={quality}
+                instanceId={`card-${citation.citationId}`}
+                labelClassName={cn(
+                  "rounded px-1.5 py-0.5 text-2xs",
+                  quality.status === "passed"
+                    ? "bg-success-light text-success"
+                    : qualityTone === "critical"
+                      ? "bg-warning-light text-warning-text"
+                      : "bg-surface-muted text-ink-meta",
+                )}
+              />
+            ) : (
+              <span
+                data-citation-quality={quality.status}
+                className={cn(
+                  "rounded px-1.5 py-0.5 text-2xs",
+                  quality.status === "passed"
+                    ? "bg-success-light text-success"
+                    : qualityTone === "critical"
+                      ? "bg-warning-light text-warning-text"
+                      : "bg-surface-muted text-ink-meta",
+                )}
+              >
+                {quality.label}
+              </span>
+            )
           ) : null}
           {citation.resolutionStatus &&
           citation.resolutionStatus !== "ready" ? (
@@ -835,125 +1011,170 @@ function CitationHoverCard({
           ) : null}
         </span>
       </span>
-      {corrections.length ? (
+      <div
+        data-citation-card-body
+        className="flex min-h-0 flex-1 flex-col overflow-hidden px-3 py-2.5"
+      >
+        {corrections.length ? (
+          <div
+            data-citation-corrections
+            className="mb-2 max-h-24 shrink-0 overflow-y-auto rounded-md bg-surface-muted/70 px-2.5 py-2 leading-5 text-ink-body"
+          >
+            {corrections.map((correction) => (
+              <span
+                key={`${correction.originalText}:${correction.replacementText}`}
+                className="block"
+              >
+                {t(
+                  correction.reason === "document-value-conflict"
+                    ? "ui.citation.sourceValueCorrected"
+                    : "ui.citation.structuredValueCorrected",
+                  {
+                    original: correction.originalText,
+                    replacement: correction.replacementText,
+                  },
+                )}
+              </span>
+            ))}
+          </div>
+        ) : null}
         <div
-          data-citation-corrections
-          className="mt-2 rounded-md bg-surface-muted/70 px-2.5 py-2 leading-5 text-ink-body"
+          data-citation-evidence-section
+          className="flex min-h-0 flex-1 flex-col"
         >
-          {corrections.map((correction) => (
-            <span
-              key={`${correction.originalText}:${correction.replacementText}`}
-              className="block"
+          <span className="block text-2xs font-medium text-ink-meta">
+            {displayedEvidenceTitle}
+          </span>
+          <div
+            ref={evidenceScrollRef}
+            data-citation-evidence-scroll
+            className="min-h-0 flex-1 overflow-y-auto pr-1"
+          >
+            <div
+              data-citation-displayed-evidence={
+                showFullEvidence ? "full" : "focused"
+              }
             >
-              {t(
-                correction.reason === "document-value-conflict"
-                  ? "ui.citation.sourceValueCorrected"
-                  : "ui.citation.structuredValueCorrected",
-                {
-                original: correction.originalText,
-                replacement: correction.replacementText,
-                },
+              <CitationEvidenceMarkdown content={displayedEvidence} />
+            </div>
+          </div>
+          {hasFocusedExcerpt ? (
+            <div className="mt-2 shrink-0 border-t border-surface-border pt-2">
+              <button
+                type="button"
+                aria-expanded={showFullEvidence}
+                data-citation-full-evidence-toggle
+                className="flex w-full items-center justify-between rounded-sm text-left text-2xs font-medium text-ink-body transition-colors hover:text-ink-heading focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  if (evidenceScrollRef.current) {
+                    evidenceScrollRef.current.scrollTop = 0;
+                  }
+                  setShowFullEvidence((current) => !current);
+                }}
+              >
+                <span>
+                  {showFullEvidence
+                    ? t("ui.citation.hideFullEvidence")
+                    : t("ui.citation.showFullEvidence")}
+                </span>
+                <ChevronDown
+                  className={cn(
+                    "h-3 w-3 text-ink-meta transition-transform",
+                    showFullEvidence && "rotate-180",
+                  )}
+                  aria-hidden="true"
+                />
+              </button>
+            </div>
+          ) : null}
+        </div>
+        {qualityIssues?.length ? (
+          <div
+            data-citation-quality-issues={qualityTone}
+            className={cn(
+              "mt-2 flex max-h-24 shrink-0 items-start gap-1.5 overflow-y-auto rounded-md px-2.5 py-2 leading-5 text-ink-body",
+              qualityTone === "critical"
+                ? "bg-warning-light/50"
+                : "bg-surface-muted/70",
+            )}
+          >
+            <span className="flex h-5 shrink-0 items-center" aria-hidden="true">
+              {qualityTone === "critical" ? (
+                <AlertTriangle className="h-3.5 w-3.5 text-warning-text" />
+              ) : (
+                <Info className="h-3.5 w-3.5 text-ink-meta" />
               )}
             </span>
-          ))}
-        </div>
-      ) : null}
-      <div data-citation-evidence-section className="mt-3">
-        <span className="block text-2xs font-medium text-ink-meta">
-          {t("ui.citation.evidenceTitle")}
-        </span>
-        <CitationEvidenceMarkdown content={detail.quote} />
-        {detail.snippet ? (
-          <span className="mt-1.5 block whitespace-pre-wrap leading-5 text-ink-meta">
-            {detail.snippet}
+            <span>
+              <span
+                className={cn(
+                  "font-medium",
+                  qualityTone === "critical"
+                    ? "text-warning-text"
+                    : "text-ink-body",
+                )}
+              >
+                {qualityTone === "critical"
+                  ? t("ui.citation.qualityNeedsReview")
+                  : t("ui.citation.qualityCheckSuggested")}
+              </span>
+              <span className="mx-1 text-ink-meta" aria-hidden="true">
+                ·
+              </span>
+              {qualityIssues.map((issue) => issue.label).join(" · ")}
+            </span>
+          </div>
+        ) : null}
+        {calculationInputs.length ? (
+          <span className="mt-2 block max-h-24 shrink-0 overflow-y-auto border-t border-surface-border pt-2">
+            <span className="block text-2xs font-medium uppercase tracking-wide text-ink-meta">
+              {t("ui.citation.calculationInputs", "Calculation inputs")}
+            </span>
+            <span className="mt-1 flex flex-col gap-1">
+              {calculationInputs.map(({ input, source }) => {
+                const disabled =
+                  !canOpenLinkedEvidence ||
+                  source.resolutionStatus === "forbidden" ||
+                  source.resolutionStatus === "missing";
+                return (
+                  <button
+                    key={`${input.name}:${input.citationId}`}
+                    type="button"
+                    disabled={disabled}
+                    className="rounded px-1.5 py-1 text-left text-2xs text-ink-body hover:bg-surface-muted disabled:cursor-default disabled:opacity-60"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onOpenCitation(input.citationId);
+                    }}
+                  >
+                    <span className="font-medium">{input.name}</span>
+                    <span className="text-ink-meta">
+                      {" "}
+                      · {String(input.value)}
+                      {input.unit ? ` ${input.unit}` : ""} · {source.source.title}
+                    </span>
+                  </button>
+                );
+              })}
+            </span>
           </span>
         ) : null}
       </div>
-      {qualityIssues?.length ? (
-        <div
-          data-citation-quality-issues={qualityTone}
-          className={cn(
-            "mt-2 flex items-start gap-1.5 rounded-md px-2.5 py-2 leading-5 text-ink-body",
-            qualityTone === "critical"
-              ? "bg-warning-light/50"
-              : "bg-surface-muted/70",
-          )}
-        >
-          <span className="flex h-5 shrink-0 items-center" aria-hidden="true">
-            {qualityTone === "critical" ? (
-              <AlertTriangle className="h-3.5 w-3.5 text-warning-text" />
-            ) : (
-              <Info className="h-3.5 w-3.5 text-ink-meta" />
-            )}
-          </span>
-          <span>
-            <span
-              className={cn(
-                "font-medium",
-                qualityTone === "critical"
-                  ? "text-warning-text"
-                  : "text-ink-body",
-              )}
-            >
-              {qualityTone === "critical"
-                ? t("ui.citation.qualityNeedsReview")
-                : t("ui.citation.qualityCheckSuggested")}
-            </span>
-            <span className="mx-1 text-ink-meta" aria-hidden="true">
-              ·
-            </span>
-            {qualityIssues.map((issue) => issue.label).join(" · ")}
-          </span>
-        </div>
-      ) : null}
-      {calculationInputs.length ? (
-        <span className="mt-2 block border-t border-surface-border pt-2">
-          <span className="block text-2xs font-medium uppercase tracking-wide text-ink-meta">
-            {t("ui.citation.calculationInputs", "Calculation inputs")}
-          </span>
-          <span className="mt-1 flex flex-col gap-1">
-            {calculationInputs.map(({ input, source }) => {
-              const disabled =
-                !canOpenLinkedEvidence ||
-                source.resolutionStatus === "forbidden" ||
-                source.resolutionStatus === "missing";
-              return (
-                <button
-                  key={`${input.name}:${input.citationId}`}
-                  type="button"
-                  disabled={disabled}
-                  className="rounded px-1.5 py-1 text-left text-2xs text-ink-body hover:bg-surface-muted disabled:cursor-default disabled:opacity-60"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onOpenCitation(input.citationId);
-                  }}
-                >
-                  <span className="font-medium">{input.name}</span>
-                  <span className="text-ink-meta">
-                    {" "}
-                    · {String(input.value)}
-                    {input.unit ? ` ${input.unit}` : ""} · {source.source.title}
-                  </span>
-                </button>
-              );
-            })}
-          </span>
-        </span>
-      ) : null}
       {canOpen ? (
-        <button
-          type="button"
-          className="mt-2 inline-flex items-center gap-1 font-medium text-primary hover:underline"
-          onClick={(event) => {
-            event.stopPropagation();
-            onOpen();
-          }}
+        <div
+          data-citation-card-footer
+          className="flex shrink-0 justify-end border-t border-surface-border px-3 py-2"
         >
-          {qualityIssues?.length
-            ? t("ui.citation.viewEvidence", "View evidence")
-            : t("ui.citation.openSource", "Open source")}
-          <ExternalLink className="h-3 w-3" aria-hidden="true" />
-        </button>
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 rounded-sm font-medium text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
+            onClick={openSource}
+          >
+            {openActionLabel}
+            <ExternalLink className="h-3 w-3" aria-hidden="true" />
+          </button>
+        </div>
       ) : null}
     </div>
   );
@@ -1229,6 +1450,7 @@ export function CitationSourceCards({
   messageIdByCitationId?: ReadonlyMap<string, string | undefined>;
 }) {
   const { t } = useI18n();
+  const sourceTierHelpTooltipId = `citation-source-tier-help-${useId().replace(/[^a-zA-Z0-9_-]/gu, "-")}`;
   const used = useMemo(
     () => usedCitations(content, citationBundle, displayOrder),
     [content, citationBundle, displayOrder],
@@ -1241,9 +1463,23 @@ export function CitationSourceCards({
       data-citation-source-list
       className="mt-3 border-t border-surface-border pt-2"
     >
-      <h3 className="text-xs font-medium text-ink-meta">
-        {t("ui.citation.sources", "Sources")}
-      </h3>
+      <div className="flex items-center gap-2">
+        <h3 className="text-xs font-medium text-ink-meta">
+          {t("ui.citation.sources", "Sources")}
+        </h3>
+        <span
+          data-citation-source-tier-help
+          className="group relative inline-flex cursor-help rounded text-2xs text-ink-meta transition-colors hover:text-ink-body focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
+          tabIndex={0}
+          aria-describedby={sourceTierHelpTooltipId}
+        >
+          {t("ui.citation.sourceTierHelp")}
+          <SourceTierLegendTooltip
+            tooltipId={sourceTierHelpTooltipId}
+            align="left"
+          />
+        </span>
+      </div>
       <div className="mt-1.5 flex flex-col gap-1.5">
         {sourceGroups.map(({ key, displayIndexes, citation }) => {
           const displayIndex = citationIndexLabel(displayIndexes);

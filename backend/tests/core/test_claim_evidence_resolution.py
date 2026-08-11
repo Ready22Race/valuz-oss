@@ -983,6 +983,50 @@ def test_source_title_entity_does_not_conflict_when_quote_names_claim_entity() -
     assert resolution.status != "contradicted"
 
 
+def test_derived_claim_is_not_auto_bound_to_a_conflicting_structured_input() -> None:
+    semantics = {
+        "metric_ontology": {
+            "metrics": {
+                "common_stock_repurchased": {
+                    "aliases": ["股票回购"],
+                    "fields": ["common_stock_repurchased"],
+                }
+            }
+        },
+        "unit_ontology": {
+            "units": {
+                "usd": {"canonical": "USD", "aliases": ["USD", "美元"], "scale": 1},
+                "multiple": {"canonical": "multiple", "aliases": ["倍", "x"], "scale": 1},
+            }
+        },
+    }
+    claim = extract_claims(
+        "股票回购 — 环比：扩大约 5.6 倍。",
+        mode="strict-domain",
+        semantics=semantics,
+    )[0]
+    evidence = {
+        "evidenceHandle": "ev_repurchase_q1_12345678",
+        "source": {"providerId": "reportify"},
+        "evidence": {
+            "kind": "structured-data",
+            "entityId": "NVDA",
+            "metric": "common_stock_repurchased",
+            "field": "common_stock_repurchased",
+            "value": -21_441_000_000,
+            "unit": "USD",
+            "period": "2027 Q1",
+        },
+    }
+
+    resolution = resolve_claim_evidence(claim, [evidence], semantics=semantics)
+
+    assert claim.kind == "calculation"
+    assert resolution.status == "unresolved"
+    assert resolution.binding_action == "none"
+    assert resolution.user_visible_severity == "none"
+
+
 def test_candidate_index_retrieves_cross_scale_equivalent_amount() -> None:
     claim = ClaimCandidate(
         claim_id="cross-scale-retrieval",
@@ -1200,6 +1244,58 @@ def test_calculation_dependency_metric_pairing_is_not_a_hard_conflict() -> None:
 
     assert resolution.status == "verified"
     assert resolution.binding_action == "auto-bind"
+
+
+def test_calculation_without_entity_metadata_does_not_invent_an_entity_conflict() -> None:
+    semantics = {
+        "metric_ontology": {
+            "metrics": {
+                "free_cash_flow_growth": {
+                    "aliases": ["自由现金流环比", "FCF"],
+                    "fields": ["free_cash_flow_growth"],
+                }
+            }
+        },
+        "unit_ontology": {
+            "units": {
+                "percent": {"canonical": "percent", "aliases": ["%"], "scale": 1}
+            }
+        },
+    }
+    handle = "ev_nvda_fcf_growth_calculation"
+    claim = ClaimCandidate(
+        claim_id="calc-no-entity-metadata",
+        exact="自由现金流（FCF）环比增长 39.2%。",
+        segment_index=0,
+        kind="calculation",
+        citation_required=True,
+        attached_citation_ids=(),
+        normalized={
+            "metric": "free_cash_flow_growth",
+            "value": "39.2",
+            "unit": "%",
+        },
+        location={"kind": "fixture", "blockIndex": 0, "start": 0, "end": 24},
+        semantic_text="NVIDIA 自由现金流（FCF）环比增长 39.2%。",
+        insertion_offset=24,
+        attached_evidence_handles=(handle,),
+    )
+    evidence = {
+        "evidenceHandle": handle,
+        "source": {"providerId": "policy-generated", "title": "Calculation"},
+        "evidence": {
+            "kind": "calculation",
+            "metric": "free_cash_flow_growth",
+            "result": 39.2,
+            "unit": "%",
+            "inputs": [],
+        },
+    }
+
+    resolution = resolve_claim_evidence(claim, [evidence], semantics=semantics)
+
+    assert resolution.status == "verified"
+    assert resolution.binding_action == "keep"
 
 
 def test_missing_source_unit_never_guesses_a_scale_conversion() -> None:

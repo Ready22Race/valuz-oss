@@ -25,6 +25,8 @@ from src.core.claim_audit import (
     CLAIM_SELECTOR_REVISION,
     CLAIM_VERIFIER_REVISION,
     ClaimCandidate,
+    _claim_metric_candidates,
+    _explicit_unit_scope_context,
     calculation_formula_matches_evidence,
     canonical_evidence_dimension,
     canonical_evidence_metric,
@@ -36,6 +38,7 @@ from src.core.claim_audit import (
     numeric_comparison_truth,
     select_claims_for_audit,
     structured_components_cover_claim,
+    structured_evidence_covers_claim_component,
     structured_units_compatible,
     structured_value_present,
     structured_values_equivalent,
@@ -588,6 +591,7 @@ def _audit_claims(
         answer,
         citation_by_id,
         provided=entity_aliases,
+        semantics=semantics,
     )
     preliminary_rows: list[tuple[ClaimCandidate, bool, list[str], bool]] = []
     for claim_index, claim in enumerate(claims):
@@ -798,6 +802,7 @@ def _audit_claims(
                     claim,
                     citation,
                     canonical_entity_aliases,
+                    semantics=semantics,
                 ):
                     support_rows.append((citation_id, "entity-conflict", 4, "entity-conflict"))
                 else:
@@ -896,25 +901,100 @@ def _audit_claims(
                 verification_gap_ids,
                 citation_by_id,
             )
-            component_covered = (
-                structured_components_cover_claim(
-                    claim,
-                    [citation_by_id[citation_id] for citation_id in citation_ids],
-                    user_prompt=user_prompt,
-                    semantics=semantics,
-                )
-                or text_components_cover_claim(
-                    claim,
-                    [citation_by_id[citation_id] for citation_id in citation_ids],
-                    semantics=semantics,
-                )
-                or _calculation_components_cover_claim(
-                    claim,
-                    citation_ids,
-                    citation_by_id,
-                    semantics=semantics,
-                )
+            structured_component_covered = structured_components_cover_claim(
+                claim,
+                [citation_by_id[citation_id] for citation_id in citation_ids],
+                user_prompt=user_prompt,
+                semantics=semantics,
             )
+            text_component_covered = text_components_cover_claim(
+                claim,
+                [citation_by_id[citation_id] for citation_id in citation_ids],
+                semantics=semantics,
+            )
+            calculation_component_covered = _calculation_components_cover_claim(
+                claim,
+                citation_ids,
+                citation_by_id,
+                semantics=semantics,
+            )
+            component_covered = (
+                structured_component_covered
+                or text_component_covered
+                or calculation_component_covered
+            )
+            hard_coordinate_conflict_ids = {
+                row[0] for row in (*entity_conflicted, *period_conflicted)
+            }
+            component_citation_ids = {
+                citation_id
+                for citation_id in citation_ids
+                if citation_id not in hard_coordinate_conflict_ids
+                and structured_evidence_covers_claim_component(
+                    claim,
+                    citation_by_id[citation_id],
+                    semantics=semantics,
+                )
+            }
+            if structured_component_covered:
+                # One compound Claim may be supported by several local
+                # Evidence items.  The single-item verifier intentionally
+                # compares each item with the complete Claim and can therefore
+                # report value/unit mismatch for an item that correctly covers
+                # a different amount in the group.  Once the component verifier
+                # has proven complete value coverage under compatible entity,
+                # period and unit coordinates, those local mismatches are not
+                # contradictions.  Keep genuine entity/period conflicts below.
+                bindings = [
+                    (
+                        {
+                            **binding,
+                            "role": "component",
+                            "supportStatus": "supported",
+                        }
+                        if binding.get("citationId") in component_citation_ids
+                        else binding
+                    )
+                    for binding in bindings
+                ]
+                confirmed_contradicted = [
+                    row for row in confirmed_contradicted if row[0] not in component_citation_ids
+                ]
+                advisory_contradicted = [
+                    row for row in advisory_contradicted if row[0] not in component_citation_ids
+                ]
+                partial = [row for row in partial if row[0] not in component_citation_ids]
+                missing = [row for row in missing if row[0] not in component_citation_ids]
+            elif component_citation_ids:
+                # A citation can validly support one local component even
+                # when neighboring uncited facts keep the complete Claim
+                # unresolved.  That is partial support, not proof that the
+                # cited value conflicts with its source.
+                bindings = [
+                    (
+                        {
+                            **binding,
+                            "role": "component",
+                            "supportStatus": "partially-supported",
+                        }
+                        if binding.get("citationId") in component_citation_ids
+                        else binding
+                    )
+                    for binding in bindings
+                ]
+                component_rows = [
+                    (row[0], "partially-supported", row[2], "component-only")
+                    for row in (*confirmed_contradicted, *advisory_contradicted, *missing)
+                    if row[0] in component_citation_ids
+                ]
+                confirmed_contradicted = [
+                    row for row in confirmed_contradicted if row[0] not in component_citation_ids
+                ]
+                advisory_contradicted = [
+                    row for row in advisory_contradicted if row[0] not in component_citation_ids
+                ]
+                missing = [row for row in missing if row[0] not in component_citation_ids]
+                partial.extend(component_rows)
             if comparison_false:
                 code = "numeric_comparison_false"
                 issue_codes.append(code)
@@ -1114,7 +1194,12 @@ def _basic_unselected_structured_conflict(
             "calculation",
         }:
             continue
-        if _citation_entity_conflicts(claim, citation, canonical_entity_aliases):
+        if _citation_entity_conflicts(
+            claim,
+            citation,
+            canonical_entity_aliases,
+            semantics=semantics,
+        ):
             rows.append((citation_id, "entity-conflict", "entity-conflict"))
             continue
         support = verify_evidence_support(claim, citation, semantics=semantics)
@@ -1142,13 +1227,23 @@ def _basic_unselected_structured_conflict(
     if entity_conflicts:
         return "claim_source_entity_conflict", entity_conflicts, bindings
     period_conflicts = [
-        row[0]
-        for row in rows
-        if row[1] == "contradicted" and row[2] == "period-conflict"
+        row[0] for row in rows if row[1] == "contradicted" and row[2] == "period-conflict"
     ]
     if period_conflicts:
         return "claim_source_period_conflict", period_conflicts, bindings
     value_conflicts = [row[0] for row in rows if row[1] == "contradicted"]
+    if value_conflicts:
+        value_conflicts = [
+            citation_id
+            for citation_id in value_conflicts
+            if not structured_evidence_covers_claim_component(
+                claim,
+                citation_by_id[citation_id],
+                semantics=semantics,
+            )
+        ]
+    if not value_conflicts:
+        return None
     if value_conflicts:
         return "claim_evidence_conflict", value_conflicts, bindings
     return None
@@ -1428,13 +1523,26 @@ def _normalize_entity_alias(value: Any) -> str:
     return re.sub(r"[^a-z0-9\u3400-\u9fff]+", "", str(value).casefold())
 
 
-def _entity_pairs(value: str) -> list[tuple[str, str]]:
-    return [
-        (_normalize_entity_alias(match.group("label")), match.group("identifier").casefold())
-        for match in _ENTITY_PAIR_RE.finditer(value)
-        if len(_normalize_entity_alias(match.group("label"))) >= 2
-        and match.group("identifier").upper() not in _NON_ENTITY_PAREN_IDENTIFIERS
-    ]
+def _entity_pairs(
+    value: str,
+    semantics: Mapping[str, Any] | None = None,
+) -> list[tuple[str, str]]:
+    output: list[tuple[str, str]] = []
+    for match in _ENTITY_PAIR_RE.finditer(value):
+        label_text = match.group("label")
+        label = _normalize_entity_alias(label_text)
+        identifier = match.group("identifier")
+        if len(label) < 2 or identifier.upper() in _NON_ENTITY_PAREN_IDENTIFIERS:
+            continue
+        # Parenthesized metric abbreviations such as ``自由现金流（FCF）`` are
+        # not company identifiers.  Let the active metric ontology decide
+        # instead of maintaining an ever-growing finance acronym blacklist;
+        # a real company label such as ``First Commonwealth Financial (FCF)``
+        # remains an entity because its label is not a configured metric.
+        if _claim_metric_candidates(label_text, semantics):
+            continue
+        output.append((label, identifier.casefold()))
+    return output
 
 
 def _entity_alias_context(
@@ -1442,6 +1550,7 @@ def _entity_alias_context(
     citation_by_id: dict[str, dict[str, Any]],
     *,
     provided: Mapping[str, Iterable[str]] | None = None,
+    semantics: Mapping[str, Any] | None = None,
 ) -> dict[str, str]:
     """Build turn-local company-name aliases from explicit name/code pairs."""
 
@@ -1461,7 +1570,7 @@ def _entity_alias_context(
     # detection.  A source title alone must not invent a second company when
     # its translated name/ticker has not been linked to the requested entity;
     # ``微软`` versus ``Microsoft (MSFT)`` is unknown, not a proven conflict.
-    for label, identifier in _entity_pairs(answer):
+    for label, identifier in _entity_pairs(answer, semantics):
         canonical = aliases.get(label) or aliases.get(identifier) or identifier
         aliases.setdefault(identifier, canonical)
         aliases.setdefault(label, canonical)
@@ -1481,7 +1590,7 @@ def _entity_alias_context(
             canonical = aliases.get(entity_name)
             if canonical:
                 aliases.setdefault(entity_id, canonical)
-        for label, identifier in _entity_pairs(str(source.get("title") or "")):
+        for label, identifier in _entity_pairs(str(source.get("title") or ""), semantics):
             canonical = aliases.get(label) or aliases.get(identifier)
             if canonical:
                 aliases.setdefault(identifier, canonical)
@@ -1510,6 +1619,7 @@ def _canonical_entities_in_text(value: str, aliases: dict[str, str]) -> set[str]
 def _citation_entities(
     citation: dict[str, Any],
     aliases: dict[str, str],
+    semantics: Mapping[str, Any] | None = None,
 ) -> set[str]:
     source = citation.get("source")
     source = source if isinstance(source, dict) else {}
@@ -1521,7 +1631,7 @@ def _citation_entities(
         if normalized in aliases:
             output.add(aliases[normalized])
     title = str(source.get("title") or "")
-    for label, identifier in _entity_pairs(title):
+    for label, identifier in _entity_pairs(title, semantics):
         canonical = aliases.get(identifier) or aliases.get(label)
         if canonical:
             output.add(canonical)
@@ -1533,19 +1643,24 @@ def _citation_entity_conflicts(
     claim: ClaimCandidate,
     citation: dict[str, Any],
     aliases: dict[str, str],
+    *,
+    semantics: Mapping[str, Any] | None = None,
 ) -> bool:
     # Inherited headings/presentation text are useful candidate context, but
     # they are not strong enough to prove a user-visible cross-company error.
     # Only the Claim's local text (table claims already include their row
     # identity) may produce the deterministic entity-conflict warning.
-    claim_identifiers = {identifier for _label, identifier in _entity_pairs(claim.exact)}
+    claim_identifiers = {
+        identifier for _label, identifier in _entity_pairs(claim.exact, semantics)
+    }
     if claim_identifiers:
         evidence = citation.get("evidence")
         evidence = evidence if isinstance(evidence, dict) else {}
         source = citation.get("source")
         source = source if isinstance(source, dict) else {}
         citation_identifiers = {
-            identifier for _label, identifier in _entity_pairs(str(source.get("title") or ""))
+            identifier
+            for _label, identifier in _entity_pairs(str(source.get("title") or ""), semantics)
         }
         raw_entity_id = _normalize_entity_alias(evidence.get("entityId") or "")
         if raw_entity_id:
@@ -1563,7 +1678,7 @@ def _citation_entity_conflicts(
     claim_entities = _canonical_entities_in_text(claim.exact, aliases)
     if len(claim_entities) != 1:
         return False
-    citation_entities = _citation_entities(citation, aliases)
+    citation_entities = _citation_entities(citation, aliases, semantics)
     return bool(citation_entities and claim_entities.isdisjoint(citation_entities))
 
 
@@ -2206,9 +2321,16 @@ def _validate_calculation(
         issue("calculation_result_mismatch", "L4", citation_ids=[citation_id])
     if rule.get("require_unit") is True and not _clean_text(evidence.get("unit"), ""):
         issue("calculation_unit_missing", "L4", citation_ids=[citation_id])
-    if rule.get("require_result_in_answer") is True and not _value_present(
-        evidence.get("result"),
-        claim_text,
+    if (
+        rule.get("require_result_in_answer") is True
+        and not _value_present(evidence.get("result"), claim_text)
+        and not structured_value_present(
+            evidence.get("result"),
+            _clean_text(evidence.get("unit"), ""),
+            claim_text,
+            metric=_clean_text(evidence.get("metric"), ""),
+            semantics=semantics,
+        )
     ):
         issue(
             "calculation_result_not_present_in_answer",
@@ -2537,11 +2659,27 @@ def _markdown_table_citation_contexts(answer: str, citation_id: str) -> list[str
         )
         if delimiter_index is None or delimiter_index <= block_start:
             continue
+        table_unit_context = next(
+            (
+                context
+                for previous_line in reversed(lines[:block_start])
+                if "|" not in previous_line
+                and (context := _explicit_unit_scope_context(previous_line))
+            ),
+            "",
+        )
+
+        def scoped(context: str, unit_context: str = table_unit_context) -> str:
+            # Keep the scope banner in its own Markdown block so the Claim
+            # extractor records it as narrative context before parsing the
+            # atomic cited cell below.
+            return f"{unit_context}\n\n{context}" if unit_context else context
+
         header = lines[delimiter_index - 1]
         header_cells = _markdown_table_cells(header)
         row_cells = _markdown_table_cells(row)
         if len(header_cells) != len(row_cells):
-            contexts.append("\n".join((header, lines[delimiter_index], row)))
+            contexts.append(scoped("\n".join((header, lines[delimiter_index], row))))
             continue
         cited_indexes = [index for index, cell in enumerate(row_cells) if marker in cell]
         for cell_index in cited_indexes:
@@ -2552,7 +2690,7 @@ def _markdown_table_citation_contexts(answer: str, citation_id: str) -> list[str
             # an uncited decision/trend column cannot impose time-range
             # requirements on a point-in-time value.
             if re.fullmatch(r"(?:source|sources|来源|出处|参考)", column_label, re.IGNORECASE):
-                contexts.append("\n".join((header, lines[delimiter_index], row)))
+                contexts.append(scoped("\n".join((header, lines[delimiter_index], row))))
                 continue
             parts = []
             if cell_index != 0 and row_cells[0]:
@@ -2565,7 +2703,7 @@ def _markdown_table_citation_contexts(answer: str, citation_id: str) -> list[str
             if column_label:
                 parts.append(column_label)
             parts.append(row_cells[cell_index])
-            contexts.append(" — ".join(parts))
+            contexts.append(scoped(" — ".join(parts)))
     return list(dict.fromkeys(contexts))
 
 

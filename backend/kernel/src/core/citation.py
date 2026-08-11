@@ -726,7 +726,7 @@ class EvidenceRegistry:
         for claim in claims:
             if not claim.citation_required:
                 continue
-            keys = _claim_scalar_keys(claim.exact)
+            keys = _claim_scalar_keys(claim.exact, normalized=claim.normalized)
             if not keys:
                 continue
             for collection in self._collections.values():
@@ -1114,11 +1114,7 @@ def _mark_deterministic_corrections(
             and isinstance(claim, dict)
             and citation_id in claim.get("citationIds", [])
         ]
-        matching = [
-            row
-            for row in candidates
-            if replacement in str(row[1].get("exact") or "")
-        ]
+        matching = [row for row in candidates if replacement in str(row[1].get("exact") or "")]
         selected = matching[0] if len(matching) == 1 else None
         if selected is not None:
             index, claim = selected
@@ -1127,8 +1123,7 @@ def _mark_deterministic_corrections(
             extracted = [
                 claim
                 for claim in corrected_candidates
-                if citation_id in claim.attached_citation_ids
-                and replacement in claim.exact
+                if citation_id in claim.attached_citation_ids and replacement in claim.exact
             ]
             if len(extracted) != 1:
                 continue
@@ -3691,12 +3686,25 @@ def _build_scalar_index(snapshot: Any, *, content_root: str) -> dict[str, tuple[
     return {key: tuple(sorted(set(pointers))) for key, pointers in index.items()}
 
 
-def _claim_scalar_keys(text: str) -> tuple[str, ...]:
+def _claim_scalar_keys(
+    text: str,
+    *,
+    normalized: Mapping[str, Any] | None = None,
+) -> tuple[str, ...]:
     keys: set[str] = set()
     for match in re.finditer(r"(?<![A-Za-z0-9_])[-+]?\d[\d,]*(?:\.\d+)?", text):
         numeric = _decimal_key(match.group(0))
         if numeric is not None:
             keys.add(f"n:{numeric}")
+    # Table cells frequently inherit their display unit from the column
+    # header. Include the normalized display and canonical base values so a
+    # rendered ``816.15 亿美元`` can materialize the immutable API scalar
+    # ``81_615_000_000 USD``. These are recall keys, never support verdicts.
+    if isinstance(normalized, Mapping):
+        for field in ("value", "valueBase"):
+            numeric = _decimal_key(normalized.get(field))
+            if numeric is not None:
+                keys.add(f"n:{numeric}")
     return tuple(sorted(keys))
 
 
@@ -4256,23 +4264,46 @@ def _materialize_collection_address(
             value = float(decimal * 100)
         unit = unit or "percent"
     currency = str(context_metadata("currency") or collection.common.get("currency") or "")
+    per_share_measure = (
+        "per_share" in normalized_field
+        or normalized_field == "eps"
+        or normalized_field.endswith("_eps")
+    )
     if (
         not unit
         and currency
-        and any(
-            term in normalized_field
-            for term in (
-                "revenue",
-                "cost",
-                "profit",
-                "asset",
-                "liabil",
-                "cash",
-                "income",
-                "equity",
+        and (
+            per_share_measure
+            or any(
+                term in normalized_field
+                for term in (
+                    "revenue",
+                    "cost",
+                    "profit",
+                    "asset",
+                    "liabil",
+                    "cash",
+                    "debt",
+                    "dividend",
+                    "income",
+                    "equity",
+                    "equipment",
+                    "expense",
+                    "expenditure",
+                    "investment",
+                    "inventory",
+                    "payable",
+                    "receivable",
+                    "repurch",
+                )
             )
         )
     ):
+        # Provider-declared field units remain authoritative.  This fallback
+        # only fills the currency dimension when an older Collection supplies
+        # row-level currency but omits field_units.  Per-share values inherit
+        # the currency for compatibility with displays such as "EPS（美元）";
+        # share-count fields deliberately do not match this branch.
         unit = currency
 
     semantic_entity_id = _collection_semantic_value(
