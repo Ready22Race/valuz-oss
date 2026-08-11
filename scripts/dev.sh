@@ -110,7 +110,11 @@ install_backend() {
     # (pg / remote) is chosen at runtime from the settings page, so the driver
     # must be present in dev regardless of the current mode. Small dep; keeping
     # it avoids a "driver pruned" failure when the user flips to Postgres.
-    uv sync --extra dev --extra postgres
+    #
+    # ``tracing`` (langfuse) rides along for the same prune-proofing reason:
+    # activation is still env-gated (LANGFUSE_* in .env — see load_dotenv), so
+    # carrying the package costs nothing when tracing is off.
+    uv sync --extra dev --extra postgres --extra tracing
     ok "backend deps ready"
 }
 
@@ -152,7 +156,26 @@ start_frontend() {
     PIDS+=("$!")
 }
 
+# ── Local env overrides ────────────────────────────────────────────────────
+# Export git-ignored .env files (repo root, then backend/ overriding) into the
+# launcher's environment so every child — the source backend AND the
+# Electron-managed backend in the unified-network flow — inherits them.
+# Primary use today: LANGFUSE_* to switch on the optional tracing bootstrap.
+load_dotenv() {
+    local env_file
+    for env_file in "$ROOT_DIR/.env" "$BACKEND_DIR/.env"; do
+        if [[ -f "$env_file" ]]; then
+            info "loading env from $env_file"
+            set -a
+            # shellcheck disable=SC1090
+            source "$env_file"
+            set +a
+        fi
+    done
+}
+
 # ── Dispatch ───────────────────────────────────────────────────────────────
+load_dotenv
 TARGET="${1:-all}"
 case "$TARGET" in
     all)
