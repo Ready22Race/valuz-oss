@@ -45,6 +45,7 @@ from valuz_agent.ports.connector_oauth_refresh import (
     ConnectorOAuthRefreshPort,
     LocalConnectorOAuthRefreshProvider,
 )
+from valuz_agent.ports.docs_runtime import DocsRuntimeFactory, default_docs_runtime
 from valuz_agent.ports.document_research import DocumentResearchProviderPort
 from valuz_agent.ports.file_address import FileAddressResolverPort, LocalFileAddressResolver
 from valuz_agent.ports.genui_blocks import GenUIBlockRegistry
@@ -163,6 +164,12 @@ class Extensions:
         # overlay binds a storage-specific resolver (e.g. COS presigned URLs) for
         # the cloud deployment. The backend never proxies file bytes.
         self.file_address_resolver: FileAddressResolverPort = LocalFileAddressResolver()
+        # Builds the document-retrieval runtime for one owner. OSS default is
+        # ripgrep over that owner's preview markdown; a deployment whose
+        # documents are indexed in an external service binds its own factory.
+        # Per-owner rather than a singleton because the OSS default is scoped
+        # to the owner's preview directory.
+        self.docs_runtime_factory: DocsRuntimeFactory = default_docs_runtime
         # Generic ephemeral cache (e.g. the connector OAuth PKCE handoff). OSS
         # default is a local file cache (single desktop process); the commercial
         # overlay swaps in a Redis-backed cache for the shared multi-process
