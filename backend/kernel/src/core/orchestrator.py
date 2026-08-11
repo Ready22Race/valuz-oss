@@ -19,6 +19,7 @@ import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -45,6 +46,7 @@ from src.core.task_coverage_continuation import (
     build_task_coverage_noop_tool,
 )
 from src.core.time_utils import now_ms
+from src.core.tracing import TurnTracingSink, start_turn_trace, turn_trace_context
 from src.core.types import (
     Error,
     Message,
@@ -1429,6 +1431,22 @@ class SessionOrchestrator:
         # count without changing the canonical assistant_message/thinking
         # record.
         coalesced: EventSink = DeltaCoalescingSink(persist_then_live)
+        # Langfuse tracing (all no-ops unless active). The attribution scope
+        # covers the WHOLE turn — every span created below (TurnTrace
+        # observations, deepagents' LangChain handler spans) inherits
+        # user/session/message. ``turn_trace`` is the event-driven flavor
+        # (claude_agent/codex; None otherwise): its tap slots UNDER the
+        # observer so spans are built from the same stream that persists —
+        # runtimes carry zero tracing code. Closed in the ``finally`` below.
+        trace_scope = ExitStack()
+        trace_scope.enter_context(
+            turn_trace_context(user_id=user_id, session_id=session_id, message_id=message.id)
+        )
+        turn_trace = start_turn_trace(
+            runtime_provider=session.runtime_provider, prompt=current_task_prompt
+        )
+        if turn_trace is not None:
+            coalesced = TurnTracingSink(coalesced, turn_trace)
         citation_enabled = _session_citation_enabled(session)
         citation_verification_enabled = _session_citation_verification_enabled(session)
         semantic_verifier: SemanticVerifierPort | None = None
@@ -1643,6 +1661,17 @@ class SessionOrchestrator:
             )
             return message
         finally:
+            if turn_trace is not None:
+                stop = session.stop_reason
+                category = getattr(stop, "category", None)
+                # End BEFORE the scope closes so the usage generation is
+                # still created inside the attribution context.
+                turn_trace.end(
+                    error=f"{category}: {getattr(stop, 'message', '') or ''}".rstrip(": ")
+                    if category
+                    else None
+                )
+            trace_scope.close()
             self._active.pop(session_id, None)
             self._active_message.pop(session_id, None)
             # Mark the runtime freshly-used at turn END too, not just at entry.

@@ -57,6 +57,7 @@ from src.core.rule_canonicalize import reduce_args_for_subject
 from src.core.session_approval_cache import SessionRule
 from src.core.task_coverage_continuation import TASK_COVERAGE_NOOP_TOOL_NAME
 from src.core.tools import ExecContext, ToolDef, ToolKit, ToolResult
+from src.core.tracing import langchain_config_overlay
 from src.core.types import (
     EndTurn,
     Error,
@@ -705,6 +706,12 @@ class DeepAgentsRuntime:
                 "configurable": {"thread_id": str(thread_id)},
                 "recursion_limit": MAIN_GRAPH_RECURSION_LIMIT,
             }
+            # Langfuse tracing (empty overlay unless active): the shared
+            # LangChain callback handler must ride in the CALL-TIME config —
+            # same reason as ``recursion_limit`` above.
+            stream_config.update(
+                langchain_config_overlay(session_id=session.id, user_id=session.user_id)
+            )
             known_citation_tool_messages: set[str] = set()
             if not bare:
                 initial_state = await graph.aget_state(stream_config)
