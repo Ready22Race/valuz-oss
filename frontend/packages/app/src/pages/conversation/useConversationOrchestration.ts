@@ -1316,6 +1316,7 @@ export function useConversationOrchestration({
     containerHeight,
     handleScrollToBottom,
     handleTurnListVirtualApiReady,
+    scrollToTurnIndex,
   } = useConversationScroll({
     selectedSessionId,
     events,
@@ -1539,6 +1540,7 @@ export function useConversationOrchestration({
     showScrollBottom,
     handleScrollToBottom,
     handleTurnListVirtualApiReady,
+    scrollToTurnIndex,
     // tool cards
     isToolCardFoldable,
     renderToolCall,
