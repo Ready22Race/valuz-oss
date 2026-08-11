@@ -51,6 +51,13 @@ export const personalSettingsSections: SettingsSectionModule[] = [
     edition: "personal",
   },
   {
+    id: "network",
+    label: "settings.tab.network.label",
+    description: "settings.tab.network.desc",
+    icon: "network",
+    edition: "personal",
+  },
+  {
     id: "about",
     label: "settings.tab.about.label",
     description: "settings.tab.about.desc",

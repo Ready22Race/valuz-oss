@@ -121,6 +121,12 @@ from src.runtimes.claude_agent.approval_bridge import (
 )
 from src.runtimes.interruption import describe_exception, is_runtime_interruption
 from src.runtimes.mcp_env import resolve_stdio_env
+from src.runtimes.network_egress import (
+    ModelIngressDescriptor,
+    claude_api_key_credential_gate,
+    merge_loopback_no_proxy,
+    record_runtime_egress_phase,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +202,24 @@ SKIP_WEBFETCH_PREFLIGHT_ENV = "VALUZ_SKIP_WEBFETCH_PREFLIGHT"
 
 def _skip_webfetch_preflight_enabled() -> bool:
     return os.getenv(SKIP_WEBFETCH_PREFLIGHT_ENV, "").strip().lower() in ("1", "true", "yes")
+
+
+def _merge_forced_settings_env(
+    raw_settings: str | None,
+    forced_env: Mapping[str, str] | None,
+) -> str | None:
+    """Add non-secret egress routing fields to the highest settings layer.
+
+    Keep ``_build_settings()`` as the established no-argument test/runtime
+    seam. When no egress fields are present this is a byte-for-byte no-op.
+    """
+    if not forced_env:
+        return raw_settings
+    parsed = json.loads(raw_settings) if raw_settings else {}
+    if not isinstance(parsed, dict):
+        parsed = {}
+    parsed["env"] = dict(forced_env)
+    return json.dumps(parsed)
 
 
 # B2a: ``claude_agent + auto_review`` sessions fail at the first turn
@@ -361,6 +385,7 @@ class ClaudeAgentRuntime:
         workspace_root: str = "",
         model_provider: ModelProvider | None = None,
         model_settings: ModelSettings | None = None,
+        egress_descriptor: ModelIngressDescriptor | None = None,
     ) -> None:
         self.config = config
         self.model = model
@@ -369,6 +394,7 @@ class ClaudeAgentRuntime:
         self.workspace_root = workspace_root
         self.model_provider = model_provider
         self.model_settings = model_settings
+        self.egress_descriptor = egress_descriptor
         self._client: ClaudeSDKClient | None = None
         self._active_client: ClaudeSDKClient | None = None
         # tool_use ids for TodoWrite calls in the current turn — used to
@@ -405,6 +431,9 @@ class ClaudeAgentRuntime:
         # Identity of the session currently being run — exposed to
         # custom-tool handlers through ExecContext.
         self._cur_session_id: str = ""
+        self._egress_turn_attempt_id: str | None = None
+        self._egress_enabled_for_spawn = False
+        self._egress_first_model_event_recorded = False
         # The task running ``run()``. Cancelled by ``interrupt()`` so the
         # iterator unblocks even when ``receive_response().__anext__`` is
         # waiting on the SDK subprocess for the next chunk.
@@ -563,9 +592,30 @@ class ClaudeAgentRuntime:
     def update_sink(self, sink: EventSink) -> None:
         self.event_sink = sink
 
+    async def prepare(self, session: Session) -> None:
+        """Claude prewarming is deferred until its client lifecycle is isolated."""
+        del session
+
     async def _emit_turn_phase(self, phase: str, **fields: Any) -> None:
         """Persisted latency marker — see ``turn_phase`` in ``events.py``."""
         await self.event_sink.emit(Event(type="turn_phase", data={"phase": phase, **fields}))
+        await record_runtime_egress_phase(
+            getattr(self, "_cur_session_id", "") or None,
+            getattr(self, "_egress_turn_attempt_id", None),
+            phase,
+            enabled=getattr(self, "_egress_enabled_for_spawn", False),
+        )
+
+    async def _record_egress_model_first_event(self) -> None:
+        if getattr(self, "_egress_first_model_event_recorded", False):
+            return
+        self._egress_first_model_event_recorded = True
+        await record_runtime_egress_phase(
+            getattr(self, "_cur_session_id", "") or None,
+            getattr(self, "_egress_turn_attempt_id", None),
+            "model_first_event",
+            enabled=getattr(self, "_egress_enabled_for_spawn", False),
+        )
 
     async def run(self, session: Session, user_message: UserMessage) -> None:
         from datetime import datetime
@@ -585,6 +635,8 @@ class ClaudeAgentRuntime:
         self._citation_raw_documents = {}
         self._citation_document_metadata = {}
         self._cur_session_id = session.id
+        self._egress_turn_attempt_id = uuid.uuid4().hex
+        self._egress_first_model_event_recorded = False
         self._cancelled = False
         # Reset stderr buffer so any ``session_error`` from this turn
         # carries only this turn's CLI output, not noise from prior
@@ -777,6 +829,17 @@ class ClaudeAgentRuntime:
             # clean turn.
             if not self._cancelled and self._client is not None:
                 self._start_idle_drainer(session)
+            await record_runtime_egress_phase(
+                self._cur_session_id or None,
+                self._egress_turn_attempt_id,
+                (
+                    "interrupted"
+                    if getattr(session.stop_reason, "category", None)
+                    in {"user_interrupt", "interrupted"}
+                    else "turn_complete"
+                ),
+                enabled=self._egress_enabled_for_spawn,
+            )
 
     async def run_task_coverage(
         self,
@@ -1676,6 +1739,28 @@ class ClaudeAgentRuntime:
         # Claude SDK uses its own thinking default for the active model.
         effort_value = session.model_settings.effort if session.model_settings is not None else None
 
+        descriptor = getattr(self, "egress_descriptor", None)
+        self._egress_enabled_for_spawn = descriptor is not None and (
+            self.model_provider is None
+            or claude_api_key_credential_gate(
+                permission_mode=session.permission_mode,
+                session_mode=session.mode,
+            ).eligible
+        )
+        # Build the env before the additional settings layer. Claude settings
+        # may themselves contain an ``env`` map and that map outranks the
+        # process environment; repeat only the non-secret loopback routing
+        # fields in ``--settings`` so a project cannot bypass the registered
+        # capability by replacing ANTHROPIC_BASE_URL.
+        model_env = self._build_model_provider_env()
+        forced_egress_env: dict[str, str] | None = None
+        if self._egress_enabled_for_spawn and model_env is not None:
+            forced_egress_env = {
+                key: model_env[key]
+                for key in ("ANTHROPIC_BASE_URL", "NO_PROXY", "no_proxy")
+                if key in model_env
+            }
+
         # ``setting_sources`` is a *positive* filter on the Claude CLI:
         # only the listed surfaces get loaded (``["project"]`` -> just
         # the repo-level surface; CLI's no-flag default would also
@@ -1693,13 +1778,17 @@ class ClaudeAgentRuntime:
         # under ``~/.claude.json``. That is by design — the harness is
         # not a Claude Code shell. If you want a specific model,
         # configure it on the session/agent.
+        runtime_settings = _merge_forced_settings_env(
+            self._build_settings(),
+            forced_egress_env,
+        )
         opts_kwargs: dict[str, Any] = dict(
             cwd=self.workspace_root,
             setting_sources=["project"] if self.workspace_root else None,
             # Harness-injected CLI settings, layered on top of what
             # ``setting_sources`` loads as an *additional* MERGE layer (CLI
             # ``--settings``), not a file rewrite — see ``_build_settings``.
-            settings=self._build_settings(),
+            settings=runtime_settings,
             system_prompt=system_prompt,
             allowed_tools=allowed,
             permission_mode=perm,
@@ -1769,9 +1858,8 @@ class ClaudeAgentRuntime:
         if self.model_provider is not None:
             opts_kwargs["disallowed_tools"] = ["WebSearch"]
         opts = ClaudeAgentOptions(**opts_kwargs)
-        env = self._build_model_provider_env()
-        if env is not None:
-            opts.env = env
+        if model_env is not None:
+            opts.env = model_env
 
         if session.runtime_session_id:
             opts.resume = str(session.runtime_session_id)
@@ -1815,9 +1903,11 @@ class ClaudeAgentRuntime:
           a sub-100k trigger is skipped entirely (emitting the 100k floor
           would place the trigger past the real window).
 
-        Keep each a true *default*: inject it only when the project hasn't
-        set the key, so a project's explicit value (loaded via
-        ``setting_sources``) wins.
+        Keep each a true *default*: inject it only when the project hasn't set
+        the key, so a project's explicit value loaded through
+        ``setting_sources`` wins. Egress routing fields are merged later by
+        ``_merge_forced_settings_env`` because those are capability boundaries,
+        not product preferences.
         """
         # Read the workspace's own settings once. Tolerant of a missing /
         # unreadable / non-dict file (treated as empty).
@@ -1844,12 +1934,14 @@ class ClaudeAgentRuntime:
                 settings["autoCompactWindow"] = min(window, 1_000_000)
         return json.dumps(settings) if settings else None
 
-    def _build_model_provider_env(self) -> dict[str, str] | None:
-        """Build the spawned SDK subprocess's env when (and only when)
-        ``session.model_provider`` carries a per-session credential
-        override. Returns ``None`` for the no-override path so the
-        caller leaves ``ClaudeAgentOptions.env`` unset and the SDK
-        inherits the parent process env verbatim.
+    def _build_model_provider_env(self, session: Session | None = None) -> dict[str, str] | None:
+        """Build the spawned SDK subprocess's model-transport env.
+
+        A per-session provider supplies its API key as before. A subscription
+        egress descriptor supplies only ``ANTHROPIC_BASE_URL``; Claude Code
+        continues reading its native OAuth login and Valuz never copies that
+        credential into process env. With neither input, return ``None`` so
+        the SDK inherits the legacy ambient environment verbatim.
 
         Layout in the override case:
 
@@ -1868,11 +1960,38 @@ class ClaudeAgentRuntime:
           against a Claude-compatible gateway model (e.g.
           DeepSeek-via-anthropic-protocol).
         """
-        if self.model_provider is None:
+        egress_descriptor = getattr(self, "egress_descriptor", None)
+        if self.model_provider is None and egress_descriptor is None:
             return None
         merged: dict[str, str] = dict(os.environ)
-        if self.model_provider.base_url is not None:
-            merged["ANTHROPIC_BASE_URL"] = self.model_provider.base_url
+        if session is not None:
+            use_egress = egress_descriptor is not None and (
+                self.model_provider is None
+                or claude_api_key_credential_gate(
+                    permission_mode=session.permission_mode,
+                    session_mode=session.mode,
+                ).eligible
+            )
+        else:
+            use_egress = bool(
+                getattr(self, "_egress_enabled_for_spawn", egress_descriptor is not None)
+            )
+        provider_base_url = (
+            self.model_provider.base_url if self.model_provider is not None else None
+        )
+        effective_base_url = (
+            egress_descriptor.base_url
+            if use_egress and egress_descriptor is not None
+            else provider_base_url
+        )
+        if effective_base_url is not None:
+            merged["ANTHROPIC_BASE_URL"] = effective_base_url
+            # A loopback model ingress must never be sent back through the
+            # user's upstream proxy. Preserve every existing bypass entry and
+            # merge the local hosts into both casing variants; some bundled
+            # HTTP stacks prefer lowercase while GUI launches often expose
+            # uppercase only.
+            merge_loopback_no_proxy(merged, effective_base_url)
             # The advisor is a server-executed, Anthropic-API-only tool. It
             # is not available on Bedrock/Vertex/Foundry, and through an LLM
             # gateway its availability depends on whether the gateway
@@ -1883,7 +2002,10 @@ class ClaudeAgentRuntime:
             # enhancement beats a recurring user-facing failure. Direct
             # first-party Anthropic (``base_url is None``) keeps it on.
             # https://code.claude.com/docs/en/advisor.md
-            merged["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"] = "1"
+            if self.model_provider is not None and self.model_provider.base_url is not None:
+                merged["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"] = "1"
+            else:
+                merged.pop("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", None)
         else:
             # If a previous env carried a stale base_url (e.g. parent
             # shell exported one for an unrelated workflow), wipe it so
@@ -1894,7 +2016,18 @@ class ClaudeAgentRuntime:
             # advisor-off flag so the first-party path gets the default
             # (advisor on) rather than silently honoring a parent export.
             merged.pop("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", None)
+        if self.model_provider is None:
+            # Native subscription credentials remain in Claude Code's own
+            # credential store. In particular, do not materialize
+            # CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_AUTH_TOKEN here.
+            return merged
         merged["ANTHROPIC_AUTH_TOKEN"] = self.model_provider.api_key
+        if use_egress:
+            # The locked Claude CLI keeps this credential for its own model
+            # transport while removing Anthropic credentials from Bash and
+            # other tool subprocesses. The egress capability itself is never
+            # placed in the CLI environment.
+            merged["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] = "1"
         if "claude" not in self.model:
             merged["ANTHROPIC_MODEL"] = self.model
             merged["ANTHROPIC_DEFAULT_OPUS_MODEL"] = self.model
@@ -2661,6 +2794,12 @@ class ClaudeAgentRuntime:
             parent_extra = {"parent_tool_use_id": parent} if parent is not None else {}
             event = message.event
             event_type = event.get("type")
+            if not getattr(self, "_egress_first_model_event_recorded", False) and event_type in {
+                "message_start",
+                "content_block_start",
+                "content_block_delta",
+            }:
+                await self._record_egress_model_first_event()
             if event_type == "content_block_start":
                 block = event.get("content_block") or {}
                 if block.get("type") == "tool_use":
@@ -2804,6 +2943,8 @@ class ClaudeAgentRuntime:
                 await self.event_sink.emit(Event(type="compaction", data=dict(meta)))
 
         elif isinstance(message, AssistantMessage):
+            if not getattr(self, "_egress_first_model_event_recorded", False):
+                await self._record_egress_model_first_event()
             # ``parent_tool_use_id`` is set when this message was produced
             # INSIDE a subagent (Task/Agent tool run). Thread it onto every
             # emitted event so downstream consumers can tell out-of-band

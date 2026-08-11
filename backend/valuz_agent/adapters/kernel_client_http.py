@@ -428,6 +428,13 @@ class HttpKernelClient:
         except KernelSessionNotFoundError:
             return
 
+    async def prepare_runtime(self, user_id: str, session_id: str) -> None:
+        await self._request(
+            "POST",
+            f"{self._prefix}/v1/sessions/{session_id}/prepare",
+            owner=user_id,
+        )
+
     async def run_turn(
         self,
         user_id: str,

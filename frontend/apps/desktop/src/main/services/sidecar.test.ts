@@ -15,7 +15,80 @@ vi.mock("node:child_process", () => {
   return { ...mod, default: mod };
 });
 
-const { killWindowsProcessTree } = await import("./sidecar");
+const {
+  configureSidecarEgressEnvironment,
+  killWindowsProcessTree,
+  resolveSidecarDataDir,
+} = await import("./sidecar");
+
+describe("resolveSidecarDataDir", () => {
+  it("keeps managed source backends isolated from packaged app data", () => {
+    expect(resolveSidecarDataDir(true, { VALUZ_DATA_DIR: "" })).toMatch(
+      /\.valuz-oss-dev$/,
+    );
+    expect(
+      resolveSidecarDataDir(true, {
+        VALUZ_DATA_DIR: "/tmp/valuz-explicit-dev-data",
+      }),
+    ).toBe("/tmp/valuz-explicit-dev-data");
+  });
+
+  it("keeps packaged sidecars on packaged app data", () => {
+    expect(
+      resolveSidecarDataDir(false, {
+        VALUZ_DATA_DIR: "/tmp/must-not-override-packaged-data",
+      }),
+    ).toMatch(/\.valuz-oss$/);
+  });
+});
+
+describe("configureSidecarEgressEnvironment", () => {
+  it("scrubs inherited channels and exposes only the stdin marker", () => {
+    const env = {
+      KEEP: "yes",
+      VALUZ_EGRESS_BOOTSTRAP_FILE: "/tmp/stale",
+      VALUZ_EGRESS_BOOTSTRAP_STDIN: "stale",
+      VALUZ_EGRESS_REQUIRED: "stale",
+    };
+    configureSidecarEgressEnvironment(
+      env,
+      {
+        mode: "auto",
+        controlEndpoint: "http://127.0.0.1:43123",
+        bootstrapToken: "memory-only-secret",
+        expiresAt: Date.now() + 60_000,
+      },
+      true,
+    );
+
+    expect(env).toEqual({ KEEP: "yes", VALUZ_EGRESS_BOOTSTRAP_STDIN: "1" });
+    expect(JSON.stringify(env)).not.toContain("memory-only-secret");
+  });
+
+  it("uses only the fail-loud marker when no bootstrap exists", () => {
+    const env = {
+      VALUZ_EGRESS_BOOTSTRAP_FILE: "/tmp/stale",
+      VALUZ_EGRESS_BOOTSTRAP_STDIN: "stale",
+    };
+    configureSidecarEgressEnvironment(env, null, true);
+    expect(env).toEqual({ VALUZ_EGRESS_REQUIRED: "1" });
+  });
+
+  it("always exposes the desktop stdin channel without copying its token", () => {
+    const env = {
+      VALUZ_EGRESS_BOOTSTRAP_STDIN: "stale",
+      VALUZ_DESKTOP_BOOTSTRAP_STDIN: "stale",
+    };
+    configureSidecarEgressEnvironment(
+      env,
+      null,
+      false,
+      "desktop-memory-only-token-that-is-long-enough",
+    );
+    expect(env).toEqual({ VALUZ_DESKTOP_BOOTSTRAP_STDIN: "1" });
+    expect(JSON.stringify(env)).not.toContain("desktop-memory-only-token");
+  });
+});
 
 describe("killWindowsProcessTree", () => {
   beforeEach(() => spawnSyncMock.mockReset());

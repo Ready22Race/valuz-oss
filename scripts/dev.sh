@@ -158,8 +158,18 @@ case "$TARGET" in
     all)
         install_backend
         install_frontend
-        start_backend
-        start_frontend
+        if [[ "${VALUZ_EGRESS_FRONTENDS:-1}" != "0" ]]; then
+            # In the unified-network canary Electron owns the source backend,
+            # matching the packaged lifecycle. Crossing the managed/client-
+            # managed boundary then rebuilds the backend with fresh state.
+            if [[ -n "$RELOAD_FLAG" ]]; then
+                warn "VALUZ_RELOAD is ignored while Electron manages the development backend"
+            fi
+            start_frontend
+        else
+            start_backend
+            start_frontend
+        fi
         ;;
     backend)
         install_backend

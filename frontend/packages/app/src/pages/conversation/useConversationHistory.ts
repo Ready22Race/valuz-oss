@@ -585,6 +585,15 @@ export function useConversationHistory({
           setSessions([sessionDetailToListItem(sessionDetail)]);
           selectedSessionIdRef.current = sessionDetail.id;
           setSelectedSessionId(sessionDetail.id);
+          // Start the external model client while the user is reading or
+          // typing. A concurrent Send joins the same runtime prepare lock, so
+          // this cannot create a duplicate Codex process.
+          if (!isPromotedNewSession && sessionDetail.status !== "running") {
+            void sessionsApi.prepare(sessionDetail.id).catch(() => {
+              // Preparation is an optimization only. The normal Send path
+              // remains the authoritative place to surface runtime failures.
+            });
+          }
           if (isPromotedNewSession) {
             promotingSessionIdRef.current = null;
             consumedPromoteSessionIdsRef.current.add(sessionDetail.id);

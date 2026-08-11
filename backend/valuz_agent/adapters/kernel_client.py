@@ -240,6 +240,8 @@ class KernelClient(Protocol):
 
     async def interrupt(self, user_id: str, session_id: str) -> None: ...
 
+    async def prepare_runtime(self, user_id: str, session_id: str) -> None: ...
+
     async def run_turn(
         self,
         user_id: str,
@@ -629,6 +631,9 @@ class InProcessKernelClient:
             if exc.status_code == 404:
                 return
             _raise_mapped(exc)
+
+    async def prepare_runtime(self, user_id: str, session_id: str) -> None:
+        await _orchestrator().prepare_runtime(user_id, session_id)
 
     async def run_turn(
         self,
@@ -1191,6 +1196,11 @@ async def submit_action(user_id: str, session_id: str, req: SubmitActionRequest)
 async def interrupt(user_id: str, session_id: str) -> None:
     k = await _kernel_for(user_id, await _scope_for(user_id, session_id))
     await k.interrupt(user_id, session_id)
+
+
+async def prepare_runtime(user_id: str, session_id: str) -> None:
+    k = await _kernel_for(user_id, await _scope_for(user_id, session_id))
+    await k.prepare_runtime(user_id, session_id)
 
 
 async def run_turn(

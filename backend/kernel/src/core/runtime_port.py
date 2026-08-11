@@ -42,6 +42,14 @@ class RuntimePort(Protocol):
         """Replace the event sink (e.g. after WebSocket reconnect)."""
         ...
 
+    async def prepare(self, session: Session) -> None:
+        """Initialize persistent client resources without sending a model turn.
+
+        Runtimes without a useful cold-start boundary may implement this as a
+        no-op. Calling it repeatedly must be safe.
+        """
+        ...
+
     async def run(self, session: Session, user_message: UserMessage) -> None:
         """Execute one conversation turn.
 

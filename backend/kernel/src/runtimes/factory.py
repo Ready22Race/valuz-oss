@@ -28,6 +28,11 @@ from src.core.runtime_port import RuntimePort
 from src.core.tool_registry import build_toolkit_for_config
 from src.core.tools import ToolKit
 from src.core.types import ApiProtocol, RuntimeProvider, Session
+from src.runtimes.network_egress import (
+    EgressDescriptor,
+    ForwardProxyDescriptor,
+    ModelIngressDescriptor,
+)
 
 # Per-runtime allowlist for ``ModelProvider.api_protocol``. Source of
 # truth for the cross-runtime "which gateway protocol can which runtime
@@ -80,6 +85,7 @@ def create_runtime(
     event_sink: EventSink,
     toolkit: ToolKit | None = None,
     workspace_root: str = "",
+    egress_descriptor: EgressDescriptor | None = None,
 ) -> RuntimePort:
     """Create the runtime that hosts ``session.model`` for this agent."""
     resolved_toolkit = toolkit or build_toolkit_for_config(config.tools)
@@ -91,6 +97,10 @@ def create_runtime(
         validate_api_protocol(provider, session.model_provider.api_protocol)
 
     if provider == "claude_agent":
+        if egress_descriptor is not None and not isinstance(
+            egress_descriptor, ModelIngressDescriptor
+        ):
+            raise ValueError("claude_agent requires a model-ingress descriptor")
         from src.runtimes.claude_agent.runtime import ClaudeAgentRuntime
 
         return ClaudeAgentRuntime(
@@ -101,9 +111,14 @@ def create_runtime(
             workspace_root=workspace_root,
             model_provider=session.model_provider,
             model_settings=session.model_settings,
+            egress_descriptor=egress_descriptor,
         )
 
     if provider == "codex":
+        if egress_descriptor is not None and not isinstance(
+            egress_descriptor, ModelIngressDescriptor
+        ):
+            raise ValueError("codex requires a model-ingress descriptor")
         from src.runtimes.codex.runtime import CodexRuntime
 
         return CodexRuntime(
@@ -114,9 +129,14 @@ def create_runtime(
             workspace_root=workspace_root,
             model_provider=session.model_provider,
             model_settings=session.model_settings,
+            egress_descriptor=egress_descriptor,
         )
 
     if provider == "deepagents":
+        if egress_descriptor is not None and not isinstance(
+            egress_descriptor, ForwardProxyDescriptor
+        ):
+            raise ValueError("deepagents requires a forward-proxy descriptor")
         if session.model_provider is None or not session.model.strip():
             raise ValueError(
                 "DeepAgentsRuntime requires both `model` and `model_provider` "
@@ -132,6 +152,7 @@ def create_runtime(
             workspace_root=workspace_root,
             model_provider=session.model_provider,
             model_settings=session.model_settings,
+            egress_descriptor=egress_descriptor,
         )
 
     raise ValueError(f"Unsupported runtime_provider: {provider!r}")

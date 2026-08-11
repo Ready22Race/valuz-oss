@@ -99,6 +99,11 @@ from src.runtimes.codex.event_mapper import (
     map_notification,
 )
 from src.runtimes.interruption import describe_exception, is_runtime_interruption
+from src.runtimes.network_egress import (
+    ModelIngressDescriptor,
+    merge_loopback_no_proxy,
+    record_runtime_egress_phase,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +154,7 @@ class CodexRuntime:
         workspace_root: str = "",
         model_provider: ModelProvider | None = None,
         model_settings: ModelSettings | None = None,
+        egress_descriptor: ModelIngressDescriptor | None = None,
     ) -> None:
         self.config = config
         self.model = model
@@ -163,15 +169,20 @@ class CodexRuntime:
         self.workspace_root = workspace_root
         self.model_provider = model_provider
         self.model_settings = model_settings
+        self.egress_descriptor = egress_descriptor
 
         self._codex: AsyncCodex | None = None
         self._thread: AsyncThread | None = None
         self._active_turn: AsyncTurnHandle | None = None
         self._active_task: asyncio.Task[Any] | None = None
+        self._prepare_lock = asyncio.Lock()
+        self._background_prepare_tasks: set[asyncio.Task[Any]] = set()
         self._cancelled: bool = False
         # Tracks whether this runtime registered a toolkit endpoint so
         # ``close()`` can revoke it without needing the session reference.
         self._registered_session_id: str | None = None
+        self._egress_runtime_key: str | None = None
+        self._egress_turn_attempt_id: str | None = None
 
         # Approval bridge (Phase 2).
         # ``_pending_futures`` maps pending_id -> asyncio.Future that
@@ -255,6 +266,42 @@ class CodexRuntime:
     def update_sink(self, sink: EventSink) -> None:
         self.event_sink = sink
 
+    async def prepare(self, session: Session) -> None:
+        """Warm the Codex app-server and thread without dispatching a turn."""
+        task = asyncio.current_task()
+        turn_attempt_id = f"prepare-{uuid.uuid4().hex}"
+        if task is not None:
+            self._background_prepare_tasks.add(task)
+        try:
+            await self._prepare(
+                session,
+                turn_attempt_id=turn_attempt_id,
+            )
+        except BaseException:
+            # A best-effort prepare has no user turn whose normal ``run``
+            # finalizer could close the monitoring activity.
+            await self._emit_turn_phase(
+                "runtime_prepare_failed",
+                egress_runtime_key=session.id,
+                egress_turn_attempt_id=turn_attempt_id,
+            )
+            raise
+        finally:
+            if task is not None:
+                self._background_prepare_tasks.discard(task)
+
+    async def _prepare(self, session: Session, *, turn_attempt_id: str) -> None:
+        async with self._prepare_lock:
+            self._egress_runtime_key = session.id
+            self._egress_turn_attempt_id = turn_attempt_id
+            self._loop = asyncio.get_running_loop()
+            was_ready = self._codex is not None and self._thread is not None
+            self._materialize_skills(session)
+            await self._ensure_codex(session)
+            await self._ensure_thread(session)
+            if not was_ready:
+                await self._emit_turn_phase("runtime_ready")
+
     async def run(self, session: Session, user_message: UserMessage) -> None:
         from datetime import datetime
 
@@ -262,14 +309,12 @@ class CodexRuntime:
 
         session.status = "running"
         self._cancelled = False
+        self._active_task = asyncio.current_task()
+        turn_attempt_id = uuid.uuid4().hex
 
         try:
-            self._loop = asyncio.get_running_loop()
-            self._materialize_skills(session)
-
-            await self._ensure_codex(session)
+            await self._prepare(session, turn_attempt_id=turn_attempt_id)
             assert self._codex is not None
-            await self._ensure_thread(session)
             assert self._thread is not None
 
             # ``/compact`` sent as a normal turn IS a real codex compaction:
@@ -337,7 +382,6 @@ class CodexRuntime:
                 now=datetime.now().astimezone(),
             )
 
-            self._active_task = asyncio.current_task()
             turn_kwargs = self._build_turn_kwargs(session)
             # Sync the live caches the sync approval handler reads from.
             # ``_cached_permission_mode`` is the only one that matters
@@ -359,6 +403,7 @@ class CodexRuntime:
             # just satisfies ``TurnStartParams``' required field.
             turn_input = UserInput(root=TextUserInput(type="text", text=prompt))
             t_dispatch = time.monotonic()
+            await self._emit_turn_phase("dispatch_started")
             turn_resp = await self._codex._client.turn_start(
                 self._thread.id,
                 prompt,
@@ -375,6 +420,7 @@ class CodexRuntime:
             error_message: str | None = None
             usage_payload: dict[str, Any] | None = None
             saw_compaction = False
+            saw_model_event = False
 
             # SDK declares ``stream()`` as ``AsyncIterator`` but always
             # returns an async generator; cast so we can call ``aclose``.
@@ -397,6 +443,19 @@ class CodexRuntime:
                             continue
                         if event.type == "compaction":
                             saw_compaction = True
+                        if not saw_model_event and event.type in {
+                            "text_delta",
+                            "thinking_delta",
+                            "assistant_message",
+                            "thinking",
+                            "tool_use",
+                        }:
+                            saw_model_event = True
+                            await record_runtime_egress_phase(
+                                self._egress_runtime_key,
+                                self._egress_turn_attempt_id,
+                                "model_first_event",
+                            )
                         await self.event_sink.emit(event)
 
                     mcp_status = extract_mcp_server_status(notification)
@@ -588,6 +647,16 @@ class CodexRuntime:
                     },
                 )
             )
+            await record_runtime_egress_phase(
+                self._egress_runtime_key,
+                self._egress_turn_attempt_id,
+                (
+                    "interrupted"
+                    if getattr(session.stop_reason, "category", None)
+                    in {"user_interrupt", "interrupted"}
+                    else "turn_complete"
+                ),
+            )
 
     async def run_task_coverage(
         self,
@@ -686,8 +755,21 @@ class CodexRuntime:
         task = self._active_task
         if task is not None and not task.done():
             task.cancel()
+        for prepare_task in tuple(self._background_prepare_tasks):
+            if not prepare_task.done():
+                prepare_task.cancel()
 
     async def close(self) -> None:
+        current = asyncio.current_task()
+        prepare_tasks = [
+            task
+            for task in self._background_prepare_tasks
+            if task is not current and not task.done()
+        ]
+        for task in prepare_tasks:
+            task.cancel()
+        if prepare_tasks:
+            await asyncio.gather(*prepare_tasks, return_exceptions=True)
         self._active_turn = None
         self._active_task = None
         self._thread = None
@@ -713,14 +795,31 @@ class CodexRuntime:
 
     # -- Lifecycle helpers --
 
-    async def _emit_turn_phase(self, phase: str, **fields: Any) -> None:
+    async def _emit_turn_phase(
+        self,
+        phase: str,
+        *,
+        egress_runtime_key: str | None = None,
+        egress_turn_attempt_id: str | None = None,
+        **fields: Any,
+    ) -> None:
         """Persisted latency marker — see ``turn_phase`` in ``events.py``."""
         await self.event_sink.emit(Event(type="turn_phase", data={"phase": phase, **fields}))
+        await record_runtime_egress_phase(
+            egress_runtime_key
+            if egress_runtime_key is not None
+            else getattr(self, "_egress_runtime_key", None),
+            egress_turn_attempt_id
+            if egress_turn_attempt_id is not None
+            else getattr(self, "_egress_turn_attempt_id", None),
+            phase,
+        )
 
     async def _ensure_codex(self, session: Session) -> None:
         if self._codex is not None:
             return
         t0 = time.monotonic()
+        await self._emit_turn_phase("runtime_init_started")
         expose_toolkit = self._register_toolkit_if_eligible(session)
         cfg = CodexConfig(
             codex_bin=_resolve_codex_bin(),
@@ -729,8 +828,16 @@ class CodexRuntime:
                 self.model_provider,
                 self.model,
                 expose_toolkit=expose_toolkit,
+                egress_base_url=(
+                    self.egress_descriptor.base_url if self.egress_descriptor is not None else None
+                ),
             ),
-            env=_build_codex_env(self.model_provider),
+            env=_build_codex_env(
+                self.model_provider,
+                egress_base_url=(
+                    self.egress_descriptor.base_url if self.egress_descriptor is not None else None
+                ),
+            ),
         )
         self._codex = AsyncCodex(config=cfg)
         await self._codex.__aenter__()
@@ -820,6 +927,7 @@ class CodexRuntime:
         # consumption path is unchanged.
         common = self._build_thread_kwargs(session)
         t0 = time.monotonic()
+        await self._emit_turn_phase("thread_init_started")
         if session.runtime_session_id:
             # NB: ``ThreadResumeParams.model`` is documented as
             # "Configuration overrides for the resumed thread, if any."
@@ -1314,6 +1422,7 @@ def _build_config_overrides(
     model: str,
     *,
     expose_toolkit: bool = False,
+    egress_base_url: str | None = None,
 ) -> tuple[str, ...]:
     """Serialize per-session config to ``--config k=v`` strings.
 
@@ -1331,9 +1440,10 @@ def _build_config_overrides(
        expected a map"); see ``_toml_key``. ``env_vars`` is passed through
        verbatim so codex resolves it against its own process env at child-spawn
        time (token values therefore never appear in the overrides string).
-    2. ``Session.model_provider`` -> a synthetic ``[model_providers.harness]``
-       block plus ``model = "..."`` / ``model_provider = "harness"`` so the
-       codex subprocess routes through the user-supplied gateway.
+    2. Model transport -> a synthetic ``[model_providers.harness]`` block when
+       a user provider or an egress subscription descriptor is present. API
+       keys use a dedicated ``env_key``; ChatGPT subscriptions use Codex's
+       native ``requires_openai_auth`` path and keep credentials in auth.json.
     3. Harness ``ToolKit`` -> ``mcp_servers.harness_toolkit`` pointing at
        the FastAPI MCP-over-HTTP endpoint. Unauthenticated; the backend is
        expected to bind loopback / private network so the URL is only
@@ -1349,7 +1459,22 @@ def _build_config_overrides(
             if cfg.args:
                 overrides.append(f"mcp_servers.{cfg.name}.args={_toml_array(cfg.args)}")
             if cfg.env_vars:
-                overrides.append(f"mcp_servers.{cfg.name}.env_vars={_toml_array(cfg.env_vars)}")
+                # The CLI's default secret-name filtering protects shell
+                # commands, but an MCP ``env_vars`` entry is an explicit
+                # allowlist and can request the provider key by name. Never
+                # emit that request on the egress API-key path; keep all other
+                # user-declared variables unchanged.
+                env_vars = tuple(
+                    name
+                    for name in cfg.env_vars
+                    if not (
+                        provider is not None
+                        and egress_base_url is not None
+                        and name.upper() == _HARNESS_PROVIDER_ENV_KEY
+                    )
+                )
+                if env_vars:
+                    overrides.append(f"mcp_servers.{cfg.name}.env_vars={_toml_array(env_vars)}")
             # ``env`` is a TOML map: emit one dotted key per var, NOT an inline
             # table — codex's ``-c`` parser rejects ``env={ … }`` as a string
             # (see ``_toml_key``).
@@ -1459,7 +1584,26 @@ def _build_config_overrides(
         # the same non-subscription wall.
         overrides.append('web_search="disabled"')
 
-    if provider is not None and provider.base_url is not None:
+    effective_base_url = egress_base_url or (provider.base_url if provider is not None else None)
+    if provider is None and egress_base_url is not None:
+        name = _HARNESS_PROVIDER_NAME
+        if model:
+            overrides.append(f"model={_toml_quote(model)}")
+        overrides.extend(
+            [
+                f"model_provider={_toml_quote(name)}",
+                # Codex keys remote-compaction support off this display name.
+                f"model_providers.{name}.name={_toml_quote('OpenAI')}",
+                f"model_providers.{name}.base_url={_toml_quote(egress_base_url)}",
+                f'model_providers.{name}.wire_api="responses"',
+                f"model_providers.{name}.requires_openai_auth=true",
+                # Prefer deterministic HTTPS streaming for the proxy canary.
+                # A broken WSS stream otherwise incurs Codex's five reconnect
+                # attempts before its own HTTPS fallback.
+                f"model_providers.{name}.supports_websockets=false",
+            ]
+        )
+    elif provider is not None and effective_base_url is not None:
         name = _HARNESS_PROVIDER_NAME
         env_key = _HARNESS_PROVIDER_ENV_KEY
         # Codex only supports ``wire_api = "responses"``; the harness-side
@@ -1475,11 +1619,19 @@ def _build_config_overrides(
                 f"model={_toml_quote(model)}",
                 f"model_provider={_toml_quote(name)}",
                 f"model_providers.{name}.name={_toml_quote('Harness-supplied gateway')}",
-                f"model_providers.{name}.base_url={_toml_quote(provider.base_url)}",
+                f"model_providers.{name}.base_url={_toml_quote(effective_base_url)}",
                 f'model_providers.{name}.wire_api="responses"',
                 f"model_providers.{name}.env_key={_toml_quote(env_key)}",
             ]
         )
+        if egress_base_url is not None:
+            # Codex 0.144.4 does not yet support the newer keyed
+            # shell_environment_policy.filters map. Its supported automatic
+            # policy removes names containing KEY/SECRET/TOKEN without
+            # replacing the user's legacy exclude/include arrays. This keeps
+            # the per-session provider key in the model transport process but
+            # out of shell and other command subprocesses.
+            overrides.append("shell_environment_policy.ignore_default_excludes=false")
     elif provider is not None and model:
         # First-party OpenAI: no synthetic provider block, no
         # ``model_provider=harness`` override. Codex uses its built-in
@@ -1497,6 +1649,8 @@ def _build_config_overrides(
 
 def _build_codex_env(
     provider: ModelProvider | None,
+    *,
+    egress_base_url: str | None = None,
 ) -> dict[str, str] | None:
     """Subprocess env passed to ``codex app-server``.
 
@@ -1515,10 +1669,19 @@ def _build_codex_env(
       it).
     """
     if provider is None:
-        return None
+        if egress_base_url is None:
+            return None
+        # The model transport keeps using Codex's native ChatGPT auth.json.
+        # We only provide an explicit environment so the loopback ingress is
+        # never captured by a user/system proxy inherited by the GUI process.
+        subscription_env = dict(os.environ)
+        merge_loopback_no_proxy(subscription_env, egress_base_url)
+        return subscription_env
     merged: dict[str, str] = dict(os.environ)
-    if provider.base_url is not None:
+    if egress_base_url is not None or provider.base_url is not None:
         merged[_HARNESS_PROVIDER_ENV_KEY] = provider.api_key
+        if egress_base_url is not None:
+            merge_loopback_no_proxy(merged, egress_base_url)
         # Present as the CLI's originator (``codex_exec``) rather than the SDK's
         # default (``codex_python_sdk``). Some third-party OpenAI-compatible
         # gateways (e.g. Volcengine/Doubao) whitelist codex's proprietary tool

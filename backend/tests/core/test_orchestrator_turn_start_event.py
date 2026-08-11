@@ -29,6 +29,7 @@ from src.core.types import (
     Session,
     UserMessage,
 )
+from src.runtimes.network_egress import EgressRegistrationError
 
 
 class _FakeStore:
@@ -207,6 +208,51 @@ async def test_failed_turn_does_not_restore_legacy_pending_task_clarification(
 
     assert message.status == "errored"
     assert "pending_task_clarification" not in store._session.metadata["valuz"]
+
+
+async def test_egress_initialization_failure_finalizes_turn_without_runtime(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    session = Session(
+        id="sess-egress-failure",
+        agent_config=AgentConfig(id="agent-1", name="tester"),
+        cwd=str(tmp_path),
+        user_id="owner-1",
+        status="created",
+    )
+    store = _FakeStore(session)
+    orch = SessionOrchestrator(store)  # type: ignore[arg-type]
+
+    async def reject_egress(*_args, **_kwargs):
+        raise EgressRegistrationError("egress_manager_unavailable")
+
+    monkeypatch.setattr(
+        "src.runtimes.network_egress.prepare_runtime_egress",
+        reject_egress,
+    )
+
+    message = await orch.run_turn(
+        "owner-1",
+        session.id,
+        UserMessage(text="hello"),
+    )
+
+    assert message.status == "errored"
+    assert message.error_message == {
+        "category": "network_egress_unavailable",
+        "message": (
+            "Unified model networking is unavailable. Check Network settings "
+            "or switch to model-client-managed connections."
+        ),
+    }
+    assert store._session.status == "idle"
+    assert [event.type for event in store.appended] == [
+        "user_message",
+        "session_error",
+        "session_update",
+    ]
+    assert store.appended[1].data["code"] == "egress_manager_unavailable"
 
 
 async def test_run_turn_emits_running_session_update_before_runtime(tmp_path, monkeypatch) -> None:
