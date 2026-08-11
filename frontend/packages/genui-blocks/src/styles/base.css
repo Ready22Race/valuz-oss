@@ -51,7 +51,22 @@
   min-width: 0;
 }
 
-/* ── Shared surfaces ─────────────────────────────────────────────── */
+/* ── Shared surface variants ─────────────────────────────────────── */
+/*
+ * Four surface levels, matching OpenUI's surface semantics:
+ *
+ *   .vgb-surface-card     — elevated card: border + subtle shadow
+ *                           Content containers (cards, panels).
+ *   .vgb-surface-sunk     — recessed / filled: soft fill, no border
+ *                           Tiles, row highlights, grouped data.
+ *   .vgb-surface-clear    — transparent, no border
+ *                           Inline content groups that need no frame.
+ *   .vgb-surface-highlight — emphasis: stronger fill
+ *                           Selected items, hover highlights, active state.
+ *
+ * All levels share the same border-radius (radius-2xl) so components can
+ * compose freely without mismatched corners.
+ */
 
 .vgb-surface {
   background-color: var(--openui-highlight-subtle);
@@ -61,6 +76,32 @@
 
 .vgb-surface-flat {
   background-color: var(--openui-highlight-subtle);
+  border-radius: var(--openui-radius-2xl);
+}
+
+/* Elevated card surface — for content containers. */
+.vgb-surface-card {
+  background-color: var(--openui-elevated);
+  border: 1px solid var(--openui-border-default);
+  border-radius: var(--openui-radius-2xl);
+  box-shadow: var(--openui-shadow-s);
+}
+
+/* Recessed / sunk surface — for tiles, filled rows, data groups. */
+.vgb-surface-sunk {
+  background-color: var(--openui-highlight-subtle);
+  border-radius: var(--openui-radius-2xl);
+}
+
+/* Clear / no-frame surface — for inline content groups. */
+.vgb-surface-clear {
+  background-color: transparent;
+  border-radius: var(--openui-radius-2xl);
+}
+
+/* Highlight / emphasis surface — for selected items, active states. */
+.vgb-surface-highlight {
+  background-color: var(--openui-highlight);
   border-radius: var(--openui-radius-2xl);
 }
 
@@ -217,6 +258,66 @@
   font-size: var(--openui-font-size-xs);
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+/* ── Accessibility utilities ─────────────────────────────────────── */
+
+/*
+ * Screen-reader only content. Standard pattern: visually hidden but available
+ * to assistive technology. Use for chart summaries, icon labels, and any
+ * content that should be announced but not displayed.
+ *
+ * Promoted from per-family copies (`.vgb-cite-sr`, `.vgb-chart-sr`) to a
+ * single package-wide utility — same rule, one definition. The family
+ * aliases remain so components need no className changes; new code should
+ * use `.vgb-sr-only` directly.
+ */
+.vgb-sr-only,
+.vgb-cite-sr,
+.vgb-chart-sr,
+.vgb-avatar-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ── Row hover wash ──────────────────────────────────────────────── */
+/*
+ * A readability aid for dense list rows: a subtle background wash appears on
+ * hover that anchors the eye while scanning. It is NOT a clickability cue —
+ * no lift, no shadow, no pointer cursor. The negative margin lets the wash
+ * run slightly wider than the text while the content stays aligned.
+ *
+ * Apply to any repeating row item: DataListItem, TimelineItem, StatusItem,
+ * table rows, etc.
+ */
+
+.vgb-row {
+  padding: var(--openui-space-2xs) var(--openui-space-2xs);
+  margin: 0 calc(-1 * var(--openui-space-2xs));
+  border-radius: var(--openui-radius-xs);
+  transition: background-color 120ms ease-out;
+}
+
+.vgb-row:hover {
+  background-color: var(--openui-highlight-subtle);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vgb-row,
+  .vgb-data-list-row,
+  .vgb-status-row,
+  .vgb-timeline-entry,
+  .vgb-comparison-table tbody tr,
+  .vgb-card-clickable {
+    transition: none;
+  }
 }
 
 /* ── Scroll containment ──────────────────────────────────────────── */

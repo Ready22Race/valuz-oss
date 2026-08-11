@@ -44,6 +44,13 @@
   flex-direction: column;
   gap: var(--openui-space-s);
   margin: 0;
+  /* Chart height tokens, host-overridable like --vgb-chart-*. A standard chart
+     is 240px (200px in a narrow column); small-multiple panels are 120/100.
+     Hosts and editions can remap these to match their own chart rhythm. */
+  --vgb-chart-h-default: 240px;
+  --vgb-chart-h-narrow: 200px;
+  --vgb-chart-h-small: 120px;
+  --vgb-chart-h-small-narrow: 100px;
 }
 
 .vgb-chart-caption {
@@ -75,24 +82,11 @@
 /*
  * The accessible summary.
  *
- * An SVG polyline and a row of `<span>`s announce nothing at all — not the
- * values, not that a chart is there — so every block states in one sentence
- * what the picture shows. Scoped to this family on purpose: a generic
- * `.vgb-sr-only` would be a package-wide utility and belongs in base.css, which
- * families do not own. (`.vgb-cite-sr` in sources.css is the same rule for the
- * same reason.)
+ * An SVG polyline and a row of <span>s announce nothing at all, so every
+ * block states in one sentence what the picture shows. The .vgb-chart-sr
+ * class is now an alias of the package-wide .vgb-sr-only utility in base.css
+ * (same visually-hidden rule, one definition there).
  */
-.vgb-chart-sr {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  margin: -1px;
-  padding: 0;
-  border: 0;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-}
 
 /* A figure that disagrees with what the chart computed. Marked, never hidden. */
 .vgb-chart-row[data-chart-mismatch="true"] .vgb-chart-value,
@@ -575,26 +569,24 @@
    reversing the "no second renderer" rule above: react-ui already ships
    recharts, so the engine is shared, and the hand-drawn plots diverged
    from the react-ui charts in look and interaction). ResponsiveContainer
-   needs a sized box — height is geometry, not spacing, so it stays px. */
+   needs a sized box — height reads from the chart-height tokens so a host
+   can retune the whole family's vertical rhythm in one place. */
 .vgb-recharts {
-  /* Taller than the old 200px so the chart reads like OpenUI's (~296px):
-     a line or bar gets room to breathe above its axis. 240 instead of 296
-     keeps a chat-column chart from dominating the turn. */
-  height: 240px;
+  height: var(--vgb-chart-h-default);
   width: 100%;
 }
 
 /* Small-multiple panels: readable but deliberately modest. */
 .vgb-recharts-small {
-  height: 120px;
+  height: var(--vgb-chart-h-small);
 }
 
 @container vgb (max-width: 30rem) {
   .vgb-recharts {
-    height: 200px;
+    height: var(--vgb-chart-h-narrow);
   }
 
   .vgb-recharts-small {
-    height: 100px;
+    height: var(--vgb-chart-h-small-narrow);
   }
 }

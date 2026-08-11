@@ -41,6 +41,12 @@
   align-items: center;
   padding-block: var(--openui-space-s);
   border-bottom: 1px solid var(--openui-border-default);
+  border-radius: var(--openui-radius-xs);
+  transition: background-color 120ms ease-out;
+}
+
+.vgb-data-list-row:hover {
+  background-color: var(--openui-highlight-subtle);
 }
 
 .vgb-data-list-rank {

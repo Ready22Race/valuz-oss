@@ -8,20 +8,10 @@
 /* ── Screen-reader-only text ─────────────────────────────────────── */
 
 /*
- * Scoped to this family on purpose. A generic `.vgb-sr-only` would be a
- * package-wide utility and belongs in base.css, which families do not own.
+ * `.vgb-cite-sr` is now an alias of the package-wide `.vgb-sr-only` utility
+ * defined in base.css (same visually-hidden rule, one definition there).
+ * Components keep using `.vgb-cite-sr`; new code may use `.vgb-sr-only`.
  */
-.vgb-cite-sr {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  margin: -1px;
-  padding: 0;
-  border: 0;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-}
 
 /* ── Citation — the inline marker ────────────────────────────────── */
 
