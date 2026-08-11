@@ -84,6 +84,8 @@ export const SpacerSchema = z.object({
 export const AspectRatioSchema = z.object({
   children: z.array(z.unknown()),
   ratio: z.string().optional(),
+  /** 媒体如何铺满比例盒,对齐 OpenUI Image 的 scale:fill 拉伸 / fit 完整显示。 */
+  scale: z.enum(["fill", "fit"]).optional(),
 });
 
 export const ScrollAreaSchema = z.object({

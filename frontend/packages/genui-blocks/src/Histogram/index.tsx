@@ -16,6 +16,7 @@ import { formatValue, readItems, readLabel, spanOf } from "../lib/chart";
 import { ChartFrame } from "../lib/chart-parts";
 import {
   AXIS_TICK,
+  BAR_RADIUS,
   CHART_INITIAL_DIMENSION,
   CHART_MARGIN,
   GRID_STROKE,
@@ -165,7 +166,7 @@ export const Histogram = defineComponent({
                   fill={toneText(tone)}
                   isAnimationActive={false}
                   maxBarSize={MAX_BAR_SIZE}
-                  radius={2}
+                  radius={BAR_RADIUS}
                 >
                   <LabelList
                     dataKey="countLabel"

@@ -27,6 +27,7 @@ import { readLooseNumber, readTextFromKeys } from "../lib/props";
 import type { Tone } from "../lib/schema";
 import {
   AXIS_TICK,
+  BAR_RADIUS,
   CHART_INITIAL_DIMENSION,
   CHART_MARGIN,
   GRID_STROKE,
@@ -279,7 +280,7 @@ function WaterfallChart({
               dataKey="delta"
               isAnimationActive={false}
               maxBarSize={MAX_BAR_SIZE}
-              radius={2}
+              radius={BAR_RADIUS}
               stackId="bridge"
             >
               {rows.map((row, index) => (

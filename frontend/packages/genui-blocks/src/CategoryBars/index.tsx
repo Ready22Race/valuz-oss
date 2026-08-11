@@ -23,6 +23,7 @@ import { ChartFrame, ChartLegend } from "../lib/chart-parts";
 import { readText, readTextFromKeys, toArray } from "../lib/props";
 import {
   AXIS_TICK,
+  BAR_RADIUS,
   CHART_INITIAL_DIMENSION,
   CHART_MARGIN,
   GRID_STROKE,
@@ -207,7 +208,7 @@ export const GroupedBar = defineComponent({
                   key={`${entry.name}-${seriesIndex}`}
                   maxBarSize={MAX_BAR_SIZE}
                   name={entry.name}
-                  radius={2}
+                  radius={BAR_RADIUS}
                 />
               ))}
             </BarChart>
@@ -331,6 +332,11 @@ export const StackedBar = defineComponent({
                   key={`${entry.name}-${seriesIndex}`}
                   maxBarSize={MAX_BAR_SIZE}
                   name={entry.name}
+                  radius={
+                    seriesIndex === data.series.length - 1
+                      ? BAR_RADIUS
+                      : [0, 0, 0, 0]
+                  }
                   stackId="stack"
                 />
               ))}

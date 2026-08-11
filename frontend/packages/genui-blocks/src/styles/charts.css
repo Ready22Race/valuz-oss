@@ -577,7 +577,10 @@
    from the react-ui charts in look and interaction). ResponsiveContainer
    needs a sized box — height is geometry, not spacing, so it stays px. */
 .vgb-recharts {
-  height: 200px;
+  /* Taller than the old 200px so the chart reads like OpenUI's (~296px):
+     a line or bar gets room to breathe above its axis. 240 instead of 296
+     keeps a chat-column chart from dominating the turn. */
+  height: 240px;
   width: 100%;
 }
 
@@ -588,7 +591,7 @@
 
 @container vgb (max-width: 30rem) {
   .vgb-recharts {
-    height: 160px;
+    height: 200px;
   }
 
   .vgb-recharts-small {

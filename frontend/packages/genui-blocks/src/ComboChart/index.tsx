@@ -18,6 +18,7 @@ import { readRecord, readText, readTextFromKeys, toArray } from "../lib/props";
 import type { Span } from "../lib/chart";
 import {
   AXIS_TICK,
+  BAR_RADIUS,
   CHART_INITIAL_DIMENSION,
   CHART_MARGIN,
   GRID_STROKE,
@@ -257,7 +258,7 @@ export const ComboChart = defineComponent({
                 isAnimationActive={false}
                 maxBarSize={MAX_BAR_SIZE}
                 name={bars.name}
-                radius={2}
+                radius={BAR_RADIUS}
               />
               <Line
                 connectNulls={false}

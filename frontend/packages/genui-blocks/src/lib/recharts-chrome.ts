@@ -10,8 +10,18 @@ import type { CSSProperties } from "react";
 
 export const CHART_MARGIN = { top: 4, right: 4, bottom: 0, left: 4 };
 
-/** Bars never balloon to fill a sparse category axis. */
-export const MAX_BAR_SIZE = 32;
+/*
+ * Bar width cap, aligned to OpenUI's chart bars (`DEFAULT_MAX_BAR_WIDTH=12`).
+ * Kept at 16 rather than 12: at 12 a two-series grouped pair reads as a single
+ * skinny line in a chat column, and the cap exists to keep bars slender, not
+ * to starve them.
+ */
+export const MAX_BAR_SIZE = 16;
+
+/* Top-only bar radius, matching OpenUI's `getRadiusArray` for positive
+   vertical bars. Negative bars keep the same small radius — 4px at the base
+   is visually negligible and avoids per-value radius plumbing. */
+export const BAR_RADIUS: [number, number, number, number] = [4, 4, 0, 0];
 
 export const AXIS_TICK = {
   /* OpenUI chart axis labels are secondary ink, not the tertiary these were

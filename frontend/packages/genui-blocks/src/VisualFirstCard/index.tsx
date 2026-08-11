@@ -2,6 +2,7 @@
 
 import { defineComponent } from "@openuidev/react-lang";
 
+import { cssRatio } from "../Layout/css";
 import { VisualFirstCardSchema } from "./schema";
 
 export { VisualFirstCardSchema } from "./schema";
@@ -12,6 +13,7 @@ export const VisualFirstCard = defineComponent({
   description:
     "A card led by its image, with the title and body beneath. Use it when the picture carries the message — a product, a place, a screenshot, a piece of work — and skip it when you have no real image URL to show. " +
     "imageUrl must be a complete URL, imageAlt describes the picture for screen readers, and body is a sentence or two under the title. " +
+    'ratio sets the image box\'s aspect ratio ("16/9", "3:2", … default 3:2); scale is how the picture fills it: fill stretches, fit letterboxes — both aligned to OpenUI\'s Image. ' +
     "Lay several out in a MediumCardBlock.",
   component: ({ props }) => (
     <div className="vgb-card vgb-visual-card" data-slot="vgb-visual-first-card">
@@ -20,6 +22,10 @@ export const VisualFirstCard = defineComponent({
         src={props.imageUrl}
         alt={props.imageAlt ?? ""}
         loading="lazy"
+        style={{
+          aspectRatio: cssRatio(props.ratio, "3 / 2"),
+          objectFit: props.scale === "fit" ? "contain" : "fill",
+        }}
       />
       <div className="vgb-visual-card-body">
         <h3 className="vgb-title vgb-card-title">{props.title}</h3>
