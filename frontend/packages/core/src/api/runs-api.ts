@@ -58,11 +58,20 @@ type RunsResponse = { runs: RunSummary[] };
 // local DB reads and falsely mark the local execution target unreachable.
 const inFlightLists = new Map<string, Promise<RunsResponse>>();
 
-const listRuns = async (params?: {
+export interface RunsListParams {
   status?: "running" | "finished";
-}): Promise<RunsResponse> => {
+  // Scope the recency window to one project. The unscoped window is global and
+  // shared with quick chats, so a project whose conversations are older than
+  // its tail otherwise reports zero runs — see the sidebar accordion.
+  projectId?: string;
+  limit?: number;
+}
+
+const listRuns = async (params?: RunsListParams): Promise<RunsResponse> => {
   const qs = new URLSearchParams();
   if (params?.status) qs.set("status", params.status);
+  if (params?.projectId) qs.set("project_id", params.projectId);
+  if (params?.limit) qs.set("limit", String(params.limit));
   const suffix = qs.toString() ? `?${qs}` : "";
   // Multi-target editions: fan out + tag ``exec_origin`` + feed the origin
   // index (session / task / project ids all ride on a run row). Zero targets
@@ -98,13 +107,19 @@ const listRuns = async (params?: {
 };
 
 export const runsApi = {
-  list(params?: {
-    status?: "running" | "finished";
-  }): Promise<RunsResponse> {
+  list(params?: RunsListParams): Promise<RunsResponse> {
     const targetsKey = getListFanOutTargets()
       .map((target) => `${target.id}:${target.baseUrl}`)
       .join("|");
-    const key = `${_apiBase}|${targetsKey}|${params?.status ?? "running"}`;
+    // Every query dimension is part of the key — a project-scoped request must
+    // never be served the global snapshot (or another project's).
+    const key = [
+      _apiBase,
+      targetsKey,
+      params?.status ?? "running",
+      params?.projectId ?? "",
+      params?.limit ?? "",
+    ].join("|");
     const current = inFlightLists.get(key);
     if (current) return current;
 

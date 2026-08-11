@@ -1186,6 +1186,85 @@
       "openFailed": "Failed to open the browser",
       "riskNote": "This is a separate, isolated browser instance — only sign into the accounts you need. Treat page content as untrusted."
     },
+    "network": {
+      "title": "Network Connection",
+      "desc": "Choose how models connect and view current connection status. System proxy settings are never changed.",
+      "modeSectionTitle": "Connection method",
+      "statusLabel": "Current model connections",
+      "statusDesc": "Shows the full active path from model-client initialization through connection and response. Entries disappear when the task ends and update every 3 seconds.",
+      "loading": "Reading status…",
+      "loadFailed": "Failed to load network status",
+      "desktopOnly": "Network egress management is available only in the desktop app.",
+      "canaryDisabled": "Valuz network management is not enabled in this build. Model clients manage their own connections.",
+      "current": "Enabled",
+      "useAuto": "Use Valuz management",
+      "autoLabel": "Managed by Valuz (recommended)",
+      "autoDesc": "Automatically reads the current proxy configuration, selects a proxy or direct route for supported models, and shows connection status and timing.",
+      "offLabel": "Managed by model clients",
+      "offDesc": "Codex, Claude Code, and other clients use their own supported network settings. Valuz does not select routes or provide connection monitoring.",
+      "enableCompatibility": "Use client management",
+      "offConfirm": "With client management, Codex, Claude Code, and other clients use their own network settings. Valuz will no longer select routes or show connection status and timing, and model connections will be rebuilt. Continue?",
+      "autoEnabled": "Valuz management is now enabled",
+      "offEnabled": "Client management is now enabled and model runtimes were rebuilt",
+      "changeFailed": "Failed to change the network connection mode",
+      "activeRunsHint": "{count} task(s) are running. When you switch, you can choose to interrupt them and continue.",
+      "activeRunsConfirm": "{count} task(s) are running. Continuing will interrupt them immediately and then rebuild model connections. Unfinished output may be lost. Continue?",
+      "activeRunsBlocked": "A running task was just detected, so the connection mode has not changed. Click again and confirm that you want to interrupt it.",
+      "activeRunsInterruptFailed": "Valuz could not safely interrupt every running task, so the connection mode was not changed. Stop the tasks manually and try again.",
+      "environmentLocked": "The app was configured at startup to use client management. Remove VALUZ_EGRESS_MODE=off and restart before enabling Valuz management.",
+      "noConnectionsTitle": "No model requests are running",
+      "noConnectionsDesc": "After you send a message, this area shows the actual route and timing used by Codex, Claude Code, or another model while the task runs.",
+      "legacyMonitoringTitle": "Client management is active",
+      "legacyMonitoringDesc": "Codex, Claude Code, and other clients currently use their own network settings, so Valuz does not show routes or stage timings. Enable Valuz management to view them here.",
+      "monitoringUnavailableTitle": "Model connection monitoring is unavailable in this build",
+      "monitoringUnavailableDesc": "Valuz network management is not enabled in this version, so model clients manage their own connections.",
+      "updatedAt": "Updated at {time}",
+      "fallbackCount": "Switched candidate routes {count} times",
+      "reconnectCount": "Model client reconnected {count} times",
+      "copyDiagnostics": "Copy diagnostics",
+      "copied": "Network diagnostics copied with sensitive information hidden",
+      "copyFailed": "Failed to copy diagnostics",
+      "activity": {
+        "runtimeInit": "Starting model client",
+        "threadInit": "Loading session and tools",
+        "modelConnecting": "Connecting to model service",
+        "waitingResponse": "Waiting for model response",
+        "streaming": "Receiving model output",
+        "elapsed": "{seconds}s elapsed",
+        "noRequestYet": "The client is still initializing locally and has not sent a model network request yet."
+      },
+      "health": {
+        "unknown": "Waiting for model response",
+        "healthy": "Connection healthy",
+        "degraded": "Slow or retried connection",
+        "failed": "Connection failed"
+      },
+      "healthDetail": {
+        "waitingRequest": "No new network request has been observed from this model yet.",
+        "waitingResponse": "The network route is connected and waiting for the model service to return data.",
+        "healthy": "The most recent model request received a normal response.",
+        "degraded": "The request succeeded, but connected slowly, switched to a fallback route, or reconnected.",
+        "failed": "The latest request failed to connect, received a server error, or the response stream ended early."
+      },
+      "mode": {
+        "auto": "Automatic selection",
+        "direct": "Direct connection (internal state)",
+        "off": "Managed by model clients"
+      },
+      "route": {
+        "direct": "Direct connection",
+        "httpProxy": "Via HTTP proxy",
+        "socks5Proxy": "Via SOCKS5 proxy",
+        "unknown": "Connection route not determined"
+      },
+      "timing": {
+        "resolve": "Choose route",
+        "connect": "Connect",
+        "response": "Response",
+        "firstByte": "First data",
+        "total": "Total request"
+      }
+    },
     "memory": {
       "enabledLabel": "Enable memory",
       "enabledDesc": "Master switch: memory injection + background auto-generation",
@@ -1660,6 +1739,10 @@
       "systemLogs": {
         "desc": "Backend status & log stream",
         "label": "System Logs"
+      },
+      "network": {
+        "desc": "Model connections, recovery, diagnostics",
+        "label": "Network"
       },
       "backup": {
         "label": "Backup",

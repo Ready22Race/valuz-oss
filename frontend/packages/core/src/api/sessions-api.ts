@@ -550,6 +550,14 @@ export const sessionsApi = {
     });
   },
 
+  prepare(sessionId: string): Promise<{ ready: boolean }> {
+    return fetchJson(`/v1/sessions/${encodeURIComponent(sessionId)}/prepare`, {
+      method: "POST",
+      baseUrl: sessionBase(sessionId),
+      timeoutMs: 120_000,
+    });
+  },
+
   async create(
     payload: SessionCreateRequest,
     opts?: { baseUrl?: string },

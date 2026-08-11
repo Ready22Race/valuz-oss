@@ -17,6 +17,7 @@ import {
   Palette,
   Radio,
   Settings,
+  Wifi,
 } from "lucide-react";
 import { SettingsNav, cn } from "@valuz/ui";
 import { useTranslation } from "@valuz/core";
@@ -32,6 +33,7 @@ import { ParsingSection } from "./settings/ParsingSection";
 import { BackupSection } from "./settings/BackupSection";
 import { SystemLogsSettingsSection } from "./settings/SystemLogsSection";
 import { AboutSection } from "./settings/AboutSection";
+import { NetworkSection } from "./settings/NetworkSection";
 
 const SETTINGS_TAB_STORAGE_KEY = "valuz-settings-tab";
 
@@ -53,6 +55,7 @@ const TAB_ICON_MAP: Record<string, ReactNode> = {
   brain: <Brain className="h-4 w-4" />,
   globe: <Globe className="h-4 w-4" />,
   browser: <Globe className="h-4 w-4" />,
+  network: <Wifi className="h-4 w-4" />,
 };
 
 const readStoredTab = (): string => {
@@ -82,6 +85,7 @@ const SECTION_MAP: Record<string, React.ComponentType> = {
   parsing: ParsingSection,
   backup: BackupSection,
   "system-logs": SystemLogsSettingsSection,
+  network: NetworkSection,
   about: AboutSection,
 };
 

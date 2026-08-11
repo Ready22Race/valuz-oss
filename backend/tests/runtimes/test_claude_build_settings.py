@@ -1,9 +1,11 @@
 """``_build_settings`` merges harness defaults without clobbering the project.
 
-Each harness default is injected only when the workspace's own
+Each harness product default is injected only when the workspace's own
 ``.claude/settings.json`` hasn't set the key, so an explicit project value
-always wins. ``skipWebFetchPreflight`` is additionally gated on the
-``VALUZ_SKIP_WEBFETCH_PREFLIGHT`` env var: the CLI's WebFetch preflight
+always wins. Egress loopback fields are the deliberate exception: the CLI's
+additional settings layer repeats those non-secret values because project
+``env`` has higher priority than process env. ``skipWebFetchPreflight`` is
+additionally gated on the ``VALUZ_SKIP_WEBFETCH_PREFLIGHT`` env var: the CLI's WebFetch preflight
 (``api.anthropic.com/api/web/domain_info``) fails closed when Anthropic is
 unreachable, so deployments behind restrictive egress opt in to skipping it;
 everyone else keeps Anthropic's malicious-domain blocklist.
@@ -25,10 +27,14 @@ from src.core.types import ModelSettings
 from src.runtimes.claude_agent.runtime import (
     SKIP_WEBFETCH_PREFLIGHT_ENV,
     ClaudeAgentRuntime,
+    _merge_forced_settings_env,
 )
 
 
-def _build(workspace_root: str | None, model_settings: ModelSettings | None = None) -> dict:
+def _build(
+    workspace_root: str | None,
+    model_settings: ModelSettings | None = None,
+) -> dict:
     rt = object.__new__(ClaudeAgentRuntime)
     rt.workspace_root = workspace_root
     rt.model_settings = model_settings
@@ -130,3 +136,38 @@ def test_project_explicit_auto_compact_window_wins(
     monkeypatch.delenv(SKIP_WEBFETCH_PREFLIGHT_ENV, raising=False)
     root = _write_project_settings(tmp_path, {"autoCompactWindow": 120_000})
     assert "autoCompactWindow" not in _build(root, ModelSettings(max_input_tokens=200_000))
+
+
+def test_egress_env_is_forced_in_additional_settings_without_copying_project_env(
+    tmp_path: Path,
+) -> None:
+    root = _write_project_settings(
+        tmp_path,
+        {
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://project.example",
+                "PROJECT_SECRET": "must-not-be-copied-to-cli-args",
+            }
+        },
+    )
+    local = "http://127.0.0.1:43123/capability"
+
+    base = _build(root)
+    settings = json.loads(
+        _merge_forced_settings_env(
+            json.dumps(base),
+            {
+                "ANTHROPIC_BASE_URL": local,
+                "NO_PROXY": "127.0.0.1,localhost,::1",
+                "no_proxy": "127.0.0.1,localhost,::1",
+            },
+        )
+        or "{}"
+    )
+
+    assert settings["env"] == {
+        "ANTHROPIC_BASE_URL": local,
+        "NO_PROXY": "127.0.0.1,localhost,::1",
+        "no_proxy": "127.0.0.1,localhost,::1",
+    }
+    assert "PROJECT_SECRET" not in json.dumps(settings)

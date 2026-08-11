@@ -1186,6 +1186,85 @@
       "openFailed": "打开浏览器失败",
       "riskNote": "这是一个独立、隔离的浏览器实例;请只在其中登录必要的账户。页面内容应视为不可信。"
     },
+    "network": {
+      "title": "网络连接",
+      "desc": "设置模型连接方式，并查看当前连接状态。不会修改系统代理设置。",
+      "modeSectionTitle": "连接方式",
+      "statusLabel": "当前模型连接",
+      "statusDesc": "显示当前任务从模型客户端初始化、建立连接到等待响应的完整阶段；任务结束后自动移除，每 3 秒更新。",
+      "loading": "正在读取状态…",
+      "loadFailed": "读取网络状态失败",
+      "desktopOnly": "网络出口管理仅在桌面客户端中可用。",
+      "canaryDisabled": "当前构建未启用 Valuz 网络管理，模型连接由各客户端自行管理。",
+      "current": "已启用",
+      "useAuto": "改用 Valuz 统一管理",
+      "autoLabel": "Valuz 统一管理（推荐）",
+      "autoDesc": "自动读取当前代理配置，为支持的模型选择代理或直连线路，并提供连接状态和耗时。",
+      "offLabel": "模型客户端自行管理",
+      "offDesc": "Codex、Claude Code 等客户端按各自支持的网络配置连接；Valuz 不选择线路，也不提供连接监控。",
+      "enableCompatibility": "改用客户端自行管理",
+      "offConfirm": "改用模型客户端自行管理后，Codex、Claude Code 等客户端将按各自配置联网，Valuz 不再选择线路或显示连接状态和耗时，并会重建模型连接。是否继续？",
+      "autoEnabled": "已改用 Valuz 统一管理",
+      "offEnabled": "已改用模型客户端自行管理，模型运行时已重建",
+      "changeFailed": "切换网络连接方式失败",
+      "activeRunsHint": "当前有 {count} 个任务正在运行。点击切换后，可选择中断这些任务并继续。",
+      "activeRunsConfirm": "当前有 {count} 个任务正在运行。继续会立即中断这些任务，然后重建模型连接；尚未完成的内容可能丢失。是否继续？",
+      "activeRunsBlocked": "刚检测到仍有任务运行，连接方式尚未切换。请再次点击并确认中断任务。",
+      "activeRunsInterruptFailed": "未能安全中断全部运行任务，连接方式没有改变。请先手动停止任务后重试。",
+      "environmentLocked": "应用启动时已指定模型客户端自行管理。移除 VALUZ_EGRESS_MODE=off 并重启应用后，才能改用 Valuz 统一管理。",
+      "noConnectionsTitle": "当前没有模型请求",
+      "noConnectionsDesc": "发送消息后，这里会在任务执行期间显示 Codex、Claude Code 或其他模型的实际连接线路和耗时。",
+      "legacyMonitoringTitle": "当前由模型客户端自行管理",
+      "legacyMonitoringDesc": "Codex、Claude Code 等客户端当前按各自配置联网，因此 Valuz 不显示线路和阶段耗时。改用“Valuz 统一管理”后可在这里查看。",
+      "monitoringUnavailableTitle": "当前构建无法监控模型连接",
+      "monitoringUnavailableDesc": "这个版本尚未启用 Valuz 网络管理，模型连接由各客户端自行管理。",
+      "updatedAt": "更新于 {time}",
+      "fallbackCount": "已切换候选线路 {count} 次",
+      "reconnectCount": "模型客户端已重连 {count} 次",
+      "copyDiagnostics": "复制诊断信息",
+      "copied": "已复制网络诊断，敏感信息已自动隐藏",
+      "copyFailed": "复制诊断失败",
+      "activity": {
+        "runtimeInit": "正在启动模型客户端",
+        "threadInit": "正在加载会话与工具",
+        "modelConnecting": "正在连接模型服务",
+        "waitingResponse": "正在等待模型响应",
+        "streaming": "正在接收模型输出",
+        "elapsed": "已用时 {seconds} 秒",
+        "noRequestYet": "当前仍处于本地初始化阶段，尚未发起模型网络请求。"
+      },
+      "health": {
+        "unknown": "等待模型响应",
+        "healthy": "连接正常",
+        "degraded": "连接较慢或发生重试",
+        "failed": "连接失败"
+      },
+      "healthDetail": {
+        "waitingRequest": "尚未看到这个模型发起新的网络请求。",
+        "waitingResponse": "网络线路已经建立，正在等待模型服务返回数据。",
+        "healthy": "最近一次模型请求已经正常收到响应。",
+        "degraded": "请求最终成功，但连接较慢、切换了备用线路或发生了重连。",
+        "failed": "最近一次请求连接失败、收到服务端错误，或响应流在完成前中断。"
+      },
+      "mode": {
+        "auto": "自动选择",
+        "direct": "直接连接（内部状态）",
+        "off": "由模型客户端管理"
+      },
+      "route": {
+        "direct": "直接连接",
+        "httpProxy": "通过 HTTP 代理",
+        "socks5Proxy": "通过 SOCKS5 代理",
+        "unknown": "连接线路尚未确定"
+      },
+      "timing": {
+        "resolve": "选择线路",
+        "connect": "建立连接",
+        "response": "收到响应",
+        "firstByte": "首个数据",
+        "total": "请求总计"
+      }
+    },
     "memory": {
       "enabledLabel": "启用记忆",
       "enabledDesc": "总开关:控制记忆注入与后台自动生成",
@@ -1660,6 +1739,10 @@
       "systemLogs": {
         "desc": "后端状态与日志流",
         "label": "服务日志"
+      },
+      "network": {
+        "desc": "模型连接、恢复与诊断",
+        "label": "网络连接"
       },
       "backup": {
         "label": "备份",

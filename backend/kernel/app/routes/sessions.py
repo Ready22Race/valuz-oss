@@ -370,6 +370,20 @@ async def delete_session(
     return {"data": None}
 
 
+@router.post("/{session_id}/prepare", response_model=DataResponse)
+async def prepare_session_runtime(
+    session_id: str,
+    owner: OwnerDep,
+    orchestrator: OrchestratorDep,
+) -> dict[str, Any]:
+    """Initialize a session runtime without dispatching a model turn."""
+    try:
+        await orchestrator.prepare_runtime(owner, session_id)
+    except SessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Session not found") from exc
+    return {"data": {"ready": True}}
+
+
 @router.post("/{session_id}/events", status_code=201, response_model=AppendEventResponse)
 async def append_session_event(
     session_id: str,

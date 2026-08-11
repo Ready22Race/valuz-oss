@@ -401,6 +401,18 @@ async def interrupt(
     return await svc.interrupt(session_id, user_id=user_id)
 
 
+@router.post("/{session_id}/prepare", status_code=202)
+async def prepare_session_runtime(
+    session_id: str,
+    user_id: str = Depends(get_current_user_id),
+) -> dict[str, bool]:
+    """Start the model client in advance without sending user content."""
+    from valuz_agent.adapters import kernel_client
+
+    await kernel_client.prepare_runtime(user_id, session_id)
+    return {"ready": True}
+
+
 class QueuedInputCreate(BaseModel):
     prompt: str
     provider_id: str | None = None
