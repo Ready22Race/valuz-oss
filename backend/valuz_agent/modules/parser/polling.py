@@ -183,10 +183,14 @@ class PollingScheduler:
     async def enqueue(
         self, kind: str, payload: Mapping[str, Any], user_id: str | None = None
     ) -> str:
+        """Insert a fresh row in ``pending`` state and return its id.
+
+        ``user_id`` is the owner the task row is stamped with — required
+        because ambient user context is banned (valuz-oss#96). Parser
+        backends receive it via ``ParseOptions.user_id``.
+        """
         if user_id is None:
             raise ValueError("user_id is required")
-
-        """Insert a fresh row in ``pending`` state and return its id."""
         if kind not in self._handlers:
             raise KeyError(f"no polling handler for kind: {kind}")
         task_id = uuid.uuid4().hex

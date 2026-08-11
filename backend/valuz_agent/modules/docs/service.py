@@ -31,7 +31,7 @@ from valuz_agent.modules.docs.models import (
     ProjectKbBindingRow,
 )
 from valuz_agent.ports.docs_runtime import DocsRuntimePort
-from valuz_agent.ports.parser_backend import ParserBackend, ParseResult
+from valuz_agent.ports.parser_backend import ParseOptions, ParserBackend, ParseResult
 
 logger = logging.getLogger(__name__)
 
@@ -1195,7 +1195,7 @@ class DocumentLibraryService:
             row.status = "processing"
             await self._ds.update(row)
 
-            result = self._parser_parse_sync(row.source_path)
+            result = self._parser_parse_sync(row.source_path, user_id)
 
             # ── Record per-plugin attempt history on the doc + task ──
             # ``fallback_from`` is set by ``ParserRouter`` when it
@@ -1738,7 +1738,10 @@ class DocumentLibraryService:
         target.write_text(markdown, encoding="utf-8")
         return key
 
-    def _parser_parse_sync(self, file_path: str) -> ParseResult:
+    def _parser_parse_sync(self, file_path: str, user_id: str | None = None) -> ParseResult:
+        # ``user_id`` is the document owner — ASYNC_POLL backends stamp it on
+        # their durable polling rows (valuz-oss#841); local parsers ignore it.
+        options = ParseOptions(user_id=user_id)
         # Fast path: any backend that exposes ``parse_sync`` is invoked
         # directly without an event loop. ``LightLocalParser`` is the
         # production case; in-memory test fakes (``FakeParser``) also
@@ -1746,8 +1749,10 @@ class DocumentLibraryService:
         # — using ``hasattr`` keeps the service decoupled from concrete
         # classes (was an ``isinstance(LightLocalParser)`` check before,
         # which forced every alternative parser through the async path).
+        # The duck-typed contract mirrors ``ParserBackend.parse``:
+        # ``parse_sync(file_path, options=None)``.
         if hasattr(self._parser, "parse_sync"):
-            return self._parser.parse_sync(file_path)
+            return self._parser.parse_sync(file_path, options)
 
         import asyncio
 
@@ -1761,4 +1766,4 @@ class DocumentLibraryService:
                 markdown="*Cannot run async parser in sync context*",
                 metadata={"error": "async_not_supported"},
             )
-        return asyncio.run(self._parser.parse(file_path))
+        return asyncio.run(self._parser.parse(file_path, options))

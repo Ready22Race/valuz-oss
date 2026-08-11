@@ -32,7 +32,7 @@ from valuz_agent.modules.docs.service import (
 
 
 class FakeParser:
-    def parse_sync(self, file_path: str):
+    def parse_sync(self, file_path: str, options=None):
         from valuz_agent.ports.parser_backend import ParseResult
 
         return ParseResult(
@@ -479,7 +479,7 @@ class TestRescan:
             def __init__(self) -> None:
                 self.pdf_pick = "light_local"
 
-            def parse_sync(self, file_path: str):
+            def parse_sync(self, file_path: str, options=None):
                 from valuz_agent.ports.parser_backend import ParseResult
 
                 # Emit the engine name that ``_engine_to_plugin_id``

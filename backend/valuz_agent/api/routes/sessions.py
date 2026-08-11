@@ -958,6 +958,7 @@ def _spawn_attachment_parse(
 
     async def _run() -> None:
         from valuz_agent.infra.db import async_unit_of_work
+        from valuz_agent.ports.parser_backend import ParseOptions
         from valuz_agent.ports.parser_plugin import ParserPluginMode
 
         parsed_path: str | None = None
@@ -974,12 +975,15 @@ def _spawn_attachment_parse(
             src_path = _resolve_file_key_path(user_id, source)
             if src_path is None:
                 raise FileNotFoundError(f"attachment source not found: {source}")
+            # Ownership stamp for durable side-effects (polling rows,
+            # valuz-oss#841); local parsers ignore it.
+            parse_options = ParseOptions(user_id=user_id)
             if router.plugin_mode_for(src_path) == ParserPluginMode.ASYNC_POLL:
-                result = await router.parse(src_path)
+                result = await router.parse(src_path, parse_options)
             else:
                 # Bound concurrent CPU-bound local parses (see semaphore note).
                 async with _LOCAL_PARSE_SEMAPHORE:
-                    result = await asyncio.to_thread(router.parse_sync, src_path)
+                    result = await asyncio.to_thread(router.parse_sync, src_path, parse_options)
             parsed_path, parse_status, engine, error_message = _write_parse_result(
                 result, session_id, base_name, user_id
             )
