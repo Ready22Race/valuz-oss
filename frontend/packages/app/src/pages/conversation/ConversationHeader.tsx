@@ -312,6 +312,13 @@ export function ConversationHeader({
                 sessionId: selectedSessionId,
                 session: selectedSession,
                 scrollToTop,
+                // The WHOLE loaded transcript, not what is on screen. An action
+                // here can act on the conversation as a unit (share it, export
+                // it), and the only per-turn slot is rendered inside the
+                // virtualised list — so an overlay that collected turns from
+                // there saw the few rows the virtualizer had mounted and
+                // silently acted on those alone.
+                turns: effectiveTurns,
               }}
             />
           </div>
