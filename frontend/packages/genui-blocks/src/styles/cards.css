@@ -23,9 +23,10 @@
   flex-direction: column;
   gap: var(--openui-space-s);
   padding: var(--openui-space-m);
-  background-color: var(--openui-background);
+  background-color: var(--openui-elevated);
   border: 1px solid var(--openui-border-default);
   border-radius: var(--openui-radius-2xl);
+  box-shadow: var(--openui-shadow-s);
 }
 
 .vgb-card-title {

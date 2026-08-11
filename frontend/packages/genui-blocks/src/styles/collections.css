@@ -70,6 +70,12 @@
   grid-template-columns: max-content minmax(0, 1fr);
   gap: var(--openui-space-m);
   padding-bottom: var(--openui-space-m);
+  border-radius: var(--openui-radius-xs);
+  transition: background-color 120ms ease-out;
+}
+
+.vgb-timeline-entry:hover {
+  background-color: var(--openui-highlight-subtle);
 }
 
 .vgb-timeline-entry::before {
@@ -308,6 +314,12 @@
   gap: var(--openui-space-s);
   padding-block: var(--openui-space-s);
   border-bottom: 1px solid var(--openui-border-default);
+  border-radius: var(--openui-radius-xs);
+  transition: background-color 120ms ease-out;
+}
+
+.vgb-status-row:hover {
+  background-color: var(--openui-highlight-subtle);
 }
 
 .vgb-status-row:last-child {
@@ -434,6 +446,19 @@
 .vgb-comparison-table {
   width: 100%;
   border-collapse: collapse;
+}
+
+/* Row hover wash — a readability aid for scanning comparison rows.
+   Applied to cells rather than the row because <tr> cannot show border-radius.
+   Uses :where() to keep specificity low so .vgb-comparison-cell[data-best="true"]
+   and other cell-level tints still win. */
+.vgb-comparison-table :where(tbody tr) {
+  transition: background-color 120ms ease-out;
+}
+
+.vgb-comparison-table :where(tbody tr:hover td),
+.vgb-comparison-table :where(tbody tr:hover th) {
+  background-color: var(--openui-highlight-subtle);
 }
 
 .vgb-comparison-corner,

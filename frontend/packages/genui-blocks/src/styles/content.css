@@ -259,22 +259,10 @@
 }
 
 /*
- * The name, for screen readers only. Scoped to this family rather than
- * promoted to a package-wide `.vgb-sr-only`: base.css is shared ground and
- * families do not add to it. (`sources.css` carries its own `.vgb-cite-sr` for
- * the same reason.)
+ * The name, for screen readers only. `.vgb-avatar-sr` is now an alias of the
+ * package-wide `.vgb-sr-only` utility defined in base.css (same visually-hidden
+ * rule, one definition there).
  */
-.vgb-avatar-sr {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  margin: -1px;
-  padding: 0;
-  border: 0;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-}
 
 /* ── Footnote / FootnoteList ─────────────────────────────────────── */
 
