@@ -212,7 +212,6 @@ function ConversationViewPage(props: ConversationViewProps) {
             draftSendInFlight={core.draftSendInFlight}
             effectiveTurns={core.effectiveTurns}
             scrollToTop={() => core.scrollToTurnIndex(0)}
-            selectedProjectOrigin={core.selectedProjectOrigin}
             headerAgentSlug={core.headerAgentSlug}
             agentNameBySlug={core.agentNameBySlug}
             activeProject={core.activeProject}

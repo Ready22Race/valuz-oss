@@ -27,7 +27,6 @@ import {
   DropdownMenuTrigger,
   cn,
 } from "@valuz/ui";
-import { OriginBadge } from "../../components/ExecutionLocationPicker";
 import { SlotRenderer } from "@valuz/core";
 import { SessionStatusPill } from "./SessionStatusPill";
 import type { useComposerConfig } from "./useComposerConfig";
@@ -59,7 +58,6 @@ type ConversationHeaderProps = {
    *  controls start at the first turn (share selection's checkboxes), and the
    *  title is normally clicked from the bottom of a long transcript. */
   scrollToTop: () => void;
-  selectedProjectOrigin: ComposerConfig["selectedProjectOrigin"];
   headerAgentSlug: string | null;
   agentNameBySlug: ComposerConfig["agentNameBySlug"];
   activeProject: ProjectDetail | null;
@@ -92,7 +90,6 @@ export function ConversationHeader({
   draftSendInFlight,
   effectiveTurns,
   scrollToTop,
-  selectedProjectOrigin,
   headerAgentSlug,
   agentNameBySlug,
   activeProject,
@@ -241,20 +238,6 @@ export function ConversationHeader({
                 </DropdownMenu>
               )
             ) : null}
-            {/* Host actions for THIS session (share, export…), placed next to
-                the title rather than in the app top bar: the top bar is shared
-                by every page, so a session-scoped control there would have to
-                keep proving which session it means. Rendered through the slot
-                registry — this package depends on ``@valuz/core``, unlike
-                ``@valuz/ui`` where the same need is served by a ReactNode prop. */}
-            <SlotRenderer
-              name="conversation.title.actions"
-              context={{
-                sessionId: selectedSessionId,
-                session: selectedSession,
-                scrollToTop,
-              }}
-            />
             <SessionStatusPill
               // ``created`` is exactly the state a not-yet-minted session is
               // in: accepted, not running. It is the same pill the promoted
@@ -275,21 +258,12 @@ export function ConversationHeader({
               // flag doesn't carry.
               background={selectedSession?.background === true}
             />
-            {/* Execution origin (multi-target editions): where this
-                  session's backend lives. Locked at creation; renders
-                  nothing on single-target builds. */}
-            <OriginBadge
-              entityId={selectedSessionId}
-              kind="session"
-              // No session id to observe yet; the session is minted on the
-              // project's origin, so show that. ``origin`` short-circuits
-              // the lookup, and single-target builds still render nothing.
-              origin={
-                !selectedSessionId && draftSendInFlight
-                  ? selectedProjectOrigin
-                  : undefined
-              }
-            />
+            {/* No execution-origin badge here. The context bar attached to
+                the composer already names the location for this conversation,
+                and it is the surface that OWNS the choice — repeating it by
+                the title made the same fact compete with the session's own
+                identity. Origin badges stay where the reader is scanning many
+                rows (Activity, Projects, Conversations). */}
             {headerAgentSlug ? (
               <Badge variant="metaBrand" className="shrink-0">
                 <Bot className="h-3 w-3" />
@@ -322,6 +296,24 @@ export function ConversationHeader({
                 {activeProject.name}
               </Badge>
             ) : null}
+          </div>
+          {/* Host actions for THIS session (share, export…) — the row's right
+              end, opposite the identity cluster, rather than wedged between
+              the title and its status. Kept in this header rather than the app
+              top bar: that bar is shared by every page, so a session-scoped
+              control there would have to keep proving which session it means.
+              Rendered through the slot registry — this package depends on
+              ``@valuz/core``, unlike ``@valuz/ui`` where the same need is
+              served by a ReactNode prop. */}
+          <div className="flex shrink-0 items-center gap-2 pl-2">
+            <SlotRenderer
+              name="conversation.title.actions"
+              context={{
+                sessionId: selectedSessionId,
+                session: selectedSession,
+                scrollToTop,
+              }}
+            />
           </div>
         </div>
       </header>
