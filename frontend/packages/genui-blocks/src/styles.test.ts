@@ -9,7 +9,10 @@ const stylesDir = join(dirname(fileURLToPath(import.meta.url)), "styles");
 function readAll(): { file: string; css: string }[] {
   return readdirSync(stylesDir)
     .filter((f) => f.endsWith(".css"))
-    .map((file) => ({ file, css: readFileSync(join(stylesDir, file), "utf8") }));
+    .map((file) => ({
+      file,
+      css: readFileSync(join(stylesDir, file), "utf8"),
+    }));
 }
 
 /** Rule bodies keyed by selector, split into base rules and container-query rules. */
@@ -21,16 +24,24 @@ function splitRules(css: string) {
 
   // Container blocks are the only nesting these files use, so a non-greedy
   // match up to the closing brace of the at-rule is enough.
-  const containerRe = /@container[^{]*\(max-width:\s*30rem\)\s*\{([\s\S]*?)\n\}/g;
+  const containerRe =
+    /@container[^{]*\(max-width:\s*30rem\)\s*\{([\s\S]*?)\n\}/g;
   let m: RegExpExecArray | null;
   const containerBodies: string[] = [];
-  while ((m = containerRe.exec(clean)) !== null) containerBodies.push(m[1] ?? "");
+  while ((m = containerRe.exec(clean)) !== null)
+    containerBodies.push(m[1] ?? "");
 
   const ruleRe = /([^{}@]+)\{([^{}]*)\}/g;
-  const collect = (source: string, into: { selector: string; body: string }[]) => {
+  const collect = (
+    source: string,
+    into: { selector: string; body: string }[],
+  ) => {
     let r: RegExpExecArray | null;
     while ((r = ruleRe.exec(source)) !== null) {
-      into.push({ selector: (r[1] ?? "").trim().replace(/\s+/g, " "), body: r[2] ?? "" });
+      into.push({
+        selector: (r[1] ?? "").trim().replace(/\s+/g, " "),
+        body: r[2] ?? "",
+      });
     }
   };
   collect(clean.replace(containerRe, ""), base);
@@ -62,7 +73,8 @@ describe("block stylesheets", () => {
           .flatMap((r) => r.selector.split(",").map((s) => s.trim())),
       );
       for (const rule of base) {
-        if (!NON_ZERO_MIN_WIDTH.test(rule.body) || !SETS_BASIS.test(rule.body)) continue;
+        if (!NON_ZERO_MIN_WIDTH.test(rule.body) || !SETS_BASIS.test(rule.body))
+          continue;
         for (const selector of rule.selector.split(",").map((s) => s.trim())) {
           if (!relaxed.has(selector)) offenders.push(`${file}: ${selector}`);
         }
@@ -79,7 +91,9 @@ describe("block stylesheets", () => {
     const hosts = resolve(stylesDir, "../../../ui/src/components/conversation");
     const wired = readdirSync(hosts)
       .filter((f) => f.endsWith(".tsx") && !f.includes(".test."))
-      .some((f) => readFileSync(join(hosts, f), "utf8").includes('className="vgb-root"'));
+      .some((f) =>
+        readFileSync(join(hosts, f), "utf8").includes('className="vgb-root"'),
+      );
     expect(wired, "no component establishes the vgb-root container").toBe(true);
 
     // And the rules that depend on it must actually exist, or the check above
@@ -99,7 +113,12 @@ describe("block stylesheets", () => {
     for (const { file, css } of readAll()) {
       for (const m of css.matchAll(/@media([^{]*)\{/g)) {
         const query = (m[1] ?? "").trim();
-        if (/prefers-reduced-motion|print|prefers-color-scheme|forced-colors/.test(query)) continue;
+        if (
+          /prefers-reduced-motion|print|prefers-color-scheme|forced-colors/.test(
+            query,
+          )
+        )
+          continue;
         offenders.push(`${file}: @media ${query}`);
       }
     }
@@ -109,10 +128,20 @@ describe("block stylesheets", () => {
   it("takes every colour from an --openui-* token", () => {
     // A literal colour ignores the host theme, and the whole point of the
     // token indirection is that a block restyles itself when the theme changes.
+    // The one allowed exception is the --vgb-chart-N palette definition itself:
+    // a palette is the literal colour set a chart may pick from, and it exists
+    // precisely so components never hold a literal — components read the token.
     const offenders: string[] = [];
     for (const { file, css } of readAll()) {
-      const clean = css.replace(/\/\*[\s\S]*?\*\//g, "");
-      for (const m of clean.matchAll(/(#[0-9a-fA-F]{3,8}\b|\brgba?\([^)]*\)|\bhsla?\([^)]*\))/g)) {
+      const clean = css
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(
+          /--vgb-chart-\d+:\s*(#[0-9a-fA-F]{3,8}|rgba?\([^)]*\)|hsla?\([^)]*\));/g,
+          "",
+        );
+      for (const m of clean.matchAll(
+        /(#[0-9a-fA-F]{3,8}\b|\brgba?\([^)]*\)|\bhsla?\([^)]*\))/g,
+      )) {
         offenders.push(`${file}: ${m[1]}`);
       }
     }

@@ -449,6 +449,15 @@
   object-fit: cover;
 }
 
+/* OpenUI-style scale: fill stretches to the box, fit letterboxes it. */
+.vgb-aspect[data-scale="fill"] :is(img, video, canvas, svg, iframe) {
+  object-fit: fill;
+}
+
+.vgb-aspect[data-scale="fit"] :is(img, video, canvas, svg, iframe) {
+  object-fit: contain;
+}
+
 /* ── ScrollArea ──────────────────────────────────────────────────── */
 
 /*
