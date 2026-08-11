@@ -30,6 +30,7 @@ via ``project_cwd()``.
 from __future__ import annotations
 
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
@@ -38,6 +39,15 @@ from valuz_agent.ports.workspace import LocalWorkspaceHandle, WorkspaceHandle
 
 ProjectKind = Literal["chat", "project"]
 SkillSource = Literal["claude", "codex"]
+
+# The only KB class OSS itself creates. ``KnowledgeBaseRow.kind`` is a neutral
+# discriminator so embedding hosts can distinguish classes of knowledge base
+# (and route them to different roots) without OSS growing any opinion about
+# what those classes mean.
+KB_KIND_DEFAULT = "normal"
+
+# ``(user_id, kind) -> root directory``. See ``FsRegistry.set_kb_root_resolver``.
+KbRootResolver = Callable[[str, str], Path | str]
 
 
 def _to_async_url(url: str) -> str:
@@ -60,6 +70,9 @@ class FsRegistry:
         # Read-only bundled trees an overlay/edition declared — see
         # ``register_system_skill_root``. Never written to.
         self._extra_system_skill_roots: list[Path] = []
+        # Optional per-KB-class root routing — see ``set_kb_root_resolver``.
+        # ``None`` (OSS default) means every KB lives under ``<data_dir>/kb``.
+        self._kb_root_resolver: KbRootResolver | None = None
 
     # ---- FS-1 / FS-2 — data root + secrets ----
 
@@ -257,17 +270,36 @@ class FsRegistry:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def kb_root(self, user_id: str) -> Path:
+    def kb_root(self, user_id: str, kind: str = KB_KIND_DEFAULT) -> Path:
         """Return (and create) the knowledge-base root directory.
 
         ``<data_dir>/kb`` — the single home for KB content, replacing the
         legacy stray ``~/.valuz/kb`` path. Routed through the registry so KB
         writes share the same audit / sandbox boundary as every other host
         write. Created on demand.
+
+        ``kind`` is the knowledge base's class (``KnowledgeBaseRow.kind``).
+        OSS only ever uses ``"normal"`` and always returns the single root;
+        a host that manages several KB classes can register a resolver via
+        :meth:`set_kb_root_resolver` to route them to distinct directories.
         """
-        path = self.data_dir(user_id) / "kb"
+        resolver = self._kb_root_resolver
+        if resolver is not None:
+            path = Path(resolver(user_id, kind))
+        else:
+            path = self.data_dir(user_id) / "kb"
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+    def set_kb_root_resolver(self, resolver: KbRootResolver | None) -> None:
+        """Install (or clear) the KB root resolver.
+
+        The resolver receives ``(user_id, kind)`` and returns the root
+        directory for that class of knowledge base; ``kb_root`` still does
+        the ``mkdir``. Passing ``None`` restores the default single-root
+        behavior. Intended for hosts embedding valuz — OSS never sets one.
+        """
+        self._kb_root_resolver = resolver
 
     # ---- FS-7 — skill-creator staging (project-cwd-keyed) ----
     #
@@ -631,4 +663,4 @@ class FsRegistry:
 
 fs_registry = FsRegistry()
 
-__all__ = ["FsRegistry", "fs_registry"]
+__all__ = ["KB_KIND_DEFAULT", "FsRegistry", "KbRootResolver", "fs_registry"]

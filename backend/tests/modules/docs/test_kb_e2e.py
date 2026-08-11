@@ -958,7 +958,7 @@ class TestManagedKbRoot:
 
         # Managed root lives under <data_dir>/kb/<kb_id>; point data_dir at
         # tmp so the test never touches the real ~/.valuz-oss tree.
-        def _kb_root(_user_id: str) -> Path:
+        def _kb_root(_user_id: str, _kind: str = "normal") -> Path:
             path = tmp_path / "kb"
             path.mkdir(parents=True, exist_ok=True)
             return path
@@ -977,7 +977,7 @@ class TestManagedKbRoot:
     ) -> None:
         from valuz_agent.modules.docs import service as docs_service
 
-        def _kb_root(_user_id: str) -> Path:
+        def _kb_root(_user_id: str, _kind: str = "normal") -> Path:
             path = tmp_path / "kb"
             path.mkdir(parents=True, exist_ok=True)
             return path

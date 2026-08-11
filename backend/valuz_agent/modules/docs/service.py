@@ -13,7 +13,7 @@ from pathlib import Path
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from valuz_agent.infra.eventbus import EventBus
-from valuz_agent.infra.fs_registry import fs_registry
+from valuz_agent.infra.fs_registry import KB_KIND_DEFAULT, fs_registry
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.docs.datastore import DocumentDatastore
 from valuz_agent.modules.docs.errors import (
@@ -495,6 +495,7 @@ class DocumentLibraryService:
         root_path: str | None = None,
         parser_routing: str = "local_only",
         auto_discover: bool = False,
+        kind: str = KB_KIND_DEFAULT,
     ) -> KbDetail:
         kb_id = uuid.uuid4().hex
         if root_path and root_path.strip():
@@ -505,7 +506,9 @@ class DocumentLibraryService:
             # Managed root (cloud / headless parity): allocate
             # ``kb_root/{id}/`` so the KB works without a caller-supplied
             # local directory, which a remote backend could not reach.
-            root = fs_registry.kb_root(user_id) / kb_id
+            # ``kind`` lets an embedding host route classes of KB to
+            # different roots (default: the single ``<data_dir>/kb``).
+            root = fs_registry.kb_root(user_id, kind) / kb_id
             root.mkdir(parents=True, exist_ok=True)
         root_str = str(root)
         if await self._ds.kb_root_path_exists(user_id, root_str):
@@ -515,6 +518,7 @@ class DocumentLibraryService:
             id=kb_id,
             name=name,
             root_path=root_str,
+            kind=kind,
             parser_routing=parser_routing,
             auto_discover=auto_discover,
         )
