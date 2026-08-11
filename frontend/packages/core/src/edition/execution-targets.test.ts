@@ -2,8 +2,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 import {
   getDefaultExecutionTarget,
+  getDefaultRuntimeLocation,
   getExecutionTargets,
+  setDefaultRuntimeLocation,
   setExecutionTargets,
+  useDefaultRuntimeLocation,
   useExecutionTargets,
   type ExecutionTarget,
 } from "./execution-targets";
@@ -22,6 +25,7 @@ const CLOUD: ExecutionTarget = {
 
 afterEach(() => {
   setExecutionTargets([]);
+  setDefaultRuntimeLocation("local");
 });
 
 describe("execution targets registry", () => {
@@ -55,5 +59,25 @@ describe("execution targets registry", () => {
       setExecutionTargets([LOCAL, CLOUD]);
     });
     expect(result.current.map((t) => t.id)).toEqual(["local", "cloud"]);
+  });
+});
+
+describe("default runtime location", () => {
+  it("should be local by default (OSS backend is a sidecar on this machine)", () => {
+    expect(getDefaultRuntimeLocation()).toBe("local");
+  });
+
+  it("should report cloud when a browser-only edition declares it", () => {
+    setDefaultRuntimeLocation("cloud");
+    expect(getDefaultRuntimeLocation()).toBe("cloud");
+  });
+
+  it("useDefaultRuntimeLocation re-renders when the declaration lands", () => {
+    const { result } = renderHook(() => useDefaultRuntimeLocation());
+    expect(result.current).toBe("local");
+    act(() => {
+      setDefaultRuntimeLocation("cloud");
+    });
+    expect(result.current).toBe("cloud");
   });
 });
