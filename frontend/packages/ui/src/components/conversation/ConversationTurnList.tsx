@@ -51,6 +51,7 @@ import type {
 } from "@valuz/shared";
 import {
   assetUrl,
+  modelLabel,
   summarizeSegmentPhrase,
   type ProcessingItem,
   type ToolCategory,
@@ -131,6 +132,9 @@ const MessageActions = ({
           <RotateCw className="h-3.5 w-3.5" />
         </button>
       ) : null}
+      {/* Host actions (share, …) sit with the other icon buttons; the token
+          readout is a number, not an action, so it trails the row. */}
+      {extraActions}
       {tokenUsage && tokenUsage.totalTokens > 0 ? (
         <Popover>
           <PopoverTrigger asChild>
@@ -232,8 +236,12 @@ const MessageActions = ({
                     )}
                     {": "}
                   </span>
+                  {/* Runtime usage reports raw model ids (gateway aliases,
+                      dated vendor ids). Show the same public name every other
+                      surface shows — ``modelLabel`` falls back to the id when
+                      the backend never labelled it. */}
                   <span className="break-all">
-                    {tokenUsage.models.join(", ")}
+                    {tokenUsage.models.map((m) => modelLabel(m)).join(", ")}
                   </span>
                 </div>
               ) : null}
@@ -241,7 +249,6 @@ const MessageActions = ({
           </PopoverContent>
         </Popover>
       ) : null}
-      {extraActions}
     </div>
   );
 };
@@ -1334,13 +1341,19 @@ const TurnRow = memo(
             />
 
             {postRunVerificationActive ? (
-              <div className="flex items-center pt-0.5" role="status" aria-live="polite">
+              <div
+                className="flex items-center pt-0.5"
+                role="status"
+                aria-live="polite"
+              >
                 <div className="inline-flex items-center gap-1.5 rounded-full border border-surface-border bg-surface-soft/80 px-2.5 py-1 text-[12px] leading-5 text-ink-muted">
                   <LoaderCircle
                     className="h-3.5 w-3.5 shrink-0 animate-spin"
                     aria-hidden="true"
                   />
-                  <span>{t("conversation.verifyingAndGeneratingCitations")}</span>
+                  <span>
+                    {t("conversation.verifyingAndGeneratingCitations")}
+                  </span>
                 </div>
               </div>
             ) : null}
