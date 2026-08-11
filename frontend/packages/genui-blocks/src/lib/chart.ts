@@ -1,4 +1,9 @@
-import { readLooseNumber, readRecord, readTextFromKeys, toArray } from "./props";
+import {
+  readLooseNumber,
+  readRecord,
+  readTextFromKeys,
+  toArray,
+} from "./props";
 import type { Tone, Trend } from "./schema";
 import { toneText } from "./tone";
 
@@ -43,6 +48,26 @@ export const MAX_SERIES = SERIES_TONES.length;
 
 export function seriesTone(index: number): Tone {
   return SERIES_TONES[Math.abs(index) % SERIES_TONES.length] ?? "brand";
+}
+
+/** Number of palette slots `seriesColor()` can address. */
+export const CHART_SERIES = 8;
+
+/**
+ * A series colour, resolved to a `--vgb-chart-N` token.
+ *
+ * `seriesTone()` maps a position to a *semantic* tone and is right where the
+ * colour must stay semantically meaningful (Sankey nodes, trend statements).
+ * Multi-series charts instead need hues that stay distinct under any host
+ * theme — a host maps `info` text to the same hue as `brand`, so two series
+ * painted with `seriesTone(0)`/`seriesTone(1)` are indistinguishable. This
+ * reads the chart-dedicated palette (`base.css`), which is decoupled from the
+ * text-semantic tones, so series 1 and 2 differ even when the host's `info`
+ * and `brand` agree. Cycles past `CHART_SERIES` and wraps.
+ */
+export function seriesColor(index: number): string {
+  const n = (Math.abs(index) % CHART_SERIES) + 1;
+  return `var(--vgb-chart-${n}, var(--openui-text-neutral-primary))`;
 }
 
 /**
@@ -153,12 +178,21 @@ export function readCells(value: unknown): (number | undefined)[] {
 
 /** A numeric list with the unreadable entries dropped. */
 export function readNumbers(value: unknown): number[] {
-  return readCells(value).filter((entry): entry is number => entry !== undefined);
+  return readCells(value).filter(
+    (entry): entry is number => entry !== undefined,
+  );
 }
 
 /** The label of a data item, under any of the keys a model reaches for. */
 export function readLabel(record: Record<string, unknown>): string {
-  return readTextFromKeys(record, ["label", "name", "title", "category", "stage", "text"]);
+  return readTextFromKeys(record, [
+    "label",
+    "name",
+    "title",
+    "category",
+    "stage",
+    "text",
+  ]);
 }
 
 /** A data item flattened out of whatever wrapper it arrived in. */

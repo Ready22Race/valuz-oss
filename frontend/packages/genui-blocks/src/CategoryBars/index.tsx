@@ -16,7 +16,7 @@ import {
   formatValue,
   readCells,
   readItems,
-  seriesTone,
+  seriesColor,
   spanOf,
 } from "../lib/chart";
 import { ChartFrame, ChartLegend } from "../lib/chart-parts";
@@ -32,7 +32,6 @@ import {
   TOOLTIP_ITEM_STYLE,
   TOOLTIP_LABEL_STYLE,
 } from "../lib/recharts-chrome";
-import { toneText } from "../lib/tone";
 import { GroupedBarSchema, StackedBarSchema } from "./schema";
 
 export {
@@ -203,7 +202,7 @@ export const GroupedBar = defineComponent({
               {data.series.map((entry, seriesIndex) => (
                 <Bar
                   dataKey={seriesKey(seriesIndex)}
-                  fill={toneText(seriesTone(seriesIndex))}
+                  fill={seriesColor(seriesIndex)}
                   isAnimationActive={false}
                   key={`${entry.name}-${seriesIndex}`}
                   maxBarSize={MAX_BAR_SIZE}
@@ -326,7 +325,7 @@ export const StackedBar = defineComponent({
               {data.series.map((entry, seriesIndex) => (
                 <Bar
                   dataKey={seriesKey(seriesIndex)}
-                  fill={toneText(seriesTone(seriesIndex))}
+                  fill={seriesColor(seriesIndex)}
                   isAnimationActive={false}
                   key={`${entry.name}-${seriesIndex}`}
                   maxBarSize={MAX_BAR_SIZE}

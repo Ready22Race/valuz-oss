@@ -12,7 +12,7 @@ import {
   YAxis,
 } from "recharts";
 
-import { formatValue, readCells, seriesTone, spanOf } from "../lib/chart";
+import { formatValue, readCells, seriesColor, spanOf } from "../lib/chart";
 import { ChartFrame, ChartLegend } from "../lib/chart-parts";
 import { readRecord, readText, readTextFromKeys, toArray } from "../lib/props";
 import type { Span } from "../lib/chart";
@@ -27,7 +27,6 @@ import {
   TOOLTIP_ITEM_STYLE,
   TOOLTIP_LABEL_STYLE,
 } from "../lib/recharts-chrome";
-import { toneText } from "../lib/tone";
 import { ComboChartSchema } from "./schema";
 
 export { ComboChartSchema, ComboSeriesSchema } from "./schema";
@@ -44,8 +43,8 @@ export { ComboChartSchema, ComboSeriesSchema } from "./schema";
 const MAX_CATEGORIES = 16;
 
 /** Bars take the first palette slot, the line the second — same as the legend. */
-const BAR_TONE = seriesTone(0);
-const LINE_TONE = seriesTone(1);
+const BAR_COLOR = seriesColor(0);
+const LINE_COLOR = seriesColor(1);
 
 interface Series {
   name: string;
@@ -254,7 +253,7 @@ export const ComboChart = defineComponent({
               />
               <Bar
                 dataKey="bar"
-                fill={toneText(BAR_TONE)}
+                fill={BAR_COLOR}
                 isAnimationActive={false}
                 maxBarSize={MAX_BAR_SIZE}
                 name={bars.name}
@@ -265,7 +264,7 @@ export const ComboChart = defineComponent({
                 dot={false}
                 isAnimationActive={false}
                 name={line.name}
-                stroke={toneText(LINE_TONE)}
+                stroke={LINE_COLOR}
                 strokeWidth={2}
                 type="linear"
                 yAxisId={split ? "line" : undefined}
