@@ -58,6 +58,7 @@ import {
   type TaskEvent,
   type TaskTokenUsage,
   recordEntityOrigin,
+  useDefaultRuntimeLocation,
   useEntityOrigin,
 } from "@valuz/core";
 import type { FileTreeNode } from "@valuz/ui";
@@ -780,12 +781,13 @@ export const TaskDetailPage = () => {
   });
   // Startup phase for the follow-up turn header, mirroring the conversation
   // page: while the lead's runtime is coming up the header names that rather
-  // than claiming to process. OSS registers no execution targets, so the
-  // origin is undefined there and this always reads "local".
+  // than claiming to process. A single-backend build observes no origin, so it
+  // falls back to whatever that build declared its one backend to be.
   const leadExecOrigin = useEntityOrigin(leadSessionId, "session");
+  const defaultRuntimeLocation = useDefaultRuntimeLocation();
   const followUpStartingRuntime: RuntimeStartLocation | null =
     followUp.awaitingRuntime
-      ? leadExecOrigin === "cloud"
+      ? (leadExecOrigin ?? defaultRuntimeLocation) === "cloud"
         ? "cloud"
         : "local"
       : null;

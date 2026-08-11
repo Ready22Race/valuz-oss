@@ -1,6 +1,7 @@
 import { useCallback, useMemo } from "react";
 import {
   getDefaultExecutionTarget,
+  useDefaultRuntimeLocation,
   useEntityOrigin,
   useComposerProviderChannelState,
   useComposerAgentLibrary,
@@ -100,18 +101,22 @@ export function useComposerConfig({
   // The route id is authoritative during navigation. ``selectedSessionId``
   // intentionally lags until session detail resolves, so preferring it here
   // would briefly query the previous conversation's execution target.
+  const defaultRuntimeLocation = useDefaultRuntimeLocation();
   const providerSessionId = id !== NEW_SESSION_ID ? id : null;
   const sessionExecOrigin = useEntityOrigin(providerSessionId, "session");
   const selectedProviderProject = projects.find(
     (project) => project.id === selectedProjectId,
   );
+  // An unobserved project still resolves to a target — but to the build's
+  // default one, never to the temp-chat chip: a project conversation follows
+  // its project, and the chip only ever spoke for a chip-less quick chat.
   const selectedProjectOrigin = selectedProviderProject
-    ? (selectedProviderProject.exec_origin ?? "local")
+    ? (selectedProviderProject.exec_origin ?? defaultRuntimeLocation)
     : undefined;
   const providerTargetId =
-    id !== NEW_SESSION_ID
+    (id !== NEW_SESSION_ID
       ? sessionExecOrigin
-      : (selectedProjectOrigin ?? execTargetId);
+      : (selectedProjectOrigin ?? execTargetId)) ?? defaultRuntimeLocation;
   const providerTarget =
     executionTargets.find((target) => target.id === providerTargetId) ??
     getDefaultExecutionTarget();
@@ -119,8 +124,8 @@ export function useComposerConfig({
   // echoes ``message.user`` (which it writes at run() entry, i.e. once the
   // runtime is actually up). ``pendingUserMessage`` tracks exactly that
   // window, so it doubles as the phase flag. The location only picks the
-  // wording — OSS registers no execution targets, so ``providerTargetId`` is
-  // undefined there and this always reads "local".
+  // wording — a single-backend build observes no origin, so this reads
+  // whatever that build declared its one backend to be.
   const startingRuntime: RuntimeStartLocation | null = pendingUserMessage
     ? providerTargetId === "cloud"
       ? "cloud"

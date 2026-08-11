@@ -326,10 +326,14 @@ const formatDuration = (elapsedMs: number | undefined): string => {
  * ``"cloud"`` is unreachable in a plain OSS build: it is derived from the
  * session's execution origin, and origin comes from the ``entity-origin``
  * edition seam, which OSS leaves unregistered (see
- * ``core/src/edition/entity-origin.ts``). Single-backend OSS therefore always
- * reads ``"local"``; a multi-target edition registers the adapter and this
- * turns two-valued. The value name matches the target id it comes from
- * (``"cloud"``), so there is one word for the concept end to end. */
+ * ``core/src/edition/entity-origin.ts``). With no observation to read, the host
+ * falls back to the build's declared default location
+ * (``core/src/edition/execution-targets.ts``), which OSS leaves at ``"local"``
+ * — its one backend is a sidecar on this machine. A multi-target edition
+ * registers the adapter and this turns two-valued; a browser-only edition
+ * whose single backend is the cloud declares that instead. The value name
+ * matches the target id it comes from (``"cloud"``), so there is one word for
+ * the concept end to end. */
 export type RuntimeStartLocation = "local" | "cloud";
 
 /** Header text for the pre-run phase: the message is sent but the runtime is
