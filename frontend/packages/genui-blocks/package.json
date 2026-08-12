@@ -11,6 +11,7 @@
     "build": "tsc --noEmit -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "eslint src --ext .ts,.tsx",
+    "lint:css": "node ../../scripts/genui-css-audit.mjs --check",
     "test": "vitest run --passWithNoTests --config ../../vitest.config.ts",
     "clean": "rm -rf dist"
   },
